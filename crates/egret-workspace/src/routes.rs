@@ -1062,7 +1062,12 @@ pub struct StartWsImpersonation {
 /// Guards run in a deliberate order so a caller learns nothing before its own
 /// authority is proven: (1) not already impersonating; (2) caller is `ws_admin`
 /// here or a platform_admin; (3) the shared target guards (not-self, reason
-/// non-empty, target exists, target-not-platform-admin); (4) the target is a
+/// non-empty, target exists, and — because the overlay THIS endpoint writes is
+/// workspace-scoped — the target holds NO platform-scoped role grant at all;
+/// `validate_impersonation_target`, and read its ⚠ paragraph: that third guard is
+/// what stops this endpoint minting a scoped overlay with platform authority,
+/// which no `/api/control-plane` route confines, and it is deliberately WIDER here
+/// than on the platform endpoint); (4) the target is a
 /// MEMBER of this workspace and is NOT itself a `ws_admin` of it. Step-up re-auth
 /// then mirrors the platform endpoint: a local caller re-enters their password; an
 /// OIDC caller gets a `409` with an authorize URL whose sealed intent carries this
@@ -1077,7 +1082,7 @@ pub struct StartWsImpersonation {
         (status = 200, description = "Impersonation started; the session now resolves to the target, scoped to this workspace"),
         (status = 400, description = "Bad target / empty reason", body = ErrorBody),
         (status = 401, description = "Not authenticated, or wrong step-up password", body = ErrorBody),
-        (status = 403, description = "Not a ws_admin, already impersonating, target not a member, or target is an admin", body = ErrorBody),
+        (status = 403, description = "Not a ws_admin, already impersonating, target not a member, target is a ws_admin here, or the target holds ANY platform-scoped role grant — wider than the platform endpoint's rule, because the overlay this one writes is workspace-scoped and no /api/control-plane route confines such an overlay", body = ErrorBody),
         (status = 409, description = "OIDC caller: re-authenticate at `authorize_url`, then the callback creates the overlay"),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -1101,8 +1106,8 @@ async fn ws_impersonate_start(
         return Err(AuthError(Error::Forbidden));
     }
     // 3. Parse the target and run the SHARED target guards (not-self, reason
-    //    non-empty, target exists, target-not-platform-admin) — identical to the
-    //    platform start endpoint and the OIDC callback.
+    //    non-empty, target exists, target holds no platform-scoped role grant) —
+    //    identical to the platform start endpoint and the OIDC callback.
     let target = UserId(
         body.target_user_id
             .parse::<Uuid>()
@@ -1115,22 +1120,29 @@ async fn ws_impersonate_start(
         ctx.principal.user_id,
         target,
         &reason,
+        // `Some`: the overlay this endpoint writes is confined to THIS workspace,
+        // which is what makes the wide target rule apply here and not on the
+        // platform endpoint.
+        Some(ctx.workspace_id),
     )
     .await
     .map_err(AuthError)?;
-    // 4. Workspace-specific target guards. `workspace_roles_for` resolves the
-    //    target's roles in THIS workspace (direct + via group, non-expired): an
-    //    empty set means the target is not a member (403), and a set containing
-    //    `ws_admin` means the target is itself an admin here (403). Both catch
-    //    group-derived roles, not just direct grants.
-    let target_roles = st
-        .authz
-        .workspace_roles_for(target, ctx.workspace_id)
-        .await
-        .map_err(AuthError)?;
-    if target_roles.is_empty() || target_roles.iter().any(|r| r == "ws_admin") {
-        return Err(AuthError(Error::Forbidden));
-    }
+    // 4. Workspace-specific target guards: the target must be a MEMBER of THIS
+    //    workspace (an empty role set means they are not) and must not be a
+    //    `ws_admin` of it. Both catch group-derived roles, not just direct grants.
+    //
+    //    The rule lives in `validate_ws_impersonation_target_membership` and is
+    //    CALLED here, because the OIDC step-up callback mints this same ws-scoped
+    //    overlay after an IdP round trip and had omitted the pair entirely
+    //    (whole-branch review, M-1) — one function, two call sites, so the two
+    //    cannot drift.
+    egret_auth::impersonation::validate_ws_impersonation_target_membership(
+        &st.sessions,
+        target,
+        ctx.workspace_id,
+    )
+    .await
+    .map_err(AuthError)?;
     // 5. Step-up re-authentication of the CALLER. A local caller re-enters their
     //    password inline; an OIDC caller must re-authenticate with the IdP, so we
     //    return a 409 carrying the authorize URL with the impersonation intent —

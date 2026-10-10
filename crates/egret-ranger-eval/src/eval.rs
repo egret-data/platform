@@ -408,10 +408,29 @@ mod tags {
     /// right answer here. The DEFECT is in the writer (tag-selected masks and
     /// clearances cannot reach a StarRocks engine at all); this function reproduces
     /// it rather than hiding it, and `attachment_for`'s own ⚠ block carries the
-    /// measurement. Nothing egret auto-binds reaches that state — `bind_trino_profile`
-    /// is the only writer of `tagService` and `tag_assignments_for_service` resolves
-    /// the owning profile with `tp.type = 'trino'` — so an operator setting the
-    /// config by hand is the population.
+    /// measurement.
+    ///
+    /// **SP4d debt Task 2 made that configuration unrepresentable, and this path
+    /// still must not be weakened.** `PolicyStore::create_service` refuses a
+    /// non-Trino profile carrying a `tagService` (it is the only `INSERT INTO
+    /// policy.authz_services` in any `src/`), and migration 0176's VALIDATED
+    /// `CHECK (config_jsonb ->> 'tagService' IS NULL OR type = 'trino')` refuses it
+    /// for every `INSERT` and every `UPDATE` — including the `SET type =
+    /// 'starrocks'` direction, which has no Rust writer at all — after clearing the
+    /// key from any row that already carried it. So no StarRocks profile can hold a
+    /// `tagService`, and the configuration in which this drop CHANGES AN OUTCOME is
+    /// gone.
+    ///
+    /// The drop itself is not dead and must stay, for three reasons that are about
+    /// code paths rather than about that configuration. (1) It still FIRES for every
+    /// StarRocks profile with a tagged column: `resolved_tags` comes from
+    /// `catalog_tag_assignments`, not from the `tagService`, which only ever decided
+    /// whether a tag POLICY existed for the drop to discard. (2) It reproduces what
+    /// the real `processServiceTags` does with that payload, which is what makes the
+    /// inertness ASSERTABLE rather than argued. (3) `attachment_for` is a producer,
+    /// and a level set it learns to emit later reaches this subset test with no
+    /// configuration change at all. **Falsified by** the per-engine resource-level
+    /// mapping landing, or by migration 0176's constraint being dropped.
     ///
     /// For a TRINO profile the drop is inert and provably so: the only level sets the
     /// mapping emits are `{catalog, schema, table}` and `{catalog, schema, table,
@@ -1252,14 +1271,19 @@ pub enum UndecidableCause {
     /// positioned where offset 553 would fire and where the verdict behind it
     /// differs.
     ///
-    /// The three shapes, and what does or does not keep egret's own compiler out
-    /// of each:
+    /// The shapes, and what does or does not keep egret's own compiler out of each.
+    /// **FIX ROUND 5 adds the fourth row and corrects the third**: the table said
+    /// three, and the fourth — an EMPTY policy value, which
+    /// [`crate::resource::trie_reproduces_matcher`] declines on explicitly — was a
+    /// shape egret's own grant compiler could emit, which is the finding SP4d debt
+    /// Task 12 closed.
     ///
     /// | shape | what the compiler does | enforced? |
     /// |---|---|---|
     /// | `isExcludes` | `egret-perm-compile`'s `grants::level()` hard-codes `is_excludes: false` on every level it builds, and it is the only constructor `scope_to_resources` uses | **yes**, by construction |
     /// | `isRecursive` | the same constructor hard-codes `is_recursive: false` | **yes**, by construction |
-    /// | a non-prefix wildcard in a VALUE (`*xyz`, `or?ers`) | `scope_to_resources` copies `scope.schema` / `scope.table` / `scope.column` into the policy **verbatim**, and `validate_grant_shape` checks principals only — nothing validates scope string CONTENT | **NO.** A grant scoped to a table named, or mistyped as, `ord*rs` compiles to exactly this shape |
+    /// | an EMPTY value (`""`) | `scope_to_resources` copies a scope level through verbatim, and `perm.grants` accepted `schema_name = ''` — so a `policy:update` caller could store one and the compiler emitted `{"values": [""]}`. **SP4d debt Task 12** closed it at three points keyed to one shape: `migrations/0178_perm_scope_levels_are_named.sql`'s CHECK, `grants::ensure_scope_levels_are_named` at the authoring boundary, and the same function inside `compile_grant` | **yes** since 0178 — and **NO** before it. The same empty value also made the LEVEL `isMatchAny`, so the grant was enforced catalog-wide; that half is the escalation, this row is only its trie consequence |
+    /// | a non-prefix wildcard in a VALUE (`*xyz`, `or?ers`) | `scope_to_resources` copies `scope.schema` / `scope.table` / `scope.column` into the policy **verbatim**. `validate_grant_shape` refuses an EMPTY level (row above) and, since **SP4d debt Task 14**, a level that is a RUN OF `*` with a NAMED level beneath it (`grants::ensure_a_grant_wildcard_level_has_nothing_named_beneath_it`, `migrations/0179`) — because that is the level skip `grants_check` already forbade, not because `*` is illegitimate. Nothing else about the string is refused: `*` with nothing named under it stays legal (a catalog- or schema-wide grant is ordinary, and `scope_to_resources` emits `*` itself for every unnamed level), and `?` and a non-prefix `*` are untouched | **NO.** A grant scoped to a table named, or mistyped as, `ord*rs` compiles to exactly this shape, and so does one scoped to `('sales', 'or?ers')` |
     ///
     /// So the honest statement is: two of the three shapes cannot come from
     /// egret's compiler because one constructor forbids them; the third can, and
@@ -1270,8 +1294,20 @@ pub enum UndecidableCause {
     /// live plugin.
     ///
     /// **What would falsify this table:** `grants::level()` ceasing to pin the
-    /// two flags, or a scope-content validator arriving (which would move the
-    /// third row to "yes"). It is NOT `scope_to_resources`'s `Access` arm and its
+    /// two flags, or a scope-content validator refusing `?` and a non-prefix `*`
+    /// ANYWHERE in a value. ⚠ An earlier round wrote the second of those as "a
+    /// scope-content validator arriving (which would move the third row to yes)",
+    /// and that prediction was MEASURABLY wrong — twice over. Two validators have
+    /// now arrived and NEITHER moved the wildcard row:
+    /// `ensure_scope_levels_are_named` (Task 12) moved the EMPTY row, because it
+    /// refuses `''` only; and
+    /// `ensure_a_grant_wildcard_level_has_nothing_named_beneath_it` (Task 14) refuses a
+    /// whole-value run of `*` only when a level BELOW it is named, which leaves
+    /// every shape in this row — `*xyz`, `or?ers`, and a bare `*` at the deepest
+    /// named level — emittable. A validator is not one thing, and naming the class
+    /// rather than the predicate is the same imprecision this doc keeps
+    /// correcting; the second prediction was wrong in the same way as the first,
+    /// which is the reason to state the PREDICATE here and not a class. It is NOT `scope_to_resources`'s `Access` arm and its
     /// `*` fill — an earlier version of this cell said so, and that falsifier
     /// belonged to the key-count rule FIX ROUND 3 replaced: an egret ACCESS
     /// policy declaring fewer than four keys now matches at `ANCESTOR` and
@@ -1455,13 +1491,16 @@ pub enum TagAttachmentProblem {
     /// '')` row and that nothing in the query stops it. What makes the refusal
     /// inert today is ONE fact, on the caller, and it is falsifiable:
     ///
-    /// 1. **`resolved_tags_for_target` (`egret-perm-compile/src/routes.rs`) runs
-    ///    `tag_assignment_coordinates_via` FIRST, for the catalog, and declines
-    ///    the whole resolution when `stored_value_problem` rules on ANY stored
-    ///    coordinate** — and an empty `schema_name` or `table_name` is one of its
-    ///    three classes, which is exactly the row that would produce a one- or
-    ///    two-level attachment. So the mapping is never reached with one. That
-    ///    gate exists for a bigger reason than this refusal: such a row is an
+    /// 1. **An empty `schema_name` or `table_name` — the row that would produce a
+    ///    one- or two-level attachment — can no longer be STORED.** ⚠ Updated by
+    ///    SP4d debt Task 3: it used to be `resolved_tags_for_target`
+    ///    (`egret-perm-compile/src/routes.rs`) running
+    ///    `tag_assignment_coordinates_via` first and declining the whole resolution
+    ///    on the gate's `EmptyLevel` class; migration 0177's
+    ///    `catalog_tag_assignments_levels_are_present_and_literal` makes it
+    ///    unrepresentable instead, so the mapping is never reached with one. (That
+    ///    gate still runs, for the fold-divergence class a `CHECK` must not take.)
+    ///    The bound exists for a bigger reason than this refusal: such a row is an
     ///    ANCESTOR of resources the resolver's predicate never returns it for,
     ///    i.e. a MISSED tag, which no inspection of the mapping's input could
     ///    detect. ⚠ Fix round 1 widened it from one class to three — a wildcard
@@ -1792,7 +1831,7 @@ pub enum Decision {
 /// | [`UndecidableCause::EvalOrderAmbiguous`] (from this loop) | a tag DENY plus a `hasDeny` band above its priority holding both an allower and a denier | offset 469's `>=` reading a `policyPriority` an allowing band member just raised | a download where deny-capable resource policies share a priority above a clearance tag policy's — no corpus generates a tag block, so the rate is UNMEASURED |
 /// | [`UndecidableCause::ResourceCandidacyNotReproducible`] | a policy matching `NONE` everywhere whose every declared request level is `isExcludes`, `isRecursive` or a non-prefix wildcard, positioned where 553 fires | the three shapes [`crate::resource::level_excluded_by_trie`] declines to reason from — the ⚠ table on that variant says which of them `grants::level()` forbids and which (the wildcard) **nothing** forbids | `grants::level()` ceasing to pin `is_excludes`/`is_recursive` false, or a scope-content validator arriving |
 /// | [`UndecidableCause::TagSubResultSplitByResourcePolicy`] (from `evaluate_sub`) | a tag mask/filter that yields plus a resource policy Ranger reaches that also yields | offsets 11-88 writing the DATA unconditionally and the identity only `if (!isAllowed)` | nothing today; the shape needs a tag block, which no corpus generates |
-/// | [`UndecidableCause::TagAttachmentNotReproducible`] (raised in [`tag_candidates`], on a set THIS function enriched) | a tag ATTACHMENT carrying `options`, `validityPeriods`, or a service resource naming fewer than three levels — and only for a tag whose match type the evaluator admits, in a download whose tag block holds a policy of the kind being decided | ⚠ **SP4d-2b TASK 7: a producer now exists and this row is no longer "unreachable at all".** `egret_perm_compile`'s `attachment_for` maps the two-field `egret_policy::ResolvedTag` into this type for every `explain` on a target naming a schema and a table. Which of the three problems can arrive is now a per-problem question, and the answer is on each variant: `Options` and `ValidityPeriods` cannot (`ServiceTags::from_assignments` writes a wire tag as `{"type", "owner"}` and nothing else, so the mapping synthesises them empty); `ResourceLevels` cannot either, but for a CALLER reason — `resolved_tags_for_target` runs `tag_assignment_coordinates_via` first and declines the resolution for the whole catalog while `stored_value_problem` rules on any stored coordinate, an empty `schema_name` or `table_name` among them. FIX ROUND 1 corrected two earlier versions of this row: it named `resolved_tags_for_resource_via` as a producer of THIS type (it produces the other one), and it credited `catalog_tag_assignments`' `NOT NULL` with a guarantee it does not give | the gate going away, a second producer (a `/tags/download` reader, an import, a shim), or `from_assignments` learning to write `attributes`/`options`/`validityPeriods`. **What exercises it is still only this crate's own tests plus `routes.rs`' mapping unit tests** — no corpus generates a tag block, so the RATE is unmeasured |
+/// | [`UndecidableCause::TagAttachmentNotReproducible`] (raised in [`tag_candidates`], on a set THIS function enriched) | a tag ATTACHMENT carrying `options`, `validityPeriods`, or a service resource naming fewer than three levels — and only for a tag whose match type the evaluator admits, in a download whose tag block holds a policy of the kind being decided | ⚠ **SP4d-2b TASK 7: a producer now exists and this row is no longer "unreachable at all".** `egret_perm_compile`'s `attachment_for` maps the two-field `egret_policy::ResolvedTag` into this type for every `explain` on a target naming a schema and a table. Which of the three problems can arrive is now a per-problem question, and the answer is on each variant: `Options` and `ValidityPeriods` cannot (`ServiceTags::from_assignments` writes a wire tag as `{"type", "owner"}` and nothing else, so the mapping synthesises them empty); `ResourceLevels` cannot either, and ⚠ **SP4d debt Task 3 changed WHY**: it used to be a CALLER reason — `resolved_tags_for_target` runs `tag_assignment_coordinates_via` first and declined the resolution for the whole catalog on the gate's `EmptyLevel` class — and it is now a SCHEMA reason, migration 0177's `catalog_tag_assignments_levels_are_present_and_literal`, which forbids an empty `schema_name`/`table_name` outright. FIX ROUND 1 corrected two earlier versions of this row: it named `resolved_tags_for_resource_via` as a producer of THIS type (it produces the other one), and it credited `catalog_tag_assignments`' `NOT NULL` with a guarantee it does not give — 0177 is the constraint that finally gives it | the gate going away, a second producer (a `/tags/download` reader, an import, a shim), or `from_assignments` learning to write `attributes`/`options`/`validityPeriods`. **What exercises it is still only this crate's own tests plus `routes.rs`' mapping unit tests** — no corpus generates a tag block, so the RATE is unmeasured |
 /// | the other tag-phase refusals | see the ⚠ tables on [`evaluate_tag_policies`] | — | — |
 ///
 /// **None of these rates is measured on a corpus**, and that is the honest state
@@ -1918,6 +1957,10 @@ pub fn evaluate(
     //   then: hasDeny() first
     //   then: Integer.compare(me.getEvalOrder(), other.getEvalOrder())
     //   then: compareStrings(policy name)
+    //
+    // Read out of `ranger-plugins-common-2.5.0` (Trino 470's jar) and not out of
+    // StarRocks's 2.8.0 — see [`sort_eval_order`]'s "WHICH JAR" note, which also
+    // names the artifact the two plugin versions are measured to disagree about.
     //
     // The first two keys are load-bearing: the priority order is what makes
     // a higher-priority allow final, and the hasDeny-first order is what
@@ -2991,6 +3034,25 @@ fn request_preamble(
 /// then: Integer.compare(me.getEvalOrder(), other.getEvalOrder())
 /// then: compareStrings(policy name)
 /// ```
+///
+/// # ⚠ WHICH JAR (added 2026-10-10, whole-branch review)
+///
+/// That listing — four keys, total order, ending at the policy name — is
+/// `compareNormal` **as disassembled from `ranger-plugins-common-2.5.0`**, the
+/// version Trino 470 loads. The record is
+/// `tests/differential.rs`'s `access_order_duel`, which states the jar. StarRocks
+/// fe-ubuntu 4.1 loads **2.8.0**, and no disassembly of THIS comparator out of the
+/// 2.8.0 jar is on record in this crate, so the listing is not asserted for it.
+/// (The three TAG comparators are different: [`sort_tag_candidates`] records all
+/// three disassembled in both jars and byte-identical.)
+///
+/// The distinction is not pedantry — the two plugins demonstrably disagree about
+/// another artifact. A tag DENY under a strictly higher-priority resource ALLOW
+/// carrying no deny items is `Allowed` on 2.8.0 and not on 2.5.0, which is why
+/// [`UndecidableCause::TagDenyReopenedDiffersByPluginVersion`] exists and why
+/// [`EngineConfig::plugin_version`] is an input rather than a constant. An
+/// unversioned claim about plugin internals is how a comment comes to promise
+/// 2.8.0's behaviour to a 2.5.0 reader.
 ///
 /// `getEvalOrder()` is `RangerOptimizedPolicyEvaluator.computeEvalOrder()`,
 /// a resource-specificity score, and is NOT reproduced. A stable
@@ -4857,7 +4919,14 @@ fn tag_order_without_the_id_standin(
 
 /// `RangerPolicyEvaluator.NAME_COMPARATOR`, and — with `getEvalOrder()`
 /// unreproduced — `EVAL_ORDER_COMPARATOR` too: priority DESC, `hasDeny` first,
-/// then `compareStrings(policy name)`, and **nothing after that**. The policy-id
+/// then `compareStrings(policy name)`, and **nothing after that**.
+///
+/// "Nothing after that" is a claim about a total order, so it names its source:
+/// both comparators disassembled from `ranger-plugins-common` **2.5.0 and 2.8.0**
+/// and byte-identical there, which is the record [`sort_tag_candidates`] carries
+/// for all three tag comparators. That is wider than what is on record for the
+/// RESOURCE path's `PolicyEvalOrderComparator`, where only the 2.5.0 jar is named
+/// — see [`sort_eval_order`]'s "WHICH JAR" note. The policy-id
 /// stand-in lives in [`sort_tag_candidates`] instead, so that
 /// [`tag_order_without_the_id_standin`] can say when two candidates are tied
 /// for RANGER rather than merely tied here.

@@ -75,6 +75,24 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
     // call sites would need to opt into individually. `queryClient` is
     // exported as a singleton from `./queryClient` for exactly this reason.
     //
+    // "~40" is now measured (SP4d debt Task 11 survey, 2026-10-10): the
+    // hand-written layer is 61 mutation hooks across 17 `src/api/*.ts` modules,
+    // carrying 99 `useMutation` calls, reached from 152 `.mutate()`/
+    // `.mutateAsync()` call sites outside `src/api/**`. 21 of those 152 discard
+    // the mutation result entirely — no `onError`, no `.isError` read, no
+    // `.catch`, no `guard()`/`run()` wrapper — so their failure is invisible to
+    // the user, which is the same defect Task 3 fixed in `CatalogTagEditor`'s
+    // assign half and Task 11 fixed in its unassign half. 9 of the 21 are
+    // reachable through a documented permission refusal the UI does not gate on
+    // (the `TagEditor` pair, `Classifications` delete-tag, three SQL-Lab saved-
+    // query/snippet sites, the notification remove); the rest need a 5xx or a
+    // dropped connection. Fixing them is a separate package — the 10
+    // `NotebookPage` sites are one cluster with one remedy, since that page
+    // already reads `addCell.isPending`. Note the count is about
+    // *visibility at the call site*, which is a wider question than this
+    // comment's: a site that opts into an error handler still does not get the
+    // `feature_disabled` refetch below without this choke point.
+    //
     // We `await` (rather than fire-and-forget) and force `refetchType: "all"`
     // so the refetch isn't deferred as inactive — this doesn't close the gap
     // (the caller's own catch/toast can still run before RequireFeature's

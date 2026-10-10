@@ -26,6 +26,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useTags, type Tag } from "@/api/tags";
+import { ApiError } from "@/api/client";
 import { useAssignResourceTag, useResourceTags, useUnassignResourceTag } from "@/api/catalogTags";
 
 /** Small colored dot representing a tag's catalog color — mirrors `TagEditor`'s. */
@@ -47,7 +48,24 @@ interface ResourceCoords {
   column?: string;
 }
 
-/** "Add tag" select: catalog tags not already assigned to this resource. */
+/**
+ * "Add tag" select: catalog tags not already assigned to this resource.
+ *
+ * ⚠ **The failure message is RENDERED, and that is load-bearing rather than
+ * polish** (SP4d debt Task 3, fix round, Minor 1). Migration 0177 made some
+ * coordinates unstorable and `assign_catalog` refuses them with a 400 naming the
+ * offending level — but the trade that justified the refusal was "a loud 400 at
+ * write time beats a silent decline at read time", and as first shipped this
+ * component had no `onError` and discarded the mutation result, so a steward
+ * tagging a table named `ord*ers` saw the trigger snap back to its placeholder and
+ * **nothing else**: the tag silently was not applied. That is the exact failure
+ * mode the refusal was supposed to trade away.
+ *
+ * `ApiError.from` puts the body's `error` field on `Error.message`, so the
+ * backend's own sentence — which names the level — is what shows. Rendering
+ * `assign.error` needs no `onError`: react-query already holds the last failure,
+ * and a thrown-away `mutate()` result is precisely what went wrong here.
+ */
 function AddCatalogTagSelect({
   warehouseId,
   schema,
@@ -61,27 +79,38 @@ function AddCatalogTagSelect({
   const [value, setValue] = useState("");
 
   return (
-    <Select
-      value={value}
-      onValueChange={(tagId) => {
-        assign.mutate({ schema, table, column: column ?? "", tag_id: tagId });
-        setValue("");
-      }}
-    >
-      <SelectTrigger className="h-8 w-56" aria-label="Add tag">
-        <SelectValue placeholder="Add tag…" />
-      </SelectTrigger>
-      <SelectContent>
-        {available.map((tag) => (
-          <SelectItem key={tag.id} value={tag.id}>
-            <span className="flex items-center gap-2">
-              <TagSwatch color={tag.color} />
-              {tag.name}
-            </span>
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <>
+      <Select
+        value={value}
+        onValueChange={(tagId) => {
+          assign.mutate({ schema, table, column: column ?? "", tag_id: tagId });
+          setValue("");
+        }}
+      >
+        <SelectTrigger className="h-8 w-56" aria-label="Add tag">
+          <SelectValue placeholder="Add tag…" />
+        </SelectTrigger>
+        <SelectContent>
+          {available.map((tag) => (
+            <SelectItem key={tag.id} value={tag.id}>
+              <span className="flex items-center gap-2">
+                <TagSwatch color={tag.color} />
+                {tag.name}
+              </span>
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {assign.isError ? (
+        <p
+          className="text-sm text-destructive"
+          role="alert"
+          data-testid="catalog-tag-assign-error"
+        >
+          Could not add that tag: {assign.error.message}
+        </p>
+      ) : null}
+    </>
   );
 }
 
@@ -89,6 +118,44 @@ function AddCatalogTagSelect({
  * Assign/unassign editor for a catalog table/column's tags. Current tags
  * render as removable chips; the "Add tag" select offers the rest of the
  * org-wide catalog.
+ *
+ * ⚠ **The REMOVE failure is rendered too** (SP4d debt Task 11). The mechanism is
+ * identical to `AddCatalogTagSelect`'s: `unassign.mutate()` discarded its result and
+ * the component carried no `onError`, so a failed removal left the chip sitting
+ * there — `unassign`'s `onSuccess` is what invalidates the query, so on failure
+ * nothing refetches and nothing changes. Indistinguishable from a slow refetch.
+ *
+ * **But the TRIGGER is not the assign half's 400, and saying so matters for what a
+ * test may assert.** `unassign_catalog` deliberately carries NO
+ * `unresolvable_coordinate` check (`crates/egret-bi/src/catalog_tags.rs`, the
+ * "`unassign_catalog` deliberately has no such check" paragraph): a `DELETE` is not
+ * constrained by migration 0177's `CHECK`, and a deployment holding a bad row must
+ * be able to remove it through the API. So no wildcard coordinate can make this
+ * mutation fail. What CAN, by code path:
+ *
+ * * **403, routinely reachable.** This dialog hangs off `BrowseTab`, inside a route
+ *   gated `catalog_registry:read` (`App.tsx`'s `warehouses/:id`), and the Remove
+ *   button is rendered for every chip with no permission check — while
+ *   `unassign_resource_tag` requires `catalog_registry:update`. A steward with read
+ *   but not update clicks Remove and, before this fix, saw nothing at all.
+ * * **500.** `unassign_catalog` bumps every bound service's `tag_version` and
+ *   recompiles the bound policy profiles *in the same transaction*; a recompile
+ *   failure rolls the DELETE back and returns 500.
+ * * network loss, and the 403/`feature_disabled` race `client.ts` documents.
+ *
+ * **One departure from the assign half, and it is because the measurement differs.**
+ * Task 11's brief asked for "the backend's own sentence rather than a frontend copy",
+ * which is right for assign: `unresolvable_coordinate` produces a sentence that NAMES
+ * the offending level, and a UI paraphrase would be a fifth place for it to drift. For
+ * unassign the dominant reachable failure is the 403 above, and its "own sentence" is
+ * `Error::Forbidden`'s Display — the bare word **`forbidden`** (`egret-core/src/error.rs`;
+ * there is no per-permission message to copy). Rendering only that would ship an alert
+ * that is visible and still says nothing actionable. `BrowseTab` already settled this
+ * exact question ~20 lines from the dialog's own trigger, for the READ 403 on the same
+ * route: it names the permission. So this does the same — 403 names
+ * `catalog_registry:update`, every other status shows the backend's message verbatim.
+ * The verbatim arm is what carries a 500, a Conflict, or any future refusal with real
+ * wording, so nothing has to be edited here when one appears.
  */
 export function CatalogTagEditor({ warehouseId, schema, table, column }: ResourceCoords) {
   const resourceTagsQ = useResourceTags(warehouseId, schema, table);
@@ -129,6 +196,19 @@ export function CatalogTagEditor({ warehouseId, schema, table, column }: Resourc
           ))
         )}
       </div>
+
+      {unassign.isError ? (
+        <p
+          className="text-sm text-destructive"
+          role="alert"
+          data-testid="catalog-tag-unassign-error"
+        >
+          Could not remove that tag:{" "}
+          {unassign.error instanceof ApiError && unassign.error.status === 403
+            ? "this needs the catalog_registry:update permission. A platform administrator can grant it."
+            : unassign.error.message}
+        </p>
+      ) : null}
 
       {catalog.length === 0 ? (
         <p className="text-sm text-muted-foreground">

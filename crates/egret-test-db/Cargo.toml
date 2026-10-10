@@ -16,3 +16,8 @@ tokio.workspace = true
 # `libc::atexit` only — see `register_exit_drop`. A test process that ends
 # cleanly drops its own clone; the sweep exists for the ones that do not.
 libc.workspace = true
+# The template name is a digest of the migration set `egret-metastore` embedded —
+# see `template_db_name`. sha2 for the digest, hex to spell it as an identifier
+# Postgres accepts. Both are already in the workspace's dependency graph.
+sha2.workspace = true
+hex.workspace = true

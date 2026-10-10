@@ -319,7 +319,7 @@
             }
           },
           "403": {
-            "description": "Not a platform admin, already impersonating, or target is an admin",
+            "description": "Not a platform admin, already impersonating, or target is an admin. A target holding a NON-admin platform role (a `data_steward`, say) is permitted here: the overlay this endpoint writes is platform-scoped, and the caller already holds strictly more than the target",
             "content": {
               "application/json": {
                 "schema": {
@@ -6170,7 +6170,7 @@
         },
         "responses": {
           "200": {
-            "description": "One verdict per profile over the artifact each engine downloads",
+            "description": "One verdict per profile over the artifact each engine downloads — including the `no_profile_serves_the_catalog` outcome for a catalog that exists and that no profile serves, which is an answer and not an error",
             "content": {
               "application/json": {
                 "schema": {
@@ -6180,7 +6180,7 @@
             }
           },
           "400": {
-            "description": "The target skips a resource level (a column implies a table implies a schema)",
+            "description": "The target skips a resource level (a column implies a table implies a schema), names a level as \"\" or \"*\" (Ranger's \"every value\", not a resource name), or names a catalog id no registered catalog has",
             "content": {
               "application/json": {
                 "schema": {
@@ -6200,7 +6200,7 @@
             }
           },
           "403": {
-            "description": "Missing policy:read permission",
+            "description": "Missing policy:read permission, or a workspace-scoped impersonation overlay asking about a catalog that workspace is not assigned",
             "content": {
               "application/json": {
                 "schema": {
@@ -6294,7 +6294,7 @@
             "description": "Grant created AND the profiles it affects recompiled, in one transaction"
           },
           "400": {
-            "description": "The grant cannot be compiled for a profile it affects",
+            "description": "The grant names a scope level as \"\" (Ranger's \"every value at that level\", not a resource name — it would be enforced across the whole catalog), names a level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), or cannot be compiled for a profile it affects",
             "content": {
               "application/json": {
                 "schema": {
@@ -6441,7 +6441,7 @@
             }
           },
           "400": {
-            "description": "The patched grant cannot be compiled, names no principal or no action, or is owned by the workspace-assignment sync",
+            "description": "The patched grant names a scope level as \"\" (Ranger's \"every value at that level\", not a resource name), names a level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), cannot be compiled, names no principal or no action, or is owned by the workspace-assignment sync",
             "content": {
               "application/json": {
                 "schema": {
@@ -6668,7 +6668,7 @@
             "description": "Rule created AND the profiles it affects recompiled, in one transaction"
           },
           "400": {
-            "description": "The rule cannot be compiled for a profile it affects",
+            "description": "The rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or cannot be compiled for a profile it affects",
             "content": {
               "application/json": {
                 "schema": {
@@ -6815,7 +6815,7 @@
             }
           },
           "400": {
-            "description": "The patched rule cannot be compiled for a profile it affects",
+            "description": "The patched rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or cannot be compiled for a profile it affects",
             "content": {
               "application/json": {
                 "schema": {
@@ -7052,7 +7052,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input or missing policy name",
+            "description": "Invalid editor input, missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter policy that would be served alongside another one selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7364,6 +7364,7 @@
           "policy-admin"
         ],
         "summary": "POST /policies/services — create a policy profile (a Ranger service\ninstance) of the given type. The manual analogue of Trino provisioning's\nauto-bind, so a StarRocks profile can exist without an egret-provisioned\nengine.",
+        "description": "`config` is stored VERBATIM except for two refusals — the type rule below,\nand SP4d debt Task 9's value-shape rule: a `tagService` whose value is not a\nnon-empty string names no profile, and four of the five readers of that field\ngo through `as_str()` while the fifth reads `->>`, so the shape produces four\ndifferent behaviours. See `egret_policy::store`'s\n`refuse_unnameable_tag_service`.\n\nThis makes it the one reachable surface that\ncould pair a non-Trino `type` with a `tagService` — a state in which every tag\npolicy under the profile is silently inert, because the tag download writes the\nresource level `schema` and only Trino's service-def has one. `create_service`\nrefuses it (400); see `egret_policy::store`'s\n`refuse_tag_service_on_non_trino_profile` for the measurement and for the\nenumeration of every write path that can reach the state.",
         "operationId": "create_profile",
         "requestBody": {
           "content": {
@@ -7387,7 +7388,7 @@
             }
           },
           "400": {
-            "description": "Invalid type or missing name",
+            "description": "Invalid type, missing name, a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert), or a `tagService` whose value is not a non-empty string (it names no policy profile, and the plugin download would carry no `tagPolicies` block)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7749,6 +7750,7 @@
           "policy-admin"
         ],
         "summary": "PUT /policies/{id} — replace a policy's body (any kind).",
+        "description": "# SP4d debt Task 16: the tag branch\n\nUntil Task 16 this handler had no `is_tag_kind` branch, so a `tag-*` form\nreached `editor_to_ranger_json` and came back `\"unknown policy kind:\ntag-masking\"`. `create_policy` had the branch and `delete_policy_handler`\nneeds none, so an editor-authored tag mask or tag row filter could be\n**created and deleted but never edited** — reachable straight from the UI,\nwhich sends `updatePolicy(id, {kind: \"tag-masking\", service: <trino\nprofile>, …})` whenever the Tags tab's row link is followed\n(`frontend/src/routes/governance/PolicyEditorPage.tsx`, `buildPayload`).\n\nThat gap is why `crate::unreadable_table_mask`'s refusal named only two\nremedies: \"edit the policy to address it by path\" was not available, so the\nreal remedy for an editor-origin pair was delete-and-recreate — a workflow\nnobody would write down. The branch and that third remedy land together.\n\nBoth authoring verbs run the same guards through\n[`guard_tag_policy_authoring`]; the one argument that differs is\n`replacing: Some(id)`, so the arbitration guard does not pair the new body\nagainst the row it is replacing.",
         "operationId": "update_policy",
         "parameters": [
           {
@@ -7784,7 +7786,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input or missing policy name",
+            "description": "Invalid editor input, missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter body that would be served alongside another policy selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)",
             "content": {
               "application/json": {
                 "schema": {
@@ -9369,6 +9371,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TagDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The new name is masked by a tag masking policy while this tag is attached to a whole TABLE (which would make that table unreadable rather than masked)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -11998,6 +12010,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The coordinate cannot be stored (an empty schema or table, or `*`/`?` in any level — see migration 0177), or the tag is being attached to a whole TABLE while a tag-addressed mask names it, which would make that table unreadable rather than masked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -23853,7 +23875,7 @@
           "workspace-members"
         ],
         "summary": "`POST /api/ws/{workspace}/impersonate` — a `ws_admin` of `{workspace}` (or a\nplatform_admin) starts impersonating a MEMBER of that workspace. The resulting\noverlay is **workspace-scoped**: `WsContext` confines it to `{workspace}` even\nthough the target may belong to others (see the containment guard there).",
-        "description": "Guards run in a deliberate order so a caller learns nothing before its own\nauthority is proven: (1) not already impersonating; (2) caller is `ws_admin`\nhere or a platform_admin; (3) the shared target guards (not-self, reason\nnon-empty, target exists, target-not-platform-admin); (4) the target is a\nMEMBER of this workspace and is NOT itself a `ws_admin` of it. Step-up re-auth\nthen mirrors the platform endpoint: a local caller re-enters their password; an\nOIDC caller gets a `409` with an authorize URL whose sealed intent carries this\n`workspace_id`, and the overlay is created by the OIDC callback.",
+        "description": "Guards run in a deliberate order so a caller learns nothing before its own\nauthority is proven: (1) not already impersonating; (2) caller is `ws_admin`\nhere or a platform_admin; (3) the shared target guards (not-self, reason\nnon-empty, target exists, and — because the overlay THIS endpoint writes is\nworkspace-scoped — the target holds NO platform-scoped role grant at all;\n`validate_impersonation_target`, and read its ⚠ paragraph: that third guard is\nwhat stops this endpoint minting a scoped overlay with platform authority,\nwhich no `/api/control-plane` route confines, and it is deliberately WIDER here\nthan on the platform endpoint); (4) the target is a\nMEMBER of this workspace and is NOT itself a `ws_admin` of it. Step-up re-auth\nthen mirrors the platform endpoint: a local caller re-enters their password; an\nOIDC caller gets a `409` with an authorize URL whose sealed intent carries this\n`workspace_id`, and the overlay is created by the OIDC callback.",
         "operationId": "ws_impersonate_start",
         "parameters": [
           {
@@ -23901,7 +23923,7 @@
             }
           },
           "403": {
-            "description": "Not a ws_admin, already impersonating, target not a member, or target is an admin",
+            "description": "Not a ws_admin, already impersonating, target not a member, target is a ws_admin here, or the target holds ANY platform-scoped role grant — wider than the platform endpoint's rule, because the overlay this one writes is workspace-scoped and no /api/control-plane route confines such an overlay",
             "content": {
               "application/json": {
                 "schema": {
@@ -34203,7 +34225,7 @@
             "description": "Ranger service type: `\"trino\"` or `\"starrocks\"`."
           },
           "config": {
-            "description": "Optional service config (e.g. StarRocks JDBC coordinates). Stored verbatim."
+            "description": "Optional service config (e.g. StarRocks JDBC coordinates). Stored verbatim.\n\nA `tagService` key is accepted only when `type` is `\"trino\"` — see the\nhandler's doc comment."
           }
         }
       },
@@ -36914,7 +36936,7 @@
               },
               {
                 "$ref": "#/components/schemas/ExplainTagDecline",
-                "description": "Why `explain` declined to resolve this target's tags — absent when it\nresolved them.\n\n**This exists because the REASON was unreachable (fix round 3, IMPORTANT 1\n/ LOW 3).** The evaluator's `UndecidableCause::TagsUnresolved` is a unit\nvariant and says only \"the caller did not resolve\", which is all the\nevaluator can know; `resolved_tags_for_target` declines for four different\nstates with four different remedies, and `.is_some()` at the call site threw\nthe distinction away. The page then rendered round 1's single sentence for\nall four — naming a stored row that does not exist, and claiming a\nper-catalog reach for the one state that is per-REQUEST.\n\n**Carried here rather than as a payload on `TagsUnresolved`**, which was\nthe other option: `egret-ranger-eval` is a pure crate that knows nothing of\n`catalog_tag_assignments`, and the reason is a property of egret's STORAGE\nand of this REQUEST, not of the evaluator's input. It is also per\ntarget-and-catalog rather than per access, so the response is where it is\ntrue exactly once. The 1:1 pairing is a property of one function: this is\n`Some` exactly when the handler passed `resolved_tags: None`, which is the\nonly production state in which the evaluator raises `TagsUnresolved`."
+                "description": "Why `explain` declined to resolve this target's tags — absent when it\nresolved them.\n\n**This exists because the REASON was unreachable (fix round 3, IMPORTANT 1\n/ LOW 3).** The evaluator's `UndecidableCause::TagsUnresolved` is a unit\nvariant and says only \"the caller did not resolve\", which is all the\nevaluator can know; `resolved_tags_for_target` declines for more than one\nstate and the states have different remedies and different REACHES, and\n`.is_some()` at the call site threw the distinction away. The page then\nrendered round 1's single sentence for every one of them — naming a stored\nrow that does not exist, and claiming a per-catalog reach for the state that\nis per-REQUEST. (There were four states when that was measured; migration\n0177 made two of them unrepresentable and left two.)\n\n**Carried here rather than as a payload on `TagsUnresolved`**, which was\nthe other option: `egret-ranger-eval` is a pure crate that knows nothing of\n`catalog_tag_assignments`, and the reason is a property of egret's STORAGE\nand of this REQUEST, not of the evaluator's input. It is also per\ntarget-and-catalog rather than per access, so the response is where it is\ntrue exactly once. The 1:1 pairing is a property of one function: this is\n`Some` exactly when the handler passed `resolved_tags: None`, which is the\nonly production state in which the evaluator raises `TagsUnresolved`."
               }
             ]
           }
@@ -36934,60 +36956,6 @@
       },
       "ExplainTagDecline": {
         "oneOf": [
-          {
-            "type": "object",
-            "description": "A stored assignment has an empty `schema_name` or `table_name`, so\n`from_assignments` omits that level and the engine resolves the shorter\nresource as an ANCESTOR of everything beneath it.",
-            "required": [
-              "schema",
-              "table",
-              "column",
-              "kind"
-            ],
-            "properties": {
-              "schema": {
-                "type": "string"
-              },
-              "table": {
-                "type": "string"
-              },
-              "column": {
-                "type": "string"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "stored_level_empty"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "A stored assignment value carries `*` or `?`, which the engine matches with\n`FilenameUtils.wildcardMatch` and no SQL predicate reproduces.",
-            "required": [
-              "schema",
-              "table",
-              "column",
-              "kind"
-            ],
-            "properties": {
-              "schema": {
-                "type": "string"
-              },
-              "table": {
-                "type": "string"
-              },
-              "column": {
-                "type": "string"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "stored_wildcard"
-                ]
-              }
-            }
-          },
           {
             "type": "object",
             "description": "A stored assignment value carries one of the characters on which the two\ncase folds can disagree — see [`FOLD_DIVERGENT`].",
@@ -37039,7 +37007,7 @@
             }
           }
         ],
-        "description": "Which of the four states made `explain` decline to resolve the target's tags\n— see [`ExplainResponse::tag_resolution_declined`] and\n[`stored_value_problem`].\n\nThe four have four different remedies and two different REACHES, which is the\nwhole reason they are carried apart: three are properties of stored data and\nhold for every target in the catalog until it changes; the fourth is a property\nof the request and holds for nothing else.\n\nEach stored variant carries the offending coordinate so the page can name the\nrow to fix. That is a `policy:read` surface already — the response's `tags`\nfield reports attachments on the target — and naming no row is what produced\nthe measured defect: a sentence telling a steward to re-store an assignment\nthat was already stored on a table."
+        "description": "Which of the two states made `explain` decline to resolve the target's tags\n— see [`ExplainResponse::tag_resolution_declined`] and\n[`stored_coordinate_is_fold_divergent`].\n\nThe two have two different REACHES, which is the whole reason they are carried\napart: the first is a property of stored data and holds for every target in the\ncatalog until that row changes; the second is a property of the request and\nholds for nothing else.\n\n⚠ **This carried FOUR variants until SP4d debt Task 3.** `StoredLevelEmpty` and\n`StoredWildcard` were the other two, and migration 0177's\n`catalog_tag_assignments_levels_are_present_and_literal` makes both states\nunrepresentable: no running egret can read such a row, so no response can\nreport one. They are removed rather than left unreachable — an API variant a\nclient must still branch on for a state that cannot occur is the same defect as\na superseded comment. The enumeration of what the matcher does and the schema\nnow forbids survives on [`stored_coordinate_is_fold_divergent`], which is where\nthe next person needs it.\n\nThe stored variant carries the offending coordinate so the page can name the\nrow to fix. That is a `policy:read` surface already — the response's `tags`\nfield reports attachments on the target — and naming no row is what produced\nthe measured defect: a sentence telling a steward to re-store an assignment\nthat was already stored on a table."
       },
       "ExplainTargetLevel": {
         "type": "string",
@@ -39281,7 +39249,7 @@
               "string",
               "null"
             ],
-            "description": "The classification-tag policy service this Trino profile carries its\ntag-based masking/row-filters in (the configured `tagService` or the\n`<name>_tag` convention), if such a service exists. `None` otherwise — the\nFE shows a \"Tags\" tab only when this is set."
+            "description": "The classification-tag policy service this Trino profile carries its\ntag-based masking/row-filters in: the profile's OWN `config.tagService`,\nresolved to a real profile. `None` when the profile carries no link or\nthe link names nothing — the FE shows a \"Tags\" tab only when this is set.\n\n**SP4d debt Task 9 fix round:** this no longer falls back to the\n`<name>_tag` naming convention. It is the same answer\n`usable_tag_service` gives before letting an engine bind, and the same\none the plugin download serves, so a tab is offered only when a tag\npolicy authored in it could actually be enforced."
           },
           "origin": {
             "type": "string",

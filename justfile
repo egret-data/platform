@@ -49,6 +49,44 @@ no_engine := "EGRET_ALLOW_ENGINE_SKIP=1"
 # `just test-workflow-docker` is the recipe that runs it for real.
 no_docker := "EGRET_ALLOW_DOCKER_SKIP=1"
 
+# The STORE axis, a FOURTH one — and the only one of the four that `check` decides by
+# RUNNING the suite rather than by opting out of it. SP4d Task 8.
+#
+# `check` used to decide the DB, ENGINE and DOCKER axes and leave this one undecided, so
+# the workspace run ended `0 passed; 14 failed` on `crates/egret-dataapi/tests/serving_
+# shared_store.rs` — measured — and the panic's own remedy text tells the reader to export
+# `EGRET_ALLOW_STORE_SKIP=1`. From that export onward every `just check` on that machine
+# skipped all fourteen with the skip's `eprintln!` swallowed by libtest. A recipe that
+# makes its user disable part of itself is worse than one that forgot a gate: the forced
+# export is permanent and silent.
+#
+# So this axis is NOT an `EGRET_ALLOW_*=1` default like the two above it. Those exist
+# because an engine or a Docker daemon is expensive and a verdict about SQL handlers is not
+# what the contributor is changing. A redis-protocol server is neither: `valkey` is in
+# `deploy/docker-compose.dev.yml` beside the Postgres `check` ALREADY requires, so `just
+# up` provides both in one command, and `brew install valkey && valkey-server --port 6399`
+# provides it with no Docker daemon at all. `check` therefore supplies the URL and SCRUBS
+# the opt-out, so the only way to disable those fourteen is to edit this file, where the
+# edit shows up in a diff.
+#
+# Which of the two does the work, because the distinction is load-bearing and MEASURED:
+# the URL does. `store_url()` reads the opt-out only when the URL is missing or blank, so
+# while `check` names a store the opt-out is unreachable — with `EGRET_ALLOW_STORE_SKIP=1`
+# exported, that line still ran all fourteen in 1.06 s. Drop the URL from the same command
+# and the identical line reports `14 passed … finished in 0.00s`, which is the shape of the
+# green this axis existed to produce. The scrub is insurance against a future edit that
+# drops the URL, and it is what makes the guard in `egret-test-db` see the decision.
+#
+# Note what `check` demands already before judging this harsh: a Postgres on 5432, and a
+# JVM + Maven for `test-ranger-gates`. A Valkey is the cheapest of the three.
+no_store_skip := "env -u EGRET_ALLOW_STORE_SKIP"
+# Stated here rather than inherited, for the same reason `test_database_url` is: `set
+# dotenv-load` would otherwise let a `.env` decide which server the tests measure. Override
+# it on the command line when your store is elsewhere — `just test_store_url=redis://
+# 127.0.0.1:6400 check` — which can only point the suite at a DIFFERENT store, never make
+# it vacuous.
+test_store_url := "redis://127.0.0.1:6399"
+
 # Format, lint, and test everything
 check:
     # Cheap (0.2s) and visible: cargo never prunes deps/, and past ~100k files every test
@@ -57,7 +95,9 @@ check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     just test-shipping-resolution
-    {{ no_db_skip }} {{ no_engine }} {{ no_docker }} DATABASE_URL={{ test_database_url }} cargo test --workspace
+    {{ no_db_skip }} {{ no_store_skip }} {{ no_engine }} {{ no_docker }} \
+      DATABASE_URL={{ test_database_url }} EGRET_TEST_SHARED_STORE_URL={{ test_store_url }} \
+      cargo test --workspace
     # ⚠ LAST, and it is in `check` rather than beside it ON PURPOSE — open item 0b.
     # The line above RUNS both Ranger gates and they SELF-SKIP without the flag,
     # reporting `1 passed … 0.00s` each, so their contribution to that green was
@@ -68,6 +108,18 @@ check:
     # Expensive (~2-3 min) so it runs after everything cheap, and it is a named
     # recipe so a failure is attributable to it rather than lost in a workspace run.
     just test-ranger-gates
+    # The reach of the green above, printed where the reader of the green is looking.
+    # Three of the four service axes are decided by opting OUT, and a skip reports `ok`
+    # having asserted nothing with its `eprintln!` swallowed by libtest — so the only
+    # place a human can learn what this run did not cover is here. No counts: a figure
+    # in an echo beside a growing suite is a stale number waiting to happen.
+    @echo ""
+    @echo "── just check: what this green covers, and what it does not"
+    @echo "   RAN  database-gated suites        ({{ test_database_url }})"
+    @echo "   RAN  shared-store suites          ({{ test_store_url }} — crates/egret-dataapi/tests/serving_shared_store.rs)"
+    @echo "   RAN  the two Ranger gates against the real 2.5.0 + 2.8.0 jars"
+    @echo "   SKIPPED engine-gated suites       (EGRET_ALLOW_ENGINE_SKIP=1) → just test-workflow-starrocks, test-engine-mgmt-starrocks, test-dataapi-starrocks"
+    @echo "   SKIPPED docker-gated suites       (EGRET_ALLOW_DOCKER_SKIP=1) → just test-workflow-docker"
 
 # The two gates whose other side is Apache Ranger ITSELF rather than this repository's
 # reading of the jars: the enforcement gate (`crates/egret-policy`) and the differential
@@ -159,8 +211,36 @@ test-shipping-resolution:
 # Caveat: this silences the suites gated on `egret_test_db::url()`. Tests using
 # `#[sqlx::test]` never call it — they resolve DATABASE_URL through dotenvy themselves —
 # so they are not covered by the opt-out and may still fail here.
+# `EGRET_ALLOW_STORE_SKIP=1` for the same reason and with the same caveat: the fourteen
+# tests in `crates/egret-dataapi/tests/serving_shared_store.rs` panic without a
+# redis-protocol server, and this recipe's whole premise is that there are no services. It
+# is set HERE, on the line, rather than left undecided — undecided is what SP4d Task 8 was
+# about — and the echo below says so afterwards, because the skip itself reports `ok`.
 test-no-db:
-    env -u DATABASE_URL EGRET_ALLOW_DB_SKIP=1 {{ no_engine }} {{ no_docker }} cargo test --workspace
+    env -u DATABASE_URL EGRET_ALLOW_DB_SKIP=1 EGRET_ALLOW_STORE_SKIP=1 {{ no_engine }} {{ no_docker }} cargo test --workspace
+    @echo ""
+    @echo "── just test-no-db: this green asserted nothing about any service."
+    @echo "   SKIPPED database-gated suites  (EGRET_ALLOW_DB_SKIP=1)"
+    @echo "   SKIPPED shared-store suites    (EGRET_ALLOW_STORE_SKIP=1)"
+    @echo "   SKIPPED engine-gated suites    (EGRET_ALLOW_ENGINE_SKIP=1)"
+    @echo "   SKIPPED docker-gated suites    (EGRET_ALLOW_DOCKER_SKIP=1)"
+    @echo "   The compile and the service-free tests ran. For the rest: just check"
+
+# The shared limiter + response cache against a real Redis/Valkey, on its own, with the
+# `--nocapture` the workspace run cannot give it.
+#
+# `just check` runs this suite too — this recipe exists for when it is the thing you are
+# changing, because the fourteen cases include two that drive FORTY concurrent callers
+# across two independent `SharedStore` handles and you want their output. Prereq: `just up`,
+# or any redis-protocol server at {{ test_store_url }}.
+#
+# No `EGRET_ALLOW_STORE_SKIP` decision on the line and that is not an oversight: supplying
+# the URL decides the axis, because `store_url()` consults the opt-out only when the URL is
+# missing or blank. `no_db_skip` is still here — nothing in this suite touches Postgres
+# today, and "today" is exactly the word that makes a scrub cheaper than a judgement.
+test-dataapi-shared-store:
+    {{ no_db_skip }} EGRET_TEST_SHARED_STORE_URL={{ test_store_url }} \
+      cargo test -p egret-dataapi --test serving_shared_store --no-fail-fast -- --nocapture
 
 # The StarRocks catalog DDL this branch builds, against a real FE — the only
 # instrument that judges the property names in `render/starrocks.rs`.

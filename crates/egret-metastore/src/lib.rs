@@ -37,6 +37,15 @@ use sqlx::PgPool;
 // re-embed: 0130 database_governed (query.databases.governed — the per-database
 // switch that makes a Data API publish require a per-principal connection;
 // DEFAULT false so the migration changes no live endpoint's behaviour)
+// re-embed: 0176-0179 (the four SP4d guardrail CHECKs: tag_service requires a
+// schema level; catalog tag levels are present and literal; perm scope levels
+// are named; perm wildcard levels name nothing beneath) — renumbered from
+// 0165-0168 during this branch's rebase onto main, which had independently
+// taken all four, exactly as it had taken 0127 above. Relative order is
+// load-bearing: 0178 refuses the unnamed level that 0179's `^[*]+$` admits, so
+// 0178 must still be applied first. See
+// `no_two_migration_files_share_a_version`, which is the gate that now sees
+// this class.
 /// All SQL migrations, embedded at compile time from the workspace `migrations/` dir.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
@@ -128,6 +137,86 @@ mod tests {
              run: `sqlx::migrate!` reads the directory at COMPILE time. Rebuild — `build.rs` \
              exists to force that — and if a rebuild does not fix it, the \
              `cargo:rerun-if-changed` there has stopped working."
+        );
+    }
+
+    /// No two migration files share a version number.
+    ///
+    /// **This closes a hole in the gate above, which cannot see this class at
+    /// all.** `every_migration_on_disk_is_embedded` reduces the directory to a
+    /// `BTreeSet<i64>` and asserts a set DIFFERENCE, so two files both numbered
+    /// `0176` are ONE element: the duplicate is never represented, the difference
+    /// is empty, and the gate reports success. A set cannot count, so the only
+    /// gate that exists is blind to a duplicated integer by construction.
+    ///
+    /// The class is neither hypothetical nor rare in this repo.
+    /// `0128_dataapi_alerts` was renumbered from 0127 during a rebase because main
+    /// had independently taken 0127 for `render_tokens_workspace_id`, and SP4d's
+    /// four guardrails were renumbered from 0165-0168 to 0176-0179 for the same
+    /// reason — main had taken all four. A collision survives review because it is
+    /// INVISIBLE from the branch that creates it: the merge-base's highest version
+    /// is lower than every number the branch picks, so the branch's own tree looks
+    /// consistent. Only main's tree disagrees.
+    ///
+    /// What a duplicate costs: `_sqlx_migrations.version` is a `BIGINT PRIMARY
+    /// KEY`, so the SECOND file to carry a version aborts `migrate()` at
+    /// `ExecuteMigration(.., version)` on a fresh database. Every migration after
+    /// it never runs — and every `CHECK` constraint those migrations were going to
+    /// add is silently absent while the Rust half of the same guardrail ships
+    /// green, which is a branch enforcing half of what it claims.
+    ///
+    /// This asserts on FILENAMES rather than on `MIGRATOR.migrations` because
+    /// `sqlx::migrate!` does not reject a duplicate version at compile time; by
+    /// the time the set is embedded the two files are indistinguishable, so the
+    /// directory is the only place the duplicate still exists.
+    #[test]
+    fn no_two_migration_files_share_a_version() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+
+        let mut by_version: std::collections::BTreeMap<i64, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(&dir).expect("migrations/ is readable from the crate dir") {
+            let name = entry
+                .expect("readable entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned();
+            // `0131_dataapi_version_breaking_changes.sql` -> 131
+            let Some(version) = name
+                .strip_suffix(".sql")
+                .and_then(|s| s.split('_').next())
+                .and_then(|v| v.parse::<i64>().ok())
+            else {
+                continue;
+            };
+            by_version.entry(version).or_default().push(name);
+        }
+
+        // The same guard the test above carries, for the same reason: an unreadable
+        // or empty directory yields a map with no duplicate in it, and this
+        // assertion would ACQUIT having measured nothing.
+        assert!(
+            !by_version.is_empty(),
+            "read no migrations from {dir:?}; the test's own instrument is broken"
+        );
+
+        let duplicated: Vec<(i64, Vec<String>)> = by_version
+            .into_iter()
+            .filter(|(_, files)| files.len() > 1)
+            .map(|(version, mut files)| {
+                files.sort();
+                (version, files)
+            })
+            .collect();
+
+        assert!(
+            duplicated.is_empty(),
+            "two or more migration files share a version: {duplicated:?}. \
+             `_sqlx_migrations.version` is a BIGINT PRIMARY KEY, so the second file \
+             to carry a version aborts `migrate()` at `ExecuteMigration` and every \
+             migration after it never runs. Renumber the newer file(s) above the \
+             highest version on `origin/main` — check MAIN and not the merge-base, \
+             because a branch cannot see the numbers main took after it forked."
         );
     }
 }

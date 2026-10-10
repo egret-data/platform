@@ -19,7 +19,7 @@ use egret_perm::{
     engine_accesses, Action, CompileError, Effect, EngineType, Grant, GrantOrigin, Principal,
     PrincipalKind, PrincipalSet, Scope,
 };
-use egret_perm_compile::compile_grant;
+use egret_perm_compile::{compile_grant, validate_grant_shape};
 
 // Dumb helpers only — a helper that computes anything is a second
 // implementation of the thing under test.
@@ -443,6 +443,354 @@ fn a_starrocks_grant_scopes_by_database_not_schema() {
         "must not emit Trino's resource-level name on a StarRocks policy"
     );
     assert_eq!(out.resources["table"].values, vec!["orders"]);
+}
+
+/// **SP4d debt Task 12 — the privilege escalation, measured end to end on the
+/// compiler's OWN artifact.**
+///
+/// The finding: `perm.grants` accepted `schema_name = ''` (the control pair is in
+/// `egret-perm/tests/store.rs`), `scope_to_resources` copies a scope level
+/// through verbatim, `RangerAbstractResourceMatcher.init()` DROPS an empty policy
+/// value before building a matcher for it, and a level with no matchers is
+/// `isMatchAny`. So a grant written for `sales.orders` was enforced on
+/// `orders` in EVERY schema of the catalog.
+///
+/// **The bad resource map is DERIVED from a real compiler artifact, not typed out
+/// here.** The test compiles the legal grant, then changes the ONE token the
+/// finding is about — the `schema` level's value — and re-measures. A hand-written
+/// map would be a second copy of `scope_to_resources`' output, free to drift from
+/// it and still green.
+///
+/// **The control is the unedited artifact**, asserted to match the foreign schema
+/// at `MatchType::None`. Without it, a `Self_` on the edited map could just as
+/// well mean the matcher ignores policy resources altogether — the
+/// "a zero is unfalsifiable alone" shape in its positive form.
+///
+/// **The third arm WAS a standing residual and SP4d debt Task 14 closed it.**
+/// `'*'` at a level is a legitimate policy value — a steward scopes a grant to a
+/// whole catalog or schema routinely, and `scope_to_resources` emits `*` itself
+/// for every level the scope does not name — so neither `0178` nor `0179` refuses
+/// it as such. What `0179` refuses is `*` with a NAMED level BENEATH it, because
+/// `grants_check` has forbidden naming a table without a schema since `0154` and
+/// `(schema = '*', table = 'orders')` expresses exactly that. The arm stays here
+/// unchanged as the MEASUREMENT (`''` and `'*'` earn the identical `Self_`), and
+/// the refusal loop below now covers both tokens — with the legal shapes that
+/// keep `*` authorable living in
+/// `a_wildcard_level_over_a_named_one_is_refused_and_a_wildcard_tail_is_not`.
+#[test]
+fn an_empty_scope_level_would_be_enforced_in_every_schema() {
+    use std::collections::BTreeMap;
+
+    use egret_policy::admin::access_to_ranger_json;
+    use egret_ranger_eval::model::ResourceLevel;
+    use egret_ranger_eval::resource::{match_resource, MatchType, RequestResource};
+    use egret_ranger_eval::servicedef::ServiceDef;
+
+    // The real Trino service-def, so `wildCard`/`ignoreCase` on each level come
+    // from the file the engine is handed rather than from a default.
+    let def = ServiceDef::parse(&service_def(EngineType::Trino));
+
+    // One request, in a schema the grant below never named.
+    let request = RequestResource::new()
+        .with("catalog", "warehouse")
+        .with("schema", "finance")
+        .with("table", "orders")
+        .with("column", "amount");
+
+    let legal = grant_allow_read_on(Scope {
+        catalog_id: Uuid::nil(),
+        schema: Some("sales".into()),
+        table: Some("orders".into()),
+        column: None,
+    });
+    let artifact = compile_grant(&legal, "warehouse", "trino-1", EngineType::Trino)
+        .expect("a fully named path is the ordinary grant");
+    let wire = access_to_ranger_json(&artifact);
+
+    // Re-read the compiler's own output through the evaluator's own reader.
+    let read = |v: &serde_json::Value| -> BTreeMap<String, ResourceLevel> {
+        serde_json::from_value(v["resources"].clone()).expect("the artifact's resources map")
+    };
+
+    assert_eq!(
+        match_resource(&read(&wire), &request, &def),
+        MatchType::None,
+        "CONTROL: the unedited artifact for sales.orders must not cover \
+         finance.orders.amount — if it does, nothing below means anything"
+    );
+
+    // The ONE token the finding is about.
+    for value in ["", "*"] {
+        let mut edited = wire.clone();
+        edited["resources"]["schema"]["values"] = serde_json::json!([value]);
+        assert_eq!(
+            match_resource(&read(&edited), &request, &def),
+            MatchType::Self_,
+            "a {value:?} at the schema level makes the level isMatchAny, so the grant \
+             written for sales.orders covers finance.orders.amount too"
+        );
+    }
+
+    // And the compiler now refuses to emit EITHER of those two, each under the
+    // variant that names what is wrong with it: `''` is not a resource name at
+    // all (Task 12), while `'*'` is a legal value with a named level under it
+    // (Task 14). Two tokens, identical measured enforcement, two different
+    // refusals — which is why they are two predicates and not one.
+    for (value, expected) in [
+        ("", CompileError::EmptyScopeLevel { level: "schema" }),
+        (
+            "*",
+            CompileError::NamedLevelUnderWildcard {
+                wildcard: "schema",
+                wildcard_value: "*".into(),
+                named: "table",
+                named_value: "orders".into(),
+            },
+        ),
+    ] {
+        let err = compile_grant(
+            &grant_allow_read_on(Scope {
+                catalog_id: Uuid::nil(),
+                schema: Some(value.to_string()),
+                table: Some("orders".into()),
+                column: None,
+            }),
+            "warehouse",
+            "trino-1",
+            EngineType::Trino,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err, expected,
+            "{value:?} at the schema level with `orders` named under it must be refused,              and by the variant that names WHY"
+        );
+    }
+}
+
+/// Every level the guard covers, in both positions it runs in, and the shapes it
+/// must NOT refuse.
+///
+/// `validate_grant_shape` is the authoring boundary (create, patch and the
+/// rolled-back `/perm/preview` all reach it) and `compile_grant` is the last point
+/// at which a wrong artifact becomes an enforced one, so both are asserted for
+/// every level rather than one standing in for the other.
+#[test]
+fn every_scope_level_is_refused_empty_and_nothing_else_is() {
+    let scope = |schema: Option<&str>, table: Option<&str>, column: Option<&str>| Scope {
+        catalog_id: Uuid::nil(),
+        schema: schema.map(str::to_string),
+        table: table.map(str::to_string),
+        column: column.map(str::to_string),
+    };
+
+    for (level, s) in [
+        ("schema", scope(Some(""), None, None)),
+        ("schema", scope(Some(""), Some("orders"), None)),
+        ("table", scope(Some("sales"), Some(""), None)),
+        ("table", scope(Some("sales"), Some(""), Some("email"))),
+        ("column", scope(Some("sales"), Some("orders"), Some(""))),
+    ] {
+        let g = grant_allow_read_on(s);
+        assert_eq!(
+            validate_grant_shape(&g).unwrap_err(),
+            CompileError::EmptyScopeLevel { level },
+            "the authoring boundary must name the empty level"
+        );
+        assert_eq!(
+            compile_grant(&g, "warehouse", "trino-1", EngineType::Trino).unwrap_err(),
+            CompileError::EmptyScopeLevel { level },
+            "and so must the compiler, which is `pub` to callers that never went \
+             near the store"
+        );
+    }
+
+    // The shapes that must stay legal. `*` is a legitimate policy value (see
+    // `an_empty_scope_level_would_be_enforced_in_every_schema`'s third arm and
+    // migration 0178); whitespace is a literal resource name, because `init()`
+    // drops `""` and nothing else; and an ABSENT level is the ordinary
+    // catalog-or-schema-wide scope that `scope_to_resources` renders as `*`.
+    //
+    // ⚠ `('*', 'orders')` was in this list when Task 12 wrote it and has MOVED to
+    // the refused set of `a_wildcard_level_over_a_named_one_is_refused_and_a_
+    // wildcard_tail_is_not` (SP4d debt Task 14) — not because `*` stopped being
+    // legitimate, but because a NAMED level under a match-any one is the level
+    // skip `grants_check` already forbids. `('*', None)` keeps this test's
+    // original point: `0178`'s predicate must not refuse `*`.
+    for s in [
+        scope(None, None, None),
+        scope(Some("sales"), None, None),
+        scope(Some("*"), None, None),
+        scope(Some("sales"), Some("*"), Some("*")),
+        scope(Some(" "), Some("orders"), None),
+        scope(Some("Sales"), Some("Orders"), Some("Email")),
+    ] {
+        let g = grant_allow_read_on(s.clone());
+        validate_grant_shape(&g).unwrap_or_else(|e| panic!("{s:?} must stay authorable: {e}"));
+        compile_grant(&g, "warehouse", "trino-1", EngineType::Trino)
+            .unwrap_or_else(|e| panic!("{s:?} must stay compilable: {e}"));
+    }
+}
+
+/// **SP4d debt Task 14 — the rule, and above all the shapes it must NOT refuse.**
+///
+/// The rule is the authored-value form of `scope_to_resources`' own
+/// `wildcard_from_here` latch: *a level may be a match-any wildcard only if every
+/// level below it is a wildcard or absent.* It is NOT "`*` is illegitimate" — the
+/// page asks catalog-wide and schema-wide questions routinely and the compiler
+/// emits `*` itself for every unnamed level — so **the accept half of this test
+/// carries as much weight as the refuse half**, and a predicate that refused any
+/// of those shapes would be the over-refusal the plan warned against.
+///
+/// Both Rust positions are asserted for every shape, never one standing in for the
+/// other: `validate_grant_shape` is the authoring boundary (create, patch and the
+/// rolled-back `/perm/preview` all reach it) and `compile_grant` is the last point
+/// at which a wrong artifact becomes an enforced one and is `pub` to callers that
+/// never went near the store.
+///
+/// **A RUN of stars, not the single character.** `'**'` classifies to the same
+/// match-any as `'*'` in Ranger's `buildResourceMatchers()` and in
+/// `egret_ranger_eval::resource::ValueMatcher::classify`, so it is in the refused
+/// set — keying on the literal `'*'` would close one spelling and leave the next
+/// reaching identical enforcement from the identical free-text field. `'ord*'` is
+/// in the ACCEPTED set for the opposite reason: it classifies to `StartsWith`,
+/// which names a SET of schemas, so a table under it is not a gap.
+#[test]
+fn a_wildcard_level_over_a_named_one_is_refused_and_a_wildcard_tail_is_not() {
+    let scope = |schema: Option<&str>, table: Option<&str>, column: Option<&str>| Scope {
+        catalog_id: Uuid::nil(),
+        schema: schema.map(str::to_string),
+        table: table.map(str::to_string),
+        column: column.map(str::to_string),
+    };
+
+    for (wildcard, wildcard_value, named, named_value, s) in [
+        // The escalation as a steward can author it in the browser today.
+        (
+            "schema",
+            "*",
+            "table",
+            "orders",
+            scope(Some("*"), Some("orders"), None),
+        ),
+        // The same match-any, the next spelling.
+        (
+            "schema",
+            "**",
+            "table",
+            "orders",
+            scope(Some("**"), Some("orders"), None),
+        ),
+        // The topmost offending pair is the one reported, not the deepest.
+        (
+            "schema",
+            "*",
+            "table",
+            "orders",
+            scope(Some("*"), Some("orders"), Some("amount")),
+        ),
+        // A gap that only appears below a legal wildcard tail.
+        (
+            "schema",
+            "*",
+            "column",
+            "amount",
+            scope(Some("*"), Some("*"), Some("amount")),
+        ),
+        (
+            "table",
+            "*",
+            "column",
+            "amount",
+            scope(Some("sales"), Some("*"), Some("amount")),
+        ),
+        // ⚠ **THE OTHER HALF OF THE 2026-10-10 RULING, and it belongs in a
+        // refuse set precisely because its twin is in an accept set.** This exact
+        // tuple — `('sales','*','email')` — is ACCEPTED on `perm.rules` by
+        // `compile_rules.rs`'s
+        // `a_wildcard_path_level_over_a_named_one_is_allowed_on_a_rule`, because
+        // a mask there widens RESTRICTION and fails closed. On a GRANT the same
+        // tuple widens AUTHORITY: it compiles to a policy enforced in every
+        // schema of the catalog, which is the measured escalation. One predicate
+        // now answers differently for two tables, so BOTH cells are asserted on
+        // this branch — otherwise nothing notices when one side drifts.
+        (
+            "table",
+            "*",
+            "column",
+            "email",
+            scope(Some("sales"), Some("*"), Some("email")),
+        ),
+    ] {
+        let expected = CompileError::NamedLevelUnderWildcard {
+            wildcard,
+            wildcard_value: wildcard_value.to_string(),
+            named,
+            named_value: named_value.to_string(),
+        };
+        let g = grant_allow_read_on(s.clone());
+        assert_eq!(
+            validate_grant_shape(&g).unwrap_err(),
+            expected,
+            "{s:?}: the authoring boundary must refuse it, naming BOTH levels"
+        );
+        assert_eq!(
+            compile_grant(&g, "warehouse", "trino-1", EngineType::Trino).unwrap_err(),
+            expected,
+            "{s:?}: and so must the compiler, which is `pub` to callers that never \
+             went near the store"
+        );
+
+        // The message is what a steward reads, and the whole point of the framing
+        // is that the refusal reads as CONSISTENCY rather than as a new
+        // restriction: it must point at the decision the model already made.
+        let msg = expected.to_string();
+        assert!(
+            msg.contains("0154_perm_model.sql") && msg.contains("does not express"),
+            "the refusal must say the model does not express this scope, by \
+             `grants_check`'s existing decision rather than by a new opinion — got: {msg}"
+        );
+        assert!(
+            msg.contains(named_value) && msg.contains(wildcard_value),
+            "and it must name both offending values so the author can fix one — got: {msg}"
+        );
+    }
+
+    // ── THE SHAPES THAT MUST STAY AUTHORABLE ─────────────────────────────────
+    // Every one of these is an ordinary thing a steward writes, and the plan is
+    // explicit that an implementation refusing any of them is wrong.
+    for s in [
+        scope(None, None, None),                         // catalog-wide
+        scope(Some("sales"), None, None),                // schema-wide
+        scope(Some("*"), None, None),                    // every schema, nothing under it
+        scope(Some("*"), Some("*"), None),               // ('*','*')
+        scope(Some("*"), Some("*"), Some("*")),          // the compiler's own emission
+        scope(Some("**"), Some("***"), None),            // runs of any length, still no gap
+        scope(Some("sales"), Some("orders"), Some("*")), // every column of one table
+        scope(Some("sales"), Some("*"), Some("*")),
+        scope(Some("ord*"), Some("orders"), None), // StartsWith names a SET
+        scope(Some("sales"), Some("ord*"), Some("amount")),
+        scope(Some(" "), Some("orders"), None), // whitespace is a literal name
+        scope(Some("sales"), Some("orders"), Some("amount")),
+    ] {
+        let g = grant_allow_read_on(s.clone());
+        validate_grant_shape(&g).unwrap_or_else(|e| panic!("{s:?} must stay authorable: {e}"));
+        compile_grant(&g, "warehouse", "trino-1", EngineType::Trino)
+            .unwrap_or_else(|e| panic!("{s:?} must stay compilable: {e}"));
+    }
+
+    // And the latch this predicate mirrors is still the emission's own: the
+    // compiler renders `*` below an ABSENT level by itself, so the accepted
+    // `('sales', None, None)` and the refused `('sales','*','amount')` are not two
+    // readings of one scope — the first HAS no column to name.
+    let wide = compile_grant(
+        &grant_allow_read_on(scope(Some("sales"), None, None)),
+        "warehouse",
+        "trino-1",
+        EngineType::Trino,
+    )
+    .expect("a schema-wide grant compiles");
+    assert_eq!(wide.resources["table"].values, vec!["*"]);
+    assert_eq!(wide.resources["column"].values, vec!["*"]);
 }
 
 #[test]

@@ -504,3 +504,168 @@ async fn download_tags_unattached_engine_exports_nothing_while_the_attaching_ser
         json!(catalog_name_w)
     );
 }
+
+// ---------------------------------------------------------------------------
+// SP4d debt Task 6, item 2 — the resolver and the download writer must cover
+// the same set, and now share the one spelling of the reachability leg.
+// ---------------------------------------------------------------------------
+
+/// **The set-equality measurement.** `explain` evaluates the artifact the
+/// engine downloads, and the TAG set it hands the evaluator comes from
+/// `resolved_tags_for_resource_via`, which scopes on `a.warehouse_id =
+/// c.warehouse_id` and applies no engine predicate at all. The engine's own tag
+/// map comes from `PolicyStore::tag_assignments_for_service`, which does. They
+/// agreed only because `explain` narrows the catalog through
+/// `catalogs_for_service_via` first, and nothing compared them — so a change to
+/// either join made `explain` resolve tags the engine never received, i.e. a
+/// confident over-deny.
+///
+/// Since Task 6 the reachability leg is spelled ONCE
+/// (`catalogs_for_service_via`) and the writer calls it, so the two cannot
+/// drift. This asserts the property that factoring buys, over a fixture built
+/// so that it is **not** vacuous:
+///
+/// * catalog A — attached to an engine bound to THIS profile: served, and
+///   resolvable.
+/// * catalog B — its own warehouse, its own assignments, attached to **no
+///   engine at all**: must appear on NEITHER side. This is the
+///   `engine_catalog_attachments` leg.
+/// * catalog C — its own warehouse, its own assignments, attached to an engine
+///   bound to a **DIFFERENT profile**: must appear on neither side either. This
+///   is the `authz_service_id` leg.
+///
+/// (B cannot be a second catalog NAME on A's warehouse: `registry.catalogs`
+/// carries `catalogs_warehouse_id_key`, a UNIQUE on `warehouse_id`, so a
+/// warehouse has at most one catalog. Measured, not assumed — the first version
+/// of this fixture tried it and got `23505`.)
+///
+/// Compared as SETS of `(catalog, schema, table, column, tag)` rather than as
+/// counts, and the set is asserted non-empty first — `assert_eq!(a, b)` over two
+/// empty sets is the assertion that cannot fail.
+///
+/// The resolver side is filtered to `MatchType::Self_`. That is not a fudge: the
+/// writer exports STORED coordinates verbatim, while the resolver also rolls a
+/// table-level attachment up as an `Ancestor` of every column asked about, so an
+/// `Ancestor` entry is the resolver's view of a row the writer already exported
+/// at its own coordinate. Counting it would double-count one row, not reveal a
+/// disagreement.
+#[tokio::test]
+async fn the_tag_download_and_the_explain_resolver_cover_the_same_set() {
+    let Some(db) = db().await else {
+        eprintln!("skip");
+        return;
+    };
+    let pool = db.pool.clone();
+    let store = PolicyStore::new(db.clone());
+    seed_trino(&store).await.expect("seed");
+
+    let profile = store
+        .create_service(
+            &format!("trino_{}", Uuid::new_v4().simple()),
+            "trino",
+            &json!({}),
+        )
+        .await
+        .expect("create profile");
+    let other_profile = store
+        .create_service(
+            &format!("trino_{}", Uuid::new_v4().simple()),
+            "trino",
+            &json!({}),
+        )
+        .await
+        .expect("create second profile");
+
+    // ── catalog A: reachable by `profile`.
+    let wh = seed_warehouse(&pool).await;
+    let eng = seed_engine(&pool, profile.id).await;
+    let (cat_a, name_a) = seed_registry_catalog(&pool, wh, "tagcat_a").await;
+    attach_catalog(&pool, eng, cat_a).await;
+    seed_tag_assignment(&pool, wh).await;
+
+    // ── catalog B: its own warehouse and assignments, attached to NO engine.
+    let wh_b = seed_warehouse(&pool).await;
+    let (_cat_b, name_b) = seed_registry_catalog(&pool, wh_b, "tagcat_b").await;
+    seed_tag_assignment(&pool, wh_b).await;
+
+    // ── catalog C: another warehouse, bound to the OTHER profile.
+    let wh_c = seed_warehouse(&pool).await;
+    let eng_c = seed_engine(&pool, other_profile.id).await;
+    let (cat_c, name_c) = seed_registry_catalog(&pool, wh_c, "tagcat_c").await;
+    attach_catalog(&pool, eng_c, cat_c).await;
+    seed_tag_assignment(&pool, wh_c).await;
+
+    type Row = (String, String, String, String, String);
+
+    // ── what the engine downloads.
+    let served: std::collections::BTreeSet<Row> = store
+        .tag_assignments_for_service(profile.id)
+        .await
+        .expect("tag assignments")
+        .into_iter()
+        .map(|r| {
+            (
+                r.catalog,
+                r.schema_name,
+                r.table_name,
+                r.column_name,
+                r.tag_name,
+            )
+        })
+        .collect();
+
+    // ── what `explain` would resolve, reached exactly the way `explain`
+    //    reaches it: narrow the catalogs through `catalogs_for_service_via`,
+    //    then resolve each stored coordinate.
+    let mut conn = pool.acquire().await.expect("conn");
+    let mut resolved: std::collections::BTreeSet<Row> = std::collections::BTreeSet::new();
+    for c in egret_policy::catalogs_for_service_via(&mut conn, profile.id)
+        .await
+        .expect("catalogs for service")
+    {
+        for (schema, table, column) in egret_policy::tag_assignment_coordinates_via(&mut conn, c.id)
+            .await
+            .expect("coordinates")
+        {
+            for t in egret_policy::resolved_tags_for_resource_via(
+                &mut conn, c.id, &schema, &table, &column,
+            )
+            .await
+            .expect("resolve")
+            .into_iter()
+            .filter(|t| t.match_type == egret_ranger_eval::resource::MatchType::Self_)
+            {
+                resolved.insert((
+                    c.name.clone(),
+                    schema.clone(),
+                    table.clone(),
+                    column.clone(),
+                    t.name,
+                ));
+            }
+        }
+    }
+
+    assert!(
+        !served.is_empty(),
+        "the fixture must actually serve something, or this comparison is vacuous"
+    );
+    assert_eq!(
+        served, resolved,
+        "the tag download and the explain resolver must cover the same set"
+    );
+    // And the fixture really did hold out the two unreachable catalogs, so the
+    // equality above is not the equality of two over-broad sets.
+    let names: Vec<&str> = served.iter().map(|r| r.0.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![name_a.as_str()],
+        "only the attached catalog's name may be served"
+    );
+    for held_out in [&name_b, &name_c] {
+        assert!(
+            !served.iter().any(|r| &r.0 == held_out) && !resolved.iter().any(|r| &r.0 == held_out),
+            "{held_out} is not reachable by this profile and must appear on neither side"
+        );
+    }
+}

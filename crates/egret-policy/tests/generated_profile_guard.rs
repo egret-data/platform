@@ -966,3 +966,93 @@ async fn a_generated_profile_refuses_a_reserved_name_for_the_reserved_reason() {
         .await
         .expect("cleanup");
 }
+
+/// **SP4d debt Task 16, closing Task 6's concern 5.** When a create would be
+/// refused by BOTH the profile's `origin` and one of the editor's own authoring
+/// guards, the operator must read the OPERATIVE refusal — "this profile is
+/// compiled, edit its grants and rules" (409) — and not the editor guard's 400.
+///
+/// Task 6 shipped its ambiguous-arbitration guard in the route handler, which
+/// runs before `store.create_policy` and therefore before
+/// `refuse_if_generated`, so a steward who hit both was told their policy was
+/// ambiguous when the real answer was that nothing they wrote could be kept: the
+/// next recompile would reap it. Task 6 deliberately did NOT add its own
+/// `origin` read to fix that (a second spelling of "is this profile
+/// compiler-owned"), and was right not to; the fix is a pre-flight that runs the
+/// store's OWN refusals, in the store's own order.
+///
+/// The premise is a generated profile that already serves a row filter, plus a
+/// POST of a DISAGREEING second row filter on the same table — Task 6's refused
+/// shape. The two accept/behaviour controls are elsewhere and both matter:
+/// `a_generated_profile_refuses_a_reserved_name_for_the_reserved_reason` pins
+/// that the pre-flight did not invert the reserved-name precedence, and
+/// `a_second_row_filter_on_one_table_is_refused_only_when_it_disagrees`
+/// (admin_routes) pins that the 400 still fires in a MANUAL profile — without
+/// that one, "always 409" would pass here.
+#[tokio::test]
+async fn a_generated_profile_answers_409_before_the_editors_own_400() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = admin_session(&f, "guard_409_before_400").await;
+    let (svc_name, svc_id) = seed_generated_profile(&f).await;
+
+    // A row filter already served by this profile, inserted directly because
+    // `create_policy` is (correctly) refused for this profile.
+    let existing = serde_json::json!({
+        "name": "rf-existing", "service": svc_name, "policyType": 2,
+        "serviceType": "trino",
+        "resources": {
+            "catalog": {"values": ["iceberg"], "isExcludes": false, "isRecursive": false},
+            "schema": {"values": ["sales"], "isExcludes": false, "isRecursive": false},
+            "table": {"values": ["orders"], "isExcludes": false, "isRecursive": false}
+        },
+        "rowFilterPolicyItems": [
+            {"groups": ["analysts"], "accesses": [{"type": "select", "isAllowed": true}],
+             "rowFilterInfo": {"filterExpr": "region = 'eu'"}}
+        ]
+    });
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(svc_id)
+    .bind("rf-existing")
+    .bind(&existing)
+    .execute(&f.db.pool)
+    .await
+    .expect("seed existing row filter");
+
+    // A second row filter on the same table with a DIFFERENT expression: Task
+    // 6's refused pair, which the editor guard would answer 400 for.
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "kind": "rowfilter", "name": "rf-second", "service": svc_name,
+            "isEnabled": true,
+            "resources": {
+                "catalog": {"values": ["iceberg"]},
+                "schema": {"values": ["sales"]},
+                "table": {"values": ["orders"]}
+            },
+            "items": [{"groups": ["analysts"], "filterExpr": "region = 'us'"}]
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a generated profile must answer the compiler-owned 409, not the editor's \
+         ambiguous-arbitration 400 — the operative fact is that nothing written here \
+         survives the next recompile; body={body}"
+    );
+    assert_names_the_compiler(&body);
+
+    sqlx::query("DELETE FROM policy.authz_services WHERE id = $1")
+        .bind(svc_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("cleanup");
+}

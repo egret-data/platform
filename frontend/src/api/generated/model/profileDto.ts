@@ -19,9 +19,15 @@ export interface ProfileDto {
   engines: ProfileEngine[];
   /**
      * The classification-tag policy service this Trino profile carries its
-     * tag-based masking/row-filters in (the configured `tagService` or the
-     * `<name>_tag` convention), if such a service exists. `None` otherwise — the
-     * FE shows a "Tags" tab only when this is set.
+     * tag-based masking/row-filters in: the profile's OWN `config.tagService`,
+     * resolved to a real profile. `None` when the profile carries no link or
+     * the link names nothing — the FE shows a "Tags" tab only when this is set.
+     *
+     * **SP4d debt Task 9 fix round:** this no longer falls back to the
+     * `<name>_tag` naming convention. It is the same answer
+     * `usable_tag_service` gives before letting an engine bind, and the same
+     * one the plugin download serves, so a tab is offered only when a tag
+     * policy authored in it could actually be enforced.
      * @nullable
      */
   tag_service?: string | null;

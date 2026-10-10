@@ -99,6 +99,30 @@ pub enum CompileError {
         total: usize,
         ceiling: usize,
     },
+    /// **The compiled set would be served with two mask (or two row-filter)
+    /// policies that arbitrate the same request and arbitrate it differently**
+    /// — SP4d debt Task 6, the WRITE side of
+    /// `egret_ranger_eval`'s `UndecidableCause::EvalOrderAmbiguous`. Measured
+    /// live as SP4d-1's finding F2
+    /// (`docs/en/plans/2026-09-28-sp4d-1-live-result.md` §8): egret's own rule
+    /// compiler put `country = 'US'` and `id > 2` on one table at one priority,
+    /// and which rows a reader saw was decided by a tie-break the artifact does
+    /// not express.
+    ///
+    /// **It is a whole-SET refusal, like [`Self::ProfileExpansionCeiling`] and
+    /// unlike every per-rule variant above**, because no single `compile_rule`
+    /// call can see the other rule's output. It therefore names the PROFILE as
+    /// well: the trigger may be a workspace-membership write on a page that
+    /// mentions neither rule.
+    ///
+    /// `refusal` is `egret_policy::AmbiguousArbitration::refusal()` — the SAME
+    /// sentence the policy editor's 400 carries, so the two surfaces cannot
+    /// describe one state differently. The rule itself is
+    /// `egret_policy::ambiguous_arbitration_in`, spelled once; read that
+    /// module for why an AGREEING tie is admitted, and for why the guard is
+    /// deliberately narrower than the evaluator's own refusal.
+    #[error("recompiling profile {profile:?} would emit an order-ambiguous pair: {refusal}")]
+    AmbiguousMaskOrFilterArbitration { profile: String, refusal: String },
     /// A `User` principal's `r#ref` is not the bare username the store is
     /// supposed to hold (`model::Principal`'s doc comment: "a username,
     /// never an email … written through unchanged"). The compiler does no
@@ -189,6 +213,140 @@ pub enum CompileError {
     /// `egret-perm-compile`'s `rules::ensure_row_filter_scope_is_a_table`).
     #[error("rule {rule:?} cannot be compiled as a row filter: {reason}")]
     UnfilterableRowFilterScope { rule: String, reason: String },
+    /// A `Scope` level is PRESENT but EMPTY (`Some("")`) — SP4d debt Task 12.
+    ///
+    /// # This is a privilege escalation, and it is a level SKIP the database
+    /// could not see
+    ///
+    /// `perm.grants` has carried `CHECK (schema_name IS NOT NULL OR table_name
+    /// IS NULL)` since `0154_perm_model.sql` because a path cannot skip a level.
+    /// `schema_name = ''` IS that skip — in enforcement terms it is exactly "a
+    /// table with no schema" — and `IS NOT NULL` cannot see it. Measured as a
+    /// pair, which is what makes it a measurement rather than a probe that could
+    /// not fail: `(schema_name = '', table_name = 'orders')` was **accepted**,
+    /// while `(schema_name = NULL, table_name = 'orders')` was **rejected** by
+    /// `grants_check` on the same connection.
+    ///
+    /// What the empty level then does:
+    /// `crate::grants::scope_to_resources` copies the level through verbatim, so
+    /// the compiled policy carries `"schema": {"values": [""]}`;
+    /// `RangerAbstractResourceMatcher.init()` **drops an empty policy value**
+    /// before a matcher is built for it; a level left with no matchers is
+    /// `isMatchAny`. Measured through `egret_ranger_eval::resource::match_resource`
+    /// (`tests/compile_grants.rs`,
+    /// `an_empty_scope_level_would_be_enforced_in_every_schema`): the artifact for
+    /// `sales.orders` with `sales` replaced by `""` matches a request for
+    /// `finance.orders.amount` at `MatchType::Self_`, while the unedited artifact
+    /// matches it at `MatchType::None`. A grant written for one schema was
+    /// enforced across the whole catalog, reachable by any `policy:update` caller.
+    ///
+    /// # `'*'` is NOT refused, deliberately
+    ///
+    /// A grant scoped to a whole catalog or schema is an ordinary thing a steward
+    /// writes, `scope_to_resources` emits `*` itself at every level the scope does
+    /// not name, and the compiled resources a steward reads are full of it. Only
+    /// `''` is wrong — it is the spelling that LOOKS like a named level. ⚠ The
+    /// consequence, measured in the same test and stated rather than hidden:
+    /// `(schema_name = '*', table_name = 'orders')` reaches the SAME catalog-wide
+    /// enforcement and stays legal, so this refusal closes the accidental door and
+    /// not the deliberate one.
+    ///
+    /// The keyed shape is `value.is_empty()`, one-for-one with
+    /// `migrations/0178_perm_scope_levels_are_named.sql`'s `<> ''`, because two
+    /// guards that must agree written to different shapes has produced a defect in
+    /// this programme four times. In particular this is NOT
+    /// `egret_ranger_eval::resource::requests_all_values`: that predicate is the
+    /// REQUEST-side rule and folds `""`, `"*"` and `null` together, and keying a
+    /// scope refusal to it would refuse `*`.
+    #[error(
+        "scope level `{level}` is present but empty — a level is a resource NAME. Ranger's \
+         `RangerAbstractResourceMatcher.init()` drops an empty policy value before building a \
+         matcher for it, so the level becomes `isMatchAny` and the policy is enforced at EVERY \
+         {level} under its parent rather than at the one named. Omit the level to scope to its \
+         parent, or name one"
+    )]
+    EmptyScopeLevel { level: &'static str },
+    /// A `Scope` level is a run of `*` — Ranger's "every value at this level",
+    /// so the level names nothing — while a level BELOW it names something.
+    /// SP4d debt Task 14, the other half of [`Self::EmptyScopeLevel`].
+    ///
+    /// # This is NOT "`*` is illegitimate"
+    ///
+    /// A grant scoped to a whole catalog or a whole schema is an ordinary thing
+    /// a steward writes, `crate::grants::scope_to_resources` emits `*` ITSELF at
+    /// every level the scope does not name, and the compiled resources a steward
+    /// reads back are full of it. `('*','*')`, `('sales','orders','*')` and every
+    /// other shape where a `*` has nothing named beneath it stay legal, and the
+    /// tests name each one.
+    ///
+    /// # What IS wrong is a gap in the path, and the table already said so
+    ///
+    /// `0154_perm_model.sql` gave `perm.grants` AND `perm.rules`
+    /// `CHECK (schema_name IS NOT NULL OR table_name IS NULL)` because "a path
+    /// cannot skip a level: a column implies a table implies a schema".
+    /// `schema_name = '*'` IS that skip — `*` names no schema, so `('*',
+    /// 'orders')` is "a table with no schema", the exact scope `grants_check`
+    /// refuses when it is spelled NULL. **Two guards in one table disagreed
+    /// about whether that scope exists**, and the model had already decided it
+    /// does not: `scope_to_resources`' `wildcard_from_here` latch renders `*` at
+    /// every level below the first unnamed one, so no scope the compiler can
+    /// emit ever carries a named level under an unnamed one. This refusal is
+    /// that latch stated over the AUTHORED values.
+    ///
+    /// # The measurement, and why this half is the reachable one
+    ///
+    /// `tests/compile_grants.rs`'s
+    /// `an_empty_scope_level_would_be_enforced_in_every_schema` compiles the
+    /// legal grant for `sales.orders`, substitutes one token in the schema
+    /// level's values, and measures with
+    /// `egret_ranger_eval::resource::match_resource` against the real Trino
+    /// service-def: `"sales"` (unedited) matches `finance.orders.amount` at
+    /// `MatchType::None`, while `""` AND `"*"` both match it at
+    /// `MatchType::Self_`. Identical catalog-wide reach.
+    ///
+    /// Unlike `""`, `"*"` is reachable from the browser — by code path, not by
+    /// authorship: `frontend/src/components/perm/ScopePicker.tsx`'s three levels
+    /// are free-text `<Input>`s whose `onChange` is `e.target.value ||
+    /// undefined`, which maps `""` to `undefined` (that is why `""` never
+    /// arrived from the UI) while `"*"` is truthy and passes straight through;
+    /// `canPickTable = !!value.schema`, so typing `*` into Schema ENABLES the
+    /// Table field, and Table's `onChange` clears only `column`.
+    ///
+    /// # A RUN of stars, not the single character
+    ///
+    /// `RangerAbstractResourceMatcher.buildResourceMatchers()` treats a pure run
+    /// of `*` as match-any and clears every other matcher on the level;
+    /// `egret_ranger_eval::resource::ValueMatcher::classify` reproduces it, and
+    /// `classify("**")` is the same match-any as `classify("*")`. Keying this on
+    /// the literal `"*"` would close one spelling and leave `"**"` reaching the
+    /// identical enforcement from the identical field. `"ord*"` is deliberately
+    /// NOT in the class: it is a prefix matcher that names a SET of schemas, so
+    /// the level is named and a table under it is not a gap.
+    ///
+    /// # ⚠ NOT keyed to `egret_ranger_eval::resource::requests_all_values`
+    ///
+    /// That predicate is the REQUEST-side rule and folds `null`, `""` and `"*"`
+    /// together. Keying a SCOPE refusal to it would refuse `'*'` outright —
+    /// [`Self::EmptyScopeLevel`]'s doc records the same trap for the same
+    /// reason. `""` and a run of stars are both match-any, but they earn
+    /// DIFFERENT refusals here (`""` is refused at every level unconditionally;
+    /// a run of stars only above a named level), so one predicate cannot serve
+    /// both.
+    #[error(
+        "scope level `{wildcard}` is {wildcard_value:?}, which is Ranger's \"every value at this \
+         level\" and so names no {wildcard} at all — while `{named}` below it names \
+         {named_value:?}. That is a path with a gap in it, and this model does not express it: \
+         `perm.grants` and `perm.rules` have both carried `CHECK (schema_name IS NOT NULL OR \
+         table_name IS NULL)` since `0154_perm_model.sql` because a column implies a table \
+         implies a schema, and a match-any level is that same unnamed level spelled differently. \
+         Name the `{wildcard}`, or drop `{named}` to scope to every {named} under it"
+    )]
+    NamedLevelUnderWildcard {
+        wildcard: &'static str,
+        wildcard_value: String,
+        named: &'static str,
+        named_value: String,
+    },
     /// A rule's `exempt` set names something a masking/row-filter Ranger
     /// item cannot express: a non-empty `exempt.exclude` (those items carry
     /// no allow/deny-exception block the way an access-policy item does —

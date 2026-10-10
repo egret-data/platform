@@ -11,7 +11,10 @@ use serde::Deserialize;
 
 use crate::cookie::{csrf_cookie, session_cookie};
 use crate::groups::GroupRepo;
-use crate::impersonation::{validate_impersonation_target, ImpersonationRepo, NewImpersonation};
+use crate::impersonation::{
+    validate_impersonation_target, validate_ws_impersonation_target_membership, ImpersonationRepo,
+    NewImpersonation,
+};
 use crate::oidc::{provision_and_sync, OidcService};
 use crate::oidc_cookie::{
     build_state_cookie, clear_state_cookie, ImpersonateIntent, OidcStateCookie, OIDC_STATE_COOKIE,
@@ -288,13 +291,18 @@ pub async fn complete_impersonation_step_up(
             .into_response();
     }
     let target = UserId(intent.target_user_id);
-    // (3) Re-run the shared target guards (not-self / target-exists / not-admin).
+    // (3) Re-run the shared target guards (not-self / target-exists / platform
+    //     authority, by the intent's own scope — see below).
     if let Err(e) = validate_impersonation_target(
         &st.users,
         &st.sessions,
         authenticated,
         target,
         &intent.reason,
+        // The sealed intent's own scope: this one callback completes BOTH the
+        // platform step-up (`None`) and the ws_admin one (`Some(ws)`), so the
+        // target rule it applies must follow the intent rather than the route.
+        intent.workspace_id.map(WorkspaceId),
     )
     .await
     {
@@ -303,6 +311,25 @@ pub async fn complete_impersonation_step_up(
             (e.status_code(), "step-up target rejected"),
         )
             .into_response();
+    }
+    // (3b) For a WS-SCOPED intent, also re-run the workspace-specific target pair:
+    //      the target must be a MEMBER of that workspace and must not be a `ws_admin`
+    //      of it. `ws_impersonate_start` runs this as its step 4 before writing the
+    //      overlay inline; an OIDC caller never reaches that write (it gets a 409 and
+    //      the overlay is minted HERE), and this callback omitted the guard — so
+    //      promoting or removing the target during the IdP round trip minted the
+    //      overlay anyway (whole-branch review, M-1). Same function as the start
+    //      endpoint calls, never a copy of it; nothing is written on refusal.
+    if let Some(ws) = intent.workspace_id {
+        if let Err(e) =
+            validate_ws_impersonation_target_membership(&st.sessions, target, WorkspaceId(ws)).await
+        {
+            return (
+                jar.remove(clear_state_cookie()),
+                (e.status_code(), "step-up target rejected"),
+            )
+                .into_response();
+        }
     }
     // (4) Mint a fresh admin session and attach the overlay to it.
     let issued = match st.sessions.create(authenticated, "", "").await {

@@ -47,7 +47,9 @@
 //! once and linked once, which is what removes that whole class of problem — see
 //! [`process_db_name`] for the part of the old workaround that is still worth keeping.
 
-use egret_metastore::Db;
+use egret_metastore::{Db, MIGRATOR};
+use sha2::{Digest, Sha256};
+use sqlx::migrate::MigrationType;
 
 /// The database this test process owns, cloned from a shared migrated template.
 ///
@@ -71,13 +73,167 @@ use egret_metastore::Db;
 ///
 /// The template is migrated once per process, before the clone. `db.migrate()` is
 /// idempotent, so a migration added since the template was built is applied to it and
-/// every later clone carries it. An **edited** migration is different: sqlx compares
-/// checksums and refuses, and the recovery is to drop the template so the next run
-/// rebuilds it — that refusal is deliberate, because silently re-running an edited
-/// migration is how two developers end up with different schemas under the same name.
+/// every later clone carries it — but only ever *within one migration set*, because the
+/// template's NAME is a digest of that set (see [`template_db_name`]). A branch that adds,
+/// removes or edits a migration therefore asks for a template of its own and builds it from
+/// empty, rather than meeting one some other branch migrated.
 static TEST_DB: tokio::sync::OnceCell<Option<String>> = tokio::sync::OnceCell::const_new();
 
-const TEMPLATE_DB: &str = "egret_test_template";
+/// The prefix every template this crate creates carries.
+///
+/// Chosen so that [`CLONE_PATTERN`] cannot match it: `egret_t_` and `egret_test_` differ at
+/// the eighth character (`_` against `e`), and a regex `_` is literal. That is the same
+/// distinction `a_clone_name_is_the_prefix_and_exactly_32_hex_digits` records for
+/// `egret_test` itself, and `postgres_matches_a_clone_and_never_the_shared_database` asks
+/// Postgres about a freshly generated template name rather than taking it on reading — which
+/// is the one claim here that is NOT a matter of reading the two strings.
+///
+/// # Templates accumulate, and that is a known condition with a manual remedy
+///
+/// A name per migration set means a template per migration set: a machine that follows
+/// `main` acquires one every few days, 12 MB each measured 2026-10-01. An automatic sweep for
+/// them was written and then **removed on the controller's ruling** — a mechanism that
+/// DELETES databases and whose drop had never been observed to fire is the one place an
+/// unfalsifiable green is not acceptable, and its whole policy was an unmeasured TTL. The
+/// remedy is a listing and a judgement, in `docs/en/testing/db-gated-tests.md`:
+///
+/// ```text
+/// psql postgres://egret:egret@localhost:5432/postgres \
+///   -c "select datname, pg_size_pretty(pg_database_size(datname)) \
+///       from pg_database where datname like 'egret_test_tmpl%'"
+/// ```
+const TEMPLATE_PREFIX: &str = "egret_test_tmpl_";
+
+/// This process's template database: [`TEMPLATE_PREFIX`] and a digest of the migration set.
+///
+/// # Why not one fixed name
+///
+/// This was `const TEMPLATE_DB: &str = "egret_test_template"` — **one** name shared by every
+/// worktree on every branch, so whichever branch migrated it last decided the schema that
+/// every other branch's tests then ran against. Measured twice on 2026-10-01 on one machine:
+/// a tree at migration `0159` met a template another checkout had taken to `0160` and 84
+/// tests failed with one identical `VersionMissing(160)`; then, with `main` at `0162`,
+/// `egret-policy`'s `tag_resolution` suite went 6/6 green and `egret-perm-compile` hit
+/// `VersionMissing(163)` **mid-run**, because a third worktree advanced the template while
+/// the measurement was in flight.
+///
+/// Nothing in that message says "your branch and your neighbour's disagree". It reads like a
+/// missing migration — a product defect — and on this programme ten such failures were
+/// labelled environmental and the label was repeated across three tasks. Naming the template
+/// after the schema it holds makes the wrong template *unreachable* rather than unlikely,
+/// which is the only form of this fix that does not depend on everyone remembering.
+///
+/// Computed once per process: the digest is over 162 migrations today and the answer cannot
+/// change while the binary runs.
+fn template_db() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        let set: Vec<(i64, u8, &[u8])> = MIGRATOR
+            .migrations
+            .iter()
+            .map(|m| (m.version, kind_bits(m.migration_type), &*m.checksum))
+            .collect();
+        template_db_name(&set)
+    })
+}
+
+/// A migration's TYPE, as the two facts that decide whether it reaches the schema.
+///
+/// # Why bits from the predicates and not the enum's discriminant
+///
+/// `MigrationType` is three variants today and is not `#[non_exhaustive]`, so `as u8` would
+/// work and would also be the wrong thing to write: a future sqlx that inserts a variant, or
+/// reorders them, renumbers every template on every machine, and a future sqlx that adds a
+/// variant with the same number as one of these silently merges two kinds. `is_reversible`
+/// and `is_down_migration` are the behaviour `Migrator::run` actually branches on, and they
+/// separate all three of today's variants: `Simple` → 0, `ReversibleUp` → 1,
+/// `ReversibleDown` → 3. `migration_kinds_are_distinguishable` asks the real enum.
+fn kind_bits(t: MigrationType) -> u8 {
+    u8::from(t.is_reversible()) | (u8::from(t.is_down_migration()) << 1)
+}
+
+/// The template name for a migration set, from the `(version, kind, checksum)` triples
+/// `sqlx` already holds for every migration — see [`kind_bits`] for the middle one.
+///
+/// # Not `max(version)`
+///
+/// The obvious key is the highest version, and it is wrong: two branches can share a head
+/// and differ in the middle. Cherry-pick `0162` onto a tree that never took `0158` and `max`
+/// reads `162` on both sides while the schemas differ by a table — so the digest covers
+/// every version, not the last one. The checksums are in it for the neighbouring reason: an
+/// edited migration keeps its version, and `sqlx` compares checksums and refuses. Asking for
+/// a different database is a better outcome than a refusal, and a far better one than
+/// silently re-running an edited migration, which is how two developers end up with
+/// different schemas under one name.
+///
+/// # And not `(version, checksum)` either — the review round 2 gap
+///
+/// `(version, checksum)` is still not enough, because **the type is not in either of them**.
+/// Rename `migrations/0162_data_apps_permissions.sql` to `…_permissions.down.sql` without
+/// changing a byte: `sqlx` reads the type from the suffix and trims the suffix off
+/// `description`, so both trees yield the one entry `(162, Sha384(the same bytes))` and
+/// would have named the same template. But `Migrator::run` SKIPS
+/// `migration_type.is_down_migration()`, so the renamed tree's template never receives 162 —
+/// a branch on it would clone the other's schema. That is this task's own bug re-entered
+/// through a different door, so the type is folded in.
+///
+/// Unreachable today: `migrations/` holds no `.up.sql` or `.down.sql` at all. Fixed anyway,
+/// on the controller's ruling, because "unreachable today" is a claim about REACH, and reach
+/// claims have been wrong five times on this programme while the behaviour claim beside them
+/// was right. One line in the digest does not age; a bound written in a comment does.
+///
+/// # What is deliberately NOT in it
+///
+/// `no_tx` and `description` are the other two fields on `sqlx`'s `Migration`.
+/// `no_tx` is derived from a `-- no-transaction` line **inside the file**, so it is already
+/// inside the checksum. `description` is derived from the FILENAME, so renaming
+/// `0162_data_apps_permissions.sql` to `0162_app_perms.sql` changes it while changing no
+/// schema at all — folding that in would rebuild every developer's template for a rename.
+///
+/// Sorted first, so the name is a function of the SET rather than of the order the macro
+/// happened to list it in. Each entry is **length-framed**. The frame is the correct
+/// contract for this signature — it is what makes the encoding injective over arbitrary
+/// `&[u8]` — and it is right for that reason rather than for a live bug:
+/// `a_name_cannot_be_reached_by_moving_bytes_between_migrations` constructs a pair that
+/// collides without it, and that pair is **not reachable from sqlx**, whose checksums are
+/// always 48 bytes (`Sha384` of the file). The framing earns its place as a property of the
+/// function, not as a fix to an observed defect.
+///
+/// # Panics
+///
+/// On an empty set. An empty digest is a perfectly *stable* name for "no migrations at
+/// all": every process would agree on it, the template would be created and left empty, and
+/// every DB-gated test in the workspace would then fail on a missing relation while the
+/// naming looked like it was working. A broken instrument must not be able to return a
+/// usable-looking answer, so this fails at the point of detection instead.
+fn template_db_name(migrations: &[(i64, u8, &[u8])]) -> String {
+    assert!(
+        !migrations.is_empty(),
+        "the embedded migration set is EMPTY, so there is nothing to name a test template \
+         after, and a digest of nothing is a perfectly stable name for the wrong database. \
+         `egret_metastore::MIGRATOR` is built by `sqlx::migrate!` at COMPILE time from \
+         `migrations/`, so an empty set means that directory was unreadable or empty when \
+         this binary was built. Rebuild — `crates/egret-metastore/build.rs` exists to force \
+         it — and see `every_migration_on_disk_is_embedded` in that crate."
+    );
+
+    let mut set: Vec<(i64, u8, &[u8])> = migrations.to_vec();
+    set.sort_unstable();
+
+    let mut h = Sha256::new();
+    for (version, kind, checksum) in &set {
+        h.update(version.to_be_bytes());
+        // One fixed-width byte, so it needs no frame of its own.
+        h.update([*kind]);
+        h.update((checksum.len() as u64).to_be_bytes());
+        h.update(checksum);
+    }
+
+    // 16 bytes of the digest, not 32: a Postgres identifier is truncated past 63 bytes, and
+    // 2^-64 birthday odds across the few dozen migration sets one machine ever holds is not
+    // the risk this file is about.
+    format!("{TEMPLATE_PREFIX}{}", hex::encode(&h.finalize()[..16]))
+}
 
 /// Everything below reconnects to `postgres` rather than reusing the caller's pool:
 /// `CREATE DATABASE ... TEMPLATE x` is refused while anything is connected to `x`.
@@ -92,6 +248,7 @@ async fn admin_conn(url: &str) -> Option<sqlx::PgConnection> {
 }
 
 async fn ensure_template(url: &str) -> Option<()> {
+    let template = template_db();
     let mut admin = admin_conn(url).await?;
     // Two test binaries may start at the same instant. The lock makes the
     // create-then-migrate pair atomic across processes; without it the second one
@@ -103,14 +260,15 @@ async fn ensure_template(url: &str) -> Option<()> {
 
     let exists: (bool,) =
         sqlx::query_as("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
-            .bind(TEMPLATE_DB)
+            .bind(template)
             .fetch_one(&mut admin)
             .await
             .ok()?;
     if !exists.0 {
-        // `AssertSqlSafe` because the only interpolation is `TEMPLATE_DB`, a `const`
-        // in this file. `CREATE DATABASE` cannot take a bind parameter for its name.
-        let stmt = format!(r#"CREATE DATABASE "{TEMPLATE_DB}""#);
+        // `AssertSqlSafe` because the only interpolation is `template`, which is
+        // `TEMPLATE_PREFIX` plus 32 hex digits from `template_db_name` and so cannot carry
+        // an identifier break. `CREATE DATABASE` cannot take a bind parameter for its name.
+        let stmt = format!(r#"CREATE DATABASE "{template}""#);
         sqlx::query(sqlx::AssertSqlSafe(stmt))
             .execute(&mut admin)
             .await
@@ -120,12 +278,18 @@ async fn ensure_template(url: &str) -> Option<()> {
     // Migrate the template itself, then drop the connection so it can be cloned.
     let tmpl_url = url
         .rsplit_once('/')
-        .map(|(b, _)| format!("{b}/{TEMPLATE_DB}"))?;
+        .map(|(b, _)| format!("{b}/{template}"))?;
     let tmpl = Db::connect(&tmpl_url, 1).await.expect("connect template");
-    tmpl.migrate().await.expect(
-        "migrate the template — if this fails on a checksum, an applied migration was \
-         edited; drop the egret_test_template database and re-run",
-    );
+    if let Err(e) = tmpl.migrate().await {
+        panic!(
+            "migrating the test template `{template}` failed: {e}\n\n\
+             The template is named after a digest of the migration set it holds, so this is \
+             NOT the shared-template collision that used to produce `VersionMissing` and \
+             `VersionMismatch` here — a different migration set asks for a different name. \
+             Look instead for two migrations sharing a version in this tree, a migration \
+             that is not valid SQL, or a database created by hand under this name."
+        );
+    }
     drop(tmpl);
 
     sqlx::query("SELECT pg_advisory_unlock(8_25_2026)")
@@ -368,13 +532,16 @@ async fn process_db_url() -> Option<String> {
     drop_abandoned_clones(&mut admin).await;
 
     let name = process_db_name();
-    // `name` is `egret_t_` plus hex; `TEMPLATE_DB` is a `const`. Neither can carry an
-    // identifier break, and `CREATE DATABASE` has no bind form for either position.
+    // `name` is `egret_t_` plus hex; the template is `TEMPLATE_PREFIX` plus hex. Neither can
+    // carry an identifier break, and `CREATE DATABASE` has no bind form for either position.
     //
     // A failure here is not fatal on its own: the name is derived, so a caller that
     // reaches this a second time finds the database already created. The connect below
     // is what decides whether this process has a usable database.
-    let stmt = format!(r#"CREATE DATABASE "{name}" TEMPLATE "{TEMPLATE_DB}""#);
+    let stmt = format!(
+        r#"CREATE DATABASE "{name}" TEMPLATE "{template}""#,
+        template = template_db()
+    );
     let _ = sqlx::query(sqlx::AssertSqlSafe(stmt))
         .execute(&mut admin)
         .await;
@@ -631,10 +798,17 @@ pub async fn url() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        dotenv_file_setting_from, opt_out_verdict, process_db_name, skip_verdict, ALLOW_SKIP_VAR,
-        CLONE_PATTERN,
+        dotenv_file_setting_from, kind_bits, opt_out_verdict, process_db_name, skip_verdict,
+        template_db, template_db_name, MigrationType, ALLOW_SKIP_VAR, CLONE_PATTERN,
+        TEMPLATE_PREFIX,
     };
     use std::path::{Path, PathBuf};
+
+    /// `kind_bits(MigrationType::Simple)` — the kind every migration in `migrations/` carries
+    /// today. A literal because `kind_bits` is not a `const fn` (`is_reversible` is not), and
+    /// `migration_kinds_are_distinguishable` asserts the two agree, so the literal cannot
+    /// drift from the function it stands for.
+    const SIMPLE: u8 = 0;
 
     /// A unique scratch directory, without a `tempfile` dependency this crate does not
     /// otherwise need. Removed by the caller; a leak here is a directory, not a database.
@@ -855,11 +1029,16 @@ mod tests {
             }
         };
         let mine = process_db_name();
-        let cases: [(&str, bool); 7] = [
+        let template = template_db();
+        let cases: [(&str, bool); 8] = [
             (mine.as_str(), true),
             ("egret_test", false),
             ("egret", false),
             ("egret_test_template", false),
+            // The generated template name, asked of the engine rather than read: the clone
+            // sweep drops what it matches, so a template it can reach is a suite that dies
+            // on a missing relation while another process is cloning from it.
+            (template, false),
             // 16 hex digits is not 32.
             ("egret_t_0123456789abcdef", false),
             // Anchored at both ends.
@@ -875,5 +1054,323 @@ mod tests {
                 .expect("evaluate the pattern");
             assert_eq!(matched, expected, "{name} against {CLONE_PATTERN}");
         }
+
+        // The other direction — a TEMPLATE pattern that must never reach `egret_test`, the
+        // dev `egret`, or a clone — was asserted here too, against the automatic template
+        // sweep that has since been removed. It is not kept: with no production code owning
+        // such a pattern, the test would have to declare the regex itself and then check it,
+        // which is an oracle drawn from the same vocabulary as the thing it checks. The
+        // claim belongs with whoever writes the next sweep, and the condition it would have
+        // guarded is on [`super::TEMPLATE_PREFIX`].
+    }
+
+    /// **The collision this whole change exists to make impossible.**
+    ///
+    /// One hard-coded template name meant whichever branch migrated it last decided the
+    /// schema every other branch tested against. Measured twice on 2026-10-01:
+    /// `VersionMissing(160)` across 84 tests on a tree at `0159`, then `VersionMissing(163)`
+    /// **mid-run** while `main` was at `0162`. So: two migration sets must never name the
+    /// same template.
+    ///
+    /// Every pair below shares its highest version, which is the point — `max(version)` is
+    /// the obvious key and it cannot tell any of these apart.
+    #[test]
+    fn two_migration_sets_that_share_a_head_name_different_templates() {
+        let base: &[(i64, u8, &[u8])] = &[
+            (1, SIMPLE, b"aaa"),
+            (2, SIMPLE, b"bbb"),
+            (3, SIMPLE, b"ccc"),
+        ];
+
+        // An EDITED migration in the middle: same versions, same count, same head.
+        let edited: &[(i64, u8, &[u8])] = &[
+            (1, SIMPLE, b"aaa"),
+            (2, SIMPLE, b"edited"),
+            (3, SIMPLE, b"ccc"),
+        ];
+        assert_ne!(
+            template_db_name(base),
+            template_db_name(edited),
+            "an edited migration keeps its version, so only its checksum can distinguish \
+             the schema it produces"
+        );
+
+        // A cherry-pick: the head is present but a migration in the middle never ran.
+        let missing: &[(i64, u8, &[u8])] = &[(1, SIMPLE, b"aaa"), (3, SIMPLE, b"ccc")];
+        assert_ne!(
+            template_db_name(base),
+            template_db_name(missing),
+            "two branches can share a head and differ in the middle — this is the pair \
+             `max(version)` reads as identical"
+        );
+
+        // And the ordinary case, a migration added on top.
+        let ahead: &[(i64, u8, &[u8])] = &[
+            (1, SIMPLE, b"aaa"),
+            (2, SIMPLE, b"bbb"),
+            (3, SIMPLE, b"ccc"),
+            (4, SIMPLE, b"ddd"),
+        ];
+        assert_ne!(
+            template_db_name(base),
+            template_db_name(ahead),
+            "the `VersionMissing` case: a longer set must not reuse a shorter one's template"
+        );
+    }
+
+    /// A name must not be reachable by moving bytes between neighbouring migrations.
+    ///
+    /// The pair below collides under an unframed digest — `version || kind || checksum`,
+    /// concatenated. Length-framing is what separates them, and this is the test that dies
+    /// if the frame is removed; `assert_ne!` on two arbitrary sets would not.
+    ///
+    /// # ⚠ The fixture was one byte short and the test could not fail (fixed 2026-10-10,
+    /// whole-branch review finding H-B)
+    ///
+    /// The absorbed checksum used to be `2i64.to_be_bytes()` — eight bytes, the second
+    /// entry's VERSION and nothing else. The second entry is `version || kind`, nine bytes,
+    /// so the two pre-images were 17 and 18 bytes long: they did not collide even unframed,
+    /// and the review measured exactly that — delete
+    /// `h.update((checksum.len() as u64).to_be_bytes())` from [`template_db_name`] and this
+    /// test still PASSED (12 passed / 1 failed; the only death was
+    /// `the_same_migration_set_always_names_the_same_template`, on its hard-coded literal
+    /// digest, which dies on any digest change at all and so distinguishes nothing). The
+    /// doc claimed to be "the test that dies if the frame is removed" while being the test
+    /// that could not.
+    ///
+    /// The checksum is nine bytes now — the second entry's version followed by its KIND
+    /// byte — so the unframed pre-images are byte-identical. The `assert_eq!` below pins
+    /// that premise explicitly rather than leaving it to arithmetic in a comment: if a later
+    /// edit makes the pair stop colliding unframed, that assertion fails and says so,
+    /// instead of this test going quietly green while guarding nothing.
+    ///
+    /// # ⚠ Narrowed by review round 2: this pair is NOT reachable from sqlx
+    ///
+    /// An earlier version of this comment called it "an actual collision", which was wider
+    /// than the measurement. `sqlx` sets every checksum to `Sha384` of the file bytes, so a
+    /// production checksum is **always 48 bytes** and a one-byte or empty one cannot occur.
+    /// The frame is still right, as the correct contract for a function whose signature
+    /// accepts an arbitrary `&[u8]` — injectivity is a property worth holding whether or not
+    /// today's only caller happens to stay inside the safe region. It is not a fix to an
+    /// observed defect, and this comment no longer implies it was.
+    #[test]
+    fn a_name_cannot_be_reached_by_moving_bytes_between_migrations() {
+        // Nine bytes: `(2, SIMPLE)` as the digest would feed it WITHOUT a frame — the
+        // version's eight big-endian bytes, then the one kind byte. Built rather than
+        // written as a literal so it cannot drift from the encoding it is absorbing.
+        let mut absorbed = [0u8; 9];
+        absorbed[..8].copy_from_slice(&2i64.to_be_bytes());
+        absorbed[8] = SIMPLE;
+
+        let absorbing: &[(i64, u8, &[u8])] = &[(1, SIMPLE, &absorbed)];
+        let two_empty: &[(i64, u8, &[u8])] = &[(1, SIMPLE, b""), (2, SIMPLE, b"")];
+
+        // The premise, asserted instead of asserted-about: with no length frame both sets
+        // feed the hasher exactly the same bytes. This is the half that makes the
+        // `assert_ne!` below able to fail — see the ⚠ note above.
+        fn unframed(migrations: &[(i64, u8, &[u8])]) -> Vec<u8> {
+            let mut set = migrations.to_vec();
+            set.sort_unstable();
+            let mut out = Vec::new();
+            for (version, kind, checksum) in &set {
+                out.extend_from_slice(&version.to_be_bytes());
+                out.push(*kind);
+                out.extend_from_slice(checksum);
+            }
+            out
+        }
+        assert_eq!(
+            unframed(absorbing),
+            unframed(two_empty),
+            "this fixture only tests the frame while the two sets are INDISTINGUISHABLE \
+             without it; if these pre-images differ, the `assert_ne!` below passes for a \
+             reason that has nothing to do with framing"
+        );
+
+        assert_ne!(
+            template_db_name(absorbing),
+            template_db_name(two_empty),
+            "without a length frame these two digest identical bytes, so one migration set \
+             would silently clone the other's template"
+        );
+    }
+
+    /// The other half of Step 2: the same set must name the same template, every time and
+    /// from any order.
+    ///
+    /// Without this, "never a wrong template" could be satisfied by a name that changes on
+    /// every call — which is not isolation, it is re-running 162 migrations per test binary,
+    /// the ~7 s this crate exists to pay once.
+    #[test]
+    fn the_same_migration_set_always_names_the_same_template() {
+        let forward: &[(i64, u8, &[u8])] = &[
+            (1, SIMPLE, b"aaa"),
+            (2, SIMPLE, b"bbb"),
+            (3, SIMPLE, b"ccc"),
+        ];
+        assert_eq!(
+            template_db_name(forward),
+            template_db_name(forward),
+            "the name must not depend on when it was asked for"
+        );
+
+        let shuffled: &[(i64, u8, &[u8])] = &[
+            (3, SIMPLE, b"ccc"),
+            (1, SIMPLE, b"aaa"),
+            (2, SIMPLE, b"bbb"),
+        ];
+        assert_eq!(
+            template_db_name(forward),
+            template_db_name(shuffled),
+            "the name is a function of the SET, not of the order the migrator lists it in"
+        );
+
+        // And it is stable across processes, which is the property no in-process assertion
+        // can reach: pinned as a literal so a change to the digest's input framing has to be
+        // a deliberate edit here rather than a silent full rebuild for everybody.
+        assert_eq!(
+            template_db_name(forward),
+            "egret_test_tmpl_68247d1687949e664065c5a317091b52",
+            "the digest changed shape; every developer rebuilds their template, which is \
+             fine once and a bug if it happens by accident"
+        );
+    }
+
+    /// **The gap review round 2 found: `(version, checksum)` does not carry the TYPE.**
+    ///
+    /// Rename `migrations/0162_data_apps_permissions.sql` to `…_permissions.down.sql` and
+    /// change not one byte. `sqlx` reads the type from the suffix and trims the suffix off
+    /// `description`, so both trees produce the single entry `(162, Sha384(the same bytes))`.
+    /// Before the type was folded in, both named the SAME template — while `Migrator::run`
+    /// skips `is_down_migration()`, so the renamed tree's template never receives 162 and a
+    /// branch on it clones the other's schema. That is this crate's own bug, re-entered.
+    ///
+    /// Unreachable today — `migrations/` holds no `.up.sql` or `.down.sql` — and asserted
+    /// anyway, because a bound on reach is not a bound on behaviour.
+    #[test]
+    fn a_renamed_migration_of_a_different_type_names_a_different_template() {
+        let checksum: &[u8] = b"identical file bytes";
+        let simple: &[(i64, u8, &[u8])] = &[(162, kind_bits(MigrationType::Simple), checksum)];
+        let down: &[(i64, u8, &[u8])] =
+            &[(162, kind_bits(MigrationType::ReversibleDown), checksum)];
+        let up: &[(i64, u8, &[u8])] = &[(162, kind_bits(MigrationType::ReversibleUp), checksum)];
+
+        assert_ne!(
+            template_db_name(simple),
+            template_db_name(down),
+            "same version, byte-identical file, and only a `.down.sql` suffix between them — \
+             `Migrator::run` applies one and skips the other, so they are two schemas"
+        );
+        assert_ne!(
+            template_db_name(simple),
+            template_db_name(up),
+            "a `.up.sql` is applied like a `Simple` one TODAY, but the pair is not the same \
+             migration set, and treating them as one is a bound on sqlx's behaviour rather \
+             than on this function's"
+        );
+        assert_ne!(
+            template_db_name(up),
+            template_db_name(down),
+            "the up and down halves of one reversible migration are the two schemas this \
+             whole fold exists to separate"
+        );
+    }
+
+    /// The instrument behind that fold, asked of the real enum.
+    ///
+    /// `kind_bits` is derived from `is_reversible`/`is_down_migration` rather than from the
+    /// discriminant, so it cannot be read off the source — it has to be measured. The
+    /// mutation this kills is making `kind_bits` return a constant, which silently restores
+    /// the `(version, checksum)` behaviour while the fold still LOOKS present in the digest.
+    #[test]
+    fn migration_kinds_are_distinguishable() {
+        let simple = kind_bits(MigrationType::Simple);
+        let up = kind_bits(MigrationType::ReversibleUp);
+        let down = kind_bits(MigrationType::ReversibleDown);
+        assert_ne!(simple, up, "Simple vs ReversibleUp");
+        assert_ne!(simple, down, "Simple vs ReversibleDown");
+        assert_ne!(
+            up, down,
+            "ReversibleUp vs ReversibleDown — the one that decides whether \
+             `Migrator::run` applies the migration at all"
+        );
+        // Said as values too, so a future sqlx that changes what the predicates answer
+        // fails here rather than quietly renaming every template on every machine.
+        assert_eq!((simple, up, down), (0, 1, 3));
+        assert_eq!(
+            SIMPLE, simple,
+            "the fixtures' `SIMPLE` literal stands for this function's answer, and a literal \
+             that no longer does is a fixture asserting the wrong migration set"
+        );
+    }
+
+    /// A digest of nothing is a perfectly stable name for the wrong database.
+    ///
+    /// `a-zero-is-unfalsifiable-alone`: if the migration list came back empty, the obvious
+    /// implementation would hash zero bytes, every process would agree on the answer, an
+    /// EMPTY template would be created, and every DB-gated test in the workspace would fail
+    /// on a missing relation — with the naming looking like it worked. It panics instead.
+    #[test]
+    #[should_panic(expected = "migration set is EMPTY")]
+    fn an_empty_migration_set_cannot_name_a_template() {
+        let _ = template_db_name(&[]);
+    }
+
+    /// The instrument check, against the real migrator rather than fixtures.
+    ///
+    /// Equality with the directory, not a floor: `egret-metastore`'s own
+    /// `every_migration_on_disk_is_embedded` records that `len() >= 7` stayed green while the
+    /// binary carried 130 migrations and the directory held 131. The digest here is only as
+    /// good as its input, so the input is checked where it is consumed as well.
+    #[test]
+    fn the_embedded_migration_set_is_the_directory_and_names_this_template() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let on_disk = std::fs::read_dir(&dir)
+            .expect("migrations/ is readable from the crate dir")
+            .filter(|e| {
+                e.as_ref()
+                    .is_ok_and(|e| e.file_name().to_string_lossy().ends_with(".sql"))
+            })
+            .count();
+        assert!(
+            on_disk > 0,
+            "read no migrations from {dir:?}; this test's own instrument is broken, and a \
+             zero here would otherwise agree with an empty embedded set"
+        );
+        assert_eq!(
+            super::MIGRATOR.migrations.len(),
+            on_disk,
+            "the digest is taken over the EMBEDDED set, so a set that is not the directory \
+             names a template whose schema is not this branch's"
+        );
+
+        let name = template_db();
+        let hex = name
+            .strip_prefix(TEMPLATE_PREFIX)
+            .unwrap_or_else(|| panic!("{name} must start with {TEMPLATE_PREFIX}"));
+        assert_eq!(hex.len(), 32, "{name}");
+        assert!(
+            hex.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "{name} must be lowercase hex — a `LIKE 'egret_test_tmpl%'` listing is how these \
+             are found by hand, and mixed case makes that listing lie"
+        );
+        assert!(
+            name.len() <= 63,
+            "Postgres truncates an identifier past 63 bytes, and two truncated template \
+             names can collide where the full ones do not: {name} is {} bytes",
+            name.len()
+        );
+        assert_eq!(
+            name,
+            template_db(),
+            "memoised once per process: the clone and the migration must name one database"
+        );
+        assert_eq!(
+            name.strip_prefix("egret_t_"),
+            None,
+            "the clone sweep anchors on `egret_t_` and DROPS what it matches, so a template \
+             must not be of that shape: {name}"
+        );
     }
 }

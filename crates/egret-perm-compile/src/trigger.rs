@@ -401,7 +401,11 @@ async fn compile_desired(
     let mut sweep: Vec<i64> = vec![service_id];
 
     let tag_service: Option<String> = if engine == EngineType::Trino {
-        match svc.config_jsonb.get("tagService").and_then(|v| v.as_str()) {
+        match svc
+            .config_jsonb
+            .get(egret_policy_api::TAG_SERVICE_CONFIG_KEY)
+            .and_then(|v| v.as_str())
+        {
             Some(name) => match service_id_by_name_via(conn, name).await.map_err(db_err)? {
                 Some(tag_id) => {
                     writable.insert(name.to_string(), tag_id);
@@ -553,6 +557,44 @@ async fn compile_desired(
                 rule_id: None,
             },
         );
+    }
+
+    // **SP4d debt Task 6, item 1: the write side of `EvalOrderAmbiguous`.**
+    // Checked HERE, on the complete desired set, because no single
+    // `compile_rule`/`compile_clearance` call can see another rule's output —
+    // the pair SP4d-1's F2 measured came from two different `perm.rules` rows
+    // compiled independently, and the ambiguity exists only in their union.
+    //
+    // The rule is `egret_policy::ambiguous_arbitration_in`, spelled once and
+    // shared with the policy editor's own create/update guard; read that
+    // module for the measurement, for why an AGREEING tie is admitted, and for
+    // the band key's one-for-one correspondence with
+    // `egret_ranger_eval::eval::PolicyView`.
+    //
+    // ⚠ It runs BEFORE `apply_diff_in_tx`, so a refusal writes nothing at all
+    // — the caller's transaction is intact and its route returns the refusal
+    // rather than rolling back a partial sweep. That also makes
+    // `POST /perm/preview` report it before the steward presses Save, since
+    // preview runs the real `write_rule` in a rolled-back transaction.
+    //
+    // ⚠ It sees the COMPILER's set only. A hand-authored mask on the same
+    // profile is not in `desired` and so cannot be paired here — that is the
+    // editor's own call site's job, and on a `generated` profile
+    // `refuse_if_generated` means there are none. The seeded `egret-admin`
+    // policies are `policyType 0` and are not in this class.
+    if let Some(pair) =
+        egret_policy::ambiguous_arbitration_in(desired.iter().map(|((service, name), dp)| {
+            egret_policy::PolicyUnderWrite {
+                service: *service,
+                name,
+                body: &dp.body,
+            }
+        }))
+    {
+        return Err(CompileError::AmbiguousMaskOrFilterArbitration {
+            profile: svc.name,
+            refusal: pair.refusal(),
+        });
     }
 
     Ok(Some(Compiled {

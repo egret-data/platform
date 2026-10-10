@@ -3,15 +3,20 @@
 //! REST-compatible serving surface engines poll. Implements the `PolicyPort`
 //! contract (egret-policy-api) that cross-seam callers depend on.
 pub mod admin;
+pub mod ambiguous_arbitration;
 pub mod default_policies;
 pub mod error;
 mod port_impl;
 pub mod ranger;
 pub mod service_def;
 pub mod store;
+pub mod unreadable_table_mask;
 pub use admin::{
     policy_admin_router, EngineBinding, EngineBindingReader, EngineReadError, PolicyAdminState,
     PolicyHttpError,
+};
+pub use ambiguous_arbitration::{
+    ambiguous_arbitration_in, AmbiguousArbitration, Arbitrated, PolicyUnderWrite,
 };
 pub use error::PolicyStoreError;
 pub use ranger::{ranger_router, RangerState};
@@ -19,11 +24,16 @@ pub use service_def::{
     seed_starrocks, seed_tag, seed_trino, starrocks_service_def, tag_service_def,
     trino_service_def, STARROCKS_DEF_NAME, TAG_DEF_NAME, TRINO_DEF_NAME,
 };
+pub use unreadable_table_mask::{
+    unreadable_table_mask_for, MaskOrigin, TagRef, TagWrite, UnreadableTableMask,
+};
+
 pub use store::{
-    catalog_names_for_ids_via, catalogs_for_service_via, clearance_gates_for_tags_via,
-    compiler_targeted_services_via, get_service_by_id_via, is_compiler_owned_policy_name,
-    resolved_tags_for_resource_via, service_id_by_name_via, services_and_tag_services_via,
-    services_for_catalog_via, tag_assignment_coordinates_via, tag_keys_by_ids_via,
+    catalog_is_assigned_to_workspace_via, catalog_names_for_ids_via, catalogs_for_service_via,
+    clearance_gates_for_tags_via, compiler_targeted_services_via, engine_binding_profile_via,
+    get_service_by_id_via, is_compiler_owned_policy_name, resolved_tags_for_resource_via,
+    service_id_by_name_via, services_and_tag_services_via, services_for_catalog_via,
+    tag_assignment_coordinates_via, tag_assignments_for_catalogs_via, tag_keys_by_ids_via,
     tag_keys_for_resource_via, tag_name_for_key_via, tag_names_for_keys_via,
     tagged_columns_for_service_via, CatalogRow, PolicyRow, PolicyStore, ResolvedTag, ServiceRow,
     TagAssignmentRow, TaggedColumnRow, COMPILER_CLEARANCE_PREFIX, COMPILER_GRANT_PREFIX,

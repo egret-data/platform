@@ -1,0 +1,244 @@
+-- 0179_perm_wildcard_levels_name_nothing_beneath.sql
+--
+-- SP4d debt Task 14, and it is the half Task 12 (`0178`) deliberately left:
+-- a `perm.grants` path level that Ranger reads as "every value at this level"
+-- may not have a NAMED level beneath it.
+--
+-- ⚠ **`perm.grants` ONLY.** This migration first shipped the same CHECK on
+-- `perm.rules` as well; a product decision on 2026-10-10 removed that half,
+-- because on a rule the shape widens RESTRICTION and fails CLOSED and both
+-- plugins enforce it. The section "`perm.rules` IS DELIBERATELY NOT CONSTRAINED
+-- HERE" at the end of this file carries the ruling and the trade-off it accepts;
+-- read it before adding a rule-side constraint back. Everything between here and
+-- there is about `perm.grants`, where the escalation was measured.
+--
+-- THIS IS NOT "`*` IS ILLEGITIMATE", and the predicate below refuses nothing a
+-- steward writes on purpose. A grant scoped to a whole catalog, a grant scoped
+-- to a whole schema, `('*','*')`, `('sales','orders','*')` — every shape where
+-- a `*` has nothing named under it — stays writable, and the accept-controls in
+-- `crates/egret-perm/tests/store.rs` pin each of them. `scope_to_resources`
+-- emits `*` ITSELF at every level a scope does not name, so refusing `*`
+-- outright would refuse the compiler's own ordinary output.
+--
+-- WHAT IS WRONG IS A GAP IN THE PATH, AND THIS TABLE ALREADY SAID SO.
+-- `0154_perm_model.sql` gave both tables
+--
+--     CHECK (schema_name IS NOT NULL OR table_name IS NULL)
+--     CHECK (table_name  IS NOT NULL OR column_name IS NULL)
+--
+-- because "a path cannot skip a level: a column implies a table implies a
+-- schema". `schema_name = '*'` IS that skip: `*` names no schema — Ranger's
+-- matcher reads it as match-any — so `('*', 'orders')` is "a table with no
+-- schema", the very scope `grants_check` refuses when it is spelled NULL. So
+-- two guards in one table disagreed about whether that scope exists. egret's
+-- model had already decided `*/orders` is not expressible; `*` was a way around
+-- that decision rather than a feature of it. And `scope_to_resources`' own
+-- `wildcard_from_here` latch is the same decision in the emission: once a level
+-- is unnamed every level below it is rendered `*`, so NO scope the compiler can
+-- render ever carries a named level under an unnamed one. This CHECK is that
+-- latch stated over the AUTHORED values.
+--
+-- THE MEASUREMENT, AS A PAIR, on `egret_test` with `0178`'s two constraints
+-- applied inside the same (rolled-back) transaction so the probe sees exactly
+-- the branch tip. `scratchpad/t14_probe.sql`; `egret_test` is untouched
+-- afterwards (0 rows, constraint absent) so it re-runs as recorded:
+--
+--   | insert into `perm.grants`                              | result                                    |
+--   |--------------------------------------------------------|-------------------------------------------|
+--   | `schema_name = '*',  table_name = 'orders'`             | **ACCEPTED**                              |
+--   | `schema_name = NULL, table_name = 'orders'`             | rejected by `grants_check`                |
+--   | `schema_name = '',   table_name = 'orders'`             | rejected by `grants_scope_levels_are_named`|
+--   | `schema_name = 'sales', table_name = '*', col = 'email'`| **ACCEPTED**                              |
+--   | `schema_name = '*', table_name = '*', col = 'email'`    | **ACCEPTED**                              |
+--   | `perm.rules`: `('*', 'orders', 'email')`                | **ACCEPTED** — and STAYS accepted (see end)|
+--
+-- The two rejections are the control, and they are what make this a
+-- measurement rather than a probe that could not fail: the SAME level skip,
+-- spelled NULL and spelled `''`, is refused on the same connection in the same
+-- transaction by two live constraints on these very columns — while spelled
+-- `'*'` it was accepted. Row 1 is not a missing guard; it is a third hole in
+-- the one guard that exists, and `0178` closed only the second.
+--
+-- WHAT THE MATCH-ANY LEVEL DOES, measured on the compiler's own artifact rather
+-- than asserted. `crates/egret-perm-compile/tests/compile_grants.rs`'s
+-- `an_empty_scope_level_would_be_enforced_in_every_schema` compiles the LEGAL
+-- grant for `sales.orders`, renders it with `access_to_ranger_json`, replaces
+-- the one token under test in the schema level's values, and asks
+-- `egret_ranger_eval::resource::match_resource` about it against the real Trino
+-- service-def and the request `catalog=warehouse, schema=finance, table=orders,
+-- column=amount`:
+--
+--   | policy `schema` value | MatchType   |
+--   |-----------------------|-------------|
+--   | `"sales"` (unedited)  | `None`      | <- control
+--   | `""`                  | `Self_`     | <- `0178`
+--   | `"*"`                 | `Self_`     | <- THIS migration
+--
+-- Identical reach. A grant written for one schema was enforced across every
+-- schema of the catalog.
+--
+-- AND UNLIKE `''` IT IS REACHABLE FROM THE BROWSER, which is why this is the
+-- more reachable half. Stated BY CODE PATH and not by authorship, because five
+-- authorship claims in this programme have been wrong:
+-- `frontend/src/components/perm/ScopePicker.tsx`'s three levels are free-text
+-- `<Input>`s whose `onChange` is `e.target.value || undefined`. That maps `""`
+-- to `undefined` — which is exactly why `''` never arrived from the UI — while
+-- `"*"` is truthy and passes straight through. `canPickTable = !!value.schema`,
+-- so typing `*` into Schema ENABLES the Table field, and Table's own `onChange`
+-- clears only `column`, never `schema`. `('*','orders')` is therefore two
+-- ordinary keystrokes in the Governance dialogs.
+--
+-- A RUN OF STARS, NOT THE SINGLE CHARACTER — and that is the mechanism rather
+-- than a list of spellings. `RangerAbstractResourceMatcher.buildResourceMatchers()`
+-- treats a value that is a pure run of `*` as match-any and CLEARS every other
+-- matcher on the level; `egret_ranger_eval::resource::ValueMatcher::classify`
+-- reproduces it (`classify("**")` and `classify("***")` are the same match-any
+-- as `classify("*")`, pinned by `classify_reproduces_rangers_four_matcher_shapes`),
+-- so keying this on the literal `'*'` alone would have closed one spelling and
+-- left `'**'` reaching the identical enforcement from the identical free-text
+-- field. `^[*]+$` is the whole class, and the Rust twin
+-- (`egret_perm_compile::grants::ensure_a_wildcard_level_has_nothing_named_beneath_it`)
+-- keys on the same class so the two cannot drift.
+--
+-- WHAT IS DELIBERATELY NOT IN THE CLASS. `'ord*'` is a PREFIX matcher
+-- (`ValueMatcher::StartsWith`), not match-any: it names a set of schemas, the
+-- level is not unnamed, and a table under it is not a gap. It stays legal, as
+-- does `' '` (a literal resource name — `init()` drops `''` and nothing else).
+-- `egret_perm::eval::glob_match` exists precisely because such values are
+-- storable and the engine glob-matches them. Every level this compiler emits on
+-- BOTH engines declares `wildCard: true` in its service-def
+-- (`crates/egret-policy/src/service-defs/{trino,starrocks}.json`: all four
+-- access levels, all four `dataMaskDef` levels, all three `rowFilterDef`
+-- levels), so "a run of stars is match-any" is engine-independent — which is
+-- what lets this rule live at an authoring boundary at all.
+--
+-- `catalog` IS NOT IN THE PREDICATE, same as in `0178`, and for the same
+-- measured reason: the value emitted at that level is `registry.catalogs.name`,
+-- and `0147_catalog_registry.sql` gives that column
+-- `CHECK (name ~ '^[a-z][a-z0-9_]{0,62}$')` — an allow-list under which `*` is
+-- impossible. Weakening that regex re-opens the catalog level here.
+--
+-- WHY A CHECK **AND** A RUST REFUSAL, when either alone looks sufficient. Tasks
+-- 2, 3 and 12 of this plan each mutation-measured that question and neither
+-- guard was redundant: with only the Rust call removed, the route returned
+-- **500 instead of 400** three separate times, because the constraint caught
+-- the write with a message naming a schema internal. So the Rust refusal is
+-- what makes a bad POST/PATCH a 400 that names both levels, and this CHECK is
+-- what holds for every writer that is not one of those paths: a route added
+-- later, `psql`, a test's raw `sqlx::query`. Stated by code path: `perm.grants`
+-- has exactly one `INSERT` and one `UPDATE` in any `src/`
+-- (`egret_perm::store::create_grant_in_tx`/`update_grant_in_tx`, plus
+-- `egret_perm::assignment`, which names no level at all), and create, patch and
+-- the rolled-back `/perm/preview` all funnel through `routes::write_grant`.
+--
+-- VALID, AND NO CLEARING STATEMENT — `0177`/`0178`'s case, not `0176`'s, and
+-- measured rather than copied. Across the 29 databases on this host that have
+-- `perm.grants` and `perm.rules` (10 more have no `perm` schema at all), the
+-- two tables hold **4 grant rows and 3 rule rows in total**, all of them in the
+-- three `egret_sp4*` scratch databases, and **not one row anywhere carries `*`
+-- at ANY level** — so the violating population is empty by a wider margin than
+-- `0178`'s was. A row this CHECK rejects is ENFORCED (that is the finding), so
+-- a clearing statement would change what an engine enforces: deleting an
+-- `allow` fails closed, but deleting a `deny` written `('*','orders')` WIDENS
+-- access, and no one statement is right for both. Nor is a repair one
+-- statement — `'*' -> NULL` at the gapped level is not enforcement-equivalent
+-- (it makes the level match-any AND forces every level below it to `*`, which
+-- is a different, wider scope than the named table the author wrote), and a
+-- correct change has to be followed by `recompile_service_in_tx` so the engine
+-- stops enforcing the old artifact, which is Rust a migration cannot call. With
+-- the measured population empty, `NOT VALID` would buy nothing and would leave
+-- a dormant row to surface later on an unrelated write.
+--
+-- IF A DEPLOYMENT DOES HOLD ONE, this `ALTER TABLE` fails naming the constraint
+-- and `migrate()` aborts before the process serves. That is intended. The
+-- operator's remedy is a product action: read the predicate from
+-- `pg_get_constraintdef` (so this comment is not a second copy of it), list the
+-- offenders with `SELECT * FROM perm.grants WHERE NOT (<that predicate>)`, and
+-- re-author each through `PATCH /api/control-plane/perm/grants/{id}` — which
+-- recompiles every profile it affects in the same transaction — either naming
+-- the gapped level or dropping the levels beneath it. `DELETE
+-- /perm/grants/{id}` carries no write-side refusal, so removing a row that
+-- should never have existed is always possible too.
+-- Read it as the Rust twin's two loops: for each level that IS a run of stars,
+-- every level BELOW it must be a run of stars or absent. Each disjunct opens
+-- with its own `IS NULL` test, so the predicate is total — it is never NULL,
+-- and the operator's `WHERE NOT (<predicate>)` above lists exactly the
+-- offenders.
+ALTER TABLE perm.grants
+    ADD CONSTRAINT grants_wildcard_levels_name_nothing_beneath
+    CHECK (
+        (schema_name IS NULL
+            OR schema_name !~ '^[*]+$'
+            OR ((table_name IS NULL OR table_name ~ '^[*]+$')
+                AND (column_name IS NULL OR column_name ~ '^[*]+$')))
+        AND (table_name IS NULL
+            OR table_name !~ '^[*]+$'
+            OR column_name IS NULL
+            OR column_name ~ '^[*]+$')
+    );
+
+-- ── `perm.rules` IS DELIBERATELY NOT CONSTRAINED HERE ───────────────────────
+--
+-- **PRODUCT DECISION, 2026-10-10.** This migration shipped a second, identical
+-- CHECK on `perm.rules`, and that constraint has been REMOVED. A path level that
+-- Ranger reads as match-any with a NAMED level beneath it — `('sales','*','email')`
+-- as a mask, `('*','orders')` as a row filter — is legal on `perm.rules` again.
+-- `perm.grants` keeps the constraint above, unchanged.
+--
+-- THE JUSTIFICATION ABOVE IS FALSE ON THE RULE PATH, AND THAT IS THE FINDING.
+-- The grant-side argument is "the artifact is wider than the author wrote". It
+-- does not transfer, because *wider* points in opposite directions on the two
+-- tables:
+--
+--   * On `perm.grants` a match-any level above a named one widens AUTHORITY. The
+--     measurement above is exactly that escalation: the compiled policy is
+--     enforced in every schema of the catalog, so a grant written for one table
+--     hands out access to its namesake in every other schema. It fails OPEN, and
+--     it stays refused.
+--   * On `perm.rules` the same shape widens RESTRICTION. A mask or a row filter
+--     covering every sibling at that level withholds MORE than a narrow one
+--     would — it fails CLOSED. `('sales','*','email')` is "mask `email` in every
+--     table of `sales`", which is a control a steward writes ON PURPOSE, and
+--     both plugins enforce it: every level of `dataMaskDef` is declared
+--     `"wildCard": true` on `ranger-plugins-common` 2.5.0 (Trino 470) and on
+--     2.8.0 (StarRocks fe-ubuntu 4.1). It used to work. Refusing it took a
+--     working, enforced control away from the author to make two tables look
+--     alike.
+--
+-- This is the same line `0178` draws, and drawing it the same way is the point.
+-- `0178` refuses `''` on BOTH tables and keeps `'*'` legal on both, because `''`
+-- is not something an author types for a reason while `'*'` is. A literal `*`
+-- the author typed is an authored value; `''` and NULL are absences. So:
+--
+--   * `0178`'s `<> ''` STAYS on both tables. `''` is not a run of `*`, and it
+--     remains refused everywhere.
+--   * `0154`'s level-skip CHECKs STAY on both tables. On `perm.rules` those are
+--     `rules_check3` (`schema_name IS NOT NULL OR table_name IS NULL`) and
+--     `rules_check4` (`table_name IS NOT NULL OR column_name IS NULL`), so
+--     `('sales', NULL, 'email')` is still rejected. Only a literal `*` the
+--     author typed becomes legal again — a NULL level is still refused.
+--
+-- ⚠ THE TRADE-OFF THIS ACCEPTS, stated here because this is where a reader
+-- meets the decision. A broad mask can win Ranger's evaluation order and apply a
+-- WEAKER mask than a narrow mask on the same table would: two mask policies
+-- selecting one column at the same `policyPriority` are arbitrated with `>=`, so
+-- the first evaluator in the band is final and which one that is falls through to
+-- a tie-break the artifact does not express. That is the ALREADY-OPEN
+-- ambiguous-priority debt — see `egret_policy::ambiguous_arbitration`, which
+-- detects and refuses the differing pair at the authoring boundary — and NOT a
+-- new hole opened by this decision. It is not addressed here, deliberately: the
+-- fix is priority arbitration, not a CHECK that forbids the broad mask.
+--
+-- WHAT THIS MEANS FOR THE RUST SIDE. `grants::ensure_a_grant_wildcard_level_has_nothing_named_beneath_it`
+-- is named for the table it binds to, and `rules::validate_rule_shape` /
+-- `rules::compile_rule` no longer call it. There is still ONE predicate over the
+-- level tuple — `grants::level_is_a_wildcard_run` — and the grant/rule
+-- distinction is carried by that single function's name and its call sites
+-- rather than by a flag a caller passes in, because a boolean two callers must
+-- agree about is the shape that has produced a defect on this branch five times.
+--
+-- Note which rule shapes were never in question, because they are not gaps
+-- either way: a mask on `('sales','orders','*')` (every column of one table) and
+-- a row filter on `('*','*')` (every table of every schema) both leave nothing
+-- named under a match-any level, and both were writable before this decision and
+-- remain so.

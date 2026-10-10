@@ -165,10 +165,10 @@ async fn column_attachment_against_a_column_request_is_self() {
 /// **And this is what ORDINARY use produces**, not malformed data: `ScopePicker`
 /// renders the three levels as free-text inputs and `request_resource` inserts them
 /// verbatim, so a steward typing `SALES` reached it with nothing wrong anywhere.
-/// That is why case is REPRODUCED here rather than refused by
-/// `egret_perm_compile::routes::stored_value_problem`, which is where the two
-/// classes the fold cannot reproduce — a wildcard metacharacter and a non-ASCII
-/// value — decline instead.
+/// That is why case is REPRODUCED here rather than refused. The other classes the
+/// fold cannot reproduce are elsewhere now: a wildcard metacharacter and an empty
+/// level are UNSTORABLE (migration 0177), and a fold-divergent value declines in
+/// `egret_perm_compile::routes::stored_coordinate_is_fold_divergent`.
 ///
 /// The two entries also prove the fold did not collapse the LEVELS: one tag at two
 /// case-shifted levels is still `SELF` + `ANCESTOR`, two members of Ranger's set.
@@ -370,4 +370,160 @@ async fn the_returned_identifier_is_the_name_not_the_key() {
         got[0].name, key,
         "tags.key is the WRONG identifier here and the fixture makes them differ"
     );
+}
+
+/// Test 6 — **the population bound, now enforced by the database.** SP4d debt
+/// Task 3, migration 0177.
+///
+/// Every test above is a claim about what
+/// [`resolved_tags_for_resource_via`](egret_policy::resolved_tags_for_resource_via)
+/// reproduces, and each one is only worth the PRECONDITION that the stored
+/// coordinates are ones its exact, case-folded predicate can return. Two shapes
+/// break that precondition — an empty `schema_name` or `table_name`, which
+/// `ServiceTags::from_assignments` ships as a SHORTER service resource the
+/// enricher admits as an ANCESTOR, and a `*` or `?`, which `trino.json`'s
+/// `{"wildCard": true}` turns into `FilenameUtils.wildcardMatch` — and neither can
+/// ever come back from an equality predicate. Both are now refused by
+/// `catalog_tag_assignments_levels_are_present_and_literal`.
+///
+/// This is the test the migration exists for, and it is run against the REAL table
+/// rather than a fixture copy: the constraint is in force in the template before
+/// any test runs, so an INSERT here is the same INSERT `assign_resource_tag` does.
+///
+/// Three groups, and the second and third are the ones that could go wrong:
+///
+/// * the coordinates the CHECK must REFUSE, each asserted to be refused BY NAME —
+///   a bare `is_err()` would pass just as well for a typo in a column name;
+/// * `column_name = ''`, which it must ACCEPT. That is migration 0081's
+///   table-level sentinel, five of the fifteen rows measured on the development
+///   host carry it, and a constraint forbidding every empty string would delete
+///   the table-level attachment feature;
+/// * a fold-divergent value, which it must also ACCEPT. A `CHECK` could forbid
+///   those 25 code points and must not: they are legitimate identifiers and which
+///   of them diverge depends on the collation, so that class stays a READ-time
+///   decline in `egret_perm_compile`'s gate. If this row ever starts failing, the
+///   two guards have been collapsed into one and the gate is now unreachable.
+#[tokio::test]
+async fn the_database_refuses_a_coordinate_the_resolver_cannot_reproduce() {
+    const CONSTRAINT: &str = "catalog_tag_assignments_levels_are_present_and_literal";
+    let Some(db) = db().await else {
+        eprintln!("skip");
+        return;
+    };
+    let pool = db.pool.clone();
+    let (wh_id, _catalog_id) = seed_catalog(&pool).await;
+    let tag = seed_tag_row(
+        &pool,
+        &format!("t0177-{}", Uuid::new_v4().simple()),
+        "Migration 0177",
+    )
+    .await;
+
+    for (schema, table, column, why) in [
+        (
+            "",
+            "orders",
+            "",
+            "an empty schema ships a resource with a HOLE",
+        ),
+        (
+            "sales",
+            "",
+            "",
+            "an empty table ships {catalog, schema}: ANCESTOR of everything under it",
+        ),
+        (
+            "",
+            "",
+            "",
+            "both empty ships {catalog}: ANCESTOR of the lot",
+        ),
+        ("sales", "*", "", "wildCard: true makes `*` match `orders`"),
+        ("sales", "ord*", "", "a wildcard PREFIX matches too"),
+        ("sales", "order?", "", "`?` is the other metacharacter"),
+        (
+            "sal*s",
+            "orders",
+            "",
+            "and the SCHEMA level is matched the same way",
+        ),
+        (
+            "sales",
+            "orders",
+            "ema*",
+            "a wildcarded COLUMN is SELF, not ancestor",
+        ),
+        (
+            "sales",
+            "orders",
+            "e?ail",
+            "the column level takes `?` as well",
+        ),
+    ] {
+        let e = try_assign(&pool, tag, wh_id, schema, table, column)
+            .await
+            .unwrap_or_else(|| {
+                panic!("({schema:?}, {table:?}, {column:?}) must be refused — {why}")
+            });
+        let named = match &e {
+            sqlx::Error::Database(d) => d.constraint() == Some(CONSTRAINT),
+            _ => false,
+        };
+        assert!(
+            named,
+            "({schema:?}, {table:?}, {column:?}) must be refused by {CONSTRAINT} \
+             and not by something else: {e}"
+        );
+    }
+
+    // The sentinel, and it is the one thing this predicate had to keep.
+    assert!(
+        try_assign(&pool, tag, wh_id, "sales", "orders", "")
+            .await
+            .is_none(),
+        "`column_name = ''` is migration 0081's table-level attachment and must stay \
+         writable — a constraint forbidding every empty string breaks the product"
+    );
+    // Ordinary non-ASCII, which the resolver reproduces (both folds agree).
+    assert!(
+        try_assign(&pool, tag, wh_id, "bán_hàng", "người", "điện_thoại")
+            .await
+            .is_none(),
+        "Vietnamese identifiers fold identically on both sides and must store"
+    );
+    // And the class the CHECK must NOT take over: still writable, still gated in
+    // `egret_perm_compile::routes`' `stored_coordinate_is_fold_divergent`.
+    assert!(
+        try_assign(&pool, tag, wh_id, "sales", "orders", "emaıl")
+            .await
+            .is_none(),
+        "a fold-divergent value is a legitimate identifier: it must STORE, and be \
+         declined at read time by the gate instead"
+    );
+}
+
+/// [`assign`] without the `expect`: `Some(error)` when the INSERT was refused,
+/// `None` when it landed. Separate from `assign` so that every other call site
+/// still panics on a fixture that silently failed to write.
+async fn try_assign(
+    pool: &sqlx::PgPool,
+    tag_id: Uuid,
+    warehouse_id: Uuid,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Option<sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments \
+             (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1,$2,$3,$4,$5)",
+    )
+    .bind(tag_id)
+    .bind(warehouse_id)
+    .bind(schema)
+    .bind(table)
+    .bind(column)
+    .execute(pool)
+    .await
+    .err()
 }

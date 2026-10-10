@@ -119,6 +119,14 @@ impl TagRepo {
     /// key is immutable (it's the stable selector token). Returns the updated tag
     /// or `None` if no such id.
     ///
+    /// **A rename into a MASKED name is refused** —
+    /// [`BiError::BadRequest`](crate::error::BiError::BadRequest), a 400 at
+    /// `PATCH /api/control-plane/tags/{id}`. This `UPDATE` is the third surface
+    /// that can create the pair `egret_policy::unreadable_table_mask` refuses
+    /// (SP4d debt Task 15); renaming a tag OUT of a masked name is still
+    /// allowed, deliberately, because that is how a steward escapes a pair that
+    /// already exists. See the guard call in the body.
+    ///
     /// **A rename is a recompile trigger, in the same transaction as the
     /// rename** (SP4a whole-branch review, Important 3 — D6 promised "a rename
     /// recompiles instead of breaking" and nothing implemented it). D6 resolves
@@ -156,6 +164,49 @@ impl TagRepo {
         let Some((key, old_name)) = before else {
             return Ok(None);
         };
+        // **"Is this a rename?" is asked exactly ONCE**, here, and both the
+        // refusal below and the recompile further down read the answer. Two
+        // spellings of it would be free to drift — the shape of defect the
+        // guard below exists for, caught inside Task 5's own first fix by its
+        // mutation M4.
+        let renamed_to: Option<&str> = name.filter(|n| *n != old_name.as_str());
+        // **SP4d debt Task 15: the rename is the THIRD surface that can author
+        // the unreadable-table pair, and Task 5's two guards do not sit on it.**
+        // An editor tag MASKING policy addresses a tag by NAME and nothing
+        // resolves that name at authoring time, so a mask naming a tag that does
+        // not exist yet is accepted and a table-level attachment of a
+        // differently-named tag is accepted — and renaming that tag INTO the
+        // masked name completes the pair having passed through neither guarded
+        // half. Measured through the real routes, down to what the Ranger plugin
+        // downloads, in `tests/tag_rename_unreadable_pair.rs`.
+        //
+        // It is the SAME function `CatalogTagRepo::assign_catalog` and
+        // `egret_perm_compile::routes::write_rule` call, reaching the same two
+        // half-predicates rather than a copy of either; `egret_policy::
+        // unreadable_table_mask` carries the live Trino 470 measurement, the full
+        // write-path enumeration and why there is no migration.
+        //
+        // ⚠ Renaming a tag OUT of a masked name stays ALLOWED. The engine
+        // matches a tag policy on the name too, so moving the name away
+        // genuinely removes the pair, and it is the only product remedy for a
+        // pair that already exists — refusing it would trap the steward. The
+        // guard asks only about the name the tag is about to HAVE.
+        //
+        // Runs before the `UPDATE`, on this transaction, so a refusal has
+        // written nothing and is a plain 400 rather than a rollback.
+        if let Some(new_name) = renamed_to {
+            if let Some(pair) = egret_policy::unreadable_table_mask_for(
+                &mut tx,
+                egret_policy::TagWrite::Rename {
+                    tag_id: id,
+                    new_name,
+                },
+            )
+            .await?
+            {
+                return Err(BiError::BadRequest(pair.refusal()));
+            }
+        }
         let affected = sqlx::query(
             "UPDATE tags SET \
                 name = COALESCE($2, name), \
@@ -173,7 +224,7 @@ impl TagRepo {
         if affected == 0 {
             return Ok(None);
         }
-        if name.is_some_and(|n| n != old_name) {
+        if renamed_to.is_some() {
             Self::recompile_for_rename_in_tx(&mut tx, id, &key).await?;
         }
         tx.commit().await?;

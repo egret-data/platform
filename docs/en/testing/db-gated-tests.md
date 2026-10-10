@@ -79,6 +79,48 @@ cargo test --workspace
 `egret_test_db` clones a private, already-migrated database per test process, so the URL
 above is only a server address plus a name it derives the admin connection from.
 
+### The template is named after the migration set, not fixed
+
+The clone comes from a template, and that template's name is `egret_test_tmpl_` plus a
+digest of the **`(version, checksum)` pairs of every embedded migration** — so two branches
+at different migration sets use different templates and neither can meet the other's schema.
+
+It used to be the single name `egret_test_template`, which meant every worktree on every
+branch shared one template and whichever branch migrated it last decided the schema the
+others tested against. Measured twice on 2026-10-01 on one machine: a tree at `0159` met a
+template another checkout had taken to `0160` and 84 tests failed with one identical
+`VersionMissing(160)`; then, with `main` at `0162`, a suite went 6/6 green and the next
+binary hit `VersionMissing(163)` **mid-run** because a third worktree advanced the template
+while the measurement was in flight. That message reads like a missing migration — a product
+defect — which is why the fix is a name that cannot be wrong rather than a rule to remember.
+
+Two consequences:
+
+- **"Drop `egret_test_template` and re-run" is obsolete.** Older plan documents in
+  `docs/en/plans/` tell you to do that after adding or editing a migration. A new or edited
+  migration now changes the digest, so it asks for a template of its own and builds it from
+  empty. Nothing needs dropping. (The old `egret_test_template` database, if your server
+  still has one, is simply unused; drop it by hand whenever no suite is running.)
+- **Templates accumulate, and the cleanup is manual on purpose.** One template per
+  migration set means a machine that follows `main` picks one up every few days, 12 MB each
+  measured 2026-10-01. An automatic sweep was written and then removed by ruling: a
+  mechanism that **deletes databases** whose drop had never been observed to fire is not
+  something to carry on an unmeasured 14-day TTL, and the cost it saves is small and cheap
+  to clean by hand. List them, and drop the ones you recognise as finished branches:
+
+  ```bash
+  psql postgres://egret:egret@localhost:5432/postgres \
+    -c "select datname, pg_size_pretty(pg_database_size(datname)) \
+        from pg_database where datname like 'egret_test_tmpl%' order by 1"
+  psql postgres://egret:egret@localhost:5432/postgres \
+    -c 'drop database "egret_test_tmpl_<digest>"'
+  ```
+
+  Dropping the one your current branch uses costs a single ~7 s re-migration, nothing more,
+  so a wrong guess here is cheap — which is the other half of why the sweep is not needed.
+  Never run the drop while a suite is running: `CREATE DATABASE … TEMPLATE x` and a `DROP`
+  of `x` race, and the loser sees a missing relation.
+
 > **Never point `DATABASE_URL` at the dev database `egret`.** `#[sqlx::test]` resolves the
 > variable through dotenvy **unconditionally**, so an *unexported* variable does not make
 > those tests skip — it makes them read `.env`, which points at the dev database, and they
@@ -137,6 +179,40 @@ EGRET_TEST_SHARED_STORE_URL=redis://127.0.0.1:6399 cargo test -p egret-dataapi
 CI runs a `valkey/valkey:8` service and sets the variable at workflow level, so CI is
 never the environment where this goes quiet. Nothing else in the workspace reads it: the
 suite needs no database, and every other Data API suite drives the in-process store.
+
+### `just check` supplies the store, and that was a hole until SP4d Task 8
+
+The paragraph above was true and beside the point, because **GitHub CI is out of quota on
+this project — `just check` is the gate.** And `just check` decided the DB, ENGINE and
+DOCKER axes while leaving this one undecided, so its workspace run ended
+`test result: FAILED. 0 passed; 14 failed` on this suite, printing the panic text above,
+whose remedy is `EGRET_ALLOW_STORE_SKIP=1`. Export that once to get work done and every
+later `just check` skipped all fourteen with the `eprintln!` swallowed by libtest. A recipe
+that recruits its own user into disabling part of itself is worse than one that forgot a
+gate: the export is permanent and invisible.
+
+So the store axis is now the one axis `check` decides by **running** the suite:
+
+* `valkey` is in `deploy/docker-compose.dev.yml` on **6399**, so `just up` provides it
+  beside the Postgres `check` already requires. With no Docker daemon,
+  `brew install valkey && valkey-server --port 6399` does the same job — the suite needs a
+  redis-protocol server, not a daemon, which is what separates this axis from
+  `EGRET_ALLOW_DOCKER_SKIP`.
+* `check` supplies `EGRET_TEST_SHARED_STORE_URL` **and** scrubs the opt-out
+  (`no_store_skip := "env -u EGRET_ALLOW_STORE_SKIP"`), so an exported
+  `EGRET_ALLOW_STORE_SKIP` cannot hollow the run out. Disabling the fourteen now takes a
+  visible edit to the justfile.
+* `just test-no-db` sets `EGRET_ALLOW_STORE_SKIP=1` **on the line** — the no-services
+  recipe decides the axis too, in the other direction — and both recipes print what their
+  green did and did not cover as the last thing on the terminal, because a skip reports
+  `ok`.
+* `just test-dataapi-shared-store` runs the suite alone with `--nocapture`.
+* `crates/egret-test-db/tests/every_test_recipe_refuses_the_skip.rs` machine-checks it:
+  a recipe that runs `cargo test` without naming its targets and without deciding this
+  variable fails that guard by line number.
+
+Override the URL when your store is elsewhere — `just test_store_url=redis://127.0.0.1:6400
+check`. That can only point the suite at a different store, never make it vacuous.
 
 ## Engine-gated tests are a separate axis
 

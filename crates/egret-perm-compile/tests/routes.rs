@@ -31,8 +31,14 @@ use axum::response::Response;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
 use egret_metastore::Db;
+use egret_perm::model::Selector;
 use egret_perm::PermStore;
-use egret_perm_compile::{perm_router, PermState};
+// `confine_to_overlay_workspace` and `confine_rule_selector` are `pub` solely so
+// these tests can call them: no HTTP entry point reaches either since
+// `391c3c3a6` — see their ⚠ paragraphs, and
+// `confine_to_overlay_workspace_allows_its_own_workspace_and_refuses_another`.
+use egret_perm_compile::routes::{confine_rule_selector, confine_to_overlay_workspace};
+use egret_perm_compile::{perm_router, PermHttpError, PermState};
 use egret_policy::{PolicyStore, COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
@@ -393,11 +399,13 @@ async fn admin_session(f: &Fixture) -> String {
         .token
 }
 
-/// A NON-admin session holding exactly one fine-grained permission key. The
-/// PDP snapshots the role catalog at build time, so the role is seeded and
-/// then the fixture's PDP is rebuilt.
-async fn session_with_permission(f: &mut Fixture, permission: &str) -> String {
-    let uid = new_user(f, "perm_scoped").await;
+/// Give `uid` exactly one fine-grained permission key, at PLATFORM scope —
+/// the only scope that can satisfy it, since `egret_core::rbac` declares the
+/// `policy:*` family `Scope::Platform` and the PDP loads `Resource::Platform`
+/// with no workspace, so `egret_auth::grants::grants_for` admits only
+/// `scope_type = 'platform'` rows. The PDP snapshots the role catalog at build
+/// time, so it is rebuilt here.
+async fn grant_platform_permission(f: &mut Fixture, uid: Uuid, permission: &str) {
     let (role_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO roles (scope, name, description) VALUES ('platform', $1, 'test-only role') \
          RETURNING id",
@@ -426,11 +434,145 @@ async fn session_with_permission(f: &mut Fixture, permission: &str) -> String {
             .await
             .expect("rebuild CedarPdp"),
     );
+}
+
+/// A NON-admin session holding exactly one fine-grained permission key.
+async fn session_with_permission(f: &mut Fixture, permission: &str) -> String {
+    let uid = new_user(f, "perm_scoped").await;
+    grant_platform_permission(f, uid, permission).await;
     f.sessions
         .create(egret_core::UserId(uid), "test", "127.0.0.1")
         .await
         .expect("create session")
         .token
+}
+
+/// A `ws_admin`'s own session token carrying a **workspace-scoped impersonation
+/// overlay row** over a target who holds `permissions` at platform scope — the
+/// exact fixture of the privilege escalation `391c3c3a6` (2026-10-10) closed.
+///
+/// Built the way production built it: the overlay row hangs off the
+/// IMPERSONATOR's own session (`SessionService::validate` consults
+/// `active_for_session(row.session_id)`), written directly through
+/// `ImpersonationRepo::start` because no entry point will mint this combination.
+///
+/// ⚠ **Resolving this token no longer yields the target.** It yields the ADMIN,
+/// with `impersonator: None`, because `validate` re-evaluates
+/// `egret_auth::impersonation::overlay_refused_by_platform_authority` on every
+/// request and a ws-scoped overlay over a platform-role holder is **inert**. That
+/// is the property this helper now exists to let a test observe, at the HTTP layer
+/// the escalation lived on — see
+/// `a_ws_scoped_overlay_over_a_platform_role_target_is_decided_as_the_admin`.
+///
+/// It used to exist for the opposite reason: to hand `/api/control-plane` a
+/// principal carrying platform authority AND `workspace_scope = Some(ws)`, so the
+/// containment in `egret_perm_compile::routes::confine_to_overlay_workspace` could
+/// be driven over HTTP. That state is now unrepresentable, so those tests call the
+/// containment directly instead
+/// (`confine_to_overlay_workspace_allows_its_own_workspace_and_refuses_another`).
+///
+/// Returns `(token, admin_user_id)`. The second half is load-bearing: giving the
+/// ADMIN the same platform permission afterwards is what distinguishes "the
+/// overlay is inert" from "any session with an overlay row is refused", and
+/// without that arm a refusal and a `return Err(Forbidden)` look identical.
+async fn ws_scoped_overlay_session_with(
+    f: &mut Fixture,
+    scope: Uuid,
+    permissions: &[&str],
+) -> (String, Uuid) {
+    let steward = new_user(f, "perm_overlay_steward").await;
+    for permission in permissions {
+        grant_platform_permission(f, steward, permission).await;
+    }
+    let ws_admin = new_user(f, "perm_overlay_wsadmin").await;
+    let issued = f
+        .sessions
+        .create(egret_core::UserId(ws_admin), "test", "127.0.0.1")
+        .await
+        .expect("create ws_admin session");
+    let session_id = f
+        .sessions
+        .session_id_for_token(&issued.token)
+        .await
+        .expect("resolve session id")
+        .expect("the session exists");
+    egret_auth::impersonation::ImpersonationRepo::new(f.db.clone())
+        .start(egret_auth::impersonation::NewImpersonation {
+            admin_session_id: session_id,
+            impersonator_id: egret_core::UserId(ws_admin),
+            target_user_id: egret_core::UserId(steward),
+            workspace_scope: Some(egret_core::WorkspaceId(scope)),
+            reason: "SP4d debt Task 4 containment test".to_string(),
+            ttl_minutes: 10,
+        })
+        .await
+        .expect("start overlay");
+    (issued.token, ws_admin)
+}
+
+/// A synthesized `Principal` **inside an impersonation overlay**, for the direct
+/// tests of the confinement guards: `Some(ws)` is a `ws_admin`'s ws-scoped
+/// overlay (confined to `ws`), `None` is a `platform_admin`'s unscoped one
+/// (unrestricted — see `confine_to_overlay_workspace`).
+///
+/// Synthesized rather than resolved from a session on purpose: the ws-scoped
+/// shape with platform authority is exactly what `SessionService::validate`
+/// refuses to build since `391c3c3a6`, so a test that needs that value has to
+/// construct it. The guards under test read nothing but
+/// `principal.impersonator.workspace_scope`, so no other field can matter.
+fn principal_under_overlay(workspace_scope: Option<Uuid>) -> egret_core::Principal {
+    egret_core::Principal {
+        impersonator: Some(egret_core::context::Impersonator {
+            user_id: egret_core::UserId(Uuid::new_v4()),
+            email: "admin@egret.local".to_string(),
+            workspace_scope: workspace_scope.map(egret_core::WorkspaceId),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+        }),
+        ..principal_without_overlay()
+    }
+}
+
+/// A synthesized `Principal` that is NOT inside an overlay — the control cell for
+/// the confinement guards, which must confine nobody here.
+fn principal_without_overlay() -> egret_core::Principal {
+    egret_core::Principal {
+        user_id: egret_core::UserId(Uuid::new_v4()),
+        email: "steward@egret.local".to_string(),
+        platform_roles: vec!["data_steward".to_string()],
+        permissions: vec!["policy:update".to_string()],
+        group_ids: Vec::new(),
+        impersonator: None,
+    }
+}
+
+/// A fresh workspace with no catalogs of its own.
+async fn new_workspace(f: &Fixture, tag: &str) -> Uuid {
+    sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$2) RETURNING id")
+        .bind(unique(tag))
+        .bind("Perm Task4 WS")
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("workspace")
+}
+
+/// Assign `catalog_id` to `workspace_id` — `registry.catalog_workspaces`, the
+/// relation the `perm` model derives its implicit `workspace_assignment` grants
+/// from, and the one the overlay containment is keyed to.
+///
+/// Written with raw SQL on purpose: production's only writer is
+/// `egret_catalog_registry::RegistryStore::set_catalog_workspaces_in_tx`, which
+/// this crate does not depend on, and whose point is that it composes the grant
+/// sync — nothing here needs the grant, and reaching for a convenience wrapper is
+/// exactly what that crate removed.
+async fn assign_catalog_to_workspace(f: &Fixture, catalog_id: Uuid, workspace_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO registry.catalog_workspaces (catalog_id, workspace_id) VALUES ($1,$2)",
+    )
+    .bind(catalog_id)
+    .bind(workspace_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("assign catalog to workspace");
 }
 
 fn grant_body(catalog_id: Uuid, user: &str) -> Value {
@@ -1290,6 +1432,265 @@ async fn patching_a_grant_into_an_uncompilable_shape_is_refused_and_changes_noth
     assert_eq!(
         stored,
         vec!["analyst".to_string()],
+        "the refused patch must not have committed its own UPDATE"
+    );
+}
+
+/// **SP4d debt Task 12 — the write-path 400, on the one path where only the Rust
+/// guard can produce it.**
+///
+/// `schema: ""` compiles to `"schema": {"values": [""]}`, Ranger's
+/// `init()` drops an empty policy value, and the level becomes `isMatchAny` — so
+/// the grant is enforced in every schema of the catalog
+/// (`compile_grants.rs::an_empty_scope_level_would_be_enforced_in_every_schema`).
+/// `perm.grants`' pre-existing level-skip CHECK could not see it, because `''` is
+/// not NULL.
+///
+/// **Why an ORPHAN catalog, and why the assertion is `400` and not "not 2xx".**
+/// Three guards can refuse this input and the test has to be pointed at one.
+/// `0178`'s CHECK would refuse the INSERT whatever happens in Rust, and on a
+/// catalog an engine reaches `compile_grant`'s own copy of the guard would refuse
+/// the recompile. An orphan catalog affects no profile, so
+/// `recompile_services_in_tx(&[])` validates nothing, and the only thing between
+/// the body and the database is `validate_grant_shape`. Remove it and this request
+/// still fails — but as a **500**, because the constraint catches it with a
+/// message naming a schema internal. Task 2 of this plan mutation-measured exactly
+/// that, which is why the status code is the assertion and the message is checked
+/// for the level name.
+///
+/// **The control is `'*'` in the same field**: it is a legitimate Ranger policy
+/// value — a steward scopes a grant to a whole catalog or schema routinely, and
+/// `scope_to_resources` emits `*` itself for every unnamed level — so a guard that
+/// refused it would break a real scope. It must be CREATED, 201. Without that arm
+/// a predicate refusing every non-literal would pass.
+#[tokio::test]
+async fn an_empty_scope_level_is_a_400_and_a_star_is_created() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "perm-empty-level").await;
+
+    // ⚠ `table` is a parameter and not a constant because SP4d debt Task 14 made
+    // the `*` CONTROL's own shape matter: `('*', 'orders')` is now a 400 of its
+    // own (a named level under a match-any one is the level skip `grants_check`
+    // already forbids), so this test's control moved to `('*', '*')` — a wildcard
+    // with nothing named beneath it, which is what `0178` must not refuse.
+    // `a_wildcard_level_over_a_named_one_is_a_400_and_a_wildcard_tail_is_created`
+    // owns the moved shape.
+    let body_with = |schema: Value, table: Value| {
+        json!({
+            "effect": "allow",
+            "actions": ["read"],
+            "scope": { "catalog_id": orphan, "schema": schema, "table": table, "column": null },
+            "principals": { "include": [{ "kind": "user", "ref": "analyst" }], "exclude": [] }
+        })
+    };
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(body_with(json!(""), json!("orders"))),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an empty scope level must be a 400 from the write-path guard, not a 500 from \
+         the CHECK; body: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("schema"),
+        "the refusal must name the level the author has to fix; body: {body}"
+    );
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM perm.grants WHERE catalog_id = $1")
+        .bind(orphan)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count");
+    assert_eq!(stored, 0, "the refused create must have stored nothing");
+
+    // CONTROL: `*` is a real policy value and stays authorable.
+    let (status, created) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(body_with(json!("*"), json!("*"))),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "`*` at a level is a legitimate scope and must still be writable; body: {created}"
+    );
+    let grant_id = created["id"].as_str().expect("minted id").to_string();
+
+    // And the PATCH path runs the same guard, leaving the stored row alone.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/grants/{grant_id}"),
+                &token,
+                Some(body_with(json!(""), json!("orders"))),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the patch path must refuse it too; body: {body}"
+    );
+    let schema: Option<String> =
+        sqlx::query_scalar("SELECT schema_name FROM perm.grants WHERE id = $1")
+            .bind(Uuid::parse_str(&grant_id).unwrap())
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("read back");
+    assert_eq!(
+        schema.as_deref(),
+        Some("*"),
+        "the refused patch must not have committed its own UPDATE"
+    );
+}
+
+/// **SP4d debt Task 14 over HTTP — the status code is the assertion.**
+///
+/// **Why an ORPHAN catalog, and why `400` and not "not 2xx".** Three guards can
+/// refuse this input and the test has to be pointed at one. `0179`'s CHECK would
+/// refuse the INSERT whatever happens in Rust, and on a catalog an engine reaches
+/// `compile_grant`'s own copy of the guard would refuse the recompile. An orphan
+/// catalog affects no profile, so `recompile_services_in_tx(&[])` validates
+/// nothing and the only thing between the body and the database is
+/// `validate_grant_shape`. Remove that call and this request still fails — but as
+/// a **500**, because the constraint catches it with a message naming a schema
+/// internal. Tasks 2, 3 and 12 mutation-measured exactly that, three times, which
+/// is why the status code is asserted and the body is checked for both level
+/// names.
+///
+/// **The control is a wildcard TAIL in the same field**, which must be CREATED,
+/// 201. This is the arm that keeps the fix from being "`*` is illegitimate": a
+/// steward scopes a grant to every table of every schema on purpose, and
+/// `scope_to_resources` emits that shape itself for an unnamed level. Without it
+/// a predicate refusing `*` outright would pass.
+#[tokio::test]
+async fn a_wildcard_level_over_a_named_one_is_a_400_and_a_wildcard_tail_is_created() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "perm-wildcard-gap").await;
+
+    let body_with = |schema: Value, table: Value| {
+        json!({
+            "effect": "allow",
+            "actions": ["read"],
+            "scope": { "catalog_id": orphan, "schema": schema, "table": table, "column": null },
+            "principals": { "include": [{ "kind": "user", "ref": "analyst" }], "exclude": [] }
+        })
+    };
+
+    // THE FINDING, as two ordinary keystrokes in `ScopePicker` produce it — and
+    // the second spelling, which keying on the literal `*` would have missed.
+    for schema in ["*", "**"] {
+        let (status, body) = into_json(
+            f.app()
+                .oneshot(req(
+                    "POST",
+                    "/perm/grants",
+                    &token,
+                    Some(body_with(json!(schema), json!("orders"))),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a match-any {schema:?} schema over a named table must be a 400 from the \
+             write-path guard, not a 500 from the CHECK; body: {body}"
+        );
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("schema") && error.contains("orders"),
+            "the refusal must name the match-any level AND what is named under it, so \
+             the author knows which to change; body: {body}"
+        );
+        assert!(
+            error.contains("does not express"),
+            "and it must read as consistency with the model's existing decision rather \
+             than as a new restriction; body: {body}"
+        );
+    }
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM perm.grants WHERE catalog_id = $1")
+        .bind(orphan)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count");
+    assert_eq!(stored, 0, "the refused creates must have stored nothing");
+
+    // CONTROL: a wildcard with nothing named beneath it is a real scope and stays
+    // authorable.
+    let (status, created) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(body_with(json!("*"), json!("*"))),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "`('*','*')` names nothing under a wildcard and must still be writable; \
+         body: {created}"
+    );
+    let grant_id = created["id"].as_str().expect("minted id").to_string();
+
+    // And the PATCH path runs the same guard, leaving the stored row alone.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/grants/{grant_id}"),
+                &token,
+                Some(body_with(json!("*"), json!("orders"))),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the patch path must refuse it too; body: {body}"
+    );
+    let table: Option<String> =
+        sqlx::query_scalar("SELECT table_name FROM perm.grants WHERE id = $1")
+            .bind(Uuid::parse_str(&grant_id).unwrap())
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("read back");
+    assert_eq!(
+        table.as_deref(),
+        Some("*"),
         "the refused patch must not have committed its own UPDATE"
     );
 }
@@ -2583,7 +2984,7 @@ async fn a_group_only_grant_is_refused_by_the_artifact_the_engine_downloads() {
 ///    row is `SELF` for this target and the table row is `ANCESTOR`, so a flag
 ///    written once — either way — pairs one tag with the wrong answer.
 /// 3. **H1: non-empty for the profile that resolves it, empty for the one that does
-///    not.** Migration 0165's `CHECK` makes a StarRocks profile carrying a
+///    not.** Migration 0176's `CHECK` makes a StarRocks profile carrying a
 ///    `tagService` unrepresentable, so "one profile resolves these tags and one
 ///    cannot" is the ONLY shape this pair can take — and it is exactly the state
 ///    whose single response-level list made the page claim, under both profiles,
@@ -4290,6 +4691,561 @@ async fn a_target_that_skips_a_level_is_refused() {
     }
 }
 
+/// **A level present as `""` or `"*"` is refused, and this is the HTTP half.**
+/// `validate_explain_target`'s own matrix lives in `src/routes.rs`; what this
+/// adds is that the handler CALLS it — delete the call and every row below turns
+/// 200 while the lib tests stay green.
+///
+/// Both forms are Ranger's `isAllValuesRequested` ("every value at this level"),
+/// not a resource name, and the reasons they must not be answered differ:
+///
+/// * `""` is the one request shape where **egret's own evaluator is measured
+///   disagreeing with the engine**. `egret_ranger_eval::resource::level_excluded_by_trie`
+///   records it: on ranger 2.8.0 a request `{catalog: ""}` reaches a policy whose
+///   only level is a literal and answers `Allowed`, while the trie candidacy
+///   filter reports that policy absent. That gap is deliberately left open there
+///   (the rule separating it from the shapes the trie gets right is not
+///   established, and that function's job is to be a proof) — so the honest place
+///   to close it is the surface that lets a caller choose the request.
+///   ⚠ The same comment used to say an empty request level "is not something
+///   egret sends", bounding the shape by AUTHORSHIP. `request_resource` copies
+///   the body through verbatim, so it was false; this test is what makes it true.
+/// * `"*"` the trie and the matcher agree about, and the answer is still about
+///   another question: `isAllValuesRequested && !isMatchAny` short-circuits to
+///   NONE without reading one policy value, so `{schema: "*"}` reports "nothing
+///   matched" for every policy naming a real schema. `ScopePicker`'s Schema /
+///   Table / Column are free text and `*` is exactly what a steward sees in a
+///   compiled grant's resources, so this is a shape ORDINARY use produces — the
+///   empty one it cannot, because the picker maps its own empty input to
+///   `undefined`.
+#[tokio::test]
+async fn a_target_level_naming_every_value_is_refused() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+
+    for value in ["", "*"] {
+        for (label, target) in [
+            (
+                "schema",
+                json!({ "catalog_id": f.catalog_id, "schema": value, "table": null, "column": null }),
+            ),
+            (
+                "table",
+                json!({ "catalog_id": f.catalog_id, "schema": "sales", "table": value, "column": null }),
+            ),
+            (
+                "column",
+                json!({ "catalog_id": f.catalog_id, "schema": "sales", "table": "orders", "column": value }),
+            ),
+        ] {
+            let mut ask = explain_body(f.catalog_id, "alice-doe");
+            ask["target"] = target;
+            let (status, body) = into_json(
+                f.app()
+                    .oneshot(req("POST", "/perm/explain", &token, Some(ask)))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{label} = {value:?} is Ranger's every-value form, not a resource name, \
+                 and no engine request carries it; body: {body}"
+            );
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(&format!("`{label}`")),
+                "the refusal has to name WHICH level: {body}"
+            );
+        }
+    }
+
+    // A `*` INSIDE a name, and whitespace, are literal values the matcher
+    // compares literally — so they stay answerable, and the guard cannot be
+    // satisfied by refusing anything that merely contains a star.
+    for target in [
+        json!({ "catalog_id": f.catalog_id, "schema": "a*b", "table": null, "column": null }),
+        json!({ "catalog_id": f.catalog_id, "schema": " ", "table": null, "column": null }),
+    ] {
+        let mut ask = explain_body(f.catalog_id, "alice-doe");
+        ask["target"] = target.clone();
+        let (status, body) = into_json(
+            f.app()
+                .oneshot(req("POST", "/perm/explain", &token, Some(ask)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{target} is a literal resource value, not the all-values form; body: {body}"
+        );
+    }
+}
+
+/// **A catalog id naming no row is refused — and that is NOT the same thing as a
+/// catalog no profile serves.**
+///
+/// `services_for_catalog_via` joins on `ea.catalog_id = $1`, so a uuid naming
+/// nothing returns the empty profile set, which the handler reported as
+/// `no_profile_serves_the_catalog` — a steward reading that for a typo believes
+/// they have learned something about enforcement.
+///
+/// ⚠ **The unserved outcome is deliberately kept.** "Nothing is enforcing here"
+/// is a real answer a steward asks for on purpose
+/// (`a_catalog_no_engine_serves_is_its_own_outcome_not_a_denial`), so both halves
+/// are asserted in ONE test: a uuid naming nothing is a 400, and in the same
+/// breath a catalog that EXISTS and that no engine serves still answers 200 with
+/// that outcome. Anyone who later "tidies" the unserved case into a refusal has
+/// to delete a line of this test to do it.
+#[tokio::test]
+async fn a_catalog_id_naming_no_catalog_is_refused_while_an_unserved_one_is_answered() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+
+    let nowhere = Uuid::new_v4();
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain_body(nowhere, "nobody")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a uuid no registered catalog has names no resource at all; body: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&nowhere.to_string()),
+        "and the refusal names the id, so the steward can see it was the typo: {body}"
+    );
+
+    // The distinction this guard exists to make, asserted here so it cannot be
+    // removed silently.
+    let real_but_unserved = orphan_catalog(&f, "explain-exists-unserved").await;
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain_body(real_but_unserved, "nobody")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a catalog that EXISTS and that no profile serves is a legitimate question \
+         and must keep its own outcome; body: {body}"
+    );
+    assert_eq!(
+        body["outcome"], "no_profile_serves_the_catalog",
+        "which is the answer, not an error; body: {body}"
+    );
+}
+
+/// **The decision this task recorded: a platform steward may explain a catalog of
+/// ANY workspace, and that is by construction, not by oversight.**
+///
+/// `explain` is mounted under `/api/control-plane` with the bare `Auth`
+/// extractor, so no workspace id reaches it; `egret_core::Principal` has no
+/// workspace field; `policy:read` is `Scope::Platform` in `egret_core::rbac` and
+/// is gated on `Resource::Platform`, which `egret_auth::grants::grants_for` loads
+/// with `ws = None` — admitting only `scope_type = 'platform'` rows. **A
+/// workspace-confined caller holding `policy:read` is not representable.** And
+/// `registry.catalogs` has no `workspace_id`: a workspace is *assigned* a
+/// catalog, many to many, so "the catalog's workspace" is not a function.
+///
+/// So this asserts the positive: a `policy:read` holder — not a platform_admin,
+/// whose PDP bypass would make the measurement vacuous — gets an answer about a
+/// catalog assigned to a workspace it has nothing to do with.
+#[tokio::test]
+async fn a_platform_steward_may_explain_a_catalog_of_any_workspace() {
+    let Some(mut f) = setup().await else { return };
+    let other_ws = new_workspace(&f, "perm-task4-foreign").await;
+    assign_catalog_to_workspace(&f, f.catalog_id, other_ws).await;
+    let token = session_with_permission(&mut f, "policy:read").await;
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain_body(f.catalog_id, "nobody")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a platform steward's remit is the installation: refusing this would break \
+         the Explain access page for every catalog, since the caller has no \
+         workspace to compare against; body: {body}"
+    );
+    assert_eq!(body["outcome"], "per_profile", "body: {body}");
+}
+
+/// **`confine_to_overlay_workspace`, called DIRECTLY, because no route reaches
+/// it any more.**
+///
+/// ⚠ **No HTTP entry point can reach this function.** The mechanism, stated
+/// instead of "nothing does this today" — a claim of that shape has been written
+/// about this guard twice and falsified twice:
+///
+/// 1. Since `391c3c3a6` (2026-10-10) `SessionService::validate` re-evaluates
+///    `egret_auth::impersonation::overlay_refused_by_platform_authority` on
+///    **every request**, so a ws-scoped overlay over a target holding any
+///    platform-scoped role grant is **inert**: the request is decided as the
+///    admin and `Principal::impersonator` is `None`, which makes
+///    `overlay_workspace_scope` here `None` and this guard a no-op.
+/// 2. A ws-scoped overlay whose target holds NO platform-scoped role grant stays
+///    live, but then it cannot pass `require("policy:read"/"policy:update")`
+///    above this function: those keys are `Scope::Platform`, the PDP loads
+///    `Resource::Platform` with `ws = None`, and
+///    `egret_auth::grants::AccessGrantStore::grants_for` admits a `workspace`-
+///    scoped row only for `scope_id = $ws`, which NULL never matches (pinned by
+///    `grants_for_returns_platform_and_scoped_workspace_grants` in `egret-auth`).
+///
+/// Those two cases exhaust `workspace_scope = Some(_)`, so the guard is defence
+/// in depth and nothing more. It is kept because it is keyed to a different
+/// relation (`registry.catalog_workspaces`) than the inertness rule is, and
+/// because it is the only half that would still hold if some future entry point
+/// wrote a scoped overlay row without going through either.
+///
+/// **It WAS reachable, before `391c3c3a6`, through the stale-measurement
+/// window.** `validate_impersonation_target` measured the target's platform roles
+/// once, when the overlay row was written, while `validate` rebuilt the principal
+/// from live tables for the overlay's whole 30-minute life — so a target who
+/// gained a platform role AFTER the overlay began (an IdP group change replayed by
+/// `sync_user_oidc_groups` on the next login, or a console grant) handed a
+/// `ws_admin`'s own token a principal carrying `policy:update` with
+/// `workspace_scope = Some(A)`, and this function was the thing standing between
+/// it and another workspace's catalog.
+///
+/// **Why the test moved off the router.** Two route-level tests drove this guard
+/// by writing the overlay row straight into the database
+/// (`a_workspace_scoped_overlay_is_confined_to_that_workspaces_catalogs`,
+/// `…_cannot_create_a_grant_on_another_workspaces_catalog`). After `391c3c3a6`
+/// their ALLOW arm could not hold — the overlay is inert, so the principal is a
+/// permissionless admin and every row is `403` — which is exactly how an
+/// unreachable guard announces itself. A test whose fixture cannot hold the state
+/// it guards is not a test, and a pair of rows that only ever observe `403` cannot
+/// tell a correct guard from `return Err(Forbidden)`. The router now pins the
+/// INERTNESS instead
+/// (`a_ws_scoped_overlay_over_a_platform_role_target_is_decided_as_the_admin`),
+/// at the layer the escalation actually lived on.
+///
+/// Four cells, because the predicate distinguishes allow from refuse and both
+/// halves have to be observed:
+/// 1. confined to the workspace the catalog IS assigned to → `Ok`;
+/// 2. confined to a workspace the catalog is NOT assigned to → `Forbidden`;
+/// 3. an UNSCOPED overlay (a `platform_admin` acting as someone) → `Ok` for that
+///    same catalog, so the confinement is keyed to the SCOPE and not merely to
+///    the presence of an overlay;
+/// 4. no overlay at all → `Ok`, likewise.
+///
+/// ⚠ **Both catalogs carry a `registry.catalog_workspaces` row.** A "foreign"
+/// catalog with no assignment at all let Task 4's M8 mutant survive — an `EXISTS`
+/// that dropped `AND workspace_id = $2`, i.e. "is this catalog assigned to ANY
+/// workspace", still produced the refusal — and that mutant is the actual leak.
+#[tokio::test]
+async fn confine_to_overlay_workspace_allows_its_own_workspace_and_refuses_another() {
+    let Some(f) = setup().await else { return };
+    let scope = new_workspace(&f, "perm-confine-scope").await;
+    let own = orphan_catalog(&f, "perm-confine-own-cat").await;
+    assign_catalog_to_workspace(&f, own, scope).await;
+    let foreign_ws = new_workspace(&f, "perm-confine-foreign-ws").await;
+    let foreign = orphan_catalog(&f, "perm-confine-foreign-cat").await;
+    assign_catalog_to_workspace(&f, foreign, foreign_ws).await;
+
+    let mut conn = f.db.pool.acquire().await.expect("acquire a connection");
+    let confined = principal_under_overlay(Some(scope));
+
+    // 1. The overlay's own workspace is assigned this catalog.
+    let own_cell = confine_to_overlay_workspace(&mut conn, &confined, own).await;
+    assert!(
+        own_cell.is_ok(),
+        "the overlay's own workspace is assigned this catalog, so the support flow \
+         the overlay exists for must still be allowed — a blanket refusal would \
+         pass cell 2 alone; got {own_cell:?}"
+    );
+
+    // 2. A catalog that workspace is not assigned.
+    let foreign_cell = confine_to_overlay_workspace(&mut conn, &confined, foreign).await;
+    assert!(
+        matches!(foreign_cell, Err(PermHttpError::Forbidden)),
+        "a ws-scoped overlay must not reach another workspace's catalog through a \
+         platform route; got {foreign_cell:?}"
+    );
+
+    // 3. An UNSCOPED overlay is a platform_admin acting as someone: unrestricted.
+    let unscoped = principal_under_overlay(None);
+    let unscoped_cell = confine_to_overlay_workspace(&mut conn, &unscoped, foreign).await;
+    assert!(
+        unscoped_cell.is_ok(),
+        "an unscoped overlay carries no workspace to confine to, so cell 2 must be \
+         the SCOPE and not the presence of an overlay; got {unscoped_cell:?}"
+    );
+
+    // 4. No overlay at all.
+    let plain = principal_without_overlay();
+    let plain_cell = confine_to_overlay_workspace(&mut conn, &plain, foreign).await;
+    assert!(
+        plain_cell.is_ok(),
+        "a platform steward with no overlay has the whole installation as a remit; \
+         got {plain_cell:?}"
+    );
+}
+
+/// [`confine_rule_selector`] directly, for the same reason and with the same
+/// unreachability — read the ⚠ paragraphs on
+/// `confine_to_overlay_workspace_allows_its_own_workspace_and_refuses_another`
+/// before changing anything here.
+///
+/// A rule's target is a `Selector`, not a catalog, and the two arms fail
+/// differently:
+///
+/// 1. `Path` on a catalog the overlay's workspace IS assigned → `Ok`;
+/// 2. `Path` on a catalog it is not → `Forbidden` (the `Path` arm is just
+///    `confine_to_overlay_workspace`, so this cell is what proves the delegation
+///    is wired at all);
+/// 3. `Tag` under a ws-scoped overlay → `Forbidden` **regardless of catalog**: a
+///    tag selector names none, and `affected_services_for_rule` fans it out over
+///    every profile in the installation, so there is no subset of it that stays
+///    inside one workspace;
+/// 4. `Tag` with no overlay → `Ok`, so cell 3 is the confinement and not a route
+///    that refuses tag rules outright;
+/// 5. `Path` on the foreign catalog with no overlay → `Ok`, the control for cell 2.
+#[tokio::test]
+async fn confine_rule_selector_refuses_a_foreign_path_and_every_tag() {
+    let Some(f) = setup().await else { return };
+    let scope = new_workspace(&f, "perm-rulesel-scope").await;
+    let own = orphan_catalog(&f, "perm-rulesel-own-cat").await;
+    assign_catalog_to_workspace(&f, own, scope).await;
+    let foreign_ws = new_workspace(&f, "perm-rulesel-foreign-ws").await;
+    let foreign = orphan_catalog(&f, "perm-rulesel-foreign-cat").await;
+    assign_catalog_to_workspace(&f, foreign, foreign_ws).await;
+
+    let path_on = |catalog_id: Uuid| {
+        Selector::Path(egret_perm::model::Scope {
+            catalog_id,
+            schema: Some("sales".to_string()),
+            table: Some("orders".to_string()),
+            column: Some("email".to_string()),
+        })
+    };
+    let tag = Selector::Tag {
+        key: f.tag_key.clone(),
+    };
+
+    let mut conn = f.db.pool.acquire().await.expect("acquire a connection");
+    let confined = principal_under_overlay(Some(scope));
+    let plain = principal_without_overlay();
+
+    // 1 and 2: the Path arm delegates to the catalog confinement.
+    let own_cell = confine_rule_selector(&mut conn, &confined, &path_on(own)).await;
+    assert!(
+        own_cell.is_ok(),
+        "a confined caller must still author rules over its own workspace's \
+         catalogs; got {own_cell:?}"
+    );
+    let foreign_cell = confine_rule_selector(&mut conn, &confined, &path_on(foreign)).await;
+    assert!(
+        matches!(foreign_cell, Err(PermHttpError::Forbidden)),
+        "a confined caller must not author a rule over another workspace's \
+         catalog; got {foreign_cell:?}"
+    );
+
+    // 3: a tag selector has no catalog and fans out over the installation.
+    let tag_cell = confine_rule_selector(&mut conn, &confined, &tag).await;
+    assert!(
+        matches!(tag_cell, Err(PermHttpError::Forbidden)),
+        "a tag rule's affected set is every profile in the installation, so a \
+         confined caller may not author one in any form; got {tag_cell:?}"
+    );
+
+    // 4 and 5: unconfined, both selectors are a platform steward's to author.
+    let plain_tag = confine_rule_selector(&mut conn, &plain, &tag).await;
+    assert!(
+        plain_tag.is_ok(),
+        "without an overlay a tag rule is a platform steward's to author, so cell \
+         3 is the confinement and not a blanket refusal of tag rules; got \
+         {plain_tag:?}"
+    );
+    let plain_path = confine_rule_selector(&mut conn, &plain, &path_on(foreign)).await;
+    assert!(
+        plain_path.is_ok(),
+        "without an overlay the foreign catalog is in remit, so cell 2 is the \
+         confinement and not a missing permission; got {plain_path:?}"
+    );
+}
+
+/// **The escalation's regression test, at the HTTP layer it lived on.**
+///
+/// A `ws_admin` of workspace A holds an overlay on a member of A who holds the
+/// platform `data_steward` role — which migration 0059 seeds with the whole
+/// `policy:*` family. Before `391c3c3a6` (2026-10-10) that token reached
+/// `POST /perm/grants` carrying the TARGET's `policy:update` and wrote a grant on
+/// another workspace's catalog, compiled by the same request into the Ranger
+/// artifact that workspace's engine downloads. egret IS the Ranger admin, so that
+/// was a data-plane compromise, and the creation-time guard did not stop it: the
+/// overlay began over a clean target and `validate` rebuilt the principal from
+/// live tables for its whole 30-minute life, so an IdP group change replayed by
+/// `sync_user_oidc_groups` — needing no permission from the admin — supplied the
+/// role afterwards.
+///
+/// What holds now is INERTNESS, and it is a property of
+/// `SessionService::validate`, not of any check on this router: the overlay is
+/// re-judged every request and falls through to the admin principal. So the
+/// assertions are about WHO the request is decided as.
+///
+/// Three observations, because "refused" alone cannot tell inertness from a route
+/// that refuses everything:
+/// 1. resolving the token yields the ADMIN — `impersonator` is `None` and the
+///    target's platform roles are absent — which is the mechanism, read directly;
+/// 2. the escalating write is `403` and **nothing is stored or compiled**,
+///    asserted against `perm.grants` AND `policy.authz_policies`, because the 403
+///    would be worth little if the row had already reached the artifact;
+/// 3. giving the ADMIN the same `policy:update` makes the same token, with the
+///    same overlay row over the same target, succeed — so row 2 is the missing
+///    authority of an inert overlay and not a session with an overlay row being
+///    refused wholesale.
+///
+/// The foreign catalog is the fixture's own `f.catalog_id` on purpose: it is
+/// attached to an engine bound to `f.service_id`, so a grant on it compiles to a
+/// real policy row and row 2's `policy.authz_policies` assertion could actually
+/// have changed.
+#[tokio::test]
+async fn a_ws_scoped_overlay_over_a_platform_role_target_is_decided_as_the_admin() {
+    let Some(mut f) = setup().await else { return };
+    // The overlay's own workspace, with a catalog of its own so row 3 is askable.
+    let scope = new_workspace(&f, "perm-inert-scope").await;
+    let own = orphan_catalog(&f, "perm-inert-own-cat").await;
+    assign_catalog_to_workspace(&f, own, scope).await;
+    // The other workspace's catalog: served by `f.service_id`, and assigned.
+    let foreign_ws = new_workspace(&f, "perm-inert-foreign-ws").await;
+    assign_catalog_to_workspace(&f, f.catalog_id, foreign_ws).await;
+
+    let grants_before = grants_on(&f, f.catalog_id).await;
+    let policies_before = policies_on(&f, f.service_id).await;
+
+    let (token, admin_uid) =
+        ws_scoped_overlay_session_with(&mut f, scope, &["policy:update"]).await;
+
+    // 1. The mechanism, read directly off `validate`.
+    let p = f
+        .sessions
+        .validate(&token)
+        .await
+        .expect("validate the session")
+        .expect("the session is live");
+    assert_eq!(
+        p.user_id.0, admin_uid,
+        "a ws-scoped overlay over a platform-role-holding target must be INERT: \
+         `validate` re-evaluates `overlay_refused_by_platform_authority` every \
+         request and falls through to the admin principal"
+    );
+    assert!(
+        p.impersonator.is_none(),
+        "an inert overlay must leave no `Impersonator` behind — a principal \
+         carrying `workspace_scope = Some(_)` on a platform route is the shape \
+         nothing confines"
+    );
+    assert!(
+        p.platform_roles.is_empty(),
+        "the admin's own principal must be rebuilt, not the target's: the target's \
+         platform roles are what the escalation borrowed"
+    );
+
+    // 2. The escalating write: refused, and nothing reaches the artifact.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(grant_body(f.catalog_id, "alice")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the admin holds no platform permission of their own, so an inert overlay \
+         must not lend them the target's `policy:update`; body: {body}"
+    );
+    assert_eq!(
+        grants_on(&f, f.catalog_id).await,
+        grants_before,
+        "the refused grant must not have been stored"
+    );
+    assert_eq!(
+        policies_on(&f, f.service_id).await,
+        policies_before,
+        "the refused grant must not have reached the artifact the engine downloads"
+    );
+
+    // 3. Same token, same overlay row, same target — but now the ADMIN holds the
+    //    permission themselves. Accepted, so row 2 was the inert overlay's missing
+    //    authority and not a blanket refusal.
+    grant_platform_permission(&mut f, admin_uid, "policy:update").await;
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(grant_body(own, "alice")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "an admin with their OWN `policy:update` still authors grants while an \
+         inert overlay row sits on their session — row 2 must be the authority, \
+         not the overlay row's existence; body: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SP4d debt Task 13: the compiled-output oracle the overlay tests above use
+// ---------------------------------------------------------------------------
+
+/// Compiled policies under the fixture's own profile — the table the engine's
+/// Ranger plugin downloads. A refused *write* is only interesting if nothing
+/// reached this, so the test asserts on it and not on `perm.grants` alone.
+async fn policies_on(f: &Fixture, service_id: i64) -> i64 {
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM policy.authz_policies WHERE service_id = $1")
+        .bind(service_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count policies")
+}
+
 /// **SP4d-2b Task 7: the refusal lifts, and this is where it is pinned.**
 ///
 /// SP4d-2a shipped `resolved_tags: None` unconditionally, so a profile whose tag
@@ -4357,33 +5313,62 @@ async fn a_tag_policy_block_with_no_tags_recorded_answers_through_the_narrowing(
     );
 }
 
-/// **The fail-open the gate closes, end to end.** One assignment row with an
-/// empty `schema_name` ships as a `RangerServiceResource` naming
-/// `{catalog, schema}` — `ServiceTags::from_assignments` omits an empty level —
-/// which the engine's enricher treats as an ANCESTOR of `sales.orders` and
-/// Ranger ADMITS for a tag request. `resolved_tags_for_resource_via` cannot
-/// return it: its predicate is an exact `table_name = $3`. So the resolved set
-/// would be MISSING a tag the engine is enforcing, and an empty set is the
-/// licence to skip the tag phase entirely.
+/// **The fail-open the gate closes, end to end — and the half of it the DATABASE
+/// now closes instead.**
 ///
-/// `stored_value_problem` rules on exactly that coordinate
-/// (`StoredValueProblem::EmptyLevel`, one of its three classes), and
-/// `resolved_tags_for_target` declines before resolving anything. Remove the gate
-/// and this goes green-but-wrong in the fail-open direction.
+/// Two assertions, in the order the fail-open is now blocked:
 ///
-/// The row is storable today: `assign_resource_tag` validates nothing and
-/// migration 0081 has no `CHECK`, so `PUT …/resource-tags {"table": ""}` writes
-/// it. This test writes it the same way every other fixture here does.
+/// 1. **The empty-level row cannot be stored.** It used to be: `('sales','','')`
+///    ships as a `RangerServiceResource` naming `{catalog, schema}` —
+///    `ServiceTags::from_assignments` omits an empty level — which the engine's
+///    enricher treats as an ANCESTOR of `sales.orders` and Ranger ADMITS for a tag
+///    request, while `resolved_tags_for_resource_via`'s exact `table_name = $3`
+///    can never return it. So egret's set was MISSING a tag the engine enforces,
+///    and an empty set is the licence to skip the tag phase entirely. SP4d-2b
+///    detected that at read time; migration 0177's
+///    `catalog_tag_assignments_levels_are_present_and_literal` makes it
+///    unstorable, which is why this test now asserts the INSERT is refused and
+///    names the constraint that refused it. The remark this test used to carry —
+///    "the row is storable today: `assign_resource_tag` validates nothing and
+///    migration 0081 has no `CHECK`" — is exactly what stopped being true.
+/// 2. **The class the schema must NOT take still declines, end to end.** A
+///    character on which Postgres `lower()` and Java `equalsIgnoreCase` can
+///    disagree is a legitimate identifier, so it stays storable and stays gated in
+///    Rust. Before this task that class had NO end-to-end instrument: all three
+///    e2e declines went through the empty-level row. Remove the gate call and this
+///    half goes green-but-wrong in the fail-open direction.
 #[tokio::test]
-async fn an_assignment_below_no_table_declines_the_resolution_and_refuses() {
+async fn the_schema_refuses_the_empty_level_and_the_fold_gate_still_declines() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
     let (trino_id, _starrocks_id, catalog_id) = two_profile_catalog(&f, "explain-broadrow").await;
     bind_tag_service_with_one_policy(&f, trino_id, "anything").await;
 
-    // A SCHEMA-level assignment: `table_name = ''`, which is the level egret's
-    // storage has no convention for and its resolver cannot roll up.
-    assign_tag(&f, catalog_id, "sales", "", "").await;
+    // 1. A SCHEMA-level assignment: `table_name = ''`, the level egret's storage
+    //    has no convention for and its resolver cannot roll up. The DATABASE is
+    //    what refuses it now, for every writer — this raw `sqlx::query`, the
+    //    `PUT …/resource-tags` route, and `psql`.
+    let e = try_assign_tag(&f, catalog_id, "sales", "", "")
+        .await
+        .expect_err("migration 0177 must refuse a row with an empty table_name");
+    let named = match &e {
+        sqlx::Error::Database(d) => {
+            d.constraint() == Some("catalog_tag_assignments_levels_are_present_and_literal")
+        }
+        _ => false,
+    };
+    assert!(
+        named,
+        "the refusal must be migration 0177's CHECK, not a typo or a dropped \
+         connection: {e}"
+    );
+
+    // 2. …and the surviving class, which no CHECK may take: the Turkish dotless i
+    //    in a stored column name. `('sales','orders','emaıl')` is a row the
+    //    matcher's per-character fold and the resolver's full-string `lower()` can
+    //    disagree about, so neither direction of the comparison is safe and the
+    //    whole resolution must decline.
+    assign_tag(&f, catalog_id, "sales", "orders", "emaıl").await;
 
     let (status, body) = into_json(
         f.app()
@@ -4401,7 +5386,7 @@ async fn an_assignment_below_no_table_declines_the_resolution_and_refuses() {
     let verdict = access_for(profile_for(&body, "trino"), "select");
     assert_eq!(
         verdict["decision"]["kind"], "undecidable",
-        "a stored assignment egret cannot roll up must refuse, not be answered \
+        "a stored assignment egret cannot reproduce must refuse, not be answered \
          from a set it is missing from; body: {body}"
     );
     assert!(
@@ -4413,19 +5398,15 @@ async fn an_assignment_below_no_table_declines_the_resolution_and_refuses() {
         "no tags_unresolved cause in {body}"
     );
     // **Fix round 3: the REASON reaches the wire, and names the row.** The cause
-    // alone cannot say which of four states produced it — the page rendered one
-    // sentence for all four, naming a stored row that did not exist — so the
-    // response carries the reason and the coordinate beside it.
+    // alone cannot say which state produced it — the page rendered one sentence for
+    // every one of them, naming a stored row that did not exist — so the response
+    // carries the reason and the coordinate beside it.
     assert_eq!(
-        body["tag_resolution_declined"]["kind"], "stored_level_empty",
+        body["tag_resolution_declined"]["kind"], "stored_fold_divergent",
         "the decline's reason must reach the response; body: {body}"
     );
     assert_eq!(
-        body["tag_resolution_declined"]["schema"], "sales",
-        "body: {body}"
-    );
-    assert_eq!(
-        body["tag_resolution_declined"]["table"], "",
+        body["tag_resolution_declined"]["column"], "emaıl",
         "and the coordinate must be the offending one, so the page can name it; body: {body}"
     );
 }
@@ -4526,6 +5507,44 @@ async fn assign_tag(
     .await
     .expect("tag assignment");
     AssignedTag { key, name }
+}
+
+/// [`assign_tag`] without the `expect`, for the one test whose subject is the
+/// INSERT being REFUSED. Separate rather than making `assign_tag` return a
+/// `Result`: every other call site is asserting the row lands, and an ignored
+/// `Result` at any of them would be a silently missing fixture.
+async fn try_assign_tag(
+    f: &Fixture,
+    catalog_id: Uuid,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Result<(), sqlx::Error> {
+    let warehouse_id: Uuid =
+        sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+            .bind(catalog_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("catalog warehouse");
+    let tag_id: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+            .bind(unique("t3key"))
+            .bind(unique("t3tag"))
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("tag");
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1,$2,$3,$4,$5)",
+    )
+    .bind(tag_id)
+    .bind(warehouse_id)
+    .bind(schema)
+    .bind(table)
+    .bind(column)
+    .execute(&f.db.pool)
+    .await
+    .map(|_| ())
 }
 
 /// The tag service the Trino profile's plugin embeds as `tagPolicies`, carrying
@@ -4790,4 +5809,206 @@ async fn explain_reads_the_profile_through_the_download_routes_own_assembler() {
         verdict["decision"]["reason"], "no_policy_matched",
         "body: {body}"
     );
+}
+
+/// **SP4d debt Task 5, at the route: a tag-addressed MASK is refused when the
+/// tag is already attached to a whole TABLE.**
+///
+/// Measured live on Trino 470 (SP4d-2b's live gate): that pair makes the engine
+/// type-check the one mask against EVERY column of the scanned table, so
+/// `SELECT item`, `SELECT id` and even `count(*)` fail — the table is
+/// unreadable, not masked. The row filter was measured and ruled out as the
+/// cause in the same run.
+///
+/// **This binary is where the 400 lives**, not
+/// `egret-policy/tests/unreadable_table_mask_db.rs`: that one pins the rule's
+/// SHAPE against the database, and a route handler's guard is not covered by it
+/// — nothing there can tell a refusal that is a 400 naming the remedy from one
+/// that is an uncaught error, and nothing there can tell a refusal that rolled
+/// the row back from one that stored it.
+///
+/// Three assertions, and the third is the one a shape-only test cannot make:
+/// the refusal is a 400, the message carries the two rule-side remedies (Task 16
+/// added a third, edit-the-policy one to the shared sentence), and the rule is NOT
+/// in `perm.rules` afterwards.
+///
+/// The fixture's tag is ALREADY attached to `sales.orders.email` at column
+/// level, and this adds a TABLE-level attachment on a different table — so the
+/// test also shows that an existing, harmless column attachment does not
+/// excuse the table one.
+#[tokio::test]
+async fn a_tag_mask_rule_is_refused_when_its_tag_is_attached_to_a_whole_table() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    attach_fixture_tag_to_whole_table(&f, "orders_t5a").await;
+
+    let name = unique("t5-tag-mask");
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/rules",
+                &token,
+                Some(json!({
+                    "name": name,
+                    "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+                    "selector": { "type": "tag", "key": f.tag_key },
+                    "exempt": { "include": [], "exclude": [] }
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("sales.orders_t5a"),
+        "the refusal must name the table that would become unreadable: {msg}"
+    );
+    assert!(
+        msg.contains("to the columns that need masking instead of to the table"),
+        "the refusal must name the attach-to-column remedy: {msg}"
+    );
+    assert!(
+        msg.contains("by catalog/schema/table/column path instead of by tag"),
+        "the refusal must name the resource-addressed remedy: {msg}"
+    );
+    assert_eq!(
+        rules_named(&f, &name).await,
+        0,
+        "the refused rule must not have been stored"
+    );
+}
+
+/// **The remedy has to keep working, and `preview` has to say so first.**
+///
+/// The refusal above names two remedies; this drives the second one through the
+/// route that applies it. A tag-addressed mask is created while nothing is
+/// attached at table level (legal), the tag is then attached to a whole table
+/// behind the route's back — which is the state the guard exists to prevent and
+/// which `psql` can still reach, so it is also the honest fixture for "a
+/// deployment that already holds the pair" — and the PATCH that makes the rule
+/// resource-addressed is then asserted to SUCCEED.
+///
+/// Without this control the obvious over-refusal (gate the guard on "the rule
+/// is a tag rule", old or new) would be green: it would refuse the very edit
+/// the error message asks the steward to make, and the steward would have no
+/// way out of the state at all.
+///
+/// `preview` is asserted on the same body first, because it funnels through the
+/// same `write_rule` and is what the dialog calls before enabling Save — a
+/// remedy that previewed as a 400 and then saved fine would be unreachable from
+/// the UI.
+///
+/// Takes [`exclusive`]: creating and patching a TAG-selected rule recompiles
+/// every compiler-targeted profile in the database, other tests' included.
+#[tokio::test]
+async fn the_resource_addressed_remedy_is_accepted_while_the_tag_is_on_a_whole_table() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+
+    // 1. A tag-addressed mask, authored while nothing is attached at table level.
+    let name = unique("t5-remedy");
+    let tag_rule = json!({
+        "name": name,
+        "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+        "selector": { "type": "tag", "key": f.tag_key },
+        "exempt": { "include": [], "exclude": [] }
+    });
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/rules", &token, Some(tag_rule.clone())))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    let rule_id = body["id"].as_str().expect("id").to_string();
+
+    // 2. The other half arrives from outside the three guarded routes.
+    attach_fixture_tag_to_whole_table(&f, "orders_t5b").await;
+
+    // 3. The dialog previews the remedy...
+    let path_rule = json!({
+        "name": name,
+        "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+        "selector": { "type": "path", "catalog_id": f.catalog_id,
+                      "schema": "sales", "table": "orders", "column": "email" },
+        "exempt": { "include": [], "exclude": [] }
+    });
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/preview",
+                &token,
+                Some(json!({ "id": rule_id, "rule": path_rule })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the preview of the remedy must not be refused; body: {body}"
+    );
+
+    // 4. ...and saves it.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/rules/{rule_id}"),
+                &token,
+                Some(path_rule),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the remedy the refusal names must be applicable; body: {body}"
+    );
+
+    // And the rule really is resource-addressed now — the assertion that makes
+    // the 200 above mean something.
+    let selector: String =
+        sqlx::query_scalar("SELECT selector_kind::text FROM perm.rules WHERE id = $1::uuid")
+            .bind(&rule_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("read back selector");
+    assert_eq!(selector, "path");
+}
+
+/// Attach the fixture's tag to the WHOLE table `sales.{table}` in the fixture's
+/// own warehouse — migration 0081's `column_name = ''` sentinel, which 0177
+/// deliberately keeps legal.
+///
+/// Raw SQL on purpose: this is the half `egret_bi::CatalogTagRepo::assign_catalog`
+/// now refuses from the other direction, and a fixture that went through that
+/// route could not set up the state the rule-side guard is being tested on.
+async fn attach_fixture_tag_to_whole_table(f: &Fixture, table: &str) {
+    let warehouse_id: Uuid =
+        sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+            .bind(f.catalog_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("fixture warehouse");
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments \
+             (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         SELECT id, $1, 'sales', $2, '' FROM tags WHERE key = $3",
+    )
+    .bind(warehouse_id)
+    .bind(table)
+    .bind(&f.tag_key)
+    .execute(&f.db.pool)
+    .await
+    .expect("table-level attachment");
 }

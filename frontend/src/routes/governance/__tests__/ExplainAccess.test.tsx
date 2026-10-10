@@ -782,8 +782,8 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
   });
 
   /**
-   * **Fix round 3: all FOUR decline states, four distinguishable remedies, two
-   * different reaches — and that is the defect this replaces, not an addition.**
+   * **Fix round 3: every decline state names its own remedy and its own reach —
+   * and that is the defect this replaces, not an addition.**
    *
    * Task 7 wrote one sentence for this cause when `EmptyLevel` was the only state
    * that produced it, and rounds 1 and 2 added three more states and left the
@@ -795,26 +795,17 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * that state is per REQUEST. The old version of this test pinned the wrong
    * wording, so the suite required it.
    *
+   * ⚠ **This covered FOUR states until SP4d debt Task 3.** `stored_level_empty` and
+   * `stored_wildcard` are gone from the wire enum: migration 0177 adds a `CHECK` to
+   * `catalog_tag_assignments` that makes an empty schema or table, and a `*` or `?`
+   * in any level, unstorable, so no backend can report them. The two that remain are
+   * the two whose reaches differ, which is what this test is really for.
+   *
    * `tsc` proves the switch exhaustive and proves nothing about two arms rendering
    * distinguishable sentences, so the distinctness is asserted directly.
    */
-  test("each of the four decline states names its own remedy and its own reach", async () => {
+  test("each decline state names its own remedy and its own reach", async () => {
     const declines = [
-      {
-        declined: {
-          kind: "stored_level_empty",
-          schema: "sales",
-          table: "",
-          column: "",
-        },
-        sentence: [/stored at sales \/ \(none\)/i, /level left empty/i, /re-store that assignment on a table or a column/i],
-        perCatalog: true,
-      },
-      {
-        declined: { kind: "stored_wildcard", schema: "sales", table: "*", column: "" },
-        sentence: [/stored at sales \/ \*/i, /matches against many resources/i, /the exact table or column/i],
-        perCatalog: true,
-      },
       {
         declined: {
           kind: "stored_fold_divergent",
@@ -866,20 +857,18 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
       const sentence = within(cause).getByTestId("undecidable-cause-sentence");
       const scope = within(cause).getByTestId("undecidable-cause-scope");
 
-      // The cause's own distinction, true of all four and therefore in the head.
+      // The cause's own distinction, true of BOTH states and therefore in the head.
       expect(sentence).toHaveTextContent(/declined to resolve/i);
       expect(sentence).toHaveTextContent(/not the same as there being none/i);
       // …and this state's own subject and remedy.
       for (const pattern of row.sentence) {
         expect(sentence).toHaveTextContent(pattern);
       }
-      // ⚠ The remedy that belongs to ONE of the four must not appear on the others.
-      if (row.declined.kind !== "stored_level_empty") {
-        expect(sentence).not.toHaveTextContent(/stored with no schema or no table/i);
-        expect(sentence).not.toHaveTextContent(
-          /re-store that assignment on a table or a column/i,
-        );
-      }
+      // ⚠ Round 1's single sentence, which the suite used to require: it must not
+      // appear on ANY state now. It belonged to `stored_level_empty`, which migration
+      // 0177 made unstorable, so nothing here may still render it.
+      expect(sentence).not.toHaveTextContent(/stored with no schema or no table/i);
+      expect(sentence).not.toHaveTextContent(/re-store that assignment on a table or a column/i);
       // The REACH, which differs, and whose round-1 wording was measured false for
       // the request-side state.
       if (row.perCatalog) {
@@ -894,7 +883,12 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
       view.unmount();
     }
 
-    expect(new Set(rendered).size).toBe(4);
+    // ⚠ **The literal, not `declines.length`** — fix round, Minor 3. Written against
+    // the array's own length this assertion is self-referential: deleting a decline
+    // row shrinks both sides and the test stays green, which is the one thing it
+    // exists to prevent. `2` is the count the wire enum has, so dropping a state
+    // from `ExplainTagDecline` without revisiting this file fails here.
+    expect(new Set(rendered).size).toBe(2);
   });
 
   /**
@@ -902,7 +896,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
    * `tag_resolution_declined` is `Some` exactly when the handler passed
    * `resolved_tags: None`, which is the only production state raising this cause.
    * It is asserted anyway, and what it must NOT do is invent a reach: round 1's
-   * note claimed a per-catalog scope unconditionally, and one of the four states
+   * note claimed a per-catalog scope unconditionally, and one of the two states
    * is per-request, so with no reason the honest answer is no note at all.
    */
   test("an unresolved-tags cause with no reason renders the head and claims no reach", async () => {
@@ -1476,71 +1470,6 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
   });
 
   /**
-   * **Task 8's browser gate, P6.** `stored_level_empty` fires for an empty SCHEMA
-   * as well as an empty table, and the one remedy it carried — "Re-store that
-   * assignment on a table or a column" — is useless for the schema case: measured
-   * on `('', 'orders', '')`, the page told a steward to re-store on a table while
-   * the assignment was already on `orders`. A remedy narrower than the states it
-   * is shown for is the exact defect fix round 3 fixed, one level down.
-   *
-   * All three shapes are asserted, because a remedy that names the schema
-   * unconditionally would be the same defect mirrored.
-   */
-  test("an empty-level decline names the level that is actually missing", async () => {
-    const rows = [
-      {
-        declined: { kind: "stored_level_empty", schema: "", table: "orders", column: "" },
-        expect: /re-store that assignment with the schema it belongs to/i,
-        reject: /on a table or a column/i,
-      },
-      {
-        declined: { kind: "stored_level_empty", schema: "sales", table: "", column: "" },
-        expect: /re-store that assignment on a table or a column/i,
-        reject: /with the schema it belongs to/i,
-      },
-      {
-        declined: { kind: "stored_level_empty", schema: "", table: "", column: "" },
-        expect: /re-store that assignment with the schema and table it belongs to/i,
-        reject: /on a table or a column/i,
-      },
-    ] as const;
-
-    for (const row of rows) {
-      mutateAsync.mockResolvedValueOnce({
-        status: 200,
-        data: {
-          outcome: "per_profile",
-          profiles: [
-            {
-              service_id: 11,
-              service_name: "egret-trino-prod",
-              engine: "trino",
-              tags: [],
-              tag_policies_in_download: 1,
-              accesses: [
-                {
-                  access_type: "select",
-                  decision: { kind: "undecidable", why: [{ kind: "tags_unresolved" }] },
-                  attribution: null,
-                },
-              ],
-            },
-          ],
-          tag_resolution_declined: row.declined,
-        } satisfies ExplainResponse,
-      });
-      const user = userEvent.setup();
-      const view = renderPage();
-      await submit(user);
-      const result = await screen.findByTestId("explain-result");
-      const sentence = within(result).getByTestId("undecidable-cause-sentence");
-      expect(sentence).toHaveTextContent(row.expect);
-      expect(sentence).not.toHaveTextContent(row.reject);
-      view.unmount();
-    }
-  });
-
-  /**
    * **Task 8's browser gate, F4 — measured on a real Trino, twice.** The tag list
    * was `tag_keys_for_resource_via`'s exact-match query while every verdict beside
    * it came from the rolled-up resolution, so a request DENIED by a tag policy
@@ -1674,10 +1603,10 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
           },
         ],
         tag_resolution_declined: {
-          kind: "stored_wildcard",
+          kind: "stored_fold_divergent",
           schema: "sales",
-          table: "ord*",
-          column: "email",
+          table: "orders",
+          column: "ema\u0131l",
         },
       } satisfies ExplainResponse,
     });

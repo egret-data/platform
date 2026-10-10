@@ -3703,10 +3703,12 @@ dependencies = [
  "egret-test-db",
  "egret-workflow",
  "egret-workspace",
+ "hex",
  "http-body-util",
  "metrics",
  "metrics-exporter-prometheus",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "tokio",
  "tower",
@@ -3747,7 +3749,9 @@ name = "egret-test-db"
 version = "0.1.0"
 dependencies = [
  "egret-metastore",
+ "hex",
  "libc",
+ "sha2 0.10.9",
  "sqlx",
  "tokio",
 ]

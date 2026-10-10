@@ -333,6 +333,116 @@ async fn ws_admin_cannot_impersonate_a_platform_admin() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
+/// **SP4d debt Task 13, over the real route: a `ws_admin` cannot impersonate a
+/// member who holds the platform `data_steward` role.**
+///
+/// This is the first half of the chain Task 4 measured and left open, and this
+/// test is the only one of the three that drives the actual HTTP endpoint — a
+/// route handler's guard is not covered by `--lib`, and the guard it exercises
+/// lives in `egret-auth`, two crates away from the route.
+///
+/// Why `data_steward` specifically and not an invented role: migration
+/// `0059_rbac_permission_seed.sql` seeds it with the whole `policy:*` family, so a
+/// scoped overlay over such a member satisfied the `policy:update` gate on
+/// `POST /api/control-plane/perm/grants` — a WRITE on any workspace's catalog,
+/// confined by nothing, because no `/api/control-plane` route resolves a
+/// `{workspace}` and so none builds a `WsContext`.
+///
+/// Two targets, not one. `bob` holds no platform role and must still be
+/// impersonable through the same request shape, or this test would also pass
+/// against an endpoint that refuses everyone.
+#[tokio::test]
+async fn ws_admin_cannot_impersonate_a_platform_data_steward() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let st = ws_state(&db).await;
+    let owner = seed_user(&db).await;
+    let ws_admin = seed_user(&db).await;
+    let steward = seed_user(&db).await;
+    let bob = seed_user(&db).await;
+    let w1 = st
+        .workspaces
+        .create(&uniq("w1"), "W1", owner)
+        .await
+        .unwrap();
+    add_member(&st, &w1, ws_admin, "ws_admin", owner).await;
+    // Both targets are ordinary MEMBERS of W1 and neither is a ws_admin there, so
+    // every other guard on this endpoint passes for both and the platform role is
+    // the only difference between them.
+    add_member(&st, &w1, steward, "ws_viewer", owner).await;
+    add_member(&st, &w1, bob, "ws_viewer", owner).await;
+    st.authz
+        .replace_platform_roles(steward, &["data_steward".into()])
+        .await
+        .unwrap();
+
+    // The fixture holds the state it guards: `data_steward` really carries
+    // `policy:update` in THIS database, and the steward is not a platform_admin
+    // (which the pre-Task-13 guard already refused, and which would make the
+    // measurement vacuous).
+    let resolved = {
+        let issued = st.sessions.create(steward, "a", "").await.unwrap();
+        st.sessions.validate(&issued.token).await.unwrap().unwrap()
+    };
+    assert!(
+        resolved.permissions.iter().any(|p| p == "policy:update"),
+        "migration 0059 must seed data_steward with policy:update, or this test \
+         pins nothing; got {:?}",
+        resolved.permissions
+    );
+    assert!(
+        !resolved
+            .platform_roles
+            .iter()
+            .any(|r| r == "platform_admin"),
+        "the steward must not be a platform_admin; roles: {:?}",
+        resolved.platform_roles
+    );
+
+    let app = app(st.clone());
+    let cookie = login_cookie(ws_admin, &st.sessions).await;
+
+    let resp = send(
+        &app,
+        &cookie,
+        "POST",
+        &format!("/api/ws/{}/impersonate", w1.slug),
+        Some(serde_json::json!({
+            "target_user_id": steward.0.to_string(),
+            "reason": "x",
+            "password": "pw",
+        })),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a ws_admin must not mint a workspace-scoped overlay over a holder of \
+         platform authority: no /api/control-plane route confines one"
+    );
+
+    // The control leg: same request, a member with no platform role → started.
+    let resp = send(
+        &app,
+        &cookie,
+        "POST",
+        &format!("/api/ws/{}/impersonate", w1.slug),
+        Some(serde_json::json!({
+            "target_user_id": bob.0.to_string(),
+            "reason": "x",
+            "password": "pw",
+        })),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "ws-scoped impersonation of an ordinary member must still work"
+    );
+}
+
 /// A ws_editor (not a ws_admin) calling the endpoint → 403.
 #[tokio::test]
 async fn non_ws_admin_cannot_start() {

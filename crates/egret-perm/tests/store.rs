@@ -124,6 +124,367 @@ async fn a_column_scope_without_a_table_is_refused_by_the_database() {
     );
 }
 
+/// SP4d debt Task 12 — **a privilege escalation, and the control is half the
+/// test.**
+///
+/// `perm.grants` has forbidden a level SKIP since `0154_perm_model.sql`, and
+/// `a_column_scope_without_a_table_is_refused_by_the_database` above pins that.
+/// `schema_name = ''` IS that skip in enforcement terms — the compiled policy
+/// carries `"schema": {"values": [""]}`, `RangerAbstractResourceMatcher.init()`
+/// drops an empty policy value, and the level becomes `isMatchAny`, so the grant
+/// is enforced in every schema of the catalog (measured in
+/// `egret-perm-compile/tests/compile_grants.rs`,
+/// `an_empty_scope_level_would_be_enforced_in_every_schema`) — and
+/// `IS NOT NULL` could not see it.
+///
+/// **The two controls, both required.** A constraint that rejected every write
+/// would pass an empties-only test, so arm 1 writes the legal row the escalation
+/// imitates and asserts it is still ACCEPTED. And the NULL skip is asserted to
+/// still fail under its OWN constraint name, which is what proves `''` and NULL
+/// are two different shapes rather than one guard answering twice: before 0178
+/// the NULL insert was rejected by `grants_check` while the `''` insert was
+/// accepted, on the same connection. Keeping both arms here is what makes this a
+/// measurement rather than a probe that could not fail.
+#[tokio::test]
+async fn an_empty_scope_level_is_refused_by_the_database_and_so_is_the_null_skip() {
+    let Some(db) = test_db().await else { return };
+    let catalog_id = seed_catalog(&db.pool).await;
+
+    // CONTROL 1 — the legal row the escalation imitates. If this ever fails,
+    // 0178 is over-refusing and every arm below is meaningless.
+    sqlx::query(
+        "INSERT INTO perm.grants (effect, actions, catalog_id, schema_name, table_name, \
+         column_name) VALUES ('allow', ARRAY['read'], $1, 'sales', 'orders', 'email')",
+    )
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .expect("a fully named path is the ordinary grant and must stay legal");
+
+    // CONTROL 2 — `*` at a level is a LEGITIMATE policy value and stays legal
+    // (migration 0178's own `'' AND NOT '*'` paragraph, and the plan's ruling).
+    // A predicate that refused it would break a scope a steward writes on
+    // purpose, so this arm is what stops 0178 over-refusing.
+    //
+    // ⚠ It was `('*', 'orders')` when Task 12 wrote it, and migration 0179
+    // (Task 14) now refuses THAT shape — not because `*` is illegitimate but
+    // because a NAMED level under a match-any one is the level skip
+    // `grants_check` already forbids. The control is kept at the same level with
+    // nothing named beneath it, which is the half 0178 is responsible for;
+    // `a_wildcard_level_with_a_named_level_beneath_it_is_refused_by_the_database`
+    // below owns the other half and keeps `('*','orders')` measured.
+    sqlx::query(
+        "INSERT INTO perm.grants (effect, actions, catalog_id, schema_name) \
+         VALUES ('allow', ARRAY['read'], $1, '*')",
+    )
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .expect("`*` is a legitimate Ranger policy value and must stay writable");
+
+    // THE FINDING, at each of the three levels.
+    for (schema, table, column) in [
+        ("", Some("orders"), None), // the escalation: a table with no schema
+        ("", None, None),           // an empty tail level
+        ("sales", Some(""), None),  // the same shape one level down
+        ("sales", Some("orders"), Some("")),
+    ] {
+        let err = sqlx::query(
+            "INSERT INTO perm.grants (effect, actions, catalog_id, schema_name, table_name, \
+             column_name) VALUES ('allow', ARRAY['read'], $1, $2, $3, $4)",
+        )
+        .bind(catalog_id)
+        .bind(schema)
+        .bind(table)
+        .bind(column)
+        .execute(&db.pool)
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("grants_scope_levels_are_named"),
+            "({schema:?}, {table:?}, {column:?}) must be refused by \
+             grants_scope_levels_are_named, got: {err}"
+        );
+    }
+
+    // CONTROL 3 — the NULL skip, which was ALREADY refused before 0178 existed.
+    // Its constraint name must still be the OLD one: if this row started failing
+    // under `grants_scope_levels_are_named` instead, the two shapes would have
+    // collapsed into one guard and the pair would no longer measure anything.
+    let err = sqlx::query(
+        "INSERT INTO perm.grants (effect, actions, catalog_id, schema_name, table_name) \
+         VALUES ('allow', ARRAY['read'], $1, NULL, 'orders')",
+    )
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("\"grants_check\""),
+        "a NULL schema under a named table must still be refused by `grants_check`, the \
+         level-skip CHECK 0154 added — got: {err}"
+    );
+}
+
+/// SP4d debt Task 14 — **the half 0178 left, and the more reachable one.**
+///
+/// `0178` closed `schema_name = ''`. `schema_name = '*'` earns the IDENTICAL
+/// `MatchType::Self_` on `finance.orders.amount` (measured on the compiler's own
+/// artifact in
+/// `egret-perm-compile/tests/compile_grants.rs::an_empty_scope_level_would_be_enforced_in_every_schema`),
+/// and unlike `''` it is reachable from the browser — stated by code path, not by
+/// authorship: `ScopePicker`'s levels are free-text `<Input>`s whose `onChange` is
+/// `e.target.value || undefined`, so `""` becomes `undefined` while `"*"` passes
+/// through, and `canPickTable = !!value.schema` means typing `*` into Schema
+/// ENABLES the Table field.
+///
+/// **The rule is NOT "`*` is illegitimate"** — it is that `grants_check` has
+/// forbidden naming a table without a schema since `0154`, and `schema_name = '*'`
+/// expresses precisely that, so two guards in this table disagreed about whether
+/// that scope exists. Hence the accept-controls below carry as much of the test as
+/// the refusals: a catalog-wide grant, a schema-wide grant, `('*','*')`,
+/// `('sales','orders','*')`, a double-star tail and `'ord*'` (a PREFIX matcher,
+/// which names a set of schemas rather than nothing) must all stay writable. If
+/// any of them failed, the predicate would be the over-refusal the plan warned
+/// about.
+///
+/// **`'**'` is in the refused set on purpose.** Ranger's
+/// `buildResourceMatchers()` treats any pure run of `*` as match-any, so keying
+/// this on the literal `'*'` would close one spelling and leave the next one
+/// reaching identical enforcement from the identical field.
+///
+/// **CONTROL 3 is the NULL skip under its OWN constraint name.** Both `0178` and
+/// `0179` are consistency fixes to `grants_check`; if a NULL schema under a named
+/// table ever started failing under one of THEM, the three shapes would have
+/// collapsed into one guard and none of these arms would measure anything.
+#[tokio::test]
+async fn a_wildcard_level_with_a_named_level_beneath_it_is_refused_by_the_database() {
+    let Some(db) = test_db().await else { return };
+    let catalog_id = seed_catalog(&db.pool).await;
+
+    // THE FINDING, at every pairing of a match-any level with a named one.
+    for (schema, table, column) in [
+        (Some("*"), Some("orders"), None),  // the escalation, as authored
+        (Some("**"), Some("orders"), None), // the same match-any, next spelling
+        (Some("*"), Some("orders"), Some("amount")),
+        (Some("*"), Some("*"), Some("amount")), // the gap one level down
+        (Some("sales"), Some("*"), Some("amount")),
+    ] {
+        let err = sqlx::query(
+            "INSERT INTO perm.grants (effect, actions, catalog_id, schema_name, table_name, \
+             column_name) VALUES ('allow', ARRAY['read'], $1, $2, $3, $4)",
+        )
+        .bind(catalog_id)
+        .bind(schema)
+        .bind(table)
+        .bind(column)
+        .execute(&db.pool)
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("grants_wildcard_levels_name_nothing_beneath"),
+            "({schema:?}, {table:?}, {column:?}) names a level under a match-any one and must \
+             be refused by grants_wildcard_levels_name_nothing_beneath, got: {err}"
+        );
+    }
+
+    // ACCEPT-CONTROLS — every shape where a wildcard has NOTHING named beneath
+    // it, plus the prefix matcher that is not a wildcard run at all. A predicate
+    // that refused `*` outright would fail here, and that failure is the one the
+    // plan cares about most.
+    for (schema, table, column) in [
+        (None, None, None),          // catalog-wide
+        (Some("sales"), None, None), // schema-wide
+        (Some("*"), None, None),     // every schema, nothing named under it
+        (Some("*"), Some("*"), None),
+        (Some("*"), Some("*"), Some("*")),
+        (Some("**"), Some("***"), None), // runs of any length, still no gap
+        (Some("sales"), Some("orders"), Some("*")), // every column of one table
+        (Some("sales"), Some("*"), Some("*")),
+        (Some("ord*"), Some("orders"), None), // StartsWith names a SET, not nothing
+        (Some("sales"), Some("ord*"), Some("amount")),
+        (Some("sales"), Some("orders"), Some("amount")),
+    ] {
+        sqlx::query(
+            "INSERT INTO perm.grants (effect, actions, catalog_id, schema_name, table_name, \
+             column_name) VALUES ('allow', ARRAY['read'], $1, $2, $3, $4)",
+        )
+        .bind(catalog_id)
+        .bind(schema)
+        .bind(table)
+        .bind(column)
+        .execute(&db.pool)
+        .await
+        .unwrap_or_else(|e| {
+            panic!("({schema:?}, {table:?}, {column:?}) must stay writable, got: {e}")
+        });
+    }
+
+    // CONTROL 3 — the NULL skip, refused before either 0178 or 0179 existed, and
+    // still refused under its OWN name.
+    let err = sqlx::query(
+        "INSERT INTO perm.grants (effect, actions, catalog_id, schema_name, table_name) \
+         VALUES ('allow', ARRAY['read'], $1, NULL, 'orders')",
+    )
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("\"grants_check\""),
+        "a NULL schema under a named table must still be refused by `grants_check`, the \
+         level-skip CHECK 0154 added — got: {err}"
+    );
+}
+
+/// ⚠ **THIS TEST ASSERTED A REFUSAL UNTIL 2026-10-10, and 0179 no longer
+/// constrains `perm.rules` at all.**
+///
+/// 0179 shipped `rules_wildcard_levels_name_nothing_beneath` as the twin of its
+/// `perm.grants` constraint. A product decision on 2026-10-10 dropped the
+/// rule-side half, so this test now pins the ACCEPT: a match-any level with a
+/// named level beneath it is storable in `perm.rules`.
+///
+/// **Why the two tables differ.** On `perm.grants` the shape widens AUTHORITY —
+/// the compiled policy is enforced in every schema of the catalog, the measured
+/// escalation — and fails OPEN, so
+/// `a_wildcard_level_with_a_named_level_beneath_it_is_refused_by_the_database`
+/// still pins that refusal. On `perm.rules` it widens RESTRICTION: it withholds
+/// more, fails CLOSED, and both plugins enforce it (every `dataMaskDef` level is
+/// `"wildCard": true` on `ranger-plugins-common` 2.5.0 and 2.8.0).
+/// `('sales','*','email')` is "mask `email` in every table of `sales`" — a
+/// control a steward writes on purpose, which used to work.
+///
+/// **The controls are the point of this test, not the accept.** An insert that
+/// succeeds proves nothing on its own: it would also succeed if someone dropped
+/// every CHECK on the table. So this asserts, on the same connection and the same
+/// columns, that the two refusals which did NOT move still fire — the `0154`
+/// level-skip CHECKs for a NULL level and `0178`'s for an empty one. Only a
+/// literal `*` the author typed became legal.
+#[tokio::test]
+async fn a_wildcard_rule_level_with_a_named_level_beneath_it_is_accepted_by_the_database() {
+    let Some(db) = test_db().await else { return };
+    let catalog_id = seed_catalog(&db.pool).await;
+
+    // CONTROL — a mask on every column of one table: a wildcard with nothing
+    // named beneath it, legal before the ruling and after it.
+    sqlx::query(
+        "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, schema_name, \
+         table_name, column_name) VALUES ($1, 'mask', 'MASK', 'path', $2, 'sales', 'orders', '*')",
+    )
+    .bind(unique("perm_rule"))
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .expect("a mask over every column of one table must stay legal");
+
+    // THE RULING'S ACCEPT CASE, and the exact tuple the grant-side test refuses.
+    for (schema, table, column) in [
+        ("sales", "*", "email"),
+        ("*", "orders", "email"),
+        ("*", "orders", ""),
+        ("**", "orders", "email"),
+    ] {
+        let column: Option<&str> = if column.is_empty() {
+            None
+        } else {
+            Some(column)
+        };
+        sqlx::query(
+            "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, \
+             schema_name, table_name, column_name) VALUES ($1, 'mask', 'MASK', 'path', $2, $3, \
+             $4, $5)",
+        )
+        .bind(unique("perm_rule"))
+        .bind(catalog_id)
+        .bind(schema)
+        .bind(table)
+        .bind(column)
+        .execute(&db.pool)
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "({schema:?}, {table:?}, {column:?}) must be STORABLE in perm.rules since \
+                 2026-10-10 — 0179 constrains perm.grants only: {e}"
+            )
+        });
+    }
+
+    // CONTROL 1 — a NULL level is still refused, by `0154`'s `rules_check4`
+    // (`table_name IS NOT NULL OR column_name IS NULL`). The ruling legalised a
+    // literal `*`, not an absent level.
+    let err = sqlx::query(
+        "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, schema_name, \
+         table_name, column_name) VALUES ($1, 'mask', 'MASK', 'path', $2, 'sales', NULL, 'email')",
+    )
+    .bind(unique("perm_rule"))
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("rules_check"),
+        "a NULL table under a named column must still be refused by `0154`'s level-skip \
+         CHECK — got: {err}"
+    );
+
+    // CONTROL 2 — an EMPTY level is still refused, by `0178`. `''` is an absence
+    // rather than an authored value, and that line did not move.
+    let err = sqlx::query(
+        "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, schema_name, \
+         table_name, column_name) VALUES ($1, 'mask', 'MASK', 'path', $2, '', 'orders', 'email')",
+    )
+    .bind(unique("perm_rule"))
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("rules_scope_levels_are_named"),
+        "an EMPTY schema must still be refused by `rules_scope_levels_are_named` (0178) — \
+         only a literal `*` became legal: {err}"
+    );
+}
+
+/// The `perm.rules` half of 0178. Not the same severity — an empty level makes a
+/// mask or row filter cover every sibling at that level, which withholds MORE
+/// than the author wrote — but the same three columns, the same verbatim copy
+/// into `scope_to_resources`, and the same predicate. Measured accepted before
+/// 0178.
+#[tokio::test]
+async fn an_empty_rule_scope_level_is_refused_by_the_database() {
+    let Some(db) = test_db().await else { return };
+    let catalog_id = seed_catalog(&db.pool).await;
+
+    // CONTROL — the legal row.
+    sqlx::query(
+        "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, schema_name, \
+         table_name, column_name) VALUES ($1, 'mask', 'MASK', 'path', $2, 'sales', 'orders', \
+         'email')",
+    )
+    .bind(unique("perm_rule"))
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .expect("a fully named path mask must stay legal");
+
+    let err = sqlx::query(
+        "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, schema_name, \
+         table_name, column_name) VALUES ($1, 'mask', 'MASK', 'path', $2, '', 'orders', 'email')",
+    )
+    .bind(unique("perm_rule"))
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("rules_scope_levels_are_named"),
+        "an empty schema on a path rule must be refused by rules_scope_levels_are_named, \
+         got: {err}"
+    );
+}
+
 #[tokio::test]
 async fn rule_round_trips_with_its_exempt_subtract() {
     // The symmetric twin of `grant_round_trips_with_its_principal_subtract`:

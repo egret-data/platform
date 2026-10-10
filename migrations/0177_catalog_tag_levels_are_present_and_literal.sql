@@ -1,0 +1,157 @@
+-- 0177_catalog_tag_levels_are_present_and_literal.sql
+--
+-- SP4d debt Task 3. A `catalog_tag_assignments` coordinate must name a schema and
+-- a table, and all three of its levels must be LITERAL — no `*`, no `?`.
+-- `column_name = ''` stays legal: it is migration 0081's documented table-level
+-- sentinel.
+--
+-- WHAT THIS IS FOR. egret IS the Ranger Admin, so `explain` has to resolve the
+-- tags on a resource the way `RangerTagEnricher.findMatchingTags` does or it lies
+-- about what the engine will do. `egret_policy::resolved_tags_for_resource_via`
+-- resolves them with an exact, case-folded SQL predicate
+-- (`schema_name = $2 AND table_name = $3 AND (column_name = $4 OR column_name = '')`),
+-- and `ServiceTags::from_assignments` OMITS an empty level when it builds the
+-- service resource the plugin downloads. So a row stored `('sales','','')` ships
+-- as `resourceElements = {catalog, schema}`, which is **measured ANCESTOR** of
+-- `hive.sales.orders.email` on the real jar and which `findMatchingTags` admits —
+-- while the equality predicate can never return it. `trino.json` also declares
+-- `{"wildCard": true}` on all four resources, so `('sales','ord*','')` is likewise
+-- ANCESTOR and `('sales','orders','ema*')` is SELF, none of them returnable.
+-- Either way egret hands the evaluator a set MISSING a tag the engine enforces,
+-- and an empty set is a licence to skip the tag phase outright
+-- (`getLikelyMatchPolicyEvaluators` returns `Collections.EMPTY_LIST` at its
+-- `isNotEmpty(tags)` branch): a wrong, confident verdict.
+--
+-- SP4d-2b closed that at READ time with a three-class gate in
+-- `egret_perm_compile::routes` (`EmptyLevel`, `WildcardMetacharacter`,
+-- `FoldDivergent`) that declines the whole resolution. This moves two of those
+-- three classes into the schema, where the state is unrepresentable instead of
+-- merely detected.
+--
+-- WHICH CLASSES THIS CHECK RETIRES, AND WHICH IT DOES NOT.
+--
+--  * RETIRED — `EmptyLevel`. `schema_name <> '' AND table_name <> ''`. No schema
+--    and no table has an empty name; `NOT NULL` simply never excluded `''`.
+--    `column_name` is NOT included, and that is the one thing this predicate had
+--    to get right: 0081 defines `column_name = ''` as "the tag is on the TABLE",
+--    the resolver's own second arm IS that ANCESTOR case, and
+--    `assign_resource_tag` writes `''` whenever the request omits `column`. A
+--    constraint forbidding every empty string would break the table-level
+--    attachment, which is the product feature. Measured before this predicate was
+--    written: of the 15 rows in the one database on this host that has any, 5
+--    carry the sentinel.
+--
+--  * RETIRED — `WildcardMetacharacter`. `*` and `?` in any of the three levels.
+--    These are the two metacharacters `FilenameUtils.wildcardMatch` acts on, and
+--    reproducing that token-based backtracking matcher in SQL is the trade this
+--    package has declined three times (the tag trie, the candidate rule, T4).
+--    ⚠ This is a real, stated over-refusal and not a free win: a quoted Trino or
+--    Iceberg identifier MAY contain `*`, so a table genuinely named `ord*ers`
+--    can no longer be tagged. The cost of allowing it is worse — one such row
+--    makes `explain` decline for EVERY target in the catalog — and the remedy if
+--    it ever bites is to implement a wildcard-equivalent resolver, not to drop
+--    this constraint.
+--
+--  * NOT RETIRED — `FoldDivergent`, which stays gated in Rust, and the reason is
+--    not that a CHECK is incapable. A CHECK *could* forbid the 25 code points in
+--    `FOLD_DIVERGENT`; it must not, for two reasons that the other two classes do
+--    not share. (1) Those code points are LEGITIMATE IDENTIFIERS. A table named
+--    with a Greek `Σ` is real data a steward has to be able to tag, so the right
+--    answer is to decline `explain`'s narrowing for that catalog, not to refuse
+--    the attachment — whereas no real resource is named `''` or `*`. (2) The set
+--    is not a property of the string, it is where Postgres `lower()` and Java
+--    `String.equalsIgnoreCase` happen to disagree, which is DEPLOYMENT-dependent:
+--    `FOLD_DIVERGENT`'s own measurement records U+0130 as an over-refusal on
+--    `en_US.utf8` and records that `tr_TR` would move `I`/`i` INTO the set. A
+--    CHECK is a static predicate stored in the catalog and is not re-validated
+--    when a collation changes, so encoding a collation-dependent set in it would
+--    be wrong in both directions and silently so. The derivation also lives in
+--    `tests/ranger/src/test/java/EgretCaseFoldAgreementTest.java`, which parses
+--    the Rust constant as the single source of truth; a third copy in SQL is a
+--    third thing to drift.
+--
+-- THE FOURTH LEVEL, which this constraint does NOT cover and does not need to.
+-- `ServiceTags::from_assignments` writes a `catalog` element UNCONDITIONALLY — no
+-- `is_empty()` guard, unlike the other three — and `trino.json` declares
+-- `{"wildCard": true}` on it too, so a catalog named `ord*` would be exactly this
+-- fail-open one level up. It is already closed, by a DIFFERENT mechanism: the value
+-- is `registry.catalogs.name` (both readers join `registry.catalogs c` and select
+-- `c.name`), and `0147_catalog_registry.sql` gives that column
+-- `CHECK (name ~ '^[a-z][a-z0-9_]{0,62}$')`, an ALLOW-list under which empty, `*`
+-- and `?` are all impossible. So the catalog level is guarded by an allow-list and
+-- these three by a deny-list, and WEAKENING 0147's REGEX RE-OPENS IT. The
+-- enumeration on `stored_coordinate_is_fold_divergent` carries this as a row, so it
+-- is not only in a migration nobody re-reads.
+--
+-- THE PREDICATE SHAPE, AND WHY IT IS NOT `registry.catalogs.name`'s. That same
+-- `CHECK (name ~ '^[a-z][a-z0-9_]{0,62}$')` is the PRECEDENT FOR THE SHAPE OF THE
+-- FIX — and, per the paragraph above, the actual guard one level up. But copying its
+-- PREDICATE down here would be a severe defect:
+-- these three columns hold identifiers from a FOREIGN catalog, so mixed case is
+-- ordinary (the resolver folds both sides on purpose, and
+-- `differing_case_is_reproduced_rather_than_declined` pins it) and non-ASCII is
+-- ordinary too (every Vietnamese letter is measured as folding identically, and
+-- SP4d-2b's fix round 2 exists because an earlier over-refusal would have made a
+-- tag on a table named `người` refuse the whole catalog). An allow-list regex
+-- would reject both.
+--
+-- `strpos(x, '*') = 0` rather than `x !~ '[*?]'` or `x NOT LIKE '%*%'`: `strpos`
+-- is a plain substring search with no pattern language and no collation input, so
+-- there is nothing to escape and nothing a collation can change. It mirrors the
+-- Rust side's `value.contains(['*', '?'])` one-for-one, which is deliberate —
+-- `stored_coordinate_is_fold_divergent`'s sibling classes used to be enforced in
+-- Rust, and "two guards that must agree, written to different shapes" has produced
+-- a defect in this programme four times. The Rust counterpart that survives is
+-- `egret_bi::catalog_tags`' write-side refusal, written to this same shape so that
+-- a bad `PUT …/resource-tags` is a 400 naming the level rather than this
+-- constraint surfacing as a 500.
+--
+-- VALID, AND NO CLEARING STATEMENT — THE OPPOSITE OF 0176, FOR A MEASURED REASON.
+-- 0176 deleted the rows its CHECK would reject because that key was PROVABLY
+-- INERT: Ranger's enricher drops the whole attachment, so nothing was enforcing
+-- it. A row this CHECK rejects is the opposite — it is ENFORCED, measured on the
+-- real jar. Deleting `('sales','ord*','email')` UNMASKS a column; deleting
+-- `('sales','','')` drops an over-broad mask. Worse, a correct removal is not one
+-- statement: `catalog_tag_assignments` is read by the Ranger tag download (which
+-- 304s until `tag_version` is bumped) and enumerated at COMPILE time for
+-- StarRocks, so removing an attachment also needs
+-- `bump_bound_tag_versions` + `recompile_service_in_tx` — Rust a migration cannot
+-- call. A migration must not silently change what an engine enforces, so this one
+-- does not try.
+--
+-- MEASURED, before choosing that: every database on the development host that has
+-- this table (11 of them, including `egret`, `egret_test` and
+-- `egret_test_template`) holds ZERO violating rows; the only exception is one
+-- scratch database whose 2 violating rows were planted the same day as fixtures
+-- for the SP4d-2b gate this migration retires. The only measurement of a live
+-- cluster on record (`crates/egret-policy/tests/tag_resolution.rs`) reports six
+-- rows, all column-level, none violating. So the expected dirty population is
+-- empty, and `NOT VALID` would buy nothing while leaving the read-side gate
+-- unable to be narrowed.
+--
+-- IF A DEPLOYMENT DOES HOLD ONE, this `ALTER TABLE` fails naming
+-- `catalog_tag_assignments_levels_are_present_and_literal` and `migrate()` aborts
+-- before the process serves. That is the intended outcome and the operator's
+-- remedy is a product action, not a SQL one: take the predicate from
+-- `\d+ catalog_tag_assignments` (or `pg_get_constraintdef`) — so that this comment
+-- is not a second copy of it — list the offenders with
+-- `SELECT * FROM catalog_tag_assignments WHERE NOT (<that predicate>)`, then
+-- re-attach each one at a literal coordinate through `PUT …/resource-tags`
+-- (which bumps `tag_version` and recompiles) and `DELETE` the broad row through
+-- the same API. `unassign_resource_tag` deliberately carries NO write-side
+-- refusal, so removing an already-stored bad row is always possible.
+--
+-- WHEN A WILDCARD MATCHER LANDS, this constraint is what that work replaces — the
+-- same "block now, map later" ruling 0176 records.
+ALTER TABLE catalog_tag_assignments
+    ADD CONSTRAINT catalog_tag_assignments_levels_are_present_and_literal
+    CHECK (
+        schema_name <> ''
+        AND table_name <> ''
+        AND strpos(schema_name, '*') = 0
+        AND strpos(schema_name, '?') = 0
+        AND strpos(table_name, '*') = 0
+        AND strpos(table_name, '?') = 0
+        AND strpos(column_name, '*') = 0
+        AND strpos(column_name, '?') = 0
+    );

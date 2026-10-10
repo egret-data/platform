@@ -50,6 +50,13 @@ tower.workspace = true
 # `Db { pool }` is public, so the options can be chosen here instead.
 sqlx.workspace = true
 http-body-util = "0.1"
+# SP4d Task 10: `generated_client_was_emitted_from_the_committed_spec` recomputes
+# the sha256 receipt `npm run gen:api` writes beside the orval client, so the
+# committed `openapi.json` cannot drift from the committed frontend client. Both
+# are already in the tree at these versions (sha2 via argon2/rsa, hex widely), so
+# they add no build.
+sha2.workspace = true
+hex.workspace = true
 # Router-mount reachability test: builds a `WorkspaceState` by hand (lazy DB
 # pool, stub Pdp) without a live Postgres.
 egret-audit.workspace = true

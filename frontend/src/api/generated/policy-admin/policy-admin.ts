@@ -792,6 +792,20 @@ export const getPolicyAdminCreateProfileUrl = () => {
 }
 
 /**
+ * `config` is stored VERBATIM except for two refusals — the type rule below,
+ * and SP4d debt Task 9's value-shape rule: a `tagService` whose value is not a
+ * non-empty string names no profile, and four of the five readers of that field
+ * go through `as_str()` while the fifth reads `->>`, so the shape produces four
+ * different behaviours. See `egret_policy::store`'s
+ * `refuse_unnameable_tag_service`.
+ *
+ * This makes it the one reachable surface that
+ * could pair a non-Trino `type` with a `tagService` — a state in which every tag
+ * policy under the profile is silently inert, because the tag download writes the
+ * resource level `schema` and only Trino's service-def has one. `create_service`
+ * refuses it (400); see `egret_policy::store`'s
+ * `refuse_tag_service_on_non_trino_profile` for the measurement and for the
+ * enumeration of every write path that can reach the state.
  * @summary POST /policies/services — create a policy profile (a Ranger service
 instance) of the given type. The manual analogue of Trino provisioning's
 auto-bind, so a StarRocks profile can exist without an egret-provisioned
@@ -1413,6 +1427,26 @@ export const getPolicyAdminUpdatePolicyUrl = (id: number,) => {
 }
 
 /**
+ * # SP4d debt Task 16: the tag branch
+ *
+ * Until Task 16 this handler had no `is_tag_kind` branch, so a `tag-*` form
+ * reached `editor_to_ranger_json` and came back `"unknown policy kind:
+ * tag-masking"`. `create_policy` had the branch and `delete_policy_handler`
+ * needs none, so an editor-authored tag mask or tag row filter could be
+ * **created and deleted but never edited** — reachable straight from the UI,
+ * which sends `updatePolicy(id, {kind: "tag-masking", service: <trino
+ * profile>, …})` whenever the Tags tab's row link is followed
+ * (`frontend/src/routes/governance/PolicyEditorPage.tsx`, `buildPayload`).
+ *
+ * That gap is why `crate::unreadable_table_mask`'s refusal named only two
+ * remedies: "edit the policy to address it by path" was not available, so the
+ * real remedy for an editor-origin pair was delete-and-recreate — a workflow
+ * nobody would write down. The branch and that third remedy land together.
+ *
+ * Both authoring verbs run the same guards through
+ * [`guard_tag_policy_authoring`]; the one argument that differs is
+ * `replacing: Some(id)`, so the arbitration guard does not pair the new body
+ * against the row it is replacing.
  * @summary PUT /policies/{id} — replace a policy's body (any kind).
  */
 export const policyAdminUpdatePolicy = async (id: number,

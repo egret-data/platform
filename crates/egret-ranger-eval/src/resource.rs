@@ -69,9 +69,11 @@ pub enum MatchType {
 /// Ranger's `RangerAccessResource` allows a *collection* of values per
 /// element; this models the one-string-per-element shape a Trino or
 /// StarRocks request actually carries. An absent key is Ranger's `null`
-/// (the level is not part of the request); a key present with `""` is a
-/// request for all values at that level, exactly as
-/// `RangerAbstractResourceMatcher.isAllValuesRequested` treats it.
+/// (the level is not part of the request); a key present with `""` — or with
+/// `"*"` — is a request for all values at that level, exactly as
+/// [`requests_all_values`] treats it. **Which is why a caller that lets a human
+/// choose the value has to refuse those two**: see that function's own
+/// `# Why this is pub`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RequestResource {
     values: BTreeMap<String, String>,
@@ -264,8 +266,27 @@ pub fn trie_reproduces_matcher(policy_value: &str, wild_card: bool) -> bool {
         // `RangerAbstractResourceMatcher.init` drops an empty policy value
         // before any matcher is built, which can make a level match-ANY when
         // it was the only value. Whether the trie does the same was not
-        // measured, and egret emits no empty tag value, so it is refused
-        // rather than guessed at.
+        // measured, so it is refused rather than guessed at.
+        //
+        // ⚠ This used to add "and egret emits no empty tag value" as if that
+        // bounded the shape. It bounded the TAG path only, and said nothing
+        // about the resource path, where egret's own grant compiler DID emit
+        // one: `perm.grants` accepted `schema_name = ''` and
+        // `scope_to_resources` copied it through, which made the level
+        // `isMatchAny` and enforced the grant across the whole catalog. SP4d
+        // debt Task 12 closed that — `migrations/0178_perm_scope_levels_are_named.sql`
+        // plus `egret_perm_compile::grants::ensure_scope_levels_are_named`, which
+        // runs at the authoring boundary AND inside `compile_grant`. Stated by
+        // code path now, not by authorship; see
+        // `crate::eval::UndecidableCause::ResourceCandidacyNotReproducible`'s table.
+        //
+        // The OTHER match-any spelling the compiler could emit is a run of `*`,
+        // and it does NOT reach this early return: `classify` sends it to the
+        // `None` arm below, which the trie reproduces. SP4d debt Task 14
+        // (`migrations/0179`, `ensure_a_grant_wildcard_level_has_nothing_named_beneath_it`)
+        // refuses it only with a NAMED level beneath it — a level skip, not a trie
+        // question — so a bare `*` at the deepest named level is still ordinary
+        // compiler output and still handled there.
         return false;
     }
     match ValueMatcher::classify(policy_value, wild_card) {
@@ -338,14 +359,26 @@ pub fn level_excluded_by_trie(
     // function's whole job is to be a proof.**
     //
     // Why it is deferred rather than refused: the only direction measured is
-    // fail-CLOSED (the crate restores a tag deny where Ranger allows), and an
-    // empty REQUEST level is not something egret sends — `perm_compile`'s
-    // `request_resource` builds concrete values from the target and
-    // `scope_to_resources`' `Access` arm fills unnamed levels with `*`, not `""`.
-    // It is reachable from the corpus and from a hand-built request, which is why
-    // it is written down here and in `tests/ranger/README.md` rather than left in
-    // a report. `restore_duel` keeps its root value concrete so the gate does not
-    // carry a standing disagreement.
+    // fail-CLOSED (the crate restores a tag deny where Ranger allows), and no
+    // egret CALLER can now hand this function an empty level.
+    //
+    // ⚠ **That bound used to be stated by authorship and it was false.** It read:
+    // *"an empty REQUEST level is not something egret sends — `perm_compile`'s
+    // `request_resource` builds concrete values from the target"*.
+    // `request_resource` copies `target.schema`/`table`/`column` through
+    // VERBATIM, and the target is an HTTP body, so every `policy:read` caller of
+    // `POST /api/control-plane/perm/explain` sent an empty level by typing one.
+    // Nothing in the browser produced it (`ScopePicker` maps its own empty input
+    // to `undefined`), which is exactly why the claim read as true.
+    //
+    // The bound is now a NAMED FUNCTION rather than a habit:
+    // `egret_perm_compile::routes::validate_explain_target` 400s a level present
+    // as `""` or `"*"`, keyed to this module's own `isAllValuesRequested`
+    // predicate, and `scope_to_resources`' `Access` arm fills unnamed levels with
+    // `*`, not `""`. It remains reachable from the corpus and from a hand-built
+    // request, which is why the gap is written down here and in
+    // `tests/ranger/README.md` rather than left in a report. `restore_duel` keeps
+    // its root value concrete so the gate does not carry a standing disagreement.
 
     if level.is_excludes || level.is_recursive {
         return false;
@@ -359,6 +392,50 @@ pub fn level_excluded_by_trie(
         return false;
     }
     !LevelMatcher::build(level, def).is_match(Some(request_value))
+}
+
+/// `RangerAbstractResourceMatcher.isAllValuesRequested`: does this request
+/// element ask for **every value at its level** rather than naming one?
+///
+/// ```text
+/// boolean isAllValuesRequested(String resource) {
+///     return StringUtils.isEmpty(resource) || WILDCARD_ASTERISK.equals(resource);
+/// }
+/// ```
+///
+/// `null`, `""` and `"*"` alike — `isEmpty` covers the first two — and the three
+/// are **not interchangeable everywhere else**, which is why this is one function
+/// and not three comparisons at each use. [`LevelMatcher::is_match`] short-circuits
+/// on it *before reading any policy value*
+/// (`if (isMatchAny || (allValuesRequested && !isPrefixMatch))`), and
+/// [`LevelMatcher::apply_excludes`] keys its carve-out to the same flag, so losing
+/// an arm flips a non-match to a **match** on an excludes policy — the fail-open
+/// direction.
+///
+/// # Why this is `pub`
+///
+/// **`egret_perm_compile::routes::validate_explain_target` is the second guard
+/// that has to agree with this rule**, and it 400s an `explain` target whose level
+/// is present as `""` or `"*"` precisely because no engine request carries one.
+/// It used to spell the predicate out again in its own crate, with the agreement
+/// kept by a pair of tests that named each other. Two guards that must agree,
+/// written to different shapes, is a defect this programme has measured four
+/// times; exporting the rule makes the pairing structural instead of remembered
+/// (SP4d debt Task 4 raised it as a concern and its fix round settled it this way).
+///
+/// So this function is the rule, not a copy of it: `is_match` above calls it too,
+/// and there is no second spelling left to drift.
+///
+/// **A caller that only means a PRESENT value must test presence itself** — the
+/// `None` arm is deliberately part of the predicate (an absent request element is
+/// Ranger's `null`, and `isEmpty(null)` is true), and for `explain` an absent
+/// *tail* level is a legitimate question answered by its parent. That handler
+/// therefore unwraps first and asks about the value it has.
+pub fn requests_all_values(resource_value: Option<&str>) -> bool {
+    match resource_value {
+        None => true,
+        Some(v) => v.is_empty() || v == "*",
+    }
 }
 
 // ── The matcher itself ───────────────────────────────────────────────────
@@ -637,11 +714,7 @@ impl LevelMatcher {
     /// `RangerDefaultResourceMatcher.getMatchType(...)` reduced to the
     /// `SELF` matching scope, then `applyExcludes`.
     fn is_match(&self, resource_value: Option<&str>) -> bool {
-        // `isAllValuesRequested`: null, "" or "*".
-        let all_values_requested = match resource_value {
-            None => true,
-            Some(v) => v.is_empty() || v == "*",
-        };
+        let all_values_requested = requests_all_values(resource_value);
 
         // `if (isMatchAny || (allValuesRequested && !isPrefixMatch)) { ret = isMatchAny ? SELF : NONE; }`
         // — `isPrefixMatch` is false at SELF scope, so a request for ALL
@@ -1115,6 +1188,116 @@ fn wildcard_match(pattern: &str, text: &str, ignore_case: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **`isAllValuesRequested` is a three-value predicate, and a SECOND guard
+    /// CALLS it from another crate.** `egret_perm_compile::routes::validate_explain_target`
+    /// 400s an `explain` target whose level is present as `""` or `"*"`, and since
+    /// SP4d debt Task 4's fix round (concern 3, overruled) it does so through
+    /// [`requests_all_values`] itself — not through a second spelling. So the two
+    /// guards cannot drift, and what this test adds is the thing a shared function
+    /// still cannot give: **that the flag has an observable effect at all**, and in
+    /// which direction losing an arm fails.
+    ///
+    /// ⚠ The earlier version of this comment said the two "cannot be mechanically
+    /// coupled across a crate boundary". That was a claim about this crate's public
+    /// surface, not about the rule, and it was answered by exporting the rule.
+    ///
+    /// Asserted through the observable consequence rather than the flag: against a
+    /// literal policy value, Ranger's
+    /// `if (isMatchAny || (allValuesRequested && !isPrefixMatch))` short-circuits
+    /// to NONE *without reading a single policy value*, so all three forms fail to
+    /// match while the literal itself matches. The `is_match_any` row is what makes
+    /// the short-circuit visible as a short-circuit: there the SAME three forms
+    /// match, which an ordinary value comparison could not produce.
+    #[test]
+    fn all_values_requested_is_null_empty_or_star_and_pairs_with_explains_target_guard() {
+        let literal = ResourceLevel {
+            values: vec!["sales".to_string()],
+            is_excludes: false,
+            is_recursive: false,
+        };
+        let m = LevelMatcher::build(&literal, None);
+        assert!(m.is_match(Some("sales")), "the literal itself matches");
+        for form in [None, Some(""), Some("*")] {
+            assert!(
+                !m.is_match(form),
+                "{form:?} is isAllValuesRequested, so a policy that does not allow all \
+                 values is NONE without any value being read — and this is the shape \
+                 `egret_perm_compile::routes::validate_explain_target` refuses in an \
+                 `explain` target"
+            );
+        }
+
+        let any = ResourceLevel {
+            values: vec!["*".to_string()],
+            is_excludes: false,
+            is_recursive: false,
+        };
+        let m = LevelMatcher::build(&any, None);
+        for form in [None, Some(""), Some("*")] {
+            assert!(
+                m.is_match(form),
+                "against a match-any policy value the SAME three forms match, which is \
+                 the short-circuit being a short-circuit rather than a comparison: {form:?}"
+            );
+        }
+        // Whitespace is NOT one of the three. Shown against a policy value that IS
+        // whitespace, because against a match-any level everything matches and
+        // against a literal `sales` nothing but `sales` does — neither of those can
+        // tell a literal comparison from the short-circuit.
+        let blank = ResourceLevel {
+            values: vec![" ".to_string()],
+            is_excludes: false,
+            is_recursive: false,
+        };
+        let m = LevelMatcher::build(&blank, None);
+        assert!(
+            m.is_match(Some(" ")),
+            "whitespace is a literal value, compared literally — which is why \
+             `validate_explain_target` leaves it answerable"
+        );
+
+        // ── The rows that actually PIN all three arms ───────────────────────
+        //
+        // ⚠ Everything above survives deleting an arm of `isAllValuesRequested`,
+        // and a mutation proved it: against a literal `sales` the three forms fail
+        // to match either way (no value matcher matches them), and against a
+        // match-any level `is_match_any` wins before the flag is read. **Nor can a
+        // policy value be chosen whose own matcher matches `""`** — `init()` drops
+        // an empty policy value before building anything, `EndsWith` is built only
+        // from a non-empty suffix, and every all-star value is match-any — so the
+        // flag has no observable effect at all on a plain level.
+        //
+        // Where it IS observable is `applyExcludes`, whose carve-out is keyed to
+        // the same flag: "the request asks for every value while the policy does
+        // not allow every value" leaves the result alone instead of flipping it. So
+        // on an excludes level each of the three forms is a NON-match, and losing
+        // any one arm flips it to a match — which is the fail-OPEN direction for an
+        // excludes-allow policy.
+        let excludes = ResourceLevel {
+            values: vec!["sales".to_string()],
+            is_excludes: true,
+            is_recursive: false,
+        };
+        let m = LevelMatcher::build(&excludes, None);
+        assert!(
+            m.is_match(Some("other")),
+            "the excludes level does flip an ordinary non-match, or the rows below \
+             would be vacuous"
+        );
+        assert!(!m.is_match(Some("sales")), "and does not flip a match");
+        for form in [None, Some(""), Some("*")] {
+            assert!(
+                !m.is_match(form),
+                "{form:?} is isAllValuesRequested, so `applyExcludes`' carve-out \
+                 leaves the non-match alone rather than flipping it to a match. \
+                 Delete this arm of the predicate and this request is ALLOWED by an \
+                 excludes policy that names a different value — and the paired \
+                 guard, `egret_perm_compile::routes::validate_explain_target`, is \
+                 refusing the wrong set"
+            );
+        }
+    }
 
     #[test]
     fn classify_reproduces_rangers_four_matcher_shapes() {

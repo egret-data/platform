@@ -1,0 +1,163 @@
+-- 0178_perm_scope_levels_are_named.sql
+--
+-- SP4d debt Task 12. A `perm.grants` or `perm.rules` path level that is PRESENT
+-- must be a resource NAME: `schema_name`, `table_name` and `column_name` may be
+-- NULL (the level is not named) but never `''`.
+--
+-- THIS CLOSES A PRIVILEGE ESCALATION IN THE PERMISSION MODEL, and it is a level
+-- SKIP the table's own CHECK could not see. egret IS the Ranger Admin — the
+-- plugin in each engine downloads policy straight from egret — so what
+-- `egret_perm_compile::compile_grant` emits is what the engine enforces.
+--
+-- THE MEASUREMENT, as a PAIR, on `egret_test` before this migration. One
+-- accepted row on its own would be the shape of a probe that simply could not
+-- fail, so the control is what makes this a measurement:
+--
+--   | insert                                                  | result                     |
+--   |---------------------------------------------------------|----------------------------|
+--   | `schema_name = '',   table_name = 'orders'`              | **ACCEPTED**               |
+--   | `schema_name = NULL, table_name = 'orders'`              | rejected by `grants_check` |
+--   | `schema_name = ''`   alone                               | **ACCEPTED**               |
+--   | `schema_name = 'sales', table_name = ''`                 | **ACCEPTED**               |
+--   | `schema_name = 'sales', table_name = 'orders', col = ''` | **ACCEPTED**               |
+--   | `schema_name = 'sales', table_name = NULL, col='email'`  | rejected by `grants_check1`|
+--
+-- The two rejections are the control. `0154_perm_model.sql` added
+-- `CHECK (schema_name IS NOT NULL OR table_name IS NULL)` precisely because a
+-- path cannot skip a level, and it is LIVE — rows 2 and 6 prove it. Row 1 is
+-- that same skip spelled `''`, which `IS NOT NULL` cannot see: in enforcement
+-- terms `(schema_name = '', table_name = 'orders')` IS "a table with no schema",
+-- and it is a shape the model cannot otherwise express at all, because
+-- `scope_to_resources` latches to `*` for every level BELOW the first unnamed
+-- one and so can never emit a named table under an unnamed schema.
+--
+-- WHAT THE EMPTY LEVEL DOES. `egret_perm_compile::grants::scope_to_resources`
+-- copies the level through verbatim, so the compiled access policy carries
+-- `"schema": {"values": [""]}`. `RangerAbstractResourceMatcher.init()` DROPS an
+-- empty policy value before a matcher is built for it, and a level left with no
+-- matchers is `isMatchAny`. Measured through
+-- `egret_ranger_eval::resource::match_resource` against the real Trino
+-- service-def (`crates/egret-perm-compile/tests/compile_grants.rs`,
+-- `an_empty_scope_level_would_be_enforced_in_every_schema`): the compiler's own
+-- artifact for `sales.orders`, with `sales` replaced by `''` and nothing else
+-- changed, matches a request for `finance.orders.amount` at `MatchType::Self_`,
+-- while the unedited artifact matches it at `MatchType::None`. **A grant written
+-- for one schema was enforced across the whole catalog**, reachable by any
+-- `policy:update` caller.
+--
+-- `''` AND NOT `'*'` — the one thing this predicate had to get right.
+-- `0177_catalog_tag_levels_are_present_and_literal.sql` bans `*` and `?` in a
+-- stored tag coordinate, where nothing real is named `*`. That is a DIFFERENT
+-- population and copying its predicate down here would refuse something real: a
+-- grant scoped to a whole catalog or schema is an ordinary thing a steward
+-- writes, `scope_to_resources` emits `*` ITSELF at every level the scope does not
+-- name, and the compiled resources a steward reads back are full of it. Only `''`
+-- is wrong, because it is the spelling that LOOKS like a named level.
+--
+--  ⚠ STATED RATHER THAN HIDDEN, and measured in the same test:
+--    `(schema_name = '*', table_name = 'orders')` reaches the SAME catalog-wide
+--    enforcement (`MatchType::Self_` for `finance.orders.amount`) and REMAINS
+--    LEGAL. This constraint closes the accidental door, not the deliberate one.
+--    The remaining one is a value a human typed on purpose into a free-text
+--    field, and it belongs to the wider "nothing validates scope string CONTENT"
+--    gap already written down on
+--    `egret_ranger_eval::eval::UndecidableCause::ResourceCandidacyNotReproducible`
+--    (whose own table says a scope-content validator arriving would move its
+--    third row to "enforced: yes" — this one does NOT, because that row is about
+--    `*` and `?`, which stay legal).
+--
+-- `column_name` IS INCLUDED HERE, UNLIKE IN 0177, AND THAT IS NOT AN OVERSIGHT.
+-- `0177` had to exclude it because `migrations/0081`'s `catalog_tag_assignments`
+-- defines `column_name = ''` as the documented TABLE-LEVEL SENTINEL, and
+-- forbidding it would have broken the table-level attachment feature. `perm`
+-- has no such sentinel: `egret_perm::model::Scope` maps all three levels to
+-- `Option<String>`, NULL is the only "not named", and nothing reads `''`
+-- specially. Measured before this predicate was written: across the 23
+-- databases on this host that then had `perm.grants` (including `egret_test`
+-- and `egret_test_template`), ZERO rows carry `''` in any of the three
+-- columns, in either table. (A 24th has since been minted by `egret-test-db`
+-- from these very migrations, so it holds the constraint by construction.)
+--
+-- THE PREDICATE SHAPE. `<> ''` rather than `length(x) > 0`, `btrim(x) <> ''` or a
+-- regex, because `egret_perm_compile::grants::ensure_scope_levels_are_named` is
+-- keyed to `value.is_empty()` and the two must be the same shape — "two guards
+-- that must agree, written to different shapes" has produced a defect in this
+-- programme four times (0176 and 0177 both record it). `NULL <> ''` is NULL, not
+-- false, so a CHECK written this way admits NULL exactly as the Rust side skips
+-- a `None`. WHITESPACE IS DELIBERATELY NOT REFUSED, and that follows from the
+-- mechanism rather than from taste: `init()` drops `''` and nothing else, so
+-- `' '` is compiled into a literal matcher and the policy really is about a
+-- resource with that name — the same line
+-- `egret_perm_compile::routes::validate_explain_target` draws.
+--
+-- WHY A CHECK AND A RUST REFUSAL, when either alone looks sufficient. Task 2 of
+-- this plan mutation-tested exactly that question and neither guard was
+-- redundant: with its Rust refusal forced to `Ok`, the route returned 500
+-- instead of 400 — the constraint caught the write, with a message naming a
+-- schema internal. So the Rust refusal
+-- (`ensure_scope_levels_are_named`, called from `validate_grant_shape`,
+-- `compile_grant` and `validate_rule_shape`) is what makes a bad POST/PATCH a
+-- 400 that names the level, and this CHECK is what holds for every writer that
+-- is not one of those paths: a route added later, `psql`, a test's raw
+-- `sqlx::query`. `perm.grants` has exactly one `INSERT` and one `UPDATE` in any
+-- `src/` (`egret_perm::store::create_grant_in_tx`/`update_grant_in_tx`, plus
+-- `egret_perm::assignment`, which names no level at all), and the HTTP surface
+-- funnels create, patch AND the rolled-back `/perm/preview` through
+-- `routes::write_grant` — so the Rust side's reach is stated by code path, not
+-- by authorship.
+--
+-- VALID, AND NO CLEARING STATEMENT — 0177's case, not 0176's, and measured
+-- rather than copied. 0176 deleted the rows its CHECK would reject because that
+-- key was provably INERT (Ranger's enricher dropped the whole attachment, so
+-- nothing was enforcing it) and because leaving it dormant turned an unrelated
+-- bulk UPDATE into an outage. A row THIS check rejects is the opposite: it is
+-- ENFORCED, which is the whole finding. Deleting an `allow` would be the safe
+-- direction, but deleting a `deny` written as `(schema_name = '', ...)` would
+-- WIDEN access, so no one statement is right for both. Nor is a repair one
+-- statement: `'' -> NULL` is enforcement-EQUIVALENT only when every level below
+-- it is already NULL (both render the level as match-any), and for the dangerous
+-- shape — an empty level with a NAMED level beneath it — there is no equivalent
+-- scope at all, by the same `wildcard_from_here` latch that makes the shape
+-- inexpressible. And a correct change to either table has to be followed by
+-- `recompile_service_in_tx` so the engine stops enforcing the old artifact,
+-- which is Rust a migration cannot call. A migration must not silently change
+-- what an engine enforces, so this one does not try. With the measured
+-- population empty, `NOT VALID` would buy nothing and would leave a dormant row
+-- to surface on an unrelated write.
+--
+-- IF A DEPLOYMENT DOES HOLD ONE, this `ALTER TABLE` fails naming the constraint
+-- and `migrate()` aborts before the process serves. That is intended, and the
+-- operator's remedy is a product action: take the predicate from
+-- `pg_get_constraintdef` (so this comment is not a second copy of it), list the
+-- offenders with `SELECT * FROM perm.grants WHERE NOT (<that predicate>)`, then
+-- re-author each one through `PATCH /api/control-plane/perm/grants/{id}` — which
+-- recompiles every profile it affects in the same transaction — naming the level
+-- or omitting it. `DELETE /perm/grants/{id}` carries no write-side refusal, so
+-- dropping a row that should never have existed is always possible too.
+ALTER TABLE perm.grants
+    ADD CONSTRAINT grants_scope_levels_are_named
+    CHECK (
+        schema_name <> ''
+        AND table_name <> ''
+        AND column_name <> ''
+    );
+
+-- `perm.rules` carries the same three columns, written by the same kind of
+-- author through `routes::write_rule`, and `scope_to_resources` renders them with
+-- the same verbatim copy. It is NOT the same severity and the comment above says
+-- why: an empty level makes a mask or a row filter cover every sibling at that
+-- level, so it withholds MORE than the author wrote rather than granting more.
+-- It is included because the predicate, the Rust refusal and the test are the
+-- same ones — and because `rules::ensure_row_filter_scope_is_a_table`, whose
+-- whole job is to refuse a row-filter scope that is not exactly
+-- catalog+schema+table, counts `schema_name = ''` as a named schema and would
+-- otherwise keep accepting it. Measured the same way: zero violating rows in any
+-- database on this host — `perm.grants` holds 4 rows in total and `perm.rules`
+-- 3, every level of every one of them either NULL or a literal name.
+ALTER TABLE perm.rules
+    ADD CONSTRAINT rules_scope_levels_are_named
+    CHECK (
+        schema_name <> ''
+        AND table_name <> ''
+        AND column_name <> ''
+    );

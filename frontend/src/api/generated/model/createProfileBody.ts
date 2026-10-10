@@ -11,6 +11,11 @@ export interface CreateProfileBody {
   name: string;
   /** Ranger service type: `"trino"` or `"starrocks"`. */
   type: string;
-  /** Optional service config (e.g. StarRocks JDBC coordinates). Stored verbatim. */
+  /**
+     * Optional service config (e.g. StarRocks JDBC coordinates). Stored verbatim.
+     *
+     * A `tagService` key is accepted only when `type` is `"trino"` — see the
+     * handler's doc comment.
+     */
   config?: unknown;
 }
