@@ -171,10 +171,25 @@ The gate evaluates the **whole profile before and after**, never the policy in i
 because Ranger decides over the policy *set*: a `denyPolicyItems` or a `policyPriority` in a
 sibling policy changes the answer.
 
+**It evaluates every affected profile, not only the one the policy came from** (user ruling,
+2026-10-11). A migrated grant on catalog X compiles into every profile whose engine serves X,
+and a tag rule into the tag service of every Trino profile (`trigger.rs`,
+`affected_services_for_grant` / `_rule`), so migrating out of profile P can change what profile
+Q enforces. The gate takes each affected profile's before and after download, and a
+disagreement on any of them blocks. Every disagreement names the profile it is on, so the
+preview can list the other profiles a migration changes. Computing which profiles are affected
+is the write path's (DB) job; the gate is pure.
+
 It decides **per `PluginVersion` of the engines actually bound to that profile**. The two
 versions demonstrably disagree on at least one artifact — a tag DENY plus a higher-priority
 resource ALLOW with no deny items is Allowed on 2.8.0 and Denied on 2.5.0 — so "equivalent on
 2.5.0, different on 2.8.0" is a valid outcome and must block.
+
+*As measured by Task 6:* the evaluator reproduces 2.8.0's answer for that shape and refuses on
+2.5.0 (`TagDenyReopenedDiffersByPluginVersion`), and that is its only version-dependent branch.
+So the gate sees this case as a decided Denied → Allowed flip on 2.8.0 **and** a refusal on
+2.5.0 — never as agreement on 2.5.0. An `Undecidable` on either side is always a disagreement:
+"cannot be decided" proves nothing about equivalence.
 
 Probes come from the coordinates and principals both sides mention, **plus probes neither side
 mentions**: a sibling at each level, a principal in no policy, and an excluded access type.

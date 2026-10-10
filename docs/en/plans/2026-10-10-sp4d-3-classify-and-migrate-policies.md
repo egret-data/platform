@@ -18,7 +18,7 @@
 - **The action expansion is fixed and is the hinge of the grammar** (`crates/egret-perm/src/actions.rs::engine_accesses`): `Action::Read` → Trino `["select"]`, StarRocks `["select"]`; `Action::Write` → Trino `["insert", "delete"]`, StarRocks `["insert", "update", "delete"]`.
 - **All-or-nothing per policy.** A policy migrates whole or not at all. Partial migration would drop that policy's deny items, because the original is switched off.
 - **A migrated policy is switched off, never deleted** — `policy.authz_policies.enabled = false`, the **column**. The download query is `WHERE service_id = $1 AND enabled = true`, so the artifact then omits the policy entirely.
-- **Equivalence is evaluated whole-profile, per `PluginVersion` of the engines bound to that profile, and re-run against the state actually written inside the transaction.** Any disagreement rolls back.
+- **Equivalence is evaluated whole-profile, over EVERY affected profile, per `PluginVersion` of the engines bound to THAT profile, and re-run against the state actually written inside the transaction.** A migrated grant compiles into every profile whose engine serves its catalog and a tag rule into every Trino profile's tag service (`trigger::affected_services_for_grant` / `_rule`), so migrating out of profile P can change profile Q (user ruling, 2026-10-11). A disagreement on any affected profile rolls back, and each disagreement names the profile it is on so the preview can list the other profiles that change.
 - **Probe sets must include coordinates and principals neither side mentions.** A probe set derived only from the two policies' own vocabulary inherits their blind spots.
 - **Verify the next migration number against `origin/main` at the moment you create the file:** `git ls-tree --name-only origin/main migrations/ | sort | tail -3`. On the branch merged as #656, four migrations were written at numbers main had since used, `migrate()` aborted at the first collision, and **none** of the four CHECK constraints was ever created while the Rust refusals shipped green. The newest on disk today is `0179_perm_wildcard_levels_name_nothing_beneath.sql`.
 - **Migration prose is append-only** for a migration that has been applied anywhere — sqlx checksums applied migrations, so editing a comment reddens `migrate()` on every database that ran it.
@@ -1204,32 +1204,49 @@ Expected: `committed_openapi_json_is_current` and `generated_client_was_emitted_
 
 **Interfaces:**
 - Consumes: `egret_ranger_eval::{evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, EngineConfig, PluginVersion, ServicePolicySet, Decision}`
-- Produces:
+- Produces (as built; the brief's illustrative signatures were replaced — see the Task 6 report for each deviation):
 
 ```rust
+pub enum Check { Access, DataMask, RowFilter }
+
 pub struct Disagreement {
+    pub service_id: i64,           // the PROFILE it is on (user ruling 2026-10-11)
+    pub service_name: String,
     pub plugin_version: PluginVersion,
+    pub check: Check,
     pub user: String,
+    pub groups: Vec<String>,       // the synthetic probe member's group/role, if any
+    pub roles: Vec<String>,
     pub access_type: String,
     pub resource: String,          // rendered coordinate, e.g. "wh.sales.orders"
     pub before: String,            // rendered Decision / MaskResult / RowFilterResult
     pub after: String,
 }
 
-/// Probes derived from BOTH policy sets, plus probes neither mentions.
-pub fn derive_probes(
-    before: &ServicePolicySet,
-    after: &ServicePolicySet,
-) -> Vec<AccessRequest>;
+pub struct ProfileCase<'a> {
+    pub service_id: i64,
+    pub service_name: String,
+    pub before: &'a ServicePolicySet,   // the whole download, resource + tagPolicies
+    pub after: &'a ServicePolicySet,
+    pub service_def: &'a ServiceDef,    // parsed, not a raw Value
+    pub engine: EngineConfig,           // super-users; plugin_version set per version
+    pub versions: Vec<PluginVersion>,   // of the engines bound to THIS profile
+    pub probes: Vec<AccessRequest>,     // with resolved_tags filled
+}
 
-/// Empty vec = equivalent on every probe, on every version in `versions`.
-pub fn compare(
-    before: &ServicePolicySet,
-    after: &ServicePolicySet,
-    service_def: &serde_json::Value,
-    versions: &[PluginVersion],
-    probes: &[AccessRequest],
-) -> Vec<Disagreement>;
+pub enum GateRefusal { NoProfiles, NoPluginVersions { service_id: i64 }, NoProbes { service_id: i64 } }
+
+/// Probes derived from BOTH policy sets, plus probes neither mentions.
+/// `tagged`: coordinates the caller knows carry a tag. `resolved_tags` is left None.
+pub fn derive_probes(before: &ServicePolicySet, after: &ServicePolicySet,
+                     service_def: &ServiceDef, tagged: &[RequestResource]) -> Vec<AccessRequest>;
+pub fn with_resolved_tags(probes: Vec<AccessRequest>,
+                          resolve: impl FnMut(&RequestResource) -> Option<UnenrichedTags>) -> Vec<AccessRequest>;
+
+/// Ok(empty) = equivalent on every probe, on every version of this profile.
+pub fn compare(case: &ProfileCase) -> Result<Vec<Disagreement>, GateRefusal>;
+/// The same over every affected profile; every disagreement names its profile.
+pub fn compare_profiles(cases: &[ProfileCase]) -> Result<Vec<Disagreement>, GateRefusal>;
 ```
 
 - [ ] **Step 1: Write the failing test**
@@ -1239,6 +1256,10 @@ Three cases, and the third is the one that justifies the whole gate:
 1. **Equivalent** — a hand-written policy and its compiled grant decide the same on every probe, on both versions: `compare` returns empty.
 2. **Not equivalent** — the compiled grant omits one user: `compare` returns a `Disagreement` naming that user, that access type and that resource.
 3. **Equivalent on 2.5.0, different on 2.8.0** — build the known divergence (a tag DENY plus a higher-priority resource ALLOW with no deny items, Allowed on 2.8.0 and Denied on 2.5.0) and assert `compare` reports a disagreement **for 2.8.0 only**. A gate that evaluated one version would pass this and ship a wrong artifact to StarRocks.
+
+   ⚠ **Corrected by Task 6: "for 2.8.0 only" is unreachable with the real evaluator.** `egret-ranger-eval` reproduces 2.8.0's answer for this shape and REFUSES on 2.5.0 (`UndecidableCause::TagDenyReopenedDiffersByPluginVersion`; 2.5.0's arm is unmodelled), and that refusal is the evaluator's only version-dependent branch — so wherever the two versions' decided answers differ, 2.5.0's is `Undecidable`, which the gate counts as a disagreement. The test therefore asserts a decided Denied → Allowed flip on 2.8.0 and a "cannot be decided" refusal on 2.5.0, on the same probe and nowhere else.
+
+5. **Every affected profile** (user ruling, 2026-10-11) — two profiles serving the same catalog; the migration is equivalent on P but adds access on Q → `compare_profiles` returns exactly Q's disagreements, each naming Q.
 
 And one test for `derive_probes` itself:
 
@@ -1253,7 +1274,7 @@ DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test \
 
 - [ ] **Step 3: Mutation-check the per-version loop**
 
-Make `compare` evaluate only `versions[0]`. Expected: case 3 fails and nothing else. `count == 1`, mutant compiles, restore by plain write with a SHA-256 compare.
+Make `compare` evaluate only `versions[0]`. Expected: case 3 fails and nothing else. `count == 1`, mutant compiles, restore by plain write with a SHA-256 compare. Second mutation: make `compare_profiles` evaluate only the first profile. Expected: case 5 fails and nothing else.
 
 - [ ] **Step 4: Commit**
 
@@ -1282,7 +1303,7 @@ The transaction, in this order — and the order is the design, not an implement
 2. `recompile_service_in_tx(tx, service_id)`.
 3. Set `enabled = false` on the original policy row.
 4. Insert provenance.
-5. **Re-derive probes and re-run `compare` against the state now in the transaction.** Any disagreement → return it to the caller and `ROLLBACK`.
+5. **Re-derive probes and re-run the gate (`compare_profiles`) against the state now in the transaction, over EVERY affected profile** — the union of `affected_services_for_grant` / `_rule` over the objects inserted in step 1, which always includes the source profile. For each: its download as served before the transaction began and as served now, its parsed service-def, the measured super-user config, the `PluginVersion` of every engine bound to it, and probes from `derive_probes` with `resolved_tags` filled by the same resolution `explain` uses (`resolved_tags_for_target`), with every tag-assignment coordinate of the catalogs it serves passed as `tagged`. Any disagreement on any profile, or any `GateRefusal` → return it to the caller (each disagreement names its profile, so the preview lists every other profile that changes) and `ROLLBACK`.
 
 Step 5 is why the order is what it is: the gate proves its claim about **the artifact the engine will actually download after the write**, not about a predicted one. `dry_run` runs the identical code and differs in exactly one place — it always rolls back.
 
