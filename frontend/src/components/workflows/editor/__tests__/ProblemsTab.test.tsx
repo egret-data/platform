@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { ProblemsBadge, ProblemsTab } from "@/components/workflows/editor/ProblemsTab";
+import { ProblemsBadge, ProblemsTab, problemsBadgeLabel } from "@/components/workflows/editor/ProblemsTab";
 import { makeEditorContext } from "./fixtures";
 
 const SOURCE = [
@@ -174,7 +174,7 @@ describe("ProblemsTab", () => {
 });
 
 describe("ProblemsBadge", () => {
-  it("counts the errors of both sources, in words for a screen reader, and hides at zero", () => {
+  it("counts the errors of both sources, digits in the badge and words in its label, and hides at zero", () => {
     const ctx = makeEditorContext({
       source: SOURCE,
       validation: {
@@ -186,11 +186,18 @@ describe("ProblemsBadge", () => {
       },
       schemaMarkers: [{ severity: "error", message: "c", range: { startLine: 1, startCol: 1, endLine: 1, endCol: 2 } }],
     });
+    const one = makeEditorContext({ source: SOURCE, validation: ctx.validation });
+    const none = makeEditorContext({ source: SOURCE });
     const { container, rerender } = render(<ProblemsBadge ctx={ctx} />);
-    expect(container).toHaveTextContent("2, 2 errors");
-    rerender(<ProblemsBadge ctx={makeEditorContext({ source: SOURCE, validation: ctx.validation })} />);
-    expect(container).toHaveTextContent("1, 1 error");
-    rerender(<ProblemsBadge ctx={makeEditorContext({ source: SOURCE })} />);
+    // The digits only, hidden from the accessibility tree: the tab's aria-label carries the words.
+    expect(container).toHaveTextContent(/^2$/);
+    expect(container.firstElementChild).toHaveAttribute("aria-hidden");
+    expect(problemsBadgeLabel(ctx)).toBe("2 errors");
+    rerender(<ProblemsBadge ctx={one} />);
+    expect(container).toHaveTextContent(/^1$/);
+    expect(problemsBadgeLabel(one)).toBe("1 error");
+    rerender(<ProblemsBadge ctx={none} />);
     expect(container).toBeEmptyDOMElement();
+    expect(problemsBadgeLabel(none)).toBeUndefined();
   });
 });

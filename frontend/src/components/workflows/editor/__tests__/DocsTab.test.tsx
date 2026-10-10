@@ -110,13 +110,17 @@ const ready = { status: "ready" as const, schema: SCHEMA, etag: '"e1"', error: n
 const renderDocs = (cursorOffset: number | null) =>
   render(<DocsTab ctx={makeEditorContext({ source: SOURCE, cursorOffset, schema: ready })} />);
 
-/** The properties table as `name → [type, required, default, description]`. */
+/**
+ * The stacked properties (or outputs) list as `name → [type, required, default, description]`;
+ * an output has no required marker, so its entry is `[type, description]`.
+ */
 function propertyRows(name = "Properties") {
-  const table = screen.getByRole("table", { name });
+  const list = screen.getByRole("list", { name });
   return Object.fromEntries(
-    within(table).getAllByRole("row").slice(1).map((r) => {
-      const cells = within(r).getAllByRole("cell").map((c) => c.textContent);
-      return [cells[0], cells.slice(1)];
+    within(list).getAllByRole("listitem").map((li) => {
+      const part = (p: string) => li.querySelector(`[data-part=${p}]`)?.textContent ?? "";
+      const req = li.querySelector("[data-part=required]");
+      return [part("name"), req ? [part("type"), part("required"), part("default"), part("description")] : [part("type"), part("description")]];
     }),
   );
 }
@@ -129,8 +133,8 @@ describe("DocsTab", () => {
     const rows = propertyRows();
     // Required ones first, each read from `required` AND `then.required`.
     expect(Object.keys(rows)).toEqual(["database", "id", "sql", "type", "fetch"]);
-    expect(rows.database).toEqual(["string", "Yes", "", "The connection's name."]);
-    expect(rows.fetch).toEqual(["string", "No", "NONE", "What to fetch."]);
+    expect(rows.database).toEqual(["string", "Required", "", "The connection's name."]);
+    expect(rows.fetch).toEqual(["string", "Optional", "NONE", "What to fetch."]);
     const outputs = propertyRows("Outputs");
     expect(outputs.rows).toEqual(["array", "Every row, with fetch: FETCH."]);
   });
@@ -141,8 +145,8 @@ describe("DocsTab", () => {
     expect(screen.getByText(/written here as/)).toHaveTextContent("written here as core.log");
     expect(screen.getByText("one or many").tagName).toBe("STRONG");
     const rows = propertyRows();
-    expect(rows.message).toEqual(["string | array", "Yes", "", "One or more messages."]);
-    expect(rows.level).toEqual(["string", "No", "INFO", "The level to log at."]);
+    expect(rows.message).toEqual(["string | array", "Required", "", "One or more messages."]);
+    expect(rows.level).toEqual(["string", "Optional", "INFO", "The level to log at."]);
     expect(rows.retry[0]).toBe("Constant");
     expect(screen.getByText("This type has no documented outputs.")).toBeInTheDocument();
   });
@@ -150,7 +154,7 @@ describe("DocsTab", () => {
   it("documents the trigger under the cursor", () => {
     renderDocs(at("cron:"));
     expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("io.kestra.plugin.core.trigger.Schedule");
-    expect(propertyRows().cron).toEqual(["string", "Yes", "", "The cron expression."]);
+    expect(propertyRows().cron).toEqual(["string", "Required", "", "The cron expression."]);
   });
 
   it("falls back to the flow's own documentation outside any task", () => {
@@ -158,8 +162,8 @@ describe("DocsTab", () => {
     expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("Flow");
     const rows = propertyRows();
     expect(Object.keys(rows)).toEqual(["id", "namespace", "tasks", "labels"]);
-    expect(rows.tasks).toEqual(["array", "Yes", "", "The tasks."]);
-    expect(screen.queryByRole("table", { name: "Outputs" })).toBeNull();
+    expect(rows.tasks).toEqual(["array", "Required", "", "The tasks."]);
+    expect(screen.queryByRole("list", { name: "Outputs" })).toBeNull();
   });
 
   it("with no cursor yet, shows the flow's documentation", () => {
@@ -194,8 +198,29 @@ describe("DocsTab", () => {
     const alert = screen.getByRole("alert");
     expect(alert).toHaveTextContent("Autocomplete unavailable");
     expect(alert).toHaveTextContent("internal error");
-    expect(screen.queryByRole("table")).toBeNull();
+    expect(screen.queryByRole("list", { name: "Properties" })).toBeNull();
     await userEvent.click(within(alert).getByRole("button", { name: "Retry loading the schema" }));
     expect(retry).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders every property's name, type, required marker, default and description, stacked in one list item", () => {
+    renderDocs(at("database: dwh"));
+    const items = within(screen.getByRole("list", { name: "Properties" })).getAllByRole("listitem");
+    const fetch = items.find((li) => li.querySelector("[data-part=name]")?.textContent === "fetch")!;
+    // Visible text, in reading order: name, type, marker, then the default, then the description.
+    expect(fetch).toHaveTextContent(/^fetch\s*string\s*OptionalDefault: NONEWhat to fetch\.$/);
+    for (const li of items) {
+      // A description only where the schema has one (the fixture's `id` has none).
+      for (const part of ["name", "type", "required"]) {
+        expect(li.querySelector(`[data-part=${part}]`)?.textContent, `${part} of ${li.textContent}`).toBeTruthy();
+      }
+    }
+    // A property without a default shows no "Default:" line.
+    const database = items.find((li) => li.querySelector("[data-part=name]")?.textContent === "database")!;
+    expect(within(database).queryByText(/Default:/)).toBeNull();
+    expect(within(database).getByText("Required")).toBeInTheDocument();
+    expect(database.querySelector("[data-part=description]")).toHaveTextContent("The connection's name.");
+    // No table: it did not fit a narrow panel.
+    expect(screen.queryByRole("table")).toBeNull();
   });
 });

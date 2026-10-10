@@ -1,6 +1,5 @@
 import { useMemo } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { EditorContext } from "@/components/workflows/editor/EditorContext";
 import { flowDoc, typeDoc, type TypeDoc } from "@/components/workflows/editor/flowSchema";
 import { Markdown } from "@/components/workflows/editor/Markdown";
@@ -60,30 +59,18 @@ function TypeDocView({ doc }: { doc: TypeDoc }) {
 
       <section className="flex flex-col gap-1">
         <h3 className="font-semibold text-foreground">Properties</h3>
-        <Table aria-label="Properties">
-          <TableHeader>
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Type</TableHead>
-              <TableHead>Required</TableHead>
-              <TableHead>Default</TableHead>
-              <TableHead>Description</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {doc.properties.map((p) => (
-              <TableRow key={p.name}>
-                <TableCell className="align-top font-mono">{p.name}</TableCell>
-                <TableCell className="align-top font-mono text-muted-foreground">{p.type}</TableCell>
-                <TableCell className="align-top">{p.required ? "Yes" : "No"}</TableCell>
-                <TableCell className="align-top font-mono">{p.default}</TableCell>
-                <TableCell className="align-top whitespace-normal">
-                  <Markdown inline>{p.description}</Markdown>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+        <ul aria-label="Properties" className="flex flex-col divide-y divide-border">
+          {doc.properties.map((p) => (
+            <DocItem
+              key={p.name}
+              name={p.name}
+              type={p.type}
+              required={p.required}
+              defaultValue={p.default}
+              description={p.description}
+            />
+          ))}
+        </ul>
       </section>
 
       {doc.outputs && (
@@ -92,29 +79,65 @@ function TypeDocView({ doc }: { doc: TypeDoc }) {
           {doc.outputs.length === 0 ? (
             <p className="text-muted-foreground">This type has no documented outputs.</p>
           ) : (
-            <Table aria-label="Outputs">
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Type</TableHead>
-                  <TableHead>Description</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {doc.outputs.map((o) => (
-                  <TableRow key={o.name}>
-                    <TableCell className="align-top font-mono">{o.name}</TableCell>
-                    <TableCell className="align-top font-mono text-muted-foreground">{o.type}</TableCell>
-                    <TableCell className="align-top whitespace-normal">
-                      <Markdown inline>{o.description}</Markdown>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <ul aria-label="Outputs" className="flex flex-col divide-y divide-border">
+              {doc.outputs.map((o) => (
+                <DocItem key={o.name} name={o.name} type={o.type} description={o.description} />
+              ))}
+            </ul>
           )}
         </section>
       )}
     </>
+  );
+}
+
+/**
+ * One property or output, stacked to fit a narrow panel (W7a Task 8 fix round 2):
+ * the name, its type and whether it is required on the first line, the default
+ * under it, and the description wrapping below. A five-column table did not fit
+ * the default 40% panel at 1440px: the Description column was off-screen, as in
+ * Kestra's docs panel, which lists properties the same way.
+ *
+ * Each part carries `data-part`, which the tests read.
+ */
+function DocItem({
+  name,
+  type,
+  required,
+  defaultValue,
+  description,
+}: {
+  name: string;
+  type: string;
+  /** Undefined for an output, which is neither required nor optional. */
+  required?: boolean;
+  defaultValue?: string;
+  description: string;
+}) {
+  return (
+    <li className="flex min-w-0 flex-col gap-0.5 py-2">
+      <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <code data-part="name" className="font-mono font-medium break-all text-foreground">{name}</code>
+        <span data-part="type" className="font-mono text-xs break-all text-muted-foreground">{type}</span>
+        {required !== undefined && (
+          <span
+            data-part="required"
+            className={required ? "text-xs font-medium text-foreground" : "text-xs text-muted-foreground"}
+          >
+            {required ? "Required" : "Optional"}
+          </span>
+        )}
+      </div>
+      {defaultValue ? (
+        <p className="text-xs text-muted-foreground">
+          Default: <code data-part="default" className="rounded bg-muted px-1 font-mono break-all text-foreground">{defaultValue}</code>
+        </p>
+      ) : null}
+      {description ? (
+        <div data-part="description" className="min-w-0 text-foreground [overflow-wrap:anywhere] [&_code]:rounded [&_code]:bg-muted [&_code]:px-1">
+          <Markdown inline>{description}</Markdown>
+        </div>
+      ) : null}
+    </li>
   );
 }

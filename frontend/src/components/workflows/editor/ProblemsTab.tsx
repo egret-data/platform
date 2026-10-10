@@ -87,23 +87,31 @@ export function ProblemsTab({ ctx }: { ctx: EditorContext }) {
   );
 }
 
+/** How many of the editor's problems are errors: the badge's number and its words. */
+function errorCount(ctx: EditorContext): number {
+  return ctx.problems.filter((p) => p.severity === "error").length;
+}
+
 /** The error count in words, the Problems tab's `badgeLabel`: "1 error", "3 errors", none at 0. */
 export function problemsBadgeLabel(ctx: EditorContext): string | undefined {
-  const errors = ctx.problems.filter((p) => p.severity === "error").length;
+  const errors = errorCount(ctx);
   if (errors === 0) return undefined;
   return errors === 1 ? "1 error" : `${errors} errors`;
 }
 
-/** The error count drawn in the Problems tab (spec §5.2). */
+/**
+ * The error count drawn in the Problems tab (spec §5.2). Only the digits: the
+ * tab is named "Problems, N errors" by its `aria-label` (`problemsBadgeLabel`),
+ * so the digits are hidden from the accessibility tree.
+ */
 export function ProblemsBadge({ ctx }: { ctx: EditorContext }) {
-  const errors = ctx.problems.filter((p) => p.severity === "error").length;
+  const errors = errorCount(ctx);
   if (errors === 0) return null;
   return (
     // Dark ink in dark mode: `--destructive` lightens there, and its near-white
     // `--destructive-foreground` measured 2.83:1 on it (W7a Task 8 fix round 1).
-    <span className="rounded-full bg-destructive px-1.5 text-xs text-destructive-foreground tabular-nums dark:text-background">
-      <span aria-hidden>{errors}</span>
-      <span className="sr-only">{errors === 1 ? ", 1 error" : `, ${errors} errors`}</span>
+    <span aria-hidden className="rounded-full bg-destructive px-1.5 text-xs text-destructive-foreground tabular-nums dark:text-background">
+      {errors}
     </span>
   );
 }
