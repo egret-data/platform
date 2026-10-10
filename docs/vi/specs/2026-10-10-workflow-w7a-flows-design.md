@@ -22,7 +22,7 @@
   - **Ngoài W7:** sửa kiểu no-code, blueprints, trang tài liệu plugin, AI, dashboards, kill và restart (chưa có backend), và SSE (API của egret chỉ có polling).
 - **Danh sách flow nhóm theo cây namespace** (`company` → `company.team`). `folder_id` không hiện ở đâu trong UI workflow.
 - **Editor flow là bố cục nhiều panel đầy đủ như `MultiPanelTabs` của Kestra.** Panel chứa tab; tab chuyển được giữa các panel và tách panel; bố cục được lưu theo từng flow.
-- **Save và Publish là hai nút.** Save ghi draft; Publish tạo một version bất biến, là thứ execution chạy theo. Một chỉ báo suy từ nội dung cho biết khi draft khác version đang live.
+- **Save và Publish là hai nút.** Save ghi draft; Publish tạo một version bất biến. *(Đính chính 2026-10-10 theo phán quyết bên dưới: execution chạy bản draft đã lưu, không chạy version.)*
 - **Độ thông minh của editor:**
   - `monaco-yaml` dùng một JSON schema do một endpoint chỉ đọc mới cung cấp. Schema dựng từ chính registry mà backend dùng để validate, và lọc theo feature của workspace. Nhờ đó có gợi ý, hover và lỗi cấu trúc ngay khi gõ.
   - Một lần validate trên server (có debounce) đưa lỗi ngữ nghĩa vào editor và vào tab Problems.
@@ -30,6 +30,12 @@
 - **(2026-10-10, phán quyết của người dùng khi lập plan) Dữ liệu thuộc tính của schema lấy từ JSON schema của chính Kestra, lọc theo egret.** Registry của egret chỉ có tên type và alias, còn `catalog.json` chỉ có thuộc tính của chín class JDBC, nên không có dữ liệu thuộc tính nào để trả về. Flow schema của Kestra cho bản đã ghim được xuất một lần từ image Kestra trên máy và commit thành một artifact, giống các fixture oracle. Schema được lọc chỉ giữ các type egret chấp nhận, và bỏ các thuộc tính egret bỏ qua. Các type riêng của egret (`egret.*`, `core.http`, `core.slack`, các type script) có schema viết bằng tay (§7.1).
 
 - **(2026-10-10, phán quyết của người dùng về review Task 2) Backend trả tên hiển thị của người tạo và người publish.** `FlowListItemDto`, `FlowDto` và `FlowVersionDto` có thêm `created_by_name: Option<String>`, join phía server. UI không cần lấy danh sách thành viên (route đó cần `workspace:manage_members`), nên mọi người xem đều thấy tên (§4, §7.4).
+
+- **(2026-10-10, phán quyết của người dùng về phát hiện của Task 6) UI nói đúng thực tế: mọi execution chạy bản draft đã lưu.** Start qua API, schedule, webhook và subflow đều đọc `workflow.flows.source`. Không đường nào đọc `flow_versions`; đây là đính chính W10 của spec chương trình ("executions run the DRAFT"). `state` không chặn gì ngoài `disabled`. Engine giữ nguyên, và W7a sửa UI cho khớp:
+  - **Save làm thay đổi thứ đang chạy.** Đây là mô hình của Kestra; thông báo xác nhận Save và editor nói rõ điều này.
+  - **Publish đổi thành "Create version".** Đó là một snapshot bất biến có số và ghi chú (một mốc phát hành), dùng để so sánh và khôi phục trong Revisions. Nó không làm thay đổi thứ đang chạy.
+  - **Chỉ báo so nội dung.** Nó ghi "Changes since v{n}": draft đã lưu khác version mới nhất, so từng byte (FE-STATE-4). Chỉ báo này tách riêng khỏi "Unsaved changes".
+  - **Run** chạy bản draft đã lưu và đọc `inputs:` của nó. Run không cần version nào, và chỉ bị vô hiệu hoá khi draft còn chỉnh sửa chưa lưu ("Save first: Run uses the saved draft"), khi validate có lỗi, hoặc khi flow đang `disabled`.
 
 ## 1. Vì sao
 
@@ -39,12 +45,12 @@ Engine đã chạy flow trong production (từ W10), nhưng người dùng chỉ
 
 | Kestra | egret | Vì sao |
 |---|---|---|
-| Save tạo một revision có hiệu lực ngay | Save ghi draft; Publish tạo version mà execution chạy theo | flow của egret có mô hình draft/version (W1); phán quyết của người dùng |
+| Save tạo một revision có hiệu lực ngay | Save cũng có hiệu lực ngay, nhưng không tạo version. "Create version" tạo một snapshot có số và ghi chú khi người dùng muốn | Mọi execution chạy bản draft đã lưu (spec chương trình, đính chính W10); phán quyết của người dùng |
 | Danh sách flow phẳng, có bộ lọc namespace | Danh sách nhóm theo cây namespace thu gọn được | Phán quyết của người dùng; namespace quyết định phạm vi ghi, file và KV, nên UI lấy nó làm trục tổ chức |
 | Tab: overview, executions, edit, revisions, triggers, logs, metrics, dependencies, concurrency | W7a có Edit và Revisions. Executions đến cùng W7b, Triggers cùng W7e; các tab khác chưa có kế hoạch | Một tab chỉ xuất hiện cùng package làm nó |
 | Panel editor: Code, No-code, Topology, Docs, Files, Blueprints | Code, Docs, Problems ở W7a; Topology cùng W7c; Files cùng W7d; không có No-code và Blueprints | Ngoài W7 theo phán quyết của người dùng. Problems là của egret: Kestra hiện lỗi trong editor và trên một banner |
 | `/flows/validate` nhận YAML có thêm tiền tố `revision: N+1`, và phát hiện lần save `outdated` | `POST …/flows/validate` nhận YAML nguyên như vậy. Lần save trên bản cũ bị `PUT` từ chối nhờ `if_updated_at` (§5.3) | draft của egret không có bộ đếm revision |
-| Form run theo revision mới nhất | Form run theo **version đang live**, và nói rõ khi draft khác | Execution chạy version live, không bao giờ chạy draft (W1) |
+| Form run theo revision mới nhất | Form run theo **bản draft đã lưu**, và Run bị vô hiệu hoá khi còn chỉnh sửa chưa lưu | Execution chạy bản draft đã lưu (phán quyết của người dùng, 2026-10-10) |
 | Panel của editor: mỗi panel có một menu chấm (chuyển panel, đóng mọi tab, đóng mọi panel); thả tab lên mép trái hoặc phải ngoài cùng của khung thì tạo panel mới ở đó; `KeepAlive` giữ các tab ẩn của panel luôn mount, và panel được key theo chỉ số | Mỗi panel có một menu "Tab actions: <title>", tác động lên tab đang chọn (Move to panel…, Split left, Split right, Close); thả tab lên mép trái hoặc phải của **bất kỳ panel nào** thì tách cạnh panel đó; mỗi panel chỉ mount tab đang chọn, và khi tập panel đổi thì các panel được mount lại (§5.1) | Một `tablist` chỉ được chứa tab, nên đặt nút menu trong từng tab sẽ phá ngữ nghĩa đó; một menu mỗi panel giữ được ngữ nghĩa mà mọi tab vẫn tới được menu của mình trong hai phím. Tách cạnh bất kỳ panel nào là mô hình của spec. React không có `KeepAlive`: trạng thái của tab nằm ngoài tab, và Task 4 giữ model và view state của Monaco qua lần mount lại (`path`, `keepCurrentModel`, `saveViewState`). Nếu một tab khác cần luôn mount thì phương án dự phòng là portal đổi cha |
 | `monaco-yaml` 5.5.1 và `monaco-worker-manager` 2.0.1 được vá trong `node_modules` (`kestra/ui/patches/`): worker được khởi động bằng `createWebWorker({ worker })` của monaco 0.56, và bộ kiểm tra chọn thành viên `oneOf` theo `type` để gợi ý `type:` liệt kê mọi kiểu | Không vá `node_modules`. `monacoYaml.ts` đưa cho `monaco-yaml` một Monaco có `createWebWorker` khởi động worker theo cách monaco 0.56 làm; schema được phục vụ chỉ bắt buộc `id` và `type` trực tiếp, phần còn lại sau `if: type là chuỗi` (§7.1), nhờ đó mọi cách viết `type:` đều được gợi ý | Đo bằng schema của egret trong Chromium và bằng chính worker của `monaco-yaml` trong Node (W7a Task 4): nếu để nguyên, worker rơi về bản giả trong trang không có phương thức YAML nào, và gợi ý `type:` chỉ đưa 10 trên 54 cách viết của task |
 
@@ -150,7 +156,9 @@ Mọi khác biệt khác tìm thấy khi đối chiếu với một Kestra đang
   - "No problems" dùng `EmptyState`;
   - request validate thất bại thì hiện lỗi kèm nút thử lại. Không bao giờ hiện thành "không có lỗi".
 
-### 5.3 Save, Publish và chỉ báo draft
+### 5.3 Save, Create version và chỉ báo thay đổi
+
+*(Viết lại 2026-10-10 theo phán quyết của người dùng về phát hiện của Task 6: execution chạy bản draft đã lưu.)*
 
 Header chi tiết flow là flow id và namespace kèm chip state. Các hành động:
 
@@ -158,22 +166,24 @@ Header chi tiết flow là flow id và namespace kèm chip state. Các hành đ�
 - Gửi `PUT …/flows/{id}` với `{ source, if_updated_at }` (§7.3).
 - Nếu nhận 409, một dialog giải thích draft đã bị đổi kể từ lúc mở. Dialog cho chọn "Reload" (bỏ thay đổi local, sau khi xác nhận) hoặc "Overwrite" (lưu lại mà không gửi `if_updated_at`).
 - Save vẫn bật khi validate có lỗi; draft được phép không hợp lệ.
+- Lưu là thay đổi thứ đang chạy: lần start qua API, lần bắn schedule, webhook hay lời gọi subflow kế tiếp sẽ dùng bản draft đã lưu. Toast của Save ghi "Saved. New runs use this version of the flow.".
 
-**Publish** (`workflow:manage`).
-- Mở một dialog có ghi chú tuỳ chọn, rồi gửi `POST …/flows/{id}/publish`.
-- Bị vô hiệu hoá khi còn chỉnh sửa chưa lưu ("Save first") hoặc có lỗi validate ("Fix N errors to publish"). Lý do hiện ngay trên control (FE-ACTION-4).
+**Create version** (`workflow:manage`; route backend là `POST …/flows/{id}/publish`).
+- Mở một dialog có ghi chú tuỳ chọn. Dialog giải thích version là một snapshot để so sánh và khôi phục, và không làm thay đổi thứ đang chạy.
+- Bị vô hiệu hoá khi còn chỉnh sửa chưa lưu ("Save first") hoặc có lỗi validate ("Fix N errors to create a version"). Lý do hiện ngay trên control (FE-ACTION-4).
 
 **Run** (`workflow:manage`).
-- Mở form run (§6). Bị vô hiệu hoá khi chưa có version nào live ("Publish the flow before running it").
+- Mở form run (§6), chạy bản draft đã lưu.
+- Bị vô hiệu hoá khi còn chỉnh sửa chưa lưu ("Save first: Run uses the saved draft"), khi validate có lỗi ("Fix N errors to run"), hoặc khi flow đang tắt ("The flow is disabled").
 
 **Delete** (`workflow:manage`).
 - Đi qua `ConfirmDeleteDialog` (FE-ACTION-1), rồi chuyển về danh sách.
 
-**Chỉ báo draft** là một pill, "Draft differs from live v{n}".
-- Nó được tính bằng cách so `source` của draft đã lưu với `source` trong snapshot của version live, từng byte (FE-STATE-4). Nếu draft được sửa về đúng nội dung live rồi lưu, pill tắt lại.
+**Chỉ báo thay đổi** là một pill, "Changes since v{n}", trong đó v{n} là version mới nhất.
+- Nó được tính bằng cách so `source` của draft đã lưu với `source` trong snapshot của version đó, từng byte (FE-STATE-4). Nếu draft được sửa về đúng nội dung của version rồi lưu, pill tắt lại. Flow chưa có version nào thì không hiện pill.
 - Chỉnh sửa local chưa lưu là một chỉ báo riêng ("Unsaved changes").
 
-Sau khi Save hoặc Publish thành công, query flow được invalidate; Publish còn invalidate thêm query versions. Save và Publish xác nhận bằng toast, vì người dùng ở lại trang (FE-ACTION-2).
+Sau khi Save hoặc Create version thành công, query flow được invalidate; Create version còn invalidate thêm query versions. Cả hai xác nhận bằng toast, vì người dùng ở lại trang (FE-ACTION-2).
 
 ### 5.4 Tạo flow
 
@@ -197,7 +207,7 @@ Hành vi:
 
 ### 6.1 Form
 
-Run đọc `inputs:` trong snapshot của **version đang live**. Khi draft khác live, form ghi "Runs live v{n}; your draft is not published".
+Run đọc `inputs:` của **bản draft đã lưu** (`FlowDto.source`), cũng là thứ server khởi chạy (phán quyết của người dùng, 2026-10-10). Run không bao giờ được mở khi còn chỉnh sửa chưa lưu (§5.3), nên form và server luôn đọc cùng một nội dung.
 
 - **Khung chứa.** Flow không có input thì chạy ngay sau một bước xác nhận. Từ một đến ba input, tất cả đều là kiểu đơn, thì mở dialog. Còn lại mở một drawer bên phải.
 - **Control theo kiểu input** (`models/input.rs`):
@@ -328,7 +338,7 @@ Trong lúc cài, một Kestra tạm chạy từ image `kestra/kestra` có sẵn 
 - 403 do feature hoặc quyền thì hiện trang forbidden có sẵn.
 - 404 với một flow thì hiện "Flow not found" kèm link về danh sách.
 - Tải schema thất bại: editor vẫn dùng được nhưng không có gợi ý, và hiện "Autocomplete unavailable" kèm nút thử lại. Validate trên server vẫn chạy.
-- Request validate thất bại: Problems hiện lỗi (§5.2). Publish vẫn bị vô hiệu hoá với lý do "Validation unavailable".
+- Request validate thất bại: Problems hiện lỗi (§5.2). Create version và Run vẫn bị vô hiệu hoá với lý do "Validation unavailable".
 
 ## 11. Kiểm thử
 

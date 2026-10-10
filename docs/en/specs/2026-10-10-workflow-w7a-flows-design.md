@@ -20,7 +20,7 @@
   - **Out of W7:** no-code editing, blueprints, plugin documentation pages, AI, dashboards, kill and restart (no backend), and SSE (egret's APIs are poll-only).
 - **The flow list groups by a namespace tree** (`company` → `company.team`). `folder_id` is not shown anywhere in the workflow UI.
 - **The flow editor is the full multi-panel layout of Kestra's `MultiPanelTabs`.** Panels hold tabs; tabs move between panels and split them; the layout persists per flow.
-- **Save and Publish are two buttons.** Save writes the draft; Publish creates an immutable version, which is what executions run. A content-derived indicator shows when the draft differs from the live version.
+- **Save and Publish are two buttons.** Save writes the draft; Publish creates an immutable version. *(Corrected 2026-10-10 by the ruling below: executions run the saved draft, not the version.)* A content-derived indicator shows when the draft differs from the live version.
 - **Editor intelligence:**
   - `monaco-yaml` uses a JSON schema served by a new read-only endpoint, built from the same registry the backend validates against and filtered by the workspace's features. This gives completion, hover and structural errors as you type.
   - A debounced server validation feeds semantic findings into the editor and a Problems tab.
@@ -28,6 +28,12 @@
 - **(2026-10-10, the user's ruling while planning) The schema's property data comes from Kestra's own JSON schema, filtered to egret.** egret's registry holds only type names and aliases, and `catalog.json` holds properties for nine JDBC classes, so there was no property data to serve. Kestra's flow schema for the pinned version is exported once from the local Kestra image and committed as an artifact, like the oracle fixtures. It is filtered to the types egret accepts, minus the properties egret ignores. egret's own types (`egret.*`, `core.http`, `core.slack`, the script types) get hand-written schemas (§7.1).
 
 - **(2026-10-10, the user's ruling on Task 2's review) The backend returns the creator's and publisher's display names.** `FlowListItemDto`, `FlowDto` and `FlowVersionDto` gain `created_by_name: Option<String>`, joined server-side. The UI needs no member listing, which requires `workspace:manage_members`, so every viewer sees names (§4, §7.4).
+
+- **(2026-10-10, the user's ruling on Task 6's finding) The UI tells the truth: every execution runs the saved draft.** API start, schedules, webhooks and subflows all read `workflow.flows.source`. None of them reads `flow_versions`, which is the programme spec's W10 correction ("executions run the DRAFT"). `state` gates nothing except `disabled`. The engine stays as it is, and W7a changes its UI to match:
+  - **Save changes what runs.** It is Kestra's model; the Save confirmation and the editor say so.
+  - **Publish becomes "Create version".** It is a numbered, noted, immutable snapshot (a release mark) that Revisions can compare and restore. It does not change what runs.
+  - **The indicator compares content.** It reads "Changes since v{n}": the saved draft differs from the latest version, byte for byte (FE-STATE-4). It stays separate from "Unsaved changes".
+  - **Run** runs the saved draft and reads its `inputs:`. It needs no version, and is disabled only while the draft has unsaved edits ("Save first: Run uses the saved draft"), while validation has errors, or while the flow is `disabled`.
 
 ## 1. Why
 
@@ -37,12 +43,12 @@ The engine runs flows in production (W10 onwards), but a user can only author an
 
 | Kestra | egret | Why |
 |---|---|---|
-| Save creates a revision that takes effect at once | Save writes a draft; Publish creates the version executions run | egret's flows have a draft/version model (W1); the user's ruling |
+| Save creates a revision that takes effect at once | Save takes effect at once too, but creates no version. "Create version" makes a numbered, noted snapshot on demand | Every execution runs the saved draft (programme spec, W10 correction); the user's rulings |
 | The flows list is flat with a namespace filter | The list is grouped by a collapsible namespace tree | The user's ruling; namespace decides write scope, files and KV, so the UI makes it the organising axis |
 | Tabs: overview, executions, edit, revisions, triggers, logs, metrics, dependencies, concurrency | W7a ships Edit and Revisions. Executions arrives with W7b, Triggers with W7e; the others are not planned | A tab appears only with the package that fills it |
 | Editor panels: Code, No-code, Topology, Docs, Files, Blueprints | Code, Docs, Problems in W7a; Topology with W7c; Files with W7d; no No-code and no Blueprints | Out of W7 by the user's ruling. Problems is egret's: Kestra shows findings in the editor and a banner |
 | `/flows/validate` takes YAML with `revision: N+1` prefixed, and detects an `outdated` save | `POST …/flows/validate` takes the YAML as is. A stale save is refused by `PUT` with `if_updated_at` (§5.3) | egret has no revision counter on drafts |
-| The run form follows the latest revision | The run form follows the **live version**, and says so when the draft differs | Executions run the live version, never the draft (W1) |
+| The run form follows the latest revision | The run form follows the **saved draft**, and Run is disabled while there are unsaved edits | Executions run the saved draft (the user's ruling, 2026-10-10) |
 | The editor's panels: each panel has a dots menu (move panel, close all tabs, close all panels); a tab dropped on the frame's outer left or right edge makes a new panel there; `KeepAlive` keeps a panel's hidden tabs mounted, and panels are keyed by index | One "Tab actions: <title>" menu per panel, acting on its selected tab (Move to panel…, Split left, Split right, Close); a tab dropped on **any panel's** left or right edge splits beside that panel; only each panel's selected tab is mounted, and a change to the set of panels remounts the panels (§5.1) | A `tablist` may own only tabs, so a menu button inside each tab would break its semantics; one menu per panel keeps them and still gives every tab its menu in two keystrokes. Splitting beside any panel is the spec's model. React has no `KeepAlive`: tab state lives outside the tab, and Task 4 keeps Monaco's model and view state across a remount (`path`, `keepCurrentModel`, `saveViewState`). A reparenting portal is the fallback if another tab needs to stay mounted |
 | `monaco-yaml` 5.5.1 and `monaco-worker-manager` 2.0.1 are patched in `node_modules` (`kestra/ui/patches/`): the worker is started with monaco 0.56's `createWebWorker({ worker })`, and the validator picks a `oneOf` member by its `type` so `type:` completion lists every type | No `node_modules` patch. `monacoYaml.ts` hands `monaco-yaml` a Monaco whose `createWebWorker` primes the worker the way monaco 0.56 does; the served schema requires only `id` and `type` outright and the rest behind `if: type is a string` (§7.1), which gives every `type:` spelling | Measured with egret's schema in Chromium and with `monaco-yaml`'s own worker in Node (W7a Task 4): unchanged, the worker fell back to an in-page stub with no YAML methods, and `type:` completion offered 10 of 54 task spellings |
 
@@ -148,7 +154,9 @@ Any further difference found while comparing against a running Kestra (§9) is a
   - "No problems" uses `EmptyState`;
   - a failed validation request shows the error with a retry action. It is never shown as "no problems".
 
-### 5.3 Save, Publish and the draft indicator
+### 5.3 Save, Create version and the changes indicator
+
+*(Rewritten 2026-10-10 by the user's ruling on Task 6's finding: executions run the saved draft.)*
 
 The flow detail header is the flow id and namespace with the state chip. Its actions are:
 
@@ -156,22 +164,24 @@ The flow detail header is the flow id and namespace with the state chip. Its act
 - It sends `PUT …/flows/{id}` with `{ source, if_updated_at }` (§7.3).
 - On 409 a dialog explains that the draft changed since it was opened. It offers "Reload", which discards local edits after a confirm, or "Overwrite", which saves again without `if_updated_at`.
 - Save stays enabled when validation has errors; a draft may be invalid.
+- Saving changes what runs: the next API start, schedule firing, webhook or subflow call uses the saved draft. The Save toast says "Saved. New runs use this version of the flow.".
 
-**Publish** (`workflow:manage`).
-- It opens a dialog with an optional note and sends `POST …/flows/{id}/publish`.
-- It is disabled while there are unsaved edits ("Save first") or validation errors ("Fix N errors to publish"). The reason is shown on the control (FE-ACTION-4).
+**Create version** (`workflow:manage`; the backend route is `POST …/flows/{id}/publish`).
+- It opens a dialog with an optional note, explaining that a version is a snapshot to compare and restore, and that it does not change what runs.
+- It is disabled while there are unsaved edits ("Save first") or validation errors ("Fix N errors to create a version"). The reason is shown on the control (FE-ACTION-4).
 
 **Run** (`workflow:manage`).
-- It opens the run form (§6). It is disabled while no version is live ("Publish the flow before running it").
+- It opens the run form (§6), which runs the saved draft.
+- It is disabled while there are unsaved edits ("Save first: Run uses the saved draft"), while validation has errors ("Fix N errors to run"), or while the flow is disabled ("The flow is disabled").
 
 **Delete** (`workflow:manage`).
 - It goes through `ConfirmDeleteDialog` (FE-ACTION-1), then navigates to the list.
 
-**The draft indicator** is a pill, "Draft differs from live v{n}".
-- It is computed by comparing the saved draft's `source` with the live version's snapshot `source`, byte for byte (FE-STATE-4). It goes out again if the draft is edited back to the live text and saved.
+**The changes indicator** is a pill, "Changes since v{n}", where v{n} is the latest version.
+- It is computed by comparing the saved draft's `source` with that version's snapshot `source`, byte for byte (FE-STATE-4). It goes out again if the draft is edited back to the version's text and saved. A flow with no version shows no pill.
 - Unsaved local edits are a separate indicator ("Unsaved changes").
 
-After a successful Save or Publish, the flow query is invalidated, and Publish also invalidates the versions query. Save and Publish confirm with a toast, because the user stays on the page (FE-ACTION-2).
+After a successful Save or Create version, the flow query is invalidated, and Create version also invalidates the versions query. Both confirm with a toast, because the user stays on the page (FE-ACTION-2).
 
 ### 5.4 Creating a flow
 
@@ -195,7 +205,7 @@ Behaviour:
 
 ### 6.1 The form
 
-Run reads the `inputs:` of the **live version's** snapshot. When the draft differs from live, the form says "Runs live v{n}; your draft is not published".
+Run reads the `inputs:` of the **saved draft** (`FlowDto.source`), which is what the server starts (the user's ruling, 2026-10-10). Run is never offered while there are unsaved edits (§5.3), so the form and the server always read the same text.
 
 - **Container.** A flow with no inputs runs at once after a confirm. Up to three inputs, all of them scalar, open a dialog. Otherwise a right-hand drawer opens.
 - **Controls by type** (`models/input.rs`):
@@ -326,7 +336,7 @@ During implementation, a temporary Kestra runs from the local `kestra/kestra` im
 - A 403 for the feature or a permission renders the existing forbidden page.
 - A 404 for a flow renders "Flow not found" with a link to the list.
 - Schema fetch failure: the editor still works without completion, and shows "Autocomplete unavailable" with retry. Server validation still runs.
-- Validation request failure: Problems shows the error (§5.2). Publish stays disabled with the reason "Validation unavailable".
+- Validation request failure: Problems shows the error (§5.2). Create version and Run stay disabled with the reason "Validation unavailable".
 
 ## 11. Testing
 
