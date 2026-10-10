@@ -5,7 +5,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ESLint } from "eslint";
 import tseslint from "typescript-eslint";
-import { plugins } from "../eslint-rules/plugins.js";
+import { plugins, a11ySettings } from "../eslint-rules/plugins.js";
 
 export async function staleEntries(legacy, { cwd }) {
   const stale = [];
@@ -22,6 +22,7 @@ export async function staleEntries(legacy, { cwd }) {
         files: ["**/*.{ts,tsx}"],
         languageOptions: { parser: tseslint.parser, parserOptions: { ecmaFeatures: { jsx: true } } },
         plugins,
+        settings: a11ySettings,
         rules: { [rule]: "error" },
       }],
     });

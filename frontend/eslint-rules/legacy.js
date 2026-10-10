@@ -39,4 +39,46 @@ export const legacy = {
     "src/routes/explore/DatabasesPage.tsx",
     "src/routes/explore/DatasetDetail.tsx",
   ],
+  "jsx-a11y/aria-role": [
+    "src/routes/control-plane/StarRocksConfigTab.tsx",
+    "src/routes/control-plane/config/CoordinatorSection.tsx",
+    "src/routes/control-plane/config/WorkerSection.tsx",
+  ],
+  "jsx-a11y/click-events-have-key-events": [
+    "src/components/chart/ObjectDetail.tsx",
+    "src/components/chart/dashboard/CardInlineFilters.tsx",
+    "src/components/chart/dashboard/FilterPill.tsx",
+    "src/components/ui/tag-combobox.tsx",
+  ],
+  "jsx-a11y/heading-has-content": [
+    "src/components/ui/alert.tsx",
+    "src/components/ui/card.tsx",
+  ],
+  "jsx-a11y/label-has-associated-control": [
+    "src/components/chart/dashboard/CardSettingsPanel.tsx",
+    "src/components/chart/dashboard/DashboardFilterBar.tsx",
+    "src/components/chart/settings/BoxplotDisplaySection.tsx",
+    "src/components/chart/settings/CartesianDisplaySection.tsx",
+    "src/components/chart/settings/RuleEditor.tsx",
+    "src/components/chart/settings/WaterfallDisplaySection.tsx",
+    "src/routes/control-plane/PodLogsDialog.tsx",
+    "src/routes/explore/DatasetDetail.tsx",
+    "src/routes/explore/settings/RolesPermissions.tsx",
+    "src/routes/governance/GrantDialog.tsx",
+  ],
+  "jsx-a11y/no-noninteractive-element-interactions": [
+    "src/components/chart/ObjectDetail.tsx",
+    "src/components/chart/TableHeaderControls.tsx",
+    "src/components/chart/dashboard/FilterPill.tsx",
+  ],
+  "jsx-a11y/no-noninteractive-tabindex": [
+    "src/components/access/MembersPanel.tsx",
+    "src/components/chart/TableHeaderControls.tsx",
+  ],
+  "jsx-a11y/no-static-element-interactions": [
+    "src/components/chart/dashboard/CardInlineFilters.tsx",
+  ],
+  "jsx-a11y/role-has-required-aria-props": [
+    "src/components/chart/settings/CurrencySelect.tsx",
+  ],
 };
