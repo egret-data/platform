@@ -21,13 +21,14 @@ describe("jsx-a11y configuration", () => {
   });
 
   it("lets the rules see through egret's primitives", async () => {
-    const config = await eslint.calculateConfigForFile("src/components/explore/EmptyState.tsx");
-    expect(config.settings["jsx-a11y"].components).toMatchObject({
-      Button: "button",
-      Input: "input",
-      Label: "label",
-      Textarea: "textarea",
-    });
+    const lint = async (code) => {
+      const [result] = await eslint.lintText(code, { filePath: "src/components/explore/Probe.tsx" });
+      return result.messages.filter((m) => m.ruleId === "jsx-a11y/label-has-associated-control");
+    };
+    expect(await lint("export const A = () => <Label>Name</Label>;")).toHaveLength(1);
+    expect(
+      await lint('export const A = () => <><Label htmlFor="x">Name</Label><Input id="x" /></>;'),
+    ).toEqual([]);
   });
 
   it("leaves test files alone", async () => {

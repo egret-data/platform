@@ -7,10 +7,11 @@ import egret from "./index.js";
 export const plugins = { egret, "jsx-a11y": jsxA11yX };
 
 // egret's primitives render these elements (src/components/ui), so the rules
-// see through them (FE-A11Y-1, FE-FORM-2). Shared with scripts/lint-legacy.mjs,
+// see through them (FE-A11Y-1, FE-FORM-2). The fork reads only the
+// `jsx-a11y-x` key, not `jsx-a11y`. Shared with scripts/lint-legacy.mjs,
 // which must lint with the same settings the main config does.
 export const a11ySettings = {
-  "jsx-a11y": {
+  "jsx-a11y-x": {
     components: { Button: "button", Input: "input", Label: "label", Textarea: "textarea" },
   },
 };

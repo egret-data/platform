@@ -32,4 +32,20 @@ describe("staleEntries", () => {
       /egret\/no-such-rule/,
     );
   });
+
+  describe("jsx-a11y rules", () => {
+    const TABINDEX = "jsx-a11y/no-noninteractive-tabindex";
+
+    it("judges a file with the main config's options (recommended allows a tabbable tabpanel)", async () => {
+      const file = "eslint-rules/__tests__/fixtures/a11y-tabpanel.tsx";
+      expect(await staleEntries({ [TABINDEX]: [file] }, { cwd })).toEqual([
+        { rule: TABINDEX, file, reason: "clean" },
+      ]);
+    });
+
+    it("accepts a listed file that still breaks the rule under those options", async () => {
+      const file = "eslint-rules/__tests__/fixtures/a11y-article.tsx";
+      expect(await staleEntries({ [TABINDEX]: [file] }, { cwd })).toEqual([]);
+    });
+  });
 });
