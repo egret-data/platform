@@ -21,7 +21,7 @@
       "revision": "ignored",
       "sla": "warned",
       "tasks": "honoured",
-      "triggers": "warned",
+      "triggers": "honoured",
       "updated": "ignored",
       "variables": "honoured",
       "workerSelector": "ignored"
