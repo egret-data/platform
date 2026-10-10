@@ -78,7 +78,7 @@ Rule nhắc tên một component thì ghi file chứa nó. Nếu component chuy�
    - Lối vào là link, không phải lệnh điều hướng (`ui-conventions.md` §3).
 4. Danh sách dạng bảng dùng `FilterableTable` (`src/components/explore/FilterableTable.tsx`) hoặc `ui/table`.
    - `<table>` tự viết chỉ được phép cho grid đặc thù (pivot, kết quả SQL), và kèm một comment giải thích.
-5. Phần cấu hình dùng `ConfigTable`/`ConfigTableRow`/`ConfigSection` (`src/components/config/`), theo dạng `Setting | Details | Value` (`ui-conventions.md` §4).
+5. Phần cấu hình dùng `ConfigTable`/`ConfigTableRow`/`ConfigSection` (`src/components/config/ConfigTable.tsx`, `src/components/form/ConfigSection.tsx`), theo dạng `Setting | Details | Value` (`ui-conventions.md` §4).
    - Một tập thuộc tính phẳng là một danh sách key/value tìm kiếm được, không làm form riêng cho từng field.
 
 ### 4.2 Trạng thái (FE-STATE)

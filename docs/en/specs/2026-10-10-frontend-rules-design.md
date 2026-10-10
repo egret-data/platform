@@ -76,7 +76,7 @@ A rule that names a component names the file it lives in. If a component moves, 
    - Entry points are links, not imperative pushes (`ui-conventions.md` §3).
 4. A tabular list uses `FilterableTable` (`src/components/explore/FilterableTable.tsx`) or `ui/table`.
    - A hand-written `<table>` is allowed only for a specialised grid (pivot, SQL results), and carries a comment saying why.
-5. Settings use `ConfigTable`/`ConfigTableRow`/`ConfigSection` (`src/components/config/`), in the `Setting | Details | Value` shape (`ui-conventions.md` §4).
+5. Settings use `ConfigTable`/`ConfigTableRow`/`ConfigSection` (`src/components/config/ConfigTable.tsx`, `src/components/form/ConfigSection.tsx`), in the `Setting | Details | Value` shape (`ui-conventions.md` §4).
    - A flat property map is one searchable key/value list, not a bespoke form per field.
 
 ### 4.2 States (FE-STATE)
