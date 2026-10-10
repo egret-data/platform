@@ -46,7 +46,7 @@ exists again — which is one reason it ships even though the migrator is the he
 
 1. **Build both halves, with real writes.** Not protection-plus-reporting; the migrator
    writes.
-2. **A migrated policy is DISABLED, not deleted** — `isEnabled: false`, left in the profile.
+2. **A migrated policy is DISABLED, not deleted** — left in the profile, switched off.
    Ranger unions allow-policies, so leaving the original enabled would grant in parallel with
    the new compiled policy and make a revocation through the new UI ineffective; deleting it
    would remove the only rollback. This also follows the standing rule adopted 2026-09-16:
@@ -202,7 +202,17 @@ one place: it always rolls back.
 1. Insert the N `perm.grants` / `perm.rules` rows.
 2. Run the existing recompile driver (`apply_diff_in_tx`), which stamps the profile
    `generated` and emits the `perm-*` policies.
-3. Set `isEnabled: false` on the original policy's `policy_jsonb`.
+3. Switch the original policy off — `policy.authz_policies.enabled = false`, the **column**,
+   not a field inside `policy_jsonb`.
+
+   This was measured, and an earlier draft of this spec had the mechanism wrong. The download
+   query is `WHERE service_id = $1 AND enabled = true` and then stamps `isEnabled` into the
+   emitted body *from that column* (`crates/egret-policy/src/store.rs`). So clearing the column
+   is both the right lever and a stronger one than editing the JSON: the artifact the engine
+   downloads **does not contain the policy at all**, rather than containing a copy marked
+   disabled. `set_policy_enabled(id, enabled)` already exists for this and already runs
+   `refuse_if_compiler_owned`, so it refuses a compiler-owned row — and must refuse an `infra`
+   row too once Part 1's column exists.
 4. Insert provenance.
 5. **Re-run the equivalence gate against the state just written, inside the transaction, and
    `ROLLBACK` on any disagreement.**
@@ -256,6 +266,15 @@ real engine finds the defects: for SP4d-2b, 127 unit tests found 0 of 3 while th
 corpus found 9. The migration corpus therefore runs through the existing harness,
 `EgretCaseRunner` with `-Degret.cases` / `-Degret.verdicts` (`tests/ranger/`), **at both 2.5.0
 and 2.8.0**, like the gate already in `just test-ranger-gates`. No second harness.
+
+**How before/after fits a harness that takes one policy set per case.** Measured: `Case` carries
+a single `service_policies` field, `Case::to_json` emits exactly one `servicePolicies` key, and
+`EgretCaseRunner.runOne` deserialises one `ServicePolicies` and calls `evaluatePolicies` once —
+the diff axis the harness supports is the **Ranger version**, not the policy-set version. So the
+before-state and the after-state are emitted as **two separate cases** (paired ids, e.g.
+`mig-0001-before` / `mig-0001-after`) and compared **pairwise on the Rust side** after
+`ask_ranger` returns. The Java needs no change, and this is a constraint on the corpus generator
+rather than on the harness.
 
 ### The corpus is generated from the service-def, not from our vocabulary
 
