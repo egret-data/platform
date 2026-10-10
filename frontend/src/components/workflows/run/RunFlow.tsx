@@ -248,7 +248,9 @@ function RunForm({
                 idPrefix={idPrefix}
               />
             ))}
-          <DialogFooter className="items-center">
+          {/* Sticky at the foot of the scrolling body, as Kestra's Execute is: a long form
+              (the drawer) otherwise hides Run below every field (W7a Task 8). */}
+          <DialogFooter className="sticky bottom-0 z-10 items-center border-t border-border bg-background pt-3">
             {reasons}
             <Button type="button" size="sm" variant="outline" onClick={() => onOpenChange(false)}>
               Cancel
