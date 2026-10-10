@@ -27,6 +27,8 @@
 
 - **(2026-10-10, the user's ruling while planning) The schema's property data comes from Kestra's own JSON schema, filtered to egret.** egret's registry holds only type names and aliases, and `catalog.json` holds properties for nine JDBC classes, so there was no property data to serve. Kestra's flow schema for the pinned version is exported once from the local Kestra image and committed as an artifact, like the oracle fixtures. It is filtered to the types egret accepts, minus the properties egret ignores. egret's own types (`egret.*`, `core.http`, `core.slack`, the script types) get hand-written schemas (§7.1).
 
+- **(2026-10-10, the user's ruling on Task 2's review) The backend returns the creator's and publisher's display names.** `FlowListItemDto`, `FlowDto` and `FlowVersionDto` gain `created_by_name: Option<String>`, joined server-side. The UI needs no member listing, which requires `workspace:manage_members`, so every viewer sees names (§4, §7.4).
+
 ## 1. Why
 
 The engine runs flows in production (W10 onwards), but a user can only author and run them with `curl`. W7a is the first package where a user writes, publishes and runs a flow in the browser. It also sets up the frame the other four W7 packages plug into: the nav group, lazy routes, the tab registry, and the state vocabulary.
@@ -269,6 +271,10 @@ While the execution is not terminal, it polls `GET …/executions/{id}` every 2 
 - The comparison and the write happen in one statement (`UPDATE … WHERE id = $1 AND updated_at = $2`), so two concurrent saves cannot both pass.
 - Absent, the route behaves exactly as today.
 - Every writer of `flows.updated_at` is listed in the route's doc comment, because the precondition's meaning rests on them (FE-STATE-4's rule, applied to a precondition).
+
+### 7.4 Creator names
+
+`FlowListItemDto`, `FlowDto` and `FlowVersionDto` gain `created_by_name: Option<String>`. It is the creating or publishing user's display name, joined in the same query that reads the row. It is null when `created_by` is null or the user no longer exists. The UI shows the name, or "—" when it is null, and never fetches workspace members for it.
 
 `openapi.json` and the generated client are regenerated with `npm run gen:api` (FE-DATA-1).
 

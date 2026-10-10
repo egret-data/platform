@@ -29,6 +29,8 @@
 
 - **(2026-10-10, phán quyết của người dùng khi lập plan) Dữ liệu thuộc tính của schema lấy từ JSON schema của chính Kestra, lọc theo egret.** Registry của egret chỉ có tên type và alias, còn `catalog.json` chỉ có thuộc tính của chín class JDBC, nên không có dữ liệu thuộc tính nào để trả về. Flow schema của Kestra cho bản đã ghim được xuất một lần từ image Kestra trên máy và commit thành một artifact, giống các fixture oracle. Schema được lọc chỉ giữ các type egret chấp nhận, và bỏ các thuộc tính egret bỏ qua. Các type riêng của egret (`egret.*`, `core.http`, `core.slack`, các type script) có schema viết bằng tay (§7.1).
 
+- **(2026-10-10, phán quyết của người dùng về review Task 2) Backend trả tên hiển thị của người tạo và người publish.** `FlowListItemDto`, `FlowDto` và `FlowVersionDto` có thêm `created_by_name: Option<String>`, join phía server. UI không cần lấy danh sách thành viên (route đó cần `workspace:manage_members`), nên mọi người xem đều thấy tên (§4, §7.4).
+
 ## 1. Vì sao
 
 Engine đã chạy flow trong production (từ W10), nhưng người dùng chỉ viết và chạy được flow bằng `curl`. W7a là package đầu tiên cho người dùng viết, publish và chạy flow trên trình duyệt. Nó cũng dựng khung để bốn package W7 còn lại gắn vào: nhóm nav, route lazy, registry tab và bộ từ vựng state.
@@ -271,6 +273,10 @@ Khi execution chưa kết thúc, trang poll `GET …/executions/{id}` mỗi 2 gi
 - So sánh và ghi nằm trong một câu lệnh (`UPDATE … WHERE id = $1 AND updated_at = $2`), nên hai lần lưu đồng thời không thể cùng qua.
 - Không có trường này thì route giữ nguyên hành vi như hiện nay.
 - Mọi nơi ghi `flows.updated_at` được liệt kê trong doc comment của route, vì ý nghĩa của điều kiện tiên quyết này dựa vào chúng (rule FE-STATE-4, áp cho một điều kiện tiên quyết).
+
+### 7.4 Tên người tạo
+
+`FlowListItemDto`, `FlowDto` và `FlowVersionDto` có thêm `created_by_name: Option<String>`. Đó là tên hiển thị của người tạo hoặc người publish, join ngay trong câu truy vấn đọc hàng đó. Nó là null khi `created_by` null hoặc người dùng không còn tồn tại. UI hiện tên, hoặc "—" khi null, và không bao giờ lấy danh sách thành viên workspace cho việc này.
 
 `openapi.json` và client được sinh lại bằng `npm run gen:api` (FE-DATA-1).
 
