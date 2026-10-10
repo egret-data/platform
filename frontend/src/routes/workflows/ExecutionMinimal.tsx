@@ -1,7 +1,7 @@
 import { Link, useParams } from "react-router-dom";
 import { ListTree, RotateCw } from "lucide-react";
 import { ApiError } from "@/api/client";
-import { useWorkflowGetExecution } from "@/api/generated/workflow/workflow";
+import { useWorkflowGetExecution, type workflowGetExecutionResponse } from "@/api/generated/workflow/workflow";
 import type { ExecutionDto } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -15,6 +15,26 @@ import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
 /** How often a running execution is read again (spec §6.3); egret's APIs are poll-only. */
 export const EXECUTION_POLL_MS = 2000;
+/** The longest wait between reads while they keep failing. */
+export const EXECUTION_POLL_MAX_MS = 30_000;
+
+/**
+ * When to read the execution again. Never once it is terminal. While reads
+ * fail, the wait grows with the time since the last good answer -- 2 s, then
+ * 4, 8, 16, capped at 30 -- so a blip costs one late refresh and an outage is
+ * not hammered. It is computed from timestamps react-query keeps, because its
+ * own failure count restarts with every fetch.
+ */
+export function nextPollMs(
+  state: { data: workflowGetExecutionResponse | undefined; status: string; dataUpdatedAt: number },
+  now: number,
+): number | false {
+  const data = state.data;
+  if (!data) return state.status === "error" ? false : EXECUTION_POLL_MS;
+  if (data.status === 200 && isTerminalState(data.data.state)) return false;
+  if (state.status !== "error") return EXECUTION_POLL_MS;
+  return Math.min(Math.max(EXECUTION_POLL_MS, now - state.dataUpdatedAt), EXECUTION_POLL_MAX_MS);
+}
 
 /**
  * `executions/:id`, the minimal execution page (W7a spec §6.3): what ran,
@@ -26,11 +46,9 @@ export default function ExecutionMinimal() {
   const query = useWorkflowGetExecution(workspace, id, {
     query: {
       queryKey: workflowsKeys.execution(id),
-      refetchInterval: (q) => {
-        const data = q.state.data;
-        if (q.state.status === "error") return false;
-        return data?.status === 200 && isTerminalState(data.data.state) ? false : EXECUTION_POLL_MS;
-      },
+      // A failed poll keeps polling (with backoff) until the execution is terminal; the
+      // page keeps the last answer and says the refresh failed (FE-STATE-1).
+      refetchInterval: (q) => nextPollMs(q.state, Date.now()),
     },
   });
   const execution = query.data?.status === 200 ? query.data.data : undefined;
@@ -79,7 +97,27 @@ export default function ExecutionMinimal() {
       </div>
     );
   }
-  return <ExecutionView ws={workspace} execution={execution} readAt={query.dataUpdatedAt} />;
+  return (
+    <>
+      {query.isError ? (
+        <div className="px-4 pt-4">
+          <Alert variant="destructive">
+            <AlertDescription className="flex flex-wrap items-center gap-3">
+              <span>
+                The execution could not be refreshed: {query.error instanceof Error ? query.error.message : "the request failed"}.
+                What is shown is the last answer, read {new Date(query.dataUpdatedAt).toLocaleTimeString()}; it keeps trying.
+              </span>
+              <Button variant="outline" size="sm" onClick={() => void query.refetch()}>
+                <RotateCw aria-hidden />
+                Retry
+              </Button>
+            </AlertDescription>
+          </Alert>
+        </div>
+      ) : null}
+      <ExecutionView ws={workspace} execution={execution} readAt={query.dataUpdatedAt} />
+    </>
+  );
 }
 
 /** `readAt`: when this answer was read (`dataUpdatedAt`), the "now" of a running execution's duration. */

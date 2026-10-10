@@ -37345,6 +37345,14 @@
             ],
             "description": "The creator's display name: the profile name, else the email. Null\nwhen `created_by` is null or the user no longer exists (W7a spec §7.4)."
           },
+          "latest_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The flow's highest version number; null when it has none. Versions\nare snapshots to compare and restore: executions run the saved draft\n(W7a spec §4, §5.3)."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -37414,6 +37422,14 @@
               "null"
             ],
             "description": "The creator's display name: the profile name, else the email. Null\nwhen `created_by` is null or the user no longer exists (W7a spec §7.4)."
+          },
+          "latest_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The flow's highest version number; null when it has none. Versions\nare snapshots to compare and restore: executions run the saved draft\n(W7a spec §4, §5.3)."
           },
           "created_at": {
             "type": "string",

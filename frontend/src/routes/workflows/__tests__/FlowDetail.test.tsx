@@ -299,7 +299,9 @@ describe("FlowDetail: Create version", () => {
     expect(server.callsTo("POST", `${FLOW_PATH}/publish`)[0].body).toEqual({ note: "First release" });
     await waitFor(() => expect(server.callsTo("GET", `${FLOW_PATH}/versions`).length).toBeGreaterThan(versionReads));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(await screen.findByText("Live")).toBeInTheDocument();
+    // The header's version label follows the new version; the chip still says the flow runs.
+    expect(await screen.findByText("Version v1")).toBeInTheDocument();
+    expect(screen.getByText("Active")).toBeInTheDocument();
     const movedByVersion = server.flow!.updated_at;
     expect(movedByVersion).not.toBe("2026-10-10T09:47:08.618779Z");
 
@@ -429,12 +431,49 @@ describe("FlowDetail: Run", () => {
     expect(screen.getByText("The flow is disabled")).toBeVisible();
   });
 
+  it("is disabled when a refetch brings someone else's saved draft, which this editor does not show", async () => {
+    server = new FakeWorkflowServer();
+    renderAt();
+    await editorBox();
+    await waitFor(() => expect(button("Create version")).toBeEnabled(), LONG);
+    expect(button("Run")).toBeEnabled();
+    // Someone saves elsewhere; Create version reads the draft back afterwards.
+    server.saveElsewhere(flowSource("theirs"));
+    await userEvent.click(button("Create version"));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create version" }));
+    await waitFor(() => expect(button("Run")).toHaveAccessibleDescription("The flow changed on the server; reload to run it"));
+    expect(button("Run")).toBeDisabled();
+    expect(screen.getByText("The flow changed on the server; reload to run it")).toBeVisible();
+    // The editor still shows its own text.
+    expect(screen.getByRole("textbox", { name: "Flow source" })).toHaveValue(flowSource("one"));
+  });
+
   it("is disabled while the saved YAML says disabled: true", async () => {
     server = new FakeWorkflowServer({ source: `${flowSource("off")}disabled: true\n` });
     renderAt();
     await editorBox();
     await waitFor(() => expect(button("Run")).toHaveAccessibleDescription("The flow is disabled"), LONG);
     expect(button("Run")).toBeDisabled();
+  });
+});
+
+describe("FlowDetail: the header's state and version", () => {
+  it("shows Active and a dash for a flow with no version", async () => {
+    server = new FakeWorkflowServer();
+    renderAt();
+    await editorBox();
+    expect(screen.getByTestId("flow-latest-version")).toHaveTextContent(/^Version —$/);
+    expect(screen.getByText("Active")).toBeInTheDocument();
+  });
+
+  it("shows the latest version number, and Disabled for a disabled flow", async () => {
+    server = new FakeWorkflowServer({ state: "disabled", latest_version: 7 });
+    renderAt();
+    await editorBox();
+    expect(screen.getByTestId("flow-latest-version")).toHaveTextContent(/^Version v7$/);
+    expect(screen.getByText("Disabled")).toBeInTheDocument();
+    expect(screen.queryByText(/^(Live|Draft)$/)).not.toBeInTheDocument();
   });
 });
 

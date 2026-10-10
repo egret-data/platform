@@ -323,6 +323,10 @@ pub struct FlowDto {
     /// The creator's display name: the profile name, else the email. Null
     /// when `created_by` is null or the user no longer exists (W7a spec §7.4).
     pub created_by_name: Option<String>,
+    /// The flow's highest version number; null when it has none. Versions
+    /// are snapshots to compare and restore: executions run the saved draft
+    /// (W7a spec §4, §5.3).
+    pub latest_version: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub validation: ValidationReportDto,
@@ -351,6 +355,10 @@ pub struct FlowListItemDto {
     /// The creator's display name: the profile name, else the email. Null
     /// when `created_by` is null or the user no longer exists (W7a spec §7.4).
     pub created_by_name: Option<String>,
+    /// The flow's highest version number; null when it has none. Versions
+    /// are snapshots to compare and restore: executions run the saved draft
+    /// (W7a spec §4, §5.3).
+    pub latest_version: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -366,6 +374,7 @@ impl From<FlowRow> for FlowListItemDto {
             live_version_id: r.live_version_id,
             created_by: r.created_by,
             created_by_name: r.created_by_name,
+            latest_version: r.latest_version,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }
@@ -487,6 +496,7 @@ fn draft_dto(row: FlowRow, can_manage: bool) -> EgretResult<FlowDto> {
         live_version_id: row.live_version_id,
         created_by: row.created_by,
         created_by_name: row.created_by_name,
+        latest_version: row.latest_version,
         created_at: row.created_at,
         updated_at: row.updated_at,
         validation: ValidationReportDto::from(&report),

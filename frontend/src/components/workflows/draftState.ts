@@ -96,6 +96,11 @@ export function canCreateVersion({
  * Run starts the SAVED draft, and the run form reads that draft's inputs, so
  * it waits for a save, a clean validation, and a flow that is not disabled.
  * It needs no version.
+ *
+ * `stale`: the server's saved draft is not the text this editor last loaded
+ * or saved (someone else's save, read back by a refetch), while the editor
+ * has no edits of its own. Run would start THAT text, which the editor does
+ * not show and validation did not check, so it waits for a reload.
  */
 export function canRun({
   manage,
@@ -103,15 +108,18 @@ export function canRun({
   errors,
   validationStatus,
   disabled,
+  stale = false,
 }: {
   manage: boolean;
   dirty: boolean;
   errors: number;
   validationStatus: ServerValidation["status"];
   disabled: boolean;
+  stale?: boolean;
 }): Enablement {
   if (!manage) return { ok: false, reason: "Running a flow needs the workflow:manage permission" };
   if (disabled) return { ok: false, reason: "The flow is disabled" };
   if (dirty) return { ok: false, reason: "Save first: Run uses the saved draft" };
+  if (stale) return { ok: false, reason: "The flow changed on the server; reload to run it" };
   return validated(errors, validationStatus, "run");
 }

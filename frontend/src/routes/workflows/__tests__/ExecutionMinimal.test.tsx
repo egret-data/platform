@@ -3,7 +3,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import ExecutionMinimal from "@/routes/workflows/ExecutionMinimal";
+import ExecutionMinimal, { nextPollMs } from "@/routes/workflows/ExecutionMinimal";
 
 const WS = "eng";
 const EXEC = "5e5e5e5e-0000-4000-8000-0000000000aa";
@@ -114,6 +114,44 @@ describe("ExecutionMinimal", () => {
     await act(() => vi.advanceTimersByTimeAsync(10_000));
     expect(gets).toHaveLength(3);
     expect(gets.every((g) => g === PATH)).toBe(true);
+  });
+
+  it("keeps polling after a failed poll, showing the last answer and the error, and clears the error when a poll succeeds", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const gets = serve(
+      { status: 200, body: execution("RUNNING") },
+      { status: 503, body: { error: "the database is unavailable" } },
+      { status: 200, body: execution("SUCCESS") },
+    );
+    renderPage();
+    await screen.findByText("Running", { selector: "[data-testid=execution-summary] *" });
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+    await waitFor(() => expect(gets).toHaveLength(2));
+    // The last answer stays, and the page says it could not refresh, with Retry.
+    expect(await screen.findByText(/The execution could not be refreshed: the database is unavailable/)).toBeInTheDocument();
+    expect(within(screen.getByTestId("execution-summary")).getByText("Running")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    // Polling did not stop: the next read lands within the backoff, succeeds, and clears the error.
+    await act(() => vi.advanceTimersByTimeAsync(5000));
+    await waitFor(() => expect(gets).toHaveLength(3));
+    expect(await within(screen.getByTestId("execution-summary")).findByText("Success")).toBeInTheDocument();
+    expect(screen.queryByText(/could not be refreshed/)).not.toBeInTheDocument();
+    // Terminal now: no more reads.
+    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    expect(gets).toHaveLength(3);
+  });
+
+  it("backs off while reads keep failing: 2 s, then the time since the last good answer, capped at 30 s", () => {
+    const running = { status: 200, data: execution("RUNNING"), headers: new Headers() } as never;
+    const done = { status: 200, data: execution("SUCCESS"), headers: new Headers() } as never;
+    const at = 1_000_000;
+    expect(nextPollMs({ data: running, status: "success", dataUpdatedAt: at }, at + 10)).toBe(2000);
+    expect(nextPollMs({ data: running, status: "error", dataUpdatedAt: at }, at + 2000)).toBe(2000);
+    expect(nextPollMs({ data: running, status: "error", dataUpdatedAt: at }, at + 8000)).toBe(8000);
+    expect(nextPollMs({ data: running, status: "error", dataUpdatedAt: at }, at + 600_000)).toBe(30_000);
+    expect(nextPollMs({ data: done, status: "error", dataUpdatedAt: at }, at + 2000)).toBe(false);
+    // Nothing ever loaded: the page's full error and Retry take over.
+    expect(nextPollMs({ data: undefined, status: "error", dataUpdatedAt: 0 }, at)).toBe(false);
   });
 
   it("shows a skeleton while loading", () => {

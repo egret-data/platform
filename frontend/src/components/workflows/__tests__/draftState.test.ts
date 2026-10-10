@@ -120,6 +120,12 @@ describe("canRun", () => {
     expect(canRun({ ...ready, validationStatus: "validating" })).toEqual({ ok: false, reason: "Validating the flow…" });
   });
 
+  it("waits for a reload when the server's saved draft is not the one this editor holds", () => {
+    expect(canRun({ ...ready, stale: true })).toEqual({ ok: false, reason: "The flow changed on the server; reload to run it" });
+    // Unsaved edits are named first: saving is what the user is about to do, and the 409 handles the rest.
+    expect(canRun({ ...ready, stale: true, dirty: true })).toEqual({ ok: false, reason: "Save first: Run uses the saved draft" });
+  });
+
   it("says the flow is disabled before anything a save could fix", () => {
     expect(canRun({ ...ready, disabled: true })).toEqual({ ok: false, reason: "The flow is disabled" });
     expect(canRun({ ...ready, disabled: true, dirty: true, errors: 2 })).toEqual({ ok: false, reason: "The flow is disabled" });

@@ -13,7 +13,7 @@ import { ListStates } from "@/components/explore/ListStates";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { useCollapsed } from "@/components/explore/folders";
-import { StateChip } from "@/components/workflows/StateChip";
+import { flowActivity, StateChip, type FlowActivity } from "@/components/workflows/StateChip";
 import {
   buildNamespaceTree,
   EMPTY_SEGMENT_LABEL,
@@ -35,14 +35,18 @@ import { workflowsKeys } from "@/routes/workflows/queryKeys";
  */
 export const nsCollapseKey = (ws: string) => `egret.wf.ns-collapsed.${ws}`;
 
-const FLOW_STATES = [
-  { value: "draft", label: "Draft" },
-  { value: "live", label: "Live" },
+/**
+ * The State filter: whether a flow runs (the user's ruling, 2026-10-10).
+ * `draft` and `live` are both Active, as the chip says; `?state=` carries
+ * `active` or `disabled`.
+ */
+const FLOW_STATES: { value: FlowActivity; label: string }[] = [
+  { value: "active", label: "Active" },
   { value: "disabled", label: "Disabled" },
 ];
 
 /** The table's column count, for the skeleton and the header rows' span. */
-const COLS = 4;
+const COLS = 5;
 
 /** One namespace's header plus the flows that are its own, in tree order. */
 interface Section {
@@ -98,7 +102,7 @@ export default function FlowsList() {
       (f) =>
         (!needle || f.flow_id.toLowerCase().includes(needle) || f.namespace.toLowerCase().includes(needle)) &&
         (!nsFilter || namespaceContains(nsFilter, f.namespace)) &&
-        (!stateFilter || f.state === stateFilter),
+        (!stateFilter || flowActivity(f.state) === stateFilter),
     );
   }, [flows, q, nsFilter, stateFilter]);
 
@@ -148,7 +152,7 @@ export default function FlowsList() {
     return out;
   }, [filtered, isCollapsed]);
 
-  const count = (state: string) => filtered.filter((f) => f.state === state).length;
+  const count = (activity: FlowActivity) => filtered.filter((f) => flowActivity(f.state) === activity).length;
 
   return (
     <ListPageShell
@@ -215,8 +219,7 @@ export default function FlowsList() {
           <SummaryStrip
             items={[
               { label: "flows", singular: "flow", value: filtered.length },
-              { label: "live", value: count("live") },
-              { label: "draft", value: count("draft") },
+              { label: "active", value: count("active") },
               { label: "disabled", value: count("disabled") },
             ]}
           />
@@ -241,6 +244,7 @@ export default function FlowsList() {
                 <tr>
                   <th className="py-1">Flow</th>
                   <th>State</th>
+                  <th>Version</th>
                   <th>Updated</th>
                   <th>Created by</th>
                 </tr>
@@ -265,6 +269,11 @@ export default function FlowsList() {
                           </td>
                           <td>
                             <StateChip kind="flow" state={f.state} />
+                          </td>
+                          <td className="tabular-nums text-muted-foreground">
+                            {/* The latest version, a snapshot to compare and restore; what
+                                runs is the saved draft whatever this says. */}
+                            {f.latest_version != null ? `v${f.latest_version}` : "—"}
                           </td>
                           <td className="text-muted-foreground">
                             <RelativeTime iso={f.updated_at} />

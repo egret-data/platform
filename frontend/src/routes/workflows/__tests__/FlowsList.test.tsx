@@ -179,11 +179,22 @@ describe("FlowsList — the namespace tree", () => {
     mockFlows([flow("a", "one", { state: "live", folder_id: "folder-secret" })]);
     renderAt();
     const row = screen.getByRole("link", { name: "one" }).closest("tr") as HTMLElement;
-    expect(within(row).getByText("Live")).toBeInTheDocument();
+    // The chip says only whether the flow runs (the user's ruling, 2026-10-10).
+    expect(within(row).getByText("Active")).toBeInTheDocument();
     expect(within(row).getByText("Alice Nguyen")).toBeInTheDocument();
     expect(screen.queryByText(/folder-secret/)).not.toBeInTheDocument();
     // The name comes with the row; workspace members are never fetched for it.
     expect(members.useWorkspaceMembers).not.toHaveBeenCalled();
+  });
+
+  it("shows the latest version as v{n} in its own column, and a dash with none", () => {
+    mockFlows([flow("a", "one", { latest_version: 12 }), flow("a", "two", { latest_version: null })]);
+    renderAt();
+    expect(screen.getByRole("columnheader", { name: "Version" })).toBeInTheDocument();
+    const cells = (name: string) => [...(screen.getByRole("link", { name }).closest("tr") as HTMLElement).querySelectorAll("td")];
+    const versionColumn = screen.getAllByRole("columnheader").findIndex((h) => h.textContent === "Version");
+    expect(cells("one")[versionColumn]).toHaveTextContent(/^v12$/);
+    expect(cells("two")[versionColumn]).toHaveTextContent(/^—$/);
   });
 
   it("shows a dash, not an id, when the server has no name for the creator", () => {
@@ -318,12 +329,12 @@ describe("FlowsList — filters live in the URL", () => {
     await user.click(screen.getByLabelText("Namespace"));
     await user.click(await screen.findByRole("option", { name: "company" }));
     await user.click(screen.getByLabelText("State"));
-    await user.click(await screen.findByRole("option", { name: "Live" }));
+    await user.click(await screen.findByRole("option", { name: "Active" }));
     await user.type(screen.getByLabelText("Search flows"), "s");
 
     const written = searchParams();
     expect(written.get("namespace")).toBe("company");
-    expect(written.get("state")).toBe("live");
+    expect(written.get("state")).toBe("active");
     expect(written.get("q")).toBe("s");
     first.unmount();
 
@@ -331,8 +342,8 @@ describe("FlowsList — filters live in the URL", () => {
     renderAt(`?${written.toString()}`);
     expect(screen.getByLabelText("Search flows")).toHaveValue("s");
     expect(screen.getByLabelText("Namespace")).toHaveTextContent("company");
-    expect(screen.getByLabelText("State")).toHaveTextContent("Live");
-    // live, inside company's subtree, matching "s": only `sync`.
+    expect(screen.getByLabelText("State")).toHaveTextContent("Active");
+    // Active, inside company's subtree, matching "s": only `sync`.
     expect(flowLinks()).toEqual(["sync"]);
   });
 
@@ -365,10 +376,13 @@ describe("FlowsList — filters live in the URL", () => {
     expect(await screen.findByRole("option", { name: "retired.team" })).toBeInTheDocument();
   });
 
-  it("filters by state", () => {
+  it("filters by whether a flow runs: disabled alone, or draft and live together as active", () => {
     mockFlows(FLOWS);
-    renderAt("?state=disabled");
+    const first = renderAt("?state=disabled");
     expect(flowLinks()).toEqual(["other"]);
+    first.unmount();
+    renderAt("?state=active");
+    expect(flowLinks()).toEqual(["root-a", "root-b", "etl", "sync"]);
   });
 
   it("counts what the filters leave, in total and by state", () => {
@@ -376,8 +390,8 @@ describe("FlowsList — filters live in the URL", () => {
     renderAt("?namespace=company");
     const strip = screen.getByTestId("flows-summary");
     expect(strip).toHaveTextContent("4flows");
-    expect(strip).toHaveTextContent("2live");
-    expect(strip).toHaveTextContent("2draft");
+    expect(strip).toHaveTextContent("4active");
     expect(strip).toHaveTextContent("0disabled");
+    expect(strip).not.toHaveTextContent(/live|draft/);
   });
 });

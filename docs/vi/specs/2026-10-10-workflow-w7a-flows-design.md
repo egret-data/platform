@@ -22,7 +22,7 @@
   - **Ngoài W7:** sửa kiểu no-code, blueprints, trang tài liệu plugin, AI, dashboards, kill và restart (chưa có backend), và SSE (API của egret chỉ có polling).
 - **Danh sách flow nhóm theo cây namespace** (`company` → `company.team`). `folder_id` không hiện ở đâu trong UI workflow.
 - **Editor flow là bố cục nhiều panel đầy đủ như `MultiPanelTabs` của Kestra.** Panel chứa tab; tab chuyển được giữa các panel và tách panel; bố cục được lưu theo từng flow.
-- **Save và Publish là hai nút.** Save ghi draft; Publish tạo một version bất biến. *(Đính chính 2026-10-10 theo phán quyết bên dưới: execution chạy bản draft đã lưu, không chạy version.)*
+- **Save và Create version là hai nút.** Save ghi draft, và đó là thứ mọi execution chạy; Create version tạo một snapshot bất biến có đánh số. Một chỉ báo suy từ nội dung cho biết khi draft đã lưu khác version mới nhất. *(Viết lại 2026-10-10 theo phán quyết bên dưới; bản đầu gọi nút thứ hai là Publish và nói execution chạy version.)*
 - **Độ thông minh của editor:**
   - `monaco-yaml` dùng một JSON schema do một endpoint chỉ đọc mới cung cấp. Schema dựng từ chính registry mà backend dùng để validate, và lọc theo feature của workspace. Nhờ đó có gợi ý, hover và lỗi cấu trúc ngay khi gõ.
   - Một lần validate trên server (có debounce) đưa lỗi ngữ nghĩa vào editor và vào tab Problems.
@@ -37,9 +37,11 @@
   - **Chỉ báo so nội dung.** Nó ghi "Changes since v{n}": draft đã lưu khác version mới nhất, so từng byte (FE-STATE-4). Chỉ báo này tách riêng khỏi "Unsaved changes".
   - **Run** chạy bản draft đã lưu và đọc `inputs:` của nó. Run không cần version nào, và chỉ bị vô hiệu hoá khi draft còn chỉnh sửa chưa lưu ("Save first: Run uses the saved draft"), khi validate có lỗi, hoặc khi flow đang `disabled`.
 
+- **(2026-10-10, phán quyết của người dùng về review Task 6, M5) Chip state của flow chỉ cho biết flow có chạy hay không.** Nó ghi **Active** khi state backend là `draft` hoặc `live`, và **Disabled** khi là `disabled`; "Draft" và "Live" đọc như "version nào đang chạy", điều không còn ý nghĩa. Số version mới nhất hiện tách khỏi chip: cột "Version" trong danh sách flow và một nhãn trong header chi tiết flow, cả hai ghi "v{n}", hoặc "—" khi chưa có version. `FlowListItemDto` và `FlowDto` có thêm `latest_version: Option<i32>`, số version lớn nhất của flow, đọc trong cùng câu truy vấn với hàng đó (như `created_by_name`).
+
 ## 1. Vì sao
 
-Engine đã chạy flow trong production (từ W10), nhưng người dùng chỉ viết và chạy được flow bằng `curl`. W7a là package đầu tiên cho người dùng viết, publish và chạy flow trên trình duyệt. Nó cũng dựng khung để bốn package W7 còn lại gắn vào: nhóm nav, route lazy, registry tab và bộ từ vựng state.
+Engine đã chạy flow trong production (từ W10), nhưng người dùng chỉ viết và chạy được flow bằng `curl`. W7a là package đầu tiên cho người dùng viết, tạo version và chạy flow trên trình duyệt. Nó cũng dựng khung để bốn package W7 còn lại gắn vào: nhóm nav, route lazy, registry tab và bộ từ vựng state.
 
 ## 2. Khác biệt với Kestra
 
@@ -51,6 +53,10 @@ Engine đã chạy flow trong production (từ W10), nhưng người dùng chỉ
 | Panel editor: Code, No-code, Topology, Docs, Files, Blueprints | Code, Docs, Problems ở W7a; Topology cùng W7c; Files cùng W7d; không có No-code và Blueprints | Ngoài W7 theo phán quyết của người dùng. Problems là của egret: Kestra hiện lỗi trong editor và trên một banner |
 | `/flows/validate` nhận YAML có thêm tiền tố `revision: N+1`, và phát hiện lần save `outdated` | `POST …/flows/validate` nhận YAML nguyên như vậy. Lần save trên bản cũ bị `PUT` từ chối nhờ `if_updated_at` (§5.3) | draft của egret không có bộ đếm revision |
 | Form run theo revision mới nhất | Form run theo **bản draft đã lưu**, và Run bị vô hiệu hoá khi còn chỉnh sửa chưa lưu | Execution chạy bản draft đã lưu (phán quyết của người dùng, 2026-10-10) |
+| Input JSON và YAML là editor code nội tuyến | Một ô văn bản font monospace; JSON được kiểm trước khi Run | Ô văn bản nhận `id` mà `Label` trỏ tới (FE-FORM-2) và để phím Tab di chuyển giữa các ô; `tabFocusMode` và `aria-labelledby` của Monaco làm được cả hai, nhưng form run không được lợi gì từ một editor (W7a Task 6, được chấp nhận khi review) |
+| MULTISELECT là một select nhiều lựa chọn có tìm kiếm và chọn tất cả | Một danh sách checkbox, mỗi giá trị một ô | Mỗi checkbox có `Label` gắn riêng (FE-FORM-2) và tập giá trị vẫn là một picker (FE-FORM-3); `ui/tag-combobox` không nhận `id`. Danh sách `values` dài làm drawer cao lên, và drawer cuộn được (W7a Task 6, được chấp nhận khi review) |
+| Form run mở trong một component drawer bên cạnh | Tối đa ba input scalar thì mở dialog; ngoài ra là chính primitive dialog ghim vào mép phải, cao hết màn hình | `components/ui` không có sheet hay drawer; phần thân của primitive dialog vốn đã cuộn được. Kích thước của nó được đo ở Task 8 (FE-TEST-2) |
+| Input BOOL không được chạm tới được gửi là `false` (`utils/inputs.ts:169-175`, được `updateDefaults` của `InputsForm.vue` áp cho mọi input chưa đặt) | Giống vậy: switch bắt đầu từ giá trị mặc định hoặc `false`, và luôn được gửi | Đúng hành vi của chính Kestra; switch không có trạng thái thứ ba |
 | Panel của editor: mỗi panel có một menu chấm (chuyển panel, đóng mọi tab, đóng mọi panel); thả tab lên mép trái hoặc phải ngoài cùng của khung thì tạo panel mới ở đó; `KeepAlive` giữ các tab ẩn của panel luôn mount, và panel được key theo chỉ số | Mỗi panel có một menu "Tab actions: <title>", tác động lên tab đang chọn (Move to panel…, Split left, Split right, Close); thả tab lên mép trái hoặc phải của **bất kỳ panel nào** thì tách cạnh panel đó; mỗi panel chỉ mount tab đang chọn, và khi tập panel đổi thì các panel được mount lại (§5.1) | Một `tablist` chỉ được chứa tab, nên đặt nút menu trong từng tab sẽ phá ngữ nghĩa đó; một menu mỗi panel giữ được ngữ nghĩa mà mọi tab vẫn tới được menu của mình trong hai phím. Tách cạnh bất kỳ panel nào là mô hình của spec. React không có `KeepAlive`: trạng thái của tab nằm ngoài tab, và Task 4 giữ model và view state của Monaco qua lần mount lại (`path`, `keepCurrentModel`, `saveViewState`). Nếu một tab khác cần luôn mount thì phương án dự phòng là portal đổi cha |
 | `monaco-yaml` 5.5.1 và `monaco-worker-manager` 2.0.1 được vá trong `node_modules` (`kestra/ui/patches/`): worker được khởi động bằng `createWebWorker({ worker })` của monaco 0.56, và bộ kiểm tra chọn thành viên `oneOf` theo `type` để gợi ý `type:` liệt kê mọi kiểu | Không vá `node_modules`. `monacoYaml.ts` đưa cho `monaco-yaml` một Monaco có `createWebWorker` khởi động worker theo cách monaco 0.56 làm; schema được phục vụ chỉ bắt buộc `id` và `type` trực tiếp, phần còn lại sau `if: type là chuỗi` (§7.1), nhờ đó mọi cách viết `type:` đều được gợi ý | Đo bằng schema của egret trong Chromium và bằng chính worker của `monaco-yaml` trong Node (W7a Task 4): nếu để nguyên, worker rơi về bản giả trong trang không có phương thức YAML nào, và gợi ý `type:` chỉ đưa 10 trên 54 cách viết của task |
 
@@ -75,7 +81,7 @@ Mọi khác biệt khác tìm thấy khi đối chiếu với một Kestra đang
 
 ## 4. Danh sách flow
 
-`ListPageShell` cho tiêu đề "Flows" và hành động chính "New flow" (link tới `flows/new`). Bên dưới là `SummaryStrip`, với tổng số và số lượng theo state, rồi tới bảng (FE-PAGE-1).
+`ListPageShell` cho tiêu đề "Flows" và hành động chính "New flow" (link tới `flows/new`). Bên dưới là `SummaryStrip`, với tổng số và số flow Active, Disabled, rồi tới bảng (FE-PAGE-1).
 
 - **Nhóm.** Các dòng được nhóm dưới một **cây namespace** dựng phía client từ namespace của các flow, tách theo dấu `.`.
   - Mỗi nút cây hiện tên đoạn của nó và số flow bên dưới. Nút thu gọn và mở được, và trạng thái mở là tuỳ chọn của từng người xem.
@@ -83,13 +89,14 @@ Mọi khác biệt khác tìm thấy khi đối chiếu với một Kestra đang
   - Cây là một `<table>` nhóm tự viết, cùng dạng với các danh sách nhóm của Explore (`ui-conventions.md` §1.5), kèm một comment giải thích (FE-PAGE-4).
 - **Cột:**
   - flow id, là link tới editor của flow;
-  - state, dưới dạng chip (draft, live, disabled);
+  - state, dưới dạng chip: **Active** (backend `draft` hoặc `live`) hoặc **Disabled** (phán quyết M5 ở phần đầu);
+  - version: version mới nhất dạng "v{n}", hoặc "—" khi chưa có (`latest_version`);
   - thời điểm cập nhật, dạng thời gian tương đối;
   - người tạo.
 - **Bộ lọc,** lưu trong URL (FE-PAGE-2):
   - tìm chữ theo flow id và namespace;
   - namespace, là một picker các namespace đã biết, tính cả các namespace con;
-  - state.
+  - state: Active hoặc Disabled (`?state=active|disabled`).
 - **Trạng thái** (FE-STATE):
   - loading dùng `ListStates`;
   - tập dữ liệu rỗng dùng `EmptyState`, với hành động chính là "New flow";
@@ -160,7 +167,7 @@ Mọi khác biệt khác tìm thấy khi đối chiếu với một Kestra đang
 
 *(Viết lại 2026-10-10 theo phán quyết của người dùng về phát hiện của Task 6: execution chạy bản draft đã lưu.)*
 
-Header chi tiết flow là flow id và namespace kèm chip state. Các hành động:
+Header chi tiết flow là flow id và namespace, chip state (Active hoặc Disabled), nhãn "Version v{n}" (hoặc "Version —"), và các chỉ báo bên dưới. Các hành động:
 
 **Save** (`workflow:manage`).
 - Gửi `PUT …/flows/{id}` với `{ source, if_updated_at }` (§7.3).
@@ -170,11 +177,15 @@ Header chi tiết flow là flow id và namespace kèm chip state. Các hành đ�
 
 **Create version** (`workflow:manage`; route backend là `POST …/flows/{id}/publish`).
 - Mở một dialog có ghi chú tuỳ chọn. Dialog giải thích version là một snapshot để so sánh và khôi phục, và không làm thay đổi thứ đang chạy.
-- Bị vô hiệu hoá khi còn chỉnh sửa chưa lưu ("Save first") hoặc có lỗi validate ("Fix N errors to create a version"). Lý do hiện ngay trên control (FE-ACTION-4).
+- Bị vô hiệu hoá khi còn chỉnh sửa chưa lưu ("Save first"), có lỗi validate ("Fix N errors to create a version"), request validate thất bại ("Validation unavailable", §10), hoặc validate còn đang chạy ("Validating the flow…"). Lý do hiện ngay trên control (FE-ACTION-4).
 
 **Run** (`workflow:manage`).
 - Mở form run (§6), chạy bản draft đã lưu.
-- Bị vô hiệu hoá khi còn chỉnh sửa chưa lưu ("Save first: Run uses the saved draft"), khi validate có lỗi ("Fix N errors to run"), hoặc khi flow đang tắt ("The flow is disabled").
+- Bị vô hiệu hoá, kèm lý do hiện ra (FE-ACTION-4), khi:
+  - flow đang tắt, do `state` hoặc do `disabled: true` trong YAML đã lưu ("The flow is disabled");
+  - còn chỉnh sửa chưa lưu ("Save first: Run uses the saved draft");
+  - bản draft đã lưu trên server không phải văn bản editor này đang giữ, vì đã đọc lại một lần lưu của người khác ("The flow changed on the server; reload to run it");
+  - validate có lỗi ("Fix N errors to run"), request validate thất bại ("Validation unavailable"), hoặc validate còn đang chạy ("Validating the flow…"), để Run không bao giờ start một draft mà lỗi của nó chưa được biết.
 
 **Delete** (`workflow:manage`).
 - Đi qua `ConfirmDeleteDialog` (FE-ACTION-1), rồi chuyển về danh sách.
@@ -214,14 +225,14 @@ Run đọc `inputs:` của **bản draft đã lưu** (`FlowDto.source`), cũng l
 
 | Kiểu input | Control |
 |---|---|
-| STRING, EMAIL, URI | ô chữ |
+| STRING, EMAIL, URI | ô chữ; EMAIL và URI được kiểm trong form |
 | INT, FLOAT | ô số |
 | BOOL | switch |
 | DATETIME, DATE, TIME | picker ngày/giờ (giá trị ISO) |
-| DURATION | ô chữ, placeholder ISO-8601 (`PT1H`) |
-| SELECT | select; MULTISELECT là multi-select (cả hai lấy từ `values`) |
+| DURATION | ô chữ, placeholder ISO-8601 (`PT1H`), kiểm theo cú pháp `Duration` của Java |
+| SELECT | select; MULTISELECT là danh sách checkbox (cả hai lấy từ `values`; §2) |
 | ARRAY | danh sách các dòng, mỗi dòng theo `itemType` |
-| JSON, YAML | một Monaco nhỏ |
+| JSON, YAML | một ô văn bản font monospace (§2) |
 | SECRET | ô mật khẩu |
 | FILE | chọn file; request chuyển thành multipart |
 | FORM, REUSABLE_INPUTS, ION | chưa hỗ trợ: form ghi tên input và kiểu của nó, và Run bị vô hiệu hoá |
@@ -236,7 +247,7 @@ Run đọc `inputs:` của **bản draft đã lưu** (`FlowDto.source`), cũng l
 
 ### 6.2 Những gì form run không làm
 
-`dependsOn` của Kestra (input được render lại theo input khác) chưa hỗ trợ trong W7a. Input có `dependsOn` hiện danh sách `values` tĩnh của nó, kèm một ghi chú. Backend có tính `dependsOn` hay không sẽ được ghi vào §15 sau khi kiểm.
+`dependsOn` của Kestra (input được render lại theo input khác) chưa hỗ trợ trong W7a. Input có `dependsOn` hiện danh sách `values` tĩnh của nó, kèm một ghi chú. Backend cũng không tính `dependsOn` (§15).
 
 ### 6.3 Trang execution tối thiểu
 
@@ -245,7 +256,7 @@ Run đọc `inputs:` của **bản draft đã lưu** (`FlowDto.source`), cũng l
 - link quay về flow;
 - các task run, dạng danh sách đơn giản gồm id và state.
 
-Khi execution chưa kết thúc, trang poll `GET …/executions/{id}` mỗi 2 giây. W7b sẽ thay trang này.
+Khi execution chưa kết thúc, trang poll `GET …/executions/{id}` mỗi 2 giây. Một lần poll thất bại thì trang giữ câu trả lời gần nhất, báo việc làm mới thất bại kèm nút Retry, và vẫn tiếp tục poll với backoff (thời gian chờ tăng theo khoảng thời gian kể từ câu trả lời tốt gần nhất, tối đa 30 giây) cho tới khi execution kết thúc. W7b sẽ thay trang này.
 
 ## 7. Bổ sung ở backend
 
@@ -292,13 +303,13 @@ Khi execution chưa kết thúc, trang poll `GET …/executions/{id}` mỗi 2 gi
 
 ### 7.4 Tên người tạo
 
-`FlowListItemDto`, `FlowDto` và `FlowVersionDto` có thêm `created_by_name: Option<String>`. Đó là tên hiển thị của người tạo hoặc người publish, join ngay trong câu truy vấn đọc hàng đó. Nó là null khi `created_by` null hoặc người dùng không còn tồn tại. UI hiện tên, hoặc "—" khi null, và không bao giờ lấy danh sách thành viên workspace cho việc này.
+`FlowListItemDto`, `FlowDto` và `FlowVersionDto` có thêm `created_by_name: Option<String>`. Đó là tên hiển thị của người đã tạo flow hoặc version, join ngay trong câu truy vấn đọc hàng đó. Nó là null khi `created_by` null hoặc người dùng không còn tồn tại. UI hiện tên, hoặc "—" khi null, và không bao giờ lấy danh sách thành viên workspace cho việc này.
 
 `openapi.json` và client được sinh lại bằng `npm run gen:api` (FE-DATA-1).
 
 ### 7.5 `can_manage` trên `FlowDto`
 
-*(Thêm ở W7a Task 5.)* `GET …/flows/{id}` trả `can_manage: bool`: người gọi có `workflow:manage` trong workspace này hay không, do PDP quyết định bằng đúng phép kiểm tra các route ghi dùng. Khi nó là false, editor mở ở chế độ chỉ đọc, không có Save, Publish, Run hay Delete (§5.2). `workflow:manage` là quyền theo workspace, còn `/auth/me` chỉ liệt kê quyền platform, nên frontend không có cách nào khác để biết; cách này theo `can_manage` mà các đối tượng workspace khác đã mang (dashboard, schedule, app). Create và update trả `true`, vì người gọi vừa qua phép kiểm tra. PDP lỗi là lỗi, không phải `false`. Đây chỉ là gợi ý cho UI: mọi route ghi vẫn tự kiểm tra.
+*(Thêm ở W7a Task 5.)* `GET …/flows/{id}` trả `can_manage: bool`: người gọi có `workflow:manage` trong workspace này hay không, do PDP quyết định bằng đúng phép kiểm tra các route ghi dùng. Khi nó là false, editor mở ở chế độ chỉ đọc, không có Save, Create version, Run hay Delete (§5.2). `workflow:manage` là quyền theo workspace, còn `/auth/me` chỉ liệt kê quyền platform, nên frontend không có cách nào khác để biết; cách này theo `can_manage` mà các đối tượng workspace khác đã mang (dashboard, schedule, app). Create và update trả `true`, vì người gọi vừa qua phép kiểm tra. PDP lỗi là lỗi, không phải `false`. Đây chỉ là gợi ý cho UI: mọi route ghi vẫn tự kiểm tra.
 
 Trang tạo flow chưa có flow để hỏi. Lời gọi validate không-id của chính nó làm đúng phép kiểm tra `workflow:manage`, nên một 403 từ lời gọi đó, hoặc từ Save, chuyển trang sang chỉ đọc, với banner "You need permission to manage flows" và không có Save. Nút "New flow" ở danh sách vẫn không bị chặn: danh sách không mang tín hiệu quyền nào mà không phải đoán.
 
@@ -325,7 +336,7 @@ Kestra tô màu state theo sắc màu. egret ánh xạ chúng sang token của m
 | thất bại | FAILED, KILLED | `destructive` |
 | trung tính | CANCELLED, SKIPPED, RETRIED | `muted-foreground` |
 
-State của flow dùng cùng chip: draft là `muted`, live là `success`, disabled là `muted-foreground`.
+State của flow dùng cùng chip, chỉ cho biết flow có chạy hay không (phán quyết M5 ở phần đầu): `draft` và `live` đều là **Active** trên `success`, còn `disabled` là **Disabled** trên `muted-foreground`. Số version không bao giờ nằm trong chip.
 
 ## 9. Đối chiếu với Kestra
 
@@ -356,14 +367,14 @@ Trong lúc cài, một Kestra tạm chạy từ image `kestra/kestra` có sẵn 
   - ba trạng thái của danh sách, và sự phân biệt giữa rỗng thật với lọc không ra kết quả;
   - map path của kết quả validate sang vùng trong YAML;
   - tab Docs tìm `type:` bao quanh con trỏ;
-  - Save, Publish và Run được bật hay bị vô hiệu hoá, kèm lý do;
+  - Save, Create version và Run được bật hay bị vô hiệu hoá, kèm lý do;
   - dialog 409;
-  - chỉ báo draft tắt khi nội dung khớp trở lại;
+  - chỉ báo thay đổi tắt khi nội dung khớp trở lại;
   - control của từng kiểu input và giá trị nó gửi đi;
   - lỗi theo ô từ server, và giá trị đã nhập được giữ;
   - restore trong Revisions kèm bước xác nhận.
 - **Playwright,** trên một stack local, không bao giờ trên dev stack dùng chung (FE-TEST-2):
-  - tạo flow → gợi ý xuất hiện → một lỗi được đánh dấu và liệt kê → Save → Publish → Run → trang execution;
+  - tạo flow → gợi ý xuất hiện → một lỗi được đánh dấu và liệt kê → Save → Create version → Run → trang execution;
   - kéo một tab để tách panel, rồi tải lại trang và thấy bố cục được khôi phục;
   - cách làm tương đương bằng bàn phím;
   - diff trong Revisions.
@@ -376,7 +387,7 @@ Trong lúc cài, một Kestra tạm chạy từ image `kestra/kestra` có sẵn 
 2. Khung: nhóm nav, route lazy, `queryKeys`, chip state, danh sách flow với cây namespace, và các trang placeholder.
 3. Khung nhiều panel và registry tab.
 4. Tab Code (monaco-yaml, schema, validate trên server, map path), Docs và Problems.
-5. Header chi tiết flow: Save với `if_updated_at`, Publish, Delete, chỉ báo draft, và trang tạo flow.
+5. Header chi tiết flow: Save với `if_updated_at`, Create version, Delete, chỉ báo thay đổi, và trang tạo flow.
 6. Form run và trang execution tối thiểu.
 7. Revisions và diff.
 8. End to end, đối chiếu Kestra, và tài liệu (cập nhật §2 và §15 của spec này).
@@ -408,7 +419,8 @@ Mỗi lần review task đều trả lời checklist cho reviewer của bộ rul
 ## 15. Giới hạn đã biết
 
 - Danh sách flow không phân trang (§4).
-- Input có `dependsOn` là tĩnh (§6.2).
+- Input có `dependsOn` là tĩnh (§6.2). **Backend cũng không tính `dependsOn` của input** (kiểm ở W7a Task 6): `models/input.rs` parse và giữ nó, nhưng không đoạn code nào đọc `Input::depends_on`. Mọi `depends_on` khác trong `egret-workflow` thuộc Flow trigger hoặc task DAG, và không có endpoint render lại input như `…/executions/validate` của Kestra.
+- **Backend không kiểm giá trị input nào** (kiểm ở W7a Task 6). `start_flow_execution` nhận object `inputs` nguyên như được gửi; `with_declared_defaults` (`worker/render.rs`) parse một chuỗi đúng một lần thành JSON cho INT, FLOAT, BOOL, JSON, ARRAY và MULTISELECT, giữ nguyên chuỗi nếu parse lỗi, và điền `defaults:` cho input bị bỏ trống. Nó không kiểm `required`, không kiểm kiểu, không kiểm giá trị SELECT có thuộc danh sách hay không; `Input` đã parse của egret không có trường `values`. Chỉ input FILE bị từ chối theo từng input (đuôi file, kích thước, upload). Vì vậy form run là nơi duy nhất kiểm `required`, số, JSON, DATETIME, EMAIL, URI và DURATION; start qua API với giá trị sai vẫn chạy.
 - Kết quả validate có `path` không map được thì hiện ở dòng 1 (§5.2).
   - Path của server gọi phần tử danh sách theo id (`tasks.<id>.…`, `inputs.<id>`). Id lặp lại thì map vào phần tử đầu tiên khớp được phần còn lại của path; khi mọi phần tử đều khớp (`tasks.dup.type`) thì là phần tử đầu tiên. Task con có id trùng tên một thuộc tính của task cha, và id input có dấu chấm, được giải bằng cách thử từng cách đọc.
   - Lỗi parse mà server không định vị được thì hiện ở dòng 1, kèm thông điệp và không có path.

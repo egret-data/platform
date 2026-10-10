@@ -7,7 +7,6 @@ import {
   CirclePlay,
   CircleSlash2,
   CircleX,
-  PencilLine,
   type LucideIcon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -84,12 +83,28 @@ const EXECUTION_STATES = new Map<string, StateLook>(Object.entries({
   RETRIED: NEUTRAL,
 }));
 
-/** A flow's own state (`workflow.flows.state`): draft, live or disabled. */
-const FLOW_STATES = new Map<string, StateLook>([
-  ["draft", { tone: "muted", icon: PencilLine }],
-  ["live", { tone: "success", icon: CircleCheck }],
-  ["disabled", { tone: "neutral", icon: CircleSlash2 }],
+/**
+ * A flow's own state (`workflow.flows.state`), shown as the one thing it
+ * decides: whether the flow runs (the user's ruling, 2026-10-10). Every
+ * execution runs the saved draft, and `state` gates nothing but `disabled`,
+ * so `draft` and `live` are both **Active**; the version number is shown on
+ * its own, never in this chip.
+ */
+const ACTIVE: StateLook & { word: string } = { tone: "success", icon: CircleCheck, word: "Active" };
+const FLOW_STATES = new Map<string, StateLook & { word: string }>([
+  ["draft", ACTIVE],
+  ["live", ACTIVE],
+  ["disabled", { tone: "neutral", icon: CircleSlash2, word: "Disabled" }],
 ]);
+
+/** The flow-list filter's values: whether a flow runs. */
+export type FlowActivity = "active" | "disabled";
+
+/** `draft` and `live` run; `disabled` does not. An unknown state is not counted as either. */
+export function flowActivity(state: string): FlowActivity | undefined {
+  if (state === "disabled") return "disabled";
+  return state === "draft" || state === "live" ? "active" : undefined;
+}
 
 /** `SUCCESS` → `Success`, `draft` → `Draft`. */
 function stateWord(state: string): string {
@@ -109,12 +124,14 @@ function stateWord(state: string): string {
  * page shows are the same string.
  */
 export function StateChip({ state, kind }: { state: string; kind: "execution" | "flow" }) {
-  const look = (kind === "execution" ? EXECUTION_STATES : FLOW_STATES).get(state);
+  const flowLook = kind === "flow" ? FLOW_STATES.get(state) : undefined;
+  const look = kind === "execution" ? EXECUTION_STATES.get(state) : flowLook;
   const { tone, icon: Icon } = look ?? UNKNOWN;
+  const word = flowLook ? flowLook.word : look ? stateWord(state) : state;
   return (
     <Badge variant="outline" data-state={state} className={cn(TONE_CLASS[tone])}>
       <Icon aria-hidden="true" />
-      {look ? stateWord(state) : state}
+      {word}
     </Badge>
   );
 }

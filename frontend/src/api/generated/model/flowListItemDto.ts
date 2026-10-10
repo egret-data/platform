@@ -30,6 +30,13 @@ export interface FlowListItemDto {
      * @nullable
      */
   created_by_name?: string | null;
+  /**
+     * The flow's highest version number; null when it has none. Versions
+     * are snapshots to compare and restore: executions run the saved draft
+     * (W7a spec §4, §5.3).
+     * @nullable
+     */
+  latest_version?: number | null;
   created_at: string;
   updated_at: string;
 }

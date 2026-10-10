@@ -1575,3 +1575,68 @@ async fn get_flow_answers_an_error_when_the_can_manage_decision_fails() {
     let res = common::get(&app, &format!("/api/ws/{ws}/workflows/flows/{id}"), user).await;
     assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
+
+/// `latest_version` (W7a spec §4, §5.3): the flow's highest version number,
+/// null with none, from every route that answers a `FlowDto` or a
+/// `FlowListItemDto`. Three flows in one workspace -- none, one and three
+/// versions -- so a number taken from the wrong flow's versions, or a count
+/// standing in for the maximum, reads differently from the right one.
+#[tokio::test]
+async fn every_flow_route_carries_the_latest_version_number() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/flows");
+
+    let mut ids = Vec::new();
+    for ns in ["v.none", "v.one", "v.three"] {
+        let created = common::json(
+            common::post(
+                &app,
+                &base,
+                user,
+                serde_json::json!({ "source": minimal_flow(ns) }),
+            )
+            .await,
+        )
+        .await;
+        assert!(created["latest_version"].is_null(), "create: {created}");
+        ids.push(created["id"].as_str().unwrap().to_string());
+    }
+    for (id, times) in [(&ids[1], 1), (&ids[2], 3)] {
+        for _ in 0..times {
+            let url = format!("{base}/{id}/publish");
+            let res = common::post(&app, &url, user, serde_json::json!({})).await;
+            assert_eq!(res.status(), StatusCode::OK);
+        }
+    }
+
+    let expected = [serde_json::Value::Null, 1.into(), 3.into()];
+    for (id, want) in ids.iter().zip(&expected) {
+        let got = common::json(common::get(&app, &format!("{base}/{id}"), user).await).await;
+        assert_eq!(&got["latest_version"], want, "get {id}: {got}");
+    }
+    let list = common::json(common::get(&app, &base, user).await).await;
+    for (id, want) in ids.iter().zip(&expected) {
+        let item = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == id.as_str())
+            .unwrap_or_else(|| panic!("{id} not listed: {list}"));
+        assert_eq!(&item["latest_version"], want, "list {id}: {item}");
+    }
+    // A save after versions keeps the number: the PUT answers it too.
+    let put = common::json(
+        common::put(
+            &app,
+            &format!("{base}/{}", ids[2]),
+            user,
+            serde_json::json!({ "source": minimal_flow("v.three") + "description: edited\n" }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(put["latest_version"], 3, "put: {put}");
+}

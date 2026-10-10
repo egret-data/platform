@@ -216,6 +216,25 @@ export function isEmpty(value: FieldValue): boolean {
 }
 
 const INTEGER = /^[+-]?\d+$/;
+/** An address with one `@` and a dotted domain; what a person means by an email, not RFC 5322 in full. */
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/**
+ * Java's `Duration.parse` grammar, which Kestra's DURATION input reads with:
+ * days, hours, minutes and seconds, each optionally signed, case-insensitive.
+ * No years, months or weeks: `Duration` refuses them. The lookaheads require a
+ * component after `P`, and one after `T`.
+ */
+const DURATION = /^[-+]?P(?=\d|[-+]|T)(?:[-+]?\d+D)?(?:T(?=[-+]?\d)(?:[-+]?\d+H)?(?:[-+]?\d+M)?(?:[-+]?\d+(?:[.,]\d{0,9})?S)?)?$/i;
+
+/** A URI with a scheme, as Kestra's URI input requires (`URI.create` of an absolute URI). */
+function isUri(text: string): boolean {
+  try {
+    new URL(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
 const isNumber = (s: string) => s.trim() !== "" && Number.isFinite(Number(s));
 
 function itemError(itemType: string | undefined, item: string): string | null {
@@ -265,6 +284,15 @@ export function validateForm(form: FormState): Record<string, string> {
       case "DATETIME":
         if (Number.isNaN(new Date(text).getTime())) errors[input.id] = "Enter a date and time.";
         break;
+      case "EMAIL":
+        if (!EMAIL.test(text.trim())) errors[input.id] = "Enter an email address, such as name@example.com.";
+        break;
+      case "URI":
+        if (!isUri(text.trim())) errors[input.id] = "Enter a URI with its scheme, such as https://example.com.";
+        break;
+      case "DURATION":
+        if (!DURATION.test(text.trim())) errors[input.id] = "Enter an ISO-8601 duration, such as PT1H or P1DT12H.";
+        break;
       case "JSON":
         try {
           JSON.parse(text);
@@ -308,7 +336,10 @@ function wireValue(input: RunInput, value: Exclude<FieldValue, null | File>): un
     case "TIME":
       return (value as string).length === 5 ? `${value}:00` : value;
     case "JSON":
-      return JSON.parse(value as string);
+      // The text as typed, already checked to parse: the backend parses a JSON input's string
+      // exactly once (`with_declared_defaults`), so sending it parsed would parse a JSON string
+      // twice and turn `"123"` into the number 123.
+      return value;
     case "MULTISELECT":
       return value;
     case "ARRAY":

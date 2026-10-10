@@ -20,7 +20,7 @@
   - **Out of W7:** no-code editing, blueprints, plugin documentation pages, AI, dashboards, kill and restart (no backend), and SSE (egret's APIs are poll-only).
 - **The flow list groups by a namespace tree** (`company` → `company.team`). `folder_id` is not shown anywhere in the workflow UI.
 - **The flow editor is the full multi-panel layout of Kestra's `MultiPanelTabs`.** Panels hold tabs; tabs move between panels and split them; the layout persists per flow.
-- **Save and Publish are two buttons.** Save writes the draft; Publish creates an immutable version. *(Corrected 2026-10-10 by the ruling below: executions run the saved draft, not the version.)* A content-derived indicator shows when the draft differs from the live version.
+- **Save and Create version are two buttons.** Save writes the draft, which is what every execution runs; Create version makes an immutable, numbered snapshot. A content-derived indicator shows when the saved draft differs from the latest version. *(Restated 2026-10-10 by the ruling below; the first wording named the second button Publish and said executions run the version.)*
 - **Editor intelligence:**
   - `monaco-yaml` uses a JSON schema served by a new read-only endpoint, built from the same registry the backend validates against and filtered by the workspace's features. This gives completion, hover and structural errors as you type.
   - A debounced server validation feeds semantic findings into the editor and a Problems tab.
@@ -35,9 +35,11 @@
   - **The indicator compares content.** It reads "Changes since v{n}": the saved draft differs from the latest version, byte for byte (FE-STATE-4). It stays separate from "Unsaved changes".
   - **Run** runs the saved draft and reads its `inputs:`. It needs no version, and is disabled only while the draft has unsaved edits ("Save first: Run uses the saved draft"), while validation has errors, or while the flow is `disabled`.
 
+- **(2026-10-10, the user's ruling on Task 6's review, M5) The flow-state chip shows only whether the flow runs.** It reads **Active** for backend state `draft` or `live`, and **Disabled** for `disabled`; "Draft" and "Live" read as "which version runs", which no longer means anything. The latest version number is shown apart from the chip: a "Version" column in the flow list and a label in the flow detail header, both "v{n}", or "—" with no version. `FlowListItemDto` and `FlowDto` gain `latest_version: Option<i32>`, the flow's highest version number, read in the same query as the row (as `created_by_name` is).
+
 ## 1. Why
 
-The engine runs flows in production (W10 onwards), but a user can only author and run them with `curl`. W7a is the first package where a user writes, publishes and runs a flow in the browser. It also sets up the frame the other four W7 packages plug into: the nav group, lazy routes, the tab registry, and the state vocabulary.
+The engine runs flows in production (W10 onwards), but a user can only author and run them with `curl`. W7a is the first package where a user writes, versions and runs a flow in the browser. It also sets up the frame the other four W7 packages plug into: the nav group, lazy routes, the tab registry, and the state vocabulary.
 
 ## 2. Divergences from Kestra
 
@@ -49,6 +51,10 @@ The engine runs flows in production (W10 onwards), but a user can only author an
 | Editor panels: Code, No-code, Topology, Docs, Files, Blueprints | Code, Docs, Problems in W7a; Topology with W7c; Files with W7d; no No-code and no Blueprints | Out of W7 by the user's ruling. Problems is egret's: Kestra shows findings in the editor and a banner |
 | `/flows/validate` takes YAML with `revision: N+1` prefixed, and detects an `outdated` save | `POST …/flows/validate` takes the YAML as is. A stale save is refused by `PUT` with `if_updated_at` (§5.3) | egret has no revision counter on drafts |
 | The run form follows the latest revision | The run form follows the **saved draft**, and Run is disabled while there are unsaved edits | Executions run the saved draft (the user's ruling, 2026-10-10) |
+| JSON and YAML inputs are inline code editors | A monospace text area; the JSON is checked before Run | A text area takes the `id` a `Label` points at (FE-FORM-2) and leaves Tab to move between fields; Monaco's `tabFocusMode` and `aria-labelledby` could do both, but a run form gains nothing from an editor (W7a Task 6, accepted on review) |
+| MULTISELECT is a multiple select with search and select-all | A list of checkboxes, one per value | Each checkbox has its own tied `Label` (FE-FORM-2) and the set stays a picker (FE-FORM-3); `ui/tag-combobox` takes no `id`. A long `values` list makes the drawer tall, and the drawer scrolls (W7a Task 6, accepted on review) |
+| The run form opens in a side drawer component | Up to three scalar inputs open a dialog; otherwise the dialog primitive pinned to the right edge at full height | `components/ui` has no sheet or drawer; the dialog primitive's body already scrolls. Its geometry is measured in Task 8 (FE-TEST-2) |
+| An untouched BOOL input is sent as `false` (`utils/inputs.ts:169-175`, applied to every unset input by `InputsForm.vue`'s `updateDefaults`) | The same: the switch starts at its default or `false`, and is always sent | Kestra's own behaviour; a switch has no third state |
 | The editor's panels: each panel has a dots menu (move panel, close all tabs, close all panels); a tab dropped on the frame's outer left or right edge makes a new panel there; `KeepAlive` keeps a panel's hidden tabs mounted, and panels are keyed by index | One "Tab actions: <title>" menu per panel, acting on its selected tab (Move to panel…, Split left, Split right, Close); a tab dropped on **any panel's** left or right edge splits beside that panel; only each panel's selected tab is mounted, and a change to the set of panels remounts the panels (§5.1) | A `tablist` may own only tabs, so a menu button inside each tab would break its semantics; one menu per panel keeps them and still gives every tab its menu in two keystrokes. Splitting beside any panel is the spec's model. React has no `KeepAlive`: tab state lives outside the tab, and Task 4 keeps Monaco's model and view state across a remount (`path`, `keepCurrentModel`, `saveViewState`). A reparenting portal is the fallback if another tab needs to stay mounted |
 | `monaco-yaml` 5.5.1 and `monaco-worker-manager` 2.0.1 are patched in `node_modules` (`kestra/ui/patches/`): the worker is started with monaco 0.56's `createWebWorker({ worker })`, and the validator picks a `oneOf` member by its `type` so `type:` completion lists every type | No `node_modules` patch. `monacoYaml.ts` hands `monaco-yaml` a Monaco whose `createWebWorker` primes the worker the way monaco 0.56 does; the served schema requires only `id` and `type` outright and the rest behind `if: type is a string` (§7.1), which gives every `type:` spelling | Measured with egret's schema in Chromium and with `monaco-yaml`'s own worker in Node (W7a Task 4): unchanged, the worker fell back to an in-page stub with no YAML methods, and `type:` completion offered 10 of 54 task spellings |
 
@@ -73,7 +79,7 @@ Any further difference found while comparing against a running Kestra (§9) is a
 
 ## 4. The flow list
 
-`ListPageShell` gives the title "Flows" and a primary action "New flow" (a link to `flows/new`). Below it come `SummaryStrip`, with the total and the counts by state, and then the table (FE-PAGE-1).
+`ListPageShell` gives the title "Flows" and a primary action "New flow" (a link to `flows/new`). Below it come `SummaryStrip`, with the total and the Active and Disabled counts, and then the table (FE-PAGE-1).
 
 - **Grouping.** Rows are grouped under a **namespace tree** built client-side from the flows' namespaces, split on `.`.
   - A tree node shows its segment and the number of flows beneath it. It collapses and expands, and its expanded state is a per-viewer preference.
@@ -81,13 +87,14 @@ Any further difference found while comparing against a running Kestra (§9) is a
   - The tree is a hand-written grouped `<table>`, the same shape as the grouped explore lists (`ui-conventions.md` §1.5), with a comment saying so (FE-PAGE-4).
 - **Columns:**
   - flow id, a link to its editor;
-  - state, as a chip (draft, live, disabled);
+  - state, as a chip: **Active** (backend `draft` or `live`) or **Disabled** (the M5 ruling in the header);
+  - version: the latest version as "v{n}", or "—" with none (`latest_version`);
   - updated, as a relative time;
   - created by.
 - **Filters,** kept in the URL (FE-PAGE-2):
   - text search on flow id and namespace;
   - namespace, as a picker of known namespaces that includes its children;
-  - state.
+  - state: Active or Disabled (`?state=active|disabled`).
 - **States** (FE-STATE):
   - loading uses `ListStates`;
   - an empty collection uses `EmptyState`, whose primary action is "New flow";
@@ -158,7 +165,7 @@ Any further difference found while comparing against a running Kestra (§9) is a
 
 *(Rewritten 2026-10-10 by the user's ruling on Task 6's finding: executions run the saved draft.)*
 
-The flow detail header is the flow id and namespace with the state chip. Its actions are:
+The flow detail header is the flow id and namespace, the state chip (Active or Disabled), the "Version v{n}" label (or "Version —"), and the indicators below. Its actions are:
 
 **Save** (`workflow:manage`).
 - It sends `PUT …/flows/{id}` with `{ source, if_updated_at }` (§7.3).
@@ -168,11 +175,15 @@ The flow detail header is the flow id and namespace with the state chip. Its act
 
 **Create version** (`workflow:manage`; the backend route is `POST …/flows/{id}/publish`).
 - It opens a dialog with an optional note, explaining that a version is a snapshot to compare and restore, and that it does not change what runs.
-- It is disabled while there are unsaved edits ("Save first") or validation errors ("Fix N errors to create a version"). The reason is shown on the control (FE-ACTION-4).
+- It is disabled while there are unsaved edits ("Save first"), validation errors ("Fix N errors to create a version"), a failed validation request ("Validation unavailable", §10), or a validation still in flight ("Validating the flow…"). The reason is shown on the control (FE-ACTION-4).
 
 **Run** (`workflow:manage`).
 - It opens the run form (§6), which runs the saved draft.
-- It is disabled while there are unsaved edits ("Save first: Run uses the saved draft"), while validation has errors ("Fix N errors to run"), or while the flow is disabled ("The flow is disabled").
+- It is disabled, with the reason shown (FE-ACTION-4), while:
+  - the flow is disabled, by its `state` or by the saved YAML's `disabled: true` ("The flow is disabled");
+  - there are unsaved edits ("Save first: Run uses the saved draft");
+  - the server's saved draft is not the text this editor holds, because someone else's save was read back ("The flow changed on the server; reload to run it");
+  - validation has errors ("Fix N errors to run"), its request failed ("Validation unavailable"), or it is still in flight ("Validating the flow…"), so Run never starts a draft whose errors are not yet known.
 
 **Delete** (`workflow:manage`).
 - It goes through `ConfirmDeleteDialog` (FE-ACTION-1), then navigates to the list.
@@ -212,14 +223,14 @@ Run reads the `inputs:` of the **saved draft** (`FlowDto.source`), which is what
 
 | Input type | Control |
 |---|---|
-| STRING, EMAIL, URI | text input |
+| STRING, EMAIL, URI | text input; EMAIL and URI are checked in the form |
 | INT, FLOAT | number input |
 | BOOL | switch |
 | DATETIME, DATE, TIME | date/time pickers (ISO value) |
-| DURATION | text input, ISO-8601 placeholder (`PT1H`) |
-| SELECT | select; MULTISELECT is a multi-select (both from `values`) |
+| DURATION | text input, ISO-8601 placeholder (`PT1H`), checked against Java `Duration`'s grammar |
+| SELECT | select; MULTISELECT is a list of checkboxes (both from `values`; §2) |
 | ARRAY | a list of rows, each typed by `itemType` |
-| JSON, YAML | a small Monaco editor |
+| JSON, YAML | a monospace text area (§2) |
 | SECRET | password input |
 | FILE | file picker; the request becomes multipart |
 | FORM, REUSABLE_INPUTS, ION | not supported: the form names the input and the type, and Run is disabled |
@@ -234,7 +245,7 @@ Run reads the `inputs:` of the **saved draft** (`FlowDto.source`), which is what
 
 ### 6.2 What the run form does not do
 
-Kestra's `dependsOn` (inputs that re-render from other inputs) is not supported in W7a. An input with `dependsOn` renders its static `values` and carries a note. Whether the backend evaluates `dependsOn` is recorded in §15 once checked.
+Kestra's `dependsOn` (inputs that re-render from other inputs) is not supported in W7a. An input with `dependsOn` renders its static `values` and carries a note. The backend does not evaluate it either (§15).
 
 ### 6.3 The minimal execution page
 
@@ -243,7 +254,7 @@ Kestra's `dependsOn` (inputs that re-render from other inputs) is not supported 
 - a link back to the flow;
 - the task runs as a plain list of id and state.
 
-While the execution is not terminal, it polls `GET …/executions/{id}` every 2 s. W7b replaces this page.
+While the execution is not terminal, it polls `GET …/executions/{id}` every 2 s. A failed poll keeps the last answer on screen, says the refresh failed with a Retry, and polling goes on with a backoff (the wait grows with the time since the last good answer, to at most 30 s) until the execution is terminal. W7b replaces this page.
 
 ## 7. Backend additions
 
@@ -290,13 +301,13 @@ While the execution is not terminal, it polls `GET …/executions/{id}` every 2 
 
 ### 7.4 Creator names
 
-`FlowListItemDto`, `FlowDto` and `FlowVersionDto` gain `created_by_name: Option<String>`. It is the creating or publishing user's display name, joined in the same query that reads the row. It is null when `created_by` is null or the user no longer exists. The UI shows the name, or "—" when it is null, and never fetches workspace members for it.
+`FlowListItemDto`, `FlowDto` and `FlowVersionDto` gain `created_by_name: Option<String>`. It is the display name of the user who created the flow or the version, joined in the same query that reads the row. It is null when `created_by` is null or the user no longer exists. The UI shows the name, or "—" when it is null, and never fetches workspace members for it.
 
 `openapi.json` and the generated client are regenerated with `npm run gen:api` (FE-DATA-1).
 
 ### 7.5 `can_manage` on `FlowDto`
 
-*(Added in W7a Task 5.)* `GET …/flows/{id}` answers `can_manage: bool`: whether the caller holds `workflow:manage` in this workspace, decided by the PDP with the same check the mutating routes make. The editor opens read-only, with no Save, Publish, Run or Delete, when it is false (§5.2). `workflow:manage` is workspace-scoped, and `/auth/me` lists only platform permissions, so the frontend cannot tell otherwise; this follows the `can_manage` other workspace objects carry (dashboards, schedules, apps). Create and update answer `true`, since the caller just passed the check. A PDP failure is an error, not `false`. It is a hint for the UI only: every mutating route still checks.
+*(Added in W7a Task 5.)* `GET …/flows/{id}` answers `can_manage: bool`: whether the caller holds `workflow:manage` in this workspace, decided by the PDP with the same check the mutating routes make. The editor opens read-only, with no Save, Create version, Run or Delete, when it is false (§5.2). `workflow:manage` is workspace-scoped, and `/auth/me` lists only platform permissions, so the frontend cannot tell otherwise; this follows the `can_manage` other workspace objects carry (dashboards, schedules, apps). Create and update answer `true`, since the caller just passed the check. A PDP failure is an error, not `false`. It is a hint for the UI only: every mutating route still checks.
 
 The create page has no flow to ask. Its own id-less validate call makes the same `workflow:manage` check, so a 403 from it, or from Save, turns the page read-only, with the banner "You need permission to manage flows" and no Save. The list's "New flow" stays ungated: the list carries no permission signal that does not guess.
 
@@ -323,7 +334,7 @@ Kestra colours states by hue. egret maps them onto its tokens (FE-VISUAL-1). Eve
 | failed | FAILED, KILLED | `destructive` |
 | neutral | CANCELLED, SKIPPED, RETRIED | `muted-foreground` |
 
-Flow states use the same chip: draft is `muted`, live is `success`, disabled is `muted-foreground`.
+Flow states use the same chip, showing only whether the flow runs (the M5 ruling in the header): `draft` and `live` are both **Active** on `success`, and `disabled` is **Disabled** on `muted-foreground`. The version number is never in the chip.
 
 ## 9. Comparing against Kestra
 
@@ -354,14 +365,14 @@ During implementation, a temporary Kestra runs from the local `kestra/kestra` im
   - the list's three states and its empty-versus-filtered distinction;
   - finding-path → YAML range mapping;
   - the Docs lookup of the enclosing `type:`;
-  - Save, Publish and Run enablement with reasons;
+  - Save, Create version and Run enablement with reasons;
   - the 409 dialog;
-  - the draft indicator going out when the content matches again;
+  - the changes indicator going out when the content matches again;
   - each input type's control and its submitted value;
   - server field errors and kept values;
   - Revisions restore with its confirm.
 - **Playwright,** on a local stack and never the shared dev stack (FE-TEST-2):
-  - create → completion appears → an error is marked and listed → Save → Publish → Run → the execution page;
+  - create → completion appears → an error is marked and listed → Save → Create version → Run → the execution page;
   - drag a tab to split a panel, and reload to see the layout restored;
   - the keyboard alternative;
   - a revisions diff.
@@ -374,7 +385,7 @@ During implementation, a temporary Kestra runs from the local `kestra/kestra` im
 2. Frame: nav group, lazy routes, `queryKeys`, the state chip, the flow list with the namespace tree, and the placeholder pages.
 3. The multi-panel frame and the tab registry.
 4. The Code tab (monaco-yaml, schema, server validation, path mapping), Docs and Problems.
-5. Flow detail header: Save with `if_updated_at`, Publish, Delete, the draft indicator, and the create page.
+5. Flow detail header: Save with `if_updated_at`, Create version, Delete, the changes indicator, and the create page.
 6. The run form and the minimal execution page.
 7. Revisions and the diff.
 8. End to end, the Kestra comparison, and the docs (this spec's §2 and §15 brought up to date).
@@ -406,7 +417,8 @@ Every task review answers the rulebook's reviewer checklist.
 ## 15. Known limits
 
 - The flow list is unpaginated (§4).
-- `dependsOn` inputs are static (§6.2).
+- `dependsOn` inputs are static (§6.2). **The backend does not evaluate an input's `dependsOn` either** (checked in W7a Task 6): `models/input.rs` parses and keeps it, and no code reads `Input::depends_on`. Every other `depends_on` in `egret-workflow` belongs to the Flow trigger or to DAG tasks, and there is no input re-render endpoint like Kestra's `…/executions/validate`.
+- **The backend checks no input value** (checked in W7a Task 6). `start_flow_execution` takes the `inputs` object as sent; `with_declared_defaults` (`worker/render.rs`) parses a string once as JSON for INT, FLOAT, BOOL, JSON, ARRAY and MULTISELECT, keeps it if that fails, and fills `defaults:` for what is left out. It checks no `required`, no type, and no SELECT membership; egret's parsed `Input` has no `values` field. Only FILE inputs are refused per input (extension, size, upload). The run form is therefore the only check of `required`, numbers, JSON, DATETIME, EMAIL, URI and DURATION; a start through the API with a wrong value runs.
 - A finding whose `path` cannot be mapped is shown on line 1 (§5.2).
   - Server paths name list items by id (`tasks.<id>.…`, `inputs.<id>`). A repeated id maps to the first item the rest of the path fits; when every one fits (`tasks.dup.type`), that is the first. A child task whose id is also a property of its parent, and an input id containing dots, are resolved by trying each reading.
   - A parse error the server could not locate is shown on line 1, with its message and no path.

@@ -142,6 +142,25 @@ macro_rules! with_creator_name {
     };
 }
 
+/// [`with_creator_name!`] for a FLOW row, plus its latest version number
+/// (W7a spec §4, §5.3; the user's ruling of 2026-10-10 on the flow-state
+/// chip): `MAX(version)` of its `flow_versions`, NULL when it has none. In the
+/// same statement, so the number a list or header shows is the one this read
+/// saw. The version reads keep [`with_creator_name!`]: their `r` is a version
+/// row, whose `id` is not a flow's.
+macro_rules! with_flow_names {
+    ($cte:expr, $tail:expr) => {
+        concat!(
+            "WITH r AS (",
+            $cte,
+            ") SELECT r.*, COALESCE(NULLIF(u.name, ''), u.email::text) AS created_by_name, \
+               (SELECT MAX(v.version) FROM workflow.flow_versions v WHERE v.flow_id = r.id) AS latest_version \
+             FROM r LEFT JOIN users u ON u.id = r.created_by",
+            $tail
+        )
+    };
+}
+
 /// A flow draft row, as stored.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct FlowRow {
@@ -166,6 +185,12 @@ pub struct FlowRow {
     /// hence `#[sqlx(default)]`.
     #[sqlx(default)]
     pub created_by_name: Option<String>,
+    /// The flow's highest version number, `None` with no version (W7a spec §4,
+    /// §5.3). Filled by the same reads as [`Self::created_by_name`]
+    /// ([`with_flow_names!`]); `None` from the internal reads, hence
+    /// `#[sqlx(default)]`.
+    #[sqlx(default)]
+    pub latest_version: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
@@ -252,7 +277,7 @@ impl FlowRepo {
         // W12: the insert and `scheduler::sync` commit together, so a flow
         // never exists without the trigger rows its YAML declares.
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
-        let row: std::result::Result<FlowRow, sqlx::Error> = sqlx::query_as(with_creator_name!(
+        let row: std::result::Result<FlowRow, sqlx::Error> = sqlx::query_as(with_flow_names!(
             concat!(
                 "INSERT INTO workflow.flows \
                    (workspace_id, folder_id, namespace, flow_id, source, plan, created_by) \
@@ -322,7 +347,7 @@ impl FlowRepo {
     /// One draft, if it belongs to `workspace`. `NotFound` otherwise -- see
     /// the module comment on why the predicate is here and not in the caller.
     pub async fn get(&self, ws: Uuid, id: Uuid) -> Result<FlowRow> {
-        let row: Option<FlowRow> = sqlx::query_as(with_creator_name!(
+        let row: Option<FlowRow> = sqlx::query_as(with_flow_names!(
             concat!(
                 "SELECT ",
                 flow_cols!(),
@@ -340,7 +365,7 @@ impl FlowRepo {
 
     /// Every draft in `workspace` matching `filter`, newest first.
     pub async fn list(&self, ws: Uuid, filter: &ListFilter) -> Result<Vec<FlowRow>> {
-        sqlx::query_as(with_creator_name!(
+        sqlx::query_as(with_flow_names!(
             concat!(
                 "SELECT ",
                 flow_cols!(),
@@ -381,7 +406,7 @@ impl FlowRepo {
         // only `namespace`/`folder_id` changed, where `sync` is a no-op.
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         let row: std::result::Result<Option<FlowRow>, sqlx::Error> =
-            sqlx::query_as(with_creator_name!(
+            sqlx::query_as(with_flow_names!(
                 concat!(
                     "UPDATE workflow.flows SET \
                    namespace = COALESCE($3, namespace), \

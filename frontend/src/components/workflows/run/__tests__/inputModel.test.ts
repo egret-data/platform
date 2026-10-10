@@ -142,10 +142,19 @@ describe("formFromInputs and requestFromForm, per type (spec §6.1)", () => {
     expect(jsonInputs(set(strs, "a", ["1", "x"]))).toEqual({ a: ["1", "x"] });
   });
 
-  it("JSON: a structured default fills in as text, and the value is sent parsed", () => {
+  it("JSON: a structured default fills in as text, and the value is sent as its text for the backend to parse once", () => {
     const { form } = one("  - id: j\n    type: JSON\n    defaults:\n      k: [1, 2]");
     expect(JSON.parse(form.values.j as string)).toEqual({ k: [1, 2] });
-    expect(jsonInputs(set(form, "j", '{"a": {"b": null}}'))).toEqual({ j: { a: { b: null } } });
+    expect(jsonInputs(set(form, "j", '{"a": {"b": null}}'))).toEqual({ j: '{"a": {"b": null}}' });
+  });
+
+  it("JSON: a JSON string is sent as its text, so the backend's one parse leaves a string, not a number", () => {
+    const { form } = one("  - id: j\n    type: JSON");
+    // Typed `"123"` (with the quotes). Sent parsed it would be the string 123, which the
+    // backend parses again into the number 123 (`with_declared_defaults` parses a JSON input's string).
+    const sent = jsonInputs(set(form, "j", '"123"')).j;
+    expect(sent).toBe('"123"');
+    expect(JSON.parse(sent as string)).toBe("123");
   });
 
   it("YAML: sent as the text typed, unparsed (the backend keeps a YAML input as a string)", () => {
@@ -229,6 +238,24 @@ describe("validateForm", () => {
   it("does not block a required input the flow has a default for", () => {
     const { form } = one("  - id: s\n    type: STRING\n    defaults: x");
     expect(validateForm(set(form, "s", ""))).toEqual({});
+  });
+
+  it("checks EMAIL, URI and DURATION, which the backend does not", () => {
+    const list = inputs("  - id: e\n    type: EMAIL\n  - id: u\n    type: URI\n  - id: d\n    type: DURATION");
+    const check = (values: Record<string, string>) => validateForm({ ...formFromInputs(list), values });
+    expect(check({ e: "abc", u: "example.com", d: "1h" })).toEqual({
+      e: "Enter an email address, such as name@example.com.",
+      u: "Enter a URI with its scheme, such as https://example.com.",
+      d: "Enter an ISO-8601 duration, such as PT1H or P1DT12H.",
+    });
+    expect(check({ e: "ada@example.com", u: "https://example.com/x?y=1", d: "PT1H" })).toEqual({});
+    for (const ok of ["P1D", "P1DT12H", "PT30M", "PT0.5S", "pt1h", "-PT6H", "PT-6H"]) {
+      expect(check({ e: "a@b.co", u: "s3://b/k", d: ok }), ok).toEqual({});
+    }
+    // Java's `Duration` has no years, months or weeks, and needs a component after P and after T.
+    for (const bad of ["P", "PT", "P1Y", "P1M", "P1W", "P1DT", "1H"]) {
+      expect(check({ e: "a@b.co", u: "s3://b/k", d: bad }), bad).toHaveProperty("d");
+    }
   });
 
   it("refuses a malformed number, JSON and array item, naming what is wrong", () => {

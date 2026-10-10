@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { StateChip } from "@/components/workflows/StateChip";
+import { flowActivity, StateChip } from "@/components/workflows/StateChip";
 
 /**
  * The spec's table (§8.1), written out as data — NOT imported from the
@@ -31,9 +31,14 @@ const EXECUTION: [state: string, name: string, bg: string][] = [
   ["RETRIED", "Retried", "bg-muted-foreground/15"],
 ];
 
+/**
+ * The user's ruling (2026-10-10): the flow chip says only whether the flow
+ * runs. Every execution runs the saved draft, so `draft` and `live` are both
+ * Active; the version number is shown elsewhere.
+ */
 const FLOW: [state: string, name: string, bg: string][] = [
-  ["draft", "Draft", "bg-muted"],
-  ["live", "Live", "bg-success/15"],
+  ["draft", "Active", "bg-success/15"],
+  ["live", "Active", "bg-success/15"],
   ["disabled", "Disabled", "bg-muted-foreground/15"],
 ];
 
@@ -61,6 +66,8 @@ describe("StateChip", () => {
   it.each(FLOW)("flow %s: its name, an aria-hidden icon, and its token", (state, name, bg) => {
     render(<StateChip kind="flow" state={state} />);
     const el = chip(name);
+    expect(el).toHaveAttribute("data-state", state);
+    expect(el).toHaveTextContent(new RegExp(`^${name}$`));
     const svg = el.querySelector("svg");
     expect(svg).toHaveAttribute("aria-hidden", "true");
     expect(el.className.split(/\s+/)).toContain(bg);
@@ -94,5 +101,25 @@ describe("StateChip", () => {
     );
     expect(chip("SUCCESS").className.split(/\s+/)).toContain("bg-muted-foreground/15");
     expect(chip("live").className.split(/\s+/)).toContain("bg-muted-foreground/15");
+  });
+
+  it("never names a flow by the word Live or Draft, which read as which version runs", () => {
+    render(
+      <>
+        <StateChip kind="flow" state="draft" />
+        <StateChip kind="flow" state="live" />
+      </>,
+    );
+    expect(screen.queryByText(/Live|Draft/)).not.toBeInTheDocument();
+    expect(screen.getAllByText("Active")).toHaveLength(2);
+  });
+});
+
+describe("flowActivity", () => {
+  it("is active for draft and live, disabled for disabled, and unknown otherwise", () => {
+    expect(flowActivity("draft")).toBe("active");
+    expect(flowActivity("live")).toBe("active");
+    expect(flowActivity("disabled")).toBe("disabled");
+    expect(flowActivity("archived")).toBeUndefined();
   });
 });

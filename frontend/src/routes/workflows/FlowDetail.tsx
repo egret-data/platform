@@ -342,7 +342,10 @@ function FlowWorkspace({
   // Run starts the saved draft (spec §6.1); with no unsaved edits, the editor's
   // text, its validation and the form's inputs are all that draft.
   const disabled = isFlowDisabled(flow.state, flow.source);
-  const runState = canRun({ manage, dirty, errors, validationStatus, disabled });
+  // Someone else's save, read back (after Create version, for one): the server would run text
+  // this editor neither shows nor validated.
+  const stale = !dirty && flow.source !== baseline.source;
+  const runState = canRun({ manage, dirty, errors, validationStatus, disabled, stale });
   const nextVersion = versions ? Math.max(0, ...versions.map((v) => v.version)) + 1 : null;
   const flowName = `${flow.namespace}.${flow.flow_id}`;
   const reasonsId = useId();
@@ -357,6 +360,11 @@ function FlowWorkspace({
           <div className="mt-1 flex flex-wrap items-center gap-2">
             <h1 className="truncate text-xl font-semibold">{flow.flow_id}</h1>
             <StateChip state={flow.state} kind="flow" />
+            {/* The latest version, shown apart from the chip (the user's ruling, 2026-10-10):
+                a snapshot to compare and restore, never what runs. */}
+            <span className="text-sm text-muted-foreground tabular-nums" data-testid="flow-latest-version">
+              Version {flow.latest_version != null ? `v${flow.latest_version}` : "—"}
+            </span>
             {changesPill && <Badge variant="outline">{changesPill}</Badge>}
             {dirty && <Badge variant="secondary">Unsaved changes</Badge>}
           </div>

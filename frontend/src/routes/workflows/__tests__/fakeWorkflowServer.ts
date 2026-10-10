@@ -54,6 +54,7 @@ export class FakeWorkflowServer {
       live_version_id: null,
       created_by: null,
       created_by_name: null,
+      latest_version: null,
       created_at: "2026-10-01T00:00:00.000001Z",
       updated_at: "2026-10-10T09:47:08.618779Z",
       validation: { errors: [], warnings: [] },
@@ -75,7 +76,7 @@ export class FakeWorkflowServer {
     };
     this.versions.push(version);
     // `set_live` moves `updated_at` too.
-    this.flow = { ...flow, state: "live", live_version_id: version.id, updated_at: stamp() };
+    this.flow = { ...flow, state: "live", live_version_id: version.id, latest_version: version.version, updated_at: stamp() };
     return version;
   }
 
