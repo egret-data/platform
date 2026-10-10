@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Keep cargo's `deps/` directory small enough that starting a binary stays instant.
+# Keep cargo's `deps/` directory small enough that starting a binary stays instant,
+# and keep `incremental/` from filling the disk.
 #
 # THE MEASUREMENT THIS EXISTS FOR (this repo, 2026-08-25). Starting a test binary that
 # lives in `target/debug/deps` — running ZERO tests — cost:
@@ -21,17 +22,51 @@
 # files. Cleaning to save 35 seconds loses 17x on the trade.
 #
 # SECOND DIRECTORY, DIFFERENT PROBLEM (added 2026-08-26). `debug/incremental` does not
-# affect startup at all — it is capped for DISK. Measured the day this was added: `target`
-# had reached 93 G, of which `incremental` alone was 37 G across ~650 session directories
-# (~50 MB each), because cargo never garbage-collects it either. It had never been pruned
-# because the original script only knew about `deps/`.
+# affect startup at all. It was added because `target` had reached 93 G, of which
+# `incremental` alone was 37 G across ~650 session directories (~50 MB each), because
+# cargo never garbage-collects it either.
 #
-# It is capped by DIRECTORY COUNT rather than by bytes on purpose: `du` on a 37 G tree
-# walks every file and takes seconds, which is too slow for something that runs on every
-# commit, while `ls -f | wc -l` on the session directories is one cheap readdir.
+# ⚠ WHAT THE DIRECTORY CAP ACTUALLY BOUNDS, AND WHAT IT DOES NOT (corrected 2026-10-10,
+# SP4d debt Task 17). This header used to say `incremental` "is capped for DISK". It is
+# not: `MAX_INCREMENTAL_DIRS` bounds a COUNT of session directories, and a count is not a
+# bound on bytes. ~50 MB was the average session directory at the moment it was measured,
+# so 200 dirs was *about* 10 G that day; the per-directory size is whatever rustc happens
+# to write, so the same 200 dirs can be 2 G or 40 G. Tasks 8+10 of this plan proved the
+# gap the expensive way: `/` reached 100 % with 117 Mi available while this cap was in
+# force and reporting itself satisfied, and recovery meant deleting 7.3 G of
+# `debug/incremental` by hand. The task after that then lost time to a repair, because the
+# full disk had filled the Docker VM's log with `input/output error` and left Postgres
+# unreachable.
+#
+# The count cap's REASONING is still sound for its own job — `du` on a 37 G tree walks
+# every file and takes seconds, which is too slow for something that runs on every commit,
+# while `ls -f | wc -l` is one cheap readdir. So the byte signal added here is NOT `du`:
+# it is `df` on the volume, which is O(1) and reports the quantity that actually matters
+# — FREE SPACE, not tree size. A tree can be huge on a disk with room to spare, and that
+# is not a problem; 117 Mi free is a problem whatever the tree measures.
+#
+# So there are now two independent caps on `incremental`, and they answer different
+# questions:
+#
+#   MAX_INCREMENTAL_DIRS  — count. Stops unbounded accumulation during normal work.
+#   PRUNE_MIN_FREE_GB     — bytes, via `df`. Fires only when the VOLUME is running out,
+#                           and then drops the count cap to LOW_DISK_INCREMENTAL_DIRS.
 #
 # Deleting a session directory only costs the next build's incremental speed for the
-# crates it covered; it is never a correctness risk, unlike deleting from `deps/`.
+# crates it covered; it is never a correctness risk, unlike deleting from `deps/`. That
+# asymmetry is why the low-disk path is allowed to empty `incremental` outright and is
+# NOT allowed to go harder on `deps/`.
+#
+# ⚠ THIS SCRIPT PRUNES ONE TREE: the one it was invoked for ($CARGO_TARGET_DIR, or
+# ./target). Several worktrees share this host and other sessions build in them — on
+# 2026-10-01 there were three holding 161 G of `target` between them; on 2026-10-10 there
+# are two, `egret` at 73 G and `egret-sp4a` at 32 G, because a worktree was removed in
+# between. (Those numbers are statements about a moment: re-measure, do not cite them.)
+# The tempting fix for a full disk is a sweep across all of them, and it is the wrong one:
+# this script runs from a post-commit hook in whichever worktree committed, with no
+# knowledge of what the others are mid-build on, and deleting another tree's `deps/` while
+# its build runs produces errors that read as source errors. When the volume is low the
+# low-disk path therefore NAMES the sibling worktrees and leaves them completely alone.
 set -euo pipefail
 
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
@@ -39,17 +74,62 @@ TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 # full suite starts paying tens of seconds of dead time.
 MAX_FILES="${PRUNE_MAX_FILES:-80000}"
 MIN_AGE_MIN="${PRUNE_MIN_AGE_MIN:-60}"
-# ~650 session directories was 37 G. 200 keeps it near 10 G while leaving plenty of
-# incremental state for the crates anyone is actively editing.
+# ~650 session directories was 37 G the day this was measured. 200 kept it near 10 G
+# THAT day while leaving plenty of incremental state for the crates anyone is actively
+# editing. It is a count, not a size — see the header.
 MAX_INCREMENTAL_DIRS="${PRUNE_MAX_INCREMENTAL_DIRS:-200}"
+# The byte cap. Below this much free space on the volume holding $TARGET_DIR, the
+# incremental cap drops to $LOW_DISK_INCREMENTAL_DIRS. 20 GiB is chosen against two
+# measurements: one full workspace rebuild of this repo writes well over 10 G into
+# `target`, and the disk-full that motivated this left 117 Mi — so the threshold has to
+# be high enough that a build which starts just after a pass cannot cross zero before
+# the next commit fires this script again.
+MIN_FREE_GB="${PRUNE_MIN_FREE_GB:-20}"
+# 0 = remove every session directory in THIS tree. Safe by the asymmetry above: the only
+# cost is the next build's incremental speed.
+LOW_DISK_INCREMENTAL_DIRS="${PRUNE_LOW_DISK_INCREMENTAL_DIRS:-0}"
+
+# Available space in GiB on the volume holding $1. O(1) — one statfs, no tree walk,
+# which is the whole point (see the header's `du` note). `-P` forces POSIX one-line
+# output so a long device name cannot wrap and shift the column; field 4 is Available
+# in 1024-byte blocks on both macOS and Linux. `df` the TARGET DIR and not `/`: on macOS
+# `/` is the sealed system snapshot and reports a different volume than the data volume
+# `target` actually lives on.
+#
+# The trailing `|| true` is load-bearing under `set -o pipefail`: without it a failing
+# `df` makes this pipeline non-zero, the `free_before=$(free_gb …)` assignment inherits
+# that, and `set -e` kills the script *before* the warning below can say the floor is
+# unenforced. Measured while writing this: with a stub `df` that exits 1, the whole
+# incremental loop was skipped and the run exited 1 having printed only the deps line.
+free_gb() {
+  df -Pk "$1" 2>/dev/null | awk 'NR==2 { printf "%d", $4 / 1048576 }' || true
+}
+
+# Never delete an artifact out from under a running build: the failure that produces
+# looks exactly like a source error and costs an afternoon to diagnose.
+#
+# ⚠ `pgrep -x`, NOT `pgrep -f "cargo (build|test|…)"` (fixed 2026-10-10, SP4d debt
+# Task 17). `-f` matches the FULL COMMAND LINE of every process, so it fired on any
+# shell whose command line merely contained the words — measured on this host: a
+# `/bin/zsh -c … cat > crates/egret-workflow/tests/w7a_t1_sizes.rs <<EOF …` heredoc from
+# another agent session matched it, and this script printed "a cargo build is running"
+# and pruned nothing while no cargo process existed at all (`pgrep -x cargo` exited 1 at
+# the same instant). A guard that can be held shut for hours by an unrelated shell is
+# how a byte cap gets added and still never fires. `-x` matches the executable NAME, so
+# it sees cargo and rustc themselves and nothing that merely talks about them.
+#
+# It is still deliberately GLOBAL rather than per-worktree: pgrep cannot see a process's
+# cwd portably, so a build in a sibling tree does pause pruning here. That errs toward
+# not deleting, which is the right direction for `deps/`.
+build_running() {
+  pgrep -x cargo >/dev/null 2>&1 || pgrep -x rustc >/dev/null 2>&1
+}
 
 for deps in "$TARGET_DIR"/debug/deps "$TARGET_DIR"/release/deps; do
   [ -d "$deps" ] || continue
 
-  # Never delete an artifact out from under a running build: the failure that produces
-  # looks exactly like a source error and costs an afternoon to diagnose.
-  if pgrep -f "cargo (build|test|clippy|run|check)" >/dev/null 2>&1; then
-    echo "prune-target: a cargo build is running — leaving $deps alone"
+  if build_running; then
+    echo "prune-target: a cargo/rustc process is running — leaving $deps alone"
     continue
   fi
 
@@ -74,24 +154,58 @@ for inc in "$TARGET_DIR"/debug/incremental "$TARGET_DIR"/release/incremental; do
 
   # Same guard as above, and for the same reason: a build that loses its incremental
   # state mid-run reports errors that look like source errors.
-  if pgrep -f "cargo (build|test|clippy|run|check)" >/dev/null 2>&1; then
-    echo "prune-target: a cargo build is running — leaving $inc alone"
+  if build_running; then
+    echo "prune-target: a cargo/rustc process is running — leaving $inc alone"
     continue
+  fi
+
+  cap="$MAX_INCREMENTAL_DIRS"
+  free_before=$(free_gb "$inc")
+  # Say so out loud. A byte cap that silently degrades to "no byte cap" when its
+  # measurement fails is the same defect this gate was added to close.
+  if [ -z "$free_before" ]; then
+    echo "prune-target: WARNING — df gave no free-space figure for $inc; the ${MIN_FREE_GB} GiB floor is NOT being enforced on this run."
+  fi
+  if [ -n "$free_before" ] && [ "$free_before" -lt "$MIN_FREE_GB" ]; then
+    cap="$LOW_DISK_INCREMENTAL_DIRS"
+    echo "prune-target: ${free_before} GiB free on $inc's volume, under the ${MIN_FREE_GB} GiB floor."
+    echo "prune-target: dropping the session-dir cap from $MAX_INCREMENTAL_DIRS to $cap for THIS tree."
+    # Name the siblings; do NOT touch them. See the header's one-tree note. Sizes are
+    # left to the operator because `du` on these is exactly the cost `df` avoids.
+    # `|| true` on the whole pipeline, and `if` rather than `&&` inside it: with
+    # `set -e` a trailing `&&`-list that ends false aborts the script, and when that
+    # happened here the sibling NOTICE silently replaced the pruning it was supposed
+    # to accompany (the run printed the names, freed nothing, and exited 1).
+    if git rev-parse --git-dir >/dev/null 2>&1; then
+      mine=$(cd "$(dirname "$TARGET_DIR")" 2>/dev/null && pwd -P || true)
+      git worktree list --porcelain 2>/dev/null \
+        | awk '/^worktree /{print $2}' \
+        | while read -r wt; do
+            here=$(cd "$wt" 2>/dev/null && pwd -P || true)
+            if [ -n "$here" ] && [ "$here" = "$mine" ]; then
+              continue
+            fi
+            if [ -d "$wt/target" ]; then
+              echo "prune-target: NOT pruned (another session may be building): $wt/target"
+            fi
+          done || true
+    fi
   fi
 
   # `-mindepth 1 -maxdepth 1`: count SESSION DIRECTORIES, not the files inside them.
   dirs=$(find "$inc" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$dirs" -le "$MAX_INCREMENTAL_DIRS" ]; then
-    echo "prune-target: $inc has $dirs session dirs (cap $MAX_INCREMENTAL_DIRS) — nothing to do"
+  if [ "$dirs" -le "$cap" ]; then
+    echo "prune-target: $inc has $dirs session dirs (cap $cap, ${free_before:-?} GiB free) — nothing to do"
     continue
   fi
 
-  excess=$((dirs - MAX_INCREMENTAL_DIRS))
-  echo "prune-target: $inc has $dirs session dirs, over the $MAX_INCREMENTAL_DIRS cap."
+  excess=$((dirs - cap))
+  echo "prune-target: $inc has $dirs session dirs, over the $cap cap."
   echo "prune-target: removing the $excess oldest — this costs rebuild speed, never correctness."
   find "$inc" -mindepth 1 -maxdepth 1 -type d -print0 \
     | xargs -0 stat -f '%m %N' 2>/dev/null \
     | sort -n | head -n "$excess" | cut -d' ' -f2- \
     | tr '\n' '\0' | xargs -0 rm -rf 2>/dev/null || true
-  echo "prune-target: $inc now has $(find "$inc" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ') session dirs"
+  free_after=$(free_gb "$inc")
+  echo "prune-target: $inc now has $(find "$inc" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ') session dirs, ${free_after:-?} GiB free (was ${free_before:-?} GiB)"
 done
