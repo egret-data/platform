@@ -376,6 +376,12 @@ fn build(accepted: &Accepted) -> Value {
             remove_refused_values(name, def);
         }
     }
+    // After the filters, which may drop a required property egret ignores.
+    for name in tasks.iter().chain(&triggers) {
+        if let Some(def) = defs.get_mut(name) {
+            defer_required_to_type(def);
+        }
+    }
     if let Value::Object(f) = flow {
         for (k, v) in f {
             root.insert(k, v);
@@ -388,6 +394,49 @@ fn build(accepted: &Accepted) -> Value {
         .collect();
     root.insert("$defs".into(), Value::Object(defs));
     Value::Object(root)
+}
+
+/// The guard [`defer_required_to_type`] puts in a type's `if`.
+fn type_is_a_string() -> Value {
+    json!({ "required": ["type"], "properties": { "type": { "type": "string" } } })
+}
+
+/// Move a task or trigger type's required properties, other than `id` and
+/// `type`, into `then.required` behind `if: type is a string`.
+///
+/// **Why.** The editor's completion is yaml-language-server's (`monaco-yaml`).
+/// To complete `type: |` it scores every `oneOf` member against the mapping
+/// being typed and merges only the best-scoring ones, and a missing required
+/// property counts against a member. With `required: [id, message, type]`,
+/// `Log` loses to every type that requires nothing else, so the `type:`
+/// completion offered 10 of the 54 task spellings and 2 of the 6 trigger
+/// spellings (measured on this schema with the language service of `monaco-yaml`
+/// 5.5.1). While `type` has no value the guard is false, so no member is
+/// penalised and every spelling is offered; once `type` holds a string the
+/// guard holds and the "Missing property" diagnostic is the same as before.
+///
+/// **It accepts exactly the same documents.** A member is only satisfied when
+/// `type` is present and equals one of its string `const`s, and then the
+/// guard holds, so `then` applies; when `type` is absent or not a string the
+/// member already fails on `required`/`type`. Kestra's schema has the same
+/// shape problem; Kestra's UI papers over it with its own `type:` completion.
+fn defer_required_to_type(def: &mut Value) {
+    let Some(Value::Array(required)) = def.get("required") else {
+        return;
+    };
+    let (outright, deferred): (Vec<Value>, Vec<Value>) = required
+        .iter()
+        .cloned()
+        .partition(|r| r == "id" || r == "type");
+    if deferred.is_empty() {
+        return;
+    }
+    let m = def
+        .as_object_mut()
+        .expect("a definition with `required` is an object");
+    m.insert("required".into(), Value::Array(outright));
+    m.insert("if".into(), type_is_a_string());
+    m.insert("then".into(), json!({ "required": deferred }));
 }
 
 /// Remove from each property's `enum` (wherever it sits in that property's
@@ -755,6 +804,71 @@ mod tests {
             let names = reachable_defs(&s, defs);
             let missing: Vec<_> = names.iter().filter(|n| !defs.contains_key(*n)).collect();
             assert!(missing.is_empty(), "{f:?}: dangling {missing:?}");
+        }
+    }
+
+    /// Every served task and trigger type requires only `id` and `type`
+    /// outright; the rest of its required properties sit behind an `if` that
+    /// holds once `type` is a string (`defer_required_to_type`). The full
+    /// requirement is unchanged: `required` plus `then.required` is what the
+    /// type required before, which `egret.sql` and Kestra's `Log` pin.
+    #[test]
+    fn every_served_type_defers_its_other_required_properties_behind_its_type() {
+        let strs = |v: &Value| -> BTreeSet<String> {
+            v.as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        for f in all_features() {
+            let s = flow_schema(&f, &permissive_deployment());
+            let defs = s["$defs"].as_object().unwrap();
+            let mut deferred = 0;
+            for union in ["egret.task", "egret.trigger"] {
+                for member in s["$defs"][union]["oneOf"].as_array().unwrap() {
+                    let name = member["$ref"]
+                        .as_str()
+                        .unwrap()
+                        .trim_start_matches("#/$defs/");
+                    let def = &defs[name];
+                    let outright = strs(&def["required"]);
+                    assert!(outright.contains("type"), "{f:?} {name}: {outright:?}");
+                    assert!(
+                        outright.iter().all(|r| r == "id" || r == "type"),
+                        "{f:?} {name} requires {outright:?} outright"
+                    );
+                    if def.get("then").is_some() {
+                        deferred += 1;
+                        assert_eq!(def["if"], type_is_a_string(), "{f:?} {name}");
+                        let rest = strs(&def["then"]["required"]);
+                        assert!(
+                            !rest.is_empty() && rest.is_disjoint(&outright),
+                            "{f:?} {name}"
+                        );
+                    } else {
+                        assert!(def.get("if").is_none(), "{f:?} {name}");
+                    }
+                }
+            }
+            assert!(deferred > 30, "{f:?}: only {deferred} types defer anything");
+            let full = |name: &str| {
+                let d = &defs[name];
+                let mut all = strs(&d["required"]);
+                all.extend(strs(&d["then"]["required"]));
+                all
+            };
+            assert_eq!(
+                full("egret.sql"),
+                strs(&json!(["database", "sql", "id", "type"]))
+            );
+            assert_eq!(
+                full("io.kestra.plugin.core.log.Log"),
+                strs(&kestra_definition("io.kestra.plugin.core.log.Log").unwrap()["required"])
+            );
         }
     }
 

@@ -278,3 +278,25 @@ or `enum` differs between the two, the catalog's schema is served
 (W7a spec §7.1, *Precedence*). At 2.0.0-rc13 none differs: compared after
 removing annotations, the only difference is how `retry`'s three subtypes are
 wrapped.
+
+## 5. The served shape of `required` (W7a Task 4)
+
+Every served task and trigger type requires only `id` and `type` outright.
+The rest of its required properties sit in `then.required`, behind
+`if: { required: [type], properties: { type: { type: string } } }`
+(`defer_required_to_type` in `mod.rs`). The documents it accepts are the
+same: a type only matches when `type` is one of its string `const`s, and then
+the guard holds.
+
+The reason is the editor. `monaco-yaml`'s language service (yaml-language-server)
+completes `type: |` from the best-scoring `oneOf` members only, and a missing
+required property lowers a member's score. With the plain `required` list,
+`type:` completion offered 10 of the 54 task spellings and 2 of the 6 trigger
+spellings; with the guard it offers all of them, and "Missing property"
+still appears once `type` has a value. The measurement drove `monaco-yaml`
+5.5.1's own worker (`yaml.worker.js`) in Node against the served document;
+the W7a Task 4 report has the script and both runs.
+
+Everything else in the served document already works with that language
+service: draft 2020-12, `$defs`, and `allOf` wrappers (it has no `$ref` with
+sibling keywords; the language service would rewrite one into `allOf` itself).

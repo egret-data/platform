@@ -545,12 +545,7 @@ fn egret_only_types_are_described_with_their_required_properties() {
             .iter()
             .any(|k| def[k].as_str().is_some_and(|s| !s.is_empty()));
         assert!(described, "{t} has no description");
-        let required: BTreeSet<&str> = def["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(Value::as_str)
-            .collect();
+        let required = all_required(def);
         let row = registry::known_type(t).expect("registry row");
         for rf in row.references {
             assert!(required.contains(rf.field), "{t} must require {}", rf.field);
@@ -558,8 +553,26 @@ fn egret_only_types_are_described_with_their_required_properties() {
         }
         assert!(required.contains("id") && required.contains("type"), "{t}");
     }
-    let sql = &schema["$defs"]["egret.sql"]["required"];
-    assert_eq!(sql, &json!(["database", "sql", "id", "type"]));
+    assert_eq!(
+        schema["$defs"]["egret.sql"]["required"],
+        json!(["id", "type"])
+    );
+    assert_eq!(
+        schema["$defs"]["egret.sql"]["then"]["required"],
+        json!(["database", "sql"])
+    );
+}
+
+/// A served type's required properties: `id` and `type` outright, the rest
+/// behind `if: type is a string` (`then.required`), so that `monaco-yaml`
+/// completes every `type:` spelling.
+fn all_required(def: &Value) -> BTreeSet<&str> {
+    [&def["required"], &def["then"]["required"]]
+        .into_iter()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
 }
 
 /// The document's shape: draft 2020-12, the flow's own properties, task
