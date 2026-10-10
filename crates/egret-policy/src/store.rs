@@ -142,6 +142,17 @@ pub fn is_compiler_owned_policy_name(name: &str) -> bool {
 /// Deliberately does not require `origin = 'generated'`: a `manual` profile
 /// is exactly the case the round-2 report showed getting silently
 /// steamrolled, so gating this on `origin` would reopen the same hole.
+fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
+    if is_compiler_owned_policy_name(name) {
+        return Err(PolicyStoreError::CompilerOwned(format!(
+            "policy name {name:?} starts with a prefix reserved for the SP4a permission model \
+             ({COMPILER_GRANT_PREFIX:?} / {COMPILER_RULE_PREFIX:?} / \
+             {COMPILER_CLEARANCE_PREFIX:?}) — only its compiler writes \
+             policies there; rename this policy instead of retrying"
+        )));
+    }
+    Ok(())
+}
 /// The infra writers' own guard: they stamp `managed_by = 'infra'`, so they may
 /// only be given a name `egret_policy_api::infra_names` recognises. A hard
 /// error, not a `debug_assert`, so the writer cannot drift from the predicate.
@@ -155,13 +166,50 @@ fn refuse_non_infrastructure_name(name: &str) -> Result<(), PolicyStoreError> {
     Ok(())
 }
 
-fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
-    if is_compiler_owned_policy_name(name) {
-        return Err(PolicyStoreError::CompilerOwned(format!(
-            "policy name {name:?} starts with a prefix reserved for the SP4a permission model \
-             ({COMPILER_GRANT_PREFIX:?} / {COMPILER_RULE_PREFIX:?} / \
-             {COMPILER_CLEARANCE_PREFIX:?}) — only its compiler writes \
-             policies there; rename this policy instead of retrying"
+/// SP4d-3 Task 2: the HUMAN paths' reservation of egret's infrastructure names.
+/// A human create, or a rename INTO such a name, would mint an `'operator'` row
+/// under a name [`is_egret_infrastructure_policy_name`] claims, so the column
+/// and the predicate would disagree from the first write.
+///
+/// Its own variant rather than [`PolicyStoreError::CompilerOwned`]: that one's
+/// message names the SP4a permission model's `perm-*` prefixes, and an operator
+/// told to "rename this policy" about a prefix they never used would be misled.
+/// Both map to 409 — the request is well-formed, the name belongs to someone
+/// else. The infra writers do NOT call this; they call
+/// [`refuse_non_infrastructure_name`], its inverse.
+fn refuse_infrastructure_name(name: &str) -> Result<(), PolicyStoreError> {
+    if is_egret_infrastructure_policy_name(name) {
+        return Err(PolicyStoreError::InfrastructureOwned(format!(
+            "policy name {name:?} is reserved for egret's own plumbing (delegator and default \
+             access policies) — choose a different name"
+        )));
+    }
+    Ok(())
+}
+
+/// SP4d-3 Task 2: refuse a human `UPDATE`/`DELETE`/enable-flip of a policy
+/// egret's own plumbing owns.
+///
+/// Keyed on `managed_by`, the COLUMN — deliberately not on the name.
+/// [`refuse_if_compiler_owned`] answers a question about a NAME, which is the
+/// right question for the compiler's reserved prefixes. This one answers a
+/// question about a ROW, because the thing being protected is the row's
+/// existence and content, and a rename must not move it out of the guard.
+async fn refuse_if_infrastructure_owned(
+    conn: &mut sqlx::PgConnection,
+    policy_id: i64,
+) -> Result<(), PolicyStoreError> {
+    let managed_by: Option<String> =
+        sqlx::query_scalar("SELECT managed_by FROM policy.authz_policies WHERE id = $1")
+            .bind(policy_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if managed_by.as_deref() == Some("infra") {
+        return Err(PolicyStoreError::InfrastructureOwned(format!(
+            "policy id {policy_id} is owned by egret's own plumbing (managed_by = 'infra') — \
+             it is seeded or maintained by the platform, and editing it can break delegation \
+             or lock every admin out of this service. Nothing in the console can change it; \
+             if it is wrong, the producer that mints it has to change"
         )));
     }
     Ok(())
@@ -1875,6 +1923,7 @@ impl PolicyStore {
         name: &str,
         policy: &Value,
     ) -> Result<i64, PolicyStoreError> {
+        refuse_infrastructure_name(name)?;
         self.insert_policy_owned_by(service_id, name, policy, "operator")
             .await
     }
@@ -2001,6 +2050,7 @@ impl PolicyStore {
         policy: &Value,
     ) -> Result<i64, PolicyStoreError> {
         refuse_reserved_name(name)?;
+        refuse_infrastructure_name(name)?;
         let mut tx = self.db.pool.begin().await?;
         let id: i64 = sqlx::query_scalar::<_, i64>(
             r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb)
@@ -2051,6 +2101,10 @@ impl PolicyStore {
             tx.rollback().await?;
             return Err(e);
         }
+        if let Err(e) = refuse_if_infrastructure_owned(&mut tx, id).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
         // Fix round 3: reserved-namespace check on the NEW/target name, AFTER
         // the ownership check above — an already-owned policy (caught above,
         // whatever `name` the caller resent) gets the ownership-specific
@@ -2066,6 +2120,16 @@ impl PolicyStore {
         if let Err(e) = refuse_reserved_name(name) {
             tx.rollback().await?;
             return Err(e);
+        }
+        // SP4d-3 Task 2: and a rename INTO an infrastructure name. Only a
+        // CHANGE of name: the editor resends the current name on every save,
+        // and a row that already carries one (it is `'operator'` here, since an
+        // `'infra'` row was refused above) must stay editable.
+        if name != current_name {
+            if let Err(e) = refuse_infrastructure_name(name) {
+                tx.rollback().await?;
+                return Err(e);
+            }
         }
         sqlx::query(
             r#"UPDATE policy.authz_policies SET name=$2, policy_jsonb=$3, enabled=$4, version=version+1, updated_at=now() WHERE id=$1"#,
@@ -2103,6 +2167,10 @@ impl PolicyStore {
             tx.rollback().await?;
             return Err(e);
         }
+        if let Err(e) = refuse_if_infrastructure_owned(&mut tx, id).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
         sqlx::query(
             r#"UPDATE policy.authz_policies SET enabled=$2, version=version+1, updated_at=now() WHERE id=$1"#,
         )
@@ -2136,6 +2204,10 @@ impl PolicyStore {
             return Err(PolicyStoreError::NotFound(format!("policy {id}")));
         };
         if let Err(e) = refuse_if_compiler_owned(&mut tx, service_id, &current_name).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
+        if let Err(e) = refuse_if_infrastructure_owned(&mut tx, id).await {
             tx.rollback().await?;
             return Err(e);
         }
