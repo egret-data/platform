@@ -455,7 +455,23 @@ pub(crate) fn ensure_scope_levels_are_named(scope: &Scope) -> Result<(), Compile
 /// `egret_ranger_eval::resource::requests_all_values`, which folds `null`, `""`
 /// and `"*"` together because it is the REQUEST-side rule.
 ///
-/// Keyed one-for-one with `migrations/0179`'s `~ '^[*]+$'`.
+/// **Keyed one-for-one with `migrations/0179`'s `~ '^[*]+$'`, and `!value.is_empty()`
+/// is the term that makes that true on `''`.** `+` is one-or-more, so the SQL
+/// regex does NOT match the empty string. Drop the emptiness term and
+/// `value.bytes().all(..)` is VACUOUSLY true on `""`: the Rust half would call an
+/// empty level a wildcard run while the CHECK called it a name, and the two
+/// halves of one guardrail would disagree about which refusal a steward gets for
+/// `('', 'orders')` — `NamedLevelUnderWildcard` from here, nothing at all from
+/// `0179`.
+///
+/// **The term is not a redundant guard in front of
+/// [`ensure_scope_levels_are_named`].** That function refuses `''` at every level
+/// unconditionally and runs FIRST at all four call sites, so the difference is
+/// unreachable end-to-end — which is exactly why it went unpinned: deleting
+/// `!value.is_empty() && ` compiled and left 291 tests passing across 20
+/// binaries, mutating a live disagreement into silence. The mask is call order,
+/// and call order is not a test. `tests::empty_level_is_not_a_wildcard_run_so_0178_owns_the_refusal`
+/// pins it by calling this rule DIRECTLY, past that mask.
 fn level_is_a_wildcard_run(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|b| b == b'*')
 }
@@ -626,4 +642,78 @@ pub fn compile_grant(
         is_override: false,
         additional: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scope(schema: Option<&str>, table: Option<&str>, column: Option<&str>) -> Scope {
+        Scope {
+            catalog_id: uuid::Uuid::nil(),
+            schema: schema.map(str::to_string),
+            table: table.map(str::to_string),
+            column: column.map(str::to_string),
+        }
+    }
+
+    /// `''` is NOT a wildcard run, so this rule must stay silent on it.
+    ///
+    /// **This exists because a mutation survived.** Deleting `!value.is_empty() && `
+    /// from [`level_is_a_wildcard_run`] compiled and left 291 tests passing across
+    /// 20 binaries, exit 0. On `""` the SQL in `migrations/0179` says false —
+    /// `^[*]+$` needs one-or-more `*` — and the mutated Rust says true, because
+    /// `bytes().all(..)` is vacuously true on an empty iterator. The `**`/`***`
+    /// half of the same predicate IS pinned (`tests/compile_grants.rs` kills
+    /// `bytes().all(..)` -> `value == "*"`); the emptiness half was not.
+    ///
+    /// **What masked it was call order, not coverage.** All four production call
+    /// sites run [`ensure_scope_levels_are_named`] first, and it refuses `''` at
+    /// every level, so no end-to-end test can reach the disagreement. This test
+    /// therefore calls [`ensure_a_wildcard_level_has_nothing_named_beneath_it`]
+    /// directly. A guardrail whose correctness rests on another function running
+    /// first needs a test at its own boundary, because the next caller is one
+    /// `pub(crate)` away from not running it.
+    ///
+    /// The ruling it pins: an empty level names nothing, which is `0178`'s
+    /// `EmptyScopeLevel` refusal and not this one. Answering
+    /// `NamedLevelUnderWildcard` for `('', 'orders')` would hand the steward the
+    /// wrong remedy for a row `0179`'s CHECK admits.
+    #[test]
+    fn empty_level_is_not_a_wildcard_run_so_0178_owns_the_refusal() {
+        assert!(
+            !level_is_a_wildcard_run(""),
+            "`^[*]+$` is one-or-more, so the empty string is not a wildcard run; \
+             `bytes().all(..)` on its own is VACUOUSLY true here"
+        );
+
+        for s in [
+            scope(Some(""), Some("orders"), None),
+            scope(Some(""), Some("orders"), Some("email")),
+            scope(Some("sales"), Some(""), Some("email")),
+        ] {
+            assert_eq!(
+                ensure_a_wildcard_level_has_nothing_named_beneath_it(&s),
+                Ok(()),
+                "{s:?}: an EMPTY level is a level that NAMES NOTHING — `0178`'s \
+                 refusal, not this one. Firing here contradicts `0179`'s CHECK, \
+                 which admits this row, and the one-for-one keying the predicate \
+                 claims"
+            );
+        }
+
+        // Control: the rule still fires on a REAL wildcard run with a named level
+        // beneath it, so the assertions above cannot be passing because the
+        // function has gone inert.
+        assert!(
+            ensure_a_wildcard_level_has_nothing_named_beneath_it(&scope(
+                Some("*"),
+                Some("orders"),
+                None,
+            ))
+            .is_err(),
+            "the rule must still refuse `('*','orders')`, or everything above is \
+             measuring an inert function"
+        );
+    }
 }
