@@ -3057,7 +3057,7 @@ async fn compile(
 /// whether it can be migrated into the permission model, and if not, every
 /// reason as a sentence naming the offending value. Read-only; `infra` and
 /// `compiler` rows are reported (as not migratable, with the reason), never
-/// omitted. See [`crate::classify`] for how the service kind, the catalog
+/// omitted. The `classify` module doc says how the service kind, the catalog
 /// lookup and the tag lookup are derived from the profile.
 #[utoipa::path(
     get,

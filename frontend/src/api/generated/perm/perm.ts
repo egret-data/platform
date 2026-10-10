@@ -816,7 +816,7 @@ export const getPermClassifyServicePoliciesUrl = (serviceId: number,) => {
 whether it can be migrated into the permission model, and if not, every
 reason as a sentence naming the offending value. Read-only; `infra` and
 `compiler` rows are reported (as not migratable, with the reason), never
-omitted. See [`crate::classify`] for how the service kind, the catalog
+omitted. The `classify` module doc says how the service kind, the catalog
 lookup and the tag lookup are derived from the profile.
  */
 export const permClassifyServicePolicies = async (serviceId: number, options?: Parameters<typeof customInstance>[1]): Promise<permClassifyServicePoliciesResponse> => {
@@ -892,7 +892,7 @@ export function usePermClassifyServicePolicies<TData = Awaited<ReturnType<typeof
 whether it can be migrated into the permission model, and if not, every
 reason as a sentence naming the offending value. Read-only; `infra` and
 `compiler` rows are reported (as not migratable, with the reason), never
-omitted. See [`crate::classify`] for how the service kind, the catalog
+omitted. The `classify` module doc says how the service kind, the catalog
 lookup and the tag lookup are derived from the profile.
  */
 

@@ -383,6 +383,14 @@ async fn every_policy_in_a_resource_profile_is_classified_in_id_order() {
         .unwrap()
         .remove("column");
     let missing_level = insert(&f, p, "saved by the editor", "operator", true, no_column).await;
+    // The catalog is never omissible, and `*` names no catalog — so the
+    // "set it to `*`" remedy the other levels get would be wrong here.
+    let mut no_catalog = access_policy(&cat, &["select"]);
+    no_catalog["resources"]
+        .as_object_mut()
+        .unwrap()
+        .remove("catalog");
+    let missing_catalog = insert(&f, p, "no catalog at all", "operator", true, no_catalog).await;
     let tag_here = insert(
         &f,
         p,
@@ -412,6 +420,7 @@ async fn every_policy_in_a_resource_profile_is_classified_in_id_order() {
         unserved,
         unknown_type,
         missing_level,
+        missing_catalog,
         tag_here,
     ];
     want.sort_unstable();
@@ -452,6 +461,14 @@ async fn every_policy_in_a_resource_profile_is_classified_in_id_order() {
     );
     assert_refused_with(by_id(&body, unknown_type), &["type is 7"]);
     assert_refused_with(by_id(&body, missing_level), &["`column`", "editor", "`*`"]);
+    let no_cat = by_id(&body, missing_catalog);
+    assert_refused_with(no_cat, &["`catalog`", "served catalog"]);
+    assert!(
+        blockers(no_cat)
+            .iter()
+            .all(|b| !b.contains("Setting `catalog` to `*`")),
+        "the catalog must not be told to become `*`: {no_cat}"
+    );
     assert_refused_with(by_id(&body, tag_here), &["resource profile", "tag service"]);
 }
 
@@ -503,6 +520,24 @@ async fn a_tag_service_is_classified_as_a_tag_service() {
             &format!("`{}`", f.tag_differs.0),
             &format!("`{}`", f.tag_differs.1),
         ],
+    );
+    // The remedy leads with keeping it hand-written, and a rename is offered
+    // only with its side effect stated: every policy naming the old name stops
+    // covering the tag's columns.
+    let differs_row = by_id(&body, differs);
+    assert_refused_with(
+        differs_row,
+        &[
+            "Keep the policy hand-written",
+            &format!("every tag policy that names `{}`", f.tag_differs.1),
+            "lose their masks or filters",
+        ],
+    );
+    assert!(
+        blockers(differs_row)
+            .iter()
+            .all(|b| !b.contains("or rewrite the policy")),
+        "rewriting the policy to the other name is not equivalent: {differs_row}"
     );
     // A path body in a tag service — and only that: the catalog it names is
     // served by the profile that links this tag service, so no second,

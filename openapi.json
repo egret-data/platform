@@ -6508,7 +6508,7 @@
         "tags": [
           "perm"
         ],
-        "summary": "SP4d-3 Task 5: every policy of one profile, classified — its owner,\nwhether it can be migrated into the permission model, and if not, every\nreason as a sentence naming the offending value. Read-only; `infra` and\n`compiler` rows are reported (as not migratable, with the reason), never\nomitted. See [`crate::classify`] for how the service kind, the catalog\nlookup and the tag lookup are derived from the profile.",
+        "summary": "SP4d-3 Task 5: every policy of one profile, classified — its owner,\nwhether it can be migrated into the permission model, and if not, every\nreason as a sentence naming the offending value. Read-only; `infra` and\n`compiler` rows are reported (as not migratable, with the reason), never\nomitted. The `classify` module doc says how the service kind, the catalog\nlookup and the tag lookup are derived from the profile.",
         "operationId": "classify_service_policies",
         "parameters": [
           {

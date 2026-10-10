@@ -247,10 +247,13 @@ pub enum Blocker {
     /// the tag NAME and the compiler stamps the name back, so the migrated
     /// rule would cover the tag named `name` while the original covers
     /// whatever tag is named `key` — possibly another tag entirely, whose
-    /// columns would be left unmasked. Operator sentence: "the policy names
-    /// tag `{key}`; egret's tag with key `{key}` is named `{name}`, and Ranger
-    /// matches names — rename the tag so its key and name agree, or rewrite
-    /// the policy".
+    /// columns would be left unmasked. The operator remedy is to keep the
+    /// policy hand-written (`crate::classify::render_blocker`, SP4d-3 Task 5
+    /// fix round 1). Renaming the tag so key and name agree is NOT a safe
+    /// default: the engine matches every tag policy on `tags.name`, so a
+    /// rename changes what every policy naming `name` covers (unmasking those
+    /// columns), and `tags.name` is not unique, so it can leave two tags under
+    /// one name. Rewriting the policy to name `name` is not equivalent either.
     TagNameDiffersFromKey { key: String, name: String },
     /// A tag-addressed body (`resources: {tag: …}`) stored in a RESOURCE
     /// service, where it matches nothing; compiled back, it would be filed in

@@ -233,8 +233,9 @@ pub fn render_blocker(b: &Blocker) -> String {
              (names are matched exactly, and `*` names no catalog). A migrated grant must point \
              at a catalog egret registers and this profile serves; a policy on any other catalog \
              enforces nothing here, and migrating it would grant on whichever profile does serve \
-             it. Name a served catalog exactly, attach the catalog to this profile's engine, or \
-             keep the policy hand-written."
+             it. Name a served catalog exactly, or keep the policy hand-written. (Attaching the \
+             catalog to this profile's engine would also work, but it exposes the catalog to \
+             that engine's users and starts enforcing every compiled grant on it there.)"
         ),
         Blocker::ResourceFlag { level, flag } => format!(
             "Resource level `{level}` sets `{flag}`; egret's permissions never exclude or recurse, \
@@ -291,7 +292,8 @@ pub fn render_blocker(b: &Blocker) -> String {
         Blocker::Disabled => "This policy is switched off, so the engine does not download it \
              and it enforces nothing today. Migrating it would create grants or rules that \
              enforce immediately (a policy that has already been migrated is switched off the \
-             same way). Switch it on first if it is meant to be migrated."
+             same way, and nothing here tells the two apart yet). Switch it on first only if it \
+             was switched off by hand and never migrated."
             .to_string(),
         Blocker::DenyAllElse => "The policy denies everything its items do not allow \
              (`isDenyAllElse`); egret has no equivalent. Clear 'deny all else', or keep the \
@@ -305,6 +307,14 @@ pub fn render_blocker(b: &Blocker) -> String {
             "The policy belongs to security zone `{zone}`; egret has no security zones. Keep \
              the policy hand-written."
         ),
+        // Fix round 1 (Minor 1): the catalog is never omissible, and `*` names
+        // no catalog, so the "set it to `*`" remedy below would be wrong here.
+        Blocker::MissingLevel { level } if level == "catalog" => "The policy names no \
+             `catalog` level. Every egret grant and rule names one catalog this profile serves \
+             (and `*` names no catalog), so this policy cannot be migrated as it stands. Name \
+             the served catalog it is meant to cover — which changes what it matches, so only \
+             if that is the intent — or keep the policy hand-written."
+            .to_string(),
         Blocker::MissingLevel { level } => format!(
             "The policy names no `{level}` level. egret's policy editor drops a level left empty \
              when it saves, so this is how most editor-saved policies look. Ranger does not read \
@@ -436,11 +446,20 @@ pub fn render_blocker(b: &Blocker) -> String {
         Blocker::CompilerRefuses { error } => {
             format!("egret's compiler would refuse the rule this policy becomes: {error}")
         }
+        // Fix round 1 (I1): renaming is NOT a safe default remedy — the engine
+        // matches every tag policy on `tags.name`, and the name is not unique —
+        // and rewriting the policy to name `{name}` is not equivalent (it would
+        // cover a different tag's columns, and `{name}` is not a key anyway).
         Blocker::TagNameDiffersFromKey { key, name } => format!(
-            "The policy names tag `{key}`; egret's tag with key `{key}` is named `{name}`, and \
-             Ranger matches tag policies by name — so the migrated rule would cover the tag \
-             named `{name}`, not the one this policy covers. Rename the tag so its key and name \
-             agree, or rewrite the policy."
+            "The policy names tag `{key}`. Ranger matches tag policies by tag name, so today it \
+             covers whatever tag is named `{key}`; egret's tag with key `{key}` is named \
+             `{name}`, so the migrated rule would cover the tag named `{name}` instead — a \
+             different set of columns. Keep the policy hand-written. Renaming egret's tag \
+             `{key}` from `{name}` to `{key}` would make the two agree, but it changes what \
+             every tag policy that names `{name}` covers (those columns would lose their masks \
+             or filters), and because tag names are not unique it can leave two tags named \
+             `{key}`. Only rename after checking that no tag policy names `{name}` and no other \
+             tag is named `{key}`."
         ),
         Blocker::TagBodyInResourceService => "The policy is addressed by tag but stored in a \
              resource profile, where Ranger matches nothing by tag, so it enforces nothing \
