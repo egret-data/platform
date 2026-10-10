@@ -65,6 +65,9 @@ function EdgeZone({ panelId, side }: { panelId: string; side: "left" | "right" }
   );
 }
 
+/** The gutter's hit width in px, on every pointer: exactly the separator's own `w-2`. */
+const GUTTER_HIT = { fine: 8, coarse: 8 };
+
 type Props<C> = {
   layout: Layout;
   onChange: (next: Layout) => void;
@@ -183,6 +186,7 @@ export function MultiPanel<C>({ layout, onChange, context }: Props<C>) {
         key={structureKey}
         defaultLayout={sizes}
         orientation="horizontal"
+        resizeTargetMinimumSize={GUTTER_HIT}
         className="h-full min-h-0"
         onLayoutChanged={(next, meta) => {
           if (!meta.isUserInteraction) return;
@@ -196,8 +200,16 @@ export function MultiPanel<C>({ layout, onChange, context }: Props<C>) {
           return (
             <Fragment key={panel.id}>
               {index > 0 && (
+                // 8px to grab, a 4px line to see. The group gets `resizeTargetMinimumSize`
+                // of this same width: the library's default (10px fine, 20px coarse) grows
+                // the hit area past a narrower gutter onto the next panel's first tab, and a
+                // drag that starts on that tab's edge resized the panels (W7a Task 8).
                 <PanelSeparator
-                  className="w-1 bg-border transition-colors hover:bg-primary/60 focus-visible:bg-primary focus-visible:outline-none active:bg-primary"
+                  className={cn(
+                    "relative w-2 shrink-0 bg-transparent focus-visible:outline-none",
+                    "before:absolute before:inset-y-0 before:left-1/2 before:w-1 before:-translate-x-1/2 before:bg-border before:transition-colors",
+                    "hover:before:bg-primary/60 focus-visible:before:bg-primary active:before:bg-primary",
+                  )}
                 />
               )}
               <Panel id={panel.id} defaultSize={`${panel.size}%`} minSize="10%">
