@@ -66,8 +66,16 @@ no_docker := "EGRET_ALLOW_DOCKER_SKIP=1"
 # `deploy/docker-compose.dev.yml` beside the Postgres `check` ALREADY requires, so `just
 # up` provides both in one command, and `brew install valkey && valkey-server --port 6399`
 # provides it with no Docker daemon at all. `check` therefore supplies the URL and SCRUBS
-# the opt-out — so an exported `EGRET_ALLOW_STORE_SKIP` cannot hollow the run out, and the
-# only way to disable those fourteen is to edit this file, where the edit is visible.
+# the opt-out, so the only way to disable those fourteen is to edit this file, where the
+# edit shows up in a diff.
+#
+# Which of the two does the work, because the distinction is load-bearing and MEASURED:
+# the URL does. `store_url()` reads the opt-out only when the URL is missing or blank, so
+# while `check` names a store the opt-out is unreachable — with `EGRET_ALLOW_STORE_SKIP=1`
+# exported, that line still ran all fourteen in 1.06 s. Drop the URL from the same command
+# and the identical line reports `14 passed … finished in 0.00s`, which is the shape of the
+# green this axis existed to produce. The scrub is insurance against a future edit that
+# drops the URL, and it is what makes the guard in `egret-test-db` see the decision.
 #
 # Note what `check` demands already before judging this harsh: a Postgres on 5432, and a
 # JVM + Maven for `test-ranger-gates`. A Valkey is the cheapest of the three.
