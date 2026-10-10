@@ -86,6 +86,17 @@ pub async fn download_policies(
     //
     // Now: `NotFound` warns and omits (the documented best-effort, made
     // audible); anything else propagates like every other read on this route.
+    //
+    // **⚠ Do NOT collapse this back to `if let Ok(tsvc)`.** The `Err(e)` arm is
+    // reached only on a database error, so it looks dead and a future reader
+    // will be tempted — that is exactly how the swallow got here. What that arm
+    // buys: a transient failure on this ONE read used to serve a
+    // complete-looking download with no `tagPolicies` block, which the plugin
+    // then **cached** until its next poll, so every tag-addressed mask and row
+    // filter was off in the meantime and nothing anywhere recorded why. A
+    // fail-open on an error, not a misconfiguration. The `match` is what keeps
+    // the two causes distinguishable, and keeps `cargo check` forcing a decision
+    // if a new `PolicyStoreError` variant appears.
     if let Some(name) = tag_service {
         match s.store.get_service(&name).await {
             Ok(tsvc) => {

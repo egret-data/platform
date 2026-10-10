@@ -310,6 +310,21 @@ fn refuse_tag_service_on_non_trino_profile(
 /// the key at all. Refusing the value at the write path is what makes the
 /// remaining four readers agree, because they then never see the shape.
 ///
+/// # ⚠ That table is about `""`. The BIGGER population is an ABSENT key.
+///
+/// The row above for `list_profiles` holds for `""` and **inverts for an absent
+/// key**, which is the shape almost every profile actually has: the fallback
+/// candidate became `<name>_tag`, and if such a row existed `names.contains` was
+/// **true**, so the tab was **shown** for a profile whose download carries no
+/// `tagPolicies` at all. And that population is not an edge case —
+/// `frontend/src/api/policies.ts::createProfile(name, type)` sends **no
+/// `config`**, so **every console-created Trino profile** is in it, and nothing
+/// can ever give one a `tagService` (there is no `UPDATE` of `config_jsonb` in
+/// any `src/`). The fix round removed that fallback: `list_profiles` resolves
+/// through [`usable_tag_services_via`], the same join this row names, so all
+/// five readers now reach ONE conclusion for every shape — absent, `null`,
+/// non-string, empty, dangling, or good.
+///
 /// # The shapes this refuses, and why a non-string is in the same class
 ///
 /// Every reader above but `usable_tag_service` goes through `as_str()`, so a
@@ -785,20 +800,50 @@ impl PolicyStore {
     /// A profile with no usable tag service compiles ZERO tag policies, so
     /// every mask and row filter vanishes and the columns are served raw.
     /// `PUT /engines/{id}` refuses to bind an engine to such a profile.
+    ///
+    /// **One query, one row** — `admin::list_profiles` needs the same answer for
+    /// every profile at once, so the join lives in
+    /// [`usable_tag_services_via`] and this is the single-id entry point. Two
+    /// entry points, one spelling; see that function.
     pub async fn usable_tag_service(
         &self,
         service_id: i64,
     ) -> Result<Option<String>, PolicyStoreError> {
-        Ok(sqlx::query_scalar::<_, String>(
-            r#"SELECT t.name
-                 FROM policy.authz_services s
-                 JOIN policy.authz_services t
-                   ON t.name = s.config_jsonb ->> 'tagService'
-                WHERE s.id = $1"#,
-        )
-        .bind(service_id)
-        .fetch_optional(&self.db.pool)
-        .await?)
+        let mut conn = self.db.pool.acquire().await?;
+        Ok(usable_tag_services_via(&mut conn, &[service_id])
+            .await?
+            .pop()
+            .map(|(_, name)| name))
+    }
+
+    /// Bulk [`Self::usable_tag_service`] — `service_id` → the tag service it can
+    /// actually USE, for every id that has one. **SP4d debt Task 9 fix round.**
+    ///
+    /// `admin::list_profiles` renders one row per profile and needs this answer
+    /// for all of them; asking per profile would be an N+1 against a query that
+    /// is a single join, and — worse — a second spelling of the join would be
+    /// free to disagree with [`Self::usable_tag_service`] about what "has a tag
+    /// service" means. That disagreement is exactly the defect Task 9 closed, so
+    /// the bulk form is the SAME function with a wider `WHERE`.
+    ///
+    /// A profile with no link, or a link naming nothing, is simply ABSENT from
+    /// the map — the caller reads that as "no Tags tab", which is what the
+    /// download will serve.
+    ///
+    /// `pub` rather than `pub(crate)` so
+    /// `tests/store_services.rs::both_entry_points_onto_the_tag_service_join_agree`
+    /// can assert the two entry points side by side, shape by shape. That test is
+    /// the only reason this is not crate-private, and it is the right reason: the
+    /// agreement is the deliverable.
+    pub async fn usable_tag_services(
+        &self,
+        service_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, String>, PolicyStoreError> {
+        let mut conn = self.db.pool.acquire().await?;
+        Ok(usable_tag_services_via(&mut conn, service_ids)
+            .await?
+            .into_iter()
+            .collect())
     }
 
     /// DELETE a profile outright — refused (Task 8) while it still holds any
@@ -1134,6 +1179,50 @@ pub async fn catalogs_for_service_via(
            WHERE e.authz_service_id = $1"#,
     )
     .bind(service_id)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// **The join that decides what "has a usable tag service" means, spelled
+/// once** — SP4d debt Task 9 fix round. `(profile id, tag service name)` for
+/// every id in `service_ids` whose `config_jsonb ->> 'tagService'` names a real
+/// `policy.authz_services` row.
+///
+/// Both halves must hold, and a profile that fails either is simply ABSENT from
+/// the result: no link, a link that is `null`/empty/non-string (so `->>` yields
+/// NULL or a string no row carries), or a link naming a profile that does not
+/// exist. That is the same answer `download_policies` serves — it reads the
+/// field, finds nothing, and ships the download with no `tagPolicies` block —
+/// which is the agreement this function exists to make unbreakable.
+///
+/// # Why this is a function and not two queries
+///
+/// Before the fix round there were THREE readers of this field in this crate
+/// with three different answers: [`PolicyStore::usable_tag_service`] joined (and
+/// refused an engine bind), `download_policies` read `as_str()` with no
+/// fallback, and `admin::list_profiles` fell back to the `<name>_tag` NAMING
+/// CONVENTION and so offered a Tags tab for profiles whose download carries no
+/// tag policies at all. The convention fallback is gone and `list_profiles` now
+/// reads THIS, through [`PolicyStore::usable_tag_services`]. One spelling, two
+/// entry points.
+///
+/// [`services_and_tag_services_via`] below carries the same `ON t.name = s
+/// .config_jsonb ->> 'tagService'` predicate deliberately: it answers a
+/// different question (which ids must be row-locked, the profile itself
+/// INCLUDED) and returns ids rather than names. If that predicate ever changes,
+/// it changes in both — they are the two halves of one agreement.
+async fn usable_tag_services_via(
+    conn: &mut sqlx::PgConnection,
+    service_ids: &[i64],
+) -> Result<Vec<(i64, String)>, PolicyStoreError> {
+    Ok(sqlx::query_as::<_, (i64, String)>(
+        r#"SELECT s.id, t.name
+             FROM policy.authz_services s
+             JOIN policy.authz_services t
+               ON t.name = s.config_jsonb ->> 'tagService'
+            WHERE s.id = ANY($1)"#,
+    )
+    .bind(service_ids)
     .fetch_all(&mut *conn)
     .await?)
 }

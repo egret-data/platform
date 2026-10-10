@@ -290,9 +290,15 @@ pub struct ProfileDto {
     pub policy_count: i64,
     pub engines: Vec<ProfileEngine>,
     /// The classification-tag policy service this Trino profile carries its
-    /// tag-based masking/row-filters in (the configured `tagService` or the
-    /// `<name>_tag` convention), if such a service exists. `None` otherwise — the
-    /// FE shows a "Tags" tab only when this is set.
+    /// tag-based masking/row-filters in: the profile's OWN `config.tagService`,
+    /// resolved to a real profile. `None` when the profile carries no link or
+    /// the link names nothing — the FE shows a "Tags" tab only when this is set.
+    ///
+    /// **SP4d debt Task 9 fix round:** this no longer falls back to the
+    /// `<name>_tag` naming convention. It is the same answer
+    /// `usable_tag_service` gives before letting an engine bind, and the same
+    /// one the plugin download serves, so a tab is offered only when a tag
+    /// policy authored in it could actually be enforced.
     pub tag_service: Option<String>,
     /// `"manual"` (hand-authored, fully editable) or `"generated"` (compiled
     /// by the SP4a permission model from its grants and rules).
@@ -593,24 +599,48 @@ async fn list_profiles(
     let engines = st.engines.list_engine_bindings().await?;
     let counts = st.store.policy_counts().await?;
     let services = st.store.list_services().await?;
-    // Owned name set so `tag_service` resolution can borrow it while we consume
-    // `services` below (can't hold a borrow of `services` across `into_iter`).
-    let names: std::collections::HashSet<String> =
-        services.iter().map(|s| s.name.clone()).collect();
+    // **SP4d debt Task 9 fix round: the `<name>_tag` CONVENTION FALLBACK IS
+    // GONE from here, and this reverses a pinned behaviour deliberately.**
+    //
+    // This used to build a candidate name — the configured `tagService`, else
+    // the `<name>_tag` convention — and offer it if any profile carried that
+    // name. Checking existence first meant it could not invent a WRITE target,
+    // which is why Task 9 initially kept it. The ruling that removed it rests on
+    // two facts rather than on taste:
+    //
+    // * **A console-created profile can never acquire a `tagService`.**
+    //   `frontend/src/api/policies.ts::createProfile(name, type)` sends only
+    //   those two fields, and Task 2's sweep established that NO `UPDATE` of
+    //   `config_jsonb` exists anywhere in `src/` (re-measured 2026-10-10). So
+    //   for every console-created Trino profile the fallback was the only reason
+    //   a Tags tab appeared — and the tab led to a workflow that cannot
+    //   complete, ever, because `resolve_tag_service_and_body` now requires the
+    //   configured link. A tab that leads to a guaranteed 400 is worse than no
+    //   tab: it tells a steward the capability exists.
+    // * **Its stated purpose was write safety, which the write side no longer
+    //   needs from it.**
+    //
+    // So all five readers of `tagService` now agree, which is the property this
+    // guard was costing: `download_policies` (the block it serves),
+    // `egret_perm_compile::trigger` (what it compiles), `usable_tag_service`
+    // (whether an engine may bind), `resolve_tag_service_and_body` (where a tag
+    // policy is filed) and this (whether the tab is offered) all resolve the
+    // field the same way. `usable_tag_services` IS the join the first three use.
+    //
+    // The product gap this exposes — no way to give an existing profile a
+    // `tagService` — is plan Task 18, not a regression introduced here.
+    let usable_tag: std::collections::HashMap<i64, String> = st
+        .store
+        .usable_tag_services(&services.iter().map(|s| s.id).collect::<Vec<_>>())
+        .await?;
     let profiles = services
         .into_iter()
         .map(|s| {
-            // Only Trino profiles carry tag policies, and only when their tag
-            // service (configured `tagService`, else `<name>_tag`) actually
-            // exists — otherwise the FE would show an empty, dead Tags tab.
+            // Only Trino profiles carry tag policies, and only when their OWN
+            // `config.tagService` resolves to a real profile — the same two
+            // halves `usable_tag_service` requires before letting an engine bind.
             let tag_service = if s.r#type == "trino" {
-                let candidate = s
-                    .config_jsonb
-                    .get(egret_policy_api::TAG_SERVICE_CONFIG_KEY)
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("{}_tag", s.name));
-                names.contains(&candidate).then_some(candidate)
+                usable_tag.get(&s.id).cloned()
             } else {
                 None
             };
@@ -1055,16 +1085,16 @@ pub struct SeedResult {
 ///   `engines.rs`'s "left by a deleted same-name engine: reuse, never delete" —
 ///   made the write succeed. Requiring the configured link closes that without a
 ///   second type check: a non-Trino profile cannot have one.
-/// * **`list_profiles`' fallback is a different thing and stays.** It checks
-///   `names.contains(candidate)` before offering the name, so it cannot invent a
-///   write target; it is the Tags tab's discovery convenience for a stranded
-///   `{profile}_tag`, and `list_profiles_surfaces_tag_service` pins it. The
-///   consequence is that the Tags tab can still LIST policies already filed in a
-///   stranded tag profile while this refuses to write new ones there — read
-///   convenience kept, mis-filing closed. That the tab is offered at all for a
-///   profile whose download carries no `tagPolicies` is a remaining divergence,
-///   recorded in the Task 9/16 report rather than fixed here, because closing it
-///   means reversing that pinned assertion.
+/// * **`list_profiles` had a SECOND, different fallback — and the fix round
+///   removed that one too.** It checked `names.contains(candidate)` before
+///   offering the name, so it could not invent a write target, and Task 9
+///   initially kept it on that ground. The ruling went the other way once the
+///   consequence was stated plainly: nothing can give an existing profile a
+///   `tagService` (no `UPDATE` of `config_jsonb` exists in `src/`, and
+///   `createProfile` sends no `config`), so the tab that fallback offered led to
+///   a workflow that **cannot complete, ever** — a guaranteed 400 from right
+///   here. `list_profiles` now resolves through the same join
+///   `usable_tag_service` uses; see the comment in that handler.
 async fn resolve_tag_service_and_body(
     st: &PolicyAdminState,
     v: &Value,

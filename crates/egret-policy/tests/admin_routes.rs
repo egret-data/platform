@@ -1187,8 +1187,32 @@ async fn resource_lookup_suggests_every_warehouse_the_engine_reads() {
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 
-/// list_profiles surfaces a trino profile's `<name>_tag` policy service (drives
-/// the FE Tags tab), and only when that service actually exists.
+/// list_profiles surfaces the tag policy service a trino profile's OWN
+/// `config.tagService` names (drives the FE Tags tab), and only when that
+/// service actually exists.
+///
+/// **⚠ THIS ASSERTION CHANGED DIRECTION — SP4d debt Task 9, fix round.** It
+/// previously created `<svc_name>_tag` and asserted that `list_profiles`
+/// surfaced it from a profile carrying **no `tagService` at all**, pinning the
+/// `<name>_tag` NAMING-CONVENTION fallback as desired behaviour. It is not
+/// desired behaviour:
+///
+/// * nothing can ever give an existing profile a `tagService` — `createProfile`
+///   sends only name and type, and no `UPDATE` of `config_jsonb` exists in any
+///   `src/` (Task 2's sweep, re-measured 2026-10-10) — so the Tags tab that
+///   fallback produced led to a workflow that **cannot complete, ever**: the
+///   write path (`resolve_tag_service_and_body`) requires the configured link
+///   and answers 400. A tab that leads to a guaranteed 400 is worse than no tab,
+///   because it tells a steward the capability exists;
+/// * the fallback's stated purpose was WRITE safety, and the write side no
+///   longer needs it.
+///
+/// So the premise moved: the profile now carries the link, and the test asserts
+/// that `list_profiles` reports what `usable_tag_service` and the plugin
+/// download report. The reverse half — a profile with no link and a
+/// conventionally-named row beside it gets **no** tab — is asserted in
+/// `a_tag_policy_is_refused_when_the_profile_configures_no_tag_service`'s
+/// control 2, which changed direction with it.
 #[tokio::test]
 async fn list_profiles_surfaces_tag_service() {
     let Some(f) = setup().await else {
@@ -1203,6 +1227,16 @@ async fn list_profiles_surfaces_tag_service() {
         .create_service(&tag_name, "tag", &serde_json::json!({}))
         .await
         .expect("create tag service");
+    // The link itself — the thing that makes the tag service USABLE, and the
+    // only reason the tab is now offered. `seed_service` creates the profile
+    // with an empty config, so this is the `UPDATE` no production code path has
+    // (hence the raw SQL: see this test's doc comment).
+    sqlx::query("UPDATE policy.authz_services SET config_jsonb = $2 WHERE id = $1")
+        .bind(svc_id)
+        .bind(serde_json::json!({ "tagService": tag_name }))
+        .execute(&f.db.pool)
+        .await
+        .expect("link the tag service");
 
     let (status, body) = into_json(
         f.app_empty()
@@ -1834,9 +1868,17 @@ async fn a_tag_policy_is_refused_when_the_profile_configures_no_tag_service() {
         "nothing may have been mis-filed into the stranded tag service"
     );
 
-    // ── CONTROL 2: `list_profiles`' read-side fallback is UNCHANGED, so the
-    // Tags tab can still discover what is stranded. The two fallbacks are
-    // different things and only one of them was the defect.
+    // ── CONTROL 2: and `list_profiles` must not OFFER a Tags tab here either.
+    //
+    // **⚠ THIS ASSERTION CHANGED DIRECTION in the Task 9 fix round.** As first
+    // written it asserted the opposite — that `list_profiles`' `<name>_tag`
+    // convention fallback still surfaced the stranded row, on the reasoning that
+    // the fallback checks existence and so cannot invent a WRITE target. The
+    // ruling went the other way: nothing can give this profile a `tagService`
+    // (no `UPDATE` of `config_jsonb` exists in `src/`, and `createProfile` sends
+    // no `config`), so the tab it offered led to the 400 asserted directly
+    // above — a workflow that cannot complete, ever. The profile is still
+    // LISTED; it just carries no tab.
     let (status, profiles) = into_json(
         f.app_empty()
             .oneshot(req("GET", "/policies/services", &token, None))
@@ -1853,9 +1895,10 @@ async fn a_tag_policy_is_refused_when_the_profile_configures_no_tag_service() {
         .unwrap_or_else(|| panic!("profile not listed; body={profiles}"));
     assert_eq!(
         listed["tag_service"],
-        serde_json::json!(format!("{unlinked}_tag")),
-        "the READ-side fallback stays: it checks existence, so it cannot invent a \
-         write target; body={profiles}"
+        serde_json::Value::Null,
+        "a profile whose own `config.tagService` names nothing must get NO Tags tab, \
+         even with a conventionally-named `{{name}}_tag` row beside it — the tab would \
+         lead to the 400 asserted above; body={profiles}"
     );
 
     // ── CONTROL 1: with the link configured, the same request is accepted and
@@ -1901,6 +1944,29 @@ async fn a_tag_policy_is_refused_when_the_profile_configures_no_tag_service() {
             .len(),
         1,
         "the accepted policy is served under the CONFIGURED tag service"
+    );
+    // ⚠ And the tab IS offered for this one — the control that keeps control 2
+    // from being satisfied by "`tag_service` is always null". Both halves read
+    // the same join, so this is the one assertion that makes the pair
+    // discriminating.
+    let (_, profiles) = into_json(
+        f.app_empty()
+            .oneshot(req("GET", "/policies/services", &token, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let listed_linked = profiles
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|p| p["id"] == serde_json::json!(linked_svc.id))
+        .unwrap_or_else(|| panic!("linked profile not listed; body={profiles}"));
+    assert_eq!(
+        listed_linked["tag_service"],
+        serde_json::json!(linked_tag),
+        "a profile whose own `config.tagService` resolves MUST get the Tags tab; \
+         body={profiles}"
     );
 
     // ── CONTROL 3: a StarRocks profile with a stranded `{name}_tag`. It can

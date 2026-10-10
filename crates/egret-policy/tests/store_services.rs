@@ -368,3 +368,103 @@ impl<T, E> UnwrapErrOrPanic<E> for Result<T, E> {
         }
     }
 }
+
+/// **SP4d debt Task 9 fix round — the two entry points onto ONE join must agree
+/// for every shape of the field.** `usable_tag_service` (single id, used by
+/// `PUT /engines/{id}` to refuse a bind) and `usable_tag_services` (bulk, used
+/// by `list_profiles` to decide whether to offer a Tags tab) are now the same
+/// `usable_tag_services_via` with a wider `WHERE`. This asserts them together,
+/// shape by shape, because the whole point of collapsing them was that a second
+/// spelling would be free to disagree — and three readers disagreeing about this
+/// one field is what Task 9 was.
+///
+/// The shapes are driven in with raw `UPDATE`s on purpose: `create_service` now
+/// refuses the unusable values (that is `refuse_unnameable_tag_service`), and no
+/// `UPDATE` of `config_jsonb` exists anywhere in `src/` — so raw SQL is the only
+/// way to reach rows a `psql` writer could still leave behind, which is exactly
+/// the population these two readers must agree about.
+#[tokio::test]
+async fn both_entry_points_onto_the_tag_service_join_agree() {
+    let Some((s, db)) = store_and_db().await else {
+        eprintln!("skip");
+        return;
+    };
+    seed_trino(&s).await.expect("seed trino");
+    seed_tag(&s).await.expect("seed tag def");
+
+    let tag_name = uniq("t9join_tag");
+    let tag_svc = s
+        .create_service(&tag_name, "tag", &json!({}))
+        .await
+        .expect("create tag service");
+    let profile = uniq("t9join_trino");
+    let svc = s
+        .create_service(&profile, "trino", &json!({ "tagService": tag_name }))
+        .await
+        .expect("create linked profile");
+
+    // A conventionally-named row beside it, so "resolves the link" cannot be
+    // confused with "guesses `<name>_tag`" — the two differ for every shape.
+    let convention = s
+        .create_service(&format!("{profile}_tag"), "tag", &json!({}))
+        .await
+        .expect("create the conventionally-named row");
+
+    let set = |cfg: Value| {
+        let pool = db.pool.clone();
+        async move {
+            sqlx::query("UPDATE policy.authz_services SET config_jsonb = $2 WHERE id = $1")
+                .bind(svc.id)
+                .bind(cfg)
+                .execute(&pool)
+                .await
+                .expect("set config");
+        }
+    };
+
+    for (label, cfg, expected) in [
+        (
+            "the configured, resolvable link",
+            json!({ "tagService": tag_name }),
+            Some(tag_name.clone()),
+        ),
+        ("no key at all", json!({}), None),
+        ("JSON null", json!({ "tagService": null }), None),
+        ("empty string", json!({ "tagService": "" }), None),
+        ("whitespace only", json!({ "tagService": "   " }), None),
+        ("a number", json!({ "tagService": 7 }), None),
+        (
+            "dangling — names no row",
+            json!({ "tagService": "t9join_nope" }),
+            None,
+        ),
+    ] {
+        set(cfg).await;
+        let single = s.usable_tag_service(svc.id).await.expect("single");
+        assert_eq!(
+            single, expected,
+            "{label}: `usable_tag_service` must answer {expected:?}"
+        );
+        // The bulk form, asked for this id among others, must say the same —
+        // and ABSENT from the map is how it says `None`.
+        let bulk = s
+            .usable_tag_services(&[svc.id, tag_svc.id, convention.id])
+            .await
+            .expect("bulk");
+        assert_eq!(
+            bulk.get(&svc.id).cloned(),
+            expected,
+            "{label}: the bulk form must agree with the single form"
+        );
+        // Neither form invents the `<name>_tag` convention for any shape.
+        assert_ne!(
+            single,
+            Some(convention.name.clone()),
+            "{label}: the convention fallback is GONE — see `list_profiles`"
+        );
+    }
+
+    s.delete_service(convention.id).await.expect("cleanup");
+    s.delete_service(svc.id).await.expect("cleanup");
+    s.delete_service(tag_svc.id).await.expect("cleanup");
+}
