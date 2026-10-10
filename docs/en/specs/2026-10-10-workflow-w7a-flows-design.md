@@ -185,7 +185,7 @@ The flow detail header is the flow id and namespace, the state chip (Active or D
 
 **Create version** (`workflow:manage`; the backend route is `POST …/flows/{id}/publish`).
 - It opens a dialog with an optional note, explaining that a version is a snapshot to compare and restore, and that it does not change what runs.
-- It is disabled while there are unsaved edits ("Save first"), validation errors ("Fix N errors to create a version"), a failed validation request ("Validation unavailable", §10), or a validation still in flight ("Validating the flow…"). The reason is shown on the control (FE-ACTION-4).
+- It is disabled while there are unsaved edits ("Save first"), while someone else's save has been read back ("The flow changed on the server; reload to create a version", as for Run; added on the final review, M1), validation errors ("Fix N errors to create a version"), a failed validation request ("Validation unavailable", §10), or a validation still in flight ("Validating the flow…"). The reason is shown on the control (FE-ACTION-4).
 
 **Run** (`workflow:manage`).
 - It opens the run form (§6), which runs the saved draft.
@@ -201,6 +201,7 @@ The flow detail header is the flow id and namespace, the state chip (Active or D
 **The changes indicator** is a pill, "Changes since v{n}", where v{n} is the latest version.
 - It is computed by comparing the saved draft's `source` with that version's snapshot `source`, byte for byte (FE-STATE-4). It goes out again if the draft is edited back to the version's text and saved. A flow with no version shows no pill.
 - Unsaved local edits are a separate indicator ("Unsaved changes").
+- While someone else's save has been read back, the local text is not the server's draft, so the pill compares nothing and reads "Changed on the server" until a reload (final review, M1).
 
 After a successful Save or Create version, the flow query is invalidated, and Create version also invalidates the versions query. Both confirm with a toast, because the user stays on the page (FE-ACTION-2).
 

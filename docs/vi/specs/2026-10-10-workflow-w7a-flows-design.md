@@ -187,7 +187,7 @@ Header chi tiết flow là flow id và namespace, chip state (Active hoặc Disa
 
 **Create version** (`workflow:manage`; route backend là `POST …/flows/{id}/publish`).
 - Mở một dialog có ghi chú tuỳ chọn. Dialog giải thích version là một snapshot để so sánh và khôi phục, và không làm thay đổi thứ đang chạy.
-- Bị vô hiệu hoá khi còn chỉnh sửa chưa lưu ("Save first"), có lỗi validate ("Fix N errors to create a version"), request validate thất bại ("Validation unavailable", §10), hoặc validate còn đang chạy ("Validating the flow…"). Lý do hiện ngay trên control (FE-ACTION-4).
+- Bị vô hiệu hoá khi còn chỉnh sửa chưa lưu ("Save first"), khi đã đọc lại một lần lưu của người khác ("The flow changed on the server; reload to create a version", như Run; thêm ở final review, M1), có lỗi validate ("Fix N errors to create a version"), request validate thất bại ("Validation unavailable", §10), hoặc validate còn đang chạy ("Validating the flow…"). Lý do hiện ngay trên control (FE-ACTION-4).
 
 **Run** (`workflow:manage`).
 - Mở form run (§6), chạy bản draft đã lưu.
@@ -203,6 +203,7 @@ Header chi tiết flow là flow id và namespace, chip state (Active hoặc Disa
 **Chỉ báo thay đổi** là một pill, "Changes since v{n}", trong đó v{n} là version mới nhất.
 - Nó được tính bằng cách so `source` của draft đã lưu với `source` trong snapshot của version đó, từng byte (FE-STATE-4). Nếu draft được sửa về đúng nội dung của version rồi lưu, pill tắt lại. Flow chưa có version nào thì không hiện pill.
 - Chỉnh sửa local chưa lưu là một chỉ báo riêng ("Unsaved changes").
+- Khi đã đọc lại một lần lưu của người khác, văn bản local không phải draft trên server, nên pill không so gì cả và ghi "Changed on the server" cho tới khi reload (final review, M1).
 
 Sau khi Save hoặc Create version thành công, query flow được invalidate; Create version còn invalidate thêm query versions. Cả hai xác nhận bằng toast, vì người dùng ở lại trang (FE-ACTION-2).
 

@@ -451,6 +451,27 @@ describe("FlowDetail: Run", () => {
     expect(screen.getByRole("textbox", { name: "Flow source" })).toHaveValue(flowSource("one"));
   });
 
+  it("disables Create version too, and marks the changes pill stale, when someone else's save is read back", async () => {
+    server = new FakeWorkflowServer();
+    renderAt();
+    await editorBox();
+    await waitFor(() => expect(button("Create version")).toBeEnabled(), LONG);
+    // Someone saves elsewhere; Create version snapshots THEIR draft as v1 and reads it back.
+    server.saveElsewhere(flowSource("theirs"));
+    await userEvent.click(button("Create version"));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create version" }));
+    const reason = "The flow changed on the server; reload to create a version";
+    await waitFor(() => expect(button("Create version")).toHaveAccessibleDescription(reason));
+    expect(button("Create version")).toBeDisabled();
+    expect(screen.getByText(reason)).toBeVisible();
+    // The server's draft equals v1; the local baseline ("one") does not. The pill must not
+    // compare the old baseline and claim "Changes since v1": it says the draft is stale.
+    await waitFor(() => expect(screen.getByTestId("flow-latest-version")).toHaveTextContent(/^Version v1$/));
+    expect(screen.queryByText(/Changes since/)).not.toBeInTheDocument();
+    expect(screen.getByText("Changed on the server")).toBeInTheDocument();
+  });
+
   it("is disabled while the saved YAML says disabled: true", async () => {
     server = new FakeWorkflowServer({ source: `${flowSource("off")}disabled: true\n` });
     renderAt();

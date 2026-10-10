@@ -362,13 +362,20 @@ function FlowWorkspace({
     }
   };
 
+  // Someone else's save, read back (after Create version, for one): the server would run text
+  // this editor neither shows nor validated.
+  const stale = !dirty && flow.source !== baseline.source;
+
   // The changes indicator (spec §5.3, FE-STATE-4): the SAVED draft against the
   // latest version's frozen source, byte for byte. No version, no pill; a
   // version list that could not be read is said, never shown as "no changes".
+  // While stale, the local baseline is not the server's draft, so it is not
+  // compared: the pill says the draft changed on the server instead.
   const latest = versions ? latestVersion(versions) : undefined;
   const latestSource = versionSourceOf(latest);
   let changesPill: string | null = null;
-  if (versionsQuery.isError) changesPill = "Versions unknown";
+  if (stale) changesPill = "Changed on the server";
+  else if (versionsQuery.isError) changesPill = "Versions unknown";
   else if (latest && latestSource === undefined) changesPill = "Versions unknown";
   else if (latest && latestSource !== undefined && changedSinceVersion(baseline.source, latestSource)) {
     changesPill = `Changes since v${latest.version}`;
@@ -377,13 +384,10 @@ function FlowWorkspace({
   const errors = editor.problems.filter((p) => p.severity === "error").length;
   const validationStatus = editor.validation.status;
   const saveState = canSave({ dirty, saving });
-  const versionState = canCreateVersion({ dirty, errors, validationStatus });
+  const versionState = canCreateVersion({ dirty, errors, validationStatus, stale });
   // Run starts the saved draft (spec §6.1); with no unsaved edits, the editor's
   // text, its validation and the form's inputs are all that draft.
   const disabled = isFlowDisabled(flow.state, flow.source);
-  // Someone else's save, read back (after Create version, for one): the server would run text
-  // this editor neither shows nor validated.
-  const stale = !dirty && flow.source !== baseline.source;
   const runState = canRun({ manage, dirty, errors, validationStatus, disabled, stale });
   const nextVersion = versions ? Math.max(0, ...versions.map((v) => v.version)) + 1 : null;
   const flowName = `${flow.namespace}.${flow.flow_id}`;

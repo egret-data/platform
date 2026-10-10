@@ -78,17 +78,27 @@ function validated(errors: number, validationStatus: ServerValidation["status"],
   return { ok: true };
 }
 
-/** Create version snapshots the SAVED draft, so it waits for a save and a clean validation. */
+/** The refusal Run and Create version share while the page is stale (see `canRun`). */
+const staleReason = (action: string): Enablement => ({ ok: false, reason: `The flow changed on the server; reload to ${action}` });
+
+/**
+ * Create version snapshots the SAVED draft, so it waits for a save and a clean
+ * validation. While `stale` (see `canRun`) the server's draft is text this
+ * editor neither shows nor validated, so it waits for a reload, as Run does.
+ */
 export function canCreateVersion({
   dirty,
   errors,
   validationStatus,
+  stale = false,
 }: {
   dirty: boolean;
   errors: number;
   validationStatus: ServerValidation["status"];
+  stale?: boolean;
 }): Enablement {
   if (dirty) return { ok: false, reason: "Save first" };
+  if (stale) return staleReason("create a version");
   return validated(errors, validationStatus, "create a version");
 }
 
@@ -120,6 +130,6 @@ export function canRun({
   if (!manage) return { ok: false, reason: "Running a flow needs the workflow:manage permission" };
   if (disabled) return { ok: false, reason: "The flow is disabled" };
   if (dirty) return { ok: false, reason: "Save first: Run uses the saved draft" };
-  if (stale) return { ok: false, reason: "The flow changed on the server; reload to run it" };
+  if (stale) return staleReason("run it");
   return validated(errors, validationStatus, "run");
 }

@@ -71,12 +71,22 @@ describe("canCreateVersion", () => {
   it("waits for a validation in flight", () => {
     expect(canCreateVersion({ dirty: false, errors: 0, validationStatus: "validating" })).toEqual({ ok: false, reason: "Validating the flow…" });
   });
+
+  it("is refused while the page is stale, after unsaved edits and before validation", () => {
+    const reason = "The flow changed on the server; reload to create a version";
+    expect(canCreateVersion({ dirty: false, errors: 0, validationStatus: "ok", stale: true })).toEqual({ ok: false, reason });
+    // Stale outranks validation: the text validated is not the server's draft.
+    expect(canCreateVersion({ dirty: false, errors: 2, validationStatus: "error", stale: true })).toEqual({ ok: false, reason });
+    // An edit is the first thing to fix, as for Run.
+    expect(canCreateVersion({ dirty: true, errors: 0, validationStatus: "ok", stale: true })).toEqual({ ok: false, reason: "Save first" });
+  });
 });
 
 describe("latestVersion", () => {
   const v = (version: number): FlowVersionDto => ({
     id: `v${version}`, flow_id: "f", version, snapshot: {}, note: "", created_at: "2026-10-10T00:00:00Z",
   });
+
   it("is the highest number, whatever order the list comes in", () => {
     expect(latestVersion([v(2), v(7), v(3)])?.version).toBe(7);
     expect(latestVersion([])).toBeUndefined();
