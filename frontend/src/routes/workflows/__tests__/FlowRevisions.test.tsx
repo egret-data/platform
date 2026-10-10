@@ -143,6 +143,35 @@ describe("FlowRevisions: the list", () => {
 });
 
 describe("FlowRevisions: selecting and comparing", () => {
+  it("disposes the previous version's model when another version is shown, never the one on screen", async () => {
+    flowWithVersions([V1, V2, V3], V3);
+    const revision = (v: number) => `inmemory://egret/revision/${encodeURIComponent(FLOW_ID)}/v${v}.yaml`;
+    const { unmount } = renderAt();
+    expect(await screen.findByRole("textbox", { name: "v3 source" })).toHaveValue(V3);
+
+    await userEvent.click(screen.getByRole("link", { name: "v1" }));
+    expect(await screen.findByRole("textbox", { name: "v1 source" })).toHaveValue(V1);
+    await waitFor(() => expect(stub.disposed).toEqual([revision(3)]));
+
+    await userEvent.click(screen.getByRole("link", { name: "v2" }));
+    expect(await screen.findByRole("textbox", { name: "v2 source" })).toHaveValue(V2);
+    await waitFor(() => expect(stub.disposed).toEqual([revision(3), revision(1)]));
+    // One revision model is left: the one on screen, intact.
+    expect([...stub.models.keys()].filter((k) => k.startsWith("inmemory://egret/revision/"))).toEqual([revision(2)]);
+    expect(stub.models.get(revision(2))?.disposed).toBe(false);
+
+    // Back to a version already seen: a fresh model with that version's text.
+    await userEvent.click(screen.getByRole("link", { name: "v1" }));
+    expect(await screen.findByRole("textbox", { name: "v1 source" })).toHaveValue(V1);
+    await waitFor(() => expect(stub.disposed).toEqual([revision(3), revision(1), revision(2)]));
+
+    // On unmount the model shown last goes too: the library disposes it, after the page's
+    // cleanup has left it alone because it was still mounted.
+    unmount();
+    expect(stub.disposed).toContain(revision(1));
+    expect([...stub.models.keys()].filter((k) => k.startsWith("inmemory://egret/revision/"))).toEqual([]);
+  });
+
   it("shows the latest version's YAML, and a selected version's, with ?v= in the URL and Back walking it", async () => {
     flowWithVersions([V1, V2], V2);
     renderAt();

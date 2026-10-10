@@ -1,4 +1,5 @@
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import type { Monaco } from "@monaco-editor/react";
 import { Link, useSearchParams } from "react-router-dom";
 import { History, Loader2, RotateCcw, RotateCw } from "lucide-react";
 import { useWorkflowListFlowVersions } from "@/api/generated/workflow/workflow";
@@ -377,14 +378,49 @@ function RevisionsView({
   );
 }
 
-/** One version's YAML, read-only, in Monaco (outside the flow model glob, so no schema markers). */
+/**
+ * Dispose the models at `paths` that no editor shows. A model still mounted is
+ * left alone: `@monaco-editor/react` disposes the one it shows on unmount, and
+ * disposing it under a live editor is what the diff editor refuses.
+ */
+function disposeUnshownModels(monaco: Monaco | null, paths: Iterable<string>): void {
+  if (!monaco) return;
+  const shown = new Set(monaco.editor.getEditors().map((e) => e.getModel()));
+  for (const path of paths) {
+    const model = monaco.editor.getModel(monaco.Uri.parse(path));
+    if (model && !shown.has(model)) model.dispose();
+  }
+}
+
+/**
+ * One version's YAML, read-only, in Monaco (outside the flow model glob, so no schema markers).
+ *
+ * Each version has its own model path. `@monaco-editor/react` switches models on a path change
+ * but never disposes the one it leaves, so every version viewed would keep a model until the
+ * page reloads (final review, M2). The caller keys this component by version, which remounts it
+ * and lets the library dispose the model it shows; this component does not rely on that key: it
+ * disposes the model it leaves on a path change, and any it left unshown on unmount.
+ */
 function VersionSource({ flowId, version, source }: { flowId: string; version: number; source: string }) {
   const isDark = useIsDark();
+  const path = `inmemory://egret/revision/${encodeURIComponent(flowId)}/v${version}.yaml`;
+  const monacoRef = useRef<Monaco | null>(null);
+  const visited = useRef(new Set<string>());
+  useEffect(() => {
+    // Runs after the editor's own effect has switched to `path`'s model.
+    disposeUnshownModels(monacoRef.current, [...visited.current].filter((p) => p !== path));
+    visited.current = new Set([path]);
+  }, [path]);
+  useEffect(() => () => disposeUnshownModels(monacoRef.current, visited.current), []);
   return (
     <div className="h-full min-h-[24rem] rounded border border-border">
       <Editor
         height="100%"
-        path={`inmemory://egret/revision/${encodeURIComponent(flowId)}/v${version}.yaml`}
+        path={path}
+        onMount={(_editor, monaco) => {
+          monacoRef.current = monaco;
+          visited.current.add(path);
+        }}
         defaultLanguage="yaml"
         defaultValue={source}
         theme={isDark ? "vs-dark" : "vs"}

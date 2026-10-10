@@ -29,12 +29,18 @@ export const stub = {
   commands: new Map<number, () => void>(),
   /** The props of every diff editor rendered, latest last. */
   diffs: [] as DiffEditorProps[],
+  /** The path of every model disposed, in order. */
+  disposed: [] as string[],
+  /** The editors mounted now, each showing one model (`monaco.editor.getEditors()`). */
+  editors: new Set<{ getModel: () => Model }>(),
 };
 
 export function resetMonacoStub(): void {
   stub.models.clear();
   stub.commands.clear();
   stub.diffs = [];
+  stub.disposed = [];
+  stub.editors.clear();
 }
 
 /** Run the editor's own `Ctrl/Cmd+S` binding, as Monaco would on that key. */
@@ -64,6 +70,7 @@ function modelFor(path: string, initial: string): Model {
     dispose: () => {
       model.disposed = true;
       stub.models.delete(path);
+      stub.disposed.push(path);
     },
   };
   stub.models.set(path, model);
@@ -86,6 +93,7 @@ const monaco = {
     getModelMarkers: () => [],
     onDidChangeMarkers: () => ({ dispose: () => {} }),
     getModel: (uri: string) => stub.models.get(uri) ?? null,
+    getEditors: () => Array.from(stub.editors),
   },
 };
 
@@ -109,9 +117,20 @@ export default function MonacoStub(props: EditorProps) {
       revealRangeInCenter: () => {},
       focus: () => {},
     };
+    stub.editors.add(editor);
     latest.current.onMount?.(editor as never, monaco as never);
-    return () => { model.listeners.delete(changed); };
+    return () => {
+      model.listeners.delete(changed);
+      stub.editors.delete(editor);
+    };
   }, [model]);
+  // As `@monaco-editor/react` 4.7 does on unmount: the model shown last is disposed unless
+  // `keepCurrentModel`. A path change disposes nothing (the library leaves the old model).
+  const shown = useRef(model);
+  useEffect(() => { shown.current = model; }, [model]);
+  useEffect(() => () => {
+    if (!latest.current.keepCurrentModel) shown.current.dispose();
+  }, []);
   return (
     <textarea
       aria-label={props.options?.ariaLabel ?? "Flow source"}
