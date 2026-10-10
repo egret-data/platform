@@ -243,9 +243,10 @@ function RevisionsView({
     viewer = <VersionSource key={selected.version} flowId={flowId} version={selected.version} source={selectedSource} />;
   }
 
+  // The list sits beside the pane from `xl`: from `lg`, a 1024px screen left the diff 222px wide (W7a Task 8).
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4 lg:flex-row">
-      <section aria-label="Versions" className="min-h-0 shrink-0 overflow-auto lg:w-[30rem]">
+    <div className="flex h-full min-h-0 flex-col gap-4 xl:flex-row">
+      <section aria-label="Versions" className="min-h-0 shrink-0 overflow-auto xl:w-[30rem]">
         <p className="mb-2 text-sm text-muted-foreground">
           Versions are snapshots of the draft. Runs use the saved draft, never a version.
         </p>
