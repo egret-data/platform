@@ -109,7 +109,7 @@ A rule that names a component names the file it lives in. If a component moves, 
    - Every screen is correct in light and dark; a colour change is checked on both and against every surface it lands on.
    - Checked in the browser.
 5. **SHOULD:** icons come from `lucide-react`, and a page has at most one `--highlight` emphasis. `--accent` is the hover/focus surface and is not used as an emphasis colour.
-6. Charts keep the Metabase series palette (`src/components/chart/echarts/palette.ts`) and its colour-independent cues: line styles, markers and decals. Literal colours inside chart option builders are allowed; ECharts needs concrete values.
+6. Charts keep the Metabase series palette (`src/components/chart/echarts/palette.ts`) and its colour-independent cues: line styles and marker shapes per series, and the `aria` data description. Decal patterns stay off, as decided in chart 05 (#360); `palette.ts` records why. *(Corrected 2026-10-10, Task 3: this line first said decals.)* Literal colours inside chart option builders are allowed; ECharts needs concrete values.
 
 ### 4.5 Forms (FE-FORM)
 1. Forms hold their state in `useState` or a dedicated hook (as `useEngineConfigForm`). No form library is added.
@@ -133,7 +133,7 @@ A rule that names a component names the file it lives in. If a component moves, 
 1. The code passes `eslint-plugin-jsx-a11y`'s recommended rules. Checked by lint.
 2. Focus uses the shared ring (`focus-visible:ring-2 focus-visible:ring-ring`). A focus indicator meets 3:1 against every surface it lands on, which `src/__tests__/focusIndicatorContrast.test.ts` guards.
 3. Every clickable element works from the keyboard. A non-button element made clickable gets a role, `tabIndex` and Enter/Space handling. An icon-only button has an `aria-label`.
-4. Information is never carried by colour alone; charts keep their decals and markers (FE-VISUAL-6).
+4. Information is never carried by colour alone; charts keep their line styles, markers and `aria` description (FE-VISUAL-6).
 5. Motion respects `prefers-reduced-motion`.
 6. `autoFocus` is only for a field that appears because of the user's own action (a dialog's first field, an inline edit), never on page load or route change. *(2026-10-10, the user's ruling: `jsx-a11y/no-autofocus` is off, because it cannot tell the two apart.)*
 

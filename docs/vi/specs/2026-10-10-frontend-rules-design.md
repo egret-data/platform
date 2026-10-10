@@ -111,7 +111,7 @@ Rule nhắc tên một component thì ghi file chứa nó. Nếu component chuy�
    - Mọi màn hình đúng ở cả light lẫn dark; thay đổi màu được kiểm trên cả hai, và trên mọi bề mặt mà màu đó xuất hiện.
    - Kiểm trên trình duyệt.
 5. **NÊN:** icon lấy từ `lucide-react`, và mỗi trang có tối đa một điểm nhấn `--highlight`. `--accent` là bề mặt hover/focus, không dùng làm màu nhấn.
-6. Chart giữ palette series của Metabase (`src/components/chart/echarts/palette.ts`) cùng các dấu hiệu không phụ thuộc màu: kiểu đường, marker và decal. Giá trị màu cụ thể bên trong code dựng option của chart được phép, vì ECharts cần giá trị cụ thể.
+6. Chart giữ palette series của Metabase (`src/components/chart/echarts/palette.ts`) cùng các dấu hiệu không phụ thuộc màu: kiểu đường và hình marker theo từng series, và phần mô tả dữ liệu `aria`. Decal vẫn tắt, theo quyết định ở chart 05 (#360); `palette.ts` ghi lý do. *(Sửa 2026-10-10, Task 3: dòng này ban đầu ghi decal.)* Giá trị màu cụ thể bên trong code dựng option của chart được phép, vì ECharts cần giá trị cụ thể.
 
 ### 4.5 Form (FE-FORM)
 1. Form giữ state bằng `useState` hoặc một hook riêng (như `useEngineConfigForm`). Không thêm thư viện form.
@@ -135,7 +135,7 @@ Rule nhắc tên một component thì ghi file chứa nó. Nếu component chuy�
 1. Code qua được bộ rule recommended của `eslint-plugin-jsx-a11y`. Kiểm bằng lint.
 2. Focus dùng ring chung (`focus-visible:ring-2 focus-visible:ring-ring`). Chỉ báo focus đạt tương phản 3:1 trên mọi bề mặt nó xuất hiện; `src/__tests__/focusIndicatorContrast.test.ts` giữ điều này.
 3. Mọi phần tử bấm được đều dùng được bằng bàn phím. Phần tử không phải nút mà được cho bấm thì có role, `tabIndex` và xử lý Enter/Space. Nút chỉ có icon thì có `aria-label`.
-4. Thông tin không bao giờ chỉ truyền bằng màu; chart giữ decal và marker của nó (FE-VISUAL-6).
+4. Thông tin không bao giờ chỉ truyền bằng màu; chart giữ kiểu đường, marker và mô tả `aria` của nó (FE-VISUAL-6).
 5. Chuyển động tôn trọng `prefers-reduced-motion`.
 6. `autoFocus` chỉ dành cho ô xuất hiện do chính thao tác của người dùng (ô đầu tiên của dialog, sửa tại chỗ), không bao giờ lúc tải trang hay đổi route. *(2026-10-10, phán quyết của người dùng: `jsx-a11y/no-autofocus` tắt, vì nó không phân biệt được hai trường hợp.)*
 
