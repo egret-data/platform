@@ -1,5 +1,5 @@
 // Splits a class string into utilities with their variant prefixes, `!` and a
-// leading `-` removed: "dark:hover:!-mt-2" -> "mt-2". Brackets may hold `:`.
+// leading `-` removed: "dark:hover:!-mt-2" -> "mt-2", and a trailing `!` too (Tailwind 4 important). Brackets may hold `:`.
 export function classTokens(text) {
   return text.split(/\s+/).filter(Boolean).map((raw) => {
     let depth = 0, cut = 0;
@@ -8,7 +8,7 @@ export function classTokens(text) {
       else if (raw[i] === "]") depth--;
       else if (raw[i] === ":" && depth === 0) cut = i + 1;
     }
-    return { raw, utility: raw.slice(cut).replace(/^!/, "").replace(/^-/, "") };
+    return { raw, utility: raw.slice(cut).replace(/^!/, "").replace(/^-/, "").replace(/!$/, "") };
   });
 }
 

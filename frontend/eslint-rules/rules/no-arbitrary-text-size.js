@@ -1,6 +1,6 @@
 import { classTokens, stringVisitors } from "../classTokens.js";
 
-const ARBITRARY_SIZE = /^text-\[\d+(?:\.\d+)?(?:px|rem|em)\]$/;
+const ARBITRARY_SIZE = /^text-\[\d+(?:\.\d+)?(?:px|rem|em)\](?:\/.+)?$/;
 
 export default {
   meta: {

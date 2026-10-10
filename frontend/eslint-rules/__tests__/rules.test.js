@@ -28,6 +28,9 @@ tester.run("no-raw-palette", noRawPalette, {
     bad('"text-[oklch(0.5_0.1_200)]"', "text-[oklch(0.5_0.1_200)]"),
     bad('"!bg-rose-950"', "!bg-rose-950"),
     bad('"-from-teal-50"', "-from-teal-50"),
+    bad('"bg-red-500!"', "bg-red-500!"),
+    bad('"bg-red-500/[0.3]"', "bg-red-500/[0.3]"),
+    bad('"bg-red-500/(--o)"', "bg-red-500/(--o)"),
   ],
 });
 
@@ -39,6 +42,8 @@ tester.run("no-arbitrary-text-size", noArbitraryTextSize, {
     size('"text-[11px]"', "text-[11px]"),
     size('"md:text-[0.75rem]"', "md:text-[0.75rem]"),
     size("`text-[13.5px] ${x}`", "text-[13.5px]"),
+    size('"text-[11px]!"', "text-[11px]!"),
+    size('"text-[11px]/5"', "text-[11px]/5"),
   ],
 });
 
@@ -54,6 +59,8 @@ tester.run("no-window-confirm", noWindowConfirm, {
     conf('window.confirm("x")'),
     conf('globalThis.confirm("x")'),
     conf('confirm("x")'),
+    conf('self.confirm("x")'),
+    conf('window.confirm?.("x")'),
     conf('function g() { if (!window.confirm("Discard?")) return; }'),
   ],
 });
