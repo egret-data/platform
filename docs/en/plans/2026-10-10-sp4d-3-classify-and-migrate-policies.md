@@ -89,7 +89,7 @@
   - `egret_policy::infra_names::DEFAULT_ALL_ACCESS_NAME_PREFIX: &str` = `"all"`
   - `egret_policy::infra_names::IMPERSONATE_POLICY_NAME: &str` = `"egret-delegator-impersonate"`
   - `egret_policy::infra_names::QUERY_TIMEOUT_POLICY_NAME: &str` = `"egret-query-timeout"`
-  - `egret_policy::infra_names::is_egret_infrastructure_policy_name(name: &str) -> bool`
+  - `egret_policy::infra_names::is_egret_infrastructure_policy_name(name: &str) -> bool` — **superseded by the final fix wave** (final review I-1, user ruling): it became `is_egret_infrastructure_policy(service_type: &str, name: &str) -> bool`, with no name-only variant. Only the `all - ` shape depends on the type (infrastructure on `trino` only); `egret-admin - …` and the delegator's two names are infrastructure on every type. The 0180 backfill's `all - ` arm joins `policy.authz_services.type = 'trino'`, both infra writers and the human-name reservation read the profile's type, and `seed_default_trino_policies` refuses a non-Trino profile with a 400. The code snippets below show the Task 1 shape, not the final one.
   - `policy.authz_policies.managed_by text NOT NULL DEFAULT 'operator'`
 - Consumes: `egret_policy::is_compiler_owned_policy_name(name: &str) -> bool` (already exists, `store.rs`)
 

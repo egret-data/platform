@@ -94,6 +94,20 @@ A new column on `policy.authz_policies`: `managed_by text NOT NULL DEFAULT 'oper
 `CHECK (managed_by IN ('compiler', 'infra', 'operator'))`. The seeder stamps `'infra'`, the
 compiler stamps `'compiler'`, the human entry point leaves the default.
 
+**Ownership depends on the profile's type for one shape (final-review I-1, user ruling).**
+`is_egret_infrastructure_policy(service_type, name)` is the single predicate. The delegator's
+two names and the per-admin `egret-admin - …` set are infrastructure on every type: StarRocks
+profiles get a StarRocks-shaped per-admin set, and unlocking it would let an operator lock
+admins out. The `all - …` default set is infrastructure **only on `trino` profiles**. It is
+built from the Trino service-def, and `seed_default_trino_policies` now refuses any other type
+with a 400. On a StarRocks profile, an `all - …` row is therefore an operator's. That covers a
+pre-0180 leftover of the old unguarded seeder, which the plugin rejects on every refresh and
+which the operator must be able to delete. The backfill, the infra writers' name refusal and the
+human-name reservation all call this one predicate (the backfill mirrors it in SQL, and an
+agreement test runs the SQL against it). The policy list carries `managed_by`. The profile page
+withholds the toggle and delete controls on `infra` rows, and offers "Seed default policies"
+and "Download Trino config" only on `trino` profiles.
+
 The write guard refuses every human `UPDATE` and `DELETE` of a row whose `managed_by` is
 `'infra'`. The reason this is a column and not a fourth name prefix: **renaming cannot defeat
 a column.** A prefix guard is a predicate over a string the editor can change; `managed_by`
@@ -277,7 +291,10 @@ one place: it always rolls back.
    no fold-divergent tag-assignment coordinate or policy resource value, a probe-evaluation
    count under `migrate::MAX_PROBE_EVALUATIONS` (refused, never truncated), and a non-vacuous
    comparison (each before/after is two reads, and the original is in every carrier's before
-   and in no carrier's after).
+   and in no carrier's after). Every profile the writes recompiled must be in the gated set.
+   `write_grant` / `write_rule` recompute their own set, so a catalog attached while the
+   migration runs can add one. That is a 422 refusal ("retry"), never a `debug_assert!`, which
+   release builds compile out (final review I-2).
 
 Step 5 is the point of the ordering. The gate proves its claim about **the artifact the engine
 will actually download after the write**, not about a predicted one. That is the lesson SP4d-2a
