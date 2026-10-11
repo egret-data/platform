@@ -752,7 +752,8 @@ macro_rules! execution_cols {
         "id, workspace_id, flow_id, namespace, flow_key, state, history, inputs, seq, \
          execution_trigger, trigger_execution_id, trigger_run_ix, \
          parent_execution_id, parent_run_ix, loop_index, loop_value, \
-         attempt_number, origin_offset_ms, created_at, updated_at"
+         attempt_number, origin_offset_ms, replayed_from_execution_id, \
+         started_at, ended_at, created_at, updated_at"
     };
 }
 
@@ -766,7 +767,7 @@ macro_rules! task_run_cols {
         "t.id, t.execution_id, t.run_ix, t.task_ix, t.task_id, t.type_id, t.parent_ix, \
          t.value, t.rendered, t.rendered_run_if, t.state, t.history, t.attempts, \
          t.not_before_ms, t.claimed_at, t.outputs, t.message, t.created_seq, \
-         t.ended_seq, t.resume_with, t.created_at, t.updated_at"
+         t.ended_seq, t.resume_with, t.started_at, t.ended_at, t.created_at, t.updated_at"
     };
 }
 
@@ -819,6 +820,14 @@ pub struct ExecutionRow {
     pub loop_value: Option<String>,
     pub attempt_number: i32,
     pub origin_offset_ms: i64,
+    /// The execution a manual replay was started from (migration 0166).
+    pub replayed_from_execution_id: Option<Uuid>,
+    /// The first time the execution entered `RUNNING` (migration 0180);
+    /// `NULL` before that, and for a row that predates the column.
+    pub started_at: Option<DateTime<Utc>>,
+    /// When the execution entered a terminal state (migration 0180); `NULL`
+    /// while it has not, and for a row that predates the column.
+    pub ended_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -856,6 +865,13 @@ pub struct TaskRunRow {
     pub created_seq: Option<i64>,
     pub ended_seq: Option<i64>,
     pub resume_with: Option<String>,
+    /// The first time the run entered `RUNNING` (migration 0180). `NULL` for a
+    /// run that never ran (`SKIPPED`, or not yet started) and for a row that
+    /// predates the column.
+    pub started_at: Option<DateTime<Utc>>,
+    /// When the run entered a terminal state (migration 0180); `NULL` while
+    /// it has not.
+    pub ended_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -914,7 +930,48 @@ pub struct ExecutionFilter {
     /// a row on the boundary.
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
+    /// Only ROOT executions: neither `parent_execution_id` (a loop iteration,
+    /// a `CREATE_NEW_EXECUTION` replay) nor `trigger_execution_id` (a subflow
+    /// or flow-trigger child) is set. `false` lists every row.
+    pub root_only: bool,
+    /// Only the direct children of this execution: rows whose
+    /// `parent_execution_id` OR `trigger_execution_id` names it. Never widens
+    /// past the workspace -- a foreign id matches nothing here, because the
+    /// workspace predicate still applies and the composite FKs of migration
+    /// 0138 make a cross-workspace child unrepresentable.
+    pub parent: Option<Uuid>,
 }
+
+/// The `WHERE` both of [`ExecutionRepo::list`]'s statements carry, written
+/// once so the page and its count cannot disagree. Parameters: `$1` the
+/// workspace, `$2..$7` the [`ExecutionFilter`] fields in declaration order,
+/// `$8` `root_only`, `$9` `parent`.
+macro_rules! execution_list_where {
+    () => {
+        " FROM workflow.executions \
+         WHERE workspace_id = $1 \
+           AND ($2::uuid IS NULL OR flow_id = $2) \
+           AND ($3::text IS NULL OR namespace = $3) \
+           AND ($4::text IS NULL OR flow_key = $4) \
+           AND ($5::text[] IS NULL OR state = ANY($5)) \
+           AND ($6::timestamptz IS NULL OR created_at >= $6) \
+           AND ($7::timestamptz IS NULL OR created_at < $7) \
+           AND (NOT $8 OR (parent_execution_id IS NULL AND trigger_execution_id IS NULL)) \
+           AND ($9::uuid IS NULL OR parent_execution_id = $9 OR trigger_execution_id = $9)"
+    };
+}
+
+/// [`ExecutionRepo::list`]'s page statement, whole. Public, and hidden from
+/// the docs, for one reader: `tests/execution_timestamps.rs` `EXPLAIN`s this
+/// exact text to show the `parent=` filter is served by migration 0180's
+/// indexes. `$10`/`$11` are `LIMIT`/`OFFSET`.
+#[doc(hidden)]
+pub const EXECUTION_LIST_SQL: &str = concat!(
+    "SELECT ",
+    execution_cols!(),
+    execution_list_where!(),
+    " ORDER BY created_at DESC, id DESC LIMIT $10 OFFSET $11"
+);
 
 /// The window [`ExecutionRepo::list`] returns, in rows.
 #[derive(Debug, Clone, Copy)]
@@ -1034,59 +1091,42 @@ impl ExecutionRepo {
         page: Page,
     ) -> Result<ExecutionPage> {
         let (limit, offset) = page.clamped();
-        let rows: Vec<ExecutionRow> = sqlx::query_as(concat!(
-            "SELECT ",
-            execution_cols!(),
-            " FROM workflow.executions \
-             WHERE workspace_id = $1 \
-               AND ($2::uuid IS NULL OR flow_id = $2) \
-               AND ($3::text IS NULL OR namespace = $3) \
-               AND ($4::text IS NULL OR flow_key = $4) \
-               AND ($5::text[] IS NULL OR state = ANY($5)) \
-               AND ($6::timestamptz IS NULL OR created_at >= $6) \
-               AND ($7::timestamptz IS NULL OR created_at < $7) \
-             ORDER BY created_at DESC, id DESC \
-             LIMIT $8 OFFSET $9"
-        ))
-        .bind(ws)
-        .bind(filter.flow_id)
-        .bind(&filter.namespace)
-        .bind(&filter.flow_key)
-        .bind(filter.states.clone())
-        .bind(filter.since)
-        .bind(filter.until)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.db.pool)
-        .await
-        .map_err(db_err)?;
+        let rows: Vec<ExecutionRow> = sqlx::query_as(EXECUTION_LIST_SQL)
+            .bind(ws)
+            .bind(filter.flow_id)
+            .bind(&filter.namespace)
+            .bind(&filter.flow_key)
+            .bind(filter.states.clone())
+            .bind(filter.since)
+            .bind(filter.until)
+            .bind(filter.root_only)
+            .bind(filter.parent)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.db.pool)
+            .await
+            .map_err(db_err)?;
 
         // A SECOND statement rather than `count(*) OVER ()`, so the window
         // clause cannot silently change what the projection above returns --
         // and so the predicate is written out twice IDENTICALLY, workspace
-        // predicate included. If the two ever diverge, the count is the one
-        // that lies, which is why the cross-workspace test asserts on
+        // predicate included -- now literally, through
+        // `execution_list_where!`. If the two ever diverge, the count is the
+        // one that lies, which is why the cross-workspace test asserts on
         // `total` as well as on `rows`.
-        let total: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM workflow.executions \
-             WHERE workspace_id = $1 \
-               AND ($2::uuid IS NULL OR flow_id = $2) \
-               AND ($3::text IS NULL OR namespace = $3) \
-               AND ($4::text IS NULL OR flow_key = $4) \
-               AND ($5::text[] IS NULL OR state = ANY($5)) \
-               AND ($6::timestamptz IS NULL OR created_at >= $6) \
-               AND ($7::timestamptz IS NULL OR created_at < $7)",
-        )
-        .bind(ws)
-        .bind(filter.flow_id)
-        .bind(&filter.namespace)
-        .bind(&filter.flow_key)
-        .bind(filter.states.clone())
-        .bind(filter.since)
-        .bind(filter.until)
-        .fetch_one(&self.db.pool)
-        .await
-        .map_err(db_err)?;
+        let total: i64 = sqlx::query_scalar(concat!("SELECT count(*)", execution_list_where!()))
+            .bind(ws)
+            .bind(filter.flow_id)
+            .bind(&filter.namespace)
+            .bind(&filter.flow_key)
+            .bind(filter.states.clone())
+            .bind(filter.since)
+            .bind(filter.until)
+            .bind(filter.root_only)
+            .bind(filter.parent)
+            .fetch_one(&self.db.pool)
+            .await
+            .map_err(db_err)?;
 
         Ok(ExecutionPage { rows, total })
     }

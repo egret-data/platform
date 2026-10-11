@@ -234,13 +234,16 @@ pub(super) async fn spawn_due(
     // In a savepoint, for `subflow::spawn_one`'s reason: the FILE-input check
     // below needs the row and may refuse it.
     let mut sp = sqlx::Connection::begin(&mut *conn).await.map_err(db_err)?;
-    let child: Uuid = sqlx::query_scalar(
+    let child: Uuid = sqlx::query_scalar(concat!(
         "INSERT INTO workflow.executions \
-           (workspace_id, flow_id, namespace, flow_key, source, state, history, \
-            parent_execution_id, attempt_number, origin_offset_ms, inputs, execution_depth) \
-         VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9,$10) \
-         RETURNING id",
-    )
+               (workspace_id, flow_id, namespace, flow_key, source, state, history, \
+                parent_execution_id, attempt_number, origin_offset_ms, inputs, \
+                execution_depth, ",
+        super::stamps::stamp_columns!(),
+        ") VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9,$10, ",
+        super::stamps::stamp_values!("'CREATED'", "'[\"CREATED\"]'"),
+        ") RETURNING id",
+    ))
     .bind(ctx.workspace_id)
     .bind(row.get::<Option<Uuid>, _>("flow_id"))
     .bind(row.get::<String, _>("namespace"))

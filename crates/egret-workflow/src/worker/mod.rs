@@ -87,6 +87,7 @@ mod registry;
 mod render;
 mod replay;
 mod spawn;
+mod stamps;
 mod subflow;
 mod timeout;
 pub(crate) mod txn;
@@ -102,6 +103,11 @@ pub use claim::{
     claim, commit_outcome, due_retries, resume, start_execution, start_execution_with_trigger,
     tick, tick_with, wake, Claimed, NewExecution, WorkerTiming,
 };
+/// Test-only (`test-util`; W7b Task 1): `persist`'s two state `UPDATE`s, so
+/// `tests/execution_timestamps.rs` can drive the production text against a
+/// terminal row.
+#[cfg(any(test, feature = "test-util"))]
+pub use claim::{EXECUTION_STATE_UPDATE, RUN_STATE_UPDATE};
 pub use reaper::reap;
 pub use registry::Handlers;
 pub use render::execution_render_context;

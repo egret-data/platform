@@ -10,7 +10,7 @@ import type { TaskRunDtoHistory } from './taskRunDtoHistory';
 import type { TaskRunDtoOutputs } from './taskRunDtoOutputs';
 
 /**
- * One task run, whole — all twenty-two columns.
+ * One task run, whole — all twenty-four columns.
  *
  * Unlike the execution's own row there is nothing dropped here: a detail page
  * reads ONE execution's runs, so there is no page-sized multiplier the way
@@ -22,8 +22,8 @@ import type { TaskRunDtoOutputs } from './taskRunDtoOutputs';
  * discover a missing field after this package closes. What it uses:
  * [`Self::task_id`] and [`Self::parent_ix`] for the label and the nesting,
  * [`Self::state`] for the bar, [`Self::created_seq`]/[`Self::ended_seq`] for
- * LOGICAL time, and [`Self::created_at`]/[`Self::updated_at`] plus
- * `attempts[].started_at` for WALL-CLOCK time.
+ * LOGICAL time, and [`Self::started_at`]/[`Self::ended_at`] plus
+ * `attempts[].started_at`/`attempts[].ended_at` for WALL-CLOCK time.
  */
 export interface TaskRunDto {
   id: string;
@@ -75,8 +75,11 @@ export interface TaskRunDto {
      */
   history: TaskRunDtoHistory;
   /**
-     * One entry per attempt: `{"history": [...], "started_at": <ms>}`, where
-     * `started_at` is milliseconds after the execution's `created_at`.
+     * One entry per attempt: `{"history": [...], "started_at": <ms>,
+     * "ended_at": <ms>}`, both in milliseconds after the execution's
+     * `created_at`. `ended_at` is absent while the attempt is open and on an
+     * attempt recorded before it existed; an attempt that a retry followed
+     * ends no later than the next one starts.
      */
   attempts: TaskRunDtoAttempts;
   /** @nullable */
@@ -103,6 +106,23 @@ export interface TaskRunDto {
   ended_seq?: number | null;
   /** @nullable */
   resume_with?: string | null;
+  /**
+     * The first time the run entered `RUNNING`: for a worker task, when the
+     * executor handed it to the workers (equal, to the millisecond, to
+     * `attempts[0].started_at`); for a flowable, when the executor first ran
+     * it. Not moved by a resumed pause or a retry. `NULL` for a run that
+     * never ran — `SKIPPED` by `runIf`, or not yet started — and for a run
+     * recorded before these times existed.
+     * @nullable
+     */
+  started_at?: string | null;
+  /**
+     * When the run entered a terminal state; `NULL` while it has not, and
+     * cleared if a retry reopens it. Written once per terminal: a later
+     * write to a finished run does not move it.
+     * @nullable
+     */
+  ended_at?: string | null;
   created_at: string;
   updated_at: string;
 }

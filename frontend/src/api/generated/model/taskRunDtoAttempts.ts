@@ -7,7 +7,10 @@
  */
 
 /**
- * One entry per attempt: `{"history": [...], "started_at": <ms>}`, where
- * `started_at` is milliseconds after the execution's `created_at`.
+ * One entry per attempt: `{"history": [...], "started_at": <ms>,
+ * "ended_at": <ms>}`, both in milliseconds after the execution's
+ * `created_at`. `ended_at` is absent while the attempt is open and on an
+ * attempt recorded before it existed; an attempt that a retry followed
+ * ends no later than the next one starts.
  */
 export type TaskRunDtoAttempts = { [key: string]: unknown };

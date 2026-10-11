@@ -1,0 +1,81 @@
+-- 0180_workflow_execution_timestamps.sql
+--
+-- W7b Task 1 (spec `docs/en/specs/2026-10-11-workflow-w7b-executions-design.md`
+-- §3): real start and end times for executions and task runs. The executions
+-- list's `root_only`/`parent=` filters need no new index (see the end of this
+-- file).
+--
+-- Until now the only "end" a run had was `updated_at`, which moves on every
+-- write. The gantt needs an instant that is written ONCE, by the write that
+-- ends the row, and never again.
+--
+-- WHO WRITES THESE COLUMNS
+--
+-- Every write is part of the same statement that writes `state`, through the
+-- two macros in `crates/egret-workflow/src/worker/stamps.rs`; there is no
+-- read-then-write. `tests/execution_timestamps.rs` fails if a statement that
+-- writes `state` on either table does not use one of them.
+--
+-- * `started_at`: `COALESCE(started_at, now())` while the row's history holds
+--   `RUNNING`, so it is set the first time the row runs and a resumed pause or
+--   a retry does not move it. `NULL` when the history does not hold `RUNNING`
+--   (a `SKIPPED` run, or a `LoopUntil` descendant that `RestartLoop` emptied).
+-- * `ended_at`: `COALESCE(ended_at, …)` while `state` is terminal, so a later
+--   write to a terminal row (outputs, `updated_at`) cannot move it; `NULL`
+--   when the row leaves a terminal state (a `RETRY_FAILED_TASK` reopen).
+--
+-- Existing rows keep `NULL` in all four columns. Nothing is guessed from
+-- `updated_at`; the UI marks such times as estimated (spec §6.3).
+
+ALTER TABLE workflow.executions
+  ADD COLUMN started_at timestamptz,
+  ADD COLUMN ended_at   timestamptz;
+
+ALTER TABLE workflow.task_runs
+  ADD COLUMN started_at timestamptz,
+  ADD COLUMN ended_at   timestamptz;
+
+-- The one terminal list in SQL. `RunState::is_terminal` is the authority and
+-- `tests/execution_timestamps.rs` asserts this function agrees with it for
+-- every variant of `RunState::ALL`, so a terminal state added in Rust and not
+-- here fails a test rather than a write in production.
+CREATE FUNCTION workflow.state_is_terminal(state text) RETURNS boolean
+  LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+  AS $$ SELECT state IN ('SUCCESS', 'FAILED', 'RETRIED', 'KILLED', 'SKIPPED',
+                         'WARNING', 'CANCELLED') $$;
+
+-- Only a terminal row has an end, and an end is never before the start. The
+-- writers cannot break either (the helper's `GREATEST` covers a transaction
+-- whose `now()` predates the one that set `started_at`, which a lock wait can
+-- produce); these make a NEW writer that bypasses the helper fail loudly.
+-- Existing rows hold NULLs and satisfy both.
+ALTER TABLE workflow.executions
+  ADD CONSTRAINT workflow_executions_ended_only_when_terminal
+    CHECK (ended_at IS NULL OR workflow.state_is_terminal(state)),
+  ADD CONSTRAINT workflow_executions_ends_after_it_starts
+    CHECK (ended_at >= started_at);
+
+ALTER TABLE workflow.task_runs
+  ADD CONSTRAINT workflow_task_runs_ended_only_when_terminal
+    CHECK (ended_at IS NULL OR workflow.state_is_terminal(state)),
+  ADD CONSTRAINT workflow_task_runs_ends_after_it_starts
+    CHECK (ended_at >= started_at);
+
+-- NO NEW INDEX for the list's `parent=<id>` filter, and that is a
+-- measurement. The spec (§3.3) asked for `(workspace_id, parent_execution_id)`
+-- and `(workspace_id, trigger_execution_id)`, partial on non-null. With them
+-- built, `EXPLAIN` of the list's own statement chose NEITHER: it answers
+-- `parent_execution_id = $9 OR trigger_execution_id = $9` with a BitmapOr over
+-- the two partial indexes that already lead with those columns --
+-- `workflow_executions_loop_run_idx` (0135, rebuilt in 0138) and
+-- `workflow_executions_trigger_idx` (0138) -- and filters the workspace on the
+-- one or two rows they return. An id is selective on its own; a leading
+-- `workspace_id` adds nothing to it. Two indexes nothing reads would be a
+-- write cost on every child execution, so they are not built.
+-- `tests/execution_timestamps.rs::the_parent_filter_is_served_by_the_partial_indexes`
+-- pins the plan, so a change that loses it fails there.
+--
+-- `root_only` (`parent_execution_id IS NULL AND trigger_execution_id IS NULL`)
+-- cannot use a partial index on NOT NULL and does not need one: it is the
+-- workspace scan every list already is (`workflow_executions_ws_idx`), with a
+-- filter.

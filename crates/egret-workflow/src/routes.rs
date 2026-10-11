@@ -1168,6 +1168,20 @@ pub struct ExecutionListItemDto {
     pub loop_value: Option<String>,
     pub attempt_number: i32,
     pub origin_offset_ms: i64,
+    /// The execution this one is a manual replay of (`POST …/replay`), `NULL`
+    /// for every other start. A `CREATE_NEW_EXECUTION` retry is NOT linked
+    /// here; it carries `parent_execution_id` instead.
+    pub replayed_from_execution_id: Option<Uuid>,
+    /// The first time the execution entered `RUNNING`. `NULL` before it runs,
+    /// for one that never ran (an SLA that cancelled it at creation), and for
+    /// an execution recorded before these times existed — a UI shows that last
+    /// case as estimated, never as "not started".
+    pub started_at: Option<DateTime<Utc>>,
+    /// When the execution entered a terminal state; `NULL` while it has not
+    /// (a paused execution has none), and for an execution recorded before
+    /// these times existed. Written once: later writes to a finished
+    /// execution do not move it.
+    pub ended_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1192,13 +1206,16 @@ impl From<ExecutionRow> for ExecutionListItemDto {
             loop_value: r.loop_value,
             attempt_number: r.attempt_number,
             origin_offset_ms: r.origin_offset_ms,
+            replayed_from_execution_id: r.replayed_from_execution_id,
+            started_at: r.started_at,
+            ended_at: r.ended_at,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }
     }
 }
 
-/// One task run, whole — all twenty-two columns.
+/// One task run, whole — all twenty-four columns.
 ///
 /// Unlike the execution's own row there is nothing dropped here: a detail page
 /// reads ONE execution's runs, so there is no page-sized multiplier the way
@@ -1210,8 +1227,8 @@ impl From<ExecutionRow> for ExecutionListItemDto {
 /// discover a missing field after this package closes. What it uses:
 /// [`Self::task_id`] and [`Self::parent_ix`] for the label and the nesting,
 /// [`Self::state`] for the bar, [`Self::created_seq`]/[`Self::ended_seq`] for
-/// LOGICAL time, and [`Self::created_at`]/[`Self::updated_at`] plus
-/// `attempts[].started_at` for WALL-CLOCK time.
+/// LOGICAL time, and [`Self::started_at`]/[`Self::ended_at`] plus
+/// `attempts[].started_at`/`attempts[].ended_at` for WALL-CLOCK time.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct TaskRunDto {
     pub id: Uuid,
@@ -1248,8 +1265,11 @@ pub struct TaskRunDto {
     /// `Tick` is in this engine).
     #[schema(value_type = Object)]
     pub history: serde_json::Value,
-    /// One entry per attempt: `{"history": [...], "started_at": <ms>}`, where
-    /// `started_at` is milliseconds after the execution's `created_at`.
+    /// One entry per attempt: `{"history": [...], "started_at": <ms>,
+    /// "ended_at": <ms>}`, both in milliseconds after the execution's
+    /// `created_at`. `ended_at` is absent while the attempt is open and on an
+    /// attempt recorded before it existed; an attempt that a retry followed
+    /// ends no later than the next one starts.
     #[schema(value_type = Object)]
     pub attempts: serde_json::Value,
     pub not_before_ms: Option<i64>,
@@ -1265,6 +1285,17 @@ pub struct TaskRunDto {
     /// The executor round this run terminated in; `NULL` while it has not.
     pub ended_seq: Option<i64>,
     pub resume_with: Option<String>,
+    /// The first time the run entered `RUNNING`: for a worker task, when the
+    /// executor handed it to the workers (equal, to the millisecond, to
+    /// `attempts[0].started_at`); for a flowable, when the executor first ran
+    /// it. Not moved by a resumed pause or a retry. `NULL` for a run that
+    /// never ran — `SKIPPED` by `runIf`, or not yet started — and for a run
+    /// recorded before these times existed.
+    pub started_at: Option<DateTime<Utc>>,
+    /// When the run entered a terminal state; `NULL` while it has not, and
+    /// cleared if a retry reopens it. Written once per terminal: a later
+    /// write to a finished run does not move it.
+    pub ended_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1292,6 +1323,8 @@ impl From<TaskRunRow> for TaskRunDto {
             created_seq: r.created_seq,
             ended_seq: r.ended_seq,
             resume_with: r.resume_with,
+            started_at: r.started_at,
+            ended_at: r.ended_at,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }
@@ -1386,6 +1419,16 @@ pub struct ListExecutionsQuery {
     /// Window over the execution's `created_at`, **exclusive**, so consecutive
     /// windows tile without double-counting the row on the boundary.
     pub until: Option<DateTime<Utc>>,
+    /// `true`: only root executions — no loop iteration, no
+    /// `CREATE_NEW_EXECUTION` replay (both carry `parent_execution_id`), no
+    /// subflow or flow-trigger child (`trigger_execution_id`). Absent or
+    /// `false` lists every execution. Cannot be combined with `parent` (400).
+    pub root_only: Option<bool>,
+    /// Only the direct children of this execution: the rows whose
+    /// `parent_execution_id` or `trigger_execution_id` is this id. An id from
+    /// another workspace answers an empty page, never an error. Cannot be
+    /// combined with `root_only=true` (400).
+    pub parent: Option<Uuid>,
     /// How many rows to return. Default 50, maximum 200; a larger value is
     /// clamped rather than refused, and the clamped value comes back in the
     /// response's own `limit`.
@@ -1423,7 +1466,7 @@ fn parse_state_filter(raw: Option<String>) -> Option<Vec<String>> {
     params(WorkspacePath, ListExecutionsQuery),
     responses(
         (status = 200, description = "One page of the workspace's executions, newest first, with the total behind it", body = ExecutionPageDto),
-        (status = 400, description = "The query string does not decode — a malformed `flow_id`/`since`/`until`, a non-numeric `limit`/`offset`, or a **repeated** key (`?state=A&state=B` answers `duplicate field state`; several states go in ONE comma-separated `state=`)", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The query string does not decode — a malformed `flow_id`/`parent`/`since`/`until`, a `root_only` that is not `true`/`false`, a non-numeric `limit`/`offset`, or a **repeated** key (`?state=A&state=B` answers `duplicate field state`; several states go in ONE comma-separated `state=`); or `root_only=true` and `parent` were both sent", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such workspace", body = egret_core::http::ErrorBody),
@@ -1446,6 +1489,17 @@ async fn list_executions(
         limit: q.limit.clamp(1, MAX_PAGE_LIMIT),
         offset: q.offset.max(0),
     };
+    let root_only = q.root_only.unwrap_or(false);
+    // Contradictory rather than empty: a root has no parent, so the pair can
+    // only ever answer nothing, and a caller who sent both has a bug worth
+    // naming. `root_only=false` beside `parent` is the default spelled out
+    // and is accepted.
+    if root_only && q.parent.is_some() {
+        return Err(Error::InvalidInput(
+            "`root_only=true` and `parent` cannot be combined: a root execution has no parent"
+                .into(),
+        ));
+    }
     let filter = ExecutionFilter {
         flow_id: q.flow_id,
         namespace: q.namespace,
@@ -1453,6 +1507,8 @@ async fn list_executions(
         states: parse_state_filter(q.state),
         since: q.since,
         until: q.until,
+        root_only,
+        parent: q.parent,
     };
     let found = st
         .executions

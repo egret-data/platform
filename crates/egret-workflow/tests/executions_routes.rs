@@ -760,14 +760,14 @@ async fn insert_wired_task_run(db: &Db, execution: Uuid) {
         "INSERT INTO workflow.task_runs \
            (execution_id, run_ix, task_ix, task_id, type_id, parent_ix, value, \
             rendered, rendered_run_if, state, history, attempts, not_before_ms, \
-            claimed_at, outputs, message, created_seq, ended_seq, resume_with) \
+            claimed_at, outputs, message, created_seq, ended_seq, resume_with, started_at) \
          VALUES ($1, 7, 9, 'task-id-value', 'type-id-value', 11, 'value-value', \
                  'rendered-value', 'rendered-run-if-value', 'RUNNING', \
                  '[\"CREATED\",\"RUNNING\"]'::jsonb, \
                  '[{\"history\":[\"CREATED\"],\"started_at\":13}]'::jsonb, \
                  17, '2026-02-03T04:05:06Z'::timestamptz, \
                  '{\"outputs-key\":\"outputs-value\"}'::jsonb, 'message-value', \
-                 19, 23, 'TERMINAL:WARNING')",
+                 19, 23, 'TERMINAL:WARNING', '2026-02-01T02:03:04Z'::timestamptz)",
     )
     .bind(execution)
     .execute(&db.pool)
@@ -779,7 +779,7 @@ async fn insert_wired_task_run(db: &Db, execution: Uuid) {
 /// name, carrying its own value.**
 ///
 /// Step 2 of this task is a column list, so this asserts the list: `TaskRunRow`
-/// carries all twenty-two columns and `ExecutionRow` all of its own minus
+/// carries all twenty-four columns and `ExecutionRow` all of its own minus
 /// `source`, and a DTO that quietly dropped one would otherwise be discovered
 /// by W7 rather than here.
 ///
@@ -806,6 +806,21 @@ async fn every_repository_column_reaches_the_wire() {
     common::grant(&db, ws, user, &["workflow:read"]).await;
     let id = insert_execution(&db, ws, None, "a.keys", "f", "RUNNING", at(1)).await;
     insert_wired_task_run(&db, id).await;
+    // W7b Task 1's three execution columns, each with a value of its own. A
+    // RUNNING row cannot carry an `ended_at` (migration 0180's CHECK), so the
+    // end is asserted `null` -- still distinct from the start beside it, which
+    // is what would show a crossed wire.
+    let replayed_from =
+        insert_execution(&db, ws, None, "a.keys-source", "src", "SUCCESS", at(1)).await;
+    sqlx::query(
+        "UPDATE workflow.executions SET started_at = '2026-01-01T00:00:05Z', \
+                replayed_from_execution_id = $2 WHERE id = $1",
+    )
+    .bind(id)
+    .bind(replayed_from)
+    .execute(&db.pool)
+    .await
+    .expect("seed the W7b columns");
 
     let app = common::app(&db).await;
     let detail = common::json(
@@ -840,6 +855,9 @@ async fn every_repository_column_reaches_the_wire() {
         "loop_value",
         "attempt_number",
         "origin_offset_ms",
+        "replayed_from_execution_id",
+        "started_at",
+        "ended_at",
         "created_at",
         "updated_at",
         "source",
@@ -875,6 +893,8 @@ async fn every_repository_column_reaches_the_wire() {
         "created_seq",
         "ended_seq",
         "resume_with",
+        "started_at",
+        "ended_at",
         "created_at",
         "updated_at",
     ];
@@ -931,6 +951,8 @@ async fn every_repository_column_reaches_the_wire() {
     assert_eq!(run["created_seq"], 19, "{run}");
     assert_eq!(run["ended_seq"], 23, "{run}");
     assert_eq!(run["resume_with"], "TERMINAL:WARNING", "{run}");
+    assert_eq!(run["started_at"], "2026-02-01T02:03:04Z", "{run}");
+    assert_eq!(run["ended_at"], Value::Null, "{run}");
     assert!(
         run["id"]
             .as_str()
@@ -950,6 +972,13 @@ async fn every_repository_column_reaches_the_wire() {
     assert_eq!(detail["state"], "RUNNING", "{detail}");
     assert_eq!(detail["source"], SEEDED_SOURCE, "{detail}");
     assert_eq!(detail["created_at"], "2026-01-01T00:00:00Z", "{detail}");
+    assert_eq!(detail["started_at"], "2026-01-01T00:00:05Z", "{detail}");
+    assert_eq!(detail["ended_at"], Value::Null, "{detail}");
+    assert_eq!(
+        detail["replayed_from_execution_id"],
+        replayed_from.to_string(),
+        "{detail}"
+    );
 
     // ---- and the list row: the same execution fields, WITHOUT source/runs ----
     let page = list(&app, ws, user, "namespace=a.keys").await;
@@ -968,7 +997,16 @@ async fn every_repository_column_reaches_the_wire() {
     assert_eq!(got_list, want_list, "the list DTO's key set: {page}");
     // The flattened parent's fields carry the same values through the list
     // route as through the detail route -- two `From` impls, one contract.
-    for k in ["id", "namespace", "flow_key", "state", "created_at"] {
+    for k in [
+        "id",
+        "namespace",
+        "flow_key",
+        "state",
+        "created_at",
+        "started_at",
+        "ended_at",
+        "replayed_from_execution_id",
+    ] {
         assert_eq!(
             row[k], detail[k],
             "list and detail disagree about {k}: {page}"
@@ -1178,6 +1216,23 @@ async fn a_gantt_row_is_computable_from_the_execution_dto_alone(pool: sqlx::PgPo
 
     let rows = gantt_rows(&dto);
     assert_eq!(rows.len(), 2, "one bar per task run: {dto}");
+
+    // W7b Task 1: the real times beside the recipe's derived ones. The
+    // terminated run has both; the open pause has a start and NO end -- the
+    // in-flight case `updated_at` could never express.
+    let (first, pause) = (&dto["runs"][0], &dto["runs"][1]);
+    assert!(
+        first["started_at"].is_string() && first["ended_at"].is_string(),
+        "{first}"
+    );
+    assert!(
+        pause["started_at"].is_string() && pause["ended_at"].is_null(),
+        "{pause}"
+    );
+    assert!(
+        dto["started_at"].is_string() && dto["ended_at"].is_null(),
+        "{dto}"
+    );
 
     // Labels, in the executor's own creation order (`run_ix`), which is the
     // order the detail route promises.
@@ -2412,4 +2467,263 @@ async fn a_start_runs_the_draft_even_when_a_published_version_exists() {
     .await
     .expect("read the started execution's frozen source");
     assert_eq!(stored, edited, "and the row agrees with the response");
+}
+
+// ── W7b Task 1: the `root_only` and `parent` filters ────────────────────────
+
+/// Insert a child execution of either kind, in the shape migration 0138's
+/// CHECKs admit: a loop iteration (`parent_execution_id` + run + index +
+/// value) or a subflow/flow-trigger child (`trigger_execution_id` + run).
+async fn insert_child(
+    db: &Db,
+    ws: Uuid,
+    parent: Option<(Uuid, i32, i32)>,
+    trigger: Option<(Uuid, i32)>,
+    created_at: DateTime<Utc>,
+) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (workspace_id, namespace, flow_key, source, state, history, created_at, \
+            parent_execution_id, parent_run_ix, loop_index, loop_value, \
+            trigger_execution_id, trigger_run_ix) \
+         VALUES ($1, 'a.tree', 'child', $2, 'SUCCESS', '[\"CREATED\",\"SUCCESS\"]', $3, \
+                 $4, $5, $6, $7, $8, $9) RETURNING id",
+    )
+    .bind(ws)
+    .bind(SEEDED_SOURCE)
+    .bind(created_at)
+    .bind(parent.map(|p| p.0))
+    .bind(parent.map(|p| p.1))
+    .bind(parent.map(|p| p.2))
+    .bind(parent.map(|p| p.2.to_string()))
+    .bind(trigger.map(|t| t.0))
+    .bind(trigger.map(|t| t.1))
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert child execution")
+}
+
+fn ids(page: &Value) -> std::collections::BTreeSet<String> {
+    page["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// **`root_only=true` lists roots alone; `parent=<id>` lists exactly that
+/// execution's children, of both link kinds; a foreign parent is an empty
+/// page; both at once, or a malformed value, is a 400.**
+///
+/// The fixture holds every kind of row each filter must tell apart: two
+/// roots, a loop iteration and a subflow child of the first, a grandchild
+/// (a child of the iteration, which `parent=<root>` must NOT reach — the
+/// filter is one level), and a root with a child in ANOTHER workspace.
+#[tokio::test]
+async fn the_root_only_and_parent_filters_split_the_tree() {
+    let Some(db) = common::db().await else { return };
+    // Arrange
+    let (ws, user) = common::seed_workspace(&db).await;
+    let (other_ws, _) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let root = insert_execution(&db, ws, None, "a.tree", "root", "SUCCESS", at(1)).await;
+    let lone = insert_execution(&db, ws, None, "a.tree", "lone", "SUCCESS", at(2)).await;
+    let iteration = insert_child(&db, ws, Some((root, 0, 0)), None, at(3)).await;
+    let subflow = insert_child(&db, ws, None, Some((root, 1)), at(4)).await;
+    let grandchild = insert_child(&db, ws, None, Some((iteration, 0)), at(5)).await;
+    let foreign = insert_execution(&db, other_ws, None, "a.tree", "far", "SUCCESS", at(1)).await;
+    insert_child(&db, other_ws, None, Some((foreign, 0)), at(2)).await;
+    let app = common::app(&db).await;
+    let set = |v: &[Uuid]| -> std::collections::BTreeSet<String> {
+        v.iter().map(Uuid::to_string).collect()
+    };
+
+    // Act + Assert: no filter is every row of the workspace (the control).
+    let all = list(&app, ws, user, "namespace=a.tree").await;
+    assert_eq!(
+        ids(&all),
+        set(&[root, lone, iteration, subflow, grandchild]),
+        "{all}"
+    );
+
+    let roots = list(&app, ws, user, "namespace=a.tree&root_only=true").await;
+    assert_eq!(ids(&roots), set(&[root, lone]), "{roots}");
+    assert_eq!(
+        roots["total"], 2,
+        "the count carries the same predicate: {roots}"
+    );
+    let everything = list(&app, ws, user, "namespace=a.tree&root_only=false").await;
+    assert_eq!(
+        everything["total"], 5,
+        "root_only=false is no filter: {everything}"
+    );
+
+    let kids = list(&app, ws, user, &format!("parent={root}")).await;
+    assert_eq!(
+        ids(&kids),
+        set(&[iteration, subflow]),
+        "both link kinds, one level only: {kids}"
+    );
+    assert_eq!(kids["total"], 2, "{kids}");
+    let grand = list(&app, ws, user, &format!("parent={iteration}")).await;
+    assert_eq!(ids(&grand), set(&[grandchild]), "{grand}");
+    let none = list(&app, ws, user, &format!("parent={lone}")).await;
+    assert_eq!(none["total"], 0, "{none}");
+
+    // Another workspace's parent: an empty page, never an error.
+    let res = common::get(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions?parent={foreign}"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    let page = common::json(res).await;
+    assert_eq!(
+        (page["total"].clone(), ids(&page).len()),
+        (Value::from(0), 0),
+        "{page}"
+    );
+
+    // 400s: both filters; a malformed uuid; a root_only that is not a bool.
+    for q in [
+        format!("root_only=true&parent={root}"),
+        "parent=not-a-uuid".to_string(),
+        "root_only=maybe".to_string(),
+    ] {
+        let res = common::get(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions?{q}"),
+            user,
+        )
+        .await;
+        assert_eq!(res.status(), 400, "{q}");
+    }
+    // `root_only=false` beside `parent` is the default spelled out, not a
+    // contradiction.
+    let ok = list(&app, ws, user, &format!("root_only=false&parent={root}")).await;
+    assert_eq!(ok["total"], 2, "{ok}");
+}
+
+// ── W7b Task 1: real times through the DTO, and the replay link ─────────────
+
+/// **A replay's DTO names what it replays, and its times are its own.**
+///
+/// Driven through the real worker and the real routes: start, finish, replay,
+/// finish. The replay's `started_at` is after the original's `ended_at`, and
+/// the original's times are untouched by it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_carries_its_source_and_fresh_times(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    // Arrange
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let flow = common::seed_flow(&db, ws, user, &runnable_source("timed"), "draft").await;
+    let app = common::app(&db).await;
+    let started = common::json(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+            user,
+        )
+        .await,
+    )
+    .await;
+    let original: Uuid = started["id"].as_str().unwrap().parse().unwrap();
+    drain_with(&pool).await;
+    let detail = |id: Uuid| {
+        let app = &app;
+        async move {
+            common::json(
+                common::get(
+                    app,
+                    &format!("/api/ws/{ws}/workflows/executions/{id}"),
+                    user,
+                )
+                .await,
+            )
+            .await
+        }
+    };
+    let before = detail(original).await;
+    assert_eq!(before["state"], "SUCCESS", "{before}");
+    assert_eq!(
+        before["replayed_from_execution_id"],
+        Value::Null,
+        "{before}"
+    );
+    let ts = |v: &Value, k: &str| -> DateTime<Utc> {
+        v[k].as_str()
+            .unwrap_or_else(|| panic!("{k} is set: {v}"))
+            .parse()
+            .unwrap()
+    };
+    let (o_start, o_end) = (ts(&before, "started_at"), ts(&before, "ended_at"));
+    for run in before["runs"].as_array().unwrap() {
+        assert!(
+            ts(run, "started_at") >= o_start && ts(run, "ended_at") <= o_end,
+            "{run}"
+        );
+        assert!(run["attempts"][0]["ended_at"].is_i64(), "{run}");
+    }
+
+    // Act
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{original}/replay"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 201);
+    let replay: Uuid = common::json(res).await["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    drain_with(&pool).await;
+
+    // Assert
+    let after = detail(replay).await;
+    assert_eq!(after["state"], "SUCCESS", "{after}");
+    assert_eq!(
+        after["replayed_from_execution_id"],
+        original.to_string(),
+        "{after}"
+    );
+    let (r_start, r_end) = (ts(&after, "started_at"), ts(&after, "ended_at"));
+    assert!(
+        r_start >= o_end && r_start <= r_end,
+        "fresh: {o_end} then {after}"
+    );
+    let row = list(&app, ws, user, &format!("flow_id={flow}")).await;
+    let listed = row["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == replay.to_string())
+        .expect("the replay is listed")
+        .clone();
+    assert_eq!(listed["replayed_from_execution_id"], original.to_string());
+    assert_eq!(listed["started_at"], after["started_at"]);
+    let again = detail(original).await;
+    assert_eq!(
+        (again["started_at"].clone(), again["ended_at"].clone()),
+        (before["started_at"].clone(), before["ended_at"].clone()),
+        "the original is untouched by its replay"
+    );
+}
+
+async fn drain_with(pool: &sqlx::PgPool) {
+    for _ in 0..32 {
+        if egret_workflow::worker::tick(pool, 8, &AlwaysSucceeds)
+            .await
+            .expect("tick")
+            == 0
+        {
+            return;
+        }
+    }
+    panic!("the worker never stopped claiming");
 }

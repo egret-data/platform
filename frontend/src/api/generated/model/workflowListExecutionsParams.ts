@@ -63,6 +63,22 @@ since?: string | null;
  */
 until?: string | null;
 /**
+ * `true`: only root executions — no loop iteration, no
+ * `CREATE_NEW_EXECUTION` replay (both carry `parent_execution_id`), no
+ * subflow or flow-trigger child (`trigger_execution_id`). Absent or
+ * `false` lists every execution. Cannot be combined with `parent` (400).
+ * @nullable
+ */
+root_only?: boolean | null;
+/**
+ * Only the direct children of this execution: the rows whose
+ * `parent_execution_id` or `trigger_execution_id` is this id. An id from
+ * another workspace answers an empty page, never an error. Cannot be
+ * combined with `root_only=true` (400).
+ * @nullable
+ */
+parent?: string | null;
+/**
  * How many rows to return. Default 50, maximum 200; a larger value is
  * clamped rather than refused, and the clamped value comes back in the
  * response's own `limit`.

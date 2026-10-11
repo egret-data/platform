@@ -63,6 +63,29 @@ export interface ExecutionListItemDto {
   loop_value?: string | null;
   attempt_number: number;
   origin_offset_ms: number;
+  /**
+     * The execution this one is a manual replay of (`POST …/replay`), `NULL`
+     * for every other start. A `CREATE_NEW_EXECUTION` retry is NOT linked
+     * here; it carries `parent_execution_id` instead.
+     * @nullable
+     */
+  replayed_from_execution_id?: string | null;
+  /**
+     * The first time the execution entered `RUNNING`. `NULL` before it runs,
+     * for one that never ran (an SLA that cancelled it at creation), and for
+     * an execution recorded before these times existed — a UI shows that last
+     * case as estimated, never as "not started".
+     * @nullable
+     */
+  started_at?: string | null;
+  /**
+     * When the execution entered a terminal state; `NULL` while it has not
+     * (a paused execution has none), and for an execution recorded before
+     * these times existed. Written once: later writes to a finished
+     * execution do not move it.
+     * @nullable
+     */
+  ended_at?: string | null;
   created_at: string;
   updated_at: string;
 }
