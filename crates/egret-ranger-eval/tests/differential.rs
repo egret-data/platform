@@ -5636,6 +5636,9 @@ const MIG_PROBE_PRINCIPALS: &[(&str, &[&str])] = &[
     ("erin", &["analysts"]),
     ("egret-probe-member-of-analysts", &["analysts"]),
     ("egret-probe-member-of-contractors", &["contractors"]),
+    // In an included group AND an excluded one (fix round 1, I-3): an excluded
+    // group must win over an included one.
+    ("egret-probe-member-of-both", &["analysts", "contractors"]),
     ("egret-probe-unnamed-user", &[]),
 ];
 
@@ -6098,6 +6101,41 @@ fn mig_corpus(profile: &Profile, def: &Value, all_mask_types: &[String]) -> Vec<
             ],
             vec![],
             vec![],
+            vec![],
+        ],
+    ));
+    // Exceptions naming a GROUP (fix round 1, I-3). `compile_grant` renders
+    // `PrincipalSet.exclude` groups on its own path; if it dropped one, access
+    // would WIDEN for every member of the excluded group. The probe principals
+    // carry a member of the excluded group, a non-member, and a member of both
+    // an included and the excluded group.
+    out.push(mig_access(
+        "split allow exception names a group".into(),
+        base(),
+        [
+            vec![mig_item(&[], &["analysts", "contractors"], &dml)],
+            vec![],
+            vec![mig_item(&[], &["contractors"], &dml)],
+            vec![],
+        ],
+    ));
+    out.push(mig_access(
+        "split deny exception names a group".into(),
+        base(),
+        [
+            vec![mig_item(&[], &["public"], &dml)],
+            vec![mig_item(&[], &["public"], &write)],
+            vec![],
+            vec![mig_item(&[], &["analysts"], &write)],
+        ],
+    ));
+    out.push(mig_access(
+        "split exception names a user and a group".into(),
+        base(),
+        [
+            vec![mig_item(&["alice"], &["analysts", "contractors"], sel)],
+            vec![],
+            vec![mig_item(&["bob", "alice"], &["contractors"], sel)],
             vec![],
         ],
     ));
@@ -6982,6 +7020,243 @@ fn mig_prepare(
     pairs
 }
 
+/// The accepted population, recorded (fix round 1, I-2).
+///
+/// ⚠ **Update these lists DELIBERATELY, in the same commit as the grammar
+/// change that moves them, and say why in that commit.** The gate proves
+/// equivalence only for what the grammar accepts, so a grammar that started
+/// refusing a shape it used to accept would leave this test green while it
+/// proved less. Any difference — a label gained or lost — fails the run with
+/// the diff; a gained label is checked by the engines like any other, a lost
+/// one is a shape that stopped being migratable and must be a decision.
+const MIG_ACCEPTED_TRINO: &[&str] = &[
+    "walk catalog.schema.table.column [select]",
+    "dml select",
+    "dml insert+delete",
+    "dml select+insert+delete",
+    "principals two users",
+    "principals a group",
+    "principals public",
+    "principals user and group",
+    "scope select schema-wide",
+    "scope select catalog-wide",
+    "scope select table-wide",
+    "scope select a ** run",
+    "scope select wildcard characters",
+    "scope select mixed case",
+    "scope select two catalogs",
+    "scope dml schema-wide",
+    "scope dml catalog-wide",
+    "scope dml table-wide",
+    "scope dml a ** run",
+    "scope dml wildcard characters",
+    "scope dml mixed case",
+    "scope dml two catalogs",
+    "split allow + exception",
+    "split allow + deny + deny exception",
+    "split allow + exception + deny + deny exception",
+    "split two items share one exception",
+    "split two deny items share one exception",
+    "split deny only",
+    "split two catalogs with deny + exceptions",
+    "split one item, two actions",
+    "mask MASK",
+    "mask MASK with exemption",
+    "mask MASK_SHOW_LAST_4",
+    "mask MASK_SHOW_LAST_4 with exemption",
+    "mask MASK_SHOW_FIRST_4",
+    "mask MASK_SHOW_FIRST_4 with exemption",
+    "mask MASK_HASH",
+    "mask MASK_HASH with exemption",
+    "mask MASK_NULL",
+    "mask MASK_NULL with exemption",
+    "mask MASK_NONE",
+    "mask MASK_NONE with exemption",
+    "mask MASK_DATE_SHOW_YEAR",
+    "mask MASK_DATE_SHOW_YEAR with exemption",
+    "mask CUSTOM",
+    "mask CUSTOM with exemption",
+    "mask shape stops at table",
+    "mask shape stops at schema",
+    "mask shape schema-wide",
+    "mask shape wildcard over named",
+    "mask shape two catalogs",
+    "filter everyone",
+    "filter user exemption",
+    "filter group exemption",
+    "filter schema-wide",
+    "filter two catalogs",
+    "tag mask MASK",
+    "tag mask MASK_SHOW_LAST_4",
+    "tag mask MASK_SHOW_FIRST_4",
+    "tag mask MASK_HASH",
+    "tag mask MASK_NULL",
+    "tag mask MASK_NONE",
+    "tag mask MASK_DATE_SHOW_YEAR",
+    "tag mask CUSTOM",
+    "tag mask with exemption",
+    "tag filter",
+    "tag filter with exemption",
+    "split allow exception names a group",
+    "split deny exception names a group",
+    "split exception names a user and a group",
+];
+
+/// See [`MIG_ACCEPTED_TRINO`].
+const MIG_ACCEPTED_STARROCKS: &[&str] = &[
+    "walk catalog.database.table.column [select]",
+    "dml select",
+    "dml insert+update+delete",
+    "dml select+insert+update+delete",
+    "principals two users",
+    "principals a group",
+    "principals public",
+    "principals user and group",
+    "scope select schema-wide",
+    "scope select catalog-wide",
+    "scope select table-wide",
+    "scope select a ** run",
+    "scope select wildcard characters",
+    "scope select mixed case",
+    "scope select two catalogs",
+    "scope dml schema-wide",
+    "scope dml catalog-wide",
+    "scope dml table-wide",
+    "scope dml a ** run",
+    "scope dml wildcard characters",
+    "scope dml mixed case",
+    "scope dml two catalogs",
+    "split allow + exception",
+    "split allow + deny + deny exception",
+    "split allow + exception + deny + deny exception",
+    "split two items share one exception",
+    "split two deny items share one exception",
+    "split deny only",
+    "split two catalogs with deny + exceptions",
+    "split one item, two actions",
+    "mask MASK",
+    "mask MASK with exemption",
+    "mask MASK_HASH",
+    "mask MASK_HASH with exemption",
+    "mask MASK_NULL",
+    "mask MASK_NULL with exemption",
+    "mask MASK_NONE",
+    "mask MASK_NONE with exemption",
+    "mask MASK_DATE_SHOW_YEAR",
+    "mask MASK_DATE_SHOW_YEAR with exemption",
+    "mask CUSTOM",
+    "mask CUSTOM with exemption",
+    "mask shape stops at table",
+    "mask shape stops at schema",
+    "mask shape schema-wide",
+    "mask shape wildcard over named",
+    "mask shape two catalogs",
+    "filter everyone",
+    "filter user exemption",
+    "filter group exemption",
+    "filter schema-wide",
+    "filter two catalogs",
+    "split allow exception names a group",
+    "split deny exception names a group",
+    "split exception names a user and a group",
+];
+
+/// The accepted labels against the recorded list, plus one named example per
+/// category the gate exists to cover — so a reader of a failure sees WHICH
+/// kind of coverage was lost, not only a label diff.
+fn mig_check_accepted(profile: &Profile, def_json: &Value, accepted: &[String]) -> Vec<String> {
+    let engine = profile.engine.service_def_name();
+    let recorded: &[&str] = match profile.engine {
+        EngineType::Trino => MIG_ACCEPTED_TRINO,
+        EngineType::StarRocks => MIG_ACCEPTED_STARROCKS,
+    };
+    let have: BTreeSet<&str> = accepted.iter().map(String::as_str).collect();
+    let want: BTreeSet<&str> = recorded.iter().copied().collect();
+    let mut failures = Vec::new();
+    let lost: Vec<&&str> = want.difference(&have).collect();
+    let gained: Vec<&&str> = have.difference(&want).collect();
+    if !lost.is_empty() || !gained.is_empty() {
+        failures.push(format!(
+            "[{engine}] the accepted population changed — update MIG_ACCEPTED_* deliberately if \
+             the grammar change is intended.\n  no longer accepted: {lost:?}\n  newly accepted: \
+             {gained:?}"
+        ));
+    }
+    let mut required: Vec<(String, String)> = vec![
+        (
+            "deny items".into(),
+            "split allow + deny + deny exception".into(),
+        ),
+        (
+            "an allow exception".into(),
+            "split allow + exception".into(),
+        ),
+        (
+            "a deny exception".into(),
+            "split two deny items share one exception".into(),
+        ),
+        (
+            "two items sharing one exception".into(),
+            "split two items share one exception".into(),
+        ),
+        (
+            "a multi-catalog split".into(),
+            "split two catalogs with deny + exceptions".into(),
+        ),
+        (
+            "an allow exception naming a group".into(),
+            "split allow exception names a group".into(),
+        ),
+        (
+            "a deny exception naming a group".into(),
+            "split deny exception names a group".into(),
+        ),
+        (
+            "an exception naming a user and a group".into(),
+            "split exception names a user and a group".into(),
+        ),
+        ("a row filter".into(), "filter everyone".into()),
+        (
+            "a row filter with an exemption".into(),
+            "filter user exemption".into(),
+        ),
+        (
+            "a multi-catalog row filter".into(),
+            "filter two catalogs".into(),
+        ),
+    ];
+    let mask_types = mig_def_names(def_json, "/dataMaskDef/maskTypes");
+    for t in &mask_types {
+        required.push((format!("mask type {t}"), format!("mask {t}")));
+        required.push((
+            format!("mask type {t} with an exemption"),
+            format!("mask {t} with exemption"),
+        ));
+    }
+    if profile.engine == EngineType::Trino {
+        for t in &mask_types {
+            required.push((format!("tag mask type {t}"), format!("tag mask {t}")));
+        }
+        required.push((
+            "a tag mask with an exemption".into(),
+            "tag mask with exemption".into(),
+        ));
+        required.push(("a tag row filter".into(), "tag filter".into()));
+        required.push((
+            "a tag row filter with an exemption".into(),
+            "tag filter with exemption".into(),
+        ));
+    }
+    for (category, label) in required {
+        if !have.contains(label.as_str()) {
+            failures.push(format!(
+                "[{engine}] no accepted policy covers {category} (`{label}` was refused)"
+            ));
+        }
+    }
+    failures
+}
+
 fn mig_refusal<'a>(refusals: &'a [(String, Vec<Blocker>)], label: &str) -> Option<&'a [Blocker]> {
     refusals
         .iter()
@@ -7231,6 +7506,7 @@ fn a_migration_the_grammar_accepts_decides_identically_on_the_real_engine() {
             &mut accepted,
         );
         failures.extend(mig_check_pins(&profile, &def_json, &refusals, &accepted));
+        failures.extend(mig_check_accepted(&profile, &def_json, &accepted));
         eprintln!(
             "migration differential [{}]: corpus {} policies, accepted={} ({} duplicates not \
              re-asked) refused={} probes={} (cases per version = {})",

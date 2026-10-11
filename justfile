@@ -152,17 +152,19 @@ check:
 # `EGRET_TEST_RANGER_E2E` alone, so the opt-out could not have reached them. The scrub is
 # the policy holding, not a vacuous green being fixed.
 #
-# SP4d-3 Task 8: the THIRD line is the migration differential — every hand-written policy the
+# SP4d-3 Task 8: the LAST line is the migration differential — every hand-written policy the
 # grammar accepts, compiled by egret's real compiler, asked of the real 2.5.0 and 2.8.0 engines
 # before and after. It lives in the same test binary as the second line, so the second line
-# `--skip`s it and the third names it `--exact`, so each runs once and the slow one (minutes,
-# not seconds) is its own visible step. If a rename made `--exact` match nothing, cargo would
-# print `0 passed` for that line — read the count.
+# `--skip`s it and the last names it `--exact`, so each runs once and the slow one (minutes,
+# not seconds) is its own visible step. A name filter that matches nothing makes cargo print
+# `0 passed` and exit 0, so the line before it LISTS the test by that exact name and fails the
+# recipe when the listing is empty — a rename breaks the gate loudly instead of skipping it.
 test-ranger-gates:
     @echo "── Ranger gates (real jars, 2.5.0 + 2.8.0). Needs a JVM and Maven; a failure"
     @echo "   here means the differential did NOT run, which is the thing to know."
     {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-policy --test ranger_engine_gate --no-fail-fast
     {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture --skip a_migration_the_grammar_accepts_decides_identically_on_the_real_engine
+    {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential -- --list --exact a_migration_the_grammar_accepts_decides_identically_on_the_real_engine | grep -qx 'a_migration_the_grammar_accepts_decides_identically_on_the_real_engine: test'
     {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture --exact a_migration_the_grammar_accepts_decides_identically_on_the_real_engine
 
 # The Kestra plugin host's Java tests (`plugin-host/`, W5b), including the pins of its refusal
