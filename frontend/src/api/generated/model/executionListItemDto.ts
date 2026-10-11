@@ -46,8 +46,11 @@ export interface ExecutionListItemDto {
   history: string[];
   inputs: ExecutionListItemDtoInputs;
   seq: number;
-  /** The trigger record, `NULL` for an API start. */
-  execution_trigger: ExecutionListItemDtoExecutionTrigger;
+  /**
+     * The trigger record, `NULL` for an API start.
+     * @nullable
+     */
+  execution_trigger?: ExecutionListItemDtoExecutionTrigger;
   /** @nullable */
   trigger_execution_id?: string | null;
   /** @nullable */

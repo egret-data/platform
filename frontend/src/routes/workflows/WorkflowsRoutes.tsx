@@ -3,7 +3,6 @@ import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import FlowsList from "@/routes/workflows/FlowsList";
 import ExecutionsList from "@/routes/workflows/ExecutionsList";
-import ExecutionMinimal from "@/routes/workflows/ExecutionMinimal";
 
 /**
  * The flow pages, a lazy chunk of their own inside this one: they bring the
@@ -13,8 +12,17 @@ import ExecutionMinimal from "@/routes/workflows/ExecutionMinimal";
  */
 const FlowDetail = lazy(() => import("@/routes/workflows/FlowDetail"));
 const FlowNew = lazy(() => import("@/routes/workflows/FlowNew"));
+/**
+ * The execution detail (W7b), split the same way: it reads the frozen source
+ * with `yaml` to decide Resume, and Tasks 4–6 hang the gantt, logs and
+ * outputs off it, none of which the lists need.
+ */
+const ExecutionDetail = lazy(() => import("@/routes/workflows/ExecutionDetail"));
 
-/** The flow pages' loading state (FE-STATE-2). A failed chunk reaches `LazyRouteArea`'s boundary. */
+/**
+ * The loading state of the flow and execution pages (FE-STATE-2). A failed
+ * chunk reaches `LazyRouteArea`'s boundary.
+ */
 function FlowPage({ children }: { children: ReactNode }) {
   return (
     <Suspense
@@ -55,8 +63,10 @@ export default function WorkflowsRoutes() {
           `revisions` and `executions` (W7b: the flow's executions list). */}
       <Route path="flows/:id/:tab" element={<FlowPage><FlowDetail /></FlowPage>} />
       <Route path="executions" element={<ExecutionsList />} />
-      {/* The minimal execution page (spec §6.3) until W7b replaces it. */}
-      <Route path="executions/:id" element={<ExecutionMinimal />} />
+      {/* The execution detail (W7b spec §4). `ExecutionDetail` sends an unknown tab to
+          `overview`; its tabs are `overview`, `gantt`, `logs` and `outputs`. */}
+      <Route path="executions/:id" element={<ExecutionIndexRedirect base={base} />} />
+      <Route path="executions/:id/:tab" element={<FlowPage><ExecutionDetail /></FlowPage>} />
       <Route path="*" element={<Navigate to={`${base}/flows`} replace />} />
     </Routes>
   );
@@ -65,4 +75,9 @@ export default function WorkflowsRoutes() {
 function FlowIndexRedirect({ base }: { base: string }) {
   const { id } = useParams();
   return <Navigate to={`${base}/flows/${encodeURIComponent(id ?? "")}/edit`} replace />;
+}
+
+function ExecutionIndexRedirect({ base }: { base: string }) {
+  const { id } = useParams();
+  return <Navigate to={`${base}/executions/${encodeURIComponent(id ?? "")}/overview`} replace />;
 }

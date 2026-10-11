@@ -18,7 +18,7 @@
  * module stayed out. There is one marker per guarded module below: a string literal from that
  * module that survives minification and that nothing outside the area spells. A static import of
  * `WorkflowsRoutes.tsx` is caught through `FlowsList.tsx`, which it imports. Modules with no such
- * literal (`queryKeys.ts`, whose strings are short words) are NOT guarded here; a module added to
+ * literal (`queryKeys.ts`, whose strings are short words; `components/workflows/ReasonButton.tsx`, which has none) are NOT guarded here; a module added to
  * the area gets a marker in this list or is not covered either.
  *
  * Each marker was proven by a scratch build that imported its module eagerly from `App.tsx`; the
@@ -38,7 +38,7 @@
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { entryChunkName } from "./dist-entry.mjs";
+import { entryChunkName, entryPreloadNames } from "./dist-entry.mjs";
 
 const DIST = "dist";
 const LIST_MARKER = "egret.wf.ns-collapsed.";
@@ -80,8 +80,6 @@ const MARKERS = [
   // chunk (`MonacoDiffEditor`, `assert-monaco-lazy.mjs`).
   ["src/routes/workflows/FlowRevisions.tsx", "The saved draft already has this text", "editor"],
   ["src/components/workflows/RevisionDiff.tsx", "Differences between ", "editor"],
-  // The minimal execution page (W7a Task 6), in the area's own chunk with the list.
-  ["src/routes/workflows/ExecutionMinimal.tsx", "The execution ended before any task ran."],
   // The executions list (W7b Task 2), in the area's own chunk with the flow list; the flow page's
   // Executions tab imports it from there. Its filter-miss sentence.
   ["src/routes/workflows/ExecutionsList.tsx", "No executions match the current filters."],
@@ -90,11 +88,22 @@ const MARKERS = [
   // `ESTIMATED_DURATION_TITLE`, shared with the execution detail (Tasks 3 and 4).
   ["src/components/workflows/executions/timing.ts", "so its creation and last update stand in."],
   ["src/components/workflows/executions/trigger.tsx", "Loop iteration"],
+  // `staleNote`'s sentence. Polling and the clock are shared by the list and the detail.
+  ["src/components/workflows/executions/polling.ts", "it keeps trying on its own."],
+  // The execution detail (W7b Task 3), a lazy chunk of its own like the flow pages: it reads the
+  // frozen source with `yaml` (`actions.ts`), so it is flagged to stay out of the list's chunk too.
+  ["src/routes/workflows/ExecutionDetail.tsx", "Edits made to the flow since it ran are not used.", "editor"],
+  ["src/routes/workflows/ExecutionOverview.tsx", "No trigger started this execution, so it has no trigger variables.", "editor"],
+  // `UNBOUNDED_PAUSE_REASON`.
+  ["src/components/workflows/executions/actions.ts", "so it cannot be resumed from here", "editor"],
 ];
 
 const entry = entryChunkName(DIST);
-const entrySource = readFileSync(join(ASSETS, entry), "utf8");
-const others = readdirSync(ASSETS).filter((f) => f.endsWith(".js") && f !== entry);
+// The entry and the chunks it imports statically (preloaded by `index.html`): everything a page
+// downloads before any `lazy()` runs. A marker in any of them is eager.
+const eager = [entry, ...entryPreloadNames(DIST)];
+const entrySource = eager.map((f) => readFileSync(join(ASSETS, f), "utf8")).join("\n");
+const others = readdirSync(ASSETS).filter((f) => f.endsWith(".js") && !eager.includes(f));
 
 let failed = false;
 
@@ -120,7 +129,7 @@ for (const [module, marker, editor] of MARKERS) {
   }
   if (entrySource.includes(marker)) {
     console.error(
-      `✗ ${marker} (${module}) is in the entry chunk (${entry}).\n` +
+      `✗ ${marker} (${module}) is in the entry chunk (${entry}) or a chunk it preloads.\n` +
         `  That module is eager again: every page now downloads it, including the login screen.\n` +
         `  Look for a static import of it from a module the entry reaches (App.tsx, the layout,\n` +
         `  a shared helper).`,

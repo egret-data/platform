@@ -17,6 +17,7 @@ describe("workflowsKeys", () => {
       workflowsKeys.version("f", 2),
       workflowsKeys.schema("eng"),
       workflowsKeys.execution("e"),
+      workflowsKeys.executionChildren("e"),
       workflowsKeys.executions("eng"),
       workflowsKeys.executions("eng", { page: 2 }),
     ]) {
@@ -35,6 +36,12 @@ describe("workflowsKeys", () => {
     expect(reaches(workflowsKeys.executions("eng"), workflowsKeys.executions("eng", { states: ["FAILED"], page: 3 }))).toBe(true);
     expect(reaches(workflowsKeys.executions("eng"), workflowsKeys.execution("e"))).toBe(false);
     expect(reaches(workflowsKeys.executions("eng"), workflowsKeys.flows("eng"))).toBe(false);
+  });
+
+  it("refreshes an execution's children with the execution, and no other execution's", () => {
+    expect(reaches(workflowsKeys.execution("e"), workflowsKeys.executionChildren("e"))).toBe(true);
+    expect(reaches(workflowsKeys.execution("f"), workflowsKeys.executionChildren("e"))).toBe(false);
+    expect(reaches(workflowsKeys.executions("eng"), workflowsKeys.executionChildren("e"))).toBe(false);
   });
 
   it("reaches every filtered list of a workspace from its unfiltered key", () => {

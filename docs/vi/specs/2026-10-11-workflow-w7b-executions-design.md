@@ -117,6 +117,8 @@ Cả hai bộ lọc dùng các index đã có, vốn bắt đầu bằng đúng 
   - `replayed_from_execution_id: Option<Uuid>`, lấy từ cột do migration 0166 thêm vào.
 - `TaskRunDto` có thêm `started_at` và `ended_at`.
 - Mỗi phần tử của `attempts` mang `ended_at` khi đã biết.
+- `ExecutionDto` có thêm `can_manage: bool`, câu trả lời của PDP cho `workflow:manage`, giống `FlowDto` (W7a). Trường này nằm trên execution vì flow của nó có thể đã bị đưa vào thùng rác, khi đó không đọc được flow, trong khi execution vẫn đọc được. *(Bổ sung 2026-10-11, Task 3.)*
+- `execution_trigger` có kiểu `object | null`: server gửi `null` cho một lần chạy qua API. *(Sửa 2026-10-11, Task 3.)*
 
 `openapi.json` và client được sinh lại bằng `npm run gen:api` (FE-DATA-1).
 
@@ -182,7 +184,7 @@ Execution được poll theo `nextPollMs` của W7a (2 giây; khi đọc lỗi t
 
 ### 5.2 Hành động
 
-Cả hai hành động cần quyền `workflow:manage`. Người dùng không có quyền này không thấy nút.
+Cả hai hành động cần quyền `workflow:manage`. Người dùng không có quyền này không thấy nút. Trang đọc quyền này từ `ExecutionDto.can_manage` (§3.4).
 
 **Resume:**
 - Chỉ hiện khi state là `PAUSED`, và phải qua dialog xác nhận.
@@ -414,3 +416,4 @@ Toàn bộ `docs/en/frontend-rules.md`. Những rule quan trọng nhất ở đ�
 
 - Execution ghi trước migration 0180 có thời gian ước tính (§6.3).
 - Resume không giải phóng được một `Pause` không có duration hay timeout (§5.2).
+- Một lần retry của một vòng lặp con hoặc của một execution con do subflow tạo ra hiện trong danh sách mặc định như một execution gốc. Execution thay thế do `CREATE_NEW_EXECUTION` tạo ra mang `parent_execution_id` (là execution con) nhưng không có `loop_index` và không có `trigger_execution_id`, đúng hình dạng của một lần retry của execution gốc, nên `root_only` giữ nó lại (§3.3). *(Phát hiện trong review Task 2.)*

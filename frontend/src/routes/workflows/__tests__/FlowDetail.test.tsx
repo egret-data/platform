@@ -78,7 +78,7 @@ describe("FlowDetail: the Executions tab", () => {
         history: ["CREATED", "RUNNING", "SUCCESS"],
         inputs: {},
         seq: 1,
-        execution_trigger: null as never,
+        execution_trigger: null,
         attempt_number: 1,
         origin_offset_ms: 0,
         started_at: "2026-10-11T10:00:05.000001Z",

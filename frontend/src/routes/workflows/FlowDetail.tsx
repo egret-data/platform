@@ -37,12 +37,11 @@ import { disposeFlowModel } from "@/components/workflows/editor/flowModel";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { Forbidden } from "@/routes/Forbidden";
 import {
-  DisabledReasons,
   FlowEditPage,
-  ReasonButton,
   useFlowLayout,
   useSaveShortcut,
 } from "@/routes/workflows/FlowEditPage";
+import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
 import { FlowRevisions } from "@/routes/workflows/FlowRevisions";
 import ExecutionsList from "@/routes/workflows/ExecutionsList";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";

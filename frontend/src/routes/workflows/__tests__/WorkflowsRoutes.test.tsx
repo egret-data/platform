@@ -28,6 +28,7 @@ function renderAt(path: string) {
   vi.mocked(api.useWorkflowGetFlowSchema).mockReturnValue(loading as unknown as ReturnType<typeof api.useWorkflowGetFlowSchema>);
   vi.mocked(api.workflowValidateUnsavedFlow).mockReturnValue(new Promise(() => {}));
   vi.mocked(api.workflowListExecutions).mockReturnValue(new Promise(() => {}));
+  vi.mocked(api.useWorkflowGetExecution).mockReturnValue(loading as unknown as ReturnType<typeof api.useWorkflowGetExecution>);
   render(
     <QueryClientProvider client={new QueryClient()}>
       <TooltipProvider>
@@ -90,6 +91,26 @@ describe("WorkflowsRoutes", () => {
       expect(api.workflowListExecutions).toHaveBeenCalledWith("eng", expect.objectContaining({ root_only: true }), expect.anything()),
     );
     expect(screen.queryByText("The executions list is not here yet")).toBeNull();
+  });
+
+  it("sends a bare execution to its overview tab", async () => {
+    renderAt("/explore/eng/workflows/executions/e-1");
+    expect(screen.getByTestId("path")).toHaveTextContent("/explore/eng/workflows/executions/e-1/overview");
+    // The execution page is a lazy chunk, cold on first import (see "keeps a known tab" above).
+    await waitFor(() => expect(api.useWorkflowGetExecution).toHaveBeenCalledWith("eng", "e-1", expect.anything()), { timeout: 4000 });
+  });
+
+  it.each(["gantt", "logs", "outputs"])("keeps the execution's %s tab", async (tab) => {
+    renderAt(`/explore/eng/workflows/executions/e-1/${tab}`);
+    await waitFor(() => expect(api.useWorkflowGetExecution).toHaveBeenCalledWith("eng", "e-1", expect.anything()), { timeout: 4000 });
+    expect(screen.getByTestId("path")).toHaveTextContent(`/explore/eng/workflows/executions/e-1/${tab}`);
+  });
+
+  it("sends an unknown execution tab to overview", async () => {
+    renderAt("/explore/eng/workflows/executions/e-1/metrics");
+    await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent("/explore/eng/workflows/executions/e-1/overview"), {
+      timeout: 4000,
+    });
   });
 
   it("keeps the flow's Executions tab", async () => {

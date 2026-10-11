@@ -3,7 +3,7 @@ import { render, screen } from "@testing-library/react";
 import { TriggerLabel, triggerKind } from "@/components/workflows/executions/trigger";
 
 type Row = Parameters<typeof triggerKind>[0];
-const base: Row = { execution_trigger: null as unknown as Row["execution_trigger"], parent_execution_id: null, loop_index: null, replayed_from_execution_id: null };
+const base: Row = { execution_trigger: null, parent_execution_id: null, loop_index: null, replayed_from_execution_id: null };
 const by = (type: string): Row => ({ ...base, execution_trigger: { id: "t", type, variables: {} } });
 
 describe("triggerKind", () => {

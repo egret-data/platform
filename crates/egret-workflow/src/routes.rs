@@ -690,12 +690,7 @@ async fn get_flow(
     let row = st.repo.get(ctx.workspace_id.0, id).await?;
     // The check the mutating routes make, so the editor and the routes
     // cannot disagree about who may write.
-    // A PDP that failed is an error, not a "no": only a refusal reads as false.
-    let can_manage = match egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await {
-        Ok(()) => true,
-        Err(Error::Forbidden) => false,
-        Err(e) => return Err(e),
-    };
+    let can_manage = caller_may_manage(&st, &ctx).await?;
     Ok(Json(draft_dto(row, can_manage)?))
 }
 
@@ -1158,7 +1153,7 @@ pub struct ExecutionListItemDto {
     pub inputs: serde_json::Value,
     pub seq: i64,
     /// The trigger record, `NULL` for an API start.
-    #[schema(value_type = Object)]
+    #[schema(value_type = Option<Object>)]
     pub execution_trigger: Option<serde_json::Value>,
     pub trigger_execution_id: Option<Uuid>,
     pub trigger_run_ix: Option<i32>,
@@ -1363,15 +1358,36 @@ pub struct ExecutionDto {
     pub source: String,
     /// Every task run, in `run_ix` order — the executor's creation order.
     pub runs: Vec<TaskRunDto>,
+    /// Whether the caller may resume and replay this execution: they hold
+    /// `workflow:manage` in this workspace. A detail page hides both actions
+    /// when this is false; the routes still check for themselves.
+    // W7b spec §5.2. The same PDP decision `FlowDto::can_manage` carries, on
+    // the execution itself because its flow may be trashed (a 404 to read)
+    // while the execution is still readable.
+    pub can_manage: bool,
 }
 
-impl From<ExecutionDetail> for ExecutionDto {
-    fn from(d: ExecutionDetail) -> Self {
+impl ExecutionDto {
+    fn new(d: ExecutionDetail, can_manage: bool) -> Self {
         Self {
             execution: ExecutionListItemDto::from(d.execution),
             source: d.source,
             runs: d.runs.into_iter().map(TaskRunDto::from).collect(),
+            can_manage,
         }
+    }
+}
+
+/// The PDP's answer to the check every mutating workflow route makes. A PDP
+/// that failed is an error, not a "no": only a refusal reads as false.
+async fn caller_may_manage(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+) -> EgretResult<bool> {
+    match egret_core::authz::require(&*st.pdp, ctx, WF_MANAGE).await {
+        Ok(()) => Ok(true),
+        Err(Error::Forbidden) => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
@@ -1588,7 +1604,8 @@ async fn get_execution(
     // a SINGLE call that already answers `NotFound` for a foreign id, so there
     // is no second statement whose empty result could be mistaken for one.
     let detail = st.executions.get(ctx.workspace_id.0, id).await?;
-    Ok(Json(ExecutionDto::from(detail)))
+    let can_manage = caller_may_manage(&st, &ctx).await?;
+    Ok(Json(ExecutionDto::new(detail, can_manage)))
 }
 
 // ---------- Execution logs (W11 Task 5, spec §6) ----------
@@ -2212,7 +2229,7 @@ async fn start_flow_execution(
         .get(ctx.workspace_id.0, execution_id)
         .await
         .map_err(core_refusal)?;
-    Ok((StatusCode::CREATED, Json(ExecutionDto::from(detail))))
+    Ok((StatusCode::CREATED, Json(ExecutionDto::new(detail, true))))
 }
 
 /// The multipart start (W9a spec §7.1), in its order: the execution id is
@@ -2513,7 +2530,7 @@ async fn resume_execution(
         serde_json::json!({ "from_state": before.execution.state }),
     ));
     let detail = st.executions.get(ctx.workspace_id.0, id).await?;
-    Ok(Json(ExecutionDto::from(detail)))
+    Ok(Json(ExecutionDto::new(detail, true)))
 }
 
 #[utoipa::path(
@@ -2665,7 +2682,7 @@ async fn replay_execution(
         serde_json::json!({ "replayed_from": id, "replacement": replacement }),
     ));
     let detail = st.executions.get(ctx.workspace_id.0, replacement).await?;
-    Ok((StatusCode::CREATED, Json(ExecutionDto::from(detail))))
+    Ok((StatusCode::CREATED, Json(ExecutionDto::new(detail, true))))
 }
 
 /// The Workflow management router. Mount under `/api` so the live paths are

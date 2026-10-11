@@ -51,7 +51,7 @@ const ICONS: Record<TriggerKind, LucideIcon> = {
 };
 
 export interface TriggerSource {
-  execution_trigger: unknown;
+  execution_trigger?: unknown;
   parent_execution_id?: string | null;
   loop_index?: number | null;
   replayed_from_execution_id?: string | null;

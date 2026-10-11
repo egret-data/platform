@@ -2826,3 +2826,106 @@ async fn drain_with(pool: &sqlx::PgPool) {
     }
     panic!("the worker never stopped claiming");
 }
+
+// ── `can_manage` on the execution (W7b Task 3, spec §5.2) ───────────────────
+
+/// `GET …/executions/{id}` carries `can_manage`, the PDP's `workflow:manage`
+/// answer, so the detail page can hide Resume and Replay from a reader. A
+/// reader gets `false`; the control, identical but for the grant, `true`.
+#[tokio::test]
+async fn get_execution_says_whether_the_caller_may_manage_it() {
+    let Some(db) = common::db().await else { return };
+    for (perms, expected) in [
+        (&["workflow:read"][..], false),
+        (&["workflow:read", "workflow:manage"][..], true),
+    ] {
+        let (ws, user) = common::seed_workspace(&db).await;
+        common::grant(&db, ws, user, perms).await;
+        let id = insert_execution(&db, ws, None, "a.cm", "f", "SUCCESS", at(1)).await;
+        let app = common::app(&db).await;
+        let res = common::get(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{id}"),
+            user,
+        )
+        .await;
+        assert_eq!(res.status(), 200, "{perms:?}");
+        let body = common::json(res).await;
+        assert_eq!(body["can_manage"], expected, "{perms:?}: {body}");
+        // An API start has no trigger record: the wire says `null`, which is
+        // what the schema now declares (`Option<Object>`).
+        assert!(body["execution_trigger"].is_null(), "{body}");
+    }
+}
+
+/// A PDP that fails while deciding `workflow:manage` is an error (500), not a
+/// "no": the page must not hide the actions on an outage. The control is the
+/// same request through an app whose PDP fails on an action nobody asks.
+#[tokio::test]
+async fn get_execution_answers_an_error_when_the_can_manage_decision_fails() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let id = insert_execution(&db, ws, None, "a.cmpdp", "f", "SUCCESS", at(1)).await;
+    let url = format!("/api/ws/{ws}/workflows/executions/{id}");
+
+    let ok = common::app_with_failing_pdp_action(&db, "no-such-action").await;
+    assert_eq!(common::get(&ok, &url, user).await.status(), 200);
+
+    let app = common::app_with_failing_pdp_action(&db, "workflow:manage").await;
+    assert_eq!(common::get(&app, &url, user).await.status(), 500);
+}
+
+/// Start, resume and replay answer `can_manage: true`: the caller just passed
+/// the `workflow:manage` check those routes make.
+#[tokio::test]
+async fn start_resume_and_replay_answer_can_manage_true() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let pause_flow =
+        common::seed_flow(&db, ws, user, &unbounded_pause_source("cm-pause"), "draft").await;
+    let source = runnable_source("cm-replay");
+    let flow = common::seed_flow(&db, ws, user, &source, "draft").await;
+    let done = insert_execution_with(
+        &db,
+        ws,
+        Some(flow),
+        "SUCCESS",
+        &source,
+        serde_json::json!({}),
+    )
+    .await;
+    let app = common::app(&db).await;
+
+    let started = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{pause_flow}/executions"),
+        user,
+    )
+    .await;
+    assert_eq!(started.status(), 201);
+    let started = common::json(started).await;
+    assert_eq!(started["can_manage"], true, "start: {started}");
+
+    let paused = started["id"].as_str().unwrap();
+    let resumed = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{paused}/resume"),
+        user,
+    )
+    .await;
+    assert_eq!(resumed.status(), 200);
+    let resumed = common::json(resumed).await;
+    assert_eq!(resumed["can_manage"], true, "resume: {resumed}");
+
+    let replayed = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{done}/replay"),
+        user,
+    )
+    .await;
+    assert_eq!(replayed.status(), 201);
+    let replayed = common::json(replayed).await;
+    assert_eq!(replayed["can_manage"], true, "replay: {replayed}");
+}

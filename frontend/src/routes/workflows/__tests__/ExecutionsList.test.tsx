@@ -22,7 +22,7 @@ function exec(id: string, over: Partial<ExecutionListItemDto> = {}): ExecutionLi
     history: ["CREATED", "RUNNING", "SUCCESS"],
     inputs: {},
     seq: 1,
-    execution_trigger: null as unknown as ExecutionListItemDto["execution_trigger"],
+    execution_trigger: null,
     attempt_number: 1,
     origin_offset_ms: 0,
     started_at: "2026-10-11T10:00:05.000001Z",

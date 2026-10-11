@@ -107,6 +107,8 @@ Both filters are served by existing indexes that already lead with those columns
   - `replayed_from_execution_id: Option<Uuid>`, from migration 0166's column
 - `TaskRunDto` gains `started_at` and `ended_at`.
 - Each element of `attempts` carries `ended_at` when it is known.
+- `ExecutionDto` gains `can_manage: bool`, the PDP's `workflow:manage` answer, as `FlowDto` carries it (W7a). It is on the execution because its flow can be trashed, and then cannot be read, while the execution still can. *(Added 2026-10-11, Task 3.)*
+- `execution_trigger` is typed `object | null`: the server sends `null` for an API start. *(Corrected 2026-10-11, Task 3.)*
 
 `openapi.json` and the generated client are regenerated with `npm run gen:api` (FE-DATA-1).
 
@@ -172,7 +174,7 @@ The execution is polled with W7a's `nextPollMs` (2 s, backing off to 30 s while 
 
 ### 5.2 Actions
 
-Both actions need `workflow:manage`. A user without it does not see them.
+Both actions need `workflow:manage`. A user without it does not see them. The page reads it from `ExecutionDto.can_manage` (§3.4).
 
 **Resume**
 - It is shown only while the state is `PAUSED`, and goes through a confirm dialog.
@@ -407,3 +409,4 @@ All of `docs/en/frontend-rules.md`. The rules most at stake:
 
 - Executions recorded before migration 0180 have estimated times (§6.3).
 - Resume cannot release a `Pause` that has no duration or timeout (§5.2).
+- A retry of a loop iteration or of a subflow child appears in the default list as a root. Its `CREATE_NEW_EXECUTION` replacement carries `parent_execution_id` (the child) with no `loop_index` and no `trigger_execution_id`, which is exactly the shape of a retry of a root, so `root_only` keeps it (§3.3). *(Found in the Task 2 review.)*

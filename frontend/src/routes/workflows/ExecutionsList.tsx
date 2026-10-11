@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
+import { useId, useMemo, type ReactNode } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronLeft, ChevronRight, History, RotateCw } from "lucide-react";
@@ -34,6 +34,7 @@ import {
   executionStart,
   startTitle,
 } from "@/components/workflows/executions/timing";
+import { useNow } from "@/components/workflows/executions/polling";
 import { TriggerLabel } from "@/components/workflows/executions/trigger";
 import { knownNamespaces } from "@/components/workflows/namespaceTree";
 import { timeAgo } from "@/lib/relativeTime";
@@ -75,16 +76,6 @@ async function fetchPage(
   const res = await workflowListExecutions(ws, toQueryParams(filters, Date.now(), { pinnedFlowId }), { signal });
   if (res.status !== 200) throw new Error("The executions could not be loaded.");
   return { rows: res.data.rows, total: res.data.total };
-}
-
-/** A clock for the "Updated … ago" label and running durations; ticks once a second. */
-function useNow(): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
-  return now;
 }
 
 const errorMessage = (e: unknown) => (e instanceof Error && e.message ? e.message : "the request failed");

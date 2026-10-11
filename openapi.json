@@ -37112,7 +37112,8 @@
             "type": "object",
             "required": [
               "source",
-              "runs"
+              "runs",
+              "can_manage"
             ],
             "properties": {
               "source": {
@@ -37125,6 +37126,10 @@
                   "$ref": "#/components/schemas/TaskRunDto"
                 },
                 "description": "Every task run, in `run_ix` order — the executor's creation order."
+              },
+              "can_manage": {
+                "type": "boolean",
+                "description": "Whether the caller may resume and replay this execution: they hold\n`workflow:manage` in this workspace. A detail page hides both actions\nwhen this is false; the routes still check for themselves."
               }
             }
           }
@@ -37142,7 +37147,6 @@
           "history",
           "inputs",
           "seq",
-          "execution_trigger",
           "attempt_number",
           "origin_offset_ms",
           "created_at",
@@ -37187,7 +37191,10 @@
             "format": "int64"
           },
           "execution_trigger": {
-            "type": "object",
+            "type": [
+              "object",
+              "null"
+            ],
             "description": "The trigger record, `NULL` for an API start."
           },
           "trigger_execution_id": {
