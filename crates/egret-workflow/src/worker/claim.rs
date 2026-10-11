@@ -2744,6 +2744,47 @@ pub async fn resume(pool: &PgPool, execution_id: Uuid) -> Result<()> {
     })
 }
 
+/// What a manual resume found under the execution's lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resumed {
+    /// The execution was `PAUSED`; this many `Pause` runs were released and
+    /// the execution settled on from there.
+    Released(usize),
+    /// The execution was no longer `PAUSED` when the lock was taken -- the
+    /// waker ended the pause first, or it was never paused. Nothing written.
+    NotPaused,
+}
+
+/// **Resume a paused execution by hand** (W7b Task 3 fix round 1; Kestra's
+/// `ExecutionService.resume`): every `PAUSED` `Pause` run is released NOW,
+/// whatever its bound, and ends `SUCCESS`; then the execution settles on.
+///
+/// Inside the same transaction model and the same `FOR NO KEY UPDATE` as
+/// every writer ([`load`]). The release only moves each paused `Pause`'s
+/// deadline to `now` (`executor::release_paused_pauses`); the run then leaves
+/// `PAUSED` through `flowable::resume_paused` inside this [`settle`], exactly
+/// as a passed deadline does, so the run's and attempt's ends and their
+/// timestamps are written by `persist` like every other transition.
+///
+/// **The race with the waker is decided by the lock.** Whichever takes it
+/// first wins: a `timeout:` pause the waker reached first has already ended
+/// `FAILED` (and the execution has moved on), so this answers
+/// [`Resumed::NotPaused`] and writes nothing; one still `PAUSED` when this
+/// takes the lock ends `SUCCESS`, and the waker then finds nothing due.
+pub async fn resume_by_hand(pool: &PgPool, execution_id: Uuid) -> Result<Resumed> {
+    transaction!(pool, |at| {
+        let (conn, gate) = at.parts();
+        let (ctx, mut state, now) = load(conn, execution_id, Stack::Fresh(gate.clone())).await?;
+        if state.history.last() != Some(&RunState::Paused) {
+            return Ok(Resumed::NotPaused);
+        }
+        let before = state.clone();
+        let released = crate::executor::release_paused_pauses(&mut state, now).len();
+        settle(conn, &ctx, &before, state, now, None).await?;
+        Ok(Resumed::Released(released))
+    })
+}
+
 /// Everything a writer needs to know about the execution it is writing.
 ///
 /// The `Plan` is rebuilt from `source` rather than stored — `build_plan` is

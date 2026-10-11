@@ -100,8 +100,9 @@ pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
 #[cfg(any(test, feature = "test-util"))]
 pub use claim::{apply_outcome, start_execution_in};
 pub use claim::{
-    claim, commit_outcome, due_retries, resume, start_execution, start_execution_with_trigger,
-    tick, tick_with, wake, Claimed, NewExecution, WorkerTiming,
+    claim, commit_outcome, due_retries, resume, resume_by_hand, start_execution,
+    start_execution_with_trigger, tick, tick_with, wake, Claimed, NewExecution, Resumed,
+    WorkerTiming,
 };
 /// Test-only (`test-util`; W7b Task 1): `persist`'s two state `UPDATE`s, so
 /// `tests/execution_timestamps.rs` can drive the production text against a

@@ -79,6 +79,8 @@ pub use flowable::loop_::{
 /// the measurement.
 pub use flowable::branch::is_truthy;
 
+/// A manual resume: see [`flowable::pause::release_now`].
+pub(crate) use flowable::pause::release_now as release_paused_pauses;
 /// Java's `Duration.parse` over the ISO-8601 subset a flow can write.
 ///
 /// **A visibility change, not a semantic one, and this is the sentence the
@@ -7351,6 +7353,94 @@ tasks:
              assertions above are satisfied by a pause that never works at all"
         );
         assert_eq!(run_ids(&bounded, &state), ["gate", "after"]);
+    }
+
+    /// **A manual resume releases every paused `Pause` at once, through the
+    /// natural end's door** (W7b Task 3 fix round 1).
+    ///
+    /// Three bounds, each paused at `T0`, long before any deadline: none, a
+    /// `pauseDuration:` and a `timeout:` (whose natural end is `FAILED`). After
+    /// [`release_paused_pauses`] the next `advance()` must emit exactly the
+    /// commands a passed deadline emits -- `SetRunState { SUCCESS }` on the
+    /// run, and `RESTARTED` on the execution -- and the flow must run on to
+    /// `after`. The control: without the release, the same state at the same
+    /// clock is still waiting.
+    #[test]
+    fn a_manual_resume_releases_every_pause_through_the_natural_end() {
+        for props in ["", "    pauseDuration: PT1H\n", "    timeout: PT1H\n"] {
+            let plan = build_plan(&pause_flow(props)).unwrap();
+            let mut state = run_to_fixpoint(&plan, RunState::Success);
+            assert_eq!(
+                wire(&state.runs[0].history),
+                ["CREATED", "RUNNING", "PAUSED"],
+                "{props:?}"
+            );
+            assert!(
+                advance(&plan, &state, T0).is_empty(),
+                "{props:?}: the control waits"
+            );
+
+            assert_eq!(release_paused_pauses(&mut state, T0), vec![0], "{props:?}");
+            let cmds = round(&plan, &mut state);
+            assert!(
+                cmds.contains(&Command::SetRunState {
+                    run: 0,
+                    state: RunState::Success
+                }),
+                "{props:?}: {cmds:?}"
+            );
+            assert!(
+                cmds.contains(&Command::SetExecutionState {
+                    state: RunState::Restarted
+                }),
+                "{props:?}: a resumed Pause owes the execution RESTARTED: {cmds:?}"
+            );
+            // On to the end, as `run_to_fixpoint` would from here.
+            for _ in 0..100 {
+                if round(&plan, &mut state).is_empty() {
+                    let next = (0..state.runs.len())
+                        .find(|&ix| state.runs[ix].history.last() == Some(&RunState::Running));
+                    match next {
+                        Some(ix) => apply(
+                            &mut state,
+                            &Command::SetRunState {
+                                run: ix,
+                                state: RunState::Success,
+                            },
+                        ),
+                        None => break,
+                    }
+                }
+            }
+            assert_eq!(run_ids(&plan, &state), ["gate", "after"], "{props:?}");
+            assert_eq!(
+                wire(&state.runs[0].history),
+                ["CREATED", "RUNNING", "PAUSED", "SUCCESS"],
+                "{props:?}"
+            );
+            assert_eq!(state.history.last(), Some(&RunState::Success), "{props:?}");
+            assert!(state.history.contains(&RunState::Restarted), "{props:?}");
+            // A second resume finds nothing paused.
+            assert!(
+                release_paused_pauses(&mut state, T0).is_empty(),
+                "{props:?}"
+            );
+        }
+    }
+
+    /// **A manual resume leaves a waiting `LoopUntil` alone**: it carries
+    /// `Resume::Iterate`, and resume is a `Pause`'s.
+    #[test]
+    fn a_manual_resume_does_not_touch_a_loop_until() {
+        // A paused run shaped as `LoopUntil` leaves it: `Iterate`, with its deadline.
+        let mut state = run_to_fixpoint(&build_plan(&pause_flow("")).unwrap(), RunState::Success);
+        state.runs[0].resume_with = Some(Resume::Iterate { at: Tick(500) });
+        state.runs[0].not_before = Some(Tick(500));
+        assert!(release_paused_pauses(&mut state, T0).is_empty());
+        assert_eq!(
+            state.runs[0].resume_with,
+            Some(Resume::Iterate { at: Tick(500) })
+        );
     }
 
     /// **A literal `pauseDuration:` needs no render; an expression does, and

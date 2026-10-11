@@ -1369,7 +1369,7 @@ fn runnable_source(id: &str) -> String {
 
 /// A flow that is a single **unbounded** `Pause` — neither `pauseDuration:`
 /// nor `timeout:`. `executor::Resume::Never`, which is the case the resume
-/// route cannot end; see [`an_unbounded_pause_is_not_ended_by_the_resume_route`].
+/// route used to leave alone; see [`a_resume_releases_every_bound_of_pause_at_once`].
 fn unbounded_pause_source(id: &str) -> String {
     format!(
         "id: {id}\nnamespace: a.write\ntasks:\n  \
@@ -2101,120 +2101,320 @@ async fn a_replay_of_an_unfinished_execution_is_a_conflict() {
     }
 }
 
-/// **The finding: an UNBOUNDED pause is not ended by the resume route, and a
-/// BOUNDED one is.**
+/// One `Pause` with `props`, nothing after it: a resumed execution ends there.
+fn pause_source(id: &str, props: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: a.write\ntasks:\n  \
+         - id: pause\n    type: io.kestra.plugin.core.flow.Pause\n{props}"
+    )
+}
+
+/// Start `flow` through the route; the id of an execution that is `PAUSED`.
+async fn start_paused(
+    app: &common::App,
+    db: &Db,
+    ws: Uuid,
+    user: egret_core::UserId,
+    flow: Uuid,
+) -> Uuid {
+    let res = common::post_no_body(
+        app,
+        &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 201);
+    let id: Uuid = common::json(res).await["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        state_of(db, id).await,
+        "PAUSED",
+        "the fixture must reach the pause"
+    );
+    id
+}
+
+async fn resume_status(app: &common::App, ws: Uuid, user: egret_core::UserId, id: Uuid) -> u16 {
+    common::post_no_body(
+        app,
+        &format!("/api/ws/{ws}/workflows/executions/{id}/resume"),
+        user,
+    )
+    .await
+    .status()
+    .as_u16()
+}
+
+/// The execution's history and `ended_at`, and each `pause*` run's history,
+/// `ended_at` and attempts, read from the tables.
+async fn pause_rows(
+    db: &Db,
+    id: Uuid,
+) -> (Vec<String>, bool, Vec<(String, Vec<String>, bool, Value)>) {
+    let (history, ended): (Value, Option<DateTime<Utc>>) =
+        sqlx::query_as("SELECT history, ended_at FROM workflow.executions WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let runs: Vec<(String, Value, Option<DateTime<Utc>>, Value)> = sqlx::query_as(
+        "SELECT task_id, history, ended_at, attempts FROM workflow.task_runs \
+         WHERE execution_id = $1 AND task_id LIKE 'pause%' ORDER BY run_ix",
+    )
+    .bind(id)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let names = |v: Value| -> Vec<String> { serde_json::from_value(v).unwrap() };
+    (
+        names(history),
+        ended.is_some(),
+        runs.into_iter()
+            .map(|(t, h, e, a)| (t, names(h), e.is_some(), a))
+            .collect(),
+    )
+}
+
+/// **A resume releases a paused `Pause` AT ONCE, whatever its bound, and it
+/// ends `SUCCESS`** (W7b Task 3 fix round 1; Kestra's `ExecutionService.resume`
+/// and `Pause.java`: a pause resumed by hand "will always succeed").
 ///
-/// `flowable::resume_paused` is the only thing that moves a run out of
-/// `PAUSED`; it is pure over `(state, run, now)` and its `Resume::Never` arm
-/// returns `Waiting` *before* it reads `now`, so no clock value and no number
-/// of calls can end such a wait. A `Pause` with neither `pauseDuration:` nor
-/// `timeout:` is exactly that case. The route is not broken — the command it
-/// would need does not exist, which is a capability `advance()` does not have
-/// and which this task is forbidden to add to it.
+/// Three bounds, none of them due: an unbounded pause (`Resume::Never`, which
+/// nothing ended before), an hour's `pauseDuration:`, and an hour's
+/// `timeout:` (whose natural end is `FAILED`). Each goes, in one call, to the
+/// natural end's shape: the run `CREATED RUNNING PAUSED SUCCESS`, its attempt
+/// closed with an end, `RESTARTED` on the execution, and every `ended_at` set.
+/// A second resume is a 409.
 ///
-/// **The fixture carries BOTH elements of the class**, which is the thing
-/// `a_gantt_row_is_computable_from_the_execution_dto_alone`'s first draft
-/// lacked: the unbounded pause (the gap) and a bounded one whose deadline has
-/// passed (the control that says the route itself works). Without the second,
-/// "resume changed nothing" is equally consistent with a route that does
-/// nothing at all.
-///
-/// `#[sqlx::test]` rather than the shared database: the bounded arm backdates
-/// `created_at` so the deadline is in the past, and `worker::wake` in a
-/// neighbouring test binary selects due deadlines **globally** — on a shared
-/// database it could resume this execution before the route does, and the
-/// control would pass for the wrong reason.
+/// `#[sqlx::test]`: the worker's waker selects due runs globally.
 #[sqlx::test(migrations = "../../migrations")]
-async fn an_unbounded_pause_is_not_ended_by_the_resume_route(pool: sqlx::PgPool) {
+async fn a_resume_releases_every_bound_of_pause_at_once(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let db = Db { pool: pool.clone() };
     let (ws, user) = common::seed_workspace(&db).await;
-    common::grant(&db, ws, user, &["workflow:manage"]).await;
-    let never = common::seed_flow(&db, ws, user, &unbounded_pause_source("never"), "draft").await;
-    let bounded = common::seed_flow(
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    for (label, props) in [
+        ("unbounded", ""),
+        ("pauseDuration", "    pauseDuration: PT1H\n"),
+        ("timeout", "    timeout: PT1H\n"),
+    ] {
+        let flow = common::seed_flow(&db, ws, user, &pause_source(label, props), "draft").await;
+        let id = start_paused(&app, &db, ws, user, flow).await;
+
+        let res = common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{id}/resume"),
+            user,
+        )
+        .await;
+        assert_eq!(res.status(), 200, "{label}");
+        let dto = common::json(res).await;
+        assert_eq!(
+            dto["state"], "SUCCESS",
+            "{label}: the answer is the state after the resume: {dto}"
+        );
+
+        let (history, ended, runs) = pause_rows(&db, id).await;
+        assert_eq!(
+            history,
+            [
+                "CREATED",
+                "RUNNING",
+                "PAUSED",
+                "RESTARTED",
+                "RUNNING",
+                "SUCCESS"
+            ],
+            "{label}"
+        );
+        assert!(ended, "{label}: the execution's ended_at");
+        assert_eq!(runs.len(), 1, "{label}");
+        let (_, run_history, run_ended, attempts) = &runs[0];
+        assert_eq!(
+            run_history,
+            &["CREATED", "RUNNING", "PAUSED", "SUCCESS"],
+            "{label}"
+        );
+        assert!(run_ended, "{label}: the run's ended_at");
+        assert_eq!(
+            attempts[0]["history"],
+            serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+            "{label}"
+        );
+        assert!(
+            attempts[0]["ended_at"].is_i64(),
+            "{label}: the attempt's end: {attempts}"
+        );
+
+        assert_eq!(
+            resume_status(&app, ws, user, id).await,
+            409,
+            "{label}: nothing is paused any more"
+        );
+    }
+}
+
+/// **Several parallel pauses are released by one resume**, and the flow runs on.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_resume_releases_every_parallel_pause(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let source = "id: fan\nnamespace: a.write\ntasks:\n  \
+         - id: both\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      \
+         - id: pause_a\n        type: io.kestra.plugin.core.flow.Pause\n      \
+         - id: pause_b\n        type: io.kestra.plugin.core.flow.Pause\n        pauseDuration: PT1H\n      \
+         - id: pause_c\n        type: io.kestra.plugin.core.flow.Pause\n        timeout: PT1H\n";
+    let flow = common::seed_flow(&db, ws, user, source, "draft").await;
+    let id = start_paused(&app, &db, ws, user, flow).await;
+    let (_, _, before) = pause_rows(&db, id).await;
+    assert_eq!(before.len(), 3, "all three branches reached their pause");
+    assert!(
+        before
+            .iter()
+            .all(|(_, h, _, _)| h.last().map(String::as_str) == Some("PAUSED")),
+        "{before:?}"
+    );
+
+    assert_eq!(resume_status(&app, ws, user, id).await, 200);
+    assert_eq!(state_of(&db, id).await, "SUCCESS");
+    let (_, _, runs) = pause_rows(&db, id).await;
+    for (task, history, ended, _) in &runs {
+        assert_eq!(
+            history,
+            &["CREATED", "RUNNING", "PAUSED", "SUCCESS"],
+            "{task}"
+        );
+        assert!(ended, "{task}");
+    }
+}
+
+/// **The race with the waker is decided by the execution's lock, and the
+/// run transitions once.** A `timeout:` pause whose deadline has passed (the
+/// execution is backdated) is due for the waker, whose natural end is `FAILED`.
+///
+/// 1. The waker first: the run ends `FAILED`, and the resume that follows is a
+///    409 that writes nothing.
+/// 2. The resume first: the run ends `SUCCESS` (a manual resume always
+///    succeeds), and the waker that follows finds nothing due.
+/// 3. Both at once, several times: exactly one terminal on the run, and the
+///    resume's answer agrees with which one won.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_resume_and_the_waker_transition_a_pause_once(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let flow = common::seed_flow(
         &db,
         ws,
         user,
-        "id: bounded\nnamespace: a.write\ntasks:\n  \
-         - id: pause\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n",
+        &pause_source("race", "    timeout: PT1S\n"),
         "draft",
     )
     .await;
+    let backdate = |id: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE workflow.executions SET created_at = created_at - interval '1 hour' WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    let run_history = |id: Uuid| {
+        let db = db.clone();
+        async move { pause_rows(&db, id).await.2.remove(0).1 }
+    };
 
-    let app = common::app(&db).await;
-    let start = |flow: Uuid| format!("/api/ws/{ws}/workflows/flows/{flow}/executions");
-
-    // ── The gap ──────────────────────────────────────────────────────────
-    let a: Uuid = common::json(common::post_no_body(&app, &start(never), user).await).await["id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert_eq!(state_of(&db, a).await, "PAUSED");
-    for round in 1..=3 {
-        assert_eq!(
-            common::post_no_body(
-                &app,
-                &format!("/api/ws/{ws}/workflows/executions/{a}/resume"),
-                user
-            )
+    // 1. The waker first.
+    let id = start_paused(&app, &db, ws, user, flow).await;
+    backdate(id).await;
+    assert_eq!(
+        egret_workflow::worker::wake(&pool, 10).await.unwrap(),
+        vec![id]
+    );
+    assert_eq!(
+        run_history(id).await,
+        ["CREATED", "RUNNING", "PAUSED", "FAILED"]
+    );
+    assert_eq!(resume_status(&app, ws, user, id).await, 409);
+    // The worker's own answer, under the lock, which is what decides a real
+    // race: the route's pre-check never lets this case reach it.
+    assert_eq!(
+        egret_workflow::worker::resume_by_hand(&pool, id)
             .await
-            .status(),
-            200,
-            "round {round}: the route accepts the request"
-        );
-        assert_eq!(
-            state_of(&db, a).await,
-            "PAUSED",
-            "round {round}: and the execution has not moved, because nothing \
-             egret holds can end a Resume::Never wait"
-        );
-    }
+            .unwrap(),
+        egret_workflow::worker::Resumed::NotPaused
+    );
+    assert_eq!(
+        run_history(id).await,
+        ["CREATED", "RUNNING", "PAUSED", "FAILED"],
+        "the 409 wrote nothing"
+    );
 
-    // ── The control ──────────────────────────────────────────────────────
-    let b: Uuid = common::json(common::post_no_body(&app, &start(bounded), user).await).await["id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert_eq!(state_of(&db, b).await, "PAUSED");
-    // `Tick` is milliseconds since `created_at` (`claim::load_with` computes it
-    // in SQL), so moving `created_at` back is the only way to put a PT1S
-    // deadline in the past without sleeping.
-    sqlx::query(
-        "UPDATE workflow.executions SET created_at = created_at - interval '1 hour' WHERE id = $1",
-    )
-    .bind(b)
-    .execute(&pool)
-    .await
-    .expect("backdate the bounded pause");
+    // 2. The resume first.
+    let id = start_paused(&app, &db, ws, user, flow).await;
+    backdate(id).await;
+    assert_eq!(resume_status(&app, ws, user, id).await, 200);
     assert_eq!(
-        common::post_no_body(
-            &app,
-            &format!("/api/ws/{ws}/workflows/executions/{b}/resume"),
-            user
-        )
-        .await
-        .status(),
-        200
+        run_history(id).await,
+        ["CREATED", "RUNNING", "PAUSED", "SUCCESS"]
+    );
+    assert!(
+        egret_workflow::worker::wake(&pool, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing is due"
     );
     assert_eq!(
-        state_of(&db, b).await,
-        "SUCCESS",
-        "a pauseDuration: ends SUCCESS, and the route is what drove it there"
+        run_history(id).await,
+        ["CREATED", "RUNNING", "PAUSED", "SUCCESS"]
     );
-    // And the same route now refuses, because the execution is no longer paused
-    // -- which also says the 200 above was not the 409 arm in disguise.
-    assert_eq!(
-        common::post_no_body(
-            &app,
-            &format!("/api/ws/{ws}/workflows/executions/{b}/resume"),
-            user
-        )
-        .await
-        .status(),
-        409
-    );
+
+    // 3. Both at once.
+    for round in 0..6 {
+        let id = start_paused(&app, &db, ws, user, flow).await;
+        backdate(id).await;
+        // Alternate which future is polled first, so either may take the lock.
+        let (by_hand, woken) = if round % 2 == 0 {
+            tokio::join!(
+                egret_workflow::worker::resume_by_hand(&pool, id),
+                egret_workflow::worker::wake(&pool, 10),
+            )
+        } else {
+            let (w, r) = tokio::join!(
+                egret_workflow::worker::wake(&pool, 10),
+                egret_workflow::worker::resume_by_hand(&pool, id),
+            );
+            (r, w)
+        };
+        let history = run_history(id).await;
+        assert_eq!(
+            history.len(),
+            4,
+            "round {round}: one terminal, written once: {history:?}"
+        );
+        match by_hand.unwrap() {
+            egret_workflow::worker::Resumed::Released(1) => {
+                assert_eq!(history[3], "SUCCESS", "round {round}")
+            }
+            egret_workflow::worker::Resumed::NotPaused => {
+                assert_eq!(history[3], "FAILED", "round {round}");
+                assert_eq!(woken.unwrap(), vec![id], "round {round}");
+            }
+            other => panic!("round {round}: {other:?}"),
+        }
+    }
 }
 
 // ── Fix round 1 ─────────────────────────────────────────────────────────────

@@ -28182,8 +28182,8 @@
         "tags": [
           "workflow"
         ],
-        "summary": "Resume a `PAUSED` execution.",
-        "description": "# What this route can and cannot do, measured\n\nIt calls [`worker::resume`](crate::worker::resume), which takes the same\n`FOR NO KEY UPDATE` and runs the same `settle` as every other writer. That drives\n`advance()` once more against the row as it now stands — which is exactly\nwhat un-parks a pause whose **deadline** has passed.\n\n**It cannot end an unbounded pause, and that is a capability `advance()`\ndoes not have rather than a bug here.** `flowable::resume_paused` is the\nonly thing that moves a run out of `PAUSED`, it is pure over\n`(state, run, now)`, and its `Resume::Never` arm returns `Step::Waiting`\n*before* it looks at `now` — so no value of the clock ends such a wait and\nno number of calls to this route will either. `Resume::Never` is a `Pause`\nwith neither `pauseDuration:` nor `timeout:`; `RunState::Resume`'s own doc\nrecords seven corpus flows written that way, every one of which \"reached\nPAUSED and stayed there for the full 90s\" on the pinned artifact, because\nsuch a pause ends only on an explicit resume signal. egret has no command\nthat carries one.\n\nThe route is still the right shape for the signal when it arrives: it is the\ngate, the 404 and the 409 that a resume needs, and the missing piece is a\n`Command` beneath it. `an_unbounded_pause_is_not_ended_by_the_resume_route`\npins the gap so that a future command makes a test fail rather than a\nparagraph stale.",
+        "summary": "Resume a `PAUSED` execution by hand.",
+        "description": "W7b Task 3 fix round 1, the user's ruling of 2026-10-11, after review\nfound the old route released nothing a human needs: it only re-settled,\nwhich ends a pause whose deadline had passed -- what the waker does anyway.\nIt now calls [`worker::resume_by_hand`](crate::worker::resume_by_hand),\nKestra's `ExecutionService.resume`: every paused `Pause` run ends `SUCCESS`\nnow, through the natural end's own path, and the execution settles on.\n\nThe `PAUSED` check is made twice: here off the scoped read (so a foreign id\nnever reaches the unscoped worker, and the common refusal is cheap), and\nagain by the worker under the execution's lock, which decides the race with\nthe waker. A pause the waker ended first is a 409, like any execution that\nis not paused.",
         "operationId": "resume_execution",
         "parameters": [
           {
@@ -28216,7 +28216,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The execution was driven forward; the body is its detail afterwards. **A `Pause` with neither `pauseDuration:` nor `timeout:` comes back still `PAUSED`** — see the handler's own doc for why, and note the state rather than assuming the call moved it.",
+            "description": "Every paused `Pause` run was released at once and ends `SUCCESS`, whatever its `pauseDuration:` or `timeout:` (Kestra: a pause resumed by hand always succeeds); the execution then runs on. The body is its detail afterwards.",
             "content": {
               "application/json": {
                 "schema": {

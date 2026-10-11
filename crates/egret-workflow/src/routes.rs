@@ -2470,7 +2470,7 @@ fn upload_refusal(
         ("id" = Uuid, Path, description = "Execution id"),
     ),
     responses(
-        (status = 200, description = "The execution was driven forward; the body is its detail afterwards. **A `Pause` with neither `pauseDuration:` nor `timeout:` comes back still `PAUSED`** — see the handler's own doc for why, and note the state rather than assuming the call moved it.", body = ExecutionDto),
+        (status = 200, description = "Every paused `Pause` run was released at once and ends `SUCCESS`, whatever its `pauseDuration:` or `timeout:` (Kestra: a pause resumed by hand always succeeds); the execution then runs on. The body is its detail afterwards.", body = ExecutionDto),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed", body = egret_core::http::ErrorBody),
@@ -2478,32 +2478,20 @@ fn upload_refusal(
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
-/// Resume a `PAUSED` execution.
+/// Resume a `PAUSED` execution by hand.
 ///
-/// # What this route can and cannot do, measured
+/// W7b Task 3 fix round 1, the user's ruling of 2026-10-11, after review
+/// found the old route released nothing a human needs: it only re-settled,
+/// which ends a pause whose deadline had passed -- what the waker does anyway.
+/// It now calls [`worker::resume_by_hand`](crate::worker::resume_by_hand),
+/// Kestra's `ExecutionService.resume`: every paused `Pause` run ends `SUCCESS`
+/// now, through the natural end's own path, and the execution settles on.
 ///
-/// It calls [`worker::resume`](crate::worker::resume), which takes the same
-/// `FOR NO KEY UPDATE` and runs the same `settle` as every other writer. That drives
-/// `advance()` once more against the row as it now stands — which is exactly
-/// what un-parks a pause whose **deadline** has passed.
-///
-/// **It cannot end an unbounded pause, and that is a capability `advance()`
-/// does not have rather than a bug here.** `flowable::resume_paused` is the
-/// only thing that moves a run out of `PAUSED`, it is pure over
-/// `(state, run, now)`, and its `Resume::Never` arm returns `Step::Waiting`
-/// *before* it looks at `now` — so no value of the clock ends such a wait and
-/// no number of calls to this route will either. `Resume::Never` is a `Pause`
-/// with neither `pauseDuration:` nor `timeout:`; `RunState::Resume`'s own doc
-/// records seven corpus flows written that way, every one of which "reached
-/// PAUSED and stayed there for the full 90s" on the pinned artifact, because
-/// such a pause ends only on an explicit resume signal. egret has no command
-/// that carries one.
-///
-/// The route is still the right shape for the signal when it arrives: it is the
-/// gate, the 404 and the 409 that a resume needs, and the missing piece is a
-/// `Command` beneath it. `an_unbounded_pause_is_not_ended_by_the_resume_route`
-/// pins the gap so that a future command makes a test fail rather than a
-/// paragraph stale.
+/// The `PAUSED` check is made twice: here off the scoped read (so a foreign id
+/// never reaches the unscoped worker, and the common refusal is cheap), and
+/// again by the worker under the execution's lock, which decides the race with
+/// the waker. A pause the waker ended first is a 409, like any execution that
+/// is not paused.
 async fn resume_execution(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
@@ -2511,7 +2499,7 @@ async fn resume_execution(
 ) -> EgretResult<Json<ExecutionDto>> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
     // The containment check AND the state check off one scoped read, so a
-    // foreign id never reaches `worker::resume` -- which is unscoped by
+    // foreign id never reaches `worker::resume_by_hand` -- which is unscoped by
     // workspace, as every `worker::` entry point is.
     let before = st.executions.get(ctx.workspace_id.0, id).await?;
     if crate::worker::from_wire(&before.execution.state) != Some(RunState::Paused) {
@@ -2520,7 +2508,11 @@ async fn resume_execution(
             before.execution.state
         )));
     }
-    crate::worker::resume(&st.db.pool, id).await?;
+    if crate::worker::resume_by_hand(&st.db.pool, id).await? == crate::worker::Resumed::NotPaused {
+        return Err(Error::Conflict(format!(
+            "execution {id} is no longer PAUSED; its pause ended before the resume reached it"
+        )));
+    }
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
         Some(ctx.workspace_id.0),
