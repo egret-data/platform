@@ -25,16 +25,21 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  ClassifiedPolicy,
   CompileResponse,
   ErrorBody,
   ExplainRequest,
   ExplainResponse,
   GrantView,
+  MigrateRequest,
+  MigrateResponse,
   NewGrant,
   NewRule,
   PreviewRequest,
   PreviewResponse,
-  RuleView
+  RuleView,
+  UndoRequest,
+  UndoResponse
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -239,7 +244,7 @@ export const getPermExplainUrl = () => {
  *
  * Four properties of the implementation below are load-bearing:
  *
- * 1. **The artifact is assembled by [`artifact_for`], which mirrors
+ * 1. **The artifact is assembled by [`artifact_via`], which mirrors
  *    `download_policies` field for field and loads each profile's policy set
  *    through `enabled_policies_for_service` — the same assembler the download
  *    route uses, not `list_policies`.** "What explain evaluated" and "what the
@@ -767,6 +772,401 @@ export const usePermPatchGrant = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getPermPatchGrantMutationOptions(options), queryClient);
+    }
+    export type permClassifyServicePoliciesResponse200 = {
+  data: ClassifiedPolicy[]
+  status: 200
+}
+
+export type permClassifyServicePoliciesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permClassifyServicePoliciesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permClassifyServicePoliciesResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permClassifyServicePoliciesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permClassifyServicePoliciesResponseSuccess = (permClassifyServicePoliciesResponse200) & {
+  headers: Headers;
+};
+export type permClassifyServicePoliciesResponseError = (permClassifyServicePoliciesResponse401 | permClassifyServicePoliciesResponse403 | permClassifyServicePoliciesResponse404 | permClassifyServicePoliciesResponse500) & {
+  headers: Headers;
+};
+
+export type permClassifyServicePoliciesResponse = (permClassifyServicePoliciesResponseSuccess | permClassifyServicePoliciesResponseError)
+
+export const getPermClassifyServicePoliciesUrl = (serviceId: number,) => {
+
+
+
+
+  return `/api/control-plane/perm/policies/services/${encodeURIComponent(serviceId)}/classify`
+}
+
+/**
+ * @summary SP4d-3 Task 5: every policy of one profile, classified — its owner,
+whether it can be migrated into the permission model, and if not, every
+reason as a sentence naming the offending value. Read-only; `infra` and
+`compiler` rows are reported (as not migratable, with the reason), never
+omitted. The `classify` module doc says how the service kind, the catalog
+lookup and the tag lookup are derived from the profile.
+ */
+export const permClassifyServicePolicies = async (serviceId: number, options?: Parameters<typeof customInstance>[1]): Promise<permClassifyServicePoliciesResponse> => {
+
+  return customInstance<permClassifyServicePoliciesResponse>(getPermClassifyServicePoliciesUrl(serviceId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermClassifyServicePoliciesQueryKey = (serviceId: number,) => {
+    return [
+    `/api/control-plane/perm/policies/services/${encodeURIComponent(serviceId)}/classify`
+    ] as const;
+    }
+
+
+export const getPermClassifyServicePoliciesQueryOptions = <TData = Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError = ErrorBody>(serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermClassifyServicePoliciesQueryKey(serviceId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permClassifyServicePolicies>>> = ({ signal }) => permClassifyServicePolicies(serviceId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: serviceId !== null && serviceId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermClassifyServicePoliciesQueryResult = NonNullable<Awaited<ReturnType<typeof permClassifyServicePolicies>>>
+export type PermClassifyServicePoliciesQueryError = ErrorBody
+
+
+export function usePermClassifyServicePolicies<TData = Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError = ErrorBody>(
+ serviceId: number, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permClassifyServicePolicies>>,
+          TError,
+          Awaited<ReturnType<typeof permClassifyServicePolicies>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermClassifyServicePolicies<TData = Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError = ErrorBody>(
+ serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permClassifyServicePolicies>>,
+          TError,
+          Awaited<ReturnType<typeof permClassifyServicePolicies>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermClassifyServicePolicies<TData = Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError = ErrorBody>(
+ serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary SP4d-3 Task 5: every policy of one profile, classified — its owner,
+whether it can be migrated into the permission model, and if not, every
+reason as a sentence naming the offending value. Read-only; `infra` and
+`compiler` rows are reported (as not migratable, with the reason), never
+omitted. The `classify` module doc says how the service kind, the catalog
+lookup and the tag lookup are derived from the profile.
+ */
+
+export function usePermClassifyServicePolicies<TData = Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError = ErrorBody>(
+ serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permClassifyServicePolicies>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermClassifyServicePoliciesQueryOptions(serviceId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permMigrateServicePoliciesResponse200 = {
+  data: MigrateResponse
+  status: 200
+}
+
+export type permMigrateServicePoliciesResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type permMigrateServicePoliciesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permMigrateServicePoliciesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permMigrateServicePoliciesResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permMigrateServicePoliciesResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type permMigrateServicePoliciesResponse422 = {
+  data: MigrateResponse
+  status: 422
+}
+
+export type permMigrateServicePoliciesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permMigrateServicePoliciesResponseSuccess = (permMigrateServicePoliciesResponse200) & {
+  headers: Headers;
+};
+export type permMigrateServicePoliciesResponseError = (permMigrateServicePoliciesResponse400 | permMigrateServicePoliciesResponse401 | permMigrateServicePoliciesResponse403 | permMigrateServicePoliciesResponse404 | permMigrateServicePoliciesResponse409 | permMigrateServicePoliciesResponse422 | permMigrateServicePoliciesResponse500) & {
+  headers: Headers;
+};
+
+export type permMigrateServicePoliciesResponse = (permMigrateServicePoliciesResponseSuccess | permMigrateServicePoliciesResponseError)
+
+export const getPermMigrateServicePoliciesUrl = (serviceId: number,) => {
+
+
+
+
+  return `/api/control-plane/perm/policies/services/${encodeURIComponent(serviceId)}/migrate`
+}
+
+/**
+ * **`dry_run` runs the identical code and differs in exactly one place: the
+ * line below that decides to commit.** A proven migration answers 200; one
+ * the gate did not prove answers 422 with the same body shape (its
+ * disagreements, or why the gate refused), and nothing is written.
+ * @summary SP4d-3 Task 7: migrate hand-written policies of one profile into the
+permission model, PROVABLY — see `crate::migrate` for the transaction, its
+order, and the refusal order. The equivalence gate runs inside the
+transaction over every profile the new objects compile into, against the
+downloads as they stand after the write.
+ */
+export const permMigrateServicePolicies = async (serviceId: number,
+    migrateRequest: MigrateRequest, options?: Parameters<typeof customInstance>[1]): Promise<permMigrateServicePoliciesResponse> => {
+
+  return customInstance<permMigrateServicePoliciesResponse>(getPermMigrateServicePoliciesUrl(serviceId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(migrateRequest)
+  }
+);}
+
+
+
+
+
+export const getPermMigrateServicePoliciesMutationOptions = <TError = ErrorBody | MigrateResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permMigrateServicePolicies>>, TError,{serviceId: number;data: MigrateRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permMigrateServicePolicies>>, TError,{serviceId: number;data: MigrateRequest}, TContext> => {
+
+const mutationKey = ['permMigrateServicePolicies'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permMigrateServicePolicies>>, {serviceId: number;data: MigrateRequest}> = (props) => {
+          const {serviceId,data} = props ?? {};
+
+          return  permMigrateServicePolicies(serviceId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermMigrateServicePoliciesMutationResult = NonNullable<Awaited<ReturnType<typeof permMigrateServicePolicies>>>
+    export type PermMigrateServicePoliciesMutationBody = MigrateRequest
+    export type PermMigrateServicePoliciesMutationError = ErrorBody | MigrateResponse
+
+    /**
+ * @summary SP4d-3 Task 7: migrate hand-written policies of one profile into the
+permission model, PROVABLY — see `crate::migrate` for the transaction, its
+order, and the refusal order. The equivalence gate runs inside the
+transaction over every profile the new objects compile into, against the
+downloads as they stand after the write.
+ */
+export const usePermMigrateServicePolicies = <TError = ErrorBody | MigrateResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permMigrateServicePolicies>>, TError,{serviceId: number;data: MigrateRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permMigrateServicePolicies>>,
+        TError,
+        {serviceId: number;data: MigrateRequest},
+        TContext
+      > => {
+      return useMutation(getPermMigrateServicePoliciesMutationOptions(options), queryClient);
+    }
+    export type permUndoServicePolicyMigrationResponse200 = {
+  data: UndoResponse
+  status: 200
+}
+
+export type permUndoServicePolicyMigrationResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type permUndoServicePolicyMigrationResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permUndoServicePolicyMigrationResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permUndoServicePolicyMigrationResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permUndoServicePolicyMigrationResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type permUndoServicePolicyMigrationResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permUndoServicePolicyMigrationResponseSuccess = (permUndoServicePolicyMigrationResponse200) & {
+  headers: Headers;
+};
+export type permUndoServicePolicyMigrationResponseError = (permUndoServicePolicyMigrationResponse400 | permUndoServicePolicyMigrationResponse401 | permUndoServicePolicyMigrationResponse403 | permUndoServicePolicyMigrationResponse404 | permUndoServicePolicyMigrationResponse409 | permUndoServicePolicyMigrationResponse500) & {
+  headers: Headers;
+};
+
+export type permUndoServicePolicyMigrationResponse = (permUndoServicePolicyMigrationResponseSuccess | permUndoServicePolicyMigrationResponseError)
+
+export const getPermUndoServicePolicyMigrationUrl = (serviceId: number,) => {
+
+
+
+
+  return `/api/control-plane/perm/policies/services/${encodeURIComponent(serviceId)}/migrate/undo`
+}
+
+/**
+ * @summary SP4d-3 Task 7: undo migrations — delete the grants and rules provenance
+names, recompile, switch each original back on, delete the provenance. One
+transaction.
+ */
+export const permUndoServicePolicyMigration = async (serviceId: number,
+    undoRequest: UndoRequest, options?: Parameters<typeof customInstance>[1]): Promise<permUndoServicePolicyMigrationResponse> => {
+
+  return customInstance<permUndoServicePolicyMigrationResponse>(getPermUndoServicePolicyMigrationUrl(serviceId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(undoRequest)
+  }
+);}
+
+
+
+
+
+export const getPermUndoServicePolicyMigrationMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permUndoServicePolicyMigration>>, TError,{serviceId: number;data: UndoRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permUndoServicePolicyMigration>>, TError,{serviceId: number;data: UndoRequest}, TContext> => {
+
+const mutationKey = ['permUndoServicePolicyMigration'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permUndoServicePolicyMigration>>, {serviceId: number;data: UndoRequest}> = (props) => {
+          const {serviceId,data} = props ?? {};
+
+          return  permUndoServicePolicyMigration(serviceId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermUndoServicePolicyMigrationMutationResult = NonNullable<Awaited<ReturnType<typeof permUndoServicePolicyMigration>>>
+    export type PermUndoServicePolicyMigrationMutationBody = UndoRequest
+    export type PermUndoServicePolicyMigrationMutationError = ErrorBody
+
+    /**
+ * @summary SP4d-3 Task 7: undo migrations — delete the grants and rules provenance
+names, recompile, switch each original back on, delete the provenance. One
+transaction.
+ */
+export const usePermUndoServicePolicyMigration = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permUndoServicePolicyMigration>>, TError,{serviceId: number;data: UndoRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permUndoServicePolicyMigration>>,
+        TError,
+        {serviceId: number;data: UndoRequest},
+        TContext
+      > => {
+      return useMutation(getPermUndoServicePolicyMigrationMutationOptions(options), queryClient);
     }
     export type permPreviewResponse200 = {
   data: PreviewResponse

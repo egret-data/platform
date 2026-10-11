@@ -3527,9 +3527,11 @@ dependencies = [
  "egret-ranger-eval",
  "egret-secrets",
  "egret-test-db",
+ "hex",
  "http-body-util",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
@@ -3651,8 +3653,12 @@ dependencies = [
 name = "egret-ranger-eval"
 version = "0.1.0"
 dependencies = [
+ "egret-perm",
+ "egret-perm-compile",
+ "egret-policy",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

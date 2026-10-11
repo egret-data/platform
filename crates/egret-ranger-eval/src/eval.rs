@@ -108,7 +108,7 @@ use crate::model::{
 };
 use crate::resource::{
     level_excluded_by_trie, match_policy_resources, trie_reproduces_matcher, MatchType,
-    RequestResource,
+    PreparedPolicyResources, RequestResource, ResourceMatch,
 };
 use crate::servicedef::{PolicyType, ServiceDef, ServiceDefIssue};
 
@@ -1864,6 +1864,152 @@ pub fn evaluate(
     service_def: &ServiceDef,
     engine: &EngineConfig,
 ) -> Decision {
+    let decision = evaluate_in(&Ctx::unprepared(policies, service_def), request, engine);
+    #[cfg(feature = "crosscheck-prepared")]
+    assert_eq!(
+        decision,
+        evaluate_prepared(
+            &PreparedPolicySet::new(policies, service_def),
+            request,
+            engine
+        ),
+        "the prepared path decided differently for {request:?}"
+    );
+    decision
+}
+
+/// [`evaluate`] against a [`PreparedPolicySet`] — the same decision, with the
+/// per-set work done once instead of on every call.
+pub fn evaluate_prepared(
+    set: &PreparedPolicySet<'_>,
+    request: &AccessRequest,
+    engine: &EngineConfig,
+) -> Decision {
+    evaluate_in(&set.ctx(), request, engine)
+}
+
+// ── the prepared path (SP4d-3 Task 7 fix round 1, review I-5) ───────────
+
+/// One policy download and its resource def, with everything that depends
+/// only on THEM — never on the request — computed once:
+///
+/// - one [`PreparedPolicyResources`] per policy (each resource map's
+///   `RangerDefaultPolicyResourceMatcher.init`, which the unprepared path
+///   re-runs per policy per call — twice, before this round);
+/// - `implied_access_grants` and the def's access-type set;
+/// - the tag block's def, parsed once (the unprepared path re-parses it from
+///   JSON on every call that reaches the tag phase).
+///
+/// That is Ranger's own lifecycle — the plugin builds its policy engine once
+/// per download — and the decision is the same: [`evaluate_prepared`] and its
+/// mask/row-filter twins run the SAME body as [`evaluate`] and differ only in
+/// where these inputs come from. `tests/differential.rs` asserts equal results
+/// over the whole differential corpus and the test suites' fixtures.
+pub struct PreparedPolicySet<'a> {
+    policies: &'a ServicePolicySet,
+    service_def: &'a ServiceDef,
+    resources: Vec<PreparedPolicyResources<'a>>,
+    implied: BTreeMap<&'a str, BTreeSet<&'a str>>,
+    all_access_types: BTreeSet<&'a str>,
+    /// `Some` iff the set carries a tag block (declared or non-empty) — the
+    /// exact condition under which [`tag_phase_input`] would parse it.
+    tag_service_def: Option<ServiceDef>,
+}
+
+impl<'a> PreparedPolicySet<'a> {
+    pub fn new(policies: &'a ServicePolicySet, service_def: &'a ServiceDef) -> Self {
+        PreparedPolicySet {
+            policies,
+            service_def,
+            resources: policies
+                .policies
+                .iter()
+                .map(|p| PreparedPolicyResources::new(p, service_def))
+                .collect(),
+            implied: service_def.implied_access_grants(),
+            all_access_types: service_def
+                .access_types()
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect(),
+            tag_service_def: tag_block(policies)
+                .map(|_| ServiceDef::parse(&policies.tag_service_def)),
+        }
+    }
+
+    pub fn policies(&self) -> &'a ServicePolicySet {
+        self.policies
+    }
+
+    pub fn service_def(&self) -> &'a ServiceDef {
+        self.service_def
+    }
+
+    fn ctx(&self) -> Ctx<'_, 'a> {
+        Ctx {
+            policies: self.policies,
+            service_def: self.service_def,
+            prepared: Some(self),
+        }
+    }
+}
+
+/// Where one evaluation's per-set inputs come from: computed now
+/// (`prepared: None`, the original path) or from a [`PreparedPolicySet`].
+struct Ctx<'p, 'a> {
+    policies: &'a ServicePolicySet,
+    service_def: &'a ServiceDef,
+    prepared: Option<&'p PreparedPolicySet<'a>>,
+}
+
+impl<'p, 'a> Ctx<'p, 'a> {
+    fn unprepared(policies: &'a ServicePolicySet, service_def: &'a ServiceDef) -> Self {
+        Ctx {
+            policies,
+            service_def,
+            prepared: None,
+        }
+    }
+
+    /// The resource matches of `policies.policies[index]`.
+    fn resource_matches(&self, index: usize, request: &AccessRequest) -> Vec<ResourceMatch> {
+        match self.prepared {
+            Some(p) => p.resources[index].matches(&request.resource),
+            None => match_policy_resources(
+                &self.policies.policies[index],
+                &request.resource,
+                self.service_def,
+            ),
+        }
+    }
+
+    /// The tag block's def, parsed now or taken from the prepared set.
+    fn tag_service_def(&self) -> std::borrow::Cow<'p, ServiceDef> {
+        match self.prepared.and_then(|p| p.tag_service_def.as_ref()) {
+            Some(def) => std::borrow::Cow::Borrowed(def),
+            None => std::borrow::Cow::Owned(ServiceDef::parse(&self.policies.tag_service_def)),
+        }
+    }
+}
+
+/// The candidate views of one policy type, each from ONE match result.
+fn candidate_views<'a>(
+    ctx: &Ctx<'_, 'a>,
+    policy_type_code: i32,
+    request: &AccessRequest,
+) -> Vec<PolicyView<'a>> {
+    ctx.policies
+        .policies
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.is_enabled)
+        .filter(|(_, p)| p.policy_type == policy_type_code)
+        .map(|(i, policy)| PolicyView::from_matches(policy, &ctx.resource_matches(i, request)))
+        .collect()
+}
+
+fn evaluate_in(ctx: &Ctx<'_, '_>, request: &AccessRequest, engine: &EngineConfig) -> Decision {
+    let (policies, service_def) = (ctx.policies, ctx.service_def);
     let mut why: Vec<UndecidableCause> = Vec::new();
 
     if request_preamble(policies, request, service_def, engine, &mut why) == SuperUser::Yes {
@@ -1891,7 +2037,7 @@ pub fn evaluate(
     // enrichment cannot be skipped and the RESOURCE phase below cannot
     // accidentally be handed an enriched request. See `UnenrichedTags`.
     let enriched = enriched_tags(request, service_def);
-    let tag = match tag_phase_input(policies, enriched.as_ref(), service_def) {
+    let tag = match tag_phase_input(ctx, enriched.as_ref()) {
         None => TagDecision::NotDetermined,
         Some(tag_service_def) => {
             evaluate_tag_policies(policies, request, enriched.as_ref(), &tag_service_def)
@@ -1901,12 +2047,19 @@ pub fn evaluate(
         merge_causes(&mut why, tag_why);
     }
 
-    let implied = service_def.implied_access_grants();
-    let all_access_types: BTreeSet<&str> = service_def
-        .access_types()
-        .iter()
-        .map(|a| a.name.as_str())
-        .collect();
+    let (implied_now, access_now);
+    let (implied, all_access_types) = match ctx.prepared {
+        Some(p) => (&p.implied, &p.all_access_types),
+        None => {
+            implied_now = service_def.implied_access_grants();
+            access_now = service_def
+                .access_types()
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<BTreeSet<&str>>();
+            (&implied_now, &access_now)
+        }
+    };
 
     // ── which policies get an evaluator ────────────────────────────────
     //
@@ -1919,27 +2072,22 @@ pub fn evaluate(
     // ("ignoring policy id=… - invalid policyType"). So a masking policy
     // cannot deny an access request, and its unmodelled constructs cannot
     // make one undecidable.
-    let mut candidates: Vec<PolicyView<'_>> = policies
-        .policies
-        .iter()
-        .filter(|p| p.is_enabled)
-        // `policy_type == 0` is the load-bearing test: `init` files a
-        // policy by its RAW code, and anything that is not null/0/1/2 is
-        // dropped with a warning rather than folded onto access. The
-        // `PolicyType::from_code` call alongside it would fold code 3
-        // (audit) and every unknown code ONTO access, which is right for
-        // picking a resource hierarchy and wrong here — so it is the
-        // raw-code test that decides, and the typed one is not consulted.
-        .filter(|p| p.policy_type == DecisionKind::Access.policy_type_code())
-        .map(|policy| PolicyView::build(policy, request, service_def))
-        .collect();
+    // `policy_type == 0` is the load-bearing test: `init` files a policy by
+    // its RAW code, and anything that is not null/0/1/2 is dropped with a
+    // warning rather than folded onto access. The `PolicyType::from_code`
+    // call alongside it would fold code 3 (audit) and every unknown code ONTO
+    // access, which is right for picking a resource hierarchy and wrong here —
+    // so it is the raw-code test that decides, and the typed one is not
+    // consulted.
+    let mut candidates: Vec<PolicyView<'_>> =
+        candidate_views(ctx, DecisionKind::Access.policy_type_code(), request);
 
     for view in &candidates {
         view.collect_causes(
             DecisionKind::Access,
             request,
-            &implied,
-            &all_access_types,
+            implied,
+            all_access_types,
             &mut why,
         );
     }
@@ -2098,7 +2246,7 @@ pub fn evaluate(
             break;
         }
 
-        if let Some(found) = view.decide(request, &implied) {
+        if let Some(found) = view.decide(request, implied) {
             // ⚠ THE ONE PLACE `getEvalOrder()` DECIDES AN ACCESS OUTCOME, and it
             // exists only under a tag DENY.
             //
@@ -2160,7 +2308,7 @@ pub fn evaluate(
                         // first, the band is shut out at an allow) and two denies
                         // cannot either.
                         other
-                            .decide(request, &implied)
+                            .decide(request, implied)
                             .is_some_and(|o| o.allowed != found.allowed)
                     });
                 if let Some(rival) = rival {
@@ -2814,29 +2962,35 @@ fn tag_block_fails_to_load(policies: &ServicePolicySet) -> Vec<UndecidableCause>
 /// answer reaching a function that does not look at it. So a non-empty
 /// `tag_policies` runs the phase whether or not a construct was reported, under
 /// the block tier its own length implies.
-fn tag_phase_input(
-    policies: &ServicePolicySet,
+fn tag_phase_input<'p>(
+    ctx: &Ctx<'p, '_>,
     tags: Option<&EnrichedTags>,
-    service_def: &ServiceDef,
-) -> Option<ServiceDef> {
+) -> Option<std::borrow::Cow<'p, ServiceDef>> {
+    let (policies, service_def) = (ctx.policies, ctx.service_def);
+    let block = tag_block(policies)?;
+    // The block's own def is a second source of context enrichers, so the gate
+    // needs it too — see `tag_policies_can_decide`. Parsed through the same
+    // `ServiceDef::parse` as the resource def so there is one enricher
+    // predicate, not two — here, or once in a `PreparedPolicySet`.
+    let tag_service_def = ctx.tag_service_def();
+    tag_policies_can_decide(&block, policies, tags, service_def, &tag_service_def)
+        .then_some(tag_service_def)
+}
+
+/// The tag block a download carries, if any: the declared one, else one
+/// implied by a non-empty `tag_policies`. See [`tag_phase_input`].
+fn tag_block(policies: &ServicePolicySet) -> Option<TagPolicyBlock> {
     let declared = policies.unmodelled.iter().find_map(|c| match c {
         Unmodelled::TagPolicies(block) => Some(block.clone()),
         _ => None,
     });
-    let block = match declared {
-        Some(block) => block,
+    match declared {
+        Some(block) => Some(block),
         None if !policies.tag_policies.is_empty() => {
-            TagPolicyBlock::Policies(policies.tag_policies.len())
+            Some(TagPolicyBlock::Policies(policies.tag_policies.len()))
         }
-        None => return None,
-    };
-    // The block's own def is a second source of context enrichers, so the gate
-    // needs it too — see `tag_policies_can_decide`. Parsed through the same
-    // `ServiceDef::parse` as the resource def so there is one enricher
-    // predicate, not two.
-    let tag_service_def = ServiceDef::parse(&policies.tag_service_def);
-    tag_policies_can_decide(&block, policies, tags, service_def, &tag_service_def)
-        .then_some(tag_service_def)
+        None => None,
+    }
 }
 
 /// Append phase-1 causes to the composed `why`, without repeating one the
@@ -3103,11 +3257,10 @@ struct PolicyView<'a> {
 }
 
 impl<'a> PolicyView<'a> {
-    fn build(
-        policy: &'a RangerPolicy,
-        request: &AccessRequest,
-        service_def: &ServiceDef,
-    ) -> PolicyView<'a> {
+    /// The view from this policy's resource matches — computed ONCE and read
+    /// for both `matched` and `any_match` (review I-5: they were two separate
+    /// `match_policy_resources` calls for the same policy and request).
+    fn from_matches(policy: &'a RangerPolicy, matches: &[ResourceMatch]) -> PolicyView<'a> {
         // `RangerDefaultPolicyEvaluator.evaluate` loops over one resource
         // evaluator per resource map and asks each for a match type. For a
         // non-tag request naming a concrete access type at the default
@@ -3116,23 +3269,19 @@ impl<'a> PolicyView<'a> {
         // doc for the two versions' differing routes to that same test.
         // ANCESTOR in particular is NOT an allow, which a live Trino
         // measurement confirmed (`…-sp4a-live-result.md` §3 T1).
-        let matched = match_policy_resources(policy, &request.resource, service_def)
-            .into_iter()
-            .any(|m| {
-                matches!(
-                    m.match_type,
-                    MatchType::Self_ | MatchType::SelfAndAllDescendants
-                )
-            });
+        let matched = matches.iter().any(|m| {
+            matches!(
+                m.match_type,
+                MatchType::Self_ | MatchType::SelfAndAllDescendants
+            )
+        });
 
         PolicyView {
             policy,
             has_deny: policy.is_deny_all_else || !policy.deny_policy_items.is_empty(),
             has_allow: !policy.policy_items.is_empty(),
             matched,
-            any_match: match_policy_resources(policy, &request.resource, service_def)
-                .into_iter()
-                .any(|m| m.match_type != MatchType::None),
+            any_match: matches.iter().any(|m| m.match_type != MatchType::None),
         }
     }
 
@@ -3562,13 +3711,41 @@ pub fn evaluate_data_mask(
     service_def: &ServiceDef,
     engine: &EngineConfig,
 ) -> MaskDecision {
-    match evaluate_sub(
+    let decision = mask_decision(evaluate_sub(
         DecisionKind::DataMask,
-        policies,
+        &Ctx::unprepared(policies, service_def),
         request,
-        service_def,
         engine,
-    ) {
+    ));
+    #[cfg(feature = "crosscheck-prepared")]
+    assert_eq!(
+        decision,
+        evaluate_data_mask_prepared(
+            &PreparedPolicySet::new(policies, service_def),
+            request,
+            engine
+        ),
+        "the prepared path masked differently for {request:?}"
+    );
+    decision
+}
+
+/// [`evaluate_data_mask`] against a [`PreparedPolicySet`].
+pub fn evaluate_data_mask_prepared(
+    set: &PreparedPolicySet<'_>,
+    request: &AccessRequest,
+    engine: &EngineConfig,
+) -> MaskDecision {
+    mask_decision(evaluate_sub(
+        DecisionKind::DataMask,
+        &set.ctx(),
+        request,
+        engine,
+    ))
+}
+
+fn mask_decision(r: Result<Option<SubResult>, Vec<UndecidableCause>>) -> MaskDecision {
+    match r {
         Err(why) => MaskDecision::Undecidable { why },
         Ok(None) => MaskDecision::NoMask,
         Ok(Some(SubResult::Mask(m))) => MaskDecision::Masked(m),
@@ -3587,13 +3764,41 @@ pub fn evaluate_row_filter(
     service_def: &ServiceDef,
     engine: &EngineConfig,
 ) -> RowFilterDecision {
-    match evaluate_sub(
+    let decision = filter_decision(evaluate_sub(
         DecisionKind::RowFilter,
-        policies,
+        &Ctx::unprepared(policies, service_def),
         request,
-        service_def,
         engine,
-    ) {
+    ));
+    #[cfg(feature = "crosscheck-prepared")]
+    assert_eq!(
+        decision,
+        evaluate_row_filter_prepared(
+            &PreparedPolicySet::new(policies, service_def),
+            request,
+            engine
+        ),
+        "the prepared path filtered differently for {request:?}"
+    );
+    decision
+}
+
+/// [`evaluate_row_filter`] against a [`PreparedPolicySet`].
+pub fn evaluate_row_filter_prepared(
+    set: &PreparedPolicySet<'_>,
+    request: &AccessRequest,
+    engine: &EngineConfig,
+) -> RowFilterDecision {
+    filter_decision(evaluate_sub(
+        DecisionKind::RowFilter,
+        &set.ctx(),
+        request,
+        engine,
+    ))
+}
+
+fn filter_decision(r: Result<Option<SubResult>, Vec<UndecidableCause>>) -> RowFilterDecision {
+    match r {
         Err(why) => RowFilterDecision::Undecidable { why },
         Ok(None) => RowFilterDecision::NoFilter,
         Ok(Some(SubResult::RowFilter(f))) => RowFilterDecision::Filtered(f),
@@ -3625,11 +3830,11 @@ pub fn evaluate_row_filter(
 ///    [`UndecidableCause::EvalOrderAmbiguous`].
 fn evaluate_sub(
     kind: DecisionKind,
-    policies: &ServicePolicySet,
+    ctx: &Ctx<'_, '_>,
     request: &AccessRequest,
-    service_def: &ServiceDef,
     engine: &EngineConfig,
 ) -> Result<Option<SubResult>, Vec<UndecidableCause>> {
+    let (policies, service_def) = (ctx.policies, ctx.service_def);
     let mut why: Vec<UndecidableCause> = Vec::new();
 
     if request_preamble(policies, request, service_def, engine, &mut why) == SuperUser::Yes {
@@ -3644,7 +3849,7 @@ fn evaluate_sub(
     // `enriched_tags` first, for the reason written out in `evaluate` — and
     // since Task 7 the phase's own parameter type is what holds that order.
     let enriched = enriched_tags(request, service_def);
-    let tag = match tag_phase_input(policies, enriched.as_ref(), service_def) {
+    let tag = match tag_phase_input(ctx, enriched.as_ref()) {
         None => None,
         Some(tag_service_def) => {
             match evaluate_tag_sub(kind, policies, request, enriched.as_ref(), &tag_service_def) {
@@ -3657,23 +3862,25 @@ fn evaluate_sub(
         }
     };
 
-    let implied = service_def.implied_access_grants();
-    let all_access_types: BTreeSet<&str> = service_def
-        .access_types()
-        .iter()
-        .map(|a| a.name.as_str())
-        .collect();
+    let (implied_now, access_now);
+    let (implied, all_access_types) = match ctx.prepared {
+        Some(p) => (&p.implied, &p.all_access_types),
+        None => {
+            implied_now = service_def.implied_access_grants();
+            access_now = service_def
+                .access_types()
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<BTreeSet<&str>>();
+            (&implied_now, &access_now)
+        }
+    };
 
-    let mut candidates: Vec<PolicyView<'_>> = policies
-        .policies
-        .iter()
-        .filter(|p| p.is_enabled)
-        .filter(|p| p.policy_type == kind.policy_type_code())
-        .map(|policy| PolicyView::build(policy, request, service_def))
-        .collect();
+    let mut candidates: Vec<PolicyView<'_>> =
+        candidate_views(ctx, kind.policy_type_code(), request);
 
     for view in &candidates {
-        view.collect_causes(kind, request, &implied, &all_access_types, &mut why);
+        view.collect_causes(kind, request, implied, all_access_types, &mut why);
     }
     if !why.is_empty() {
         return Err(why);
@@ -3784,7 +3991,7 @@ fn evaluate_sub(
         }
         let split: Vec<&PolicyView<'_>> = reachable
             .into_iter()
-            .filter(|view| view.decide_sub(kind, request, &implied).is_some())
+            .filter(|view| view.decide_sub(kind, request, implied).is_some())
             .collect();
         if !split.is_empty() {
             let (tag_policy_id, tag_policy_name) = sub_result_identity(&tag_result);
@@ -3814,7 +4021,7 @@ fn evaluate_sub(
         if band.is_some_and(|b| b != this_band) {
             break;
         }
-        if let Some(found) = view.decide_sub(kind, request, &implied) {
+        if let Some(found) = view.decide_sub(kind, request, implied) {
             band = Some(this_band);
             deciding.push((view, found));
         }

@@ -79,6 +79,18 @@ pub trait PolicyPort: Send + Sync {
         policy: &Value,
     ) -> Result<(), PolicyError>;
 
+    /// [`create_policy`](Self::create_policy) for egret's OWN infrastructure
+    /// policies: same semantics (`AlreadyExists` on a clash), but the row is
+    /// stamped `managed_by = 'infra'`. Errors `Backend` for a name that
+    /// `infra_names::is_egret_infrastructure_policy` does not recognise on the profile's type.
+    /// Used by engine provisioning for the delegator's two fixed policies.
+    async fn create_infra_policy(
+        &self,
+        service_id: i64,
+        name: &str,
+        policy: &Value,
+    ) -> Result<(), PolicyError>;
+
     /// Seed idempotent admin all-access policies for `users` on the given
     /// service type ("trino"/"starrocks"). Returns the count written.
     async fn seed_admin_all_access(

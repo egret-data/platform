@@ -154,6 +154,16 @@
 //! 2.8.0 — is out of the corpus by construction, since `_any` is
 //! [`UndecidableCause::PseudoAccessType`]. It is recorded in
 //! `tests/ranger/README.md` instead.
+//!
+//! ## The migration corpus (SP4d-3 Task 8)
+//!
+//! A second, separate question at the bottom of this file
+//! (`a_migration_the_grammar_accepts_decides_identically_on_the_real_engine`):
+//! does a hand-written policy the `egret-perm-compile` grammar ACCEPTS decide
+//! identically on the real Java engine once it is replaced by what egret's
+//! compiler emits for it? Java before against Java after, pairwise — this
+//! crate's evaluator takes no part. Read that section's header for how the
+//! corpus is enumerated from the service-defs.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -168,6 +178,15 @@ use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::{MatchType, RequestResource};
 use egret_ranger_eval::servicedef::ServiceDef;
 use serde_json::{json, Map, Value};
+
+// SP4d-3 Task 8 only — the migration corpus at the bottom of this file.
+use egret_perm::{EngineType as PermEngine, Grant, Rule, Selector};
+use egret_perm_compile::grammar::{
+    grants_from_access_policy, rules_from_mask_or_filter_policy, Blocker, ServiceKind,
+};
+use egret_perm_compile::{compile_grant, compile_rule, validate_grant_shape, ResolvedNames};
+use egret_policy::admin::access_to_ranger_json;
+use uuid::Uuid;
 
 /// The seed the recorded run used. Overridable with `EGRET_DIFF_SEED` so a
 /// reported failure can be reproduced exactly, and so a wider sweep can be run
@@ -4826,6 +4845,13 @@ fn ask_ranger(cases: &[Case], service_type: &str, ranger_version: &str, tag: &st
         cases_path.display()
     );
 
+    // ONE `mvn test` at a time in `tests/ranger`. Since SP4d-3 Task 8 two
+    // tests in this binary drive the harness, and cargo runs them on parallel
+    // threads; two Mavens compiling into the same `target/` race each other.
+    // A poisoned lock only means another test panicked, which that test
+    // already reports.
+    static MAVEN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_maven = MAVEN.lock().unwrap_or_else(|e| e.into_inner());
     // No `-q`: the per-class surefire summary this asserts on is logged at
     // INFO, and `-q` suppresses it.
     let out = Command::new("mvn")
@@ -5457,4 +5483,2119 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
         total.filtered,
         total.compared
     );
+}
+
+/// SP4d-3 Task 7 fix round 1 (review I-5): the PREPARED path decides every
+/// corpus case exactly as the unprepared one — full results, all three
+/// questions, whatever the case's own policy type. Runs WITHOUT the JVM (the
+/// corpus generator needs none), on every `cargo test`.
+///
+/// One prepared set answers MANY requests in the gate, so each set is
+/// prepared once and asked the requests of the next `REUSE` cases too, then
+/// its own request again last — a matcher that carried state from one request
+/// to the next would show up as a difference on the repeat.
+#[test]
+fn the_prepared_path_decides_every_corpus_case_exactly_as_the_unprepared_one() {
+    use egret_ranger_eval::eval::{
+        evaluate_data_mask_prepared, evaluate_prepared, evaluate_row_filter_prepared,
+        PreparedPolicySet,
+    };
+    const REUSE: usize = 4;
+    let mut compared = 0usize;
+    for profile in [trino(), starrocks()] {
+        let (def_json, def, engine) = load_engine(&profile);
+        let tag_def_json = load_tag_def();
+        let mut rng =
+            Rng::new(DEFAULT_SEED ^ (profile.ranger_version.len() as u64) ^ profile.engine as u64);
+        let cases: Vec<Case> = (0..DEFAULT_CASES)
+            .map(|i| generate_case(&mut rng, &profile, &def_json, &tag_def_json, i))
+            .collect();
+        for (i, case) in cases.iter().enumerate() {
+            let set: ServicePolicySet =
+                serde_json::from_value(case.service_policies.clone()).expect("parse generated set");
+            let prepared = PreparedPolicySet::new(&set, &def);
+            let requests = cases[i..cases.len().min(i + 1 + REUSE)]
+                .iter()
+                .map(|c| &c.request)
+                .chain(std::iter::once(&case.request));
+            for request in requests {
+                assert_eq!(
+                    evaluate(&set, request, &def, &engine),
+                    evaluate_prepared(&prepared, request, &engine),
+                    "access: {} against {request:?}",
+                    case.id
+                );
+                assert_eq!(
+                    evaluate_data_mask(&set, request, &def, &engine),
+                    evaluate_data_mask_prepared(&prepared, request, &engine),
+                    "mask: {} against {request:?}",
+                    case.id
+                );
+                assert_eq!(
+                    evaluate_row_filter(&set, request, &def, &engine),
+                    evaluate_row_filter_prepared(&prepared, request, &engine),
+                    "row filter: {} against {request:?}",
+                    case.id
+                );
+                compared += 3;
+            }
+        }
+    }
+    eprintln!("prepared == unprepared on {compared} evaluations");
+    assert!(compared >= 2 * DEFAULT_CASES * 3, "{compared}");
+}
+
+// ── SP4d-3 Task 8: migrations proven against the REAL engines ───────────
+//
+// The grammar (`egret_perm_compile::grammar`) turns a hand-written Ranger
+// policy into permission-model objects or names why it cannot. The equivalence
+// gate then checks the migration with THIS crate's evaluator — Rust checking
+// Rust. Nothing in that chain has been asked of Apache Ranger itself, and the
+// finding this programme keeps reproducing is that only the real engine finds
+// the defects. So this corpus asks it, and trusts none of the Rust under test:
+//
+// * **before** = a service policy set holding the hand-written policy (plus a
+//   background the probes do not target, so the policy is decided inside a
+//   set and not alone);
+// * **after** = the same set with the original REMOVED — the download serves
+//   only enabled policies (`enabled_policies_for_service`), so a switched-off
+//   original is absent from what the engine receives — and the grammar's
+//   output compiled by egret's REAL compiler (`compile_grant` +
+//   `access_to_ranger_json`, `compile_rule`), routed by the compiled body's own
+//   `service` field exactly as `trigger::target_service_id` routes it;
+// * both are sent to `EgretCaseRunner` as two cases with paired ids, at 2.5.0
+//   AND 2.8.0 for both engines' corpora, and compared pairwise here.
+//
+// **The corpus is enumerated from the service-defs.** Every resource hierarchy
+// prefix the def declares × every access type it declares is generated as a
+// single-access policy, so `create` / `drop` / `alter` / `execute` and the
+// non-catalog hierarchies are REACHED and refused, not merely imagined; the
+// DML access types are generated as their full power set, so every subset of
+// an action's expansion is generated, not just the ones the author thought of.
+// On top of that walk come the shapes the grammar SPLITS (allow + deny +
+// exceptions, two items sharing one exception, several catalogs → N grants),
+// every mask type either def declares, row filters, and tag-addressed masks and
+// filters whose key equals their name.
+//
+// **Probes are not derived from the policy's vocabulary alone** (a correlated
+// oracle is not an oracle): every probe set carries a sibling value at every
+// level, the ancestors of the policy's coordinate, a user no policy names, case
+// variants, and — at the policy's own coordinate — every access type the def
+// declares.
+
+const MIG_WH: Uuid = Uuid::from_u128(0x5d03_0008_0000_0000_0000_0000_0000_0001);
+const MIG_LAKE: Uuid = Uuid::from_u128(0x5d03_0008_0000_0000_0000_0000_0000_0002);
+
+/// The catalog registry the grammar is given: `wh` and `lake` exist, nothing
+/// else does (so `ext` and `*` are unregistered).
+fn mig_catalog_id(name: &str) -> Option<Uuid> {
+    match name {
+        "wh" => Some(MIG_WH),
+        "lake" => Some(MIG_LAKE),
+        _ => None,
+    }
+}
+
+fn mig_catalog_name(id: Uuid) -> &'static str {
+    match id {
+        MIG_WH => "wh",
+        MIG_LAKE => "lake",
+        other => panic!("the grammar produced a catalog id the registry never issued: {other}"),
+    }
+}
+
+/// The tag registry, `tags.key` → `tags.name`. `phi` is the one migratable
+/// shape (key == name); `pii`'s name differs from its key.
+fn mig_tag_name(key: &str) -> Option<String> {
+    match key {
+        "phi" => Some("phi".to_string()),
+        "pii" => Some("Sensitive".to_string()),
+        _ => None,
+    }
+}
+
+const MIG_ORIGINAL_ID: i64 = 10;
+const MIG_COMPILED_ID_BASE: i64 = 100;
+/// A value at one level that no generated policy names.
+const MIG_SIBLING: &str = "egret-probe-other";
+/// The background's only principal. No probe uses it, so the background never
+/// decides a probe; it is there so the policy is evaluated inside a SET.
+const MIG_BG_USER: &str = "egret-bg-user";
+/// Cases per Maven run. Every case carries its own service-def (~10 KB of
+/// JSON), so the file is chunked rather than handed over whole.
+const MIG_CHUNK: usize = 8000;
+
+/// Every probe is issued for each of these. The corpus's policies name
+/// `alice`, `bob`, `erin`, `analysts`, `contractors` and `public`; the list
+/// adds a user no policy names, a case variant of a named user, and a user who
+/// is both excepted by name and a member of an included group.
+const MIG_PROBE_PRINCIPALS: &[(&str, &[&str])] = &[
+    ("alice", &[]),
+    ("Alice", &[]),
+    ("bob", &[]),
+    ("erin", &["analysts"]),
+    ("egret-probe-member-of-analysts", &["analysts"]),
+    ("egret-probe-member-of-contractors", &["contractors"]),
+    // In an included group AND an excluded one (fix round 1, I-3): an excluded
+    // group must win over an included one.
+    ("egret-probe-member-of-both", &["analysts", "contractors"]),
+    ("egret-probe-unnamed-user", &[]),
+];
+
+/// The principals asked at the coordinates AROUND a policy's own (its
+/// ancestors and siblings): the list above minus the case variant and the
+/// contractors member, which only the policy's own coordinate needs. A cost
+/// cut — every case carries a whole service-def through the JVM — taken where
+/// the question is "which coordinates does it cover", not "whom".
+const MIG_AROUND_PRINCIPALS: &[(&str, &[&str])] = &[
+    ("alice", &[]),
+    ("bob", &[]),
+    ("erin", &["analysts"]),
+    ("egret-probe-member-of-analysts", &["analysts"]),
+    ("egret-probe-unnamed-user", &[]),
+];
+
+/// The verdict fields compared between before and after.
+///
+/// **`policyId` is deliberately NOT compared.** A migration replaces the
+/// hand-written policy (id [`MIG_ORIGINAL_ID`]) with compiled ones (ids from
+/// [`MIG_COMPILED_ID_BASE`]), so on every probe the original decided, the
+/// deciding policy's id differs by construction — comparing it would fail every
+/// correct migration and say nothing about the decision. It is still READ: the
+/// reach check below requires the original to have decided at least one probe
+/// before, and a compiled policy at least one after.
+const MIG_COMPARED_FIELDS: &[&str] = &[
+    "isAllowed",
+    "isAccessDetermined",
+    "maskType",
+    "maskedValue",
+    "maskCondition",
+    "filterExpr",
+];
+
+struct MigPolicy {
+    label: String,
+    body: Value,
+    service: ServiceKind,
+}
+
+/// What the grammar made of one policy.
+enum MigAccepted {
+    Grants(Vec<Grant>),
+    Rules(Vec<Rule>),
+}
+
+fn mig_perm_engine(profile: &Profile) -> PermEngine {
+    match profile.engine {
+        EngineType::Trino => PermEngine::Trino,
+        EngineType::StarRocks => PermEngine::StarRocks,
+    }
+}
+
+fn mig_level(values: &[&str]) -> Value {
+    json!({"values": values, "isExcludes": false, "isRecursive": false})
+}
+
+fn mig_accesses(accesses: &[&str]) -> Value {
+    Value::Array(
+        accesses
+            .iter()
+            .map(|a| json!({"type": a, "isAllowed": true}))
+            .collect(),
+    )
+}
+
+fn mig_item(users: &[&str], groups: &[&str], accesses: &[&str]) -> Value {
+    json!({"users": users, "groups": groups, "roles": [], "accesses": mig_accesses(accesses)})
+}
+
+/// A resources map over the engine's catalog hierarchy, root first; `levels`
+/// may be shorter than the hierarchy.
+fn mig_path(profile: &Profile, levels: &[&[&str]]) -> Value {
+    let mut m = Map::new();
+    for (name, values) in profile.hierarchy.iter().zip(levels) {
+        m.insert((*name).to_string(), mig_level(values));
+    }
+    Value::Object(m)
+}
+
+fn mig_full(profile: &Profile, schema: &str, table: &str, column: &str) -> Value {
+    mig_path(profile, &[&["wh"], &[schema], &[table], &[column]])
+}
+
+fn mig_access(label: String, resources: Value, buckets: [Vec<Value>; 4]) -> MigPolicy {
+    let [allow, deny, allow_exc, deny_exc] = buckets;
+    MigPolicy {
+        label,
+        service: ServiceKind::Resource,
+        body: json!({
+            "name": "hand-written",
+            "policyType": 0,
+            "isEnabled": true,
+            "resources": resources,
+            "policyItems": allow,
+            "denyPolicyItems": deny,
+            "allowExceptions": allow_exc,
+            "denyExceptions": deny_exc,
+        }),
+    }
+}
+
+fn mig_allow(label: String, resources: Value, item: Value) -> MigPolicy {
+    mig_access(label, resources, [vec![item], vec![], vec![], vec![]])
+}
+
+fn mig_mask_item(users: &[&str], groups: &[&str], mask_type: &str, value: Option<&str>) -> Value {
+    let mut info = json!({"dataMaskType": mask_type});
+    if let Some(v) = value {
+        info["valueExpr"] = json!(v);
+    }
+    json!({"users": users, "groups": groups, "roles": [], "accesses": mig_accesses(&["select"]),
+           "dataMaskInfo": info})
+}
+
+fn mig_filter_item(users: &[&str], groups: &[&str], expr: Option<&str>) -> Value {
+    let mut item = json!({"users": users, "groups": groups, "roles": [],
+                          "accesses": mig_accesses(&["select"])});
+    if let Some(e) = expr {
+        item["rowFilterInfo"] = json!({"filterExpr": e});
+    }
+    item
+}
+
+fn mig_rule(label: String, policy_type: i32, resources: Value, items: Vec<Value>) -> MigPolicy {
+    let service = if resources.get("tag").is_some() {
+        ServiceKind::Tag
+    } else {
+        ServiceKind::Resource
+    };
+    let bucket = if policy_type == 1 {
+        "dataMaskPolicyItems"
+    } else {
+        "rowFilterPolicyItems"
+    };
+    let mut body = json!({
+        "name": "hand-written",
+        "policyType": policy_type,
+        "isEnabled": true,
+        "resources": resources,
+        "policyItems": [],
+        "denyPolicyItems": [],
+    });
+    body[bucket] = Value::Array(items);
+    MigPolicy {
+        label,
+        body,
+        service,
+    }
+}
+
+/// A mask that the default value of a `CUSTOM` mask needs.
+fn mig_mask_value(mask_type: &str) -> Option<&'static str> {
+    (mask_type == "CUSTOM").then_some("concat('x', {col})")
+}
+
+fn mig_def_names(def: &Value, pointer: &str) -> Vec<String> {
+    def.pointer(pointer)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("service-def has no {pointer}"))
+        .iter()
+        .map(|t| t["name"].as_str().expect("named entry").to_string())
+        .collect()
+}
+
+/// Every hierarchy PREFIX the def declares: one path per resource, from its
+/// root down to it (each resource has one parent, so this is every node of
+/// every hierarchy exactly once).
+fn mig_hierarchy_paths(def: &Value) -> Vec<Vec<String>> {
+    let resources = def["resources"].as_array().expect("resources");
+    let parent: BTreeMap<String, String> = resources
+        .iter()
+        .map(|r| {
+            (
+                r["name"].as_str().expect("name").to_string(),
+                r["parent"].as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    resources
+        .iter()
+        .map(|r| {
+            let mut path = vec![r["name"].as_str().expect("name").to_string()];
+            while let Some(p) = parent.get(path.last().expect("non-empty")) {
+                if p.is_empty() {
+                    break;
+                }
+                path.push(p.clone());
+            }
+            path.reverse();
+            path
+        })
+        .collect()
+}
+
+fn mig_walk_value(level: &str) -> String {
+    match level {
+        "catalog" => "wh".to_string(),
+        "schema" | "database" => "sales".to_string(),
+        "table" => "orders".to_string(),
+        "column" => "email".to_string(),
+        other => format!("{other}_x"),
+    }
+}
+
+/// The corpus for one engine. See the section header for what it covers.
+fn mig_corpus(profile: &Profile, def: &Value, all_mask_types: &[String]) -> Vec<MigPolicy> {
+    let mut out = Vec::new();
+    let access_types = mig_def_names(def, "/accessTypes");
+    let full = |s: &str, t: &str, c: &str| mig_full(profile, s, t, c);
+    let base = || full("sales", "orders", "email");
+
+    // A. The walk: every hierarchy prefix × every access type, one each.
+    for path in mig_hierarchy_paths(def) {
+        let mut res = Map::new();
+        for level in &path {
+            res.insert(level.clone(), mig_level(&[&mig_walk_value(level)]));
+        }
+        for at in &access_types {
+            out.push(mig_allow(
+                format!("walk {} [{at}]", path.join(".")),
+                Value::Object(res.clone()),
+                mig_item(&["alice"], &[], &[at]),
+            ));
+        }
+    }
+
+    // B. The power set of the DML access types the def declares — every
+    // subset of every action's expansion — and the whole DML set plus each
+    // non-DML type.
+    let dml: Vec<&str> = ["select", "insert", "update", "delete"]
+        .into_iter()
+        .filter(|a| access_types.iter().any(|t| t == a))
+        .collect();
+    for bits in 1u32..(1 << dml.len()) {
+        let set: Vec<&str> = dml
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| bits & (1 << i) != 0)
+            .map(|(_, a)| *a)
+            .collect();
+        out.push(mig_allow(
+            format!("dml {}", set.join("+")),
+            base(),
+            mig_item(&["alice"], &[], &set),
+        ));
+    }
+    for extra in access_types.iter().filter(|t| !dml.contains(&t.as_str())) {
+        let mut set = dml.clone();
+        set.push(extra);
+        out.push(mig_allow(
+            format!("dml+{extra}"),
+            base(),
+            mig_item(&["alice"], &[], &set),
+        ));
+    }
+
+    // C. Principals, on the full DML set.
+    let principal_shapes: Vec<(&str, Value)> = vec![
+        (
+            "two users",
+            json!({"users": ["alice", "bob"], "groups": [], "roles": []}),
+        ),
+        (
+            "a group",
+            json!({"users": [], "groups": ["analysts"], "roles": []}),
+        ),
+        (
+            "public",
+            json!({"users": [], "groups": ["public"], "roles": []}),
+        ),
+        (
+            "user and group",
+            json!({"users": ["alice"], "groups": ["contractors"], "roles": []}),
+        ),
+        (
+            "{USER}",
+            json!({"users": ["{USER}"], "groups": [], "roles": []}),
+        ),
+        (
+            "a role",
+            json!({"users": ["alice"], "groups": [], "roles": ["r_a"]}),
+        ),
+        ("nobody", json!({"users": [], "groups": [], "roles": []})),
+    ];
+    for (what, p) in principal_shapes {
+        let mut item = p;
+        item["accesses"] = mig_accesses(&dml);
+        out.push(mig_allow(format!("principals {what}"), base(), item));
+    }
+
+    // D. Scopes, each for `select` and for the full DML set.
+    let p = profile;
+    for (acc_label, accs) in [("select", vec!["select"]), ("dml", dml.clone())] {
+        let scopes: Vec<(&str, Value)> = vec![
+            ("schema-wide", full("sales", "*", "*")),
+            ("catalog-wide", full("*", "*", "*")),
+            ("table-wide", full("sales", "orders", "*")),
+            ("a ** run", full("sales", "**", "*")),
+            ("wildcard characters", full("sal*", "ord?rs", "*")),
+            ("mixed case", full("Sales", "ORDERS", "Email")),
+            ("wildcard over named", full("*", "orders", "email")),
+            (
+                "two catalogs",
+                mig_path(p, &[&["wh", "lake"], &["sales"], &["orders"], &["email"]]),
+            ),
+            (
+                "unregistered catalog",
+                mig_path(p, &[&["ext"], &["sales"], &["orders"], &["email"]]),
+            ),
+            (
+                "registered + unregistered",
+                mig_path(p, &[&["wh", "ext"], &["sales"], &["orders"], &["*"]]),
+            ),
+            ("catalog *", mig_path(p, &[&["*"], &["*"], &["*"], &["*"]])),
+            (
+                "two tables",
+                mig_path(p, &[&["wh"], &["sales"], &["orders", "items"], &["*"]]),
+            ),
+            (
+                "empty value",
+                mig_path(p, &[&["wh"], &["sales"], &[""], &["*"]]),
+            ),
+            (
+                "no values",
+                mig_path(p, &[&["wh"], &["sales"], &[], &["*"]]),
+            ),
+        ];
+        for (what, res) in scopes {
+            out.push(mig_allow(
+                format!("scope {acc_label} {what}"),
+                res,
+                mig_item(&["alice"], &["analysts"], &accs),
+            ));
+        }
+        for flag in ["isExcludes", "isRecursive"] {
+            let mut res = base();
+            res[profile.hierarchy[2]][flag] = json!(true);
+            out.push(mig_allow(
+                format!("scope {acc_label} {flag}"),
+                res,
+                mig_item(&["alice"], &[], &accs),
+            ));
+        }
+    }
+
+    // E. The shapes the grammar SPLITS or folds.
+    let sel = &["select"][..];
+    let write: Vec<&str> = dml.iter().copied().filter(|a| *a != "select").collect();
+    out.push(mig_access(
+        "split allow + exception".into(),
+        base(),
+        [
+            vec![mig_item(&[], &["analysts"], sel)],
+            vec![],
+            vec![mig_item(&["erin"], &[], sel)],
+            vec![],
+        ],
+    ));
+    out.push(mig_access(
+        "split allow + deny + deny exception".into(),
+        base(),
+        [
+            vec![mig_item(&["alice"], &["analysts"], &dml)],
+            vec![mig_item(&["bob"], &["analysts"], &write)],
+            vec![],
+            vec![mig_item(&["erin"], &[], &write)],
+        ],
+    ));
+    out.push(mig_access(
+        "split allow + exception + deny + deny exception".into(),
+        base(),
+        [
+            vec![mig_item(&[], &["analysts", "contractors"], &dml)],
+            vec![mig_item(
+                &["egret-probe-member-of-contractors"],
+                &[],
+                &write,
+            )],
+            vec![mig_item(&["erin"], &[], &dml)],
+            vec![mig_item(&["alice"], &[], &write)],
+        ],
+    ));
+    out.push(mig_access(
+        "split two items share one exception".into(),
+        base(),
+        [
+            vec![
+                mig_item(&["alice"], &[], sel),
+                mig_item(&[], &["analysts"], sel),
+            ],
+            vec![],
+            vec![mig_item(&["erin"], &[], sel)],
+            vec![],
+        ],
+    ));
+    out.push(mig_access(
+        "split two deny items share one exception".into(),
+        base(),
+        [
+            vec![mig_item(&[], &["public"], &dml)],
+            vec![
+                mig_item(&["bob"], &[], &write),
+                mig_item(&[], &["analysts"], &write),
+            ],
+            vec![],
+            vec![mig_item(&["erin"], &[], &write)],
+        ],
+    ));
+    out.push(mig_access(
+        "split two items, exception access set differs".into(),
+        base(),
+        [
+            vec![
+                mig_item(&["alice"], &[], sel),
+                mig_item(&[], &["analysts"], &dml),
+            ],
+            vec![],
+            vec![mig_item(&["erin"], &[], sel)],
+            vec![],
+        ],
+    ));
+    out.push(mig_access(
+        "split two exceptions".into(),
+        base(),
+        [
+            vec![mig_item(&[], &["analysts"], sel)],
+            vec![],
+            vec![mig_item(&["erin"], &[], sel), mig_item(&["bob"], &[], sel)],
+            vec![],
+        ],
+    ));
+    out.push(mig_access(
+        "split deny only".into(),
+        base(),
+        [vec![], vec![mig_item(&["bob"], &[], sel)], vec![], vec![]],
+    ));
+    out.push(mig_access(
+        "split orphan exception".into(),
+        base(),
+        [vec![], vec![], vec![mig_item(&["erin"], &[], sel)], vec![]],
+    ));
+    out.push(mig_access(
+        "split two catalogs with deny + exceptions".into(),
+        mig_path(p, &[&["wh", "lake"], &["sales"], &["*"], &["*"]]),
+        [
+            vec![mig_item(&[], &["analysts"], &dml)],
+            vec![mig_item(&["bob"], &[], &write)],
+            vec![mig_item(&["erin"], &[], &dml)],
+            vec![mig_item(&["alice"], &[], &write)],
+        ],
+    ));
+    out.push(mig_access(
+        "split one item, two actions".into(),
+        base(),
+        [
+            vec![
+                mig_item(&["alice"], &[], &dml),
+                mig_item(&["bob"], &[], sel),
+            ],
+            vec![],
+            vec![],
+            vec![],
+        ],
+    ));
+    // Exceptions naming a GROUP (fix round 1, I-3). `compile_grant` renders
+    // `PrincipalSet.exclude` groups on its own path; if it dropped one, access
+    // would WIDEN for every member of the excluded group. The probe principals
+    // carry a member of the excluded group, a non-member, and a member of both
+    // an included and the excluded group.
+    out.push(mig_access(
+        "split allow exception names a group".into(),
+        base(),
+        [
+            vec![mig_item(&[], &["analysts", "contractors"], &dml)],
+            vec![],
+            vec![mig_item(&[], &["contractors"], &dml)],
+            vec![],
+        ],
+    ));
+    out.push(mig_access(
+        "split deny exception names a group".into(),
+        base(),
+        [
+            vec![mig_item(&[], &["public"], &dml)],
+            vec![mig_item(&[], &["public"], &write)],
+            vec![],
+            vec![mig_item(&[], &["analysts"], &write)],
+        ],
+    ));
+    out.push(mig_access(
+        "split exception names a user and a group".into(),
+        base(),
+        [
+            vec![mig_item(&["alice"], &["analysts", "contractors"], sel)],
+            vec![],
+            vec![mig_item(&["bob", "alice"], &["contractors"], sel)],
+            vec![],
+        ],
+    ));
+
+    // F. Decision-relevant header fields and unmodelled constructs.
+    let headers: Vec<(&str, &str, Value)> = vec![
+        ("disabled", "/isEnabled", json!(false)),
+        ("priority 1", "/policyPriority", json!(1)),
+        ("deny-all-else", "/isDenyAllElse", json!(true)),
+        (
+            "validity schedule",
+            "/validitySchedules",
+            json!([{"startTime": "2020/01/01 00:00:00", "endTime": "2099/01/01 00:00:00"}]),
+        ),
+        (
+            "policy condition",
+            "/conditions",
+            json!([{"type": "ip-range", "values": ["10.0.0.0/8"]}]),
+        ),
+        ("zone", "/zoneName", json!("z1")),
+        (
+            "additional resources",
+            "/additionalResources",
+            json!([mig_full(p, "hr", "people", "*")]),
+        ),
+        ("options", "/options", json!({"k": "v"})),
+        ("unknown field", "/egretUnknown", json!(1)),
+        (
+            "item delegateAdmin",
+            "/policyItems/0/delegateAdmin",
+            json!(true),
+        ),
+        (
+            "item condition",
+            "/policyItems/0/conditions",
+            json!([{"type": "ip-range", "values": ["10.0.0.0/8"]}]),
+        ),
+        (
+            "access isAllowed false",
+            "/policyItems/0/accesses/0/isAllowed",
+            json!(false),
+        ),
+        (
+            "resource expression",
+            "/resources/table/values",
+            json!(["${{USER.dept}}"]),
+        ),
+    ];
+    for (what, pointer, v) in headers {
+        let mut pol = mig_allow(
+            format!("header {what}"),
+            base(),
+            mig_item(&["alice"], &[], sel),
+        );
+        let (parent, key) = pointer.rsplit_once('/').expect("pointer");
+        // `/resources/table/...` names Trino's level; on StarRocks `table` is
+        // the same name, so the pointer holds for both.
+        let target = if parent.is_empty() {
+            &mut pol.body
+        } else {
+            pol.body
+                .pointer_mut(parent)
+                .unwrap_or_else(|| panic!("{pointer}"))
+        };
+        target[key] = v;
+        out.push(pol);
+    }
+
+    // G. Masks: every mask type either def declares, plus the shapes the rule
+    // grammar must refuse.
+    for t in all_mask_types {
+        let v = mig_mask_value(t);
+        out.push(mig_rule(
+            format!("mask {t}"),
+            1,
+            base(),
+            vec![mig_mask_item(&[], &["public"], t, v)],
+        ));
+        out.push(mig_rule(
+            format!("mask {t} with exemption"),
+            1,
+            base(),
+            vec![
+                mig_mask_item(&["alice"], &["analysts"], "MASK_NONE", None),
+                mig_mask_item(&[], &["public"], t, v),
+            ],
+        ));
+    }
+    let hash = |users: &[&str], groups: &[&str]| mig_mask_item(users, groups, "MASK_HASH", None);
+    let masks: Vec<(&str, Value, Vec<Value>)> = vec![
+        (
+            "stops at table",
+            mig_path(p, &[&["wh"], &["sales"], &["orders"]]),
+            vec![hash(&[], &["public"])],
+        ),
+        (
+            "stops at schema",
+            mig_path(p, &[&["wh"], &["sales"]]),
+            vec![hash(&[], &["public"])],
+        ),
+        (
+            "schema-wide",
+            full("sales", "*", "*"),
+            vec![hash(&[], &["public"])],
+        ),
+        (
+            "wildcard over named",
+            full("*", "orders", "email"),
+            vec![hash(&[], &["public"])],
+        ),
+        (
+            "two catalogs",
+            mig_path(p, &[&["wh", "lake"], &["sales"], &["orders"], &["email"]]),
+            vec![hash(&[], &["public"])],
+        ),
+        (
+            "unregistered catalog",
+            mig_path(p, &[&["ext"], &["sales"], &["orders"], &["email"]]),
+            vec![hash(&[], &["public"])],
+        ),
+        (
+            "two columns",
+            mig_path(p, &[&["wh"], &["sales"], &["orders"], &["email", "phone"]]),
+            vec![hash(&[], &["public"])],
+        ),
+        (
+            "skips a level",
+            mig_path(p, &[&["wh"], &["sales"]])
+                .as_object()
+                .cloned()
+                .map(|mut m| {
+                    m.insert(p.hierarchy[3].to_string(), mig_level(&["email"]));
+                    Value::Object(m)
+                })
+                .expect("map"),
+            vec![hash(&[], &["public"])],
+        ),
+        ("per-principal only", base(), vec![hash(&["alice"], &[])]),
+        (
+            "two masks",
+            base(),
+            vec![
+                hash(&["alice"], &[]),
+                mig_mask_item(&[], &["public"], "MASK_NULL", None),
+            ],
+        ),
+        (
+            "exemption after everyone",
+            base(),
+            vec![
+                hash(&[], &["public"]),
+                mig_mask_item(&["alice"], &[], "MASK_NONE", None),
+            ],
+        ),
+        (
+            "public exemption",
+            base(),
+            vec![
+                mig_mask_item(&[], &["public"], "MASK_NONE", None),
+                hash(&[], &["public"]),
+            ],
+        ),
+        (
+            "three items",
+            base(),
+            vec![
+                mig_mask_item(&["alice"], &[], "MASK_NONE", None),
+                mig_mask_item(&["bob"], &[], "MASK_NONE", None),
+                hash(&[], &["public"]),
+            ],
+        ),
+        (
+            "value on a non-custom mask",
+            base(),
+            vec![mig_mask_item(&[], &["public"], "MASK_HASH", Some("x"))],
+        ),
+        (
+            "custom without a value",
+            base(),
+            vec![mig_mask_item(&[], &["public"], "CUSTOM", None)],
+        ),
+        (
+            "undeclared mask type",
+            base(),
+            vec![mig_mask_item(&[], &["public"], "MASK_EGRET_UNKNOWN", None)],
+        ),
+    ];
+    for (what, res, items) in masks {
+        out.push(mig_rule(format!("mask shape {what}"), 1, res, items));
+    }
+    {
+        let mut pol = mig_rule(
+            "mask shape insert access".into(),
+            1,
+            base(),
+            vec![hash(&[], &["public"])],
+        );
+        pol.body["dataMaskPolicyItems"][0]["accesses"] = mig_accesses(&["insert"]);
+        out.push(pol);
+        let mut pol = mig_rule(
+            "mask shape condition expr".into(),
+            1,
+            base(),
+            vec![hash(&[], &["public"])],
+        );
+        pol.body["dataMaskPolicyItems"][0]["dataMaskInfo"]["conditionExpr"] = json!("1 = 1");
+        out.push(pol);
+        let mut pol = mig_rule(
+            "mask shape no mask info".into(),
+            1,
+            base(),
+            vec![hash(&[], &["public"])],
+        );
+        pol.body["dataMaskPolicyItems"][0]
+            .as_object_mut()
+            .expect("item")
+            .remove("dataMaskInfo");
+        out.push(pol);
+        let mut pol = mig_rule(
+            "mask shape priority 1".into(),
+            1,
+            base(),
+            vec![hash(&[], &["public"])],
+        );
+        pol.body["policyPriority"] = json!(1);
+        out.push(pol);
+    }
+
+    // H. Row filters (three levels: `rowFilterDef` stops at `table`).
+    let table = || mig_path(p, &[&["wh"], &["sales"], &["orders"]]);
+    let eu = Some("region = 'EU'");
+    let filters: Vec<(&str, Value, Vec<Value>)> = vec![
+        (
+            "everyone",
+            table(),
+            vec![mig_filter_item(&[], &["public"], eu)],
+        ),
+        (
+            "user exemption",
+            table(),
+            vec![
+                mig_filter_item(&["bob"], &[], Some("")),
+                mig_filter_item(&[], &["public"], eu),
+            ],
+        ),
+        (
+            "group exemption",
+            table(),
+            vec![
+                mig_filter_item(&["alice"], &["contractors"], Some("")),
+                mig_filter_item(&[], &["public"], eu),
+            ],
+        ),
+        (
+            "schema-wide",
+            mig_path(p, &[&["wh"], &["sales"], &["*"]]),
+            vec![mig_filter_item(&[], &["public"], eu)],
+        ),
+        (
+            "two catalogs",
+            mig_path(p, &[&["wh", "lake"], &["sales"], &["orders"]]),
+            vec![mig_filter_item(&[], &["public"], eu)],
+        ),
+        (
+            "with a column",
+            base(),
+            vec![mig_filter_item(&[], &["public"], eu)],
+        ),
+        (
+            "stops at schema",
+            mig_path(p, &[&["wh"], &["sales"]]),
+            vec![mig_filter_item(&[], &["public"], eu)],
+        ),
+        (
+            "no filter expr",
+            table(),
+            vec![mig_filter_item(&[], &["public"], None)],
+        ),
+        (
+            "runtime expr",
+            table(),
+            vec![mig_filter_item(
+                &[],
+                &["public"],
+                Some("owner = '{{USER}}'"),
+            )],
+        ),
+        (
+            "per-principal only",
+            table(),
+            vec![mig_filter_item(&["alice"], &[], eu)],
+        ),
+        (
+            "two everyone items",
+            table(),
+            vec![
+                mig_filter_item(&[], &["public"], eu),
+                mig_filter_item(&[], &["public"], Some("1 = 0")),
+            ],
+        ),
+    ];
+    for (what, res, items) in filters {
+        out.push(mig_rule(format!("filter {what}"), 2, res, items));
+    }
+
+    // I. Tag-addressed bodies, stored in the TAG service.
+    let tag = |values: &[&str]| json!({"tag": mig_level(values)});
+    for t in all_mask_types {
+        out.push(mig_rule(
+            format!("tag mask {t}"),
+            1,
+            tag(&["phi"]),
+            vec![mig_mask_item(&[], &["public"], t, mig_mask_value(t))],
+        ));
+    }
+    let tag_shapes: Vec<(&str, i32, Value, Vec<Value>)> = vec![
+        (
+            "tag mask with exemption",
+            1,
+            tag(&["phi"]),
+            vec![
+                mig_mask_item(&["alice"], &["analysts"], "MASK_NONE", None),
+                hash(&[], &["public"]),
+            ],
+        ),
+        (
+            "tag filter",
+            2,
+            tag(&["phi"]),
+            vec![mig_filter_item(&[], &["public"], eu)],
+        ),
+        (
+            "tag filter with exemption",
+            2,
+            tag(&["phi"]),
+            vec![
+                mig_filter_item(&["bob"], &[], Some("")),
+                mig_filter_item(&[], &["public"], eu),
+            ],
+        ),
+        (
+            "tag mask key differs from name",
+            1,
+            tag(&["pii"]),
+            vec![hash(&[], &["public"])],
+        ),
+        (
+            "tag mask unknown tag",
+            1,
+            tag(&["nosuch"]),
+            vec![hash(&[], &["public"])],
+        ),
+        (
+            "tag mask two tags",
+            1,
+            tag(&["phi", "pii"]),
+            vec![hash(&[], &["public"])],
+        ),
+    ];
+    for (what, pt, res, items) in tag_shapes {
+        out.push(mig_rule(what.to_string(), pt, res, items));
+    }
+    let mut clearance = mig_allow(
+        "tag access policy".into(),
+        tag(&["phi"]),
+        mig_item(&["alice"], &[], sel),
+    );
+    clearance.service = ServiceKind::Tag;
+    out.push(clearance);
+    // Placement: each body in the wrong kind of service.
+    let mut misplaced = mig_rule(
+        "tag mask in a resource service".into(),
+        1,
+        tag(&["phi"]),
+        vec![hash(&[], &["public"])],
+    );
+    misplaced.service = ServiceKind::Resource;
+    out.push(misplaced);
+    let mut misplaced = mig_rule(
+        "path mask in a tag service".into(),
+        1,
+        base(),
+        vec![hash(&[], &["public"])],
+    );
+    misplaced.service = ServiceKind::Tag;
+    out.push(misplaced);
+
+    out
+}
+
+fn mig_classify(profile: &Profile, policy: &MigPolicy) -> Result<MigAccepted, Vec<Blocker>> {
+    let engine = mig_perm_engine(profile);
+    match policy.body["policyType"].as_i64().unwrap_or(0) {
+        0 => grants_from_access_policy(&policy.body, engine, &mig_catalog_id, policy.service)
+            .map(|c| MigAccepted::Grants(c.grants)),
+        _ => rules_from_mask_or_filter_policy(
+            &policy.body,
+            engine,
+            &mig_catalog_id,
+            &mig_tag_name,
+            policy.service,
+        )
+        .map(|c| MigAccepted::Rules(c.rules)),
+    }
+}
+
+/// The variant name of a blocker, for the per-kind tally.
+fn mig_blocker_kind(b: &Blocker) -> String {
+    let s = format!("{b:?}");
+    s.split([' ', '{', '(']).next().unwrap_or("").to_string()
+}
+
+/// The grammar's output compiled by egret's real compiler, as
+/// `(resource-service policies, tag-service policies)`.
+///
+/// What `trigger::recompile_service` does with an accepted grant or rule, minus
+/// the DB: ids are assigned (the grammar emits `Uuid::nil()`, `perm.grants` /
+/// `perm.rules` assign the real ones), the body is compiled, StarRocks access
+/// bodies are stamped `serviceType: starrocks` (`rules::stamp_service_type`,
+/// `pub(crate)`, restated here as its one line), and each body is filed under
+/// the service its own `service` field names (`trigger::target_service_id`).
+fn mig_compile(profile: &Profile, accepted: &MigAccepted) -> (Vec<Value>, Vec<Value>) {
+    let engine = mig_perm_engine(profile);
+    let mut bodies: Vec<Value> = Vec::new();
+    match accepted {
+        MigAccepted::Grants(grants) => {
+            for (n, g) in grants.iter().enumerate() {
+                let mut g = g.clone();
+                g.id = Uuid::from_u128(0x7000 + n as u128);
+                validate_grant_shape(&g)
+                    .unwrap_or_else(|e| panic!("the model refuses an accepted grant {g:?}: {e:?}"));
+                let input = compile_grant(
+                    &g,
+                    mig_catalog_name(g.scope.catalog_id),
+                    profile.service_name,
+                    engine,
+                )
+                .unwrap_or_else(|e| panic!("compile_grant refused an accepted grant {g:?}: {e:?}"));
+                let mut body = access_to_ranger_json(&input);
+                if engine == PermEngine::StarRocks {
+                    body["serviceType"] = json!("starrocks");
+                }
+                bodies.push(body);
+            }
+        }
+        MigAccepted::Rules(rules) => {
+            for (n, r) in rules.iter().enumerate() {
+                let mut r = r.clone();
+                r.id = Uuid::from_u128(0x8000 + n as u128);
+                let (catalog, tag_name) = match &r.selector {
+                    Selector::Path(s) => (mig_catalog_name(s.catalog_id), None),
+                    Selector::Tag { key } => ("", mig_tag_name(key)),
+                };
+                let compiled = compile_rule(
+                    &r,
+                    engine,
+                    profile.service_name,
+                    Some(profile.tag_service_name),
+                    &ResolvedNames {
+                        catalog_name: catalog,
+                        tag_name: tag_name.as_deref(),
+                    },
+                    &[],
+                    100,
+                )
+                .unwrap_or_else(|e| panic!("compile_rule refused an accepted rule {r:?}: {e:?}"));
+                bodies.extend(compiled);
+            }
+        }
+    }
+    // `recompile_service` keys its desired set by (service, name): two bodies
+    // with one name would silently collapse to one there.
+    let names: BTreeSet<&str> = bodies.iter().filter_map(|b| b["name"].as_str()).collect();
+    assert_eq!(
+        names.len(),
+        bodies.len(),
+        "compiled names collide: {bodies:?}"
+    );
+
+    let (mut resource, mut tag) = (Vec::new(), Vec::new());
+    for (i, mut body) in bodies.into_iter().enumerate() {
+        body["id"] = json!(MIG_COMPILED_ID_BASE + i as i64);
+        match body["service"].as_str() {
+            Some(s) if s == profile.service_name => resource.push(body),
+            Some(s) if s == profile.tag_service_name => tag.push(body),
+            other => panic!("compiled body names service {other:?}: {body}"),
+        }
+    }
+    (resource, tag)
+}
+
+/// Policies every set carries, before and after alike, none of which any probe
+/// principal can match (access) or any probe coordinate reaches (mask, filter).
+fn mig_background(profile: &Profile) -> Vec<Value> {
+    let h = profile.hierarchy;
+    vec![
+        json!({"id": 1, "name": "bg access", "service": profile.service_name, "policyType": 0,
+               "isEnabled": true,
+               "resources": {h[0]: mig_level(&["wh"]), h[1]: mig_level(&["*"]),
+                             h[2]: mig_level(&["*"]), h[3]: mig_level(&["*"])},
+               "policyItems": [mig_item(&[MIG_BG_USER], &[], &["select"])]}),
+        json!({"id": 2, "name": "bg mask", "service": profile.service_name, "policyType": 1,
+               "isEnabled": true,
+               "resources": {h[0]: mig_level(&["wh"]), h[1]: mig_level(&["sales"]),
+                             h[2]: mig_level(&["orders"]), h[3]: mig_level(&["egret_bg_col"])},
+               "dataMaskPolicyItems": [mig_mask_item(&[], &["public"], "MASK_NULL", None)]}),
+        json!({"id": 3, "name": "bg filter", "service": profile.service_name, "policyType": 2,
+               "isEnabled": true,
+               "resources": {h[0]: mig_level(&["wh"]), h[1]: mig_level(&["sales"]),
+                             h[2]: mig_level(&["egret_bg_table"])},
+               "rowFilterPolicyItems": [mig_filter_item(&[], &["public"], Some("1 = 0"))]}),
+    ]
+}
+
+fn mig_envelope(
+    profile: &Profile,
+    def_json: &Value,
+    tag_def_json: &Value,
+    resource: Vec<Value>,
+    tag: Option<Vec<Value>>,
+) -> Value {
+    let mut envelope = json!({
+        "serviceName": profile.service_name,
+        "serviceId": 1,
+        "policyVersion": 1,
+        "serviceDef": def_json,
+        "policies": resource,
+    });
+    if let Some(tag) = tag {
+        envelope["tagPolicies"] = tag_block(profile, tag_def_json, tag);
+    }
+    envelope
+}
+
+/// One question to ask of both sets.
+struct MigProbe {
+    policy_type: i32,
+    user: String,
+    groups: Vec<String>,
+    access_type: String,
+    resource: Vec<(String, String)>,
+    tags: Option<Vec<String>>,
+}
+
+/// A value the policy's own (possibly wildcarded) value matches.
+fn mig_concrete(v: &str) -> String {
+    v.replace('*', "any").replace('?', "q")
+}
+
+/// The first value at each catalog-hierarchy level (absent → the walk value),
+/// and every catalog value.
+fn mig_levels(profile: &Profile, resources: &Value) -> (Vec<String>, Vec<String>) {
+    let values = |level: &str| -> Vec<String> {
+        resources[level]["values"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(mig_concrete)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let catalogs = values(profile.hierarchy[0]);
+    let below = profile.hierarchy[1..]
+        .iter()
+        .map(|l| {
+            values(l)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| mig_walk_value(l))
+        })
+        .collect();
+    (catalogs, below)
+}
+
+fn mig_push_principals(
+    out: &mut Vec<MigProbe>,
+    principals: &[(&str, &[&str])],
+    policy_type: i32,
+    access_type: &str,
+    coord: &[(String, String)],
+    tags: Option<Vec<String>>,
+) {
+    for (user, groups) in principals {
+        out.push(MigProbe {
+            policy_type,
+            user: (*user).to_string(),
+            groups: groups.iter().map(|g| (*g).to_string()).collect(),
+            access_type: access_type.to_string(),
+            resource: coord.to_vec(),
+            tags: tags.clone(),
+        });
+    }
+}
+
+/// `values` at `depth` levels, with level `sibling` (if any) replaced by a
+/// value nobody names.
+fn mig_coord(
+    profile: &Profile,
+    values: &[String],
+    depth: usize,
+    sibling: Option<usize>,
+) -> Vec<(String, String)> {
+    (0..depth)
+        .map(|i| {
+            let v = if sibling == Some(i) {
+                MIG_SIBLING.to_string()
+            } else {
+                values[i].clone()
+            };
+            (profile.hierarchy[i].to_string(), v)
+        })
+        .collect()
+}
+
+fn mig_probes(profile: &Profile, access_types: &[String], policy: &MigPolicy) -> Vec<MigProbe> {
+    let mut out = Vec::new();
+    let body = &policy.body;
+    let policy_type = body["policyType"].as_i64().unwrap_or(0) as i32;
+
+    if policy.service == ServiceKind::Tag {
+        // The tag phase: the coordinate the original names nothing about, so
+        // probe a plain column (and the background mask's column, where a
+        // resource mask competes) carrying the policy's tag, another tag, no
+        // tag, and both.
+        let tag_name = body["resources"]["tag"]["values"][0]
+            .as_str()
+            .unwrap_or("phi")
+            .to_string();
+        let depth = if policy_type == 2 { 3 } else { 4 };
+        let leaves: &[&str] = if policy_type == 2 {
+            &["orders", "egret_bg_table"]
+        } else {
+            &["email", "egret_bg_col"]
+        };
+        for leaf in leaves {
+            let mut values: Vec<String> = ["wh", "sales", "orders", "email"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+            values[depth - 1] = (*leaf).to_string();
+            let coord = mig_coord(profile, &values, depth, None);
+            for tags in [
+                vec![tag_name.clone()],
+                vec!["Sensitive".to_string()],
+                vec![],
+                vec![tag_name.clone(), "Sensitive".to_string()],
+            ] {
+                mig_push_principals(
+                    &mut out,
+                    MIG_PROBE_PRINCIPALS,
+                    policy_type,
+                    "select",
+                    &coord,
+                    Some(tags),
+                );
+            }
+        }
+        return out;
+    }
+
+    let (catalogs, below) = mig_levels(profile, &body["resources"]);
+    let mut own: BTreeSet<String> = BTreeSet::new();
+    for bucket in [
+        "policyItems",
+        "denyPolicyItems",
+        "allowExceptions",
+        "denyExceptions",
+    ] {
+        for item in body[bucket].as_array().into_iter().flatten() {
+            for a in item["accesses"].as_array().into_iter().flatten() {
+                own.insert(a["type"].as_str().unwrap_or("").to_string());
+            }
+        }
+    }
+    let narrow: Vec<String> = access_types
+        .iter()
+        .filter(|t| own.contains(*t) || ["select", "insert", "delete"].contains(&t.as_str()))
+        .cloned()
+        .collect();
+
+    for catalog in &catalogs {
+        let mut values = vec![catalog.clone()];
+        values.extend(below.iter().cloned());
+        match policy_type {
+            0 => {
+                // The policy's own coordinate: EVERY access type the def declares.
+                let exact = mig_coord(profile, &values, 4, None);
+                for at in access_types {
+                    mig_push_principals(&mut out, MIG_PROBE_PRINCIPALS, 0, at, &exact, None);
+                }
+                // Its ancestors and a sibling at every level: the access types
+                // it names plus `select`, `insert` and `delete`.
+                let mut others: Vec<Vec<(String, String)>> = (1..4)
+                    .map(|d| mig_coord(profile, &values, d, None))
+                    .collect();
+                others.extend((0..4).map(|i| mig_coord(profile, &values, 4, Some(i))));
+                for coord in &others {
+                    for at in &narrow {
+                        mig_push_principals(&mut out, MIG_AROUND_PRINCIPALS, 0, at, coord, None);
+                    }
+                }
+            }
+            1 => {
+                // A column, a sibling at every level, and the table and schema
+                // themselves — a mask may stop above the column, and then only
+                // a request at its own depth reaches it.
+                let mut coords: Vec<Vec<(String, String)>> = std::iter::once(None)
+                    .chain((0..4).map(Some))
+                    .map(|sibling| mig_coord(profile, &values, 4, sibling))
+                    .collect();
+                coords.extend((2..4).map(|d| mig_coord(profile, &values, d, None)));
+                for coord in &coords {
+                    mig_push_principals(&mut out, MIG_PROBE_PRINCIPALS, 1, "select", coord, None);
+                }
+            }
+            _ => {
+                for sibling in std::iter::once(None).chain((0..3).map(Some)) {
+                    let coord = mig_coord(profile, &values, 3, sibling);
+                    mig_push_principals(&mut out, MIG_PROBE_PRINCIPALS, 2, "select", &coord, None);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn mig_case(id: String, set: &Value, probe: &MigProbe) -> Case {
+    let mut resource = RequestResource::new();
+    for (k, v) in &probe.resource {
+        resource.insert(k.clone(), v.clone());
+    }
+    let resolved_tags = probe.tags.as_ref().map(|names| {
+        let levels: BTreeSet<String> = probe.resource.iter().map(|(k, _)| k.clone()).collect();
+        UnenrichedTags::new(
+            names
+                .iter()
+                .map(|n| ResolvedTag {
+                    name: n.clone(),
+                    match_type: MatchType::Self_,
+                    attributes: BTreeMap::new(),
+                    options: BTreeSet::new(),
+                    validity_periods: 0,
+                    attached_through: TagServiceResource {
+                        levels: levels.clone(),
+                        is_enabled: true,
+                    },
+                })
+                .collect(),
+        )
+    });
+    Case {
+        id,
+        policy_type: probe.policy_type,
+        duel: false,
+        composed_duel: false,
+        candidacy_duel: false,
+        restore_duel: false,
+        version_split_duel: false,
+        service_policies: set.clone(),
+        request: AccessRequest {
+            user: probe.user.clone(),
+            groups: probe.groups.iter().cloned().collect(),
+            roles: BTreeSet::new(),
+            access_type: probe.access_type.clone(),
+            resource,
+            owner: None,
+            resolved_tags,
+        },
+    }
+}
+
+/// One accepted policy, ready to ask.
+struct MigPair {
+    label: String,
+    body: Value,
+    service: ServiceKind,
+    before: Value,
+    after: Value,
+    probes: Vec<MigProbe>,
+}
+
+/// Per engine: the population, for the report and the assertions.
+#[derive(Default)]
+struct MigTally {
+    accepted: usize,
+    refused: usize,
+    probes: usize,
+    /// Accepted bodies identical to an earlier accepted one, not asked again.
+    duplicates: usize,
+    blockers: BTreeMap<String, usize>,
+}
+
+fn mig_prepare(
+    profile: &Profile,
+    def_json: &Value,
+    tag_def_json: &Value,
+    all_mask_types: &[String],
+    tally: &mut MigTally,
+    refusals: &mut Vec<(String, Vec<Blocker>)>,
+    accepted_labels: &mut Vec<String>,
+) -> Vec<MigPair> {
+    let access_types = mig_def_names(def_json, "/accessTypes");
+    let mut pairs = Vec::new();
+    for policy in mig_corpus(profile, def_json, all_mask_types) {
+        let accepted = match mig_classify(profile, &policy) {
+            Ok(a) => a,
+            Err(blockers) => {
+                assert!(
+                    !blockers.is_empty(),
+                    "{}: refused without naming a blocker",
+                    policy.label
+                );
+                tally.refused += 1;
+                // Policies per kind, not blocker instances: one body missing
+                // three levels is one `MissingLevel` refusal.
+                let kinds: BTreeSet<String> = blockers.iter().map(mig_blocker_kind).collect();
+                for kind in kinds {
+                    *tally.blockers.entry(kind).or_default() += 1;
+                }
+                refusals.push((policy.label.clone(), blockers));
+                continue;
+            }
+        };
+        tally.accepted += 1;
+        accepted_labels.push(policy.label.clone());
+        // The walk and the DML power set generate some bodies twice (the
+        // walk's `select` on the full hierarchy IS `dml select`); asking the
+        // engine the same thing twice measures nothing new.
+        if pairs
+            .iter()
+            .any(|p: &MigPair| p.body == policy.body && p.service == policy.service)
+        {
+            tally.duplicates += 1;
+            continue;
+        }
+
+        let (compiled_resource, compiled_tag) = mig_compile(profile, &accepted);
+        let mut original = policy.body.clone();
+        original["id"] = json!(MIG_ORIGINAL_ID);
+        let mut before_resource = mig_background(profile);
+        let mut before_tag = Vec::new();
+        match policy.service {
+            ServiceKind::Resource => {
+                original["service"] = json!(profile.service_name);
+                before_resource.push(original);
+            }
+            ServiceKind::Tag => {
+                original["service"] = json!(profile.tag_service_name);
+                before_tag.push(original);
+            }
+        }
+        let mut after_resource = mig_background(profile);
+        after_resource.extend(compiled_resource);
+        let has_tags = !before_tag.is_empty() || !compiled_tag.is_empty();
+        let before = mig_envelope(
+            profile,
+            def_json,
+            tag_def_json,
+            before_resource,
+            has_tags.then_some(before_tag),
+        );
+        let after = mig_envelope(
+            profile,
+            def_json,
+            tag_def_json,
+            after_resource,
+            has_tags.then_some(compiled_tag),
+        );
+        let probes = mig_probes(profile, &access_types, &policy);
+        tally.probes += probes.len();
+        pairs.push(MigPair {
+            label: policy.label,
+            body: policy.body,
+            service: policy.service,
+            before,
+            after,
+            probes,
+        });
+    }
+    pairs
+}
+
+/// The accepted population, recorded (fix round 1, I-2).
+///
+/// ⚠ **Update these lists DELIBERATELY, in the same commit as the grammar
+/// change that moves them, and say why in that commit.** The gate proves
+/// equivalence only for what the grammar accepts, so a grammar that started
+/// refusing a shape it used to accept would leave this test green while it
+/// proved less. Any difference — a label gained or lost — fails the run with
+/// the diff; a gained label is checked by the engines like any other, a lost
+/// one is a shape that stopped being migratable and must be a decision.
+const MIG_ACCEPTED_TRINO: &[&str] = &[
+    "walk catalog.schema.table.column [select]",
+    "dml select",
+    "dml insert+delete",
+    "dml select+insert+delete",
+    "principals two users",
+    "principals a group",
+    "principals public",
+    "principals user and group",
+    "scope select schema-wide",
+    "scope select catalog-wide",
+    "scope select table-wide",
+    "scope select a ** run",
+    "scope select wildcard characters",
+    "scope select mixed case",
+    "scope select two catalogs",
+    "scope dml schema-wide",
+    "scope dml catalog-wide",
+    "scope dml table-wide",
+    "scope dml a ** run",
+    "scope dml wildcard characters",
+    "scope dml mixed case",
+    "scope dml two catalogs",
+    "split allow + exception",
+    "split allow + deny + deny exception",
+    "split allow + exception + deny + deny exception",
+    "split two items share one exception",
+    "split two deny items share one exception",
+    "split deny only",
+    "split two catalogs with deny + exceptions",
+    "split one item, two actions",
+    "mask MASK",
+    "mask MASK with exemption",
+    "mask MASK_SHOW_LAST_4",
+    "mask MASK_SHOW_LAST_4 with exemption",
+    "mask MASK_SHOW_FIRST_4",
+    "mask MASK_SHOW_FIRST_4 with exemption",
+    "mask MASK_HASH",
+    "mask MASK_HASH with exemption",
+    "mask MASK_NULL",
+    "mask MASK_NULL with exemption",
+    "mask MASK_NONE",
+    "mask MASK_NONE with exemption",
+    "mask MASK_DATE_SHOW_YEAR",
+    "mask MASK_DATE_SHOW_YEAR with exemption",
+    "mask CUSTOM",
+    "mask CUSTOM with exemption",
+    "mask shape stops at table",
+    "mask shape stops at schema",
+    "mask shape schema-wide",
+    "mask shape wildcard over named",
+    "mask shape two catalogs",
+    "filter everyone",
+    "filter user exemption",
+    "filter group exemption",
+    "filter schema-wide",
+    "filter two catalogs",
+    "tag mask MASK",
+    "tag mask MASK_SHOW_LAST_4",
+    "tag mask MASK_SHOW_FIRST_4",
+    "tag mask MASK_HASH",
+    "tag mask MASK_NULL",
+    "tag mask MASK_NONE",
+    "tag mask MASK_DATE_SHOW_YEAR",
+    "tag mask CUSTOM",
+    "tag mask with exemption",
+    "tag filter",
+    "tag filter with exemption",
+    "split allow exception names a group",
+    "split deny exception names a group",
+    "split exception names a user and a group",
+];
+
+/// See [`MIG_ACCEPTED_TRINO`].
+const MIG_ACCEPTED_STARROCKS: &[&str] = &[
+    "walk catalog.database.table.column [select]",
+    "dml select",
+    "dml insert+update+delete",
+    "dml select+insert+update+delete",
+    "principals two users",
+    "principals a group",
+    "principals public",
+    "principals user and group",
+    "scope select schema-wide",
+    "scope select catalog-wide",
+    "scope select table-wide",
+    "scope select a ** run",
+    "scope select wildcard characters",
+    "scope select mixed case",
+    "scope select two catalogs",
+    "scope dml schema-wide",
+    "scope dml catalog-wide",
+    "scope dml table-wide",
+    "scope dml a ** run",
+    "scope dml wildcard characters",
+    "scope dml mixed case",
+    "scope dml two catalogs",
+    "split allow + exception",
+    "split allow + deny + deny exception",
+    "split allow + exception + deny + deny exception",
+    "split two items share one exception",
+    "split two deny items share one exception",
+    "split deny only",
+    "split two catalogs with deny + exceptions",
+    "split one item, two actions",
+    "mask MASK",
+    "mask MASK with exemption",
+    "mask MASK_HASH",
+    "mask MASK_HASH with exemption",
+    "mask MASK_NULL",
+    "mask MASK_NULL with exemption",
+    "mask MASK_NONE",
+    "mask MASK_NONE with exemption",
+    "mask MASK_DATE_SHOW_YEAR",
+    "mask MASK_DATE_SHOW_YEAR with exemption",
+    "mask CUSTOM",
+    "mask CUSTOM with exemption",
+    "mask shape stops at table",
+    "mask shape stops at schema",
+    "mask shape schema-wide",
+    "mask shape wildcard over named",
+    "mask shape two catalogs",
+    "filter everyone",
+    "filter user exemption",
+    "filter group exemption",
+    "filter schema-wide",
+    "filter two catalogs",
+    "split allow exception names a group",
+    "split deny exception names a group",
+    "split exception names a user and a group",
+];
+
+/// The accepted labels against the recorded list, plus one named example per
+/// category the gate exists to cover — so a reader of a failure sees WHICH
+/// kind of coverage was lost, not only a label diff.
+fn mig_check_accepted(profile: &Profile, def_json: &Value, accepted: &[String]) -> Vec<String> {
+    let engine = profile.engine.service_def_name();
+    let recorded: &[&str] = match profile.engine {
+        EngineType::Trino => MIG_ACCEPTED_TRINO,
+        EngineType::StarRocks => MIG_ACCEPTED_STARROCKS,
+    };
+    let have: BTreeSet<&str> = accepted.iter().map(String::as_str).collect();
+    let want: BTreeSet<&str> = recorded.iter().copied().collect();
+    let mut failures = Vec::new();
+    let lost: Vec<&&str> = want.difference(&have).collect();
+    let gained: Vec<&&str> = have.difference(&want).collect();
+    if !lost.is_empty() || !gained.is_empty() {
+        failures.push(format!(
+            "[{engine}] the accepted population changed — update MIG_ACCEPTED_* deliberately if \
+             the grammar change is intended.\n  no longer accepted: {lost:?}\n  newly accepted: \
+             {gained:?}"
+        ));
+    }
+    let mut required: Vec<(String, String)> = vec![
+        (
+            "deny items".into(),
+            "split allow + deny + deny exception".into(),
+        ),
+        (
+            "an allow exception".into(),
+            "split allow + exception".into(),
+        ),
+        (
+            "a deny exception".into(),
+            "split two deny items share one exception".into(),
+        ),
+        (
+            "two items sharing one exception".into(),
+            "split two items share one exception".into(),
+        ),
+        (
+            "a multi-catalog split".into(),
+            "split two catalogs with deny + exceptions".into(),
+        ),
+        (
+            "an allow exception naming a group".into(),
+            "split allow exception names a group".into(),
+        ),
+        (
+            "a deny exception naming a group".into(),
+            "split deny exception names a group".into(),
+        ),
+        (
+            "an exception naming a user and a group".into(),
+            "split exception names a user and a group".into(),
+        ),
+        ("a row filter".into(), "filter everyone".into()),
+        (
+            "a row filter with an exemption".into(),
+            "filter user exemption".into(),
+        ),
+        (
+            "a multi-catalog row filter".into(),
+            "filter two catalogs".into(),
+        ),
+    ];
+    let mask_types = mig_def_names(def_json, "/dataMaskDef/maskTypes");
+    for t in &mask_types {
+        required.push((format!("mask type {t}"), format!("mask {t}")));
+        required.push((
+            format!("mask type {t} with an exemption"),
+            format!("mask {t} with exemption"),
+        ));
+    }
+    if profile.engine == EngineType::Trino {
+        for t in &mask_types {
+            required.push((format!("tag mask type {t}"), format!("tag mask {t}")));
+        }
+        required.push((
+            "a tag mask with an exemption".into(),
+            "tag mask with exemption".into(),
+        ));
+        required.push(("a tag row filter".into(), "tag filter".into()));
+        required.push((
+            "a tag row filter with an exemption".into(),
+            "tag filter with exemption".into(),
+        ));
+    }
+    for (category, label) in required {
+        if !have.contains(label.as_str()) {
+            failures.push(format!(
+                "[{engine}] no accepted policy covers {category} (`{label}` was refused)"
+            ));
+        }
+    }
+    failures
+}
+
+fn mig_refusal<'a>(refusals: &'a [(String, Vec<Blocker>)], label: &str) -> Option<&'a [Blocker]> {
+    refusals
+        .iter()
+        .find(|(l, _)| l == label)
+        .map(|(_, b)| b.as_slice())
+}
+
+/// The pins, both cells each, on the corpus the engine is asked about — so the
+/// ACCEPTED cell of each is also proven equivalent by the real engine below.
+///
+/// Returned rather than asserted, so a grammar that broke a pin is ALSO run
+/// through the engines: the mutation gate reads the engine's verdict on the
+/// mutant, not only this function's.
+fn mig_check_pins(
+    profile: &Profile,
+    def_json: &Value,
+    refusals: &[(String, Vec<Blocker>)],
+    accepted: &[String],
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    let engine = profile.engine.service_def_name();
+    let is_accepted = |label: &str| accepted.iter().any(|l| l == label);
+    let mut refused_naming = |label: &str, want: Blocker| match mig_refusal(refusals, label) {
+        Some(b) if b.contains(&want) => {}
+        Some(b) => failures.push(format!(
+            "[{engine}] pin: `{label}` must be refused naming {want:?}, got {b:?}"
+        )),
+        None => failures.push(format!(
+            "[{engine}] pin: `{label}` must be refused naming {want:?}, but the grammar ACCEPTED it"
+        )),
+    };
+    // `Write` is atomic: the full expansion is accepted, a strict subset is
+    // refused naming what it lacks.
+    let (full_write, insert_missing) = match profile.engine {
+        EngineType::Trino => ("dml insert+delete", vec!["delete".to_string()]),
+        EngineType::StarRocks => (
+            "dml insert+update+delete",
+            vec!["update".to_string(), "delete".to_string()],
+        ),
+    };
+    refused_naming(
+        "dml insert",
+        Blocker::PartialActionExpansion {
+            action: egret_perm::Action::Write,
+            missing: insert_missing,
+        },
+    );
+    // A catalog outside the registry: registered accepted, unregistered
+    // refused naming it.
+    refused_naming(
+        "scope select unregistered catalog",
+        Blocker::UnregisteredCatalog {
+            catalog: "ext".to_string(),
+        },
+    );
+    // The non-expressible access types are REACHED and refused by name, on the
+    // full catalog hierarchy, for every one of them the def declares.
+    let full_path = profile.hierarchy.join(".");
+    for at in mig_def_names(def_json, "/accessTypes")
+        .iter()
+        .filter(|t| !["select", "insert", "update", "delete"].contains(&t.as_str()))
+    {
+        refused_naming(
+            &format!("walk {full_path} [{at}]"),
+            Blocker::UnknownAccessType {
+                access_type: at.clone(),
+            },
+        );
+    }
+    // Every non-catalog hierarchy is reached and refused.
+    for path in mig_hierarchy_paths(def_json) {
+        if path[0] != "catalog" {
+            let label = format!("walk {} [select]", path.join("."));
+            if mig_refusal(refusals, &label).is_none() {
+                failures.push(format!("[{engine}] pin: `{label}` must be refused"));
+            }
+        }
+    }
+    for label in [full_write, "dml select"] {
+        if !is_accepted(label) {
+            failures.push(format!("[{engine}] pin: `{label}` must be accepted"));
+        }
+    }
+    failures
+}
+
+/// Before vs after on every probe, at one Ranger version. Returns the number
+/// of probes compared, plus the reach counts.
+#[derive(Default)]
+struct MigRun {
+    compared: usize,
+    allowed: usize,
+    denied_by_original: usize,
+    masked: usize,
+    filtered: usize,
+    disagreements: Vec<String>,
+    unreached: Vec<String>,
+}
+
+fn mig_run(profile: &Profile, pairs: &[MigPair], ranger_version: &str) -> MigRun {
+    let mut run = MigRun::default();
+    // (pair index, probe index), in case order.
+    let index: Vec<(usize, usize)> = pairs
+        .iter()
+        .enumerate()
+        .flat_map(|(pi, p)| (0..p.probes.len()).map(move |qi| (pi, qi)))
+        .collect();
+    let mut original_decided = vec![false; pairs.len()];
+    let mut compiled_decided = vec![false; pairs.len()];
+    for (chunk_no, chunk) in index.chunks(MIG_CHUNK / 2).enumerate() {
+        let mut cases = Vec::with_capacity(chunk.len() * 2);
+        for &(pi, qi) in chunk {
+            let pair = &pairs[pi];
+            let probe = &pair.probes[qi];
+            let id = format!("mig-{pi:04}-{qi:04}");
+            cases.push(mig_case(format!("{id}-before"), &pair.before, probe));
+            cases.push(mig_case(format!("{id}-after"), &pair.after, probe));
+        }
+        let verdicts = ask_ranger(
+            &cases,
+            profile.engine.service_def_name(),
+            ranger_version,
+            &format!("mig-{}-{chunk_no}", profile.engine.service_def_name()),
+        );
+        for (k, &(pi, qi)) in chunk.iter().enumerate() {
+            let (before, after) = (&verdicts[2 * k], &verdicts[2 * k + 1]);
+            let pair = &pairs[pi];
+            let probe = &pair.probes[qi];
+            assert_eq!(before["id"], json!(cases[2 * k].id), "verdict order");
+            assert_eq!(after["id"], json!(cases[2 * k + 1].id), "verdict order");
+            for v in [before, after] {
+                assert!(
+                    v["error"].is_null(),
+                    "ranger {ranger_version} threw on {} ({}): {}\npolicy: {}",
+                    v["id"],
+                    pair.label,
+                    v["error"],
+                    pair.body
+                );
+            }
+            run.compared += 1;
+            if before["policyId"] == json!(MIG_ORIGINAL_ID) {
+                original_decided[pi] = true;
+            }
+            if before["policyId"]
+                .as_i64()
+                .is_some_and(|id| id >= MIG_COMPILED_ID_BASE)
+            {
+                panic!("a compiled id decided a BEFORE case: {before}");
+            }
+            if after["policyId"]
+                .as_i64()
+                .is_some_and(|id| id >= MIG_COMPILED_ID_BASE)
+            {
+                compiled_decided[pi] = true;
+            }
+            match probe.policy_type {
+                0 if before["isAllowed"] == json!(true) => run.allowed += 1,
+                // Not `isAccessDetermined`: with no fallback authorizer Ranger
+                // marks EVERY denial determined, matched or not.
+                0 if before["policyId"] == json!(MIG_ORIGINAL_ID) => run.denied_by_original += 1,
+                1 if before["maskType"]
+                    .as_str()
+                    .is_some_and(|t| t != "MASK_NONE") =>
+                {
+                    run.masked += 1
+                }
+                2 if before["filterExpr"].as_str().is_some_and(|f| !f.is_empty()) => {
+                    run.filtered += 1
+                }
+                _ => {}
+            }
+            let differing: Vec<&str> = MIG_COMPARED_FIELDS
+                .iter()
+                .copied()
+                .filter(|f| before.get(*f) != after.get(*f))
+                .collect();
+            if !differing.is_empty() && run.disagreements.len() < 20 {
+                let after_policies = &pair.after["policies"];
+                let after_tags = &pair.after["tagPolicies"]["policies"];
+                run.disagreements.push(format!(
+                    "ranger {ranger_version} DISAGREES on `{}` — fields {differing:?}\n  \
+                     probe: policyType {} user {:?} groups {:?} access {:?} resource {:?} tags {:?}\n  \
+                     before: {before}\n  after:  {after}\n  hand-written policy: {}\n  \
+                     compiled (resource): {after_policies}\n  compiled (tag): {after_tags}",
+                    pair.label,
+                    probe.policy_type,
+                    probe.user,
+                    probe.groups,
+                    probe.access_type,
+                    probe.resource,
+                    probe.tags,
+                    pair.body,
+                ));
+            } else if !differing.is_empty() {
+                run.disagreements.push(String::new());
+            }
+        }
+    }
+    for (i, pair) in pairs.iter().enumerate() {
+        if !original_decided[i] || !compiled_decided[i] {
+            run.unreached.push(format!(
+                "`{}` (original decided a probe: {}, compiled decided a probe: {})",
+                pair.label, original_decided[i], compiled_decided[i]
+            ));
+        }
+    }
+    run
+}
+
+#[test]
+fn a_migration_the_grammar_accepts_decides_identically_on_the_real_engine() {
+    if std::env::var("EGRET_TEST_RANGER_E2E").ok().as_deref() != Some("1") {
+        eprintln!("EGRET_TEST_RANGER_E2E != 1 — skipping the migration differential");
+        return;
+    }
+    let started = std::time::Instant::now();
+    let tag_def_json = load_tag_def();
+    // Every mask type EITHER def declares, on both engines — so a type one
+    // engine lacks is generated there and refused.
+    let mut all_mask_types: Vec<String> = Vec::new();
+    for profile in [trino(), starrocks()] {
+        let (def_json, _, _) = load_engine(&profile);
+        for t in mig_def_names(&def_json, "/dataMaskDef/maskTypes") {
+            if !all_mask_types.contains(&t) {
+                all_mask_types.push(t);
+            }
+        }
+    }
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut total_refused = 0usize;
+    let mut total_accepted = 0usize;
+    let mut blockers_all: BTreeMap<String, usize> = BTreeMap::new();
+    for profile in [trino(), starrocks()] {
+        let (def_json, _, _) = load_engine(&profile);
+        let mut tally = MigTally::default();
+        let mut refusals = Vec::new();
+        let mut accepted = Vec::new();
+        let pairs = mig_prepare(
+            &profile,
+            &def_json,
+            &tag_def_json,
+            &all_mask_types,
+            &mut tally,
+            &mut refusals,
+            &mut accepted,
+        );
+        failures.extend(mig_check_pins(&profile, &def_json, &refusals, &accepted));
+        failures.extend(mig_check_accepted(&profile, &def_json, &accepted));
+        eprintln!(
+            "migration differential [{}]: corpus {} policies, accepted={} ({} duplicates not \
+             re-asked) refused={} probes={} (cases per version = {})",
+            profile.engine.service_def_name(),
+            tally.accepted + tally.refused,
+            tally.accepted,
+            tally.duplicates,
+            tally.refused,
+            tally.probes,
+            tally.probes * 2
+        );
+        eprintln!("  accepted: {}", accepted.join(" | "));
+        for (kind, n) in &tally.blockers {
+            eprintln!("  refused, blocker {kind:32} ×{n}");
+            *blockers_all.entry(kind.clone()).or_default() += n;
+        }
+        assert!(
+            tally.accepted > 0,
+            "a corpus the grammar wholly refuses proves nothing"
+        );
+        assert!(
+            tally.refused > 0,
+            "a corpus the grammar wholly accepts reached no refusal"
+        );
+        total_refused += tally.refused;
+        total_accepted += tally.accepted;
+
+        for version in ["2.5.0", "2.8.0"] {
+            let t = std::time::Instant::now();
+            let run = mig_run(&profile, &pairs, version);
+            eprintln!(
+                "migration differential [{} @ ranger {version}]: {} probes compared ({} cases) \
+                 in {:.2} s; before-state allowed {} / denied by the original {} / masked {} / \
+                 filtered {}; disagreements {}; unreached {}",
+                profile.engine.service_def_name(),
+                run.compared,
+                run.compared * 2,
+                t.elapsed().as_secs_f64(),
+                run.allowed,
+                run.denied_by_original,
+                run.masked,
+                run.filtered,
+                run.disagreements.len(),
+                run.unreached.len(),
+            );
+            assert_eq!(run.compared, tally.probes, "every probe answered");
+            for (what, n) in [
+                ("allowed", run.allowed),
+                ("denied by the original's deny item", run.denied_by_original),
+                ("masked", run.masked),
+                ("filtered", run.filtered),
+            ] {
+                if n == 0 {
+                    failures.push(format!(
+                        "[{} @ {version}] no probe was {what} before the migration — the \
+                         comparison on that question is vacuous",
+                        profile.engine.service_def_name()
+                    ));
+                }
+            }
+            if !run.disagreements.is_empty() {
+                failures.push(format!(
+                    "[{} @ {version}] {} probe(s) decide differently after the migration:\n{}",
+                    profile.engine.service_def_name(),
+                    run.disagreements.len(),
+                    run.disagreements
+                        .iter()
+                        .filter(|d| !d.is_empty())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ));
+            }
+            if !run.unreached.is_empty() {
+                failures.push(format!(
+                    "[{} @ {version}] accepted policies no probe let decide — their equivalence \
+                     is vacuous:\n  {}",
+                    profile.engine.service_def_name(),
+                    run.unreached.join("\n  ")
+                ));
+            }
+        }
+    }
+    eprintln!(
+        "migration differential: accepted={total_accepted} refused={total_refused} in {:.2} s",
+        started.elapsed().as_secs_f64()
+    );
+    for (kind, n) in &blockers_all {
+        eprintln!("  refusals naming {kind:32} ×{n}");
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }

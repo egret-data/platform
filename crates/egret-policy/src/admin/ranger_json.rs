@@ -502,7 +502,7 @@ mod tests {
     #[test]
     fn round_trips_through_summary() {
         let body = access_to_ranger_json(&sample());
-        let s = summarize_policy(7, "trino", true, &body);
+        let s = summarize_policy(7, "trino", true, "operator", &body);
         assert_eq!(s.policy_type, "access");
         assert_eq!(s.resource_path, "iceberg.sales.orders.*");
         assert!(s.principals.contains(&"alice".to_string()));
@@ -539,7 +539,7 @@ mod tests {
         assert_eq!(items[0]["dataMaskInfo"]["dataMaskType"], "MASK_HASH");
         assert_eq!(items[0]["accesses"][0]["type"], "select");
         assert_eq!(items[0]["users"][0], "alice");
-        let s = summarize_policy(1, "trino", true, &body);
+        let s = summarize_policy(1, "trino", true, "operator", &body);
         assert_eq!(s.policy_type, "masking");
         assert_eq!(s.resource_path, "iceberg.sales.users.email");
     }
@@ -573,7 +573,7 @@ mod tests {
         let items = body["rowFilterPolicyItems"].as_array().unwrap();
         assert_eq!(items[0]["rowFilterInfo"]["filterExpr"], "country = 'US'");
         assert_eq!(items[0]["groups"][0], "analysts");
-        let s = summarize_policy(2, "trino", true, &body);
+        let s = summarize_policy(2, "trino", true, "operator", &body);
         assert_eq!(s.policy_type, "rowfilter");
         assert_eq!(s.resource_path, "iceberg.sales.orders");
     }
@@ -614,7 +614,7 @@ mod tests {
             "allowExceptions":[{"users":["alice"],"accesses":[{"type":"insert"}]}],
             "description":"d","policyLabels":["l1"]
         });
-        let s = summarize_policy(1, "trino", true, &body);
+        let s = summarize_policy(1, "trino", true, "operator", &body);
         assert!(s.principals.contains(&"contractors".to_string()));
         assert!(s.principals.contains(&"alice".to_string()));
         assert!(s.permissions.contains(&"select".to_string()));
@@ -834,7 +834,7 @@ mod tests {
         }))
         .unwrap();
         let body = tag_masking_to_ranger_json(&inp, "pii", "eng_tag");
-        let s = summarize_policy(9, "eng_tag", true, &body);
+        let s = summarize_policy(9, "eng_tag", true, "operator", &body);
         assert_eq!(s.policy_type, "masking");
         assert_eq!(s.resource_path, "tag: pii");
         assert!(s.principals.contains(&"pii".to_string()));

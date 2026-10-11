@@ -614,7 +614,11 @@ pub(crate) fn stamp_service_type(mut body: Value, e: EngineType) -> Value {
 /// nothing. Returns `CompileError::ServiceDefUnreadable` rather than
 /// panicking if the embedded JSON somehow fails to parse — every other
 /// failure in this module is a `CompileError`, not a `.expect()`.
-fn declared_mask_types(e: EngineType) -> Result<Vec<String>, CompileError> {
+///
+/// `pub(crate)` since SP4d-3 Task 4: `crate::grammar` refuses a hand-written
+/// mask whose type the engine does not declare by reading THIS list, so the
+/// compiler and its inverse cannot disagree about which names are masks.
+pub(crate) fn declared_mask_types(e: EngineType) -> Result<Vec<String>, CompileError> {
     let def = match e {
         EngineType::Trino => trino_service_def(),
         EngineType::StarRocks => starrocks_service_def(),

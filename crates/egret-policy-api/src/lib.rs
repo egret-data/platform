@@ -2,6 +2,7 @@
 //! DTOs + the `PolicyPort` trait that cross-seam callers depend on instead of the
 //! concrete `PolicyStore`. Leaf crate — serde-only, no sqlx/axum/egret-* deps.
 pub mod dto;
+pub mod infra_names;
 pub mod port;
 
 pub use dto::{PolicyService, ServicePolicies, ServiceTags, TagAssignment};

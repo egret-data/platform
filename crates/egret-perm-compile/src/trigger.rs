@@ -1002,8 +1002,8 @@ async fn apply_diff_in_tx(
         match existing_by_key.remove(&(service_id, name.clone())) {
             None => {
                 let policy_id: i64 = sqlx::query_scalar(
-                    "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb) \
-                     VALUES ($1, $2, $3) RETURNING id",
+                    "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by) \
+                     VALUES ($1, $2, $3, 'compiler') RETURNING id",
                 )
                 .bind(service_id)
                 .bind(&name)

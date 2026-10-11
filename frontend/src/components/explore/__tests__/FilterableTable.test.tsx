@@ -248,3 +248,39 @@ it("re-reports when a search narrows what is on screen", async () => {
   fireEvent.change(screen.getByPlaceholderText(/search/i), { target: { value: "Alice" } });
   expect(onDrawnChange).toHaveBeenLastCalledWith(["a"]);
 });
+
+it("draws a refused row's checkbox disabled and leaves it out of Select all", () => {
+  const onToggle = vi.fn();
+  render(
+    <FilterableTable
+      rows={rows}
+      columns={columns}
+      getId={(r) => r.id}
+      selection={{
+        selected: new Set<string>(),
+        onToggle,
+        canSelect: (r) => r.id !== "a",
+        rowLabel: (r) => `Select ${r.name}`,
+      }}
+    />,
+  );
+  // The refused row is drawn — disabled, not hidden — under its own name.
+  expect(screen.getByRole("checkbox", { name: "Select Alice" })).toBeDisabled();
+  expect(screen.getByRole("checkbox", { name: "Select Bob" })).toBeEnabled();
+
+  fireEvent.click(screen.getByLabelText("Select all"));
+  expect(onToggle).toHaveBeenCalledWith("b");
+  expect(onToggle).not.toHaveBeenCalledWith("a");
+});
+
+it("disables Select all when no drawn row can be selected", () => {
+  render(
+    <FilterableTable
+      rows={rows}
+      columns={columns}
+      getId={(r) => r.id}
+      selection={{ selected: new Set<string>(), onToggle: vi.fn(), canSelect: () => false }}
+    />,
+  );
+  expect(screen.getByRole("checkbox", { name: "Select all" })).toBeDisabled();
+});

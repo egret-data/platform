@@ -53,6 +53,21 @@ export function FilterableTable<T>({
   selection?: {
     selected: Set<string>;
     onToggle: (id: string) => void;
+    /**
+     * Whether a row may be selected at all. A row it refuses renders its
+     * checkbox DISABLED (still drawn, so the column stays aligned and the row
+     * visibly cannot be picked), and "Select all" neither counts nor toggles
+     * it. The page owns saying WHY (FE-ACTION-4) — in the row itself, where
+     * the reason is next to the box. Optional: omitted, every row is
+     * selectable, exactly as before.
+     */
+    canSelect?: (row: T) => boolean;
+    /**
+     * The accessible name of a row's checkbox. Defaults to "Select row",
+     * which names no row — fine for a bulk toggle, not for a page whose rows
+     * differ in whether they can be picked at all.
+     */
+    rowLabel?: (row: T) => string;
   };
   /**
    * The ids this table actually DREW, reported whenever they change.
@@ -189,7 +204,8 @@ export function FilterableTable<T>({
                 // off. Unlike the collapsed-folder case on the Explore lists,
                 // this needed no deliberate act: pagination is the default
                 // state, so the gap opened on its own.
-                const drawnIds = pageRows.map(getId);
+                const canSelect = selection.canSelect ?? (() => true);
+                const drawnIds = pageRows.filter((r) => canSelect(r)).map(getId);
                 const allShownSelected =
                   drawnIds.length > 0 && drawnIds.every((id) => selection.selected.has(id));
                 return (
@@ -197,6 +213,9 @@ export function FilterableTable<T>({
                     <Checkbox
                       aria-label="Select all"
                       checked={allShownSelected}
+                      // Only with `canSelect`: an empty table without it keeps
+                      // its enabled box, as before (additive change).
+                      disabled={selection.canSelect ? drawnIds.length === 0 : undefined}
                       onCheckedChange={() => {
                         const target = !allShownSelected;
                         for (const id of drawnIds) {
@@ -241,8 +260,9 @@ export function FilterableTable<T>({
                   {selection && (
                     <TableCell className="w-8">
                       <Checkbox
-                        aria-label="Select row"
+                        aria-label={selection.rowLabel?.(row) ?? "Select row"}
                         checked={selection.selected.has(getId(row))}
+                        disabled={selection.canSelect ? !selection.canSelect(row) : false}
                         onCheckedChange={() => selection.onToggle(getId(row))}
                       />
                     </TableCell>

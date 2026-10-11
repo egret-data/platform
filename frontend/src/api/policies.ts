@@ -36,8 +36,17 @@ import {
   policyAdminTrinoConfig,
   policyAdminUpdatePolicy,
 } from "./generated/policy-admin/policy-admin";
+import {
+  getPermClassifyServicePoliciesQueryKey,
+  permClassifyServicePolicies,
+  permMigrateServicePolicies,
+  permUndoServicePolicyMigration,
+} from "./generated/perm/perm";
 import type {
+  ClassifiedPolicy,
   CreatedProfile,
+  MigrateResponse,
+  UndoResponse,
   PolicyAdminCreatePolicyBody,
   PolicyAdminUpdatePolicyBody,
   ProfileDto,
@@ -59,6 +68,9 @@ export interface PolicySummary {
   is_enabled: boolean;
   description: string;
   labels: string[];
+  /** Who owns the row (migration 0180). The server refuses edits, toggles and
+   *  deletes of an `infra` row, so the profile page withholds those controls. */
+  managed_by: "operator" | "compiler" | "infra";
 }
 
 // Re-export generated DTOs under the app's existing names.
@@ -273,4 +285,75 @@ export function compilerOwnedConflict(err: unknown): string | null {
   const msg = err.message || "";
   if (msg.startsWith("conflict: ")) return msg.slice("conflict: ".length);
   return msg || "This policy is compiled by the permission model and cannot be edited directly.";
+}
+
+// ── SP4d-3: classify a profile's policies, migrate them, undo ─────────────
+//
+// Thin adapters over the generated `perm` client (tag `perm`), in this file's
+// style: unwrap orval's envelope, keep the generated DTOs. The blocker
+// sentences, the disagreement sentences, the refusal and the notices are the
+// SERVER's text — nothing here re-derives or re-words them.
+
+export type {
+  ClassifiedPolicy,
+  GatedProfile,
+  MigrateResponse,
+  MigratedPolicy,
+  MigrationRecord,
+  UndoResponse,
+  WireDisagreement,
+} from "./generated/model";
+
+/** Every policy of one profile, classified (owner, verdict, blocker sentences). */
+export async function classifyServicePolicies(serviceId: number): Promise<ClassifiedPolicy[]> {
+  return (await permClassifyServicePolicies(serviceId)).data as ClassifiedPolicy[];
+}
+
+/** The key the classification is cached under — orval's own key factory, so a
+ *  migrate or undo invalidates exactly what the page reads. */
+export function classifyQueryKey(serviceId: number) {
+  return getPermClassifyServicePoliciesQueryKey(serviceId);
+}
+
+function isMigrateResponse(body: unknown): body is MigrateResponse {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    "equivalent" in body &&
+    Array.isArray((body as { disagreements?: unknown }).disagreements)
+  );
+}
+
+/**
+ * Migrate (or, with `dryRun`, prove without writing) the named policies of one
+ * profile.
+ *
+ * **A 422 is an ANSWER, not a failure:** the gate ran and did not prove the
+ * migration — its body is the same `MigrateResponse`, carrying the
+ * disagreements or the gate's refusal (the probe budget among them). So it
+ * resolves, and the caller reads `equivalent` / `refusal` / `disagreements`.
+ * Every other non-2xx (400, 403, 404, 409, 500) still throws its `ApiError`.
+ */
+export async function migrateServicePolicies(
+  serviceId: number,
+  policyNames: string[],
+  dryRun: boolean,
+): Promise<MigrateResponse> {
+  try {
+    return (
+      await permMigrateServicePolicies(serviceId, { policy_names: policyNames, dry_run: dryRun })
+    ).data as MigrateResponse;
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 422 && isMigrateResponse(e.body)) return e.body;
+    throw e;
+  }
+}
+
+/** Undo the named migrations (the policies' CURRENT names). */
+export async function undoServicePolicyMigration(
+  serviceId: number,
+  policyNames: string[],
+): Promise<UndoResponse> {
+  return (await permUndoServicePolicyMigration(serviceId, { policy_names: policyNames }))
+    .data as UndoResponse;
 }

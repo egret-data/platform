@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Cog, Download, Loader2, Lock, Plus, ShieldCheck, Sprout, Trash2 } from "lucide-react";
+import { ArrowLeft, ArrowRightLeft, Cog, Download, Loader2, Lock, Plus, ShieldCheck, Sprout, Trash2 } from "lucide-react";
 import {
   type Profile,
   type PolicySummary,
@@ -24,6 +24,11 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TrinoConfigDialog } from "@/components/policy/TrinoConfigDialog";
 import { refusalMessage, usePolicyPermissions } from "./policyWrites";
+
+/** Why an infra row offers no edit, toggle or delete — the server refuses all
+ *  three for `managed_by = 'infra'` (SP4d-3). */
+const INFRA_OWNED_REASON =
+  "Managed by egret (engine delegation, admin access or query limits) — it cannot be changed here.";
 
 const TYPES = [
   { key: "access", label: "Access" },
@@ -148,7 +153,10 @@ export default function ProfileDetailPage() {
               they are four different keys (`policy:seed`, `policy:create`,
               `policy:update`, `policy:delete`), so one blanket "can write"
               flag would hide a control the account can in fact use. */}
-          {can("policy:seed") && (
+          {/* The seeded set is Trino-shaped and the server refuses any other
+              profile type (SP4d-3 final review I-1), so it is offered only on a
+              loaded Trino profile — not while the profile is still loading. */}
+          {can("policy:seed") && profile?.type === "trino" && (
             <Button
               size="sm"
               variant="secondary"
@@ -163,9 +171,21 @@ export default function ProfileDetailPage() {
               Seed default policies
             </Button>
           )}
+          {/* SP4d-3: a read-only page too (it says what each policy is), so
+              offered on `policy:read`; its write controls check
+              `policy:update` themselves. A link, per FE-PAGE-3. */}
+          {service && (
+            <Button size="sm" variant="outline" asChild>
+              <Link to={`/governance/policies/${encodeURIComponent(service)}/migrate`}>
+                <ArrowRightLeft className="mr-1 h-4 w-4" />
+                Migrate policies
+              </Link>
+            </Button>
+          )}
           {/* The downloadable config is the Trino coordinator's Ranger-plugin
-              config — only meaningful for Trino profiles. */}
-          {(profile?.type ?? "trino").startsWith("trino") && (
+              config — only meaningful for Trino profiles, and not offered
+              while the profile is still loading. */}
+          {profile?.type === "trino" && (
             <Button size="sm" variant="outline" onClick={() => setConfigOpen(true)}>
               <Download className="mr-1 h-4 w-4" />
               Download Trino config
@@ -323,6 +343,10 @@ function PolicyTypeTable({
   // why the guard cannot be profile-wide.
   const compilerOwned = (r: PolicySummary) =>
     profileOrigin === "generated" && isCompilerOwnedPolicyName(r.name);
+  // SP4d-3: egret's own plumbing (delegation, admin access, query limits). The
+  // server refuses every edit, toggle and delete of such a row, keyed on the
+  // row's `managed_by` column — so this reads the same column.
+  const infraOwned = (r: PolicySummary) => r.managed_by === "infra";
 
   const toggleEnabled = useMutation({
     mutationFn: ({ id, enabled }: { id: number; enabled: boolean }) =>
@@ -359,14 +383,19 @@ function PolicyTypeTable({
       sortable: true,
       value: (r) => r.name,
       cell: (r) =>
-        compilerOwned(r) ? (
+        compilerOwned(r) || infraOwned(r) ? (
           // D10: a compiler-owned row in a generated profile — not a Link,
           // so it is not "offered for edit" the way a foreign policy still
           // is (that distinction is the whole point; see `compilerOwned`).
+          // An infra row is likewise not editable here at all.
           <div className="min-w-0">
             <span
               className="inline-flex items-center gap-1 font-medium text-muted-foreground"
-              title="Compiled by the permission model — edit the underlying grant or rule instead."
+              title={
+                infraOwned(r)
+                  ? INFRA_OWNED_REASON
+                  : "Compiled by the permission model — edit the underlying grant or rule instead."
+              }
             >
               <Lock className="h-3 w-3 shrink-0" />
               {r.name}
@@ -459,10 +488,13 @@ function PolicyTypeTable({
           disabled={
             (toggleEnabled.isPending && togglingId === r.id) ||
             compilerOwned(r) ||
+            infraOwned(r) ||
             !can("policy:update")
           }
           title={
-            compilerOwned(r)
+            infraOwned(r)
+              ? INFRA_OWNED_REASON
+              : compilerOwned(r)
               ? "Compiler-owned — edit the underlying grant or rule instead."
               : !can("policy:update")
                 ? "Enabling or disabling a policy needs the policy:update permission."
@@ -481,9 +513,11 @@ function PolicyTypeTable({
           <Button
             variant="ghost"
             size="icon"
-            disabled={compilerOwned(r)}
+            disabled={compilerOwned(r) || infraOwned(r)}
             title={
-              compilerOwned(r)
+              infraOwned(r)
+                ? INFRA_OWNED_REASON
+                : compilerOwned(r)
                 ? "Compiler-owned — delete the underlying grant or rule instead."
                 : "Delete policy"
             }

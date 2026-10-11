@@ -994,6 +994,11 @@ export const usePolicyAdminDeleteProfile = <TError = ErrorBody,
   status: 200
 }
 
+export type policyAdminSeedDefaultsResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
 export type policyAdminSeedDefaultsResponse401 = {
   data: ErrorBody
   status: 401
@@ -1022,7 +1027,7 @@ export type policyAdminSeedDefaultsResponse500 = {
 export type policyAdminSeedDefaultsResponseSuccess = (policyAdminSeedDefaultsResponse200) & {
   headers: Headers;
 };
-export type policyAdminSeedDefaultsResponseError = (policyAdminSeedDefaultsResponse401 | policyAdminSeedDefaultsResponse403 | policyAdminSeedDefaultsResponse404 | policyAdminSeedDefaultsResponse409 | policyAdminSeedDefaultsResponse500) & {
+export type policyAdminSeedDefaultsResponseError = (policyAdminSeedDefaultsResponse400 | policyAdminSeedDefaultsResponse401 | policyAdminSeedDefaultsResponse403 | policyAdminSeedDefaultsResponse404 | policyAdminSeedDefaultsResponse409 | policyAdminSeedDefaultsResponse500) & {
   headers: Headers;
 };
 

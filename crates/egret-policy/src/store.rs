@@ -1,5 +1,6 @@
 use crate::PolicyStoreError;
 use egret_metastore::Db;
+use egret_policy_api::infra_names::is_egret_infrastructure_policy;
 use egret_policy_api::TAG_SERVICE_CONFIG_KEY;
 use egret_ranger_eval::resource::MatchType;
 use serde_json::Value;
@@ -148,6 +149,85 @@ fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
              ({COMPILER_GRANT_PREFIX:?} / {COMPILER_RULE_PREFIX:?} / \
              {COMPILER_CLEARANCE_PREFIX:?}) — only its compiler writes \
              policies there; rename this policy instead of retrying"
+        )));
+    }
+    Ok(())
+}
+
+/// A profile's `type`, read on the caller's connection (inside its transaction
+/// where there is one), for the type-aware [`is_egret_infrastructure_policy`].
+/// A missing profile is `NotFound`: every caller is about to write under it.
+async fn service_type_of(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<String, PolicyStoreError> {
+    sqlx::query_scalar::<_, String>("SELECT type FROM policy.authz_services WHERE id = $1")
+        .bind(service_id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .ok_or_else(|| PolicyStoreError::NotFound(format!("service id {service_id}")))
+}
+
+/// The infra writers' own guard: they stamp `managed_by = 'infra'`, so they may
+/// only be given a name `egret_policy_api::infra_names` recognises on a profile
+/// of `service_type`. A hard error, not a `debug_assert`, so the writer cannot
+/// drift from the predicate. This is also what refuses a Trino-shaped
+/// `all - …` name aimed at a StarRocks profile.
+fn refuse_non_infrastructure_name(service_type: &str, name: &str) -> Result<(), PolicyStoreError> {
+    if !is_egret_infrastructure_policy(service_type, name) {
+        return Err(PolicyStoreError::BadRequest(format!(
+            "policy name {name:?} is not an egret infrastructure policy name on a \
+             {service_type:?} profile; refusing to stamp it managed_by = 'infra'"
+        )));
+    }
+    Ok(())
+}
+
+/// SP4d-3 Task 2: the HUMAN paths' reservation of egret's infrastructure names.
+/// A human create, or a rename INTO such a name, would mint an `'operator'` row
+/// under a name [`is_egret_infrastructure_policy`] claims on this profile's
+/// type, so the column and the predicate would disagree from the first write.
+/// On a non-Trino profile an `all - …` name is an ordinary human name.
+///
+/// Its own variant rather than [`PolicyStoreError::CompilerOwned`]: that one's
+/// message names the SP4a permission model's `perm-*` prefixes, and an operator
+/// told to "rename this policy" about a prefix they never used would be misled.
+/// Both map to 409 — the request is well-formed, the name belongs to someone
+/// else. The infra writers do NOT call this; they call
+/// [`refuse_non_infrastructure_name`], its inverse.
+fn refuse_infrastructure_name(service_type: &str, name: &str) -> Result<(), PolicyStoreError> {
+    if is_egret_infrastructure_policy(service_type, name) {
+        return Err(PolicyStoreError::InfrastructureOwned(format!(
+            "policy name {name:?} is reserved for egret's own plumbing (delegator and default \
+             access policies) — choose a different name"
+        )));
+    }
+    Ok(())
+}
+
+/// SP4d-3 Task 2: refuse a human `UPDATE`/`DELETE`/enable-flip of a policy
+/// egret's own plumbing owns.
+///
+/// Keyed on `managed_by`, the COLUMN — deliberately not on the name.
+/// [`refuse_if_compiler_owned`] answers a question about a NAME, which is the
+/// right question for the compiler's reserved prefixes. This one answers a
+/// question about a ROW, because the thing being protected is the row's
+/// existence and content, and a rename must not move it out of the guard.
+async fn refuse_if_infrastructure_owned(
+    conn: &mut sqlx::PgConnection,
+    policy_id: i64,
+) -> Result<(), PolicyStoreError> {
+    let managed_by: Option<String> =
+        sqlx::query_scalar("SELECT managed_by FROM policy.authz_policies WHERE id = $1")
+            .bind(policy_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if managed_by.as_deref() == Some("infra") {
+        return Err(PolicyStoreError::InfrastructureOwned(format!(
+            "policy id {policy_id} is owned by egret's own plumbing (managed_by = 'infra') — \
+             it is seeded or maintained by the platform, and editing it can break delegation \
+             or lock every admin out of this service. Nothing in the console can change it; \
+             if it is wrong, the producer that mints it has to change"
         )));
     }
     Ok(())
@@ -597,8 +677,42 @@ impl PolicyStore {
         service_id: i64,
         name: &str,
     ) -> Result<(), PolicyStoreError> {
+        // First, exactly where `create_policy` puts it. Not inside
+        // `refuse_before_policy_insert`: the infra writers share that one.
         let mut conn = self.db.pool.acquire().await?;
+        let service_type = service_type_of(&mut conn, service_id).await?;
+        refuse_infrastructure_name(&service_type, name)?;
         refuse_before_policy_insert(&mut conn, service_id, name).await
+    }
+
+    /// The `PUT` route's counterpart of [`Self::preflight_policy_insert`]:
+    /// the SP4d-3 infrastructure refusals `update_policy` makes (an `'infra'`
+    /// row, and a rename INTO an infrastructure name), on a pooled connection,
+    /// so they win over the route's authoring guards (ambiguous-arbitration,
+    /// unreadable-table) that run before `update_policy` is called. The
+    /// in-transaction checks inside `update_policy` STAY and are the real
+    /// bound; this only decides which refusal the operator reads.
+    pub(crate) async fn preflight_policy_update(
+        &self,
+        id: i64,
+        name: &str,
+    ) -> Result<(), PolicyStoreError> {
+        let mut conn = self.db.pool.acquire().await?;
+        let current: Option<(String, String)> = sqlx::query_as(
+            "SELECT p.name, s.type FROM policy.authz_policies p \
+             JOIN policy.authz_services s ON s.id = p.service_id WHERE p.id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some((current_name, service_type)) = current else {
+            return Err(PolicyStoreError::NotFound(format!("policy {id}")));
+        };
+        refuse_if_infrastructure_owned(&mut conn, id).await?;
+        if name != current_name {
+            refuse_infrastructure_name(&service_type, name)?;
+        }
+        Ok(())
     }
 
     /// SP4d debt Task 5 — the POLICY EDITOR's entry into the one rule in
@@ -672,13 +786,8 @@ impl PolicyStore {
     }
 
     pub async fn get_service_def(&self, name: &str) -> Result<ServiceDefRow, PolicyStoreError> {
-        sqlx::query_as::<_, ServiceDefRow>(
-            r#"SELECT id, name, def_jsonb FROM policy.authz_service_defs WHERE name = $1"#,
-        )
-        .bind(name)
-        .fetch_optional(&self.db.pool)
-        .await?
-        .ok_or_else(|| PolicyStoreError::NotFound(format!("service-def {name}")))
+        let mut conn = self.db.pool.acquire().await?;
+        get_service_def_via(&mut conn, name).await
     }
 
     pub async fn list_service_defs(&self) -> Result<Vec<ServiceDefRow>, PolicyStoreError> {
@@ -1827,6 +1936,91 @@ pub async fn tag_names_for_keys_via(
     )
 }
 
+/// Connection-generic core of [`PolicyStore::get_service_def`] — SP4d-3 Task
+/// 7 assembles a profile's download INSIDE its migration transaction, before
+/// and after the write, and a pooled read there would not see the write.
+pub async fn get_service_def_via(
+    conn: &mut sqlx::PgConnection,
+    name: &str,
+) -> Result<ServiceDefRow, PolicyStoreError> {
+    sqlx::query_as::<_, ServiceDefRow>(
+        r#"SELECT id, name, def_jsonb FROM policy.authz_service_defs WHERE name = $1"#,
+    )
+    .bind(name)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or_else(|| PolicyStoreError::NotFound(format!("service-def {name}")))
+}
+
+/// Connection-generic core of [`PolicyStore::enabled_policies_for_service`] —
+/// the ONE assembler of the policies a download serves, so the migration gate
+/// (SP4d-3 Task 7) and the download route read the same rows the same way.
+pub async fn enabled_policies_for_service_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Vec<Value>, PolicyStoreError> {
+    // Inject the DB-assigned numeric `id`, `version`, and `isEnabled` into each policy.
+    // The Ranger policy engine NPEs on a policy whose `id` is null, and clients only send
+    // these on the response/CRUD path — the stored body keeps the client's original JSON.
+    let rows = sqlx::query_as::<_, (i64, i64, bool, Value)>(
+        r#"SELECT id, version, enabled, policy_jsonb FROM policy.authz_policies
+           WHERE service_id = $1 AND enabled = true ORDER BY id"#,
+    )
+    .bind(service_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, version, enabled, mut p)| {
+            if let Value::Object(m) = &mut p {
+                m.insert("id".into(), Value::from(id));
+                m.insert("version".into(), Value::from(version));
+                m.insert("isEnabled".into(), Value::from(enabled));
+            }
+            p
+        })
+        .collect())
+}
+
+/// Connection-generic core of [`PolicyStore::set_policy_enabled`], with the
+/// SAME two guards in the same order (a compiler-owned name in a generated
+/// profile, then an `infra` row). SP4d-3 Task 7 switches a migrated original
+/// off — and `undo` switches it back on — inside the migration's own
+/// transaction, so the flip commits or rolls back with the model write; a
+/// second, unguarded `UPDATE` there would be a write path the guards do not
+/// cover. Does not begin or commit.
+pub async fn set_policy_enabled_via(
+    conn: &mut sqlx::PgConnection,
+    id: i64,
+    enabled: bool,
+) -> Result<(), PolicyStoreError> {
+    let row: Option<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
+        r#"SELECT service_id, name FROM policy.authz_policies WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((service_id, current_name)) = row else {
+        return Err(PolicyStoreError::NotFound(format!("policy id {id}")));
+    };
+    refuse_if_compiler_owned(conn, service_id, &current_name).await?;
+    refuse_if_infrastructure_owned(conn, id).await?;
+    sqlx::query(
+        r#"UPDATE policy.authz_policies SET enabled=$2, version=version+1, updated_at=now() WHERE id=$1"#,
+    )
+    .bind(id)
+    .bind(enabled)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
+    )
+    .bind(service_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 /// One registry catalog: `(id, name)`.
 #[derive(Debug, sqlx::FromRow)]
 pub struct CatalogRow {
@@ -1851,6 +2045,10 @@ pub struct PolicyRow {
     pub policy_jsonb: Value,
     pub enabled: bool,
     pub version: i64,
+    /// Who owns the row: `'operator'`, `'compiler'` or `'infra'` (migration
+    /// 0180). The profile page reads it to withhold edit controls the server
+    /// would refuse.
+    pub managed_by: String,
 }
 
 impl PolicyStore {
@@ -1861,23 +2059,61 @@ impl PolicyStore {
         name: &str,
         policy: &Value,
     ) -> Result<i64, PolicyStoreError> {
+        self.insert_policy_owned_by(service_id, name, policy, "operator")
+            .await
+    }
+
+    /// [`create_policy`](Self::create_policy) for egret's OWN infrastructure
+    /// policies (the delegator's two): same guards and errors, but the row is
+    /// stamped `managed_by = 'infra'`. Refuses a name that
+    /// [`is_egret_infrastructure_policy`] does not recognise on the profile's
+    /// type, so this writer cannot drift from the predicate that defines the
+    /// owner.
+    pub async fn create_infra_policy(
+        &self,
+        service_id: i64,
+        name: &str,
+        policy: &Value,
+    ) -> Result<i64, PolicyStoreError> {
+        self.insert_policy_owned_by(service_id, name, policy, "infra")
+            .await
+    }
+
+    async fn insert_policy_owned_by(
+        &self,
+        service_id: i64,
+        name: &str,
+        policy: &Value,
+        managed_by: &str,
+    ) -> Result<i64, PolicyStoreError> {
         // Fix round 3's reserved-namespace check and Task 8's origin check, in
         // the one order they are allowed to fire in — spelled once, in
         // `refuse_before_policy_insert`, and shared with
         // `preflight_policy_insert`. The reserved-name reason wins; see that
         // function's doc comment for the ruling and for the test that pins it.
+        //
+        // First, the SP4d-3 owner/name agreement, which needs the profile's
+        // type: a human writer may not take an infrastructure name, and the
+        // infra writer may take nothing else. A refusal drops `tx` (rollback).
         let mut tx = self.db.pool.begin().await?;
+        let service_type = service_type_of(&mut tx, service_id).await?;
+        if managed_by == "infra" {
+            refuse_non_infrastructure_name(&service_type, name)?;
+        } else {
+            refuse_infrastructure_name(&service_type, name)?;
+        }
         if let Err(e) = refuse_before_policy_insert(&mut tx, service_id, name).await {
             tx.rollback().await?;
             return Err(e);
         }
         let id: i64 = sqlx::query_scalar::<_, i64>(
-            r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb)
-               VALUES ($1,$2,$3) RETURNING id"#,
+            r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by)
+               VALUES ($1,$2,$3,$4) RETURNING id"#,
         )
         .bind(service_id)
         .bind(name)
         .bind(policy)
+        .bind(managed_by)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| match &e {
@@ -1886,6 +2122,46 @@ impl PolicyStore {
             }
             _ => PolicyStoreError::Db(e),
         })?;
+        sqlx::query(
+            r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
+        )
+        .bind(service_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(id)
+    }
+
+    /// [`upsert_policy`](Self::upsert_policy) for egret's OWN infrastructure
+    /// policies (`infra_names`): identical, except the row is stamped
+    /// `managed_by = 'infra'` rather than the human default `'operator'`.
+    /// On conflict the owner is re-stamped too, so a row an operator
+    /// pre-created under an infrastructure name becomes infrastructure.
+    pub async fn upsert_infra_policy(
+        &self,
+        service_id: i64,
+        name: &str,
+        policy: &Value,
+    ) -> Result<i64, PolicyStoreError> {
+        refuse_reserved_name(name)?;
+        let mut tx = self.db.pool.begin().await?;
+        let service_type = service_type_of(&mut tx, service_id).await?;
+        refuse_non_infrastructure_name(&service_type, name)?;
+        let id: i64 = sqlx::query_scalar::<_, i64>(
+            r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by)
+               VALUES ($1,$2,$3,'infra')
+               ON CONFLICT (service_id, name) DO UPDATE
+                 SET policy_jsonb = EXCLUDED.policy_jsonb,
+                     managed_by = 'infra',
+                     version = policy.authz_policies.version + 1,
+                     updated_at = now()
+               RETURNING id"#,
+        )
+        .bind(service_id)
+        .bind(name)
+        .bind(policy)
+        .fetch_one(&mut *tx)
+        .await?;
         sqlx::query(
             r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
         )
@@ -1921,6 +2197,8 @@ impl PolicyStore {
     ) -> Result<i64, PolicyStoreError> {
         refuse_reserved_name(name)?;
         let mut tx = self.db.pool.begin().await?;
+        let service_type = service_type_of(&mut tx, service_id).await?;
+        refuse_infrastructure_name(&service_type, name)?;
         let id: i64 = sqlx::query_scalar::<_, i64>(
             r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb)
                VALUES ($1,$2,$3)
@@ -1956,17 +2234,22 @@ impl PolicyStore {
         // Fetch the policy's CURRENT name — ownership (Task 8 fix round 2,
         // I-1) is decided by what this policy IS today, not by the new name
         // the caller is trying to write.
-        let row: Option<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
-            r#"SELECT service_id, name FROM policy.authz_policies WHERE id = $1"#,
+        let row: Option<(i64, String, String)> = sqlx::query_as::<_, (i64, String, String)>(
+            r#"SELECT p.service_id, p.name, s.type FROM policy.authz_policies p
+               JOIN policy.authz_services s ON s.id = p.service_id WHERE p.id = $1"#,
         )
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((service_id, current_name)) = row else {
+        let Some((service_id, current_name, service_type)) = row else {
             tx.rollback().await?;
             return Err(PolicyStoreError::NotFound(format!("policy {id}")));
         };
         if let Err(e) = refuse_if_compiler_owned(&mut tx, service_id, &current_name).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
+        if let Err(e) = refuse_if_infrastructure_owned(&mut tx, id).await {
             tx.rollback().await?;
             return Err(e);
         }
@@ -1985,6 +2268,16 @@ impl PolicyStore {
         if let Err(e) = refuse_reserved_name(name) {
             tx.rollback().await?;
             return Err(e);
+        }
+        // SP4d-3 Task 2: and a rename INTO an infrastructure name. Only a
+        // CHANGE of name: the editor resends the current name on every save,
+        // and a row that already carries one (it is `'operator'` here, since an
+        // `'infra'` row was refused above) must stay editable.
+        if name != current_name {
+            if let Err(e) = refuse_infrastructure_name(&service_type, name) {
+                tx.rollback().await?;
+                return Err(e);
+            }
         }
         sqlx::query(
             r#"UPDATE policy.authz_policies SET name=$2, policy_jsonb=$3, enabled=$4, version=version+1, updated_at=now() WHERE id=$1"#,
@@ -2008,33 +2301,8 @@ impl PolicyStore {
     /// Flip a policy's enabled flag without rewriting its body; bumps versions.
     pub async fn set_policy_enabled(&self, id: i64, enabled: bool) -> Result<(), PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
-        let row: Option<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
-            r#"SELECT service_id, name FROM policy.authz_policies WHERE id = $1"#,
-        )
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some((service_id, current_name)) = row else {
-            tx.rollback().await?;
-            return Err(PolicyStoreError::NotFound(format!("policy id {id}")));
-        };
-        if let Err(e) = refuse_if_compiler_owned(&mut tx, service_id, &current_name).await {
-            tx.rollback().await?;
-            return Err(e);
-        }
-        sqlx::query(
-            r#"UPDATE policy.authz_policies SET enabled=$2, version=version+1, updated_at=now() WHERE id=$1"#,
-        )
-        .bind(id)
-        .bind(enabled)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
-        )
-        .bind(service_id)
-        .execute(&mut *tx)
-        .await?;
+        // A refusal drops `tx`, which rolls it back — nothing was written yet.
+        set_policy_enabled_via(&mut tx, id, enabled).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -2058,10 +2326,32 @@ impl PolicyStore {
             tx.rollback().await?;
             return Err(e);
         }
-        sqlx::query(r#"DELETE FROM policy.authz_policies WHERE id = $1"#)
+        if let Err(e) = refuse_if_infrastructure_owned(&mut tx, id).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
+        // SP4d-3 Task 7 (review I-3): a migrated original is referenced by
+        // `perm.migrated_from.policy_id` (ON DELETE NO ACTION, migration 0181).
+        // Deleting it would make the undo impossible, so the violation is
+        // answered as an ownership refusal (409) naming the remedy, not a 500.
+        if let Err(e) = sqlx::query(r#"DELETE FROM policy.authz_policies WHERE id = $1"#)
             .bind(id)
             .execute(&mut *tx)
-            .await?;
+            .await
+        {
+            if matches!(&e, sqlx::Error::Database(d)
+                if d.is_foreign_key_violation()
+                    && d.constraint() == Some("migrated_from_policy_id_fkey"))
+            {
+                tx.rollback().await?;
+                return Err(PolicyStoreError::CompilerOwned(format!(
+                    "policy {current_name:?} was migrated into the permission model and is \
+                     kept, switched off, so the migration can be undone; undo the migration \
+                     before deleting it"
+                )));
+            }
+            return Err(e.into());
+        }
         sqlx::query(
             r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
         )
@@ -2074,7 +2364,7 @@ impl PolicyStore {
 
     pub async fn get_policy(&self, id: i64) -> Result<PolicyRow, PolicyStoreError> {
         sqlx::query_as::<_, PolicyRow>(
-            r#"SELECT id, service_id, name, policy_jsonb, enabled, version FROM policy.authz_policies WHERE id = $1"#,
+            r#"SELECT id, service_id, name, policy_jsonb, enabled, version, managed_by FROM policy.authz_policies WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(&self.db.pool)
@@ -2087,7 +2377,7 @@ impl PolicyStore {
     /// this does not inject id/version into the body (the caller/summary does that).
     pub async fn list_policies(&self, service_id: i64) -> Result<Vec<PolicyRow>, PolicyStoreError> {
         Ok(sqlx::query_as::<_, PolicyRow>(
-            r#"SELECT id, service_id, name, policy_jsonb, enabled, version
+            r#"SELECT id, service_id, name, policy_jsonb, enabled, version, managed_by
                FROM policy.authz_policies WHERE service_id = $1 ORDER BY id DESC"#,
         )
         .bind(service_id)
@@ -2100,27 +2390,8 @@ impl PolicyStore {
         &self,
         service_id: i64,
     ) -> Result<Vec<Value>, PolicyStoreError> {
-        // Inject the DB-assigned numeric `id`, `version`, and `isEnabled` into each policy.
-        // The Ranger policy engine NPEs on a policy whose `id` is null, and clients only send
-        // these on the response/CRUD path — the stored body keeps the client's original JSON.
-        let rows = sqlx::query_as::<_, (i64, i64, bool, Value)>(
-            r#"SELECT id, version, enabled, policy_jsonb FROM policy.authz_policies
-               WHERE service_id = $1 AND enabled = true ORDER BY id"#,
-        )
-        .bind(service_id)
-        .fetch_all(&self.db.pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|(id, version, enabled, mut p)| {
-                if let Value::Object(m) = &mut p {
-                    m.insert("id".into(), Value::from(id));
-                    m.insert("version".into(), Value::from(version));
-                    m.insert("isEnabled".into(), Value::from(enabled));
-                }
-                p
-            })
-            .collect())
+        let mut conn = self.db.pool.acquire().await?;
+        enabled_policies_for_service_via(&mut conn, service_id).await
     }
 }
 

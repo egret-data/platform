@@ -144,10 +144,20 @@ pub struct PolicySummary {
     pub is_enabled: bool,
     pub description: String,
     pub labels: Vec<String>,
+    /// Who owns the row (migration 0180): `"operator"`, `"compiler"` or
+    /// `"infra"`. The server refuses edits, toggles and deletes of an
+    /// `"infra"` row, so the profile page withholds those controls.
+    pub managed_by: String,
 }
 
 /// Parse a stored Ranger policy body into a `PolicySummary`.
-pub fn summarize_policy(id: i64, service: &str, enabled: bool, body: &Value) -> PolicySummary {
+pub fn summarize_policy(
+    id: i64,
+    service: &str,
+    enabled: bool,
+    managed_by: &str,
+    body: &Value,
+) -> PolicySummary {
     let policy_type = body.get("policyType").and_then(Value::as_i64).unwrap_or(0);
 
     // resource_path = catalog.schema.table.column, joining the first value of each level present.
@@ -245,6 +255,7 @@ pub fn summarize_policy(id: i64, service: &str, enabled: bool, body: &Value) -> 
             .unwrap_or_default()
             .to_string(),
         service: service.to_string(),
+        managed_by: managed_by.to_string(),
         policy_type: policy_type_name(policy_type).to_string(),
         resource_path,
         principals,
@@ -533,7 +544,7 @@ async fn list_policies(
         .list_policies(svc.id)
         .await?
         .into_iter()
-        .map(|r| summarize_policy(r.id, &svc.name, r.enabled, &r.policy_jsonb))
+        .map(|r| summarize_policy(r.id, &svc.name, r.enabled, &r.managed_by, &r.policy_jsonb))
         .collect();
     if let Some(t) = qp.r#type.as_deref() {
         out.retain(|s| s.policy_type == t);
@@ -873,6 +884,7 @@ async fn trino_config(
     params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
     responses(
         (status = 200, description = "Number of default policies created (0 if the profile already had policies)", body = SeedResult),
+        (status = 400, description = "The profile is not of type trino; the default set is Trino-shaped and its engine would reject it. Nothing is written", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:seed permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
@@ -1489,6 +1501,9 @@ async fn update_policy(
     if is_tag_kind(&v) {
         let (svc, pol) = resolve_tag_service_and_body(&st, &v).await?;
         refuse_service_mismatch(row.service_id, &svc, id)?;
+        // SP4d-3 Task 2: the infrastructure refusals win over the authoring
+        // guards, as `preflight_policy_insert` does on the create path.
+        st.store.preflight_policy_update(id, &pol.name).await?;
         guard_tag_policy_authoring(&st, svc.id, Some(id), &pol).await?;
         st.store
             .update_policy(id, &pol.name, &pol.body, pol.is_enabled)
@@ -1507,6 +1522,7 @@ async fn update_policy(
             "policy name is required".into(),
         ));
     }
+    st.store.preflight_policy_update(id, &pol.name).await?;
     // SP4d debt Task 6, item 1 — the editor's half, with `replacing: Some(id)`
     // so the new body is not compared against the row it is replacing.
     refuse_ambiguous_arbitration(&st, svc.id, Some(id), &pol).await?;
@@ -1642,7 +1658,7 @@ mod tests {
                 {"users": ["alice"], "groups": ["analysts"], "accesses": [{"type": "select"}]}
             ]
         });
-        let s = summarize_policy(42, "trino", true, &body);
+        let s = summarize_policy(42, "trino", true, "operator", &body);
         assert_eq!(s.id, 42);
         assert_eq!(s.name, "allow-analysts-select");
         assert_eq!(s.policy_type, "access");
@@ -1658,13 +1674,13 @@ mod tests {
         let mask = json!({"name":"m","policyType":1,"dataMaskPolicyItems":[
             {"groups":["pii"],"accesses":[{"type":"select"}]}]});
         assert_eq!(
-            summarize_policy(1, "trino", true, &mask).policy_type,
+            summarize_policy(1, "trino", true, "operator", &mask).policy_type,
             "masking"
         );
         let rf = json!({"name":"r","policyType":2,"rowFilterPolicyItems":[
             {"users":["bob"],"accesses":[{"type":"select"}]}]});
         assert_eq!(
-            summarize_policy(2, "trino", true, &rf).policy_type,
+            summarize_policy(2, "trino", true, "operator", &rf).policy_type,
             "rowfilter"
         );
     }

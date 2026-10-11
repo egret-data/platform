@@ -55,8 +55,22 @@ pub mod explain_wire;
 // — the one place egret emits a tag ACCESS policy, which AMENDS SP4a's D2. The
 // argument is in that module's own doc comment, at the site.
 pub(crate) mod clearance;
+// SP4d-3 Task 5: classify every policy of a profile (owner, verdict, blocker
+// sentences) for `GET /perm/policies/services/{id}/classify`.
+pub mod classify;
+// SP4d-3 Task 6: the equivalence gate — probes derived from a profile's
+// before/after downloads, compared per plugin version over every affected
+// profile. Pure; Task 7's migration transaction is its caller.
+pub mod equivalence;
+// SP4d-3 Task 3: the closed grammar from a hand-written Ranger access policy to
+// the `Grant`s it is equivalent to, or every named reason it is not. Pure; the
+// inverse of `grants::compile_grant` — see that module's own doc comment.
+pub mod grammar;
+// SP4d-3 Task 7: the migration transaction (re-classify, write, recompile,
+// switch off, provenance, re-gate every affected profile) and its undo.
 pub mod grants;
 pub(crate) mod members;
+pub mod migrate;
 pub mod role_membership;
 pub mod routes;
 pub mod rules;

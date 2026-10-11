@@ -6156,7 +6156,7 @@
           "perm"
         ],
         "summary": "POST because the request carries a subject, an action and a whole target\nscope — a body, not a query string. **It is nonetheless read-only**: it\nopens no transaction and issues no write. It gates on `policy:read`, not\n`policy:update`, precisely so the method does not decide the permission.",
-        "description": "# What this answers with, and why it changed (SP4d-2a)\n\nUntil SP4d-2a this handler evaluated egret's OWN permission model\n(`egret_perm::eval::evaluate`) and never read `policy.authz_policies` at\nall. The engine evaluates the compiled artifact it downloads from egret.\nThose were two implementations of one question, and they had already been\nmeasured disagreeing in production — a predecessor package caught `explain`\nreporting a decision the engine did not make. So there is now ONE answer\nand it is the engine's: the disagreement class disappears instead of\nbecoming visible.\n\nIt also removes a real blindness. Auto-bind seeds thirteen `egret-admin`\nhierarchies granting `*` on everything onto every generated profile\n(`egret_policy::default_policies`), and the model-only evaluator could not\nsee one of them: an operator asking \"why can this person read that?\" got\n`no_grant_matched` while the engine allowed.\n\nFour properties of the implementation below are load-bearing:\n\n1. **The artifact is assembled by [`artifact_for`], which mirrors\n   `download_policies` field for field and loads each profile's policy set\n   through `enabled_policies_for_service` — the same assembler the download\n   route uses, not `list_policies`.** \"What explain evaluated\" and \"what the\n   engine received\" must not be able to drift.\n2. **`roles` and `groups` are empty** — see [`ExplainSubject`].\n3. **`resolved_tags` carries egret's own resolution, and\n   [`resolved_tags_for_target`] is what decides whether it may.** Until\n   SP4d-2b Task 7 this was `None` unconditionally, which made every verdict on\n   every catalog a profile serves `Undecidable` while that profile's tag block\n   held any policy at all. It is now a real tag set for the one resolution\n   shown enricher-equivalent, and still `None` — so still a refusal — for\n   every state where it is not. The whole argument is on that function.\n4. **A `write` explain is several evaluations**, one per Ranger access type\n   the action maps to on that engine, reported separately.",
+        "description": "# What this answers with, and why it changed (SP4d-2a)\n\nUntil SP4d-2a this handler evaluated egret's OWN permission model\n(`egret_perm::eval::evaluate`) and never read `policy.authz_policies` at\nall. The engine evaluates the compiled artifact it downloads from egret.\nThose were two implementations of one question, and they had already been\nmeasured disagreeing in production — a predecessor package caught `explain`\nreporting a decision the engine did not make. So there is now ONE answer\nand it is the engine's: the disagreement class disappears instead of\nbecoming visible.\n\nIt also removes a real blindness. Auto-bind seeds thirteen `egret-admin`\nhierarchies granting `*` on everything onto every generated profile\n(`egret_policy::default_policies`), and the model-only evaluator could not\nsee one of them: an operator asking \"why can this person read that?\" got\n`no_grant_matched` while the engine allowed.\n\nFour properties of the implementation below are load-bearing:\n\n1. **The artifact is assembled by [`artifact_via`], which mirrors\n   `download_policies` field for field and loads each profile's policy set\n   through `enabled_policies_for_service` — the same assembler the download\n   route uses, not `list_policies`.** \"What explain evaluated\" and \"what the\n   engine received\" must not be able to drift.\n2. **`roles` and `groups` are empty** — see [`ExplainSubject`].\n3. **`resolved_tags` carries egret's own resolution, and\n   [`resolved_tags_for_target`] is what decides whether it may.** Until\n   SP4d-2b Task 7 this was `None` unconditionally, which made every verdict on\n   every catalog a profile serves `Undecidable` while that profile's tag block\n   held any policy at all. It is now a real tag set for the one resolution\n   shown enricher-equivalent, and still `None` — so still a refusal — for\n   every state where it is not. The whole argument is on that function.\n4. **A `write` explain is several evaluations**, one per Ranger access type\n   the action maps to on that engine, reported separately.",
         "operationId": "explain",
         "requestBody": {
           "content": {
@@ -6482,6 +6482,299 @@
           },
           "409": {
             "description": "The grant changed concurrently and now affects a profile this request did not lock; retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/policies/services/{service_id}/classify": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP4d-3 Task 5: every policy of one profile, classified — its owner,\nwhether it can be migrated into the permission model, and if not, every\nreason as a sentence naming the offending value. Read-only; `infra` and\n`compiler` rows are reported (as not migratable, with the reason), never\nomitted. The `classify` module doc says how the service kind, the catalog\nlookup and the tag lookup are derived from the profile.",
+        "operationId": "classify_service_policies",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "description": "policy.authz_services id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every policy of the profile, ordered by id, with its owner, verdict and blocker sentences",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ClassifiedPolicy"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/policies/services/{service_id}/migrate": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP4d-3 Task 7: migrate hand-written policies of one profile into the\npermission model, PROVABLY — see `crate::migrate` for the transaction, its\norder, and the refusal order. The equivalence gate runs inside the\ntransaction over every profile the new objects compile into, against the\ndownloads as they stand after the write.",
+        "description": "**`dry_run` runs the identical code and differs in exactly one place: the\nline below that decides to commit.** A proven migration answers 200; one\nthe gate did not prove answers 422 with the same body shape (its\ndisagreements, or why the gate refused), and nothing is written.",
+        "operationId": "migrate_service_policies",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "description": "policy.authz_services id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MigrateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Proved equivalent on every affected profile; committed unless `dry_run`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MigrateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A named policy is not migratable (the classifier's sentences), or the request names no policy / a policy twice",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such profile, or no policy of that name in it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already migrated, not hand-written (compiler or infra owned), or a rule name it would create is taken",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Not proved: the disagreements on any affected profile, or why the gate could not answer. Nothing was written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MigrateResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/policies/services/{service_id}/migrate/undo": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP4d-3 Task 7: undo migrations — delete the grants and rules provenance\nnames, recompile, switch each original back on, delete the provenance. One\ntransaction.",
+        "operationId": "undo_service_policy_migration",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "description": "policy.authz_services id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UndoRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Every named migration undone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UndoResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request names no policy, or a policy twice",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such profile, or no migration on record for a named policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing was changed: an object the migration created was edited or deleted since, or the original was edited or switched on (each change is named); or a profile became reachable from the migrated objects while undo waited for its locks (retry)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7541,6 +7834,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SeedResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The profile is not of type trino; the default set is Trino-shaped and its engine would reject it. Nothing is written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -33668,6 +33971,67 @@
           }
         }
       },
+      "ClassifiedPolicy": {
+        "type": "object",
+        "description": "One policy of the profile, as the classifier reports it.",
+        "required": [
+          "id",
+          "name",
+          "managed_by",
+          "enabled",
+          "migratable",
+          "blockers"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "managed_by": {
+            "type": "string",
+            "description": "`compiler` | `infra` | `operator` — `policy.authz_policies.managed_by`."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "The `enabled` COLUMN — what decides whether the engine downloads it."
+          },
+          "migratable": {
+            "type": "boolean"
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every reason the policy cannot be migrated, as operator-readable\nsentences naming the offending value. Empty iff `migratable`."
+          },
+          "proposed": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProposedObjects",
+                "description": "For a migratable policy, the model objects it would become."
+              }
+            ]
+          },
+          "migrated": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MigrationRecord",
+                "description": "Present iff `perm.migrated_from` records this policy as migrated —\nwhich is what tells a migrated original apart from one switched off by\nhand (both have `enabled = false`). A migrated policy is never\n`migratable`, and its one blocker sentence says how to undo it."
+              }
+            ]
+          }
+        }
+      },
       "ClientDto": {
         "type": "object",
         "required": [
@@ -37522,6 +37886,56 @@
           }
         }
       },
+      "GatedProfile": {
+        "type": "object",
+        "description": "One profile the gate evaluated, and the artifact diff the engine will see.",
+        "required": [
+          "service_id",
+          "service_name",
+          "plugin_versions",
+          "probes",
+          "disagreements",
+          "removed_policies",
+          "added_policies"
+        ],
+        "properties": {
+          "service_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "service_name": {
+            "type": "string"
+          },
+          "plugin_versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WirePluginVersion"
+            }
+          },
+          "probes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "disagreements": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "removed_policies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Policy names (resource and tag) the download no longer serves."
+          },
+          "added_policies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Policy names the download now serves that it did not. A compiled name\nembeds its grant or rule id (`perm-grant-<id>`), so when `committed` is\nfalse that id is the rolled-back write's and is never stored; the real\nmigration's compiled policies are named when written."
+          }
+        }
+      },
       "Grant": {
         "type": "object",
         "description": "One row of `perm.grants` plus its principal subtract (`perm.grant_principals`).",
@@ -38399,6 +38813,177 @@
           }
         }
       },
+      "MigrateRequest": {
+        "type": "object",
+        "description": "`POST …/migrate`.",
+        "required": [
+          "policy_names"
+        ],
+        "properties": {
+          "policy_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Names of policies of THIS profile, exactly as stored."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Run everything, report it, and roll back."
+          }
+        }
+      },
+      "MigrateResponse": {
+        "type": "object",
+        "description": "What a migration (or its dry run) did, and the proof.",
+        "required": [
+          "dry_run",
+          "committed",
+          "equivalent",
+          "policies",
+          "profiles",
+          "probe_evaluations",
+          "disagreements",
+          "compile",
+          "notices"
+        ],
+        "properties": {
+          "dry_run": {
+            "type": "boolean"
+          },
+          "committed": {
+            "type": "boolean",
+            "description": "Whether the transaction committed. `false` for every dry run and for\nevery migration the gate did not prove."
+          },
+          "equivalent": {
+            "type": "boolean",
+            "description": "The gate ran over every affected profile and found no disagreement."
+          },
+          "refusal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the gate refused to answer at all (no disagreement list is a proof\nthen). Absent when it answered."
+          },
+          "policies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MigratedPolicy"
+            },
+            "description": "Each migrated policy and the model objects it became."
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GatedProfile"
+            },
+            "description": "EVERY profile the gate evaluated — the source and every other profile\nthe new objects compile into — with what changed in its download."
+          },
+          "probe_evaluations": {
+            "type": "integer",
+            "description": "Probe evaluations run (probes × plugin versions, over every profile).",
+            "minimum": 0
+          },
+          "disagreements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WireDisagreement"
+            },
+            "description": "Every probe on which a profile answers differently after the write."
+          },
+          "compile": {
+            "$ref": "#/components/schemas/CompileResponse",
+            "description": "What the recompile did."
+          },
+          "notices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Consequences to read before committing (see the module doc)."
+          }
+        }
+      },
+      "MigratedPolicy": {
+        "type": "object",
+        "description": "One migrated policy.",
+        "required": [
+          "policy_id",
+          "policy_name",
+          "grant_ids",
+          "rule_ids"
+        ],
+        "properties": {
+          "policy_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "policy_name": {
+            "type": "string"
+          },
+          "grant_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The grants it became. When `committed` is false (a dry run, or a\nmigration the gate did not prove) these ids belong to a write that was\nrolled back and will never exist: a real migration assigns new ids when\nit writes. Use the count, not the ids, to describe a preview."
+          },
+          "rule_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The rules it became; the same caveat as `grant_ids`."
+          }
+        }
+      },
+      "MigrationRecord": {
+        "type": "object",
+        "description": "One `perm.migrated_from` row, as the classifier and the page read it.",
+        "required": [
+          "policy_name",
+          "grant_ids",
+          "rule_ids",
+          "probes_proved",
+          "migrated_by",
+          "migrated_at"
+        ],
+        "properties": {
+          "policy_name": {
+            "type": "string",
+            "description": "The policy's name when it was migrated (it may have been renamed\nsince; provenance is keyed by policy id)."
+          },
+          "grant_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "rule_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "probes_proved": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many probe evaluations agreed when the migration was proved."
+          },
+          "migrated_by": {
+            "type": "string"
+          },
+          "migrated_at": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          }
+        }
+      },
       "NamespaceDto": {
         "type": "object",
         "required": [
@@ -39158,7 +39743,8 @@
           "permissions",
           "is_enabled",
           "description",
-          "labels"
+          "labels",
+          "managed_by"
         ],
         "properties": {
           "id": {
@@ -39200,6 +39786,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "managed_by": {
+            "type": "string",
+            "description": "Who owns the row (migration 0180): `\"operator\"`, `\"compiler\"` or\n`\"infra\"`. The server refuses edits, toggles and deletes of an\n`\"infra\"` row, so the profile page withholds those controls."
           }
         }
       },
@@ -39463,6 +40053,24 @@
           },
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "ProposedObjects": {
+        "type": "object",
+        "description": "How many model objects a migratable policy becomes. No `clearances`:\nclearance migration is out of scope ([`Blocker::ClearanceNotExpressible`]).",
+        "required": [
+          "grants",
+          "rules"
+        ],
+        "properties": {
+          "grants": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rules": {
+            "type": "integer",
+            "minimum": 0
           }
         }
       },
@@ -42882,6 +43490,76 @@
           }
         }
       },
+      "UndoRequest": {
+        "type": "object",
+        "description": "`POST …/migrate/undo`.",
+        "required": [
+          "policy_names"
+        ],
+        "properties": {
+          "policy_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "UndoResponse": {
+        "type": "object",
+        "description": "What `undo` did.",
+        "required": [
+          "policies",
+          "compile",
+          "notices"
+        ],
+        "properties": {
+          "policies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UndonePolicy"
+            }
+          },
+          "compile": {
+            "$ref": "#/components/schemas/CompileResponse"
+          },
+          "notices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Consequences that outlive the undo (review I-2)."
+          }
+        }
+      },
+      "UndonePolicy": {
+        "type": "object",
+        "description": "One restored policy.",
+        "required": [
+          "policy_id",
+          "policy_name",
+          "grants_deleted",
+          "rules_deleted"
+        ],
+        "properties": {
+          "policy_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "policy_name": {
+            "type": "string"
+          },
+          "grants_deleted": {
+            "type": "integer",
+            "description": "Model objects the migration created, deleted by the undo.",
+            "minimum": 0
+          },
+          "rules_deleted": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
       "UndropBody": {
         "type": "object",
         "required": [
@@ -43671,6 +44349,15 @@
           }
         }
       },
+      "WireCheck": {
+        "type": "string",
+        "description": "Wire mirror of [`Check`].",
+        "enum": [
+          "access",
+          "data_mask",
+          "row_filter"
+        ]
+      },
       "WireDecision": {
         "oneOf": [
           {
@@ -43760,6 +44447,81 @@
           "deny_all_else",
           "no_policy_matched"
         ]
+      },
+      "WireDisagreement": {
+        "type": "object",
+        "description": "Wire mirror of [`Disagreement`], plus its one-line rendering.",
+        "required": [
+          "service_id",
+          "service_name",
+          "plugin_version",
+          "check",
+          "user",
+          "groups",
+          "roles",
+          "tags",
+          "tagging",
+          "access_type",
+          "resource",
+          "before",
+          "after",
+          "sentence"
+        ],
+        "properties": {
+          "service_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "service_name": {
+            "type": "string"
+          },
+          "plugin_version": {
+            "$ref": "#/components/schemas/WirePluginVersion"
+          },
+          "check": {
+            "$ref": "#/components/schemas/WireCheck"
+          },
+          "user": {
+            "type": "string"
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tagging": {
+            "$ref": "#/components/schemas/WireTagging"
+          },
+          "access_type": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "before": {
+            "type": "string"
+          },
+          "after": {
+            "type": "string"
+          },
+          "sentence": {
+            "type": "string",
+            "description": "`Disagreement`'s `Display` — the sentence the page shows."
+          }
+        }
       },
       "WireEngineType": {
         "type": "string",
@@ -44167,6 +44929,14 @@
           }
         ],
         "description": "Wire mirror of [`TagResourceProblem`]: why a tag policy's resource map is\none the evaluator cannot filter the way Ranger's `RangerResourceTrie` does\n(SP4d-2b Task 2).\n\nCarried as its own `kind`, not a formatted string, for the same reason\n[`WireTagPolicyBlock`] carries a `count`: a steward has to be able to tell\n\"this policy names a second resource level\" from \"this policy's tag value is\na wildcard\", and the remedies differ."
+      },
+      "WireTagging": {
+        "type": "string",
+        "description": "Wire mirror of [`Tagging`].",
+        "enum": [
+          "actual",
+          "hypothetical"
+        ]
       },
       "WireUndecidableCause": {
         "oneOf": [

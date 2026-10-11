@@ -25,6 +25,10 @@ egret-perm.workspace = true
 egret-policy.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
+# SP4d-3 Task 7 fix round 1 (I-2): content hashes of what a migration
+# created, so undo can refuse when any of it changed since.
+sha2.workspace = true
+hex.workspace = true
 sqlx.workspace = true
 # SP4a Task 7 fix round 1: a skipped grant/rule (WorkspaceMembers, not yet
 # expanded) must not vanish silently — the only production caller
