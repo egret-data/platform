@@ -65,10 +65,10 @@ Existing rows keep `NULL`; nothing is guessed. The UI marks their times as estim
 - `started_at` is set once, the first time the execution enters `RUNNING`.
 - `ended_at` is set once, when the execution enters a terminal state (`models/state.rs` `is_terminated`).
 - A resumed pause does not move `started_at`.
-- If a later transition leaves a terminal state, which nothing does today, `ended_at` is cleared. A test pins that no current path does this.
+- When a transition leaves a terminal state, `ended_at` is cleared, and it is set afresh when the row next becomes terminal. *(Corrected 2026-10-11, Task 1: `RETRY_FAILED_TASK` does this today — RUNNING, FAILED, RETRYING, RUNNING, SUCCESS — and a test pins it.)*
 
 **Task runs**
-- `started_at` is set once, the first time the run enters `RUNNING`. For a worker task, that is when the worker claims and starts it. For a flowable, it is when the executor first runs it.
+- `started_at` is set once, the first time the run enters `RUNNING`. For a worker task, that is when the run enters `RUNNING`, which is the first attempt's start; a worker's claim sets only a lease, so time queued before the claim is inside the bar. For a flowable, it is when the executor first runs it.
 - `ended_at` is set once, when the run enters a terminal state.
 
 **Attempts**
@@ -91,7 +91,7 @@ Existing rows keep `NULL`; nothing is guessed. The UI marks their times as estim
 
 It is a 400 to send both, or to send either with a malformed value.
 
-Indexes on `(workspace_id, parent_execution_id)` and `(workspace_id, trigger_execution_id)`, partial where the column is non-null, keep both filters cheap.
+Both filters are served by existing indexes that already lead with those columns (`workflow_executions_loop_run_idx`, migration 0135, and `workflow_executions_trigger_idx`, migration 0138), as `EXPLAIN` showed. No new index is added. *(Corrected 2026-10-11, Task 1: new indexes were built and measured, and the planner used neither.)* A test pins the plan.
 
 ### 3.4 DTOs
 

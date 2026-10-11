@@ -72,10 +72,10 @@ Các hàng đã có giữ `NULL`, không đoán. UI đánh dấu thời gian c�
 - `started_at` được gán một lần, khi execution vào `RUNNING` lần đầu.
 - `ended_at` được gán một lần, khi execution vào một state kết thúc (`is_terminated` trong `models/state.rs`).
 - Một lần resume sau pause không làm dời `started_at`.
-- Nếu về sau có lần chuyển state rời khỏi state kết thúc (hiện chưa đường nào làm vậy), `ended_at` bị xoá về null. Có test khẳng định hiện không đường nào làm thế.
+- Khi một lần chuyển state rời khỏi state kết thúc, `ended_at` bị xoá về null, và được gán lại khi hàng đó kết thúc lần nữa. *(Đính chính 2026-10-11, Task 1: `RETRY_FAILED_TASK` đang làm đúng như vậy — RUNNING, FAILED, RETRYING, RUNNING, SUCCESS — và có test giữ điều này.)*
 
 **Task run:**
-- `started_at` được gán một lần, khi run vào `RUNNING` lần đầu: với task do worker chạy là lúc worker nhận và bắt đầu chạy; với task flowable là lúc executor chạy nó lần đầu.
+- `started_at` được gán một lần, khi run vào `RUNNING` lần đầu: với task do worker chạy là lúc run vào `RUNNING`, cũng là lúc attempt đầu tiên bắt đầu; việc worker nhận task chỉ đặt lease, nên thời gian chờ trong hàng đợi trước khi được nhận nằm trong thanh; với task flowable là lúc executor chạy nó lần đầu.
 - `ended_at` được gán một lần, khi run vào một state kết thúc.
 
 **Attempt:**
@@ -101,7 +101,7 @@ Các hàng đã có giữ `NULL`, không đoán. UI đánh dấu thời gian c�
 
 Gửi cả hai bộ lọc cùng lúc, hoặc gửi một bộ lọc với giá trị sai định dạng, đều trả 400.
 
-Index partial trên `(workspace_id, parent_execution_id)` và `(workspace_id, trigger_execution_id)`, chỉ cho các hàng có cột đó khác null, giúp cả hai bộ lọc chạy nhanh.
+Cả hai bộ lọc dùng các index đã có, vốn bắt đầu bằng đúng các cột đó (`workflow_executions_loop_run_idx`, migration 0135, và `workflow_executions_trigger_idx`, migration 0138), như `EXPLAIN` cho thấy. Không thêm index mới. *(Đính chính 2026-10-11, Task 1: đã thử dựng index mới và đo, planner không dùng cái nào.)* Có test giữ query plan này.
 
 ### 3.4 DTO
 
