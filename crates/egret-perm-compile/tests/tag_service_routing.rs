@@ -106,6 +106,18 @@ async fn a_trino_tag_rule_lands_in_the_tag_service_and_is_reaped_from_it_on_dele
         .create_service(&tag_service_name, "tag", &serde_json::json!({}))
         .await
         .expect("create tag service");
+    // A SECOND resource profile linking the same tag service. Its download
+    // embeds the same `tagPolicies` block, so the recompile of `profile` below
+    // changes what its engine must enforce too — and nothing recompiles it.
+    // Migration 0182 is what carries the tag service's bump to it.
+    let sibling = policy
+        .create_service(
+            &unique("trino_tagroute_sib"),
+            "trino",
+            &serde_json::json!({ "tagService": tag_service_name }),
+        )
+        .await
+        .expect("create sibling profile");
 
     let tag_key = unique("route-pii");
     sqlx::query("INSERT INTO tags (key, name) VALUES ($1, 'Route PII')")
@@ -132,6 +144,7 @@ async fn a_trino_tag_rule_lands_in_the_tag_service_and_is_reaped_from_it_on_dele
 
     let tag_version_before = policy_version(pool, tag_service.id).await;
     let profile_version_before = policy_version(pool, profile.id).await;
+    let sibling_version_before = policy_version(pool, sibling.id).await;
 
     recompile_service(&perm, &policy, profile.id)
         .await
@@ -258,6 +271,12 @@ async fn a_trino_tag_rule_lands_in_the_tag_service_and_is_reaped_from_it_on_dele
         profile_version_before + 1,
         "the profile's version must bump too, or its plugin is answered 304 and never \
          re-downloads the tagPolicies block"
+    );
+    assert_eq!(
+        policy_version(pool, sibling.id).await,
+        sibling_version_before + 1,
+        "a profile that shares the tag service embeds the same tagPolicies block, so it \
+         must bump too, or its engine is answered 304 and keeps the old tag policies"
     );
 
     // ── 3. the download actually serves it ───────────────────────────────────

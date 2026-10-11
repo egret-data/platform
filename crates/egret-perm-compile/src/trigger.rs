@@ -1061,21 +1061,52 @@ async fn apply_diff_in_tx(
     if summary.wrote_anything() {
         // The profile's own version always bumps when anything changed: its
         // download embeds the tag service's policies and is gated by THIS
-        // version (see this function's doc comment).
-        wrote_under.insert(profile_service_id);
-        for sid in wrote_under {
-            sqlx::query(
-                "UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() \
-                 WHERE id = $1",
+        // version (see this function's doc comment). Exactly once: since
+        // migration 0182, bumping a `tag` service already bumps every profile
+        // that links it — this one included — so the profile is bumped here
+        // only if nothing else moved it in this transaction.
+        let version_of = |sid: i64| {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT policy_version FROM policy.authz_services WHERE id = $1",
             )
             .bind(sid)
-            .execute(&mut **tx)
+        };
+        let before: i64 = version_of(profile_service_id)
+            .fetch_one(&mut **tx)
             .await
             .map_err(db_err)?;
+        for sid in wrote_under
+            .iter()
+            .copied()
+            .filter(|sid| *sid != profile_service_id)
+        {
+            bump_policy_version(tx, sid).await?;
+        }
+        let after: i64 = version_of(profile_service_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(db_err)?;
+        if after == before {
+            bump_policy_version(tx, profile_service_id).await?;
         }
     }
 
     Ok(summary)
+}
+
+async fn bump_policy_version(
+    tx: &mut Transaction<'_, Postgres>,
+    service_id: i64,
+) -> Result<(), CompileError> {
+    sqlx::query(
+        "UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() \
+         WHERE id = $1",
+    )
+    .bind(service_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(())
 }
 
 /// Idempotent provenance write: `perm.compiled` names which grant/rule
