@@ -1128,39 +1128,40 @@ pub const UNDO_GENERATED_NOTICE: &str =
      egret's permission model after the undo: its hand-written policies can be edited and \
      deleted, but a NEW hand-written policy still cannot be created in it.";
 
-/// `migrate/undo`, on the caller's transaction (the caller commits): delete
-/// the objects provenance names, recompile, switch the original back on,
-/// delete the provenance row. A MECHANICAL rollback — possible only because
-/// the original was switched off, not deleted.
-///
-/// **Guarded by content hashes** (review I-2, the user's ruling of
-/// 2026-10-11): every created grant/rule and the original are re-hashed in
-/// this transaction, and if ANY differs from what provenance recorded — an
-/// object edited or deleted since, or the original edited or switched back on
-/// — the answer is 409 naming each change, and nothing is written. An object
-/// edited since the migration is no longer the migration's to delete.
-///
-/// Names resolve to the policy as it is NOW (a renamed original is undone by
-/// its new name) and provenance is read by policy id. 404 for a profile, a
-/// name, or a policy with no migration on record.
-pub(crate) async fn undo_in_tx(
+/// What undo found for its named policies at one point in time.
+struct UndoRecord {
+    policy_id: i64,
+    policy_name: String,
+    grants: Vec<egret_perm::Grant>,
+    rules: Vec<egret_perm::Rule>,
+}
+
+/// One reading of every named policy's provenance, created objects and
+/// original: the records of what is still intact, the changes found (a missing
+/// or differently-hashed object), and the profiles those objects reach NOW.
+struct UndoReading {
+    records: Vec<UndoRecord>,
+    changed: Vec<String>,
+    /// Profiles the intact objects reach, plus their tag-service sharers, plus
+    /// the requested profile — ascending, deduplicated.
+    affected: Vec<i64>,
+}
+
+/// Read and hash-check the named policies' migrations. `lock_provenance`
+/// takes `FOR UPDATE` on the provenance rows; it is set only on the reading
+/// made under the profile locks (migrate takes profile locks first, then writes
+/// provenance, so undo must not hold a provenance row while it waits for a
+/// profile).
+async fn read_undo_state(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
-    req: &UndoRequest,
-) -> Result<UndoResponse, PermHttpError> {
-    validate_names(&req.policy_names)?;
-    get_service_by_id_via(tx, service_id).await?;
-
-    struct Record {
-        policy_id: i64,
-        policy_name: String,
-        grants: Vec<egret_perm::Grant>,
-        rules: Vec<egret_perm::Rule>,
-    }
+    names: &[String],
+    lock_provenance: bool,
+) -> Result<UndoReading, PermHttpError> {
     let mut records = Vec::new();
     let mut changed: Vec<String> = Vec::new();
     let mut affected: Vec<i64> = Vec::new();
-    for name in &req.policy_names {
+    for name in names {
         let policy_id: Option<i64> = sqlx::query_scalar(
             "SELECT id FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
         )
@@ -1173,14 +1174,18 @@ pub(crate) async fn undo_in_tx(
             return Err(PermHttpError::NotFound);
         };
         type Prov = (Vec<Uuid>, Vec<Uuid>, Vec<String>, Vec<String>, String);
-        let row: Option<Prov> = sqlx::query_as(
+        let sql = if lock_provenance {
             "SELECT grant_ids, rule_ids, grant_hashes, rule_hashes, original_hash \
-               FROM perm.migrated_from WHERE policy_id = $1 FOR UPDATE",
-        )
-        .bind(policy_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(PermHttpError::db)?;
+               FROM perm.migrated_from WHERE policy_id = $1 FOR UPDATE"
+        } else {
+            "SELECT grant_ids, rule_ids, grant_hashes, rule_hashes, original_hash \
+               FROM perm.migrated_from WHERE policy_id = $1"
+        };
+        let row: Option<Prov> = sqlx::query_as(sql)
+            .bind(policy_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(PermHttpError::db)?;
         let Some((grant_ids, rule_ids, grant_hashes, rule_hashes, original)) = row else {
             return Err(PermHttpError::NotFound);
         };
@@ -1224,26 +1229,92 @@ pub(crate) async fn undo_in_tx(
                  since it was migrated"
             ));
         }
-        records.push(Record {
+        records.push(UndoRecord {
             policy_id,
             policy_name: name.clone(),
             grants,
             rules,
         });
     }
-    if !changed.is_empty() {
-        return Err(PermHttpError::Conflict(format!(
-            "undo refused, nothing was changed: {}. Undo deletes exactly what the migration \
-             created and restores exactly what it switched off; reconcile these by hand (or \
-             revert the edits) first.",
-            changed.join("; ")
-        )));
-    }
-
     // Review I-4: the profiles sharing a recompiled profile's tag service.
     let affected = with_tag_service_sharers(tx, &affected).await?;
+    let affected = merge_service_ids(&affected, &[service_id]);
+    Ok(UndoReading {
+        records,
+        changed,
+        affected,
+    })
+}
+
+fn undo_conflict(changed: &[String]) -> PermHttpError {
+    PermHttpError::Conflict(format!(
+        "undo refused, nothing was changed: {}. Undo deletes exactly what the migration \
+         created and restores exactly what it switched off; reconcile these by hand (or \
+         revert the edits) first.",
+        changed.join("; ")
+    ))
+}
+
+/// `migrate/undo`, on the caller's transaction (the caller commits): delete
+/// the objects provenance names, recompile, switch the original back on,
+/// delete the provenance row. A MECHANICAL rollback — possible only because
+/// the original was switched off, not deleted.
+///
+/// **Guarded by content hashes** (review I-2, the user's ruling of
+/// 2026-10-11): every created grant/rule and the original are re-hashed in
+/// this transaction, and if ANY differs from what provenance recorded — an
+/// object edited or deleted since, or the original edited or switched back on
+/// — the answer is 409 naming each change, and nothing is written. An object
+/// edited since the migration is no longer the migration's to delete.
+///
+/// **The check that counts is made UNDER the profile locks** (re-review N-1).
+/// Every hand-written write to a profile — a grant or rule PATCH, the policy
+/// editor — takes that profile's `authz_services` row lock before it writes,
+/// and commits holding it. So: a first reading, taken before any lock, only
+/// decides WHICH profiles to lock (the ones the intact objects reach); then
+/// those locks are taken (ascending, as `lock_services_in_tx` requires); then
+/// everything is read and hashed AGAIN, and that second reading alone decides
+/// 409 or proceed. A writer that commits between the readings is seen by the
+/// second; a writer that is in flight holds a lock this transaction waits for,
+/// and its commit is visible to the statements after the wait (READ COMMITTED);
+/// no writer can commit between the second reading and the DELETEs, because
+/// the locks are held to commit. A grant moved to another catalog in the gap
+/// changes its hash, so it is a 409, not a silent miss of the new profile; and
+/// if the second reading reaches a profile the first did not (a catalog
+/// re-bound to another engine), that is a 409 too, because deleting would
+/// leave that profile's compiled policy behind.
+///
+/// Names resolve to the policy as it is NOW (a renamed original is undone by
+/// its new name) and provenance is read by policy id. 404 for a profile, a
+/// name, or a policy with no migration on record.
+pub(crate) async fn undo_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    service_id: i64,
+    req: &UndoRequest,
+) -> Result<UndoResponse, PermHttpError> {
+    validate_names(&req.policy_names)?;
+    get_service_by_id_via(tx, service_id).await?;
+
+    // Reading 1, unlocked: which profiles to lock. Its verdict is discarded.
+    let first = read_undo_state(tx, service_id, &req.policy_names, false).await?;
     // Before any DELETE — see `lock_services_in_tx`.
-    lock_services_in_tx(tx, &merge_service_ids(&affected, &[service_id])).await?;
+    lock_services_in_tx(tx, &first.affected).await?;
+
+    // Reading 2, under the locks: the verdict.
+    let UndoReading {
+        records,
+        changed,
+        affected,
+    } = read_undo_state(tx, service_id, &req.policy_names, true).await?;
+    if !changed.is_empty() {
+        return Err(undo_conflict(&changed));
+    }
+    if let Some(missed) = affected.iter().find(|id| !first.affected.contains(id)) {
+        return Err(PermHttpError::Conflict(format!(
+            "undo refused, nothing was changed: profile {missed} became reachable from the \
+             migrated objects while undo waited for its locks. Retry the undo."
+        )));
+    }
     let mut out = Vec::new();
     for r in &records {
         let mut grants_deleted = 0;

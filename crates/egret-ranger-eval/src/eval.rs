@@ -1903,7 +1903,7 @@ pub fn evaluate_prepared(
 /// That is Ranger's own lifecycle — the plugin builds its policy engine once
 /// per download — and the decision is the same: [`evaluate_prepared`] and its
 /// mask/row-filter twins run the SAME body as [`evaluate`] and differ only in
-/// where these inputs come from. `tests/prepared.rs` asserts equal results
+/// where these inputs come from. `tests/differential.rs` asserts equal results
 /// over the whole differential corpus and the test suites' fixtures.
 pub struct PreparedPolicySet<'a> {
     policies: &'a ServicePolicySet,

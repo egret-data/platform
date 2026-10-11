@@ -208,7 +208,7 @@ pub fn match_policy_resources(
 /// asking it many times is Ranger's own lifecycle (the plugin builds one
 /// evaluator per policy at load, not per request). [`Self::matches`] returns
 /// exactly what `match_policy_resources` returns for the same
-/// `(policy, request, def)`; `tests/prepared.rs` checks that on the whole
+/// `(policy, request, def)`; `tests/differential.rs` checks that on the whole
 /// corpus.
 pub struct PreparedPolicyResources<'a> {
     maps: Vec<(ResourceMapSource, PolicyResourceMatcher<'a>)>,

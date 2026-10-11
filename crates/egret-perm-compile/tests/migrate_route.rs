@@ -42,6 +42,7 @@ struct Fixture {
     catalog: String,
     catalog_id: Uuid,
     warehouse_id: Uuid,
+    dsn: String,
 }
 
 async fn trino_profile_with_engine(db: &Db, policy: &PolicyStore, catalog_id: Uuid) -> i64 {
@@ -181,6 +182,7 @@ async fn setup() -> Option<Fixture> {
         catalog,
         catalog_id,
         warehouse_id,
+        dsn,
     })
 }
 
@@ -925,6 +927,106 @@ async fn undo_after_the_migrated_grant_was_edited_is_409_and_changes_nothing() {
     );
     assert!(e.contains("created by the migration"), "{e}");
     assert_eq!(grants_on_catalog(&f).await, 1, "the grant is still there");
+    assert!(!enabled(&f, id).await, "the original is still off");
+    assert_eq!(provenance(&f, f.p).await.len(), 1);
+}
+
+/// Re-review N-1: the hash check must be made UNDER the profile locks. A second
+/// session holds the source profile's row lock (what every hand-written write
+/// holds until it commits), undo starts and parks on it, and while it is parked
+/// the migrated grant is edited and committed. Undo's first reading, taken
+/// before the lock, saw an intact grant; only a reading made after the lock is
+/// held can see the edit. It must answer 409 and delete nothing.
+///
+/// Driven without a sleep: the holder's backend pid is polled in
+/// `pg_blocking_pids` until some backend is blocked by it, and only then is the
+/// edit committed. (With the check before the lock, this test fails: undo
+/// deletes the edited grant and answers 200.)
+#[tokio::test]
+async fn undo_whose_grant_was_edited_while_it_waited_for_the_lock_is_409_and_deletes_nothing() {
+    use sqlx::Connection as _;
+    let Some(f) = setup().await else { return };
+    let name = unique("alice reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gid: Uuid = body["policies"][0]["grant_ids"][0]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let mut holder = sqlx::PgConnection::connect(&f.dsn).await.expect("holder");
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut holder)
+        .await
+        .expect("holder pid");
+    sqlx::query("BEGIN").execute(&mut holder).await.unwrap();
+    sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
+        .bind(f.p)
+        .execute(&mut holder)
+        .await
+        .expect("hold the profile lock");
+
+    let (app, token, uri) = (
+        f.app.clone(),
+        f.token.clone(),
+        format!("/perm/policies/services/{}/migrate/undo", f.p),
+    );
+    let body = json!({"policy_names": [&name]}).to_string();
+    let undoing = tokio::spawn(async move {
+        let request = HttpRequest::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Cookie", format!("egret_session={token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(request).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    });
+
+    let mut parked = false;
+    for _ in 0..400 {
+        parked = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+              WHERE $1 = ANY(pg_blocking_pids(pid)))",
+        )
+        .bind(holder_pid)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("read pg_blocking_pids");
+        if parked {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(parked, "undo never parked on the held profile lock");
+
+    // Behind undo's back, as the PATCH that committed first would.
+    sqlx::query("UPDATE perm.grants SET table_name = 'invoices' WHERE id = $1")
+        .bind(gid)
+        .execute(&f.db.pool)
+        .await
+        .expect("edit the grant under the parked undo");
+    sqlx::query("COMMIT").execute(&mut holder).await.unwrap();
+
+    let (status, text) = undoing.await.expect("undo task");
+    assert_eq!(status, StatusCode::CONFLICT, "{text}");
+    assert!(
+        text.contains(&format!("grant {gid}")) && text.contains("edited"),
+        "{text}"
+    );
+    assert_eq!(grants_on_catalog(&f).await, 1, "the edited grant survives");
     assert!(!enabled(&f, id).await, "the original is still off");
     assert_eq!(provenance(&f, f.p).await.len(), 1);
 }
