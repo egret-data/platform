@@ -23,9 +23,12 @@ import { nextPollMs } from "@/components/workflows/executions/polling";
  * **The window.** At most `windowLines` lines are held. Past that, the oldest
  * pages are dropped, and each dropped page's starting cursor is kept, so
  * "Load earlier" can read it again (`loadEarlier`): the cursor only moves
- * forward, but re-reading from a page's own `after` returns that page. After
- * the first "Load earlier", nothing more is set aside: the user asked for the
- * history, and the next page must not push it out again.
+ * forward, but re-reading from a page's own `after` returns that page.
+ * From the moment "Load earlier" starts, nothing more is set aside: a page
+ * dropped while its read is in flight would otherwise take the cursor it
+ * meant to read (review I1), and the next page would push the history the
+ * user asked for out again. `followLatest` (the view calls it when the user
+ * is back at the bottom) re-arms the window.
  */
 
 /** Lines per read (spec §7: "Pages are 500 lines"). */
@@ -64,6 +67,8 @@ export interface LogFollow {
   hasEarlier: boolean;
   loadEarlier: () => void;
   loadingEarlier: boolean;
+  /** The user is back at the newest lines: hold at most the window again. */
+  followLatest: () => void;
   earlierError: unknown;
 }
 
@@ -90,6 +95,7 @@ async function readPage(
   signal?: AbortSignal,
 ): Promise<LogPageDto> {
   // `apiFetch` throws an `ApiError` on any other status; this narrows the type.
+  // FE-DATA-2 exception: a generated fetcher called directly, for a cursor across pages (one query key cannot hold it).
   const res = await workflowGetExecutionLogs(ws, id, params, { signal });
   if (res.status !== 200) throw new Error("The logs could not be read.");
   return res.data;
@@ -129,7 +135,11 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
   const { minLevel, taskId, taskRunId } = filters;
   const key = JSON.stringify([ws, executionId, minLevel ?? null, taskId ?? null, taskRunId ?? null, pageSize, windowLines]);
   const [snap, setSnap] = useState<Snapshot>(INITIAL);
-  const controls = useRef<{ retry: () => void; loadEarlier: () => void }>({ retry: () => {}, loadEarlier: () => {} });
+  const controls = useRef<{ retry: () => void; loadEarlier: () => void; followLatest: () => void }>({
+    retry: () => {},
+    loadEarlier: () => {},
+    followLatest: () => {},
+  });
 
   useEffect(() => {
     const f: LogFilters = { minLevel, taskId, taskRunId };
@@ -138,10 +148,7 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
     const pages: Page[] = [];
     /** The starting cursors of dropped pages, the most recently dropped last. */
     const earlier: (number | undefined)[] = [];
-    /**
-     * Once the user has brought earlier lines back, nothing is set aside any
-     * more: the next page would otherwise push out what they just asked for.
-     */
+    /** `Infinity` from the start of a "Load earlier" until `followLatest`. */
     let capacity = windowLines;
     let lastPage: LogPageDto | undefined;
     let lastGoodAt = 0;
@@ -233,6 +240,12 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
     document.addEventListener("visibilitychange", onVisibility);
 
     controls.current = {
+      followLatest: () => {
+        if (loadingEarlier || capacity === windowLines) return;
+        capacity = windowLines;
+        trim();
+        publish();
+      },
       retry: () => {
         if (inFlight || done) return;
         clearTimeout(timer);
@@ -241,8 +254,11 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
       },
       loadEarlier: () => {
         if (loadingEarlier || earlier.length === 0 || pages.length === 0) return;
-        const after = earlier[earlier.length - 1];
-        const firstKept = pages[0].lines[0]?.id ?? Number.POSITIVE_INFINITY;
+        // Nothing is set aside from now on, so no poll can drop a page (and
+        // push its cursor) while this read is in flight.
+        capacity = Number.POSITIVE_INFINITY;
+        const at = earlier.length - 1;
+        const after = earlier[at];
         loadingEarlier = true;
         earlierError = null;
         publish();
@@ -250,11 +266,12 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
           try {
             const page = await readPage(ws, executionId, logParams(f, after, pageSize), abort.signal);
             if (abort.signal.aborted) return;
-            earlier.pop();
+            // Exactly the cursor that was read.
+            earlier.splice(at, 1);
             // The re-read may run past the dropped page into lines already held.
+            const firstKept = pages[0]?.lines[0]?.id ?? Number.POSITIVE_INFINITY;
             const lines = page.items.filter((l) => l.id < firstKept);
             if (lines.length > 0) pages.unshift({ after, lines });
-            capacity = Number.POSITIVE_INFINITY;
           } catch (e) {
             if (abort.signal.aborted) return;
             earlierError = e;
@@ -276,9 +293,10 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
 
   const retry = useCallback(() => controls.current.retry(), []);
   const loadEarlier = useCallback(() => controls.current.loadEarlier(), []);
+  const followLatest = useCallback(() => controls.current.followLatest(), []);
   // Until the first answer for new filters, the old filters' lines are not shown as theirs.
   const current = snap.key === key ? snap : INITIAL;
-  return { ...current, retry, loadEarlier };
+  return { ...current, retry, loadEarlier, followLatest };
 }
 
 /** The most lines a download holds; the UI says so when it stops there. */
@@ -307,12 +325,16 @@ export async function downloadLogs(
   ws: string,
   executionId: string,
   filters: LogFilters,
-  { pageSize = LOG_DOWNLOAD_PAGE, maxLines = LOG_DOWNLOAD_MAX_LINES }: { pageSize?: number; maxLines?: number } = {},
+  {
+    pageSize = LOG_DOWNLOAD_PAGE,
+    maxLines = LOG_DOWNLOAD_MAX_LINES,
+    signal,
+  }: { pageSize?: number; maxLines?: number; signal?: AbortSignal } = {},
 ): Promise<LogDownload> {
   const out: string[] = [];
   let after: number | undefined;
   for (;;) {
-    const page = await readPage(ws, executionId, logParams(filters, after, Math.min(pageSize, maxLines - out.length + 1)));
+    const page = await readPage(ws, executionId, logParams(filters, after, Math.min(pageSize, maxLines - out.length + 1)), signal);
     for (const l of page.items) {
       if (out.length === maxLines) return { text: out.join("\n") + "\n", lines: out.length, capped: true };
       out.push(formatLogLine(l));

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type UIEvent } from "react";
 import dayjs from "dayjs";
 import { ArrowDown, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Download, History, Loader2, RotateCw, ScrollText } from "lucide-react";
 import type { LogLevel, LogLineDto, TaskRunDto } from "@/api/generated/model";
@@ -103,6 +103,8 @@ export interface LogViewProps {
   /** Lines per read and the window, for tests. */
   pageSize?: number;
   windowLines?: number;
+  /** The downloaded file's name; `<executionId>.log` by default. */
+  downloadName?: string;
   /** A download's page and cap, for tests. */
   downloadPageSize?: number;
   downloadMaxLines?: number;
@@ -122,6 +124,7 @@ export function LogView({
   windowLines,
   downloadPageSize,
   downloadMaxLines = LOG_DOWNLOAD_MAX_LINES,
+  downloadName,
 }: LogViewProps) {
   const follow = useLogFollow(ws, executionId, filters, { pageSize, windowLines });
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
@@ -146,13 +149,24 @@ export function LogView({
     capped: false,
     error: null,
   });
+  // A download in flight stops paging when the view goes away.
+  const downloadAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => downloadAbort.current?.abort(), []);
   const runDownload = async () => {
+    const abort = new AbortController();
+    downloadAbort.current = abort;
     setDownload({ busy: true, capped: false, error: null });
     try {
-      const file = await downloadLogs(ws, executionId, filters, { pageSize: downloadPageSize, maxLines: downloadMaxLines });
-      saveText(`${executionId}.log`, file.text);
+      const file = await downloadLogs(ws, executionId, filters, {
+        pageSize: downloadPageSize,
+        maxLines: downloadMaxLines,
+        signal: abort.signal,
+      });
+      if (abort.signal.aborted) return;
+      saveText(downloadName ?? `${executionId}.log`, file.text);
       setDownload({ busy: false, capped: file.capped, error: null });
     } catch (e) {
+      if (abort.signal.aborted) return;
       setDownload({ busy: false, capped: false, error: errorMessage(e) });
     }
   };
@@ -233,7 +247,14 @@ export function LogView({
             </span>
           </div>
         ) : null}
-        <WindowedLines rows={rows} offsets={offsets} heightClass={heightClass} label={label} onToggle={toggle} />
+        <WindowedLines
+          rows={rows}
+          offsets={offsets}
+          heightClass={heightClass}
+          label={label}
+          onToggle={toggle}
+          onBackAtBottom={follow.followLatest}
+        />
       </>
     );
   }
@@ -290,12 +311,15 @@ function WindowedLines({
   heightClass,
   label,
   onToggle,
+  onBackAtBottom,
 }: {
   rows: LogRow[];
   offsets: number[];
   heightClass: string;
   label: string;
   onToggle: (key: string) => void;
+  /** The user came back to the newest lines (scrolled there, or Jump to latest). */
+  onBackAtBottom: () => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -304,6 +328,8 @@ function WindowedLines({
   /** Follow new lines: true while the user is at the bottom. */
   const stick = useRef(true);
   const anchor = useRef<Anchor | null>(null);
+  /** The row holding keyboard focus: it stays rendered wherever the view scrolls. */
+  const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const total = offsets[rows.length];
 
   useEffect(() => {
@@ -345,6 +371,7 @@ function WindowedLines({
     const top = el.scrollTop;
     const vh = el.clientHeight || viewport;
     const bottom = top + vh >= total - STICK_PX;
+    if (bottom && !stick.current) onBackAtBottom();
     stick.current = bottom;
     setAtBottom(bottom);
     setScrollTop(top);
@@ -354,6 +381,7 @@ function WindowedLines({
 
   const jumpToLatest = () => {
     const el = scroller.current;
+    onBackAtBottom();
     stick.current = true;
     setAtBottom(true);
     if (el) {
@@ -364,37 +392,57 @@ function WindowedLines({
 
   const first = rows.length === 0 ? 0 : rowAt(offsets, Math.max(0, scrollTop - OVERSCAN_PX));
   const last = rows.length === 0 ? -1 : rowAt(offsets, scrollTop + viewport + OVERSCAN_PX);
-  const visible = rows.slice(first, last + 1);
+  // The rendered runs of rows: the window, plus the focused row when it lies
+  // outside it, so scrolling never unmounts the element holding focus (which
+  // would drop focus to `body`). Spacers stand in for every gap.
+  const focusedIndex = focusedKey === null ? undefined : keyIndex.get(focusedKey);
+  const spans: [number, number][] = [[first, last]];
+  if (focusedIndex !== undefined && (focusedIndex < first || focusedIndex > last)) {
+    spans.push([focusedIndex, focusedIndex]);
+    spans.sort((a, b) => a[0] - b[0]);
+  }
+  const parts: ReactNode[] = [];
+  let y = 0;
+  for (const [from, to] of spans) {
+    if (to < from) continue;
+    if (offsets[from] > y) parts.push(<div key={`gap-${from}`} style={{ height: offsets[from] - y }} aria-hidden />);
+    for (const row of rows.slice(from, to + 1)) {
+      parts.push(
+        row.kind === "group" ? (
+          <GroupRow key={row.key} row={row} onToggle={onToggle} />
+        ) : (
+          <LineRow key={row.key} line={row.line} showAttempt={row.showAttempt} />
+        ),
+      );
+    }
+    y = offsets[to + 1];
+  }
+  if (total > y) parts.push(<div key="gap-end" style={{ height: total - y }} aria-hidden />);
 
   return (
     <div className="relative">
-      {/* No `tabIndex`: jsx-a11y refuses one on a non-interactive role, and
-          browsers make a scroller with no focusable child a tab stop
-          themselves (Chromium 130+, Firefox), so the run panel's list is
-          reachable; grouped, Tab reaches the group headers inside it, and the
-          arrow keys then scroll it (FE-A11Y-3; measured in the task report).
-          `aria-live` off: a live region would read every polled page aloud. */}
+      {/* A tab stop, so the keyboard can scroll it (FE-A11Y-3: a scrollable
+          `role="log"` takes `tabIndex={0}`, as axe's scrollable-region-focusable
+          expects). `aria-live` off: a live region would read every polled page
+          aloud. */}
       <div
         ref={scroller}
         role="log"
         aria-live="off"
         aria-label={label}
+        tabIndex={0}
         data-testid="log-scroller"
         onScroll={onScroll}
+        onFocus={(e) => setFocusedKey(e.target.closest<HTMLElement>("[data-row-key]")?.dataset.rowKey ?? null)}
+        onBlur={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocusedKey(null);
+        }}
         className={cn(
           "overflow-auto rounded-md border bg-card font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           heightClass,
         )}
       >
-        <div style={{ height: offsets[first] ?? 0 }} aria-hidden />
-        {visible.map((row) =>
-          row.kind === "group" ? (
-            <GroupRow key={row.key} row={row} onToggle={onToggle} />
-          ) : (
-            <LineRow key={row.key} line={row.line} showAttempt={row.showAttempt} />
-          ),
-        )}
-        <div style={{ height: total - (offsets[last + 1] ?? total) }} aria-hidden />
+        {parts}
       </div>
       {atBottom ? null : (
         <Button size="sm" className="absolute bottom-3 right-5 shadow-md" onClick={jumpToLatest}>
@@ -410,7 +458,7 @@ function GroupRow({ row, onToggle }: { row: Extract<LogRow, { kind: "group" }>; 
   const g = row.group;
   const Icon = row.collapsed ? ChevronRight : ChevronDown;
   return (
-    <div data-testid="log-group" className="sticky left-0 flex w-full items-center border-b bg-muted/60 px-2" style={{ height: rowHeight(row) }}>
+    <div data-testid="log-group" data-row-key={row.key} className="sticky left-0 flex w-full items-center border-b bg-muted/60 px-2" style={{ height: rowHeight(row) }}>
       <button
         type="button"
         aria-expanded={!row.collapsed}
@@ -431,6 +479,7 @@ function LineRow({ line, showAttempt }: { line: LogLineDto; showAttempt: boolean
   return (
     <div
       data-testid="log-line"
+      data-row-key={`l:${line.id}`}
       className="flex w-max min-w-full items-start gap-2 px-2 py-0.5 leading-5 hover:bg-accent/50"
       style={{ height: rowHeight({ kind: "line", key: "", line, showAttempt }) }}
     >

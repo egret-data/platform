@@ -198,6 +198,7 @@ function RunLogs({ ws, executionId, run }: { ws: string; executionId: string; ru
       grouped={false}
       heightClass="h-72"
       label={`Logs of ${run.task_id} #${run.run_ix}`}
+      downloadName={`${executionId}-${run.task_id}-run-${run.run_ix}.log`}
     />
   );
 }

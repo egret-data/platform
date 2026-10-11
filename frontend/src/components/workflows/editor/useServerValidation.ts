@@ -80,6 +80,7 @@ export function useServerValidation(
     immediate.current = false;
     const timer = setTimeout(() => {
       const body = { source };
+      // FE-DATA-2 exception: a generated fetcher called directly, for an abort signal per request (each edit cancels the last).
       const request = flowId
         ? workflowValidateFlow(workspace, flowId, body, { signal })
         : workflowValidateUnsavedFlow(workspace, body, { signal });

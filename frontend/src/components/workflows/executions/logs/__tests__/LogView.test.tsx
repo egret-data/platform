@@ -173,7 +173,8 @@ describe("LogView: lines", () => {
     expect(rendered.at(-1)!.querySelector("pre")!.textContent).toBe("line 10000");
     // The spacers stand in for the rest: the scroll height is every row's.
     const scroller = screen.getByTestId("log-scroller");
-    const spacers = [scroller.firstElementChild as HTMLElement, scroller.lastElementChild as HTMLElement];
+    const spacers = [...scroller.querySelectorAll<HTMLElement>(":scope > [aria-hidden]")];
+    expect(spacers.length).toBeGreaterThan(0);
     const placed = rendered.length * 24 + spacers.reduce((n, s) => n + parseFloat(s.style.height), 0);
     expect(placed).toBe(10_000 * 24);
   });
@@ -238,6 +239,86 @@ describe("LogView: following and scrolling", () => {
     toTop();
     expect(rowTexts()[0]).toBe("line 1");
     expect(screen.queryByRole("button", { name: "Load earlier" })).toBeNull();
+  });
+});
+
+describe("LogView: the keyboard", () => {
+  it("the scroller is a tab stop", async () => {
+    server.lines = Array.from({ length: 30 }, (_, i) => line(i + 1));
+    view({ grouped: false });
+    await settle();
+    const scroller = screen.getByRole("log", { name: "Log lines" });
+    expect(scroller).toHaveAttribute("tabindex", "0");
+    vi.useRealTimers();
+    // Download, then the scroller (the ungrouped view has no other focusable control in it).
+    await userEvent.tab();
+    await userEvent.tab();
+    expect(scroller).toHaveFocus();
+  });
+
+  it("a focused group header stays mounted, and focused, however far the view scrolls", async () => {
+    server.lines = [
+      ...Array.from({ length: 300 }, (_, i) => line(i + 1, { task_id: "extract", task_run_id: "r-0" })),
+      ...Array.from({ length: 300 }, (_, i) => line(i + 301, { task_id: "load", task_run_id: "r-1" })),
+    ];
+    view();
+    await settle();
+    const scroller = screen.getByTestId("log-scroller");
+    scroller.scrollTop = 0;
+    fireEvent.scroll(scroller);
+    const header = screen.getByRole("button", { name: /extract #0/ });
+    act(() => header.focus());
+    expect(header).toHaveFocus();
+    // Thousands of pixels below the header: far outside the rendered window.
+    scroller.scrollTop = 500 * 24;
+    fireEvent.scroll(scroller);
+    expect(screen.getByRole("button", { name: /extract #0/ })).toBe(header);
+    expect(header).toHaveFocus();
+    // The rows around the viewport render too, and the rows between are not.
+    expect(screen.getByText("line 500")).toBeInTheDocument();
+    expect(screen.queryByText("line 150")).toBeNull();
+    // Placed by spacers, so every row keeps its offset.
+    const spacers = [...scroller.querySelectorAll<HTMLElement>(":scope > [aria-hidden]")];
+    const rendered = scroller.querySelectorAll("[data-testid=log-line]").length;
+    const headers = scroller.querySelectorAll("[data-testid=log-group]").length;
+    const placed = rendered * 24 + headers * 32 + spacers.reduce((n, el) => n + parseFloat(el.style.height), 0);
+    expect(placed).toBe(600 * 24 + 2 * 32);
+    // Focus leaves: the header is no longer kept.
+    act(() => header.blur());
+    expect(screen.queryByRole("button", { name: /extract #0/ })).toBeNull();
+  });
+
+  it("back at the bottom, the window is held again after Load earlier (review M1)", async () => {
+    server.lines = Array.from({ length: 90 }, (_, i) => line(i + 1));
+    view({ grouped: false, pageSize: 30, windowLines: 30 });
+    for (let i = 0; i < 4; i++) await settle();
+    const scroller = screen.getByTestId("log-scroller");
+    scroller.scrollTop = 10;
+    fireEvent.scroll(scroller);
+    await act(async () => screen.getByRole("button", { name: "Load earlier" }).click());
+    await settle();
+    expect(screen.getByRole("button", { name: "Load earlier" })).toBeInTheDocument();
+    await act(async () => screen.getByRole("button", { name: "Jump to latest" }).click());
+    // Back to the newest 30 lines: the 30 brought back are set aside again.
+    scroller.scrollTop = 0;
+    fireEvent.scroll(scroller);
+    expect(screen.getAllByTestId("log-line")[0].querySelector("pre")!.textContent).toBe("line 61");
+  });
+  it("scrolling back down to the bottom after Load earlier also holds the window again", async () => {
+    server.lines = Array.from({ length: 90 }, (_, i) => line(i + 1));
+    view({ grouped: false, pageSize: 30, windowLines: 30 });
+    for (let i = 0; i < 4; i++) await settle();
+    const scroller = screen.getByTestId("log-scroller");
+    scroller.scrollTop = 10;
+    fireEvent.scroll(scroller);
+    await act(async () => screen.getByRole("button", { name: "Load earlier" }).click());
+    await settle();
+    // 60 rows held now; the user scrolls to the very bottom by hand.
+    scroller.scrollTop = 60 * 24 - 480;
+    fireEvent.scroll(scroller);
+    scroller.scrollTop = 0;
+    fireEvent.scroll(scroller);
+    expect(screen.getAllByTestId("log-line")[0].querySelector("pre")!.textContent).toBe("line 61");
   });
 });
 
@@ -337,6 +418,35 @@ describe("LogView: Download", () => {
     expect(reads.map((q) => q.get("after"))).toEqual([null, "2", "4"]);
     expect(reads.every((q) => q.get("min_level") === "WARN" && q.get("task_run_id") === "r-0")).toBe(true);
     expect(screen.queryByText(/The file holds the first/)).toBeNull();
+  });
+
+  it("names the file as asked: a run's file is not the execution's", async () => {
+    vi.useRealTimers();
+    server.lines = [line(1)];
+    server.complete = true;
+    const saved = captureSaves();
+    view({ grouped: false, downloadName: `${EXEC}-extract-run-0.log` });
+    await screen.findByText("line 1");
+    await userEvent.click(screen.getByRole("button", { name: "Download" }));
+    await vi.waitFor(() => expect(saved).toHaveLength(1));
+    expect(saved[0].name).toBe(`${EXEC}-extract-run-0.log`);
+  });
+
+  it("stops paging when the view goes away mid-download", async () => {
+    vi.useRealTimers();
+    server.lines = Array.from({ length: 50 }, (_, i) => line(i + 1));
+    server.complete = true;
+    const saved = captureSaves();
+    const { unmount } = view({ grouped: false, downloadPageSize: 1 });
+    await screen.findByText("line 50");
+    const before = server.queries.length;
+    // Synchronously, so it unmounts while the first page is being read.
+    fireEvent.click(screen.getByRole("button", { name: "Download" }));
+    unmount();
+    await new Promise((r) => setTimeout(r, 100));
+    // At most the read in flight when it unmounted, not the 50 pages.
+    expect(server.queries.length - before).toBeLessThan(5);
+    expect(saved).toHaveLength(0);
   });
 
   it("says so when the file stops at the cap", async () => {

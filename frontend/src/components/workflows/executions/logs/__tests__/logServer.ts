@@ -63,7 +63,9 @@ export class LogServer {
   install(): this {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: string) => {
+      vi.fn(async (input: string, init?: RequestInit) => {
+        // As a real fetch does: an aborted request rejects.
+        init?.signal?.throwIfAborted();
         const [path, qs] = String(input).split("?");
         if (path !== LOGS_PATH) {
           const other = this.others.get(path) ?? { status: 404, body: { error: `no route ${path}` } };

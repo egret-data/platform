@@ -73,6 +73,7 @@ async function fetchPage(
   signal: AbortSignal,
 ): Promise<ListPage> {
   // `customInstance` throws `ApiError` on a non-2xx answer; the check narrows the union.
+  // FE-DATA-2 exception: a generated fetcher called directly, for parameters computed at fetch time (`since` from the time preset).
   const res = await workflowListExecutions(ws, toQueryParams(filters, Date.now(), { pinnedFlowId }), { signal });
   if (res.status !== 200) throw new Error("The executions could not be loaded.");
   return { rows: res.data.rows, total: res.data.total };

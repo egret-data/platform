@@ -35,8 +35,11 @@ export default function ExecutionLogsTab({ ws, execution }: { ws: string; execut
 
   const level = isLevel(rawLevel) ? rawLevel : undefined;
   const task = rawTask !== null && taskIds.includes(rawTask) ? rawTask : undefined;
-  const run = rawRun !== null && /^\d+$/.test(rawRun) ? runs.find((r) => r.run_ix === Number(rawRun)) : undefined;
-  const unknownRun = rawRun !== null && run === undefined;
+  const named = rawRun !== null && /^\d+$/.test(rawRun) ? runs.find((r) => r.run_ix === Number(rawRun)) : undefined;
+  // A run of another task than `?task=` would select nothing: it is ignored, and said so.
+  const otherTask = named !== undefined && task !== undefined && named.task_id !== task ? named : undefined;
+  const run = otherTask ? undefined : named;
+  const unknownRun = rawRun !== null && named === undefined;
 
   const filters: LogFilters = useMemo(
     () => ({ minLevel: level, taskId: task, taskRunId: run?.id }),
@@ -89,6 +92,11 @@ export default function ExecutionLogsTab({ ws, execution }: { ws: string; execut
           options={runOptions}
         />
       </div>
+      {otherTask ? (
+        <p className="mb-3 text-sm text-muted-foreground">
+          Task run #{otherTask.run_ix} is a run of {otherTask.task_id}, not of {task}, so every run of {task} is shown.
+        </p>
+      ) : null}
       {unknownRun ? (
         <p className="mb-3 text-sm text-muted-foreground">
           Task run #{rawRun} is not in this execution, so every run is shown. The link may point to another execution.

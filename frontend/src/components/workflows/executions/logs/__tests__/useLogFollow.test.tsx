@@ -254,6 +254,63 @@ describe("useLogFollow: the window and Load earlier", () => {
   });
 });
 
+describe("useLogFollow: Load earlier against a poll", () => {
+  it("a poll that lands while Load earlier is in flight drops no page (review I1)", async () => {
+    const server = new LogServer().install();
+    server.lines = Array.from({ length: 9 }, (_, i) => line(i + 1));
+    const { result } = follow({}, { pageSize: 3, windowLines: 3 });
+    for (let i = 0; i < 4; i++) await settle();
+    expect(ids(result)).toEqual([7, 8, 9]);
+    // Hold the Load earlier read until a poll has run.
+    const served = globalThis.fetch as unknown as (...a: unknown[]) => Promise<Response>;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let first = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (...a: unknown[]) => {
+        if (first) {
+          first = false;
+          await gate;
+        }
+        return served(...a);
+      }),
+    );
+    await act(async () => result.current.loadEarlier());
+    server.lines.push(line(10), line(11), line(12));
+    await advance(2000);
+    await settle();
+    release();
+    await settle();
+    await settle();
+    expect(ids(result)).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    // The one page still set aside is the first, and it reads back whole.
+    expect(result.current.hasEarlier).toBe(true);
+    await act(async () => result.current.loadEarlier());
+    await settle();
+    expect(ids(result)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(result.current.hasEarlier).toBe(false);
+  });
+
+  it("followLatest holds the window again after Load earlier, and Load earlier still reaches what it sets aside", async () => {
+    const server = new LogServer().install();
+    server.lines = Array.from({ length: 9 }, (_, i) => line(i + 1));
+    const { result } = follow({}, { pageSize: 3, windowLines: 3 });
+    for (let i = 0; i < 4; i++) await settle();
+    await act(async () => result.current.loadEarlier());
+    await settle();
+    expect(ids(result)).toEqual([4, 5, 6, 7, 8, 9]);
+    await act(async () => result.current.followLatest());
+    expect(ids(result)).toEqual([7, 8, 9]);
+    server.lines.push(line(10), line(11), line(12));
+    await advance(2000);
+    expect(ids(result)).toEqual([10, 11, 12]);
+    await act(async () => result.current.loadEarlier());
+    await settle();
+    expect(ids(result)).toEqual([7, 8, 9, 10, 11, 12]);
+  });
+});
+
 describe("downloadLogs", () => {
   it("reads every page with the current filters, and writes one line per log line", async () => {
     vi.useRealTimers();
@@ -272,6 +329,16 @@ describe("downloadLogs", () => {
     // Every read carried the filter, and the cursor walked: none, 2, 4.
     expect(server.queries.every((q) => q.get("min_level") === "WARN")).toBe(true);
     expect(server.afters()).toEqual([null, 2, 4]);
+  });
+
+  it("stops reading when its signal is aborted", async () => {
+    vi.useRealTimers();
+    const server = new LogServer().install();
+    server.lines = Array.from({ length: 6 }, (_, i) => line(i + 1));
+    const abort = new AbortController();
+    abort.abort();
+    await expect(downloadLogs(WS, EXEC, {}, { pageSize: 2, signal: abort.signal })).rejects.toThrow();
+    expect(server.queries.length).toBeLessThanOrEqual(1);
   });
 
   it("stops at the cap and says so", async () => {

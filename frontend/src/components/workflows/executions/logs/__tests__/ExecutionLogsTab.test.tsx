@@ -153,6 +153,16 @@ describe("ExecutionLogsTab", () => {
     expect(lastQuery(server).has("task_run_id")).toBe(false);
   });
 
+  it("a run of another task than ?task= is ignored, and said so (review M5)", async () => {
+    renderAt("logs?task=extract&run=2");
+    expect(await screen.findByText("extract debug")).toBeInTheDocument();
+    expect(screen.getByText("Task run #2 is a run of load, not of extract, so every run of extract is shown.")).toBeInTheDocument();
+    const q = lastQuery(server);
+    expect(q.get("task_id")).toBe("extract");
+    expect(q.has("task_run_id")).toBe(false);
+    expect(screen.getByRole("combobox", { name: "Task run" })).toHaveTextContent("All");
+  });
+
   it("a filter that matches nothing says so, and Clear filters empties the URL", async () => {
     server.lines = [line(1, { level: "INFO", message: "only info" })];
     renderAt("logs?level=ERROR");
@@ -176,5 +186,6 @@ describe("The Gantt's run panel", () => {
     expect(server.queries.every((q) => q.get("task_run_id") === "r-1")).toBe(true);
     expect(within(panel).queryByTestId("log-group")).toBeNull();
     expect(within(panel).getByRole("log", { name: "Logs of extract #1" })).toBeInTheDocument();
+    expect(within(panel).getByRole("log", { name: "Logs of extract #1" })).toHaveAttribute("tabindex", "0");
   });
 });
