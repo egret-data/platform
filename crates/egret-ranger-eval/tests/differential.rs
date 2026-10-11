@@ -7767,6 +7767,10 @@ struct LvCell {
 /// One Part A pin: a mask set and what Java must answer.
 struct LvPin {
     label: &'static str,
+    /// What Java must answer. `MASK` for the pins proper; `MASK_NULL` for the
+    /// mask-type-swapped controls, which show the winner is the POLICY (broader
+    /// / tag), not a "MASK beats MASK_NULL" ranking.
+    want: &'static str,
     case: Case,
 }
 
@@ -7783,6 +7787,7 @@ fn lv_pins(profile: &Profile, def_json: &Value, tag_def_json: &Value) -> Vec<LvP
     let mut pins = vec![
         LvPin {
             label: "pin1 broader-wins (m-broad MASK vs m-narrow MASK_NULL)",
+            want: "MASK",
             case: lv_case(
                 "lv-pin1".into(),
                 1,
@@ -7798,6 +7803,7 @@ fn lv_pins(profile: &Profile, def_json: &Value, tag_def_json: &Value) -> Vec<LvP
         },
         LvPin {
             label: "pin1 control: names swapped (z-broad MASK vs a-narrow MASK_NULL)",
+            want: "MASK",
             case: lv_case(
                 "lv-pin1-names".into(),
                 1,
@@ -7815,13 +7821,32 @@ fn lv_pins(profile: &Profile, def_json: &Value, tag_def_json: &Value) -> Vec<LvP
         // the download order can be what picks the winner.
         LvPin {
             label: "pin1 control: names, ids and order swapped",
+            want: "MASK",
             case: lv_case(
                 "lv-pin1-ids".into(),
                 1,
                 set(
                     vec![
                         lv_mask_policy(profile, 21, "a-narrow", leaf.clone(), "MASK_NULL"),
-                        lv_mask_policy(profile, 22, "z-broad", broad, "MASK"),
+                        lv_mask_policy(profile, 22, "z-broad", broad.clone(), "MASK"),
+                    ],
+                    None,
+                ),
+                request(),
+            ),
+        },
+        // Fix round 1: the MASK TYPES swapped — the broad policy now carries
+        // MASK_NULL. The broad policy must still win, so Java answers MASK_NULL.
+        LvPin {
+            label: "pin1 control: mask types swapped (m-broad MASK_NULL vs m-narrow MASK)",
+            want: "MASK_NULL",
+            case: lv_case(
+                "lv-pin1-types".into(),
+                1,
+                set(
+                    vec![
+                        lv_mask_policy(profile, 21, "m-broad", broad, "MASK_NULL"),
+                        lv_mask_policy(profile, 22, "m-narrow", leaf.clone(), "MASK"),
                     ],
                     None,
                 ),
@@ -7830,24 +7855,48 @@ fn lv_pins(profile: &Profile, def_json: &Value, tag_def_json: &Value) -> Vec<LvP
         },
     ];
     if profile.engine == EngineType::Trino {
-        let tag_mask = json!({
-            "id": 931, "name": "t-pii", "service": profile.tag_service_name, "policyType": 1,
-            "isEnabled": true, "policyPriority": 0,
-            "resources": {"tag": {"values": ["pii"]}},
-            "dataMaskPolicyItems": [mig_mask_item(&[], &["public"], "MASK", None)],
-        });
-        pins.push(LvPin {
-            label: "pin2 tag MASK beats path MASK_NULL at equal priority",
-            case: lv_case(
-                "lv-pin2".into(),
-                1,
-                set(
-                    vec![lv_mask_policy(profile, 31, "p-leaf", leaf, "MASK_NULL")],
-                    Some(vec![tag_mask]),
-                ),
-                lv_request(profile, 4, "select", Some(vec!["pii"])),
+        let tag_mask = |mask: &str| {
+            json!({
+                "id": 931, "name": "t-pii", "service": profile.tag_service_name, "policyType": 1,
+                "isEnabled": true, "policyPriority": 0,
+                "resources": {"tag": {"values": ["pii"]}},
+                "dataMaskPolicyItems": [mig_mask_item(&[], &["public"], mask, None)],
+            })
+        };
+        for (label, id, tag_type, path_type) in [
+            (
+                "pin2 tag MASK beats path MASK_NULL at equal priority",
+                "lv-pin2",
+                "MASK",
+                "MASK_NULL",
             ),
-        });
+            (
+                "pin2 control: mask types swapped (tag MASK_NULL vs path MASK)",
+                "lv-pin2-types",
+                "MASK_NULL",
+                "MASK",
+            ),
+        ] {
+            pins.push(LvPin {
+                label,
+                want: tag_type,
+                case: lv_case(
+                    id.into(),
+                    1,
+                    set(
+                        vec![lv_mask_policy(
+                            profile,
+                            31,
+                            "p-leaf",
+                            leaf.clone(),
+                            path_type,
+                        )],
+                        Some(vec![tag_mask(tag_type)]),
+                    ),
+                    lv_request(profile, 4, "select", Some(vec!["pii"])),
+                ),
+            });
+        }
     }
     pins
 }
@@ -8057,6 +8106,28 @@ fn editor_shaped_levels_on_the_real_ranger_jars() {
                 eprintln!("{line}");
             }
 
+            // Fix round 1: PIN the cells the B1 conclusion rests on, so a jar that
+            // flips one turns this gate red instead of only changing a printout.
+            // `select` at column depth (SELF): the editor shapes deny, the `*`-filled
+            // shapes allow — the latter is the positive control, in the same run.
+            for (name, want) in [
+                ("d1", '-'),
+                ("d2", '-'),
+                ("d3", '-'),
+                ("gap", '-'),
+                ("d4star", 'A'),
+                ("d1star", 'A'),
+                ("d2star", 'A'),
+            ] {
+                let got = grid.get(&(name, 4, "select".to_string())).copied();
+                if got != Some(want) {
+                    failures.push(format!(
+                        "B1 PREMISE [{service_type} @ {version}] `{name}` select at column depth \
+                         (SELF): want {want}, Java answered {got:?}"
+                    ));
+                }
+            }
+
             // The Part A pins.
             for (pin, verdict) in pins.iter().zip(&verdicts[cells.len()..]) {
                 assert_eq!(verdict["id"], json!(pin.case.id), "verdict order");
@@ -8068,11 +8139,11 @@ fn editor_shaped_levels_on_the_real_ranger_jars() {
                     "  {} @ {version}: java maskType={} policyId={} error={} | rust {mine:?}",
                     pin.label, verdict["maskType"], verdict["policyId"], verdict["error"]
                 );
-                if verdict["maskType"].as_str() != Some("MASK") {
+                if verdict["maskType"].as_str() != Some(pin.want) {
                     failures.push(format!(
                         "PART A PREMISE [{service_type} @ {version}] {}: Java answered maskType={} \
-                         (policyId {}), not MASK",
-                        pin.label, verdict["maskType"], verdict["policyId"]
+                         (policyId {}), not {}",
+                        pin.label, verdict["maskType"], verdict["policyId"], pin.want
                     ));
                 }
             }

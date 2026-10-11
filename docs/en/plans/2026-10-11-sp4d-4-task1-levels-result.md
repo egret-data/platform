@@ -9,8 +9,9 @@ through `tests/ranger` (`EgretCaseRunner`) under egret's `trino.json` and `starr
 **Verdict, in one line:** the evidence supports **B1** on every engine × version measured. A policy
 that stops at the table (`d3`), schema/database (`d2`) or catalog (`d1`) is **denied `select` at
 column depth** on all four runs, and both deployed plugins check `SELECT col` at **column** depth.
-Both Part A pins held: the broader mask policy wins inside an equal-priority band, and a tag mask
-beats a path mask at equal priority — at both versions.
+Both Part A pins held: inside an equal-priority band the broader mask policy wins (broader = more
+`*` values, with equal principal / access / condition discounts — see §4), and a tag mask beats a
+path mask at equal priority — at both versions.
 
 ## 1. What was asked
 
@@ -103,10 +104,20 @@ What the tables say:
   (`A`), which is how `SHOW`/filter checks find them.
 - **`d3` vs `d4star` differ in exactly one place: depth 4** (every access). Everywhere else they are
   equal. So egret's compiled form of a table-stopping policy is a strict superset of it.
-- **`d1star` ⊇ `d1` and `d2star` ⊇ `d2`, cell by cell.** The `*`-filled form keeps every allow the
-  editor-saved form has and adds every deeper depth. B1's rewrite therefore never takes an allow
-  away; it only adds the deeper ones (which, for `d1star`, means the whole catalog's tables and
-  columns — the steward's intent question, below).
+- **`d1star` ⊇ `d1` and `d2star` ⊇ `d2`, cell by cell — for a policy measured ALONE.** Every set
+  here is one policy, so what this shows is: the `*`-filled form, on its own, allows everything the
+  editor-saved form allows on its own, plus every deeper depth (for `d1star`, the whole catalog's
+  tables and columns — the steward's intent question, §7). It does **not** show that a B1 rewrite
+  keeps every allow inside a set of several policies; see the next bullet.
+- **Unmeasured: B1 also MOVES the policy within its band.** Filling an emptied level with `*` changes
+  the rewritten policy's `evalOrder`, not only its resources: a match-any level earns a 25 discount
+  (capped at 100 in total, `RangerOptimizedPolicyEvaluator.computeEvalOrder`), and an OMITTED level
+  earns nothing. So the rewritten policy sorts EARLIER among policies with the same
+  `(priority, hasDeny)`. In a set of several policies that can change which one decides — access
+  sets with deny or exception items, row-filter policies whose table level was emptied, and mask
+  policies (first yielding evaluator is final). This is the same mechanism as Part A. Not measured
+  here (one policy per set); **Task 11 must handle it** — e.g. by refusing or reporting a rewrite
+  whose new evalOrder reorders it against another policy that may decide the same request.
 - **`gap` decides nothing anywhere** — denied at every depth, every access, both scopes, `_any`
   included. It is a dead policy on both engines at both versions, so it must be fixed in **both**
   branches (refuse it, or save the emptied level as `*`).
@@ -123,7 +134,12 @@ Concrete-access `SELF` cells were also evaluated by `egret_ranger_eval::eval::ev
   against. The test asserts that exact refusal instead. With `plugin_version: None` the same 196
   cells **agree 196 / 196** (printed, not asserted). Relevant to Task 7 (external engines): an
   external Trino on 2.8.0 or StarRocks on 2.5.0 gets `Undecidable` from the evaluator today.
-- Total Java verdicts in the run: **742** (cases sent = verdicts received, asserted).
+- Total Java verdicts in the run: **748** after fix round 1 (742 before the two mask-type controls;
+  cases sent = verdicts received, asserted).
+- **Asserted since fix round 1** on all four engine × version runs: `select` at column depth (SELF)
+  is `-` for `d1`, `d2`, `d3`, `gap` and `A` for `d4star`, `d1star`, `d2star` — the cells the B1
+  verdict rests on, with the positive control in the same Maven run. Mutation check: flipping the
+  expected `d3` cell to `A` turned the test red with 4 `B1 PREMISE` failures (one per run).
 
 ## 4. The two Part A pins (policyType 1, request `{wh, sales, orders, email}`, `select`, `alice`)
 
@@ -132,10 +148,23 @@ Concrete-access `SELF` cells were also evaluated by `egret_ranger_eval::eval::ev
 | 1 | `m-broad` `{wh,sales,*,email}` MASK (id 21) + `m-narrow` `{…orders,email}` MASK_NULL (id 22) | **MASK** (21) | **MASK** (21) | **MASK** (21) | **MASK** (21) |
 | 1 control | names swapped: `z-broad` MASK (21) + `a-narrow` MASK_NULL (22) | **MASK** (21) | **MASK** (21) | **MASK** (21) | **MASK** (21) |
 | 1 control (added) | names, ids **and** download order swapped: `a-narrow` (21) listed first, `z-broad` MASK (22) | **MASK** (22) | **MASK** (22) | **MASK** (22) | **MASK** (22) |
+| 1 control (fix round 1) | mask types swapped: `m-broad` **MASK_NULL** (21) + `m-narrow` **MASK** (22) | **MASK_NULL** (21) | **MASK_NULL** (21) | **MASK_NULL** (21) | **MASK_NULL** (21) |
 | 2 | path MASK_NULL `{wh,sales,orders,email}` (31) + tag MASK on `pii` (931), request tagged `pii` @ SELF | **MASK** (931) | **MASK** (931) | — | — |
+| 2 control (fix round 1) | mask types swapped: path **MASK** (31) + tag **MASK_NULL** (931) | **MASK_NULL** (931) | **MASK_NULL** (931) | — | — |
 
-**Both facts hold on both jars.** The broader policy wins whatever its name, id or position in the
-download — it is `evalOrder`. The Rust evaluator answers pin 1 with
+**Both facts hold on both jars.** The broader policy wins whatever its name, id, position in the
+download or mask type, and the tag policy wins whatever its mask type — so neither result is a
+"MASK beats MASK_NULL" ranking (Ranger's comparator has no mask-type key; now also measured).
+The winner is `evalOrder` (comparator order: priority, `hasDeny`, `evalOrder`, name).
+
+**What "broader" means here — the spec's condition, not "fewer levels".** The two pin-1 policies
+name the SAME four levels and differ only in a `*` value at `table`; both carry the compiler's item
+shape (`public` group, `select` only, no conditions), so their principal, access and condition
+discounts are equal and only the resource discount separates them. "Broader wins" is established
+for exactly that: more match-any `*` values, other discounts equal. A policy that is wider because
+it names FEWER levels (an omitted level) is **not** broader for `evalOrder` — an omitted level earns
+no discount — and a policy with a different principal / access / condition shape can be reordered
+by those discounts. Neither case was measured. The Rust evaluator answers pin 1 with
 `Undecidable[EvalOrderAmbiguous{21, 22}]` on the measured pairing (the modelling gap the spec
 names) and pin 2 with `Masked{MASK, policy 931}` on Trino @ 2.5.0; off the pairing it answers
 `PluginVersionMismatch`, as above.
@@ -264,6 +293,8 @@ Authorizer.checkAnyActionOnTable(context,
 |---|---|
 | Step 2: existing differential (2 tests, `--skip` migration) after the `ask_ranger_json` refactor | 69.52 s (2 passed; baseline 59.8 s) |
 | Step 4: the matrix, final form (7 policies, 742 verdicts) | 25.94 s; per Maven run 5.5–6.9 s |
+| Fix round 1: the matrix with conclusion-cell asserts + mask-type controls (748 verdicts) | 23.20 s, 1 passed |
+| Fix round 1: `cargo test -p egret-ranger-eval --no-fail-fast` (no E2E) | 266 passed / 0 failed across 10 |
 | `just test-ranger-gates`, line 1 `ranger_engine_gate` | 10.03 s (baseline 13.3 s) |
 | line 2 differential (`--skip` migration and the matrix) | 66.10 s (baseline 59.8 s) |
 | line 3–4 the matrix (5-row form at the time of the recipe run) | 44.90 s; after `d1star`/`d2star` were added, lines 3–4 were re-run alone at `52cacaf20`: listing guard OK, 25.94 s, 1 passed |
@@ -296,17 +327,29 @@ the grammar cannot accept `d3` as "deciding the same" as anything egret's compil
 always emits the column level); B2 would mean teaching the compiler to emit table-stopping access
 policies, which reproduce a grant that reads no column.
 
-**What B1 changes for an existing saved policy** (to state to the user): `d1star` ⊇ `d1` and
-`d2star` ⊇ `d2` and `d4star` ⊇ `d3`, cell by cell — no allow is lost; the deeper levels are added.
-For a catalog-stopping policy that is the whole catalog's tables and columns, which is a real widening
-of what Ranger enforces today (though it matches what such a policy reads as in the editor).
+**What B1 changes for an existing saved policy** (to state to the user):
+
+- **Measured, per policy in isolation:** `d1star` ⊇ `d1`, `d2star` ⊇ `d2`, `d4star` ⊇ `d3`, cell by
+  cell — a rewritten policy, alone, allows everything the original allowed alone, plus the deeper
+  levels. For a catalog-stopping policy that is the whole catalog's tables and columns, a real
+  widening of what Ranger enforces today (though it matches what such a policy reads as in the
+  editor).
+- **Unmeasured, in a set of several policies:** the rewrite lowers the policy's `evalOrder` (25 per
+  `*` level, capped at 100; an omitted level earns 0), so it moves EARLIER in its
+  `(priority, hasDeny)` band and can change which policy decides a request another same-band policy
+  also matches — access policies with deny/exception items, row filters, masks (§2). "No allow is
+  lost" is therefore NOT established for a multi-policy set. Task 11 has to handle this reordering
+  explicitly. It does not move the B1-vs-B2 verdict: `d3` grants no column read under either
+  ordering.
 
 **`gap`:** decides nothing on any engine at any version — fix it in both branches.
 
 ## 8. Things that contradict or refine the spec's premises
 
 1. **The spec's premises hold.** Ancestor-match is not an allow (§2), Trino and StarRocks ask at
-   column depth (§5), and the broader-wins / tag-beats-path evalOrder facts hold on both jars (§4).
+   column depth (§5), and the broader-wins / tag-beats-path evalOrder facts hold on both jars (§4)
+   — "broader" in the spec's sense: more match-any `*` values with equal principal / access /
+   condition discounts, NOT fewer levels named (an omitted level earns no evalOrder discount).
    Part A may proceed.
 2. **The evaluator does not answer off its pairing.** The brief assumed `evaluate` could be
    compared at both versions; it refuses `PluginVersionMismatch` for Trino @ 2.8.0 and StarRocks @
