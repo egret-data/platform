@@ -1,8 +1,8 @@
-import { Profiler } from "react";
+import { Profiler, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import type { ExecutionDto, TaskRunDto } from "@/api/generated/model";
 import ExecutionGanttTab from "@/components/workflows/executions/gantt/ExecutionGanttTab";
 
@@ -83,7 +83,15 @@ function execution(over: Partial<ExecutionDto> = {}): ExecutionDto {
 
 function Where() {
   const loc = useLocation();
-  return <div data-testid="where">{loc.pathname + loc.search}</div>;
+  const navigate = useNavigate();
+  return (
+    <>
+      <div data-testid="where">{loc.pathname + loc.search}</div>
+      <button type="button" onClick={() => navigate(-1)}>
+        Back
+      </button>
+    </>
+  );
 }
 
 function renderTab(exec: ExecutionDto, url = "/gantt", slots?: Parameters<typeof ExecutionGanttTab>[0]["slots"]) {
@@ -104,7 +112,7 @@ function renderTab(exec: ExecutionDto, url = "/gantt", slots?: Parameters<typeof
   );
 }
 
-const bodyRows = () => within(screen.getByRole("grid", { name: "Task runs over time" })).getAllByRole("row").slice(1);
+const bodyRows = () => within(screen.getByRole("treegrid", { name: "Task runs over time" })).getAllByRole("row").slice(1);
 const rowFor = (ix: number) => bodyRows().find((r) => r.getAttribute("data-run-ix") === String(ix))!;
 
 afterEach(() => {
@@ -279,6 +287,103 @@ describe("ExecutionGanttTab: selection", () => {
   });
 });
 
+describe("ExecutionGanttTab: tree semantics", () => {
+  it("is a treegrid whose rows say their level, place among siblings, and expansion", async () => {
+    const user = userEvent.setup();
+    renderTab(execution());
+    const attrs = (ix: number) => {
+      const r = rowFor(ix);
+      return [r.getAttribute("aria-level"), r.getAttribute("aria-posinset"), r.getAttribute("aria-setsize"), r.getAttribute("aria-expanded")];
+    };
+    // Roots 0, 1, 2, 4, 5; `inner` (3) is the only child of `each` (1).
+    expect(attrs(0)).toEqual(["1", "1", "5", null]);
+    expect(attrs(1)).toEqual(["1", "2", "5", "true"]);
+    expect(attrs(3)).toEqual(["2", "1", "1", null]);
+    expect(attrs(5)).toEqual(["1", "5", "5", null]);
+    await user.click(screen.getByRole("button", { name: "Collapse each" }));
+    expect(attrs(1)).toEqual(["1", "2", "5", "false"]);
+  });
+});
+
+describe("ExecutionGanttTab: focus and history", () => {
+  it("returns focus to the run's row when the panel's Close is used", async () => {
+    const user = userEvent.setup();
+    renderTab(execution());
+    await user.click(within(rowFor(2)).getByText("load"));
+    await user.click(screen.getByRole("button", { name: "Close the task run" }));
+    expect(screen.queryByTestId("gantt-run-panel")).toBeNull();
+    expect(rowFor(2)).toHaveFocus();
+  });
+
+  it("closes with Escape from inside the panel, focus back on the row", async () => {
+    const user = userEvent.setup();
+    renderTab(execution(), "/gantt?run=0");
+    screen.getByRole("button", { name: "Close the task run" }).focus();
+    await user.keyboard("{Escape}");
+    expect(screen.getByTestId("where")).toHaveTextContent(/^\/gantt$/);
+    expect(rowFor(0)).toHaveFocus();
+  });
+
+  it("leaves Escape alone when something inside the panel has used it", async () => {
+    const user = userEvent.setup();
+    renderTab(execution(), "/gantt?run=0", {
+      logs: () => (
+        <input
+          aria-label="Search logs"
+          onKeyDown={(e) => {
+            if (e.key === "Escape") e.preventDefault();
+          }}
+        />
+      ),
+    });
+    screen.getByRole("textbox", { name: "Search logs" }).focus();
+    await user.keyboard("{Escape}");
+    expect(screen.getByTestId("gantt-run-panel")).toBeInTheDocument();
+  });
+
+  it("puts focus on the grid when an unknown run's note is closed", async () => {
+    const user = userEvent.setup();
+    renderTab(execution(), "/gantt?run=99");
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(rowFor(0)).toHaveFocus();
+  });
+
+  it("pushes one history entry per change of selection, so Back walks them", async () => {
+    const user = userEvent.setup();
+    renderTab(execution());
+    await user.tab();
+    await user.keyboard("{Enter}");
+    // Enter again on the selected row is not a new entry.
+    await user.keyboard("{Enter}");
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(screen.getByTestId("where")).toHaveTextContent("/gantt?run=1");
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.getByTestId("where")).toHaveTextContent("/gantt?run=0");
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.getByTestId("where")).toHaveTextContent(/^\/gantt$/);
+  });
+});
+
+describe("ExecutionGanttTab: slots", () => {
+  function Counter({ id }: { id: string }) {
+    const [n, setN] = useState(0);
+    return (
+      <button type="button" onClick={() => setN(n + 1)}>
+        {id} clicked {n}
+      </button>
+    );
+  }
+
+  it("starts a stateful slot afresh when the selection changes", async () => {
+    const user = userEvent.setup();
+    renderTab(execution(), "/gantt?run=0", { logs: (r) => <Counter id={r.id} /> });
+    await user.click(screen.getByRole("button", { name: "r-0 clicked 0" }));
+    expect(screen.getByRole("button", { name: "r-0 clicked 1" })).toBeInTheDocument();
+    await user.click(within(rowFor(2)).getByText("load"));
+    expect(screen.getByRole("button", { name: "r-2 clicked 0" })).toBeInTheDocument();
+  });
+});
+
 describe("ExecutionGanttTab: live redraws", () => {
   const live = () =>
     execution({
@@ -332,6 +437,49 @@ describe("ExecutionGanttTab: live redraws", () => {
     setVisibility("visible");
     frames(100);
     expect(duration()).toBe("16 s so far");
+  });
+
+  it("does not re-render the slots on clock ticks", () => {
+    vi.useFakeTimers({ toFake: ["requestAnimationFrame", "cancelAnimationFrame", "Date"], now: Date.parse(at(10)) });
+    let slotRenders = 0;
+    function Slot() {
+      slotRenders++;
+      return <p>slot</p>;
+    }
+    const logs = () => <Slot />;
+    render(
+      <MemoryRouter initialEntries={["/gantt?run=0"]}>
+        <ExecutionGanttTab execution={live()} slots={{ logs }} />
+      </MemoryRouter>,
+    );
+    const before = slotRenders;
+    const duration = () => within(rowFor(0)).getAllByRole("gridcell")[2].textContent;
+    for (let t = 0; t < 1000; t += 16) act(() => vi.advanceTimersByTime(16));
+    expect(duration()).toBe("11 s so far");
+    expect(slotRenders).toBe(before);
+  });
+
+  it("steps once a second under prefers-reduced-motion", () => {
+    vi.useFakeTimers({ toFake: ["requestAnimationFrame", "cancelAnimationFrame", "Date"], now: Date.parse(at(10)) });
+    const original = window.matchMedia;
+    window.matchMedia = ((q: string) => ({ ...original(q), matches: q.includes("prefers-reduced-motion: reduce") })) as typeof window.matchMedia;
+    try {
+      let renders = 0;
+      render(
+        <MemoryRouter initialEntries={["/gantt"]}>
+          <Profiler id="gantt" onRender={() => renders++}>
+            <ExecutionGanttTab execution={live()} />
+          </Profiler>
+        </MemoryRouter>,
+      );
+      renders = 0;
+      for (let t = 0; t < 3000; t += 16) act(() => vi.advanceTimersByTime(16));
+      // About three in three seconds; the 40 ms cap would allow 75.
+      expect(renders).toBeGreaterThanOrEqual(2);
+      expect(renders).toBeLessThanOrEqual(4);
+    } finally {
+      window.matchMedia = original;
+    }
   });
 
   it("does not redraw a finished execution", () => {

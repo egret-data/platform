@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useId, useImperativeHandle, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type Ref } from "react";
 import { ChevronDown, ChevronRight, RotateCcw, X } from "lucide-react";
 import type { TaskRunDto } from "@/api/generated/model";
 import { useElementSize } from "@/components/chart/useElementSize";
@@ -6,6 +6,7 @@ import { IconButton } from "@/components/ui/icon-button";
 import { StateChip, executionStateTone, type StateTone } from "@/components/workflows/StateChip";
 import { formatDuration } from "@/components/workflows/executionState";
 import {
+  ESTIMATED_RUN_TITLE,
   axisTicks,
   markerReason,
   visibleRows,
@@ -13,7 +14,6 @@ import {
   type GanttModel,
   type GanttRow,
 } from "@/components/workflows/executions/gantt/ganttModel";
-import { ESTIMATED_DURATION_TITLE } from "@/components/workflows/executions/timing";
 import { fullTimestamp } from "@/lib/relativeTime";
 import { cn } from "@/lib/utils";
 
@@ -22,9 +22,12 @@ import { cn } from "@/lib/utils";
  * Kestra's `Gantt.vue` does, so every bar sits in a row a keyboard and a
  * screen reader can reach.
  *
- * - The rows are a `grid` (FE-A11Y-3): one tab stop, arrow keys between rows,
- *   Home and End, Enter or Space opens the run, Escape closes it; Right and
- *   Left expand and collapse a row with children.
+ * - The rows are a `treegrid` (a grid whose rows nest, FE-A11Y-3): one tab
+ *   stop, arrow keys between rows, Home and End, Enter or Space opens the run,
+ *   Escape closes it; Right and Left expand and collapse a row with children,
+ *   and Left on a child goes to its parent. Each row says its depth
+ *   (`aria-level`), its place among its siblings (`aria-posinset`,
+ *   `aria-setsize`) and, with children, whether it is expanded.
  * - A bar's colour is never the only word on its state (FE-A11Y-4): the row
  *   carries the state chip (word and glyph), the attempt count, and a
  *   screen-reader sentence for the timeline cell.
@@ -65,7 +68,7 @@ function RowDuration({ row }: { row: GanttRow }) {
   const text = formatDuration(row.bar.end - row.bar.start);
   if (row.estimated) {
     return (
-      <span title={ESTIMATED_DURATION_TITLE} className="flex flex-col leading-tight">
+      <span title={ESTIMATED_RUN_TITLE} className="flex flex-col leading-tight">
         <span>≈ {text}</span>
         <span className="text-xs text-muted-foreground">estimated</span>
       </span>
@@ -107,7 +110,7 @@ function TimelineCell({ row, axis, ticks }: { row: GanttRow; axis: GanttModel["a
           data-testid={`gantt-bar-${row.runIx}`}
           data-estimated={row.estimated || undefined}
           data-open={bar.open || undefined}
-          title={row.estimated ? ESTIMATED_DURATION_TITLE : undefined}
+          title={row.estimated ? ESTIMATED_RUN_TITLE : undefined}
           className={cn(
             "absolute top-1/2 h-3 min-w-0.5 -translate-y-1/2 rounded-sm",
             row.estimated ? "border border-dashed" : row.attempts.length > 0 ? `${TONE_FILL[tone]} opacity-35` : TONE_FILL[tone],
@@ -171,7 +174,14 @@ function AttemptSegment({
   );
 }
 
+/** What the tab may ask of the view: to put focus back on a row, e.g. when the run panel closes. */
+export interface GanttViewHandle {
+  /** Focuses that run's row, or the grid's tab stop when the row is not on screen. */
+  focusRow: (runIx: number | null) => void;
+}
+
 export interface GanttViewProps {
+  ref?: Ref<GanttViewHandle>;
   model: GanttModel;
   /** The run whose panel is open (`?run=`), if any. */
   selectedRunIx: number | null;
@@ -179,7 +189,7 @@ export interface GanttViewProps {
   onSelect: (runIx: number | null) => void;
 }
 
-export function GanttView({ model, selectedRunIx, onSelect }: GanttViewProps) {
+export function GanttView({ ref, model, selectedRunIx, onSelect }: GanttViewProps) {
   const [collapsed, setCollapsed] = useState<ReadonlySet<number>>(() => new Set());
   const [focusIx, setFocusIx] = useState<number | null>(selectedRunIx);
   const rowEls = useRef(new Map<number, HTMLDivElement>());
@@ -197,6 +207,16 @@ export function GanttView({ model, selectedRunIx, onSelect }: GanttViewProps) {
     setFocusIx(ix);
     rowEls.current.get(ix)?.focus();
   };
+  useImperativeHandle(ref, () => ({
+    focusRow: (ix) => {
+      const target = ix !== null && rows.some((r) => r.runIx === ix) ? ix : tabStop;
+      if (target !== null) focusRow(target);
+    },
+  }));
+
+  // Siblings, for `aria-posinset`/`aria-setsize`: a collapse hides whole sibling sets, so all of `model.rows` counts.
+  const siblings = new Map<number | null, number[]>();
+  for (const r of model.rows) siblings.set(r.parentIx, [...(siblings.get(r.parentIx) ?? []), r.runIx]);
   const toggle = (ix: number, open?: boolean) => {
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -247,7 +267,7 @@ export function GanttView({ model, selectedRunIx, onSelect }: GanttViewProps) {
 
   return (
     <div className="overflow-x-auto rounded-md border">
-      <div role="grid" aria-label="Task runs over time" aria-rowcount={rows.length + 1} className="min-w-[36rem] text-sm">
+      <div role="treegrid" aria-label="Task runs over time" aria-rowcount={rows.length + 1} className="min-w-[36rem] text-sm">
         <div role="row" aria-rowindex={1} className={cn(COLUMNS, "h-8 border-b bg-muted text-xs text-muted-foreground")}>
           <div role="columnheader" className="px-3">
             Task
@@ -287,6 +307,10 @@ export function GanttView({ model, selectedRunIx, onSelect }: GanttViewProps) {
               key={row.runIx}
               role="row"
               aria-rowindex={i + 2}
+              aria-level={row.depth + 1}
+              aria-posinset={(siblings.get(row.parentIx) ?? []).indexOf(row.runIx) + 1}
+              aria-setsize={(siblings.get(row.parentIx) ?? []).length}
+              aria-expanded={row.hasChildren ? !isCollapsed : undefined}
               aria-selected={selected}
               data-run-ix={row.runIx}
               tabIndex={row.runIx === tabStop ? 0 : -1}
@@ -309,7 +333,6 @@ export function GanttView({ model, selectedRunIx, onSelect }: GanttViewProps) {
                   <IconButton
                     tabIndex={-1}
                     aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${row.taskId}`}
-                    aria-expanded={!isCollapsed}
                     onClick={(e) => {
                       e.stopPropagation();
                       toggle(row.runIx);
@@ -352,7 +375,12 @@ export function GanttView({ model, selectedRunIx, onSelect }: GanttViewProps) {
   );
 }
 
-/** What the run panel's slots get: the run, for Tasks 5 and 6 to filter logs and read outputs by. */
+/**
+ * The run panel's slots, for Tasks 5 and 6: each gets the run (`run.id` is the
+ * `task_run_id` filter). The tab calls them once per run, not per clock tick,
+ * and remounts the panel when the selection changes, so a slot's own state
+ * (a log cursor) never carries over to another run.
+ */
 export interface GanttRunSlots {
   logs?: (run: TaskRunDto) => ReactNode;
   outputs?: (run: TaskRunDto) => ReactNode;
@@ -373,11 +401,37 @@ function Fact({ term, children }: { term: string; children: ReactNode }) {
  * under the row; egret opens one panel under the chart, so the bars keep their
  * places while a run is read.
  */
-export function GanttRunPanel({ row, onClose, slots }: { row: GanttRow; onClose: () => void; slots?: GanttRunSlots }) {
+export function GanttRunPanel({
+  row,
+  onClose,
+  logs,
+  outputs,
+}: {
+  row: GanttRow;
+  onClose: () => void;
+  /** The slots' content for this run, already rendered (see `GanttRunSlots`). */
+  logs?: ReactNode;
+  outputs?: ReactNode;
+}) {
   const headingId = useId();
   const run = row.run;
+  const panel = useRef<HTMLElement>(null);
+  // Escape closes the panel from anywhere inside it (spec §6.4), unless
+  // something in it (a slot's own input, dialog or menu) has already used the
+  // key. Listened for on the document, after React's root listener has run
+  // the slots' own handlers, so `defaultPrevented` is already known.
+  useEffect(() => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      if (!(e.target instanceof Node) || !panel.current?.contains(e.target)) return;
+      e.preventDefault();
+      onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
   return (
-    <section aria-labelledby={headingId} data-testid="gantt-run-panel" className="mt-4 rounded-md border p-4">
+    <section ref={panel} aria-labelledby={headingId} data-testid="gantt-run-panel" className="mt-4 rounded-md border p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <h2 id={headingId} className="truncate font-mono text-base font-semibold">
@@ -438,11 +492,11 @@ export function GanttRunPanel({ row, onClose, slots }: { row: GanttRow; onClose:
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <section aria-label="Logs" data-testid="gantt-run-logs">
           <h3 className="text-sm font-medium">Logs</h3>
-          <div className="mt-1">{slots?.logs ? slots.logs(run) : <SlotPlaceholder what="This run's logs" />}</div>
+          <div className="mt-1">{logs ?? <SlotPlaceholder what="This run's logs" />}</div>
         </section>
         <section aria-label="Outputs" data-testid="gantt-run-outputs">
           <h3 className="text-sm font-medium">Outputs</h3>
-          <div className="mt-1">{slots?.outputs ? slots.outputs(run) : <SlotPlaceholder what="This run's outputs" />}</div>
+          <div className="mt-1">{outputs ?? <SlotPlaceholder what="This run's outputs" />}</div>
         </section>
       </div>
     </section>

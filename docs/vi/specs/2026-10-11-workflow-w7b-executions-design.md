@@ -221,15 +221,16 @@ Mọi hành động bị vô hiệu hoá đều hiện lý do thành chữ (FE-A
 
 - Mỗi task run là một dòng, theo thứ tự `run_ix`.
 - Dòng lồng dưới dòng cha theo `parent_ix`, và thu gọn được.
-- Các con của một run loop hoặc `ForEach` có nhãn theo `value` của chúng.
+- Một `Loop` (`ForEach` của Kestra) không có dòng con. Các vòng lặp của nó là execution con, liệt kê ở mục "Child executions" của Overview (§5.3), vì `executor/flowable/loop_.rs` không tạo run nào trong execution cha cho thân vòng lặp. Loop là một dòng flowable. Hiện không `CreateRun` nào đặt `value`, nên value chỉ hiện cạnh task id khi có. *(Sửa 2026-10-11, Task 4.)*
 - Mỗi dòng hiện task id, value (nếu có), chip state và thời lượng.
+- Các dòng là một `treegrid`: mỗi dòng có `aria-level`, `aria-posinset`/`aria-setsize`, và `aria-expanded` nếu có con. *(Thêm 2026-10-11, review Task 4.)*
 
 ### 6.2 Thanh thời gian
 
 - **Trục:** đi từ lúc execution bắt đầu tới lúc kết thúc, hoặc tới thời điểm hiện tại khi còn đang chạy. Trục có vạch chia và nhãn dễ đọc.
 - **Thanh của run:** đi từ `started_at` tới `ended_at`, tô màu theo token state của run.
 - **Attempt:** mỗi attempt là một đoạn riêng trong dòng, từ `started_at` tới `ended_at` của attempt đó. Một attempt thất bại rồi được retry mang màu theo state kết thúc của chính nó, nên nhìn thấy được các lần retry.
-- **Run chưa kết thúc:** thanh kéo dài tới hiện tại và được vẽ lại ở mỗi lần poll. Khi tab đang hiển thị, việc vẽ lại được giới hạn theo animation frame; khi tab bị ẩn thì dừng.
+- **Run chưa kết thúc:** thanh kéo dài tới hiện tại. Khi execution còn chạy, gantt vẽ lại theo animation frame, nhiều nhất mỗi 40 ms (mỗi 500 ms khi có từ 50 run), đúng chu kỳ của `Gantt.vue` trong Kestra. Việc vẽ lại dừng khi tab bị ẩn, và giảm xuống mỗi giây một lần khi có `prefers-reduced-motion`. Trong một execution đã kết thúc, run chưa từng kết thúc bị chặn ở thời điểm kết thúc của execution và được đánh dấu là ước tính. *(Sửa 2026-10-11, Task 4.)*
 - **Run chưa từng bắt đầu** (`CREATED`, hoặc `SKIPPED` do `runIf`): hiện một điểm đánh dấu thay vì thanh.
 
 ### 6.3 Thời gian ước tính

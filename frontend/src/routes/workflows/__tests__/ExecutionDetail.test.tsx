@@ -535,7 +535,7 @@ describe("ExecutionDetail: Overview", () => {
     await userEvent.click(within(runs).getByRole("link", { name: "each" }));
     expect(screen.getByTestId("where")).toHaveTextContent(`/explore/${WS}/workflows/executions/${EXEC}/gantt?run=1`);
     // The link lands on the Gantt with that run's panel open (Task 4).
-    const grid = await screen.findByRole("grid", { name: "Task runs over time" });
+    const grid = await screen.findByRole("treegrid", { name: "Task runs over time" });
     expect(within(grid).getAllByRole("row").slice(1).map((r) => r.getAttribute("aria-selected"))).toEqual(["false", "true"]);
     expect(within(screen.getByTestId("gantt-run-panel")).getByRole("heading", { name: "each eu-west" })).toBeInTheDocument();
   });

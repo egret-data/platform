@@ -15,10 +15,35 @@ import { hasRun } from "@/components/workflows/executions/timing";
  * |---|---|---|
  * | never ran (no `RUNNING` in `history`, no `started_at`): `CREATED`, `SKIPPED`, cancelled at `CREATED` | — a marker, never a bar | — |
  * | ran, `started_at` recorded | `started_at` | `ended_at`; else now while live |
- * | ran, `started_at` null (before migration 0180, or in flight when it was deployed) | `created_at` + `attempts[0].started_at`, else the run's own `created_at` (a flowable has no attempts) — estimated | `ended_at` when recorded (real); else `updated_at` once `ended_seq` is set (or the run is terminal) — estimated; else now |
+ * | ran, `started_at` null (before migration 0180, or in flight when it was deployed) | `created_at` + `attempts[0].started_at`, else the run's own `created_at` (a flowable has no attempts) — estimated | as above |
+ *
+ * **The end, for any run that ran:** `ended_at` when recorded (real); else
+ * `updated_at` once `ended_seq` is set or the run's state is terminal —
+ * estimated; else, in an execution that has ended, the execution's end —
+ * estimated; else now (an open bar).
  *
  * The estimated recipe is `crates/egret-workflow/tests/executions_routes.rs`
- * `gantt_rows`, which reads the same DTO the same way.
+ * `gantt_rows`, which reads the same DTO the same way, with two departures,
+ * both on purpose and both tested:
+ * - **A terminal state also closes a bar,** not only `ended_seq`. `gantt_rows`
+ *   lets `ended_seq` alone decide, so a terminal run with a null `ended_seq`
+ *   would be drawn open to now, which says "still running" about a run whose
+ *   chip says it finished. Its last write is the better stand-in.
+ * - **An execution that has ended caps every run that has not.** A run left
+ *   unended inside a finished execution would otherwise run to the viewer's
+ *   clock, and the axis with it (a probe drew 72 h for a 100 s execution).
+ *
+ * **`updated_at` as an end (FE-STATE-4).** It is a timestamp, not content, so
+ * here are its writers, all in `crates/egret-workflow/src/worker/`:
+ * - the `INSERT` in `claim.rs` `persist` (the column default, `now()`);
+ * - `claim.rs` `claim`, which takes the lease (`claimed_at`, `updated_at`);
+ * - `claim.rs` `RUN_STATE_UPDATE`, every persisted change of state, history
+ *   or attempts (start, retry, pause, resume, end);
+ * - `reaper.rs` `reap`, which drops an expired lease.
+ *
+ * The outputs and message writes (`claim.rs`, `subflow.rs`) do not move it.
+ * `claim` and `reap` pick only `RUNNING` runs, so once a run is terminal its
+ * `updated_at` is the write that ended it, give or take a later state write.
  *
  * **Attempts** are milliseconds after the EXECUTION's `created_at` (a `Tick`
  * in this engine). Each keeps the state its own history ended in, so a failed
@@ -80,7 +105,7 @@ function lastState(history: readonly string[], fallback: string): string {
 }
 
 /** One run's times, before nesting. */
-function timeRun(run: TaskRunDto, origin: number, now: number) {
+function timeRun(run: TaskRunDto, origin: number, now: number, cap: number | undefined) {
   const ended = parse(run.ended_at);
   if (!hasRun(run)) {
     // A run that never ran gets no bar, estimated or not: it sits where it was
@@ -99,8 +124,12 @@ function timeRun(run: TaskRunDto, origin: number, now: number) {
   let open = false;
   if (ended !== undefined) end = ended;
   else if (run.ended_seq != null || isTerminalState(run.state)) {
-    // `updated_at` moves on every write; it is an end only once the run has one.
+    // `updated_at` moves with each write listed in the header; it is an end only once the run has one.
     end = Date.parse(run.updated_at);
+    estimated = true;
+  } else if (cap !== undefined) {
+    // The execution has ended and this run never did: it ran no later than that.
+    end = cap;
     estimated = true;
   } else {
     end = now;
@@ -125,6 +154,8 @@ function timeRun(run: TaskRunDto, origin: number, now: number) {
 export function buildGantt(execution: GanttExecution, now: number): GanttModel {
   const origin = Date.parse(execution.created_at);
   const live = !isTerminalState(execution.state);
+  const executionEnd = parse(execution.ended_at) ?? Date.parse(execution.updated_at);
+  const cap = live ? undefined : executionEnd;
 
   const byIx = new Map(execution.runs.map((r) => [r.run_ix, r]));
   const children = new Map<number | null, TaskRunDto[]>();
@@ -151,7 +182,7 @@ export function buildGantt(execution: GanttExecution, now: number): GanttModel {
       state: r.state,
       hasChildren: kids.length > 0,
       run: r,
-      ...timeRun(r, origin, now),
+      ...timeRun(r, origin, now, cap),
     });
     for (const k of kids) visit(k, depth + 1, r.run_ix);
   };
@@ -161,7 +192,7 @@ export function buildGantt(execution: GanttExecution, now: number): GanttModel {
 
   // The axis: the execution's start to its end, or to now while it runs, widened to hold every bar and marker.
   let start = parse(execution.started_at) ?? origin;
-  let end = live ? now : (parse(execution.ended_at) ?? Date.parse(execution.updated_at));
+  let end = live ? now : executionEnd;
   for (const row of rows) {
     const from = row.bar?.start ?? row.markerAt;
     const to = row.bar?.end ?? row.markerAt;
@@ -194,10 +225,15 @@ export function visibleRows(rows: readonly GanttRow[], collapsed: ReadonlySet<nu
  */
 export function markerReason(state: string): string {
   if (state === "SKIPPED") return "Skipped: it never ran.";
-  if (state === "CANCELLED" || state === "KILLED") return "Cancelled before it started.";
+  if (state === "CANCELLED") return "Cancelled before it started.";
+  if (state === "KILLED") return "Killed before it started.";
   if (isTerminalState(state)) return "Ended without running.";
   return "Not started yet.";
 }
+
+/** What an estimated bar or duration says on hover: a task run's words, beside `timing.ts`'s execution ones. */
+export const ESTIMATED_RUN_TITLE =
+  "Estimated: this task run's start or end was not recorded, so its first attempt, its creation or its last update stands in.";
 
 /** Round tick steps, smallest first. */
 const STEPS_MS = [

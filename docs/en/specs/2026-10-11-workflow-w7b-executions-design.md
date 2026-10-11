@@ -211,8 +211,9 @@ Every disabled action shows its reason as visible text (FE-ACTION-4), using W7a'
 
 - There is one row per task run, in `run_ix` order.
 - Rows nest under their `parent_ix` parent and collapse.
-- A loop or `ForEach` run's children are labelled with their `value`.
+- A `Loop` (Kestra's `ForEach`) has no child rows. Its iterations are child executions, listed in Overview's "Child executions" (§5.3), because `executor/flowable/loop_.rs` creates no run in the parent for a loop body. The loop is one flowable row. No `CreateRun` sets `value` today, so the value is shown beside the task id only when present. *(Corrected 2026-10-11, Task 4.)*
 - Each row shows the task id, the value if there is one, the state chip and the duration.
+- The rows are a `treegrid`: each row carries `aria-level`, `aria-posinset`/`aria-setsize` and, with children, `aria-expanded`. *(Added 2026-10-11, Task 4 review.)*
 
 ### 6.2 Bars
 
@@ -223,7 +224,7 @@ Every disabled action shows its reason as visible text (FE-ACTION-4), using W7a'
 **Bars**
 - A run's bar runs from `started_at` to `ended_at`, coloured by the run's state token.
 - Each attempt is a separate segment within the row, from its `started_at` to its `ended_at`. A failed attempt that was retried is coloured by its own end state, so retries are visible.
-- A run that has not ended extends to now and is redrawn on each poll. The redraw is throttled to animation frames while visible, and paused while the tab is hidden.
+- A run that has not ended extends to now. While the execution is live, the gantt redraws on animation frames, at most every 40 ms (every 500 ms from 50 runs), which is Kestra's `Gantt.vue` interval. It pauses while the tab is hidden, and steps to once a second under `prefers-reduced-motion`. In an execution that has ended, a run that never did is capped at the execution's end and marked estimated. *(Corrected 2026-10-11, Task 4.)*
 - A run that never started (`CREATED`, or `SKIPPED` by `runIf`) shows a marker, not a bar.
 
 ### 6.3 Estimated times

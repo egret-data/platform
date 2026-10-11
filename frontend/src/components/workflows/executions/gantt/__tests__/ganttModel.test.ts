@@ -185,6 +185,7 @@ describe("buildGantt: never-started markers", () => {
   it("says why there is no bar", () => {
     expect(markerReason("SKIPPED")).toMatch(/skipped/i);
     expect(markerReason("CANCELLED")).toMatch(/cancelled before it started/i);
+    expect(markerReason("KILLED")).toBe("Killed before it started.");
     expect(markerReason("CREATED")).toMatch(/not started/i);
   });
 });
@@ -242,6 +243,43 @@ describe("buildGantt: the estimated fallback (spec §6.3)", () => {
     );
     expect(rowOf(g, 0).bar).toEqual({ start: AT(3000), end: NOW, open: true });
     expect(rowOf(g, 0).estimated).toBe(true);
+  });
+
+  it("closes a terminal run with no ended_seq at updated_at rather than leaving it open (a departure from gantt_rows)", () => {
+    const g = buildGantt(
+      execution(
+        [run(0, "done", { state: "FAILED", history: ["CREATED", "RUNNING", "FAILED"], ended_seq: null, started_at: "2026-10-11T10:00:02Z", updated_at: "2026-10-11T10:00:30Z" })],
+        { state: "RUNNING", ended_at: null },
+      ),
+      NOW,
+    );
+    expect(rowOf(g, 0).bar).toEqual({ start: T("2026-10-11T10:00:02Z"), end: T("2026-10-11T10:00:30Z"), open: false });
+    expect(rowOf(g, 0).estimated).toBe(true);
+  });
+
+  it("caps a run that never ended inside an execution that has, and keeps the axis to the execution", () => {
+    // Viewed three days later: the page's clock must not become the run's end, or the axis's.
+    const later = T("2026-10-14T10:00:00Z");
+    const g = buildGantt(
+      execution(
+        [
+          run(0, "stuck", {
+            state: "RUNNING",
+            history: ["CREATED", "RUNNING"],
+            ended_seq: null,
+            started_at: "2026-10-11T10:00:02Z",
+            attempts: [{ started_at: 2000, history: ["RUNNING"] }],
+          }),
+        ],
+        { state: "FAILED", ended_at: "2026-10-11T10:01:40.000001Z" },
+      ),
+      later,
+    );
+    const r = rowOf(g, 0);
+    expect(r.bar).toEqual({ start: T("2026-10-11T10:00:02Z"), end: T("2026-10-11T10:01:40.000001Z"), open: false });
+    expect(r.estimated).toBe(true);
+    expect(r.attempts).toEqual([{ start: AT(2000), end: T("2026-10-11T10:01:40.000001Z"), state: "RUNNING" }]);
+    expect(g.axis.end).toBe(T("2026-10-11T10:01:40.000001Z"));
   });
 
   it("is not estimated when both times are recorded, and the chart says so", () => {
