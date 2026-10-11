@@ -90,12 +90,12 @@ const MARKERS = [
   ["src/components/workflows/executions/trigger.tsx", "Loop iteration"],
   // `staleNote`'s sentence. Polling and the clock are shared by the list and the detail.
   ["src/components/workflows/executions/polling.ts", "it keeps trying on its own."],
-  // The execution detail (W7b Task 3), a lazy chunk of its own like the flow pages: it reads the
-  // frozen source with `yaml` (`actions.ts`), so it is flagged to stay out of the list's chunk too.
+  // The execution detail (W7b Task 3), a lazy chunk of its own like the flow pages, which the
+  // gantt, logs and outputs (Tasks 4–6) grow; flagged to stay out of the list's chunk too.
   ["src/routes/workflows/ExecutionDetail.tsx", "Edits made to the flow since it ran are not used.", "editor"],
   ["src/routes/workflows/ExecutionOverview.tsx", "No trigger started this execution, so it has no trigger variables.", "editor"],
-  // `UNBOUNDED_PAUSE_REASON`.
-  ["src/components/workflows/executions/actions.ts", "so it cannot be resumed from here", "editor"],
+  // `REPLAY_NOT_FINISHED_REASON`.
+  ["src/components/workflows/executions/actions.ts", "Replay is available when the execution has finished", "editor"],
 ];
 
 const entry = entryChunkName(DIST);

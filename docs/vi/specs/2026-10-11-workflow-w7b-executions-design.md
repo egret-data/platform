@@ -30,6 +30,9 @@ Bộ rule frontend `docs/en/frontend-rules.md` ràng buộc mọi dòng code fro
 - **Bộ lọc tiền tố namespace phía server.** `GET …/executions` có thêm `namespace_prefix`: một namespace và mọi namespace bên dưới nó, neo theo dấu chấm. "Include child namespaces" gửi tham số này. Nó thay cho cách mở rộng phía client trên các namespace đã biết, vốn chỉ phân trang đúng trong 200 hàng đầu của mỗi namespace.
 - **`root_only` giữ lại execution retry.** Chỉ ẩn iteration của loop và execution con của subflow hay flow trigger. Execution do retry `CREATE_NEW_EXECUTION` tạo ra là phần tiếp của một lần chạy gốc, nên vẫn hiện trong danh sách mặc định, với nhãn Retry.
 
+**Đã quyết với người dùng, 2026-10-11 (review Task 3):**
+- **Resume thật sự.** `POST …/executions/{id}/resume` giải phóng ngay mọi run `Pause` đang PAUSED của execution, bất kể `pauseDuration:` hay `timeout:`, và mỗi run kết thúc `SUCCESS`. Đó là `ExecutionService.resume` của Kestra, và `Pause.java` ghi rằng một pause được resume trước hạn "will always succeed". Trước quyết định này, route chỉ settle lại execution: nó chỉ kết thúc được pause đã quá hạn, việc mà bộ đánh thức (waker) của worker vẫn tự làm.
+
 ## 1. Vì sao
 
 Từ W7a người dùng chạy được flow trên trình duyệt, nhưng chỉ theo dõi được qua một trang tối thiểu liệt kê state của các task run. W7b mang tới đúng những gì người dùng Kestra quen dùng cho một lần chạy:
@@ -48,6 +51,7 @@ Gantt cần thời điểm bắt đầu và kết thúc thật, nhưng engine ch
 | Cập nhật trực tiếp qua SSE (`/executions/{id}/follow`, `/logs/{id}/follow`) | Polling: execution theo nhịp backoff của W7a, log mỗi 2 giây theo cursor | API của egret chỉ hỗ trợ polling (W11) |
 | Tab: overview, gantt, logs, outputs, metrics, dependencies, audit-logs, assets | Overview, Gantt, Logs, Outputs; Topology đến cùng W7c | Không có dữ liệu metrics hay dependencies; audit và assets chỉ có ở bản EE |
 | Hành động: restart, replay (kèm inputs, từ một task run, theo revision), kill, pause, resume, change state, set labels, unqueue, force run, delete | Replay (cả execution, dùng source và inputs đã đóng băng) và resume | Chỉ hai lệnh này có trong engine (§5) |
+| Resume giải phóng ngay run đang pause và run thành công; một `Pause` có thể khai báo input `onResume`, dialog resume sẽ hỏi các input đó | Resume giải phóng ngay mọi `Pause` đang pause và mỗi run thành công; không nhận input khi resume | egret bỏ qua `onResume` của `Pause` (`spec/schema/property-treatment.json`: `ignored`), và route không nhận body, nên không có gì để hỏi |
 | Danh sách execution có thao tác hàng loạt | Không có thao tác hàng loạt | Chỉ có route theo từng execution; phán quyết của người dùng |
 | Danh sách hiện mọi execution | Mặc định chỉ execution gốc, có công tắc "Show child executions" | Phán quyết của người dùng: iteration của loop và execution con của subflow sẽ làm ngập danh sách |
 | Outputs có expression debugger | Không có expression debugger | Không có endpoint đánh giá biểu thức |
@@ -187,9 +191,11 @@ Execution được poll theo `nextPollMs` của W7a (2 giây; khi đọc lỗi t
 Cả hai hành động cần quyền `workflow:manage`. Người dùng không có quyền này không thấy nút. Trang đọc quyền này từ `ExecutionDto.can_manage` (§3.4).
 
 **Resume:**
-- Chỉ hiện khi state là `PAUSED`, và phải qua dialog xác nhận.
-- Giới hạn của backend (route resume trong `routes.rs`): task `Pause` không có `pauseDuration` lẫn `timeout` thì vẫn đứng ở PAUSED sau khi gọi resume. Với trường hợp đó, Resume bị vô hiệu hoá kèm lý do "This pause has no duration or timeout, so it cannot be resumed from here". Thông tin này đọc từ `source` đã đóng băng của execution.
-- Thành công thì refresh query của execution.
+- Hiện và bật đúng khi state là `PAUSED`, và phải qua dialog xác nhận. Dialog nói rằng mọi task đang pause sẽ kết thúc ngay như một lần thành công, bất kể duration hay timeout, và execution chạy tiếp.
+- Route giải phóng ngay mọi run `Pause` đang `PAUSED` với `SUCCESS` (quyết định ở đầu tài liệu, review Task 3). Nó dời hạn của từng pause về thời điểm hiện tại; sau đó run rời `PAUSED` qua đúng con đường của một pause hết hạn tự nhiên, nên lịch sử (`… PAUSED SUCCESS`, `RESTARTED` trên execution) và mốc thời gian giống hệt một lần kết thúc tự nhiên. `LoopUntil` đang chờ vòng lặp kế tiếp không bị đụng tới.
+- Cuộc đua với waker của worker được khoá của execution phân xử: bên nào lấy khoá trước thì thắng. Một pause có `timeout:` mà waker kết thúc trước thì là `FAILED`, và resume trả 409. Một pause vẫn `PAUSED` khi resume lấy được khoá thì kết thúc `SUCCESS`.
+- Thành công thì refresh query của execution. Toast theo state mà route trả về: "Resumed the execution" chỉ khi execution không còn pause; "Resumed, but the execution then ended Failed." (hoặc Killed, Cancelled) khi kết thúc xấu; và một ghi chú phòng hờ nếu câu trả lời vẫn là `PAUSED`.
+- 409 (không pause, hoặc waker thắng) thì hiện thông báo của server trong dialog.
 
 **Replay:**
 - Chỉ bật khi execution đã kết thúc; còn lại thì vô hiệu hoá với lý do "Replay is available when the execution has finished".
@@ -204,7 +210,7 @@ Mọi hành động bị vô hiệu hoá đều hiện lý do thành chữ (FE-A
 - **Inputs:** bảng key/value. Giá trị dạng `kestra:///` được hiện thành một hàng file (§8).
 - **Trigger:** loại trigger và các biến của nó. Body, headers và parameters của webhook hiện trong một khung JSON thu gọn được.
 - **Execution con:** một danh sách gọn lấy qua `parent=<id>`, gồm id, state, `loop_index`/`loop_value` và thời điểm bắt đầu; mỗi dòng là link tới execution đó.
-- **Task run:** một danh sách gọn gồm task id, value, state và thời lượng. Bấm một dòng thì mở tab Gantt với run đó được chọn.
+- **Task run:** một danh sách gọn gồm task id, value, state và thời lượng ("so far" khi đang chạy). Task id là một liên kết mở tab Gantt với run đó được chọn (`gantt?run=<run_ix>`). Dùng liên kết thay vì cả dòng bấm được để dùng được bằng bàn phím (FE-A11Y-3). *(Sửa 2026-10-11, Task 3.)*
 
 ## 6. Gantt
 
@@ -346,6 +352,7 @@ Khác biệt được đưa vào §2.
 
 **Rust:**
 - Mốc thời gian trên mọi đường đổi state: thành công, thất bại, retry (`RETRY_FAILED_TASK` và `CREATE_NEW_EXECUTION`), pause rồi resume, subflow (`wait` true và false), iteration của loop, SLA cancel, replay.
+- Resume thủ công: mọi loại pause được giải phóng ngay thành `SUCCESS` kèm mốc thời gian, nhiều pause song song, cuộc đua với waker (chỉ chuyển state một lần), 409 khi không pause, và 404 với workspace khác.
 - Các bất biến ở §3.2.
 - Thời điểm kết thúc của attempt khi retry.
 - `root_only` và `parent`:
@@ -370,7 +377,7 @@ Khác biệt được đưa vào §2.
   - chỉ poll khi có hàng chưa kết thúc.
 - Chi tiết:
   - hành động bật hoặc vô hiệu hoá kèm lý do;
-  - trường hợp resume khi pause không có timeout;
+  - Resume bật cho mọi pause, và thông báo sau resume theo đúng state được trả về;
   - replay chuyển trang, và hiện lỗi từ server;
   - tab lạ chuyển hướng về overview.
 - Outputs: nhận ra `kestra:///`, copy dưới dạng biểu thức, các trạng thái của preview.
@@ -415,5 +422,4 @@ Toàn bộ `docs/en/frontend-rules.md`. Những rule quan trọng nhất ở đ�
 ## 15. Giới hạn đã biết
 
 - Execution ghi trước migration 0180 có thời gian ước tính (§6.3).
-- Resume không giải phóng được một `Pause` không có duration hay timeout (§5.2).
 - Một lần retry của một vòng lặp con hoặc của một execution con do subflow tạo ra hiện trong danh sách mặc định như một execution gốc. Execution thay thế do `CREATE_NEW_EXECUTION` tạo ra mang `parent_execution_id` (là execution con) nhưng không có `loop_index` và không có `trigger_execution_id`, đúng hình dạng của một lần retry của execution gốc, nên `root_only` giữ nó lại (§3.3). *(Phát hiện trong review Task 2.)*

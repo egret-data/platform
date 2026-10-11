@@ -307,7 +307,8 @@ function RunDuration({ run, now }: { run: TaskRunDto; now: number }) {
       </span>
     );
   }
-  return <>{formatDuration(duration.ms)}</>;
+  // Still running: measured to now, and said so, as the header does (review M-7).
+  return <>{duration.running ? `${formatDuration(duration.ms)} so far` : formatDuration(duration.ms)}</>;
 }
 
 /**

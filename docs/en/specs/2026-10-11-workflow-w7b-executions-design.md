@@ -23,6 +23,9 @@ The frontend rulebook `docs/en/frontend-rules.md` binds every frontend line.
 - **A namespace prefix filter on the server.** `GET …/executions` gains `namespace_prefix`, a namespace and every namespace beneath it, dot-anchored. "Include child namespaces" sends it. It replaces the client-side expansion over known namespaces, whose merged paging was exact only for the first 200 rows of each namespace.
 - **`root_only` keeps retries.** It hides loop iterations and subflow and flow-trigger children only. The execution a `CREATE_NEW_EXECUTION` retry starts continues a root run, so it stays in the default list, labelled Retry.
 
+**Decided with the user, 2026-10-11 (Task 3 review):**
+- **A real resume.** `POST …/executions/{id}/resume` releases every paused `Pause` run of the execution at once, whatever its `pauseDuration:` or `timeout:`, and each ends `SUCCESS`. That is Kestra's `ExecutionService.resume`, and `Pause.java` says a pause resumed before its duration "will always succeed". Until this ruling, the route only re-settled the execution: it ended a pause whose deadline had passed, which the worker's waker does by itself.
+
 ## 1. Why
 
 Since W7a, a user can run a flow from the browser, but can follow it only on a minimal page that lists task-run states. W7b gives runs the surface Kestra users expect:
@@ -41,6 +44,7 @@ The gantt needs real start and end times, and the engine does not record them. T
 | Live updates through SSE (`/executions/{id}/follow`, `/logs/{id}/follow`) | Polling: the execution with W7a's backoff, logs every 2 s by cursor | egret's APIs are poll-only (W11) |
 | Tabs: overview, gantt, logs, outputs, metrics, dependencies, audit-logs, assets | Overview, Gantt, Logs and Outputs. Topology arrives with W7c | No metrics or dependency data. Audit and assets are EE-only |
 | Actions: restart, replay (with inputs, from a task run, at a revision), kill, pause, resume, change state, set labels, unqueue, force run, delete | Replay (whole execution, frozen source and inputs) and resume | The only engine commands that exist (§5) |
+| Resume releases the paused run at once and it succeeds; a `Pause` may declare `onResume` inputs, which the resume dialog collects | Resume releases every paused `Pause` at once and each succeeds; no inputs on resume | egret ignores a `Pause`'s `onResume` (`spec/schema/property-treatment.json`: `ignored`), and the route takes no body, so there is nothing to collect |
 | The executions list has bulk actions | No bulk actions | Per-execution routes only; the user's ruling |
 | The list shows every execution | Root executions by default, with a "Show child executions" switch | The user's ruling: loop iterations and subflow children would flood the list |
 | Outputs has an expression debugger | No expression debugger | No expression-evaluation endpoint |
@@ -177,9 +181,11 @@ The execution is polled with W7a's `nextPollMs` (2 s, backing off to 30 s while 
 Both actions need `workflow:manage`. A user without it does not see them. The page reads it from `ExecutionDto.can_manage` (§3.4).
 
 **Resume**
-- It is shown only while the state is `PAUSED`, and goes through a confirm dialog.
-- A `Pause` task with neither `pauseDuration` nor `timeout` stays paused after a resume call. This is a backend limit, `routes.rs` resume. For that case Resume is disabled with the reason "This pause has no duration or timeout, so it cannot be resumed from here". The pause's properties are read from the execution's frozen `source`.
-- On success the execution query is refreshed.
+- It is shown, and enabled, exactly while the state is `PAUSED`, and goes through a confirm dialog. The dialog says that every paused task ends now as a success, whatever its duration or timeout, and that the execution continues.
+- The route releases every `PAUSED` `Pause` run at once with `SUCCESS` (header ruling, Task 3 review). It moves each pause's deadline to now, and the run then leaves `PAUSED` through the same path a passed deadline takes, so its history (`… PAUSED SUCCESS`, `RESTARTED` on the execution) and its timestamps are those of a natural end. A `LoopUntil` waiting for its next iteration is not touched.
+- The race with the worker's waker is decided by the execution's lock: whichever takes it first wins. A `timeout:` pause the waker ended first is `FAILED`, and the resume answers 409. A pause still `PAUSED` when the resume takes the lock ends `SUCCESS`.
+- On success the execution query is refreshed. The toast follows the state the route answered: "Resumed the execution" only when it is no longer paused; "Resumed, but the execution then ended Failed." (or Killed, Cancelled) for a bad end; and a defensive note if the answer is still `PAUSED`.
+- A 409 (not paused, or the waker won) shows the server's message in the dialog.
 
 **Replay**
 - It is enabled only when the execution is terminal. Otherwise it is disabled with the reason "Replay is available when the execution has finished".
@@ -194,7 +200,7 @@ Every disabled action shows its reason as visible text (FE-ACTION-4), using W7a'
 - **Inputs:** a key/value table. A `kestra:///` value is a file row (§8).
 - **Trigger:** its type and variables. Webhook body, headers and parameters are shown as a collapsible JSON view.
 - **Child executions:** a compact list fetched with `parent=<id>`, giving id, state, `loop_index`/`loop_value` and start time, each linking to its execution.
-- **Task runs:** a compact list of task id, value, state and duration. Clicking a row opens the Gantt with that run selected.
+- **Task runs:** a compact list of task id, value, state and duration ("so far" while running). The task id is a link that opens the Gantt with that run selected (`gantt?run=<run_ix>`). It is a link rather than a clickable row so that it works from the keyboard (FE-A11Y-3). *(Corrected 2026-10-11, Task 3.)*
 
 ## 6. The Gantt
 
@@ -360,7 +366,7 @@ Differences go into §2.
   - polling only while non-terminal rows exist.
 - The detail:
   - actions enabled and disabled with reasons;
-  - the resume no-timeout case;
+  - resume enabled for every pause, and its feedback following the answered state;
   - replay navigation and server errors;
   - unknown tab redirect.
 - Outputs:
@@ -408,5 +414,4 @@ All of `docs/en/frontend-rules.md`. The rules most at stake:
 ## 15. Known limits
 
 - Executions recorded before migration 0180 have estimated times (§6.3).
-- Resume cannot release a `Pause` that has no duration or timeout (§5.2).
 - A retry of a loop iteration or of a subflow child appears in the default list as a root. Its `CREATE_NEW_EXECUTION` replacement carries `parent_execution_id` (the child) with no `loop_index` and no `trigger_execution_id`, which is exactly the shape of a retry of a root, so `root_only` keeps it (§3.3). *(Found in the Task 2 review.)*

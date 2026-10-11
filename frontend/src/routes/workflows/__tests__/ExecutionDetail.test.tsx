@@ -190,6 +190,17 @@ describe("ExecutionDetail: the header", () => {
     );
   });
 
+  it("links the parent of a loop iteration as Child of, through parent_execution_id", async () => {
+    const PARENT = "44444444-0000-4000-8000-000000000004";
+    new Server(ok(execution("SUCCESS", { parent_execution_id: PARENT, loop_index: 0, loop_value: "a" })));
+    renderPage();
+    await screen.findByRole("heading", { level: 1, name: EXEC });
+    expect(within(fact("Child of")).getByRole("link", { name: PARENT })).toHaveAttribute(
+      "href",
+      `/explore/${WS}/workflows/executions/${PARENT}/overview`,
+    );
+  });
+
   it("marks a start and duration that were not recorded as estimated", async () => {
     new Server(ok(execution("SUCCESS", { started_at: null, ended_at: null })));
     renderPage();
@@ -304,22 +315,27 @@ describe("ExecutionDetail: Resume", () => {
     expect(screen.getByRole("button", { name: "Replay" })).toBeInTheDocument();
   });
 
-  it("is disabled, saying why in visible text, when the frozen source's pause has no duration or timeout", async () => {
+  it("is enabled for every pause, an unbounded one included, and says what it does", async () => {
     new Server(ok(paused("")));
     renderPage();
     const button = await screen.findByRole("button", { name: "Resume" });
-    expect(button).toBeDisabled();
-    const reason = "This pause has no duration or timeout, so it cannot be resumed from here";
-    expect(screen.getByText(reason)).toBeVisible();
-    expect(button).toHaveAccessibleDescription(reason);
+    expect(button).toBeEnabled();
+    expect(screen.queryByText(/cannot be resumed/)).toBeNull();
+    await userEvent.click(button);
+    const dialog = await screen.findByRole("alertdialog", { name: "Resume this execution?" });
+    expect(dialog).toHaveTextContent("Every paused task ends now as a success, whatever its duration or timeout");
   });
 
-  it("asks first, then resumes, refetches the execution and confirms with a toast", async () => {
+  it.each([
+    ["RUNNING", "success", "Resumed the execution"],
+    ["SUCCESS", "success", "Resumed the execution"],
+    ["FAILED", "warning", "Resumed, but the execution then ended Failed."],
+    ["PAUSED", "warning", "Resume was sent, but the execution is still paused. Refresh to see its latest state."],
+  ] as const)("asks first, resumes, refetches, and on a %s answer says so (%s)", async (answered, tone, message) => {
     const server = new Server(ok(paused("    pauseDuration: PT1M\n")), ok(paused("    pauseDuration: PT1M\n")), ok(execution("RUNNING")));
+    server.resume = { status: 200, body: execution(answered) };
     renderPage();
-    const button = await screen.findByRole("button", { name: "Resume" });
-    expect(button).toBeEnabled();
-    await userEvent.click(button);
+    await userEvent.click(await screen.findByRole("button", { name: "Resume" }));
     const dialog = await screen.findByRole("alertdialog", { name: "Resume this execution?" });
     // Nothing sent until confirmed.
     expect(server.calls.some((c) => c.method === "POST")).toBe(false);
@@ -327,7 +343,8 @@ describe("ExecutionDetail: Resume", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: "Resume" }));
     await waitFor(() => expect(server.calls.filter((c) => c.method === "POST" && c.path === `${EXEC_PATH}/resume`)).toHaveLength(1));
     await waitFor(() => expect(server.executionReads()).toBeGreaterThan(readsBefore));
-    expect(toast.success).toHaveBeenCalledWith("Resumed the execution");
+    await waitFor(() => expect(toast[tone]).toHaveBeenCalledWith(message));
+    expect(toast[tone === "success" ? "warning" : "success"]).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
   });
 
@@ -472,6 +489,16 @@ describe("ExecutionDetail: Overview", () => {
     expect(rows.map((r) => r.textContent)).toEqual(["extract—Success45 s", "eacheu-westSuccess15 s"]);
     await userEvent.click(within(runs).getByRole("link", { name: "each" }));
     expect(screen.getByTestId("where")).toHaveTextContent(`/explore/${WS}/workflows/executions/${EXEC}/gantt?run=1`);
+  });
+
+  it("says a running task run's duration is so far", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-10-10T10:00:30Z"));
+    new Server(ok(execution("RUNNING", { runs: [run("slow", "RUNNING", 0, { started_at: "2026-10-10T10:00:00Z" })] })));
+    renderPage();
+    const runs = await screen.findByRole("region", { name: "Task runs" });
+    const row = within(runs).getAllByRole("row")[1];
+    expect(row).toHaveTextContent(/slow—Running\d+ s so far/);
   });
 
   it("says when the execution has no task runs yet", async () => {

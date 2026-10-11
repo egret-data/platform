@@ -27,7 +27,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
 import { StateChip } from "@/components/workflows/StateChip";
 import { formatDuration } from "@/components/workflows/executionState";
-import { canReplay, canResume, showsResume } from "@/components/workflows/executions/actions";
+import { canReplay, resumeFeedback, showsResume } from "@/components/workflows/executions/actions";
 import { nextExecutionPollMs, staleNote, useNow } from "@/components/workflows/executions/polling";
 import {
   ESTIMATED_DURATION_TITLE,
@@ -284,7 +284,6 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
   const reasonsId = useId();
 
   const resumeShown = showsResume(execution);
-  const resumeState = canResume(execution);
   const replayState = canReplay(execution);
 
   const runResume = async () => {
@@ -292,13 +291,11 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
     if (res.status !== 200) throw new Error("The execution could not be resumed. Try again.");
     void queryClient.invalidateQueries({ queryKey: workflowsKeys.execution(execution.id) });
     void queryClient.invalidateQueries({ queryKey: workflowsKeys.executions(ws) });
-    // The page stays, so a toast confirms it (FE-ACTION-2). A bounded pause whose
-    // time has not come stays paused through a resume; say so rather than claim it moved.
-    if (res.data.state === "PAUSED") {
-      toast.warning("Resume was sent, but the execution is still paused. A pause ends once its duration has passed.");
-    } else {
-      toast.success("Resumed the execution");
-    }
+    // The page stays, so a toast confirms it (FE-ACTION-2), in terms of the
+    // state the route answered, not of what was asked.
+    const feedback = resumeFeedback(res.data.state);
+    if (feedback.tone === "success") toast.success(feedback.message);
+    else toast.warning(feedback.message);
   };
 
   const runReplay = async () => {
@@ -315,10 +312,11 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
     <div className="flex flex-col items-end gap-1">
       <div className="flex flex-wrap items-center justify-end gap-2">
         {resumeShown ? (
-          <ReasonButton enablement={resumeState} reasonId={`${reasonsId}-resume`} onClick={() => setOpen("resume")}>
+          // Always enabled while paused: the route releases every pause (spec §5.2).
+          <Button type="button" size="sm" onClick={() => setOpen("resume")}>
             <Play aria-hidden />
             Resume
-          </ReasonButton>
+          </Button>
         ) : null}
         <ReasonButton
           enablement={replayState}
@@ -331,16 +329,13 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
         </ReasonButton>
       </div>
       <DisabledReasons
-        actions={[
-          ...(resumeShown ? [{ id: `${reasonsId}-resume`, label: "Resume", enablement: resumeState }] : []),
-          { id: `${reasonsId}-replay`, label: "Replay", enablement: replayState },
-        ]}
+        actions={[{ id: `${reasonsId}-replay`, label: "Replay", enablement: replayState }]}
       />
       <ConfirmAction
         open={open === "resume"}
         onOpenChange={(o) => setOpen(o ? "resume" : null)}
         title="Resume this execution?"
-        description="The paused task continues, and the tasks after it run."
+        description="Every paused task ends now as a success, whatever its duration or timeout, and the execution continues with the tasks after it."
         confirmLabel="Resume"
         onConfirm={runResume}
         fallbackError="The execution could not be resumed. Try again."

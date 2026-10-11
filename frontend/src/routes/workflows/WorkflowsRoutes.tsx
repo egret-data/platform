@@ -13,9 +13,8 @@ import ExecutionsList from "@/routes/workflows/ExecutionsList";
 const FlowDetail = lazy(() => import("@/routes/workflows/FlowDetail"));
 const FlowNew = lazy(() => import("@/routes/workflows/FlowNew"));
 /**
- * The execution detail (W7b), split the same way: it reads the frozen source
- * with `yaml` to decide Resume, and Tasks 4–6 hang the gantt, logs and
- * outputs off it, none of which the lists need.
+ * The execution detail (W7b), split the same way: Tasks 4–6 hang the gantt,
+ * logs and outputs off it, none of which the lists need.
  */
 const ExecutionDetail = lazy(() => import("@/routes/workflows/ExecutionDetail"));
 

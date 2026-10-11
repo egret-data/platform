@@ -48,5 +48,14 @@ export function entryChunkName(dist) {
  */
 export function entryPreloadNames(dist) {
   const html = readFileSync(join(dist, "index.html"), "utf8");
-  return [...html.matchAll(/<link[^>]+rel="modulepreload"[^>]+href="\/assets\/([^"]+\.js)"/g)].map((m) => m[1]);
+  // Attribute order is Vite's to choose, so each `<link>` is read whole and its `rel` and `href`
+  // asked for separately (W7b Task 3 review, M-1): a regex that wanted `rel` first would answer
+  // `[]` for `<link href=… rel="modulepreload">`, and the guard would fall back to entry-only.
+  const names = [];
+  for (const [tag] of html.matchAll(/<link\b[^>]*>/g)) {
+    if (!/\brel="modulepreload"/.test(tag)) continue;
+    const href = /\bhref="\/assets\/([^"]+\.js)"/.exec(tag);
+    if (href) names.push(href[1]);
+  }
+  return names;
 }
