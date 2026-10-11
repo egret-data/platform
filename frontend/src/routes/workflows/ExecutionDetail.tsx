@@ -2,7 +2,7 @@ import { useId, useState, type ReactNode } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ChartGantt, FileOutput, History, Loader2, Play, RotateCw, ScrollText } from "lucide-react";
+import { FileOutput, History, Loader2, Play, RotateCw, ScrollText } from "lucide-react";
 import { ApiError } from "@/api/client";
 import {
   useWorkflowGetExecution,
@@ -27,6 +27,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
 import { StateChip } from "@/components/workflows/StateChip";
 import { formatDuration } from "@/components/workflows/executionState";
+import ExecutionGanttTab from "@/components/workflows/executions/gantt/ExecutionGanttTab";
 import { canReplay, canResume, resumeFeedback, showsResume } from "@/components/workflows/executions/actions";
 import { nextExecutionPollMs, staleNote, useNow } from "@/components/workflows/executions/polling";
 import {
@@ -156,10 +157,10 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
         <TabsContent value="overview" className="min-h-0 flex-1 overflow-auto p-4">
           <ExecutionOverview ws={ws} execution={execution} now={now} />
         </TabsContent>
-        {/* Tasks 4–6 of W7b fill these three. */}
         <TabsContent value="gantt" className="min-h-0 flex-1 overflow-auto p-4">
-          <EmptyState icon={ChartGantt} title="The Gantt is not here yet" description="The task-run timeline arrives in a later release." />
+          <ExecutionGanttTab execution={execution} />
         </TabsContent>
+        {/* Tasks 5 and 6 of W7b fill these two. */}
         <TabsContent value="logs" className="min-h-0 flex-1 overflow-auto p-4">
           <EmptyState icon={ScrollText} title="Logs are not here yet" description="The execution's logs arrive in a later release." />
         </TabsContent>

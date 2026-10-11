@@ -96,6 +96,11 @@ const MARKERS = [
   ["src/routes/workflows/ExecutionOverview.tsx", "No trigger started this execution, so it has no trigger variables.", "editor"],
   // `REPLAY_NOT_FINISHED_REASON`.
   ["src/components/workflows/executions/actions.ts", "Replay is available when the execution has finished", "editor"],
+  // The Gantt tab (W7b Task 4), in the execution detail's chunk. `markerReason`'s sentence, the
+  // run panel's close label, and the unknown-`?run=` note.
+  ["src/components/workflows/executions/gantt/ganttModel.ts", "Cancelled before it started.", "editor"],
+  ["src/components/workflows/executions/gantt/GanttView.tsx", "Close the task run", "editor"],
+  ["src/components/workflows/executions/gantt/ExecutionGanttTab.tsx", "The link may be from another execution.", "editor"],
 ];
 
 const entry = entryChunkName(DIST);
