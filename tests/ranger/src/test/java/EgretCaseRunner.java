@@ -9,6 +9,7 @@ import org.apache.ranger.authorization.utils.JsonUtils;
 import org.apache.ranger.plugin.contextenricher.RangerTagForEval;
 import org.apache.ranger.plugin.model.RangerPolicy;
 import org.apache.ranger.plugin.model.RangerTag;
+import org.apache.ranger.plugin.policyengine.RangerAccessRequest;
 import org.apache.ranger.plugin.policyengine.RangerAccessRequestImpl;
 import org.apache.ranger.plugin.policyengine.RangerAccessResourceImpl;
 import org.apache.ranger.plugin.policyengine.RangerAccessResult;
@@ -197,9 +198,20 @@ public class EgretCaseRunner {
         // setAccessType rewrites null/empty to ANY_ACCESS; the generator never
         // emits either, so what is set here is what is evaluated.
         r.setAccessType(req.get("accessType").getAsString());
+        // SP4d-4 Task 1: the Trino plugin's filter* methods ask with
+        // SELF_OR_DESCENDANTS (RangerSystemAccessControl.java:972/:990 at tag 470).
+        // Absent = Ranger's default (SELF), so every existing case serialises and
+        // evaluates exactly as before. Measured with javap -c at 2.5.0 and 2.8.0:
+        // besides the field write, the setter only resets ISREQUESTPREPROCESSED
+        // to FALSE (as setResource does) and never touches the TAGS key, so it
+        // stays BEFORE the tags block below and the seeded tag set survives.
+        if (req.has("resourceMatchingScope")) {
+            r.setResourceMatchingScope(RangerAccessRequest.ResourceMatchingScope.valueOf(
+                    req.get("resourceMatchingScope").getAsString()));
+        }
         if (req.has("tags")) {
-            // AFTER setResource, which is the only setter on this class that
-            // touches the context (it clears ISREQUESTPREPROCESSED). Nothing
+            // AFTER setResource (and setResourceMatchingScope), the setters on
+            // this class that touch the context (both clear ISREQUESTPREPROCESSED). Nothing
             // between here and evaluatePolicies writes the TAGS key — see
             // tagsFrom.
             RangerAccessRequestUtil.setRequestTagsInContext(

@@ -4818,6 +4818,18 @@ fn check_measured_tag_crash(
 /// anchors passed" and "no anchor ran" indistinguishable from the exit
 /// status. So this reads the per-class summary line and requires it.
 fn ask_ranger(cases: &[Case], service_type: &str, ranger_version: &str, tag: &str) -> Vec<Value> {
+    ask_ranger_json(
+        cases.iter().map(|c| c.to_json(service_type)).collect(),
+        ranger_version,
+        tag,
+    )
+}
+
+/// [`ask_ranger`] over already-serialised cases (SP4d-4 Task 1), for a request
+/// [`Case::to_json`] cannot express — `resourceMatchingScope`, and the `_any`
+/// pseudo access type this crate refuses. Every assertion `ask_ranger` makes
+/// lives here, so both paths carry them.
+fn ask_ranger_json(payload: Vec<Value>, ranger_version: &str, tag: &str) -> Vec<Value> {
     let dir = ranger_dir();
     // The scratch path carries the pid: several agents share one temp
     // directory and an unprefixed name is another run's file.
@@ -4832,7 +4844,13 @@ fn ask_ranger(cases: &[Case], service_type: &str, ranger_version: &str, tag: &st
     // answer if Maven failed to write one.
     let _ = std::fs::remove_file(&verdicts_path);
 
-    let payload: Vec<Value> = cases.iter().map(|c| c.to_json(service_type)).collect();
+    let sent = payload.len();
+    let service_type = payload
+        .first()
+        .and_then(|c| c.get("serviceType"))
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_string();
     std::fs::write(
         &cases_path,
         serde_json::to_vec(&Value::Array(payload)).expect("serialise cases"),
@@ -4841,7 +4859,7 @@ fn ask_ranger(cases: &[Case], service_type: &str, ranger_version: &str, tag: &st
 
     eprintln!(
         "differential: {} {tag} cases at ranger {ranger_version} ({service_type}); cases={}",
-        cases.len(),
+        sent,
         cases_path.display()
     );
 
@@ -4887,10 +4905,10 @@ fn ask_ranger(cases: &[Case], service_type: &str, ranger_version: &str, tag: &st
             .expect("parse verdicts.json");
     assert_eq!(
         verdicts.len(),
-        cases.len(),
+        sent,
         "ranger {ranger_version} answered {} of {} cases",
         verdicts.len(),
-        cases.len()
+        sent
     );
     verdicts
 }
@@ -7598,4 +7616,476 @@ fn a_migration_the_grammar_accepts_decides_identically_on_the_real_engine() {
         eprintln!("  refusals naming {kind:32} ×{n}");
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+// ── SP4d-4 Task 1: what an absent level grants on the real jars ─────────────
+//
+// The policy editor saves a level the steward left empty by OMITTING it, so a
+// hand-written policy can stop above the leaf (`d1`..`d3`) or name a level below
+// an absent one (`gap`). egret's compiler always emits every level, with `*` for
+// "all" (`d4star`). This MEASURES what each shape grants on the real 2.5.0 and
+// 2.8.0 engines, under both service-defs, so the choice between fixing the editor
+// (B1) and widening the grammar (B2) rests on Ranger's answer rather than on a
+// reading of it. It also pins the two evalOrder facts Part A depends on.
+//
+// Every set is ONE policy and nothing else — no background — so anything allowed
+// was allowed by that policy. Concrete-access cells at `SELF` are also asked of
+// this crate: on the pairing it was measured against (Trino → 2.5.0, StarRocks →
+// 2.8.0) it must AGREE; off that pairing it must REFUSE with
+// `PluginVersionMismatch` alone, and what it would answer with the version left
+// unstated is printed, not asserted. `_any` (refused here as `PseudoAccessType`)
+// and `SELF_OR_DESCENDANTS` (which `AccessRequest` cannot carry) are Java-only.
+
+const LV_VALUES: [&str; 4] = ["wh", "sales", "orders", "email"];
+const LV_USER: &str = "alice";
+
+fn lv_access_types(profile: &Profile) -> Vec<&'static str> {
+    match profile.engine {
+        EngineType::StarRocks => vec!["select", "insert", "delete", "update"],
+        _ => vec!["select", "insert", "delete"],
+    }
+}
+
+/// `levels` as (hierarchy index, value) pairs; an index not named is ABSENT.
+fn lv_resources(profile: &Profile, levels: &[(usize, &str)]) -> Value {
+    let mut m = Map::new();
+    for (i, v) in levels {
+        m.insert(profile.hierarchy[*i].to_string(), mig_level(&[v]));
+    }
+    Value::Object(m)
+}
+
+fn lv_policies(profile: &Profile) -> Vec<(&'static str, Value)> {
+    vec![
+        ("d1", lv_resources(profile, &[(0, "wh")])),
+        ("d2", lv_resources(profile, &[(0, "wh"), (1, "sales")])),
+        (
+            "d3",
+            lv_resources(profile, &[(0, "wh"), (1, "sales"), (2, "orders")]),
+        ),
+        (
+            "d4star",
+            lv_resources(profile, &[(0, "wh"), (1, "sales"), (2, "orders"), (3, "*")]),
+        ),
+        ("gap", lv_resources(profile, &[(0, "wh"), (2, "orders")])),
+        // Not in the brief: what B1 would SAVE for `d1` and `d2` (every emptied
+        // non-root level written as `*`), so the doc can say which of today's
+        // allows B1's rewrite keeps and which it adds, cell by cell.
+        (
+            "d1star",
+            lv_resources(profile, &[(0, "wh"), (1, "*"), (2, "*"), (3, "*")]),
+        ),
+        (
+            "d2star",
+            lv_resources(profile, &[(0, "wh"), (1, "sales"), (2, "*"), (3, "*")]),
+        ),
+    ]
+}
+
+fn lv_access_policy(profile: &Profile, id: i64, name: &str, resources: &Value) -> Value {
+    json!({
+        "id": id, "name": name, "service": profile.service_name, "policyType": 0,
+        "isEnabled": true, "policyPriority": 0, "resources": resources,
+        "policyItems": [mig_item(&[LV_USER], &[], &lv_access_types(profile))],
+    })
+}
+
+fn lv_mask_policy(profile: &Profile, id: i64, name: &str, resources: Value, mask: &str) -> Value {
+    json!({
+        "id": id, "name": name, "service": profile.service_name, "policyType": 1,
+        "isEnabled": true, "policyPriority": 0, "resources": resources,
+        "dataMaskPolicyItems": [mig_mask_item(&[], &["public"], mask, None)],
+    })
+}
+
+fn lv_request(
+    profile: &Profile,
+    depth: usize,
+    access: &str,
+    tags: Option<Vec<&str>>,
+) -> AccessRequest {
+    let mut resource = RequestResource::new();
+    for (level, value) in profile.hierarchy.iter().zip(LV_VALUES).take(depth) {
+        resource.insert(*level, value);
+    }
+    let levels: BTreeSet<String> = profile.hierarchy[..depth]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    AccessRequest {
+        user: LV_USER.to_string(),
+        groups: BTreeSet::new(),
+        roles: BTreeSet::new(),
+        access_type: access.to_string(),
+        resource,
+        owner: None,
+        resolved_tags: tags.map(|names| {
+            UnenrichedTags::new(
+                names
+                    .into_iter()
+                    .map(|n| ResolvedTag {
+                        name: n.to_string(),
+                        match_type: MatchType::Self_,
+                        attributes: BTreeMap::new(),
+                        options: BTreeSet::new(),
+                        validity_periods: 0,
+                        attached_through: TagServiceResource {
+                            levels: levels.clone(),
+                            is_enabled: true,
+                        },
+                    })
+                    .collect(),
+            )
+        }),
+    }
+}
+
+fn lv_case(id: String, policy_type: i32, set: Value, request: AccessRequest) -> Case {
+    Case {
+        id,
+        policy_type,
+        duel: false,
+        composed_duel: false,
+        candidacy_duel: false,
+        restore_duel: false,
+        version_split_duel: false,
+        service_policies: set,
+        request,
+    }
+}
+
+/// One matrix cell: which policy, which request, at which scope.
+struct LvCell {
+    policy: &'static str,
+    depth: usize,
+    access: String,
+    /// `None` = the key is absent (Ranger's default, `SELF`).
+    scope: Option<&'static str>,
+    case: Case,
+}
+
+/// One Part A pin: a mask set and what Java must answer.
+struct LvPin {
+    label: &'static str,
+    case: Case,
+}
+
+fn lv_pins(profile: &Profile, def_json: &Value, tag_def_json: &Value) -> Vec<LvPin> {
+    let leaf = lv_resources(
+        profile,
+        &[(0, "wh"), (1, "sales"), (2, "orders"), (3, "email")],
+    );
+    let broad = lv_resources(profile, &[(0, "wh"), (1, "sales"), (2, "*"), (3, "email")]);
+    let set = |policies: Vec<Value>, tags: Option<Vec<Value>>| {
+        mig_envelope(profile, def_json, tag_def_json, policies, tags)
+    };
+    let request = || lv_request(profile, 4, "select", None);
+    let mut pins = vec![
+        LvPin {
+            label: "pin1 broader-wins (m-broad MASK vs m-narrow MASK_NULL)",
+            case: lv_case(
+                "lv-pin1".into(),
+                1,
+                set(
+                    vec![
+                        lv_mask_policy(profile, 21, "m-broad", broad.clone(), "MASK"),
+                        lv_mask_policy(profile, 22, "m-narrow", leaf.clone(), "MASK_NULL"),
+                    ],
+                    None,
+                ),
+                request(),
+            ),
+        },
+        LvPin {
+            label: "pin1 control: names swapped (z-broad MASK vs a-narrow MASK_NULL)",
+            case: lv_case(
+                "lv-pin1-names".into(),
+                1,
+                set(
+                    vec![
+                        lv_mask_policy(profile, 21, "z-broad", broad.clone(), "MASK"),
+                        lv_mask_policy(profile, 22, "a-narrow", leaf.clone(), "MASK_NULL"),
+                    ],
+                    None,
+                ),
+                request(),
+            ),
+        },
+        // Not in the brief: ids AND list order swapped too, so neither the id nor
+        // the download order can be what picks the winner.
+        LvPin {
+            label: "pin1 control: names, ids and order swapped",
+            case: lv_case(
+                "lv-pin1-ids".into(),
+                1,
+                set(
+                    vec![
+                        lv_mask_policy(profile, 21, "a-narrow", leaf.clone(), "MASK_NULL"),
+                        lv_mask_policy(profile, 22, "z-broad", broad, "MASK"),
+                    ],
+                    None,
+                ),
+                request(),
+            ),
+        },
+    ];
+    if profile.engine == EngineType::Trino {
+        let tag_mask = json!({
+            "id": 931, "name": "t-pii", "service": profile.tag_service_name, "policyType": 1,
+            "isEnabled": true, "policyPriority": 0,
+            "resources": {"tag": {"values": ["pii"]}},
+            "dataMaskPolicyItems": [mig_mask_item(&[], &["public"], "MASK", None)],
+        });
+        pins.push(LvPin {
+            label: "pin2 tag MASK beats path MASK_NULL at equal priority",
+            case: lv_case(
+                "lv-pin2".into(),
+                1,
+                set(
+                    vec![lv_mask_policy(profile, 31, "p-leaf", leaf, "MASK_NULL")],
+                    Some(vec![tag_mask]),
+                ),
+                lv_request(profile, 4, "select", Some(vec!["pii"])),
+            ),
+        });
+    }
+    pins
+}
+
+#[test]
+fn editor_shaped_levels_on_the_real_ranger_jars() {
+    if std::env::var("EGRET_TEST_RANGER_E2E").ok().as_deref() != Some("1") {
+        eprintln!("EGRET_TEST_RANGER_E2E != 1 — skipping the editor-shaped levels matrix");
+        return;
+    }
+    let started = std::time::Instant::now();
+    let tag_def_json = load_tag_def();
+    let mut failures: Vec<String> = Vec::new();
+    let (mut compared, mut agreed, mut java_total) = (0usize, 0usize, 0usize);
+    let (mut off_refused, mut off_compared, mut off_agreed) = (0usize, 0usize, 0usize);
+
+    for profile in [trino(), starrocks()] {
+        let service_type = profile.engine.service_def_name();
+        let (def_json, def, base_engine) = load_engine(&profile);
+        let accesses = lv_access_types(&profile);
+        let policies = lv_policies(&profile);
+
+        let mut cells: Vec<LvCell> = Vec::new();
+        for (pi, (name, resources)) in policies.iter().enumerate() {
+            let set = mig_envelope(
+                &profile,
+                &def_json,
+                &tag_def_json,
+                vec![lv_access_policy(&profile, 1 + pi as i64, name, resources)],
+                None,
+            );
+            for depth in 1..=4 {
+                let mut asks: Vec<(String, Option<&'static str>)> =
+                    accesses.iter().map(|a| ((*a).to_string(), None)).collect();
+                asks.push(("_any".to_string(), Some("SELF")));
+                asks.push(("_any".to_string(), Some("SELF_OR_DESCENDANTS")));
+                // Not in the brief: a concrete access at SELF_OR_DESCENDANTS. It is
+                // the control that shows the scope REACHES the engine — `_any`
+                // already matches descendants at SELF, so its two columns cannot
+                // differ and would read the same whether the field was honoured or
+                // dropped.
+                asks.push(("select".to_string(), Some("SELF_OR_DESCENDANTS")));
+                for (access, scope) in asks {
+                    cells.push(LvCell {
+                        policy: name,
+                        depth,
+                        access: access.clone(),
+                        scope,
+                        case: lv_case(
+                            format!("lv-{name}-{depth}-{access}-{}", scope.unwrap_or("default")),
+                            0,
+                            set.clone(),
+                            lv_request(&profile, depth, &access, None),
+                        ),
+                    });
+                }
+            }
+        }
+        let pins = lv_pins(&profile, &def_json, &tag_def_json);
+
+        for (version, plugin_version) in [
+            ("2.5.0", PluginVersion::Ranger2_5_0),
+            ("2.8.0", PluginVersion::Ranger2_8_0),
+        ] {
+            let engine = EngineConfig {
+                plugin_version: Some(plugin_version),
+                ..base_engine.clone()
+            };
+            // The crate answers only for the pairing it was measured against
+            // (`EngineType::plugin_version`: Trino → 2.5.0, StarRocks → 2.8.0).
+            let on_pairing = base_engine.plugin_version == Some(plugin_version);
+            let mut payload: Vec<Value> = cells
+                .iter()
+                .map(|c| {
+                    let mut v = c.case.to_json(service_type);
+                    if let Some(scope) = c.scope {
+                        v["request"]["resourceMatchingScope"] = json!(scope);
+                    }
+                    v
+                })
+                .collect();
+            payload.extend(pins.iter().map(|p| p.case.to_json(service_type)));
+            let sent = payload.len();
+            let t = std::time::Instant::now();
+            let verdicts = ask_ranger_json(payload, version, &format!("levels-{service_type}"));
+            let java_elapsed = t.elapsed().as_secs_f64();
+            assert!(sent > 0 && verdicts.len() == sent, "every case answered");
+            java_total += verdicts.len();
+
+            let mut grid: BTreeMap<(&str, usize, String), char> = BTreeMap::new();
+            for (cell, verdict) in cells.iter().zip(&verdicts) {
+                assert_eq!(verdict["id"], json!(cell.case.id), "verdict order");
+                if !verdict["error"].is_null() {
+                    failures.push(format!(
+                        "[{service_type} @ {version}] ranger threw on {}: {}",
+                        cell.case.id, verdict["error"]
+                    ));
+                    continue;
+                }
+                let allowed = verdict["isAllowed"].as_bool().expect("isAllowed");
+                let column = match cell.scope {
+                    None => cell.access.clone(),
+                    Some("SELF") => format!("{}:S", cell.access),
+                    Some(_) => format!("{}:D", cell.access),
+                };
+                grid.insert(
+                    (cell.policy, cell.depth, column),
+                    if allowed { 'A' } else { '-' },
+                );
+                if cell.scope.is_none() {
+                    let set: ServicePolicySet =
+                        serde_json::from_value(cell.case.service_policies.clone())
+                            .expect("parse levels set");
+                    let as_allowed = |d: &Decision| match d {
+                        Decision::Allowed { .. } => Some(true),
+                        Decision::Denied { .. } => Some(false),
+                        Decision::Undecidable { .. } => None,
+                    };
+                    let mine = evaluate(&set, &cell.case.request, &def, &engine);
+                    if on_pairing {
+                        compared += 1;
+                        if as_allowed(&mine) == Some(allowed) {
+                            agreed += 1;
+                        } else {
+                            failures.push(format!(
+                                "CRITICAL [{service_type} @ {version}] the evaluator disagrees \
+                                 with Java on {}: java isAllowed={allowed} policyId={}, rust \
+                                 {mine:?}",
+                                cell.case.id, verdict["policyId"]
+                            ));
+                        }
+                    } else {
+                        // The crate has not been read against this pairing and says so:
+                        // `PluginVersionMismatch`, and nothing else, is the right answer.
+                        let refused_for_version = matches!(
+                            &mine,
+                            Decision::Undecidable { why }
+                                if why.len() == 1
+                                    && matches!(why[0], UndecidableCause::PluginVersionMismatch { .. })
+                        );
+                        if refused_for_version {
+                            off_refused += 1;
+                        } else {
+                            failures.push(format!(
+                                "[{service_type} @ {version}] off the measured pairing the \
+                                 evaluator must refuse with PluginVersionMismatch alone, not \
+                                 {mine:?} ({})",
+                                cell.case.id
+                            ));
+                        }
+                        // Recorded, NOT asserted: the crate's logic with the version left
+                        // unstated, against the jar it was not measured on.
+                        let unstated = EngineConfig {
+                            plugin_version: None,
+                            ..engine.clone()
+                        };
+                        let loose = evaluate(&set, &cell.case.request, &def, &unstated);
+                        off_compared += 1;
+                        if as_allowed(&loose) == Some(allowed) {
+                            off_agreed += 1;
+                        } else {
+                            eprintln!(
+                                "  note [{service_type} @ {version}] version-unstated evaluator \
+                                 vs Java on {}: java isAllowed={allowed}, rust {loose:?}",
+                                cell.case.id
+                            );
+                        }
+                    }
+                }
+            }
+
+            // The table: rows = policy, columns = depth × access.
+            let mut columns: Vec<String> = accesses.iter().map(|a| (*a).to_string()).collect();
+            columns.push("_any:S".to_string());
+            columns.push("_any:D".to_string());
+            columns.push("select:D".to_string());
+            eprintln!(
+                "\nlevels matrix [{service_type} @ ranger {version}] — {} cases in {java_elapsed:.2} s \
+                 (A allowed, - denied; _any:S = _any at SELF, _any:D / sel:D = _any / select \
+                 at SELF_OR_DESCENDANTS; every other column at the default scope, SELF)",
+                sent
+            );
+            let short = |c: &str| -> String {
+                match c {
+                    "_any:S" | "_any:D" => c.to_string(),
+                    "select:D" => "sel:D".to_string(),
+                    other => other.chars().take(3).collect(),
+                }
+            };
+            let mut header = format!("  {:8}", "policy");
+            for depth in 1..=4 {
+                header.push_str(&format!(" | depth {depth}:"));
+                for c in &columns {
+                    header.push_str(&format!(" {:>6}", short(c)));
+                }
+            }
+            eprintln!("{header}");
+            for (name, _) in &policies {
+                let mut line = format!("  {name:8}");
+                for depth in 1..=4 {
+                    line.push_str(" |         ");
+                    for c in &columns {
+                        let v = grid.get(&(*name, depth, c.clone())).copied().unwrap_or('?');
+                        line.push_str(&format!(" {v:>6}"));
+                    }
+                }
+                eprintln!("{line}");
+            }
+
+            // The Part A pins.
+            for (pin, verdict) in pins.iter().zip(&verdicts[cells.len()..]) {
+                assert_eq!(verdict["id"], json!(pin.case.id), "verdict order");
+                let set: ServicePolicySet =
+                    serde_json::from_value(pin.case.service_policies.clone())
+                        .expect("parse pin set");
+                let mine = evaluate_data_mask(&set, &pin.case.request, &def, &engine);
+                eprintln!(
+                    "  {} @ {version}: java maskType={} policyId={} error={} | rust {mine:?}",
+                    pin.label, verdict["maskType"], verdict["policyId"], verdict["error"]
+                );
+                if verdict["maskType"].as_str() != Some("MASK") {
+                    failures.push(format!(
+                        "PART A PREMISE [{service_type} @ {version}] {}: Java answered maskType={} \
+                         (policyId {}), not MASK",
+                        pin.label, verdict["maskType"], verdict["policyId"]
+                    ));
+                }
+            }
+        }
+    }
+    eprintln!(
+        "\nlevels matrix: java verdicts {java_total}; rust/java agreement {agreed}/{compared} \
+         concrete SELF cells on the measured pairing; off the pairing {off_refused} refused with \
+         PluginVersionMismatch, and the version-unstated evaluator agreed on \
+         {off_agreed}/{off_compared} (recorded, not asserted); in {:.2} s",
+        started.elapsed().as_secs_f64()
+    );
+    assert!(java_total > 0, "no Java verdict at all");
+    assert!(compared > 0, "no cell compared with the evaluator");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
