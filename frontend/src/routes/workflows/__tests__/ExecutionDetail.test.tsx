@@ -455,8 +455,11 @@ describe("ExecutionDetail: Overview", () => {
     renderPage();
     const inputs = await screen.findByRole("region", { name: "Inputs" });
     const rows = within(inputs).getAllByRole("row").slice(1);
-    expect(rows.map((r) => r.textContent)).toEqual(["whoworld", "dataorders.csv(file)"]);
-    expect(within(inputs).getByTestId("input-file")).toHaveAttribute("title", expect.stringContaining("kestra:///company/team"));
+    expect(rows[0].textContent).toBe("whoworld");
+    // The file row (Task 6); this server has no file routes, so the file reads as gone.
+    const file = within(rows[1]).getByTestId("file-row");
+    expect(within(file).getByText("orders.csv")).toHaveAttribute("title", expect.stringContaining("kestra:///company/team"));
+    expect(await within(file).findByText("This file is no longer available")).toBeInTheDocument();
   });
 
   it("shows the trigger's variables, a structured one as collapsed JSON", async () => {

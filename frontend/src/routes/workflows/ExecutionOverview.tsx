@@ -1,6 +1,6 @@
 import { useId, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { ChevronDown, ChevronRight, FileText, GitFork, ListTree, RotateCw, TextCursorInput } from "lucide-react";
+import { ChevronDown, ChevronRight, GitFork, ListTree, RotateCw, TextCursorInput } from "lucide-react";
 import { useWorkflowListExecutions } from "@/api/generated/workflow/workflow";
 import type { ExecutionDto, ExecutionListItemDto, TaskRunDto } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
@@ -11,6 +11,8 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StateChip } from "@/components/workflows/StateChip";
 import { formatDuration, isTerminalState } from "@/components/workflows/executionState";
+import { FileRow } from "@/components/workflows/executions/files/FileRow";
+import { findFileUris, isFileUri, pathSteps } from "@/components/workflows/executions/outputs/outputsModel";
 import { nextPollMs } from "@/components/workflows/executions/polling";
 import {
   ESTIMATED_DURATION_TITLE,
@@ -25,9 +27,6 @@ import { workflowsKeys } from "@/routes/workflows/queryKeys";
 /** How many children the overview lists; the rest are counted, not shown. */
 export const CHILDREN_LIMIT = 50;
 
-/** A `kestra:///` URI names a file in internal storage (spec §8). */
-const FILE_PREFIX = "kestra:///";
-
 const errorMessage = (e: unknown) => (e instanceof Error && e.message ? e.message : "the request failed");
 
 /**
@@ -40,7 +39,7 @@ export default function ExecutionOverview({ ws, execution, now }: { ws: string; 
   return (
     <div className="grid gap-6">
       <Section title="Inputs">
-        <InputsTable inputs={execution.inputs} />
+        <InputsTable ws={ws} executionId={execution.id} inputs={execution.inputs} />
       </Section>
       <Section title="Trigger">
         <TriggerSection execution={execution} />
@@ -73,24 +72,24 @@ function plainValue(v: unknown): string {
 }
 
 /**
- * An input's value. A `kestra:///` string is a file row: its name, with the
- * full URI on hover. Task 6 of W7b gives it its size, preview and download.
+ * An input's value (spec §5.3). A `kestra:///` string is a file row: its name,
+ * size, Preview and Download. A structured value is shown as JSON, with a file
+ * row under it for each file inside it (a multi-file input, an array of URIs).
  */
-function InputValue({ value }: { value: unknown }) {
-  if (typeof value === "string" && value.startsWith(FILE_PREFIX)) {
-    const name = value.slice(value.lastIndexOf("/") + 1) || value;
-    return (
-      <span className="inline-flex items-center gap-1.5" title={value} data-testid="input-file">
-        <FileText aria-hidden className="h-4 w-4 shrink-0 text-muted-foreground" />
-        <span className="font-mono text-xs">{name}</span>
-        <span className="text-muted-foreground">(file)</span>
-      </span>
-    );
-  }
-  return <span className="whitespace-pre-wrap break-all font-mono text-xs">{plainValue(value)}</span>;
+function InputValue({ ws, executionId, value }: { ws: string; executionId: string; value: unknown }) {
+  if (isFileUri(value)) return <FileRow ws={ws} executionId={executionId} uri={value} />;
+  const files = typeof value === "object" && value !== null ? findFileUris(value) : [];
+  return (
+    <div className="grid gap-1.5">
+      <span className="whitespace-pre-wrap break-all font-mono text-xs">{plainValue(value)}</span>
+      {files.map((f) => (
+        <FileRow key={JSON.stringify(f.path)} ws={ws} executionId={executionId} uri={f.uri} label={pathSteps(f.path)} />
+      ))}
+    </div>
+  );
 }
 
-function InputsTable({ inputs }: { inputs: ExecutionDto["inputs"] }) {
+function InputsTable({ ws, executionId, inputs }: { ws: string; executionId: string; inputs: ExecutionDto["inputs"] }) {
   const entries = Object.entries(inputs ?? {});
   if (entries.length === 0) {
     return <EmptyState icon={TextCursorInput} title="No inputs" description="This execution was started without inputs." />;
@@ -106,9 +105,9 @@ function InputsTable({ inputs }: { inputs: ExecutionDto["inputs"] }) {
       <TableBody>
         {entries.map(([name, value]) => (
           <TableRow key={name}>
-            <TableCell className="font-mono text-xs">{name}</TableCell>
+            <TableCell className="align-top font-mono text-xs">{name}</TableCell>
             <TableCell>
-              <InputValue value={value} />
+              <InputValue ws={ws} executionId={executionId} value={value} />
             </TableCell>
           </TableRow>
         ))}

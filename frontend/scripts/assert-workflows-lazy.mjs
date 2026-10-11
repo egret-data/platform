@@ -108,6 +108,15 @@ const MARKERS = [
   ["src/components/workflows/executions/logs/useLogFollow.ts", "The logs could not be read.", "editor"],
   ["src/components/workflows/executions/logs/LogView.tsx", "Older lines were set aside to keep the view fast.", "editor"],
   ["src/components/workflows/executions/logs/ExecutionLogsTab.tsx", "so every run is shown", "editor"],
+  // Outputs and files (W7b Task 6), in the execution detail's chunk: `LOOP_EXPRESSION_NOTE`, the
+  // tree's empty sentence, the tab's unknown-`?run=` note, `NO_LONGER_AVAILABLE`, the row's
+  // unread-size sentence, and the drawer's not-previewable title.
+  ["src/components/workflows/executions/outputs/outputsModel.ts", "A run inside a loop is reached through its value", "editor"],
+  ["src/components/workflows/executions/outputs/OutputsTree.tsx", "This task run has no outputs.", "editor"],
+  ["src/components/workflows/executions/outputs/ExecutionOutputsTab.tsx", "has no outputs in this execution.", "editor"],
+  ["src/components/workflows/executions/files/fileModel.ts", "This file is no longer available", "editor"],
+  ["src/components/workflows/executions/files/FileRow.tsx", "The size could not be read; the file may still open.", "editor"],
+  ["src/components/workflows/executions/files/FilePreviewDrawer.tsx", "This file cannot be previewed", "editor"],
 ];
 
 const entry = entryChunkName(DIST);

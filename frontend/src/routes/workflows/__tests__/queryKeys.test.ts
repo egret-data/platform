@@ -44,6 +44,19 @@ describe("workflowsKeys", () => {
     expect(reaches(workflowsKeys.executions("eng"), workflowsKeys.executionChildren("e"))).toBe(false);
   });
 
+  it("reaches a file's reads from the file and the execution, and no other file's", () => {
+    const metas = workflowsKeys.executionFileMetas("e", "kestra:///a.csv");
+    const preview = workflowsKeys.executionFilePreview("e", "kestra:///a.csv", 100);
+    for (const key of [metas, preview]) {
+      expect(key[0]).toBe("workflows");
+      expect(reaches(workflowsKeys.executionFile("e", "kestra:///a.csv"), key)).toBe(true);
+      expect(reaches(workflowsKeys.execution("e"), key)).toBe(true);
+      expect(reaches(workflowsKeys.executionFile("e", "kestra:///b.csv"), key)).toBe(false);
+      expect(reaches(workflowsKeys.execution("f"), key)).toBe(false);
+    }
+    expect(reaches(preview, workflowsKeys.executionFilePreview("e", "kestra:///a.csv", 500))).toBe(false);
+  });
+
   it("reaches every filtered list of a workspace from its unfiltered key", () => {
     expect(reaches(workflowsKeys.flows("eng"), workflowsKeys.flows("eng", { namespace: "x" }))).toBe(true);
   });

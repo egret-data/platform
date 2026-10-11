@@ -2,7 +2,7 @@ import { useId, useMemo, useState, type ReactNode } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { FileOutput, History, Loader2, Play, RotateCw } from "lucide-react";
+import { History, Loader2, Play, RotateCw } from "lucide-react";
 import { ApiError } from "@/api/client";
 import {
   useWorkflowGetExecution,
@@ -31,6 +31,8 @@ import ExecutionGanttTab from "@/components/workflows/executions/gantt/Execution
 import type { GanttRunSlots } from "@/components/workflows/executions/gantt/GanttView";
 import ExecutionLogsTab from "@/components/workflows/executions/logs/ExecutionLogsTab";
 import { LogView } from "@/components/workflows/executions/logs/LogView";
+import ExecutionOutputsTab from "@/components/workflows/executions/outputs/ExecutionOutputsTab";
+import { OutputsTree } from "@/components/workflows/executions/outputs/OutputsTree";
 import { canReplay, canResume, resumeFeedback, showsResume } from "@/components/workflows/executions/actions";
 import { nextExecutionPollMs, staleNote, useNow } from "@/components/workflows/executions/polling";
 import {
@@ -148,7 +150,11 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
   const now = useNow();
   // Stable across polls: the Gantt renders a slot once per selected run (Task 4).
   const ganttSlots = useMemo<GanttRunSlots>(
-    () => ({ logs: (run: TaskRunDto) => <RunLogs ws={ws} executionId={execution.id} run={run} /> }),
+    () => ({
+      logs: (run: TaskRunDto) => <RunLogs ws={ws} executionId={execution.id} run={run} />,
+      // The panel is keyed by run, so the tree's open items start afresh for each run.
+      outputs: (run: TaskRunDto) => <OutputsTree ws={ws} executionId={execution.id} run={run} />,
+    }),
     [ws, execution.id],
   );
 
@@ -171,9 +177,8 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
         <TabsContent value="logs" className="min-h-0 flex-1 overflow-auto p-4">
           <ExecutionLogsTab ws={ws} execution={execution} />
         </TabsContent>
-        {/* Task 6 of W7b fills this one. */}
         <TabsContent value="outputs" className="min-h-0 flex-1 overflow-auto p-4">
-          <EmptyState icon={FileOutput} title="Outputs are not here yet" description="Task outputs and files arrive in a later release." />
+          <ExecutionOutputsTab ws={ws} execution={execution} />
         </TabsContent>
       </Tabs>
     </>
