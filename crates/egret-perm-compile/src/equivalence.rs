@@ -313,67 +313,128 @@ pub fn derive_probes(
     service_def: &ServiceDef,
     assignments: &[TagAssignment],
 ) -> Vec<Probe> {
-    let policies: Vec<&RangerPolicy> = [before, after]
-        .iter()
-        .flat_map(|s| s.policies.iter().chain(s.tag_policies.iter()))
-        .collect();
+    ProbeFactors::new(before, after, service_def, assignments).build(assignments)
+}
 
-    let principals = principals(&policies);
-    let access_types = access_types(&policies, service_def);
-    let schema_level = if service_def.resource(PolicyType::Access, "schema").is_some() {
-        "schema"
-    } else {
-        "database"
-    };
-    let assigned: Vec<RequestResource> = assignments
-        .iter()
-        .map(|a| {
-            let mut r = RequestResource::new()
-                .with("catalog", a.catalog.clone())
-                .with(schema_level, a.schema.clone())
-                .with("table", a.table.clone());
-            if !a.column.is_empty() {
-                r.insert("column", a.column.clone());
-            }
-            r
-        })
-        .collect();
-    let coordinates = coordinates(&policies, service_def, &assigned);
-    let tag_names = tag_names(before, after);
+/// How many probes [`derive_probes`] would build for these inputs, computed
+/// from the factors WITHOUT building any probe (Task 7 review, I-1): the
+/// migration refuses over its cap before it spends the memory and the time.
+/// Always equal to `derive_probes(..).len()` — `tests/equivalence.rs` pins it.
+pub fn probe_count(
+    before: &ServicePolicySet,
+    after: &ServicePolicySet,
+    service_def: &ServiceDef,
+    assignments: &[TagAssignment],
+) -> usize {
+    ProbeFactors::new(before, after, service_def, assignments).count()
+}
 
-    let mut out = Vec::new();
-    for coordinate in &coordinates {
-        let resource: RequestResource = coordinate.iter().cloned().collect();
-        let mut taggings = vec![(Tagging::Actual, resolve_tags(&resource, assignments))];
-        if table_of(&resource).is_some() {
-            for name in &tag_names {
-                taggings.push((
-                    Tagging::Hypothetical,
-                    vec![attachment(name, MatchType::Self_, &resource)],
-                ));
-            }
+/// The three axes of the probe cross product, plus the tag names that
+/// multiply the table coordinates — computed once, then either counted or
+/// built, so the count and the build cannot disagree.
+struct ProbeFactors {
+    principals: Vec<(String, BTreeSet<String>, BTreeSet<String>)>,
+    access_types: Vec<String>,
+    coordinates: Vec<Coordinate>,
+    tag_names: Vec<String>,
+}
+
+impl ProbeFactors {
+    fn new(
+        before: &ServicePolicySet,
+        after: &ServicePolicySet,
+        service_def: &ServiceDef,
+        assignments: &[TagAssignment],
+    ) -> Self {
+        let policies: Vec<&RangerPolicy> = [before, after]
+            .iter()
+            .flat_map(|s| s.policies.iter().chain(s.tag_policies.iter()))
+            .collect();
+
+        let principals = principals(&policies);
+        let access_types = access_types(&policies, service_def);
+        let schema_level = if service_def.resource(PolicyType::Access, "schema").is_some() {
+            "schema"
+        } else {
+            "database"
+        };
+        let assigned: Vec<RequestResource> = assignments
+            .iter()
+            .map(|a| {
+                let mut r = RequestResource::new()
+                    .with("catalog", a.catalog.clone())
+                    .with(schema_level, a.schema.clone())
+                    .with("table", a.table.clone());
+                if !a.column.is_empty() {
+                    r.insert("column", a.column.clone());
+                }
+                r
+            })
+            .collect();
+        let coordinates = coordinates(&policies, service_def, &assigned)
+            .into_iter()
+            .collect();
+        let tag_names = tag_names(before, after).into_iter().collect();
+        ProbeFactors {
+            principals: principals.into_iter().collect(),
+            access_types: access_types.into_iter().collect(),
+            coordinates,
+            tag_names,
         }
-        for (tagging, tags) in taggings {
-            let tags = UnenrichedTags::new(tags);
-            for (user, groups, roles) in &principals {
-                for access_type in &access_types {
-                    out.push(Probe {
-                        request: AccessRequest {
-                            user: user.clone(),
-                            groups: groups.clone(),
-                            roles: roles.clone(),
-                            access_type: access_type.clone(),
-                            resource: resource.clone(),
-                            owner: None,
-                            resolved_tags: Some(tags.clone()),
-                        },
-                        tagging,
-                    });
+    }
+
+    fn taggings_at(&self, coordinate: &Coordinate) -> usize {
+        let resource: RequestResource = coordinate.iter().cloned().collect();
+        1 + if table_of(&resource).is_some() {
+            self.tag_names.len()
+        } else {
+            0
+        }
+    }
+
+    fn count(&self) -> usize {
+        let per_tagging = self.principals.len() * self.access_types.len();
+        self.coordinates
+            .iter()
+            .map(|c| self.taggings_at(c) * per_tagging)
+            .sum()
+    }
+
+    fn build(self, assignments: &[TagAssignment]) -> Vec<Probe> {
+        let mut out = Vec::with_capacity(self.count());
+        for coordinate in &self.coordinates {
+            let resource: RequestResource = coordinate.iter().cloned().collect();
+            let mut taggings = vec![(Tagging::Actual, resolve_tags(&resource, assignments))];
+            if table_of(&resource).is_some() {
+                for name in &self.tag_names {
+                    taggings.push((
+                        Tagging::Hypothetical,
+                        vec![attachment(name, MatchType::Self_, &resource)],
+                    ));
+                }
+            }
+            for (tagging, tags) in taggings {
+                let tags = UnenrichedTags::new(tags);
+                for (user, groups, roles) in &self.principals {
+                    for access_type in &self.access_types {
+                        out.push(Probe {
+                            request: AccessRequest {
+                                user: user.clone(),
+                                groups: groups.clone(),
+                                roles: roles.clone(),
+                                access_type: access_type.clone(),
+                                resource: resource.clone(),
+                                owner: None,
+                                resolved_tags: Some(tags.clone()),
+                            },
+                            tagging,
+                        });
+                    }
                 }
             }
         }
+        out
     }
-    out
 }
 
 /// `(catalog, schema, table, column)` of a request, `column` `""` when the

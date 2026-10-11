@@ -90,6 +90,9 @@ pub struct ClassifiedPolicy {
 /// One `perm.migrated_from` row, as the classifier and the page read it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema, sqlx::FromRow)]
 pub struct MigrationRecord {
+    /// The policy's name when it was migrated (it may have been renamed
+    /// since; provenance is keyed by policy id).
+    pub policy_name: String,
     pub grant_ids: Vec<Uuid>,
     pub rule_ids: Vec<Uuid>,
     /// How many probe evaluations agreed when the migration was proved.
@@ -571,8 +574,9 @@ pub struct ServiceInputs {
     tags: HashMap<String, String>,
     /// Every policy of the profile, ordered by `id`.
     pub rows: Vec<PolicyRecord>,
-    /// `perm.migrated_from` rows of this profile, by policy name.
-    pub migrated: HashMap<String, MigrationRecord>,
+    /// `perm.migrated_from` rows of this profile, by POLICY ID — a rename of
+    /// the switched-off original must not orphan its marker (review I-3).
+    pub migrated: HashMap<i64, MigrationRecord>,
 }
 
 impl ServiceInputs {
@@ -627,9 +631,9 @@ impl ServiceInputs {
             .into_iter()
             .collect();
 
-        let migrated: Vec<(String, MigrationRecord)> =
-            sqlx::query_as::<_, (String, Vec<Uuid>, Vec<Uuid>, i32, String, String)>(
-                "SELECT policy_name, grant_ids, rule_ids, probes_proved, migrated_by, \
+        let migrated: Vec<(i64, MigrationRecord)> =
+            sqlx::query_as::<_, (i64, String, Vec<Uuid>, Vec<Uuid>, i32, String, String)>(
+                "SELECT policy_id, policy_name, grant_ids, rule_ids, probes_proved, migrated_by, \
                     to_char(migrated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
                FROM perm.migrated_from WHERE service_id = $1",
             )
@@ -638,10 +642,19 @@ impl ServiceInputs {
             .await?
             .into_iter()
             .map(
-                |(name, grant_ids, rule_ids, probes_proved, migrated_by, migrated_at)| {
+                |(
+                    policy_id,
+                    policy_name,
+                    grant_ids,
+                    rule_ids,
+                    probes_proved,
+                    migrated_by,
+                    migrated_at,
+                )| {
                     (
-                        name,
+                        policy_id,
                         MigrationRecord {
+                            policy_name,
                             grant_ids,
                             rule_ids,
                             probes_proved,
@@ -672,7 +685,7 @@ impl ServiceInputs {
         let target = self.target.ok_or(self.svc.r#type.as_str());
         let (mut classified, candidates) =
             classify_policy_objects(rec, target, &catalog_ids, &tag_names);
-        if let Some(record) = self.migrated.get(&rec.name) {
+        if let Some(record) = self.migrated.get(&rec.id) {
             classified.migratable = false;
             classified.proposed = None;
             classified.blockers = vec![migrated_sentence(record)];

@@ -2293,10 +2293,28 @@ impl PolicyStore {
             tx.rollback().await?;
             return Err(e);
         }
-        sqlx::query(r#"DELETE FROM policy.authz_policies WHERE id = $1"#)
+        // SP4d-3 Task 7 (review I-3): a migrated original is referenced by
+        // `perm.migrated_from.policy_id` (ON DELETE NO ACTION, migration 0181).
+        // Deleting it would make the undo impossible, so the violation is
+        // answered as an ownership refusal (409) naming the remedy, not a 500.
+        if let Err(e) = sqlx::query(r#"DELETE FROM policy.authz_policies WHERE id = $1"#)
             .bind(id)
             .execute(&mut *tx)
-            .await?;
+            .await
+        {
+            if matches!(&e, sqlx::Error::Database(d)
+                if d.is_foreign_key_violation()
+                    && d.constraint() == Some("migrated_from_policy_id_fkey"))
+            {
+                tx.rollback().await?;
+                return Err(PolicyStoreError::CompilerOwned(format!(
+                    "policy {current_name:?} was migrated into the permission model and is \
+                     kept, switched off, so the migration can be undone; undo the migration \
+                     before deleting it"
+                )));
+            }
+            return Err(e.into());
+        }
         sqlx::query(
             r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
         )

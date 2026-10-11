@@ -11,8 +11,8 @@ use std::collections::BTreeSet;
 
 use egret_perm::{EngineType, Grant, PrincipalKind};
 use egret_perm_compile::equivalence::{
-    compare, compare_profiles, derive_probes, Check, Disagreement, GateRefusal, Probe, ProfileCase,
-    TagAssignment, Tagging, PROBE_SIBLING_PREFIX, PROBE_UNNAMED_USER,
+    compare, compare_profiles, derive_probes, probe_count, Check, Disagreement, GateRefusal, Probe,
+    ProfileCase, TagAssignment, Tagging, PROBE_SIBLING_PREFIX, PROBE_UNNAMED_USER,
 };
 use egret_perm_compile::grammar::{
     grants_from_access_policy, rules_from_mask_or_filter_policy, ServiceKind,
@@ -958,4 +958,58 @@ fn a_gate_with_nothing_to_evaluate_refuses_instead_of_answering_equivalent() {
         compare(&case(7, &set, &set, &def, &BOTH, vec![])),
         Err(GateRefusal::NoProbes { service_id: 7 })
     );
+}
+
+/// Task 7 review I-1: the migration refuses over its cap on `probe_count`,
+/// before building anything — so the count must be exactly what
+/// `derive_probes` would build, on every shape: plain grants, several
+/// catalogs, tag policies (hypothetical tagging), and real assignments.
+#[test]
+fn the_probe_count_is_exactly_the_number_of_probes_derived() {
+    let def = trino_def();
+    let plain = hand_policy(
+        "p",
+        &["wh"],
+        vec![item(&["alice"], &["analysts"], &["select"])],
+    );
+    let two = hand_policy("q", &["wh", "lake"], vec![item(&["bob"], &[], &["select"])]);
+    let cases: Vec<(ServicePolicySet, ServicePolicySet, Vec<TagAssignment>)> = vec![
+        (envelope(vec![], vec![]), envelope(vec![], vec![]), vec![]),
+        (
+            envelope(vec![plain.clone()], vec![]),
+            envelope(compiled(&grants_of(&plain)), vec![]),
+            vec![],
+        ),
+        (
+            envelope(vec![two.clone()], vec![]),
+            envelope(compiled(&grants_of(&two)), vec![]),
+            vec![],
+        ),
+        (
+            envelope(vec![allow_alice_at(1)], vec![tag_deny_pii()]),
+            envelope(vec![allow_alice_at(1)], vec![]),
+            vec![],
+        ),
+        (
+            envelope(
+                vec![plain.clone()],
+                compiled_rules(&tag_mask("MASK_NULL"), ServiceKind::Tag),
+            ),
+            envelope(
+                vec![plain],
+                compiled_rules(&tag_mask("MASK_HASH"), ServiceKind::Tag),
+            ),
+            vec![
+                assign("wh", "sales", "orders", "ssn", "phi"),
+                assign("wh", "sales", "orders", "", "pii"),
+            ],
+        ),
+    ];
+    for (i, (b, a, assignments)) in cases.iter().enumerate() {
+        assert_eq!(
+            probe_count(b, a, &def, assignments),
+            derive_probes(b, a, &def, assignments).len(),
+            "case {i}"
+        );
+    }
 }

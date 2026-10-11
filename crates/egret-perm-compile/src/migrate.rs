@@ -101,8 +101,8 @@ use uuid::Uuid;
 
 use crate::classify::{Candidates, ServiceInputs};
 use crate::equivalence::{
-    compare_profiles, derive_probes, Check, Disagreement, GateRefusal, ProfileCase, TagAssignment,
-    Tagging,
+    compare_profiles, derive_probes, probe_count, Check, Disagreement, GateRefusal, ProfileCase,
+    TagAssignment, Tagging,
 };
 use crate::explain_wire::WirePluginVersion;
 use crate::grammar::ServiceKind;
@@ -277,6 +277,8 @@ impl From<&Disagreement> for WireDisagreement {
 pub struct UndoResponse {
     pub policies: Vec<UndonePolicy>,
     pub compile: CompileResponse,
+    /// Consequences that outlive the undo (review I-2).
+    pub notices: Vec<String>,
 }
 
 /// One restored policy.
@@ -284,7 +286,7 @@ pub struct UndoResponse {
 pub struct UndonePolicy {
     pub policy_id: i64,
     pub policy_name: String,
-    /// Model objects provenance named that still existed and were deleted.
+    /// Model objects the migration created, deleted by the undo.
     pub grants_deleted: usize,
     pub rules_deleted: usize,
 }
@@ -496,25 +498,34 @@ pub(crate) struct ProfileInputs {
     pub(crate) download: ServicePolicySet,
 }
 
-/// Probe evaluations the cases will run — `Σ probes × versions` over the
-/// `(probes, versions)` count of each case — or the refusal sentence when
-/// over `cap` (ruling 3: refuse, never truncate).
+/// Probe evaluations the cases will run — `Σ probes × versions` over each
+/// profile's `(probes, versions, policies in its download)` — or the refusal
+/// sentence when over `cap` (ruling 3: refuse, never truncate).
+///
+/// The count is driven by the SIZE of each affected profile's download (it
+/// grows roughly with the square of its policy count), not by how many
+/// policies the request migrates — so the sentence names the largest
+/// download, which is what an operator can act on (review M-5).
 pub(crate) fn probe_budget(
-    counts: impl IntoIterator<Item = (usize, usize)>,
+    counts: impl IntoIterator<Item = (usize, usize, usize)>,
     cap: usize,
 ) -> Result<usize, String> {
     let mut total = 0usize;
     let mut profiles = 0usize;
-    for (probes, versions) in counts {
+    let mut largest = 0usize;
+    for (probes, versions, policies) in counts {
         total = total.saturating_add(probes.saturating_mul(versions));
         profiles += 1;
+        largest = largest.max(policies);
     }
     if total > cap {
         return Err(format!(
             "proving this migration needs {total} probe evaluations across {profiles} \
-             profile(s), over the limit of {cap}. The probe set is never cut short — a partial \
-             proof would be reported as a whole one — so migrate fewer policies at once, or \
-             reduce the tag policies and tagged columns these profiles carry."
+             profile(s), over the limit of {cap}. The count grows with the size of each \
+             affected profile's download (the largest serves {largest} policies), roughly with \
+             its square, not with how many policies this request migrates. The probe set is \
+             never cut short — a partial proof would be reported as a whole one — so this \
+             migration cannot be proved until those profiles are smaller."
         ));
     }
     Ok(total)
@@ -534,6 +545,148 @@ fn render_refusal(r: &GateRefusal) -> String {
              about it."
         ),
     }
+}
+
+// ── content hashes (review I-2) ──────────────────────────────────────────
+
+/// JSON text with every object's keys sorted, recursively — independent of
+/// jsonb's key order and of `preserve_order`. Array order is kept: it is
+/// meaningful in a policy body (rule items are positional).
+pub(crate) fn canonical_json(v: &serde_json::Value) -> String {
+    use serde_json::Value;
+    match v {
+        Value::Object(m) => {
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            let fields: Vec<String> = keys
+                .into_iter()
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        Value::String(k.clone()),
+                        canonical_json(&m[k.as_str()])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", fields.join(","))
+        }
+        Value::Array(a) => format!(
+            "[{}]",
+            a.iter().map(canonical_json).collect::<Vec<_>>().join(",")
+        ),
+        other => other.to_string(),
+    }
+}
+
+fn sha256_hex(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(text.as_bytes()))
+}
+
+/// A principal set's two lists are SETS (stored as rows with no order), so
+/// they are sorted before hashing; everything else is hashed as stored.
+fn sorted_principals(p: &egret_perm::PrincipalSet) -> egret_perm::PrincipalSet {
+    let key =
+        |x: &egret_perm::Principal| canonical_json(&serde_json::to_value(x).unwrap_or_default());
+    let mut out = p.clone();
+    out.include.sort_by_key(key);
+    out.exclude.sort_by_key(key);
+    out
+}
+
+pub(crate) fn grant_hash(g: &egret_perm::Grant) -> String {
+    let mut g = g.clone();
+    g.principals = sorted_principals(&g.principals);
+    g.actions.sort_by_key(|a| a.as_str().to_string());
+    sha256_hex(&canonical_json(
+        &serde_json::to_value(&g).unwrap_or_default(),
+    ))
+}
+
+pub(crate) fn rule_hash(r: &egret_perm::Rule) -> String {
+    let mut r = r.clone();
+    r.exempt = sorted_principals(&r.exempt);
+    sha256_hex(&canonical_json(
+        &serde_json::to_value(&r).unwrap_or_default(),
+    ))
+}
+
+/// The original policy's body WITHOUT its `name` (a rename stays undoable —
+/// review I-3), plus its `enabled` COLUMN. `None` when the row is gone.
+async fn original_hash_via(
+    conn: &mut sqlx::PgConnection,
+    policy_id: i64,
+) -> Result<Option<String>, PermHttpError> {
+    let row: Option<(serde_json::Value, bool)> =
+        sqlx::query_as("SELECT policy_jsonb, enabled FROM policy.authz_policies WHERE id = $1")
+            .bind(policy_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(PermHttpError::db)?;
+    Ok(row.map(|(mut body, enabled)| {
+        if let serde_json::Value::Object(m) = &mut body {
+            m.remove("name");
+        }
+        sha256_hex(&canonical_json(&serde_json::json!({
+            "body": body,
+            "enabled": enabled,
+        })))
+    }))
+}
+
+// ── the affected set (review I-4) ────────────────────────────────────────
+
+/// `ids` plus every engine-bound profile that downloads the tag service of
+/// any member. A recompile of a member writes into its tag service, and every
+/// profile naming that tag service serves the result, so each of those
+/// profiles' downloads can change and must be gated (or, for undo,
+/// recompiled) too. Ascending and deduplicated.
+pub(crate) async fn with_tag_service_sharers(
+    conn: &mut sqlx::PgConnection,
+    ids: &[i64],
+) -> Result<Vec<i64>, PermHttpError> {
+    let sharers: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT y.id FROM policy.authz_services x \
+           JOIN policy.authz_services y \
+             ON y.config_jsonb ->> 'tagService' = x.config_jsonb ->> 'tagService' \
+           JOIN engine_mgmt.engines e ON e.authz_service_id = y.id \
+          WHERE x.id = ANY($1) AND x.config_jsonb ->> 'tagService' IS NOT NULL \
+          ORDER BY 1",
+    )
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(PermHttpError::db)?;
+    Ok(merge_service_ids(ids, &sharers))
+}
+
+/// Ruling 7: the grammar names a policy's N rules "{name} #i", and
+/// `perm.rules.name` is globally UNIQUE — a taken name is a 409 naming it.
+async fn refuse_taken_rule_names(
+    tx: &mut Transaction<'_, Postgres>,
+    rule_names: &[String],
+) -> Result<(), PermHttpError> {
+    if rule_names.is_empty() {
+        return Ok(());
+    }
+    let taken: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM perm.rules WHERE name = ANY($1) ORDER BY name")
+            .bind(rule_names)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(PermHttpError::db)?;
+    if taken.is_empty() {
+        return Ok(());
+    }
+    Err(PermHttpError::Conflict(format!(
+        "the migration would create rule(s) named {}, and a rule with that name already \
+         exists; rename the policy or the existing rule first",
+        taken
+            .iter()
+            .map(|n| format!("{n:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 // ── migrate ──────────────────────────────────────────────────────────────
@@ -597,7 +750,7 @@ pub(crate) async fn migrate_in_tx(
         recs.push(rec);
     }
     for rec in &recs {
-        if let Some(m) = inputs.migrated.get(&rec.name) {
+        if let Some(m) = inputs.migrated.get(&rec.id) {
             return Err(PermHttpError::Conflict(format!(
                 "policy {:?} was already migrated on {} by {}; undo that migration before \
                  migrating it again",
@@ -651,23 +804,7 @@ pub(crate) async fn migrate_in_tx(
              unique, so migrate them one at a time after renaming one"
         )));
     }
-    let taken: Vec<String> =
-        sqlx::query_scalar("SELECT name FROM perm.rules WHERE name = ANY($1) ORDER BY name")
-            .bind(&rule_names)
-            .fetch_all(&mut **tx)
-            .await
-            .map_err(PermHttpError::db)?;
-    if !taken.is_empty() {
-        return Err(PermHttpError::Conflict(format!(
-            "the migration would create rule(s) named {}, and a rule with that name already \
-             exists; rename the policy or the existing rule first",
-            taken
-                .iter()
-                .map(|n| format!("{n:?}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
-    }
+    refuse_taken_rule_names(tx, &rule_names).await?;
 
     // ── the affected set, locked, and each member's state BEFORE ──────────
     let carriers = profiles_serving_source(tx, &inputs.svc, kind).await?;
@@ -688,7 +825,15 @@ pub(crate) async fn migrate_in_tx(
             }
         }
     }
+    // Review I-4: a first recompile writes into each member's TAG service, and
+    // every engine-bound profile naming that tag service downloads the result.
+    affected = with_tag_service_sharers(tx, &affected).await?;
     lock_services_in_tx(tx, &merge_service_ids(&affected, &[service_id])).await?;
+    // Review M-1: the first check ran before the lock; a concurrent migration
+    // that created one of these names has committed by now if it shares a
+    // lock with this one. (One that does not share a lock is caught at the
+    // INSERT, which `write_rule` answers 409.)
+    refuse_taken_rule_names(tx, &rule_names).await?;
 
     let mut before: BTreeMap<i64, (ServiceDef, ProfileInputs)> = BTreeMap::new();
     for &id in &affected {
@@ -793,15 +938,38 @@ pub(crate) async fn migrate_in_tx(
     // ── step 4: provenance (the count lands in step 6) ────────────────────
     let actor = p.email.clone();
     for m in &response.policies {
+        // Review I-2: the content undo will compare against, as STORED.
+        let mut grant_hashes = Vec::with_capacity(m.grant_ids.len());
+        for id in &m.grant_ids {
+            let g = egret_perm::get_grant_via(tx, *id)
+                .await?
+                .ok_or_else(|| PermHttpError::db(format!("grant {id} vanished in its own tx")))?;
+            grant_hashes.push(grant_hash(&g));
+        }
+        let mut rule_hashes = Vec::with_capacity(m.rule_ids.len());
+        for id in &m.rule_ids {
+            let r = egret_perm::get_rule_via(tx, *id)
+                .await?
+                .ok_or_else(|| PermHttpError::db(format!("rule {id} vanished in its own tx")))?;
+            rule_hashes.push(rule_hash(&r));
+        }
+        let original = original_hash_via(tx, m.policy_id)
+            .await?
+            .ok_or_else(|| PermHttpError::db("the original vanished in its own tx"))?;
         let inserted = sqlx::query(
             "INSERT INTO perm.migrated_from \
-               (service_id, policy_name, grant_ids, rule_ids, probes_proved, migrated_by) \
-             VALUES ($1, $2, $3, $4, 0, $5)",
+               (service_id, policy_id, policy_name, grant_ids, rule_ids, grant_hashes, \
+                rule_hashes, original_hash, probes_proved, migrated_by) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9)",
         )
         .bind(service_id)
+        .bind(m.policy_id)
         .bind(&m.policy_name)
         .bind(&m.grant_ids)
         .bind(&m.rule_ids)
+        .bind(&grant_hashes)
+        .bind(&rule_hashes)
+        .bind(&original)
         .bind(&actor)
         .execute(&mut **tx)
         .await;
@@ -816,6 +984,11 @@ pub(crate) async fn migrate_in_tx(
             Err(e) => return Err(PermHttpError::db(e)),
         }
     }
+    // Review M-7: every profile a recompile wrote is one the gate evaluates.
+    debug_assert!(
+        recompiled.iter().all(|s| affected.binary_search(s).is_ok()),
+        "recompiled {recompiled:?} ⊄ affected {affected:?}"
+    );
     response.compile = CompileResponse::from_summaries(recompiled, &summaries);
 
     // ── step 5: re-read every affected download and gate them all ─────────
@@ -843,6 +1016,25 @@ pub(crate) async fn migrate_in_tx(
             return Ok(response);
         }
     }
+    // Review I-1: COUNT the probes from their factors and refuse over the cap
+    // BEFORE building any — the build is the cost the cap exists to bound.
+    let mut counts = Vec::with_capacity(affected.len());
+    for id in &affected {
+        if let (Some((def, b)), Some(a)) = (before.get(id), after.get(id)) {
+            counts.push((
+                probe_count(&b.download, a, def, &b.assignments),
+                b.versions.len(),
+                b.download.policies.len() + b.download.tag_policies.len(),
+            ));
+        }
+    }
+    let evaluations = match probe_budget(counts, MAX_PROBE_EVALUATIONS) {
+        Ok(n) => n,
+        Err(sentence) => {
+            response.refusal = Some(sentence);
+            return Ok(response);
+        }
+    };
     let cases = match build_cases(&affected, &before, &after, &originals, &carriers) {
         Ok(c) => c,
         Err(sentence) => {
@@ -865,16 +1057,14 @@ pub(crate) async fn migrate_in_tx(
             }
         })
         .collect();
-    let evaluations = match probe_budget(
-        cases.iter().map(|c| (c.probes.len(), c.versions.len())),
-        MAX_PROBE_EVALUATIONS,
-    ) {
-        Ok(n) => n,
-        Err(sentence) => {
-            response.refusal = Some(sentence);
-            return Ok(response);
-        }
-    };
+    debug_assert_eq!(
+        evaluations,
+        cases
+            .iter()
+            .map(|c| c.probes.len() * c.versions.len())
+            .sum::<usize>(),
+        "the counted probes are the built probes"
+    );
     response.probe_evaluations = evaluations;
     let verdict = compare_profiles(&cases);
     match verdict {
@@ -896,10 +1086,16 @@ pub(crate) async fn migrate_in_tx(
     let proved = i32::try_from(evaluations).unwrap_or(i32::MAX);
     let updated = sqlx::query(
         "UPDATE perm.migrated_from SET probes_proved = $3 \
-          WHERE service_id = $1 AND policy_name = ANY($2)",
+          WHERE service_id = $1 AND policy_id = ANY($2)",
     )
     .bind(service_id)
-    .bind(&originals)
+    .bind(
+        response
+            .policies
+            .iter()
+            .map(|m| m.policy_id)
+            .collect::<Vec<i64>>(),
+    )
     .bind(proved)
     .execute(&mut **tx)
     .await
@@ -917,15 +1113,27 @@ pub(crate) async fn migrate_in_tx(
 
 // ── undo ─────────────────────────────────────────────────────────────────
 
+/// The consequence that outlives an undo.
+pub const UNDO_GENERATED_NOTICE: &str =
+    "Every profile this migration recompiled stays compiled by \
+     egret's permission model after the undo: its hand-written policies can be edited and \
+     deleted, but a NEW hand-written policy still cannot be created in it.";
+
 /// `migrate/undo`, on the caller's transaction (the caller commits): delete
 /// the objects provenance names, recompile, switch the original back on,
 /// delete the provenance row. A MECHANICAL rollback — possible only because
 /// the original was switched off, not deleted.
 ///
-/// 404 for a profile, or a name with no migration on record; 409 when the
-/// original policy no longer exists (nothing to switch back on). Objects
-/// provenance names that were since deleted by hand are simply not there to
-/// delete, and the counts say so.
+/// **Guarded by content hashes** (review I-2, the user's ruling of
+/// 2026-10-11): every created grant/rule and the original are re-hashed in
+/// this transaction, and if ANY differs from what provenance recorded — an
+/// object edited or deleted since, or the original edited or switched back on
+/// — the answer is 409 naming each change, and nothing is written. An object
+/// edited since the migration is no longer the migration's to delete.
+///
+/// Names resolve to the policy as it is NOW (a renamed original is undone by
+/// its new name) and provenance is read by policy id. 404 for a profile, a
+/// name, or a policy with no migration on record.
 pub(crate) async fn undo_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
@@ -941,20 +1149,9 @@ pub(crate) async fn undo_in_tx(
         rules: Vec<egret_perm::Rule>,
     }
     let mut records = Vec::new();
+    let mut changed: Vec<String> = Vec::new();
     let mut affected: Vec<i64> = Vec::new();
     for name in &req.policy_names {
-        let row: Option<(Vec<Uuid>, Vec<Uuid>)> = sqlx::query_as(
-            "SELECT grant_ids, rule_ids FROM perm.migrated_from \
-              WHERE service_id = $1 AND policy_name = $2 FOR UPDATE",
-        )
-        .bind(service_id)
-        .bind(name)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(PermHttpError::db)?;
-        let Some((grant_ids, rule_ids)) = row else {
-            return Err(PermHttpError::NotFound);
-        };
         let policy_id: Option<i64> = sqlx::query_scalar(
             "SELECT id FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
         )
@@ -964,25 +1161,59 @@ pub(crate) async fn undo_in_tx(
         .await
         .map_err(PermHttpError::db)?;
         let Some(policy_id) = policy_id else {
-            return Err(PermHttpError::Conflict(format!(
-                "the hand-written policy {name:?} no longer exists, so undoing its migration \
-                 would delete the grants and rules that replaced it and restore nothing"
-            )));
+            return Err(PermHttpError::NotFound);
         };
+        type Prov = (Vec<Uuid>, Vec<Uuid>, Vec<String>, Vec<String>, String);
+        let row: Option<Prov> = sqlx::query_as(
+            "SELECT grant_ids, rule_ids, grant_hashes, rule_hashes, original_hash \
+               FROM perm.migrated_from WHERE policy_id = $1 FOR UPDATE",
+        )
+        .bind(policy_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(PermHttpError::db)?;
+        let Some((grant_ids, rule_ids, grant_hashes, rule_hashes, original)) = row else {
+            return Err(PermHttpError::NotFound);
+        };
+
         let mut grants = Vec::new();
-        for id in grant_ids {
-            if let Some(g) = egret_perm::get_grant_via(tx, id).await? {
-                affected =
-                    merge_service_ids(&affected, &affected_services_for_grant(tx, &g).await?);
-                grants.push(g);
+        for (id, recorded) in grant_ids.iter().zip(&grant_hashes) {
+            match egret_perm::get_grant_via(tx, *id).await? {
+                None => changed.push(format!(
+                    "grant {id}, created by the migration of {name:?}, has been deleted"
+                )),
+                Some(g) if &grant_hash(&g) != recorded => changed.push(format!(
+                    "grant {id}, created by the migration of {name:?}, has been edited"
+                )),
+                Some(g) => {
+                    affected =
+                        merge_service_ids(&affected, &affected_services_for_grant(tx, &g).await?);
+                    grants.push(g);
+                }
             }
         }
         let mut rules = Vec::new();
-        for id in rule_ids {
-            if let Some(r) = egret_perm::get_rule_via(tx, id).await? {
-                affected = merge_service_ids(&affected, &affected_services_for_rule(tx, &r).await?);
-                rules.push(r);
+        for (id, recorded) in rule_ids.iter().zip(&rule_hashes) {
+            match egret_perm::get_rule_via(tx, *id).await? {
+                None => changed.push(format!(
+                    "rule {id}, created by the migration of {name:?}, has been deleted"
+                )),
+                Some(r) if &rule_hash(&r) != recorded => changed.push(format!(
+                    "rule {id} ({:?}), created by the migration of {name:?}, has been edited",
+                    r.name
+                )),
+                Some(r) => {
+                    affected =
+                        merge_service_ids(&affected, &affected_services_for_rule(tx, &r).await?);
+                    rules.push(r);
+                }
             }
+        }
+        if original_hash_via(tx, policy_id).await?.as_deref() != Some(original.as_str()) {
+            changed.push(format!(
+                "the original policy {name:?} (id {policy_id}) has been edited or switched on \
+                 since it was migrated"
+            ));
         }
         records.push(Record {
             policy_id,
@@ -991,7 +1222,17 @@ pub(crate) async fn undo_in_tx(
             rules,
         });
     }
+    if !changed.is_empty() {
+        return Err(PermHttpError::Conflict(format!(
+            "undo refused, nothing was changed: {}. Undo deletes exactly what the migration \
+             created and restores exactly what it switched off; reconcile these by hand (or \
+             revert the edits) first.",
+            changed.join("; ")
+        )));
+    }
 
+    // Review I-4: the profiles sharing a recompiled profile's tag service.
+    let affected = with_tag_service_sharers(tx, &affected).await?;
     // Before any DELETE — see `lock_services_in_tx`.
     lock_services_in_tx(tx, &merge_service_ids(&affected, &[service_id])).await?;
     let mut out = Vec::new();
@@ -1020,9 +1261,8 @@ pub(crate) async fn undo_in_tx(
         set_policy_enabled_via(tx, r.policy_id, true)
             .await
             .map_err(store_refusal)?;
-        sqlx::query("DELETE FROM perm.migrated_from WHERE service_id = $1 AND policy_name = $2")
-            .bind(service_id)
-            .bind(&r.policy_name)
+        sqlx::query("DELETE FROM perm.migrated_from WHERE policy_id = $1")
+            .bind(r.policy_id)
             .execute(&mut **tx)
             .await
             .map_err(PermHttpError::db)?;
@@ -1030,6 +1270,7 @@ pub(crate) async fn undo_in_tx(
     Ok(UndoResponse {
         policies: out,
         compile: CompileResponse::from_summaries(affected, &summaries),
+        notices: vec![UNDO_GENERATED_NOTICE.to_string()],
     })
 }
 
@@ -1039,12 +1280,17 @@ mod tests {
 
     #[test]
     fn the_probe_budget_counts_every_version_of_every_profile_and_refuses_over_the_cap() {
-        assert_eq!(probe_budget([(100, 1), (50, 2)], 200), Ok(200));
-        let refused = probe_budget([(100, 1), (50, 2)], 199).unwrap_err();
+        assert_eq!(probe_budget([(100, 1, 3), (50, 2, 9)], 200), Ok(200));
+        let refused = probe_budget([(100, 1, 3), (50, 2, 9)], 199).unwrap_err();
         assert!(refused.contains("200 probe evaluations"), "{refused}");
         assert!(refused.contains("2 profile(s)"), "{refused}");
         assert!(refused.contains("never cut short"), "{refused}");
         assert!(refused.contains("limit of 199"), "{refused}");
+        assert!(
+            refused.contains("the largest serves 9 policies"),
+            "{refused}"
+        );
+        assert!(!refused.contains("fewer policies"), "{refused}");
     }
 
     fn envelope(names: &[&str]) -> ServicePolicySet {

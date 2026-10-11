@@ -1161,7 +1161,20 @@ pub(crate) async fn write_rule(
             }
             id
         }
-        None => create_rule_in_tx(tx, &r).await?,
+        // `perm.rules.name` is UNIQUE. A taken name is the caller's to fix, so
+        // it is a 409 naming it, not a 500 — on the create route and on a
+        // migration that lost a race for the name (SP4d-3 Task 7 review M-1).
+        None => match create_rule_in_tx(tx, &r).await {
+            Err(egret_perm::PermError::Db(sqlx::Error::Database(d)))
+                if d.is_unique_violation() && d.constraint() == Some("rules_name_key") =>
+            {
+                return Err(PermHttpError::Conflict(format!(
+                    "a rule named {:?} already exists; rule names are unique",
+                    r.name
+                )));
+            }
+            other => other?,
+        },
     };
     let summaries = recompile_services_in_tx(tx, &services).await?;
     Ok(WriteOutcome {

@@ -45,8 +45,18 @@ struct Fixture {
 }
 
 async fn trino_profile_with_engine(db: &Db, policy: &PolicyStore, catalog_id: Uuid) -> i64 {
+    trino_profile_with_engine_and_config(db, policy, Some(catalog_id), json!({})).await
+}
+
+/// A Trino profile with one engine, attached to `catalog_id` when given.
+async fn trino_profile_with_engine_and_config(
+    db: &Db,
+    policy: &PolicyStore,
+    catalog_id: Option<Uuid>,
+    config: Value,
+) -> i64 {
     let svc = policy
-        .create_service(&unique("mig_trino"), "trino", &json!({}))
+        .create_service(&unique("mig_trino"), "trino", &config)
         .await
         .expect("create trino service");
     let engine_id: Uuid = sqlx::query_scalar(
@@ -58,14 +68,16 @@ async fn trino_profile_with_engine(db: &Db, policy: &PolicyStore, catalog_id: Uu
     .fetch_one(&db.pool)
     .await
     .expect("engine");
-    sqlx::query(
-        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
-    )
-    .bind(engine_id)
-    .bind(catalog_id)
-    .execute(&db.pool)
-    .await
-    .expect("attach catalog");
+    if let Some(catalog_id) = catalog_id {
+        sqlx::query(
+            "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+        )
+        .bind(engine_id)
+        .bind(catalog_id)
+        .execute(&db.pool)
+        .await
+        .expect("attach catalog");
+    }
     svc.id
 }
 
@@ -78,6 +90,7 @@ async fn setup() -> Option<Fixture> {
     let perm = PermStore::new(pool.clone());
     let policy = PolicyStore::new(db.clone());
     egret_policy::seed_trino(&policy).await.expect("seed trino");
+    egret_policy::seed_tag(&policy).await.expect("seed tag");
 
     let ws_id: Uuid =
         sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$2) RETURNING id")
@@ -623,7 +636,8 @@ async fn a_rule_name_that_is_taken_is_a_clean_409_and_nothing_is_written() {
     let Some(f) = setup().await else { return };
     let name = unique("mask ssn");
     let id = insert(&f, f.p, &name, "operator", mask_policy(&f.catalog)).await;
-    // A rule already holding that name, on a catalog nothing serves.
+    // A rule already holding that name (on this fixture's catalog, on a
+    // table no policy names).
     sqlx::query(
         "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, schema_name, \
                                  table_name, column_name) \
@@ -815,4 +829,275 @@ async fn a_migrated_policy_is_classified_as_migrated_not_as_switched_off() {
         !b.contains("Switch it on"),
         "no switch-it-on advice for a migrated policy: {b}"
     );
+}
+
+// ── fix round 1 ──────────────────────────────────────────────────────────
+
+/// Review I-1: the cap is checked on a COUNT, before any probe is built, and
+/// the refusal is a 422 that writes nothing. Forty sibling policies make the
+/// profile's own download large enough; the migrated policy is one of them.
+#[tokio::test]
+async fn a_profile_too_large_to_prove_is_refused_by_count_with_nothing_written() {
+    let Some(f) = setup().await else { return };
+    for i in 0..40 {
+        insert(
+            &f,
+            f.p,
+            &unique(&format!("sibling {i}")),
+            "operator",
+            access_policy(&f.catalog, &format!("s{i}"), &format!("user{i}")),
+        )
+        .await;
+    }
+    let name = unique("alice reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let started = std::time::Instant::now();
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    let elapsed = started.elapsed();
+    eprintln!("MEASURE cap refusal elapsed={elapsed:?}");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let refusal = body["refusal"].as_str().expect("refusal");
+    assert!(refusal.contains("probe evaluations"), "{refusal}");
+    assert!(
+        refusal.contains("the largest serves 41 policies"),
+        "{refusal}"
+    );
+    assert!(refusal.contains("never cut short"), "{refusal}");
+    assert_eq!(
+        body["probe_evaluations"], 0,
+        "nothing was evaluated: {body}"
+    );
+    assert_eq!(grants_on_catalog(&f).await, 0);
+    assert!(provenance(&f, f.p).await.is_empty());
+    assert!(enabled(&f, id).await);
+}
+
+async fn edit_original(f: &Fixture, id: i64, name: &str, body: Value) {
+    let mut body = body;
+    body["name"] = json!(name);
+    f.policy
+        .update_policy(id, name, &body, false)
+        .await
+        .expect("update the switched-off original");
+}
+
+/// Review I-2: undo after a migrated grant was edited is a 409 naming it, and
+/// nothing changes.
+#[tokio::test]
+async fn undo_after_the_migrated_grant_was_edited_is_409_and_changes_nothing() {
+    let Some(f) = setup().await else { return };
+    let name = unique("alice reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gid: Uuid = body["policies"][0]["grant_ids"][0]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    sqlx::query("UPDATE perm.grants SET table_name = 'invoices' WHERE id = $1")
+        .bind(gid)
+        .execute(&f.db.pool)
+        .await
+        .expect("edit the grant");
+
+    let (status, body) = undo(&f, f.p, &[&name]).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let e = body["error"].as_str().unwrap();
+    assert!(
+        e.contains(&format!("grant {gid}")) && e.contains("edited"),
+        "{e}"
+    );
+    assert!(e.contains("created by the migration"), "{e}");
+    assert_eq!(grants_on_catalog(&f).await, 1, "the grant is still there");
+    assert!(!enabled(&f, id).await, "the original is still off");
+    assert_eq!(provenance(&f, f.p).await.len(), 1);
+}
+
+/// Review I-2: undo after the switched-off original was edited is a 409.
+#[tokio::test]
+async fn undo_after_the_original_was_edited_is_409_and_changes_nothing() {
+    let Some(f) = setup().await else { return };
+    let name = unique("alice reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    edit_original(&f, id, &name, access_policy(&f.catalog, "sales", "mallory")).await;
+
+    let (status, body) = undo(&f, f.p, &[&name]).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let e = body["error"].as_str().unwrap();
+    assert!(
+        e.contains("the original policy") && e.contains("edited"),
+        "{e}"
+    );
+    assert_eq!(grants_on_catalog(&f).await, 1);
+    assert!(!enabled(&f, id).await);
+    assert_eq!(provenance(&f, f.p).await.len(), 1);
+}
+
+/// Review I-3: provenance is keyed by policy id — a renamed original is still
+/// reported as migrated, and is undone by its new name; the undo says the
+/// profile stays generated.
+#[tokio::test]
+async fn a_renamed_original_stays_migrated_and_is_undone_by_its_new_name() {
+    let Some(f) = setup().await else { return };
+    let name = unique("alice reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let renamed = unique("renamed");
+    edit_original(
+        &f,
+        id,
+        &renamed,
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let request = HttpRequest::builder()
+        .method("GET")
+        .uri(format!("/perm/policies/services/{}/classify", f.p))
+        .header("Cookie", format!("egret_session={}", f.token))
+        .body(Body::empty())
+        .unwrap();
+    let resp = f.app.clone().oneshot(request).await.unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let rows: Value = serde_json::from_slice(&bytes).unwrap();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id)
+        .unwrap();
+    assert_eq!(row["name"], json!(renamed));
+    assert_eq!(row["migrated"]["policy_name"], json!(name), "{row}");
+    assert!(
+        row["blockers"][0]
+            .as_str()
+            .unwrap()
+            .contains("was migrated"),
+        "{row}"
+    );
+
+    let (status, body) = undo(&f, f.p, &[&renamed]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["notices"][0]
+            .as_str()
+            .unwrap()
+            .contains("stays compiled"),
+        "{body}"
+    );
+    assert!(enabled(&f, id).await);
+    assert_eq!(grants_on_catalog(&f).await, 0);
+    assert!(provenance(&f, f.p).await.is_empty());
+}
+
+/// I-3's ON DELETE choice: the migrated original cannot be deleted (undo
+/// first), and deleting the whole profile still cascades.
+#[tokio::test]
+async fn a_migrated_original_cannot_be_deleted_but_its_profile_can() {
+    let Some(f) = setup().await else { return };
+    let name = unique("alice reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let err = f.policy.delete_policy(id).await.expect_err("refused");
+    assert!(
+        matches!(&err, egret_policy::PolicyStoreError::CompilerOwned(m) if m.contains("undo the migration")),
+        "{err:?}"
+    );
+    sqlx::query("DELETE FROM policy.authz_services WHERE id = $1")
+        .bind(f.p)
+        .execute(&f.db.pool)
+        .await
+        .expect("the profile delete cascades through provenance");
+    assert!(provenance(&f, f.p).await.is_empty());
+}
+
+/// Review I-4: X serves the catalog, Y does not, both download tag service T.
+/// X's recompile writes into T, so Y's download can change — Y is gated too.
+#[tokio::test]
+async fn a_profile_sharing_the_tag_service_is_gated_too() {
+    let Some(f) = setup().await else { return };
+    let t = f
+        .policy
+        .create_service(&unique("mig_tag"), "tag", &json!({}))
+        .await
+        .expect("tag service");
+    let x = trino_profile_with_engine_and_config(
+        &f.db,
+        &f.policy,
+        Some(f.catalog_id),
+        json!({"tagService": t.name}),
+    )
+    .await;
+    let y =
+        trino_profile_with_engine_and_config(&f.db, &f.policy, None, json!({"tagService": t.name}))
+            .await;
+    let name = unique("alice reads orders");
+    insert(
+        &f,
+        x,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    // The fixture's first profile `f.p` serves the catalog too; it is in the
+    // set through the grant. Y is in it only through T.
+    let (_, body) = migrate(&f, x, &[&name], true).await;
+    let gated: Vec<i64> = body["profiles"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{body}"))
+        .iter()
+        .map(|p| p["service_id"].as_i64().unwrap())
+        .collect();
+    assert!(
+        gated.contains(&y),
+        "Y downloads T and must be gated: {body}"
+    );
+    assert!(gated.contains(&x), "{body}");
+    assert!(gated.contains(&f.p), "{body}");
+    assert_eq!(gated.len(), 3, "{body}");
+    assert_eq!(body["committed"], false);
 }
