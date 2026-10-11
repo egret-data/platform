@@ -2,7 +2,7 @@ import { lazy, Suspense, type ReactNode } from "react";
 import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import FlowsList from "@/routes/workflows/FlowsList";
-import ExecutionsPlaceholder from "@/routes/workflows/ExecutionsPlaceholder";
+import ExecutionsList from "@/routes/workflows/ExecutionsList";
 import ExecutionMinimal from "@/routes/workflows/ExecutionMinimal";
 
 /**
@@ -51,9 +51,10 @@ export default function WorkflowsRoutes() {
       {/* `new` before `:id`, as the convention in `App.tsx` records. */}
       <Route path="flows/new" element={<FlowPage><FlowNew /></FlowPage>} />
       <Route path="flows/:id" element={<FlowIndexRedirect base={base} />} />
-      {/* `FlowDetail` sends an unknown tab to `edit`. */}
+      {/* `FlowDetail` sends an unknown tab to `edit`. Its tabs are `edit`,
+          `revisions` and `executions` (W7b: the flow's executions list). */}
       <Route path="flows/:id/:tab" element={<FlowPage><FlowDetail /></FlowPage>} />
-      <Route path="executions" element={<ExecutionsPlaceholder />} />
+      <Route path="executions" element={<ExecutionsList />} />
       {/* The minimal execution page (spec §6.3) until W7b replaces it. */}
       <Route path="executions/:id" element={<ExecutionMinimal />} />
       <Route path="*" element={<Navigate to={`${base}/flows`} replace />} />

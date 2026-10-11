@@ -27,4 +27,14 @@ export const workflowsKeys = {
   version: (id: string, v: number) => ["workflows", "flow", id, "versions", v] as const,
   schema: (ws: string) => ["workflows", "ws", ws, "schema"] as const,
   execution: (id: string) => ["workflows", "execution", id] as const,
+  /**
+   * A page of the executions list. `params` is what the list was asked for
+   * (`ExecutionsList`'s filters, the pinned flow, the expanded namespaces), not
+   * the request: a time preset is turned into `since` at fetch time, so the key
+   * stays the same between polls. Without `params` it reaches every page.
+   */
+  executions: (ws: string, params?: object) =>
+    params
+      ? (["workflows", "ws", ws, "executions", params] as const)
+      : (["workflows", "ws", ws, "executions"] as const),
 };

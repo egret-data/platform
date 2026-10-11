@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 vi.mock("@/api/generated/workflow/workflow");
 // The flow pages mount the editor; real Monaco cannot load in jsdom.
@@ -26,8 +27,10 @@ function renderAt(path: string) {
   vi.mocked(api.useWorkflowGetFlow).mockReturnValue(loading as unknown as ReturnType<typeof api.useWorkflowGetFlow>);
   vi.mocked(api.useWorkflowGetFlowSchema).mockReturnValue(loading as unknown as ReturnType<typeof api.useWorkflowGetFlowSchema>);
   vi.mocked(api.workflowValidateUnsavedFlow).mockReturnValue(new Promise(() => {}));
+  vi.mocked(api.workflowListExecutions).mockReturnValue(new Promise(() => {}));
   render(
     <QueryClientProvider client={new QueryClient()}>
+      <TooltipProvider>
       <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route
@@ -41,6 +44,7 @@ function renderAt(path: string) {
           />
         </Routes>
       </MemoryRouter>
+      </TooltipProvider>
     </QueryClientProvider>,
   );
 }
@@ -79,9 +83,18 @@ describe("WorkflowsRoutes", () => {
     expect(api.useWorkflowGetFlow).not.toHaveBeenCalledWith("eng", "new", expect.anything());
   });
 
-  it("holds the Executions entry with a page that says the list is not here yet", () => {
+  it("opens the executions list at executions, root executions only", async () => {
     renderAt("/explore/eng/workflows/executions");
     expect(screen.getByRole("heading", { level: 1, name: "Executions" })).toBeInTheDocument();
-    expect(screen.getByText("The executions list is not here yet")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(api.workflowListExecutions).toHaveBeenCalledWith("eng", expect.objectContaining({ root_only: true }), expect.anything()),
+    );
+    expect(screen.queryByText("The executions list is not here yet")).toBeNull();
+  });
+
+  it("keeps the flow's Executions tab", async () => {
+    renderAt("/explore/eng/workflows/flows/f-1/executions");
+    await waitFor(() => expect(api.useWorkflowGetFlow).toHaveBeenCalledWith("eng", "f-1", expect.anything()), { timeout: 4000 });
+    expect(screen.getByTestId("path")).toHaveTextContent("/explore/eng/workflows/flows/f-1/executions");
   });
 });

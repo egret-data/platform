@@ -54,7 +54,6 @@ const MARKERS = [
   ["src/components/workflows/StateChip.tsx", "RESUBMITTED"],
   // `EMPTY_SEGMENT_LABEL`, this module's only string literal.
   ["src/components/workflows/namespaceTree.ts", "(empty segment)"],
-  ["src/routes/workflows/ExecutionsPlaceholder.tsx", "The executions list is not here yet"],
   // The flow editor's tabs (W7a Task 4), registered by the flow pages' chunk (Task 5).
   ["src/components/workflows/editor/CodeTab.tsx", "egret-validate", "editor"],
   ["src/components/workflows/editor/DocsTab.tsx", "This type has no documented outputs.", "editor"],
@@ -83,6 +82,14 @@ const MARKERS = [
   ["src/components/workflows/RevisionDiff.tsx", "Differences between ", "editor"],
   // The minimal execution page (W7a Task 6), in the area's own chunk with the list.
   ["src/routes/workflows/ExecutionMinimal.tsx", "The execution ended before any task ran."],
+  // The executions list (W7b Task 2), in the area's own chunk with the flow list; the flow page's
+  // Executions tab imports it from there. Its filter-miss sentence.
+  ["src/routes/workflows/ExecutionsList.tsx", "No executions match the current filters."],
+  // A time preset's label. ("Last 30 days" is also a dashboard filter's, so not that one.)
+  ["src/routes/workflows/executionsListModel.ts", "Last 24 hours"],
+  // `ESTIMATED_DURATION_TITLE`, shared with the execution detail (Tasks 3 and 4).
+  ["src/components/workflows/executions/timing.ts", "so its creation and last update stand in."],
+  ["src/components/workflows/executions/trigger.tsx", "Loop iteration"],
 ];
 
 const entry = entryChunkName(DIST);

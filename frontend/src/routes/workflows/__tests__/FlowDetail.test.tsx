@@ -3,6 +3,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import type { ExecutionListItemDto } from "@/api/generated/model";
 
 vi.mock("@/components/monaco/MonacoEditor", () => import("./monacoStub"));
 vi.mock("@/components/workflows/editor/monacoYaml", () => ({ configureFlowYaml: vi.fn() }));
@@ -38,6 +40,8 @@ function renderAt(tab = "edit", id = FLOW_ID) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
+      {/* The app's shell provides it (`AppShell.tsx`); the Executions tab's Refresh is a tooltip button. */}
+      <TooltipProvider>
       <MemoryRouter initialEntries={[`/explore/${WS}/workflows/flows/${id}/${tab}`]}>
         <Routes>
           <Route path="/explore/:workspace/workflows/flows/:id/:tab" element={<FlowDetail />} />
@@ -45,6 +49,7 @@ function renderAt(tab = "edit", id = FLOW_ID) {
         </Routes>
         <Where />
       </MemoryRouter>
+      </TooltipProvider>
     </QueryClientProvider>,
   );
 }
@@ -60,6 +65,42 @@ function liveFlow(live: string, draft = live) {
   server.publishNow();
   server.flow = { ...server.flow!, source: draft };
 }
+
+describe("FlowDetail: the Executions tab", () => {
+  it("lists this flow's executions, pinned to the flow, with the tab in the URL", async () => {
+    server = new FakeWorkflowServer();
+    // `history` is an array on the wire; the generated type calls it an object.
+    server.executions = [
+      {
+        id: "aaaaaaaa-0000-4000-8000-000000000001",
+        flow_id: FLOW_ID,
+        namespace: "company.team",
+        flow_key: "hello",
+        state: "SUCCESS",
+        history: ["CREATED", "RUNNING", "SUCCESS"],
+        inputs: {},
+        seq: 1,
+        execution_trigger: null as never,
+        attempt_number: 1,
+        origin_offset_ms: 0,
+        started_at: "2026-10-11T10:00:05.000001Z",
+        ended_at: "2026-10-11T10:01:10.000001Z",
+        created_at: "2026-10-11T10:00:00.000001Z",
+        updated_at: "2026-10-11T10:01:10.000001Z",
+      } as unknown as ExecutionListItemDto,
+    ];
+    renderAt();
+    await editorBox();
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Executions" }), { button: 0 });
+    expect(screen.getByTestId("path")).toHaveTextContent(`/flows/${FLOW_ID}/executions`);
+    expect(await screen.findByRole("link", { name: "aaaaaaaa" })).toBeInTheDocument();
+    const lists = server.callsTo("GET", `/api/ws/${WS}/workflows/executions`);
+    expect(lists.at(-1)!.query!.get("flow_id")).toBe(FLOW_ID);
+    expect(lists.at(-1)!.query!.get("root_only")).toBe("true");
+    // The flow's own heading is the page's only h1.
+    expect(screen.getAllByRole("heading", { level: 1 }).map((h) => h.textContent)).toEqual(["hello"]);
+  });
+});
 
 describe("FlowDetail: the changes indicator", () => {
   it("lights after a saved change, and goes out when the draft is saved back to the version's text", async () => {

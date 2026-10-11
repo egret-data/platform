@@ -44,10 +44,11 @@ import {
   useSaveShortcut,
 } from "@/routes/workflows/FlowEditPage";
 import { FlowRevisions } from "@/routes/workflows/FlowRevisions";
+import ExecutionsList from "@/routes/workflows/ExecutionsList";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
-/** The flow detail's tabs in W7a (spec §3); W7b and W7e add theirs here. */
-export const FLOW_TABS = ["edit", "revisions"] as const;
+/** The flow detail's tabs (W7a spec §3; W7b adds Executions); W7e adds its own here. */
+export const FLOW_TABS = ["edit", "revisions", "executions"] as const;
 type FlowTab = (typeof FLOW_TABS)[number];
 const isFlowTab = (t: string | undefined): t is FlowTab => (FLOW_TABS as readonly string[]).includes(t ?? "");
 
@@ -452,6 +453,7 @@ function FlowWorkspace({
         <TabsList className="mx-4 self-start">
           <TabsTrigger value="edit">Edit</TabsTrigger>
           <TabsTrigger value="revisions">Revisions</TabsTrigger>
+          <TabsTrigger value="executions">Executions</TabsTrigger>
         </TabsList>
         <TabsContent value="edit" className="min-h-0 flex-1">
           <FlowEditPage ctx={editor} flowLayout={flowLayout} />
@@ -467,6 +469,11 @@ function FlowWorkspace({
             manage={manage}
             onRestore={restoreVersion}
           />
+        </TabsContent>
+        <TabsContent value="executions" className="min-h-0 flex-1 overflow-auto p-4">
+          {/* The executions list pinned to this flow (W7b spec §4); its filters
+              live in this tab's URL. */}
+          <ExecutionsList pinnedFlowId={id} />
         </TabsContent>
       </Tabs>
 

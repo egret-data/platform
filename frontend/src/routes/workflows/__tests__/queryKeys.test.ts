@@ -17,6 +17,8 @@ describe("workflowsKeys", () => {
       workflowsKeys.version("f", 2),
       workflowsKeys.schema("eng"),
       workflowsKeys.execution("e"),
+      workflowsKeys.executions("eng"),
+      workflowsKeys.executions("eng", { page: 2 }),
     ]) {
       expect(key[0]).toBe("workflows");
       expect(reaches(workflowsKeys.all, key)).toBe(true);
@@ -26,6 +28,13 @@ describe("workflowsKeys", () => {
   it("keeps one workspace's list and schema apart from another's", () => {
     expect(reaches(workflowsKeys.flows("a"), workflowsKeys.flows("b"))).toBe(false);
     expect(reaches(workflowsKeys.schema("a"), workflowsKeys.schema("b"))).toBe(false);
+    expect(reaches(workflowsKeys.executions("a"), workflowsKeys.executions("b", { page: 1 }))).toBe(false);
+  });
+
+  it("reaches every page and filter of a workspace's executions from its unfiltered key, and no execution", () => {
+    expect(reaches(workflowsKeys.executions("eng"), workflowsKeys.executions("eng", { states: ["FAILED"], page: 3 }))).toBe(true);
+    expect(reaches(workflowsKeys.executions("eng"), workflowsKeys.execution("e"))).toBe(false);
+    expect(reaches(workflowsKeys.executions("eng"), workflowsKeys.flows("eng"))).toBe(false);
   });
 
   it("reaches every filtered list of a workspace from its unfiltered key", () => {
