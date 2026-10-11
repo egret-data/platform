@@ -27288,6 +27288,19 @@
           {
             "name": "namespace",
             "in": "query",
+            "description": "Exactly this namespace. Cannot be combined with `namespace_prefix` (400).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "namespace_prefix",
+            "in": "query",
+            "description": "This namespace and every namespace beneath it, dot-anchored: `a.b`\nmatches `a.b` and `a.b.c`, never `a.bc`. A `_` or `%` is a literal\ncharacter, not a wildcard. Cannot be combined with `namespace` (400).",
             "required": false,
             "schema": {
               "type": [
@@ -27349,7 +27362,7 @@
           {
             "name": "root_only",
             "in": "query",
-            "description": "`true`: only root executions — no loop iteration, no\n`CREATE_NEW_EXECUTION` replay (both carry `parent_execution_id`), no\nsubflow or flow-trigger child (`trigger_execution_id`). Absent or\n`false` lists every execution. Cannot be combined with `parent` (400).",
+            "description": "`true`: hide child executions — a loop iteration (`loop_index` set)\nand a subflow or flow-trigger child (`trigger_execution_id` set). A\n`CREATE_NEW_EXECUTION` retry is NOT hidden: it carries\n`parent_execution_id` without a `loop_index`, and continues a root run.\nAbsent or `false` lists every execution. Cannot be combined with\n`parent` (400).",
             "required": false,
             "schema": {
               "type": [
@@ -27404,7 +27417,7 @@
             }
           },
           "400": {
-            "description": "The query string does not decode — a malformed `flow_id`/`parent`/`since`/`until`, a `root_only` that is not `true`/`false`, a non-numeric `limit`/`offset`, or a **repeated** key (`?state=A&state=B` answers `duplicate field state`; several states go in ONE comma-separated `state=`); or `root_only=true` and `parent` were both sent",
+            "description": "The query string does not decode — a malformed `flow_id`/`parent`/`since`/`until`, a `root_only` that is not `true`/`false`, a non-numeric `limit`/`offset`, or a **repeated** key (`?state=A&state=B` answers `duplicate field state`; several states go in ONE comma-separated `state=`); or `root_only=true` and `parent` were both sent; or `namespace` and `namespace_prefix` were both sent",
             "content": {
               "application/json": {
                 "schema": {
@@ -33264,6 +33277,36 @@
           }
         }
       },
+      "AttemptDto": {
+        "type": "object",
+        "description": "One element of [`TaskRunDto::attempts`], as `worker::claim`'s\n`attempts_json` writes it.\n\n**The schema of a field that is passed through as stored.** `attempts` is\nserved as the stored `jsonb` (`serde_json::Value`), and this type is what\nthe document says it holds; `tests/executions_routes.rs`\n(`a_gantt_row_is_computable_from_the_execution_dto_alone`) deserialises a\nreal run's `attempts` into it, so the two cannot drift silently.",
+        "required": [
+          "history",
+          "started_at"
+        ],
+        "properties": {
+          "history": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The attempt's state names, in order, e.g. `[\"RUNNING\",\"FAILED\"]`."
+          },
+          "started_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Milliseconds after the execution's `created_at`."
+          },
+          "ended_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Milliseconds after the execution's `created_at`. Absent while the\nattempt is open, and on an attempt recorded before migration 0180."
+          }
+        }
+      },
       "AuditEntryDto": {
         "type": "object",
         "required": [
@@ -37130,7 +37173,10 @@
             "description": "Kestra's wire spelling — `RUNNING`, `SUCCESS`, `FAILED`, …"
           },
           "history": {
-            "type": "object",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
             "description": "The state timeline, as stored: an array of state NAMES, e.g.\n`[\"CREATED\",\"RUNNING\",\"SUCCESS\"]`. It carries no timestamps — see\n[`TaskRunDto::history`], which is written by the same function."
           },
           "inputs": {
@@ -43268,11 +43314,17 @@
             "type": "string"
           },
           "history": {
-            "type": "object",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
             "description": "**An array of state NAMES and nothing else** — `[\"CREATED\",\"RUNNING\",\n\"SUCCESS\"]` — written by `worker::claim`'s `states_json`, which maps\neach `RunState` to its wire spelling. It is **not** Kestra's\n`State.History`, and it carries **no dates**: a timeline drawn from\nthis alone has an order but no clock. The wall-clock instants are\n[`Self::created_at`], [`Self::updated_at`], and `attempts[].started_at`\n(milliseconds after the EXECUTION's `created_at`, which is what a\n`Tick` is in this engine)."
           },
           "attempts": {
-            "type": "object",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttemptDto"
+            },
             "description": "One entry per attempt: `{\"history\": [...], \"started_at\": <ms>,\n\"ended_at\": <ms>}`, both in milliseconds after the execution's\n`created_at`. `ended_at` is absent while the attempt is open and on an\nattempt recorded before it existed; an attempt that a retry followed\nends no later than the next one starts."
           },
           "not_before_ms": {

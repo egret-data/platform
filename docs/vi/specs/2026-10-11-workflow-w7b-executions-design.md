@@ -26,6 +26,10 @@ Bộ rule frontend `docs/en/frontend-rules.md` ràng buộc mọi dòng code fro
   - W7c sẽ thêm tab Topology.
 - **Danh sách mặc định chỉ hiện execution gốc**, kèm công tắc "Show child executions". Không có thao tác hàng loạt, vì backend chỉ replay và resume từng execution một.
 
+**Đã quyết với người dùng, 2026-10-11 (review Task 2):**
+- **Bộ lọc tiền tố namespace phía server.** `GET …/executions` có thêm `namespace_prefix`: một namespace và mọi namespace bên dưới nó, neo theo dấu chấm. "Include child namespaces" gửi tham số này. Nó thay cho cách mở rộng phía client trên các namespace đã biết, vốn chỉ phân trang đúng trong 200 hàng đầu của mỗi namespace.
+- **`root_only` giữ lại execution retry.** Chỉ ẩn iteration của loop và execution con của subflow hay flow trigger. Execution do retry `CREATE_NEW_EXECUTION` tạo ra là phần tiếp của một lần chạy gốc, nên vẫn hiện trong danh sách mặc định, với nhãn Retry.
+
 ## 1. Vì sao
 
 Từ W7a người dùng chạy được flow trên trình duyệt, nhưng chỉ theo dõi được qua một trang tối thiểu liệt kê state của các task run. W7b mang tới đúng những gì người dùng Kestra quen dùng cho một lần chạy:
@@ -93,13 +97,15 @@ Các hàng đã có giữ `NULL`, không đoán. UI đánh dấu thời gian c�
 
 ### 3.3 Route danh sách
 
-`GET …/executions` có thêm hai bộ lọc:
-- `root_only=true`: loại các hàng có `parent_execution_id` hoặc `trigger_execution_id` khác null, tức iteration của loop, execution con của subflow và execution con do flow trigger tạo ra.
+`GET …/executions` có thêm ba bộ lọc:
+- `root_only=true`: loại iteration của loop (`loop_index IS NOT NULL`) và execution con của subflow hay flow trigger (`trigger_execution_id IS NOT NULL`). *(Quyết 2026-10-11, review Task 2: execution do retry `CREATE_NEW_EXECUTION` tạo ra, có `parent_execution_id` mà không có `loop_index`, được giữ lại.)* `loop_index` phân biệt chính xác: CHECK `workflow_executions_loop_run_whole_or_absent` của migration 0138 buộc bộ ba của loop phải đủ hoặc vắng hết, nên có cha mà có index là iteration, có cha mà không có index là retry (`worker/replay.rs`).
 - `parent=<uuid>`: trả các hàng có `parent_execution_id` hoặc `trigger_execution_id` bằng id đó.
   - Id phải thuộc workspace của người gọi.
   - Nếu id thuộc workspace khác, trả một trang rỗng, không bao giờ báo lỗi làm lộ việc id đó tồn tại.
 
-Gửi cả hai bộ lọc cùng lúc, hoặc gửi một bộ lọc với giá trị sai định dạng, đều trả 400.
+- `namespace_prefix=<ns>`: trả các hàng có namespace bằng `<ns>` hoặc bắt đầu bằng `<ns>.`: `namespace = $n OR starts_with(namespace, $n || '.')`, SQL tĩnh, không dùng `LIKE`, nên `a.b` không bao giờ khớp `a.bc`, và `_` hay `%` là ký tự thường. *(Quyết 2026-10-11, review Task 2.)*
+
+Gửi cùng lúc `root_only=true` và `parent`, hoặc cùng lúc `namespace` và `namespace_prefix`, hoặc gửi bất kỳ bộ lọc nào với giá trị sai định dạng, đều trả 400.
 
 Cả hai bộ lọc dùng các index đã có, vốn bắt đầu bằng đúng các cột đó (`workflow_executions_loop_run_idx`, migration 0135, và `workflow_executions_trigger_idx`, migration 0138), như `EXPLAIN` cho thấy. Không thêm index mới. *(Đính chính 2026-10-11, Task 1: đã thử dựng index mới và đo, planner không dùng cái nào.)* Có test giữ query plan này.
 
@@ -142,7 +148,7 @@ Bố cục theo FE-PAGE-1: `ListPageShell` → toolbar → `SummaryStrip` (đế
 
 **Bộ lọc,** tất cả nằm trên URL (FE-PAGE-2):
 - state: chọn nhiều, gửi dưới dạng danh sách ngăn cách bằng dấu phẩy;
-- namespace: có tuỳ chọn "include children", lọc phía client trên các namespace đã biết, vì API so khớp namespace chính xác;
+- namespace: có tuỳ chọn "Include child namespaces", khi bật thì gửi namespace dưới dạng `namespace_prefix` thay cho `namespace` (§3.3);
 - flow;
 - khoảng thời gian: các preset 1 giờ, 24 giờ, 7 ngày, 30 ngày và tuỳ chọn, gửi bằng `since` và `until`;
 - công tắc "Show child executions": mặc định tắt; khi tắt thì gửi `root_only=true`.
@@ -343,7 +349,9 @@ Khác biệt được đưa vào §2.
 - `root_only` và `parent`:
   - id cha thuộc workspace khác thì trả trang rỗng;
   - gửi cả hai bộ lọc thì trả 400;
-  - các index thật sự được dùng, kiểm bằng `EXPLAIN`.
+  - các index thật sự được dùng, kiểm bằng `EXPLAIN`;
+  - execution retry vẫn hiện khi `root_only`, còn iteration của loop và execution con của subflow thì không.
+- `namespace_prefix`: khớp chính xác, khớp con, namespace anh em cùng tiền tố nhưng không có dấu chấm, workspace khác, và 400 khi gửi cùng `namespace`.
 - Migration.
 
 **Vitest** (render component thật, fixture có khả năng làm test đỏ):
@@ -406,4 +414,3 @@ Toàn bộ `docs/en/frontend-rules.md`. Những rule quan trọng nhất ở đ�
 
 - Execution ghi trước migration 0180 có thời gian ước tính (§6.3).
 - Resume không giải phóng được một `Pause` không có duration hay timeout (§5.2).
-- "Include children" của namespace chỉ phủ các namespace mà client đã biết (§4.1).

@@ -6,7 +6,6 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ExecutionListItemDtoExecutionTrigger } from './executionListItemDtoExecutionTrigger';
-import type { ExecutionListItemDtoHistory } from './executionListItemDtoHistory';
 import type { ExecutionListItemDtoInputs } from './executionListItemDtoInputs';
 
 /**
@@ -44,7 +43,7 @@ export interface ExecutionListItemDto {
      * `["CREATED","RUNNING","SUCCESS"]`. It carries no timestamps — see
      * [`TaskRunDto::history`], which is written by the same function.
      */
-  history: ExecutionListItemDtoHistory;
+  history: string[];
   inputs: ExecutionListItemDtoInputs;
   seq: number;
   /** The trigger record, `NULL` for an API start. */

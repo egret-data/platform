@@ -1152,7 +1152,7 @@ pub struct ExecutionListItemDto {
     /// The state timeline, as stored: an array of state NAMES, e.g.
     /// `["CREATED","RUNNING","SUCCESS"]`. It carries no timestamps — see
     /// [`TaskRunDto::history`], which is written by the same function.
-    #[schema(value_type = Object)]
+    #[schema(value_type = Vec<String>)]
     pub history: serde_json::Value,
     #[schema(value_type = Object)]
     pub inputs: serde_json::Value,
@@ -1215,6 +1215,26 @@ impl From<ExecutionRow> for ExecutionListItemDto {
     }
 }
 
+/// One element of [`TaskRunDto::attempts`], as `worker::claim`'s
+/// `attempts_json` writes it.
+///
+/// **The schema of a field that is passed through as stored.** `attempts` is
+/// served as the stored `jsonb` (`serde_json::Value`), and this type is what
+/// the document says it holds; `tests/executions_routes.rs`
+/// (`a_gantt_row_is_computable_from_the_execution_dto_alone`) deserialises a
+/// real run's `attempts` into it, so the two cannot drift silently.
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AttemptDto {
+    /// The attempt's state names, in order, e.g. `["RUNNING","FAILED"]`.
+    pub history: Vec<String>,
+    /// Milliseconds after the execution's `created_at`.
+    pub started_at: i64,
+    /// Milliseconds after the execution's `created_at`. Absent while the
+    /// attempt is open, and on an attempt recorded before migration 0180.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<i64>,
+}
+
 /// One task run, whole — all twenty-four columns.
 ///
 /// Unlike the execution's own row there is nothing dropped here: a detail page
@@ -1263,14 +1283,14 @@ pub struct TaskRunDto {
     /// [`Self::created_at`], [`Self::updated_at`], and `attempts[].started_at`
     /// (milliseconds after the EXECUTION's `created_at`, which is what a
     /// `Tick` is in this engine).
-    #[schema(value_type = Object)]
+    #[schema(value_type = Vec<String>)]
     pub history: serde_json::Value,
     /// One entry per attempt: `{"history": [...], "started_at": <ms>,
     /// "ended_at": <ms>}`, both in milliseconds after the execution's
     /// `created_at`. `ended_at` is absent while the attempt is open and on an
     /// attempt recorded before it existed; an attempt that a retry followed
     /// ends no later than the next one starts.
-    #[schema(value_type = Object)]
+    #[schema(value_type = Vec<AttemptDto>)]
     pub attempts: serde_json::Value,
     pub not_before_ms: Option<i64>,
     /// The lease. `NULL` means unclaimed.
@@ -1385,7 +1405,12 @@ pub struct ListExecutionsQuery {
     /// Only executions started from this draft. A trashed draft still matches:
     /// `FlowRepo`'s delete is soft, so the column keeps pointing at it.
     pub flow_id: Option<Uuid>,
+    /// Exactly this namespace. Cannot be combined with `namespace_prefix` (400).
     pub namespace: Option<String>,
+    /// This namespace and every namespace beneath it, dot-anchored: `a.b`
+    /// matches `a.b` and `a.b.c`, never `a.bc`. A `_` or `%` is a literal
+    /// character, not a wildcard. Cannot be combined with `namespace` (400).
+    pub namespace_prefix: Option<String>,
     /// The YAML's own `id` — the only filter that still finds an execution
     /// whose `flow_id` was `NULL`ed by a real `DELETE`.
     pub flow_key: Option<String>,
@@ -1419,10 +1444,12 @@ pub struct ListExecutionsQuery {
     /// Window over the execution's `created_at`, **exclusive**, so consecutive
     /// windows tile without double-counting the row on the boundary.
     pub until: Option<DateTime<Utc>>,
-    /// `true`: only root executions — no loop iteration, no
-    /// `CREATE_NEW_EXECUTION` replay (both carry `parent_execution_id`), no
-    /// subflow or flow-trigger child (`trigger_execution_id`). Absent or
-    /// `false` lists every execution. Cannot be combined with `parent` (400).
+    /// `true`: hide child executions — a loop iteration (`loop_index` set)
+    /// and a subflow or flow-trigger child (`trigger_execution_id` set). A
+    /// `CREATE_NEW_EXECUTION` retry is NOT hidden: it carries
+    /// `parent_execution_id` without a `loop_index`, and continues a root run.
+    /// Absent or `false` lists every execution. Cannot be combined with
+    /// `parent` (400).
     pub root_only: Option<bool>,
     /// Only the direct children of this execution: the rows whose
     /// `parent_execution_id` or `trigger_execution_id` is this id. An id from
@@ -1466,7 +1493,7 @@ fn parse_state_filter(raw: Option<String>) -> Option<Vec<String>> {
     params(WorkspacePath, ListExecutionsQuery),
     responses(
         (status = 200, description = "One page of the workspace's executions, newest first, with the total behind it", body = ExecutionPageDto),
-        (status = 400, description = "The query string does not decode — a malformed `flow_id`/`parent`/`since`/`until`, a `root_only` that is not `true`/`false`, a non-numeric `limit`/`offset`, or a **repeated** key (`?state=A&state=B` answers `duplicate field state`; several states go in ONE comma-separated `state=`); or `root_only=true` and `parent` were both sent", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The query string does not decode — a malformed `flow_id`/`parent`/`since`/`until`, a `root_only` that is not `true`/`false`, a non-numeric `limit`/`offset`, or a **repeated** key (`?state=A&state=B` answers `duplicate field state`; several states go in ONE comma-separated `state=`); or `root_only=true` and `parent` were both sent; or `namespace` and `namespace_prefix` were both sent", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such workspace", body = egret_core::http::ErrorBody),
@@ -1490,19 +1517,27 @@ async fn list_executions(
         offset: q.offset.max(0),
     };
     let root_only = q.root_only.unwrap_or(false);
-    // Contradictory rather than empty: a root has no parent, so the pair can
-    // only ever answer nothing, and a caller who sent both has a bug worth
-    // naming. `root_only=false` beside `parent` is the default spelled out
-    // and is accepted.
+    // Two views of the tree that do not compose: `parent` lists one level
+    // beneath an execution, `root_only` hides the children that `parent` is
+    // for. A caller who sent both has a bug worth naming. `root_only=false`
+    // beside `parent` is the default spelled out and is accepted.
     if root_only && q.parent.is_some() {
         return Err(Error::InvalidInput(
-            "`root_only=true` and `parent` cannot be combined: a root execution has no parent"
+            "`root_only=true` and `parent` cannot be combined: `parent` lists children, which `root_only` hides"
                 .into(),
+        ));
+    }
+    // Two answers to one question: the exact namespace, or it and its
+    // children. Sending both is a caller bug, named rather than intersected.
+    if q.namespace.is_some() && q.namespace_prefix.is_some() {
+        return Err(Error::InvalidInput(
+            "`namespace` and `namespace_prefix` cannot be combined: send one".into(),
         ));
     }
     let filter = ExecutionFilter {
         flow_id: q.flow_id,
         namespace: q.namespace,
+        namespace_prefix: q.namespace_prefix,
         flow_key: q.flow_key,
         states: parse_state_filter(q.state),
         since: q.since,

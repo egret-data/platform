@@ -19,6 +19,10 @@ The frontend rulebook `docs/en/frontend-rules.md` binds every frontend line.
 - **Kestra's tabs.** The execution detail has the tabs Overview, Gantt, Logs and Outputs, with the tab in the URL. Clicking a run in the Gantt opens that run's logs and outputs. Metrics and Dependencies are left out because there is no data for them. W7c adds Topology.
 - **The list.** It shows root executions by default, with a "Show child executions" switch. There are no bulk actions, because the backend replays and resumes one execution at a time.
 
+**Decided with the user, 2026-10-11 (Task 2 review):**
+- **A namespace prefix filter on the server.** `GET …/executions` gains `namespace_prefix`, a namespace and every namespace beneath it, dot-anchored. "Include child namespaces" sends it. It replaces the client-side expansion over known namespaces, whose merged paging was exact only for the first 200 rows of each namespace.
+- **`root_only` keeps retries.** It hides loop iterations and subflow and flow-trigger children only. The execution a `CREATE_NEW_EXECUTION` retry starts continues a root run, so it stays in the default list, labelled Retry.
+
 ## 1. Why
 
 Since W7a, a user can run a flow from the browser, but can follow it only on a minimal page that lists task-run states. W7b gives runs the surface Kestra users expect:
@@ -85,11 +89,13 @@ Existing rows keep `NULL`; nothing is guessed. The UI marks their times as estim
 
 ### 3.3 The list route
 
-`GET …/executions` gains two filters:
-- `root_only=true` excludes rows with a non-null `parent_execution_id` or `trigger_execution_id`, that is, loop iterations, subflow children and flow-trigger children.
+`GET …/executions` gains three filters:
+- `root_only=true` excludes loop iterations (`loop_index IS NOT NULL`) and subflow and flow-trigger children (`trigger_execution_id IS NOT NULL`). *(Ruled 2026-10-11, Task 2 review: a `CREATE_NEW_EXECUTION` retry, which has `parent_execution_id` and no `loop_index`, is kept.)* `loop_index` is the exact discriminator: migration 0138's `workflow_executions_loop_run_whole_or_absent` makes the loop triple whole or absent, so a parent with an index is an iteration and a parent without one is a retry (`worker/replay.rs`).
 - `parent=<uuid>` returns the rows whose `parent_execution_id` or `trigger_execution_id` equals that id. The id must belong to the caller's workspace; an id from another workspace answers an empty page, never an error that reveals it exists.
 
-It is a 400 to send both, or to send either with a malformed value.
+- `namespace_prefix=<ns>` returns the rows whose namespace is `<ns>` or starts with `<ns>.`: `namespace = $n OR starts_with(namespace, $n || '.')`, static SQL and no `LIKE`, so `a.b` never matches `a.bc` and `_` or `%` is a literal character. *(Ruled 2026-10-11, Task 2 review.)*
+
+It is a 400 to send `root_only=true` and `parent` together, to send `namespace` and `namespace_prefix` together, or to send any of them with a malformed value.
 
 Both filters are served by existing indexes that already lead with those columns (`workflow_executions_loop_run_idx`, migration 0135, and `workflow_executions_trigger_idx`, migration 0138), as `EXPLAIN` showed. No new index is added. *(Corrected 2026-10-11, Task 1: new indexes were built and measured, and the planner used neither.)* A test pins the plan.
 
@@ -132,7 +138,7 @@ The page is built from `ListPageShell`, then the toolbar, then `SummaryStrip` (c
 
 **Filters**, all in the URL (FE-PAGE-2):
 - state, multi-select, sent as a comma list;
-- namespace, with "include children" implemented client-side over the known namespaces, because the API matches namespaces exactly;
+- namespace, with "Include child namespaces", which sends the namespace as `namespace_prefix` instead of `namespace` (§3.3);
 - flow;
 - time window: presets 1 h, 24 h, 7 d and 30 d, plus custom, sent as `since` and `until`;
 - the "Show child executions" switch, off by default, which sends `root_only=true` while off.
@@ -332,7 +338,8 @@ Differences go into §2.
 - Timestamps on every state path: success, failure, retry (`RETRY_FAILED_TASK` and `CREATE_NEW_EXECUTION`), pause and resume, subflow (`wait` true and false), loop iterations, SLA cancel, and replay.
 - The invariants of §3.2.
 - The attempt end on retry.
-- `root_only` and `parent`, including another workspace's parent id giving an empty page, both filters together giving 400, and the indexes being used (`EXPLAIN`).
+- `root_only` and `parent`, including another workspace's parent id giving an empty page, both filters together giving 400, and the indexes being used (`EXPLAIN`); a retry execution listed under `root_only`, a loop iteration and a subflow child not.
+- `namespace_prefix`: exact, child, a sibling sharing the prefix without the dot, another workspace, and 400 beside `namespace`.
 - The migration.
 
 **Vitest** (real components, fixtures that can fail):
@@ -400,4 +407,3 @@ All of `docs/en/frontend-rules.md`. The rules most at stake:
 
 - Executions recorded before migration 0180 have estimated times (§6.3).
 - Resume cannot release a `Pause` that has no duration or timeout (§5.2).
-- "Include children" for namespaces only covers namespaces the client already knows (§4.1).

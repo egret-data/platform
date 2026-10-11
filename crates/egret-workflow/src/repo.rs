@@ -930,9 +930,17 @@ pub struct ExecutionFilter {
     /// a row on the boundary.
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
-    /// Only ROOT executions: neither `parent_execution_id` (a loop iteration,
-    /// a `CREATE_NEW_EXECUTION` replay) nor `trigger_execution_id` (a subflow
-    /// or flow-trigger child) is set. `false` lists every row.
+    /// Hide child executions: a loop iteration (`loop_index` set) and a
+    /// subflow or flow-trigger child (`trigger_execution_id` set). `false`
+    /// lists every row.
+    ///
+    /// **A `CREATE_NEW_EXECUTION` retry stays** (the user's ruling,
+    /// 2026-10-11): it carries `parent_execution_id` but no `loop_index`, and
+    /// it is the continuation of a root run, not a part of one. `loop_index`
+    /// is the exact discriminator: migration 0138's
+    /// `workflow_executions_loop_run_whole_or_absent` makes the loop triple
+    /// whole or absent, so a parent with an index is an iteration and a
+    /// parent without one is a replay (`worker/replay.rs`'s lineage table).
     pub root_only: bool,
     /// Only the direct children of this execution: rows whose
     /// `parent_execution_id` OR `trigger_execution_id` names it. Never widens
@@ -940,12 +948,19 @@ pub struct ExecutionFilter {
     /// workspace predicate still applies and the composite FKs of migration
     /// 0138 make a cross-workspace child unrepresentable.
     pub parent: Option<Uuid>,
+    /// A namespace and every namespace beneath it, dot-anchored: `a.b`
+    /// matches `a.b` and `a.b.c`, never `a.bc`. Written with `starts_with`,
+    /// not `LIKE`, so a `_` or `%` in a namespace is a character and not a
+    /// wildcard. The route refuses it beside [`Self::namespace`] (400).
+    pub namespace_prefix: Option<String>,
 }
 
 /// The `WHERE` both of [`ExecutionRepo::list`]'s statements carry, written
 /// once so the page and its count cannot disagree. Parameters: `$1` the
 /// workspace, `$2..$7` the [`ExecutionFilter`] fields in declaration order,
-/// `$8` `root_only`, `$9` `parent`.
+/// `$8` `root_only`, `$9` `parent`, `$10` `namespace_prefix`. The page's
+/// `LIMIT`/`OFFSET` follow as `$11`/`$12`, so the count statement uses
+/// `$1..$10` with no gap.
 macro_rules! execution_list_where {
     () => {
         " FROM workflow.executions \
@@ -956,18 +971,19 @@ macro_rules! execution_list_where {
            AND ($5::text[] IS NULL OR state = ANY($5)) \
            AND ($6::timestamptz IS NULL OR created_at >= $6) \
            AND ($7::timestamptz IS NULL OR created_at < $7) \
-           AND (NOT $8 OR (parent_execution_id IS NULL AND trigger_execution_id IS NULL)) \
-           AND ($9::uuid IS NULL OR parent_execution_id = $9 OR trigger_execution_id = $9)"
+           AND (NOT $8 OR (loop_index IS NULL AND trigger_execution_id IS NULL)) \
+           AND ($9::uuid IS NULL OR parent_execution_id = $9 OR trigger_execution_id = $9) \
+           AND ($10::text IS NULL OR namespace = $10 OR starts_with(namespace, $10 || '.'))"
     };
 }
 
-/// [`ExecutionRepo::list`]'s page statement, whole. `$10`/`$11` are
+/// [`ExecutionRepo::list`]'s page statement, whole. `$11`/`$12` are
 /// `LIMIT`/`OFFSET`.
 const LIST_SQL: &str = concat!(
     "SELECT ",
     execution_cols!(),
     execution_list_where!(),
-    " ORDER BY created_at DESC, id DESC LIMIT $10 OFFSET $11"
+    " ORDER BY created_at DESC, id DESC LIMIT $11 OFFSET $12"
 );
 
 /// Test-only (`test-util`): [`ExecutionRepo::list`]'s page statement, for
@@ -1106,6 +1122,7 @@ impl ExecutionRepo {
             .bind(filter.until)
             .bind(filter.root_only)
             .bind(filter.parent)
+            .bind(&filter.namespace_prefix)
             .bind(limit)
             .bind(offset)
             .fetch_all(&self.db.pool)
@@ -1129,6 +1146,7 @@ impl ExecutionRepo {
             .bind(filter.until)
             .bind(filter.root_only)
             .bind(filter.parent)
+            .bind(&filter.namespace_prefix)
             .fetch_one(&self.db.pool)
             .await
             .map_err(db_err)?;

@@ -14,9 +14,17 @@ export type WorkflowListExecutionsParams = {
  */
 flow_id?: string | null;
 /**
+ * Exactly this namespace. Cannot be combined with `namespace_prefix` (400).
  * @nullable
  */
 namespace?: string | null;
+/**
+ * This namespace and every namespace beneath it, dot-anchored: `a.b`
+ * matches `a.b` and `a.b.c`, never `a.bc`. A `_` or `%` is a literal
+ * character, not a wildcard. Cannot be combined with `namespace` (400).
+ * @nullable
+ */
+namespace_prefix?: string | null;
 /**
  * The YAML's own `id` — the only filter that still finds an execution
  * whose `flow_id` was `NULL`ed by a real `DELETE`.
@@ -63,10 +71,12 @@ since?: string | null;
  */
 until?: string | null;
 /**
- * `true`: only root executions — no loop iteration, no
- * `CREATE_NEW_EXECUTION` replay (both carry `parent_execution_id`), no
- * subflow or flow-trigger child (`trigger_execution_id`). Absent or
- * `false` lists every execution. Cannot be combined with `parent` (400).
+ * `true`: hide child executions — a loop iteration (`loop_index` set)
+ * and a subflow or flow-trigger child (`trigger_execution_id` set). A
+ * `CREATE_NEW_EXECUTION` retry is NOT hidden: it carries
+ * `parent_execution_id` without a `loop_index`, and continues a root run.
+ * Absent or `false` lists every execution. Cannot be combined with
+ * `parent` (400).
  * @nullable
  */
 root_only?: boolean | null;

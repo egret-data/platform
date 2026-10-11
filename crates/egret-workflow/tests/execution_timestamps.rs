@@ -1132,14 +1132,14 @@ async fn the_parent_filter_is_served_by_the_partial_indexes(pool: sqlx::PgPool) 
         .unwrap();
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "PREPARE list_q(uuid, uuid, text, text, text[], timestamptz, timestamptz, boolean, uuid, \
-         bigint, bigint) AS {}",
+         text, bigint, bigint) AS {}",
         egret_workflow::repo::EXECUTION_LIST_SQL
     )))
     .execute(&mut *conn)
     .await
     .unwrap();
     let plan: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "EXPLAIN EXECUTE list_q('{ws}', NULL, NULL, NULL, NULL, NULL, NULL, false, '{root}', 50, 0)"
+        "EXPLAIN EXECUTE list_q('{ws}', NULL, NULL, NULL, NULL, NULL, NULL, false, '{root}', NULL, 50, 0)"
     )))
     .fetch_all(&mut *conn)
     .await
@@ -1153,7 +1153,7 @@ async fn the_parent_filter_is_served_by_the_partial_indexes(pool: sqlx::PgPool) 
     // NOT an index lookup on the link columns, so the assertion above is about
     // the filter and not about a plan this table always gets.
     let unfiltered: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "EXPLAIN EXECUTE list_q('{ws}', NULL, NULL, NULL, NULL, NULL, NULL, false, NULL, 50, 0)"
+        "EXPLAIN EXECUTE list_q('{ws}', NULL, NULL, NULL, NULL, NULL, NULL, false, NULL, NULL, 50, 0)"
     )))
     .fetch_all(&mut *conn)
     .await

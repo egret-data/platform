@@ -5,8 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
-import type { TaskRunDtoAttempts } from './taskRunDtoAttempts';
-import type { TaskRunDtoHistory } from './taskRunDtoHistory';
+import type { AttemptDto } from './attemptDto';
 import type { TaskRunDtoOutputs } from './taskRunDtoOutputs';
 
 /**
@@ -73,7 +72,7 @@ export interface TaskRunDto {
      * (milliseconds after the EXECUTION's `created_at`, which is what a
      * `Tick` is in this engine).
      */
-  history: TaskRunDtoHistory;
+  history: string[];
   /**
      * One entry per attempt: `{"history": [...], "started_at": <ms>,
      * "ended_at": <ms>}`, both in milliseconds after the execution's
@@ -81,7 +80,7 @@ export interface TaskRunDto {
      * attempt recorded before it existed; an attempt that a retry followed
      * ends no later than the next one starts.
      */
-  attempts: TaskRunDtoAttempts;
+  attempts: AttemptDto[];
   /** @nullable */
   not_before_ms?: number | null;
   /**

@@ -1213,6 +1213,20 @@ async fn a_gantt_row_is_computable_from_the_execution_dto_alone(pool: sqlx::PgPo
     for entry in dto["history"].as_array().expect("execution history") {
         assert!(entry.is_string(), "{dto}");
     }
+    // The OpenAPI document types these as `Vec<String>` and `Vec<AttemptDto>`
+    // while the DTO passes the stored `jsonb` through: the wire must decode
+    // into the documented types, or the generated client lies.
+    serde_json::from_value::<Vec<String>>(dto["history"].clone())
+        .expect("execution history is Vec<String>");
+    for run in dto["runs"].as_array().unwrap() {
+        serde_json::from_value::<Vec<String>>(run["history"].clone())
+            .expect("run history is Vec<String>");
+        let attempts: Vec<egret_workflow::routes::AttemptDto> =
+            serde_json::from_value(run["attempts"].clone()).expect("attempts are Vec<AttemptDto>");
+        for a in &attempts {
+            assert!(!a.history.is_empty(), "an attempt has a history: {run}");
+        }
+    }
 
     let rows = gantt_rows(&dto);
     assert_eq!(rows.len(), 2, "one bar per task run: {dto}");
@@ -2503,6 +2517,26 @@ async fn insert_child(
     .expect("insert child execution")
 }
 
+/// Insert the replacement a `CREATE_NEW_EXECUTION` retry starts, in the shape
+/// `worker::replay` writes: `parent_execution_id` alone (no run, no loop
+/// index), `attempt_number` 2 — the shape 0138/0139's CHECKs admit for it.
+async fn insert_retry(db: &Db, ws: Uuid, parent: Uuid, created_at: DateTime<Utc>) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (workspace_id, namespace, flow_key, source, state, history, created_at, \
+            parent_execution_id, attempt_number) \
+         VALUES ($1, 'a.tree', 'root', $2, 'SUCCESS', '[\"CREATED\",\"SUCCESS\"]', $3, $4, 2) \
+         RETURNING id",
+    )
+    .bind(ws)
+    .bind(SEEDED_SOURCE)
+    .bind(created_at)
+    .bind(parent)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert retry execution")
+}
+
 fn ids(page: &Value) -> std::collections::BTreeSet<String> {
     page["rows"]
         .as_array()
@@ -2512,14 +2546,16 @@ fn ids(page: &Value) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
-/// **`root_only=true` lists roots alone; `parent=<id>` lists exactly that
-/// execution's children, of both link kinds; a foreign parent is an empty
-/// page; both at once, or a malformed value, is a 400.**
+/// **`root_only=true` hides loop iterations and subflow/flow-trigger
+/// children and keeps `CREATE_NEW_EXECUTION` retries (the user's ruling,
+/// 2026-10-11); `parent=<id>` lists exactly that execution's children, of
+/// every link kind; a foreign parent is an empty page; both at once, or a
+/// malformed value, is a 400.**
 ///
 /// The fixture holds every kind of row each filter must tell apart: two
-/// roots, a loop iteration and a subflow child of the first, a grandchild
-/// (a child of the iteration, which `parent=<root>` must NOT reach — the
-/// filter is one level), and a root with a child in ANOTHER workspace.
+/// roots, a loop iteration, a subflow child and a retry of the first, a
+/// grandchild (a child of the iteration, which `parent=<root>` must NOT reach
+/// — the filter is one level), and a root with a child in ANOTHER workspace.
 #[tokio::test]
 async fn the_root_only_and_parent_filters_split_the_tree() {
     let Some(db) = common::db().await else { return };
@@ -2532,6 +2568,7 @@ async fn the_root_only_and_parent_filters_split_the_tree() {
     let iteration = insert_child(&db, ws, Some((root, 0, 0)), None, at(3)).await;
     let subflow = insert_child(&db, ws, None, Some((root, 1)), at(4)).await;
     let grandchild = insert_child(&db, ws, None, Some((iteration, 0)), at(5)).await;
+    let retry = insert_retry(&db, ws, root, at(6)).await;
     let foreign = insert_execution(&db, other_ws, None, "a.tree", "far", "SUCCESS", at(1)).await;
     insert_child(&db, other_ws, None, Some((foreign, 0)), at(2)).await;
     let app = common::app(&db).await;
@@ -2543,29 +2580,31 @@ async fn the_root_only_and_parent_filters_split_the_tree() {
     let all = list(&app, ws, user, "namespace=a.tree").await;
     assert_eq!(
         ids(&all),
-        set(&[root, lone, iteration, subflow, grandchild]),
+        set(&[root, lone, iteration, subflow, grandchild, retry]),
         "{all}"
     );
 
+    // The retry stays beside the roots; the iteration, the subflow child and
+    // the grandchild (a subflow child of the iteration) do not.
     let roots = list(&app, ws, user, "namespace=a.tree&root_only=true").await;
-    assert_eq!(ids(&roots), set(&[root, lone]), "{roots}");
+    assert_eq!(ids(&roots), set(&[root, lone, retry]), "{roots}");
     assert_eq!(
-        roots["total"], 2,
+        roots["total"], 3,
         "the count carries the same predicate: {roots}"
     );
     let everything = list(&app, ws, user, "namespace=a.tree&root_only=false").await;
     assert_eq!(
-        everything["total"], 5,
+        everything["total"], 6,
         "root_only=false is no filter: {everything}"
     );
 
     let kids = list(&app, ws, user, &format!("parent={root}")).await;
     assert_eq!(
         ids(&kids),
-        set(&[iteration, subflow]),
-        "both link kinds, one level only: {kids}"
+        set(&[iteration, subflow, retry]),
+        "every link kind, one level only: {kids}"
     );
-    assert_eq!(kids["total"], 2, "{kids}");
+    assert_eq!(kids["total"], 3, "{kids}");
     let grand = list(&app, ws, user, &format!("parent={iteration}")).await;
     assert_eq!(ids(&grand), set(&[grandchild]), "{grand}");
     let none = list(&app, ws, user, &format!("parent={lone}")).await;
@@ -2603,7 +2642,67 @@ async fn the_root_only_and_parent_filters_split_the_tree() {
     // `root_only=false` beside `parent` is the default spelled out, not a
     // contradiction.
     let ok = list(&app, ws, user, &format!("root_only=false&parent={root}")).await;
-    assert_eq!(ok["total"], 2, "{ok}");
+    assert_eq!(ok["total"], 3, "{ok}");
+}
+
+/// **`namespace_prefix` is a namespace and its children, dot-anchored, in
+/// this workspace only; beside `namespace` it is a 400.**
+///
+/// The fixture holds what a prefix match could get wrong: the namespace
+/// itself, a child and a grandchild, a sibling that shares the prefix without
+/// the dot (`a.bc` against `a.b`), a parent (`a`), an underscore that `LIKE`
+/// would read as a wildcard (`a_b`), and the same namespace in ANOTHER
+/// workspace.
+#[tokio::test]
+async fn namespace_prefix_matches_a_namespace_and_its_children_only() {
+    let Some(db) = common::db().await else { return };
+    // Arrange
+    let (ws, user) = common::seed_workspace(&db).await;
+    let (other_ws, _) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let exact = insert_execution(&db, ws, None, "a.b", "f", "SUCCESS", at(1)).await;
+    let child = insert_execution(&db, ws, None, "a.b.c", "f", "SUCCESS", at(2)).await;
+    let grandchild = insert_execution(&db, ws, None, "a.b.c.d", "f", "SUCCESS", at(3)).await;
+    insert_execution(&db, ws, None, "a.bc", "f", "SUCCESS", at(4)).await;
+    insert_execution(&db, ws, None, "a", "f", "SUCCESS", at(5)).await;
+    insert_execution(&db, ws, None, "a_b", "f", "SUCCESS", at(6)).await;
+    insert_execution(&db, other_ws, None, "a.b", "f", "SUCCESS", at(7)).await;
+    insert_execution(&db, other_ws, None, "a.b.c", "f", "SUCCESS", at(8)).await;
+    let app = common::app(&db).await;
+    let set = |v: &[Uuid]| -> std::collections::BTreeSet<String> {
+        v.iter().map(Uuid::to_string).collect()
+    };
+
+    // Act + Assert: the subtree, and nothing beside or above it.
+    let tree = list(&app, ws, user, "namespace_prefix=a.b").await;
+    assert_eq!(ids(&tree), set(&[exact, child, grandchild]), "{tree}");
+    assert_eq!(tree["total"], 3, "the count carries the predicate: {tree}");
+
+    // A leaf prefix is the exact namespace.
+    let leaf = list(&app, ws, user, "namespace_prefix=a.b.c.d").await;
+    assert_eq!(ids(&leaf), set(&[grandchild]), "{leaf}");
+
+    // The exact filter, for contrast: the namespace alone.
+    let only = list(&app, ws, user, "namespace=a.b").await;
+    assert_eq!(ids(&only), set(&[exact]), "{only}");
+
+    // `_` is a character: `a_b` matches itself, not `a.b`.
+    let underscore = list(&app, ws, user, "namespace_prefix=a_b").await;
+    assert_eq!(underscore["total"], 1, "{underscore}");
+
+    // Both at once is a 400, whichever values they carry.
+    for q in [
+        "namespace=a.b&namespace_prefix=a.b",
+        "namespace=a&namespace_prefix=a.b",
+    ] {
+        let res = common::get(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions?{q}"),
+            user,
+        )
+        .await;
+        assert_eq!(res.status(), 400, "{q}");
+    }
 }
 
 // ── W7b Task 1: real times through the DTO, and the replay link ─────────────
