@@ -42,24 +42,20 @@ import {
   EXECUTION_STATE_NAMES,
   isFiltering,
   LIST_POLL_MS,
-  MERGED_ROW_LIMIT,
-  mergePages,
-  namespacesToQuery,
   PAGE_SIZE,
   pageCount,
-  planRequests,
   readFilters,
   TIME_PRESETS,
+  toQueryParams,
   withFilters,
   type ExecutionFilters,
 } from "@/routes/workflows/executionsListModel";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
-/** One page as the list shows it: the rows, the whole match's size, and whether namespaces were merged. */
+/** One page as the list shows it: the rows and the whole match's size. */
 interface ListPage {
   rows: ExecutionListItemDto[];
   total: number;
-  merged: boolean;
 }
 
 /**
@@ -67,26 +63,18 @@ interface ListPage {
  * poll asks for the window ending now while the query key (the filters, not
  * the timestamps) stays put. That is why this calls the orval fetcher inside
  * `useQuery` rather than `useWorkflowListExecutions`, whose params, and so
- * whose `since`, are fixed at render. Several namespaces are read at once and
- * merged (`planRequests`, `mergePages`).
+ * whose `since`, are fixed at render.
  */
 async function fetchPage(
   ws: string,
   filters: ExecutionFilters,
-  namespaces: string[],
   pinnedFlowId: string | undefined,
   signal: AbortSignal,
 ): Promise<ListPage> {
-  const plan = planRequests(filters, Date.now(), namespaces, { pinnedFlowId });
-  const pages = await Promise.all(
-    plan.requests.map(async (params) => {
-      // `customInstance` throws `ApiError` on a non-2xx answer; the check narrows the union.
-      const res = await workflowListExecutions(ws, params, { signal });
-      if (res.status !== 200) throw new Error("The executions could not be loaded.");
-      return res.data;
-    }),
-  );
-  return { ...mergePages(pages, plan.offset, plan.merged), merged: plan.merged };
+  // `customInstance` throws `ApiError` on a non-2xx answer; the check narrows the union.
+  const res = await workflowListExecutions(ws, toQueryParams(filters, Date.now(), { pinnedFlowId }), { signal });
+  if (res.status !== 200) throw new Error("The executions could not be loaded.");
+  return { rows: res.data.rows, total: res.data.total };
 }
 
 /** A clock for the "Updated … ago" label and running durations; ticks once a second. */
@@ -110,8 +98,9 @@ const stateWord = (s: string) => s.charAt(0).toUpperCase() + s.slice(1).toLowerC
  *
  * - Every filter, the child switch and the page live in the URL
  *   (`executionsListModel.ts`, FE-PAGE-2).
- * - Root executions only by default; "Show child executions" adds loop
- *   iterations, retries and subflow and flow-trigger children.
+ * - By default it hides loop iterations and subflow and flow-trigger
+ *   children (`root_only`); a `CREATE_NEW_EXECUTION` retry stays, labelled
+ *   Retry. "Show child executions" adds the hidden ones.
  * - It polls every 5 s while a row on the page is not terminal, and only while
  *   the browser tab is visible: react-query skips an interval tick while the
  *   document is hidden (`refetchIntervalInBackground: false`).
@@ -124,27 +113,20 @@ export default function ExecutionsList({ pinnedFlowId }: { pinnedFlowId?: string
   const embedded = pinnedFlowId !== undefined;
 
   const [params, setParams] = useSearchParams();
-  const filters = useMemo(() => readFilters(params), [params]);
+  const filters = useMemo(() => readFilters(params, { pinned: embedded }), [params, embedded]);
   // A picker pushes an entry, so Back undoes it; the time inputs replace theirs.
   const setFilters = (patch: Partial<ExecutionFilters>, replace = false) =>
     setParams((p) => withFilters(p, patch), { replace });
 
-  // The flow list feeds the namespace and flow pickers, and "include child namespaces".
+  // The flow list feeds the namespace and flow pickers; the flow's tab shows neither.
   const flowsQuery = useWorkflowListFlows(ws, undefined, {
     query: { queryKey: workflowsKeys.flows(ws), enabled: !embedded },
   });
   const flows = useMemo(() => (flowsQuery.data?.status === 200 ? flowsQuery.data.data : []), [flowsQuery.data]);
-  const namespaces = useMemo(
-    () => (embedded ? [] : namespacesToQuery(filters, [...new Set(flows.map((f) => f.namespace))])),
-    [embedded, filters, flows],
-  );
-  // "Include child namespaces" waits for the namespaces it expands over.
-  const waitingForFlows = !embedded && filters.subNamespaces && flowsQuery.isLoading;
 
   const query = useQuery({
-    queryKey: workflowsKeys.executions(ws, { ...filters, pinnedFlowId: pinnedFlowId ?? null, namespaces }),
-    queryFn: ({ signal }) => fetchPage(ws, filters, namespaces, pinnedFlowId, signal),
-    enabled: !waitingForFlows,
+    queryKey: workflowsKeys.executions(ws, { ...filters, pinnedFlowId: pinnedFlowId ?? null }),
+    queryFn: ({ signal }) => fetchPage(ws, filters, pinnedFlowId, signal),
     // A new page or filter keeps the old rows on screen until the answer lands.
     placeholderData: keepPreviousData,
     refetchInterval: (q) => (q.state.data?.rows.some((r) => !isTerminalState(r.state)) ? LIST_POLL_MS : false),
@@ -393,13 +375,12 @@ function Pager({
   filters: ExecutionFilters;
   setFilters: (patch: Partial<ExecutionFilters>) => void;
 }) {
-  const pages = pageCount(page.total, page.merged);
-  const capped = page.merged && page.total > MERGED_ROW_LIMIT;
-  if (pages <= 1 && filters.page <= 1 && !capped) return null;
+  const pages = pageCount(page.total);
+  if (pages <= 1 && filters.page <= 1) return null;
   const first = (filters.page - 1) * PAGE_SIZE + 1;
   const last = first + page.rows.length - 1;
   return (
-    <div className="mt-3 grid gap-1 text-sm text-muted-foreground">
+    <div className="mt-3 text-sm text-muted-foreground">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="tabular-nums">{`Showing ${first}–${last} of ${page.total}`}</span>
         <div className="flex items-center gap-2">
@@ -424,13 +405,6 @@ function Pager({
           </Button>
         </div>
       </div>
-      {capped ? (
-        // The reason Next stops before the end (FE-ACTION-4).
-        <p>
-          With child namespaces included, only the newest {MERGED_ROW_LIMIT} executions of each namespace can be paged
-          through. Turn off &quot;Include child namespaces&quot; to page further.
-        </p>
-      ) : null}
     </div>
   );
 }

@@ -12,15 +12,8 @@ const FLOW = "0a7c1d2e-0000-4000-8000-000000000001";
 const OTHER_FLOW = "0a7c1d2e-0000-4000-8000-000000000002";
 const LIST = `/api/ws/${WS}/workflows/executions`;
 
-/**
- * A row as the server sends it. `history` is an array of state names on the
- * wire; the generated type calls it an object, so the fixture says what is
- * really sent and casts once, here.
- */
-type WireRow = Omit<ExecutionListItemDto, "history"> & { history: string[] };
-
-function exec(id: string, over: Partial<WireRow> = {}): ExecutionListItemDto {
-  const row: WireRow = {
+function exec(id: string, over: Partial<ExecutionListItemDto> = {}): ExecutionListItemDto {
+  return {
     id,
     flow_id: FLOW,
     namespace: "company.team",
@@ -38,7 +31,6 @@ function exec(id: string, over: Partial<WireRow> = {}): ExecutionListItemDto {
     updated_at: "2026-10-11T10:01:10.000001Z",
     ...over,
   };
-  return row as unknown as ExecutionListItemDto;
 }
 
 const ROWS: ExecutionListItemDto[] = [
@@ -91,7 +83,7 @@ function slice(total: number, offset: number): Reply {
  * through the real hooks, mutator and `apiFetch` (FE-TEST-1). Returns every
  * executions request's query, in order.
  */
-function serve(answer: (q: URLSearchParams, n: number) => Reply | Promise<Reply>) {
+function serve(answer: (q: URLSearchParams, n: number) => Reply | Promise<Reply>, flows: Reply = { status: 200, body: FLOWS }) {
   const lists: URLSearchParams[] = [];
   vi.stubGlobal(
     "fetch",
@@ -102,7 +94,7 @@ function serve(answer: (q: URLSearchParams, n: number) => Reply | Promise<Reply>
         lists.push(url.searchParams);
         reply = await answer(url.searchParams, lists.length);
       } else if (url.pathname === `/api/ws/${WS}/workflows/flows`) {
-        reply = { status: 200, body: FLOWS };
+        reply = flows;
       } else {
         reply = { status: 404, body: { error: `unexpected ${url.pathname}` } };
       }
@@ -251,6 +243,17 @@ describe("ExecutionsList: the flow's Executions tab", () => {
     expect(screen.queryByRole("combobox", { name: "Namespace" })).toBeNull();
   });
 
+  it("ignores a flow or namespace left in the URL: an empty flow says it has not run, not that filters match nothing", async () => {
+    const lists = serve(() => page([]));
+    renderList(`/explore/${WS}/workflows/flows/${FLOW}/executions?flow=${OTHER_FLOW}&namespace=company&subns=1`, FLOW);
+    expect(await screen.findByText("This flow has not run yet")).toBeInTheDocument();
+    expect(screen.queryByText("No executions match the current filters.")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Clear filters" })).toBeNull();
+    expect(lists[0].get("flow_id")).toBe(FLOW);
+    expect(lists[0].get("namespace")).toBeNull();
+    expect(lists[0].get("namespace_prefix")).toBeNull();
+  });
+
   it("says the flow has not run yet when it has no executions, without a link away", async () => {
     serve(() => page([]));
     renderList(`/explore/${WS}/workflows/flows/${FLOW}/executions`, FLOW);
@@ -320,18 +323,25 @@ describe("ExecutionsList: filters in the URL", () => {
     await waitFor(() => expect(lists.at(-1)!.get("since")).toBe(expected));
   });
 
-  it("fans the namespace out to its known child namespaces when asked, and merges them newest first", async () => {
-    const lists = serve((q) =>
-      q.get("namespace") === "company"
-        ? page([exec("bbbbbbbb-0000-4000-8000-000000000002", { namespace: "company", created_at: "2026-10-11T09:00:00.000001Z" })], 1)
-        : page([exec("aaaaaaaa-0000-4000-8000-000000000001", { created_at: "2026-10-11T10:00:00.000001Z" })], 4),
-    );
+  it("sends the namespace as namespace_prefix when child namespaces are included", async () => {
+    const lists = serve(() => page(ROWS));
+    renderList(`/explore/${WS}/workflows/executions?namespace=company`);
+    await screen.findByTestId("executions-table");
+    expect(lists[0].get("namespace")).toBe("company");
+    expect(lists[0].get("namespace_prefix")).toBeNull();
+    await userEvent.click(screen.getByRole("checkbox", { name: "Include child namespaces" }));
+    await waitFor(() => expect(lists.at(-1)!.get("namespace_prefix")).toBe("company"));
+    expect(lists.at(-1)!.get("namespace")).toBeNull();
+    expect(search().get("subns")).toBe("1");
+  });
+
+  it("still sends namespace_prefix when the flow list (the pickers' source) fails to load", async () => {
+    const lists = serve(() => page(ROWS), { status: 503, body: { error: "the database is unavailable" } });
     renderList(`/explore/${WS}/workflows/executions?namespace=company&subns=1`);
     await screen.findByTestId("executions-table");
-    await waitFor(() => expect(lists.map((q) => q.get("namespace")).sort()).toEqual(["company", "company.team"]));
+    expect(lists).toHaveLength(1);
+    expect(lists[0].get("namespace_prefix")).toBe("company");
     expect(screen.getByRole("checkbox", { name: "Include child namespaces" })).toBeChecked();
-    expect(bodyRows().map((r) => cell(r, "Namespace").textContent)).toEqual(["company.team", "company"]);
-    expect(screen.getByTestId("executions-summary")).toHaveTextContent(/^5\s*executions·2\s*on this page/);
   });
 });
 

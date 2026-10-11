@@ -1,15 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { ExecutionListItemDto } from "@/api/generated/model";
 import {
   DEFAULT_FILTERS,
   isFiltering,
-  mergePages,
-  MERGED_ROW_LIMIT,
-  namespacesToQuery,
   PAGE_SIZE,
   pageCount,
-  planRequests,
   readFilters,
+  toQueryParams,
   withFilters,
   type ExecutionFilters,
 } from "@/routes/workflows/executionsListModel";
@@ -117,134 +113,74 @@ describe("isFiltering", () => {
   });
 });
 
-describe("namespacesToQuery", () => {
-  const flowNamespaces = ["company.team", "company", "company.team.etl", "companyx", "other"];
-
-  it("is nothing without a namespace, and the namespace alone without child namespaces", () => {
-    expect(namespacesToQuery(DEFAULT_FILTERS, flowNamespaces)).toEqual([]);
-    expect(namespacesToQuery({ ...DEFAULT_FILTERS, namespace: "company" }, flowNamespaces)).toEqual(["company"]);
-  });
-
-  it("expands to the known namespaces beneath it, segment-anchored, sorted, each once", () => {
-    expect(namespacesToQuery({ ...DEFAULT_FILTERS, namespace: "company", subNamespaces: true }, [...flowNamespaces, "company.team"])).toEqual([
-      "company",
-      "company.team",
-      "company.team.etl",
-    ]);
-  });
-
-  it("always includes the chosen namespace, even when no known flow lives in it", () => {
-    expect(namespacesToQuery({ ...DEFAULT_FILTERS, namespace: "gone", subNamespaces: true }, flowNamespaces)).toEqual(["gone"]);
+describe("readFilters on the flow's own tab", () => {
+  it("reads a flow, namespace or child-namespace switch left in the URL as absent, and nothing else", () => {
+    const params = new URLSearchParams("flow=other&namespace=x&subns=1&state=FAILED&child=1&page=2");
+    expect(readFilters(params, { pinned: true })).toEqual({
+      ...DEFAULT_FILTERS,
+      states: ["FAILED"],
+      showChildren: true,
+      page: 2,
+    });
+    expect(isFiltering(readFilters(new URLSearchParams("flow=other&namespace=x"), { pinned: true }))).toBe(false);
   });
 });
 
-describe("planRequests", () => {
+describe("toQueryParams", () => {
   it("sends root_only=true while the child switch is off, and no root_only once it is on", () => {
-    expect(planRequests(DEFAULT_FILTERS, NOW, []).requests).toEqual([{ root_only: true, limit: PAGE_SIZE, offset: 0 }]);
-    const on = planRequests({ ...DEFAULT_FILTERS, showChildren: true }, NOW, []).requests[0];
-    expect(on).not.toHaveProperty("root_only");
+    expect(toQueryParams(DEFAULT_FILTERS, NOW)).toEqual({ root_only: true, limit: PAGE_SIZE, offset: 0 });
+    expect(toQueryParams({ ...DEFAULT_FILTERS, showChildren: true }, NOW)).not.toHaveProperty("root_only");
   });
 
   it("sends the states as one comma list, the namespace, the flow and the page's offset", () => {
-    const plan = planRequests(
-      { ...DEFAULT_FILTERS, states: ["RUNNING", "FAILED"], namespace: "company", flow: "f-1", page: 3 },
-      NOW,
-      ["company"],
-    );
-    expect(plan.requests).toEqual([
-      { state: "RUNNING,FAILED", namespace: "company", flow_id: "f-1", root_only: true, limit: PAGE_SIZE, offset: 2 * PAGE_SIZE },
-    ]);
-    expect(plan.merged).toBe(false);
+    expect(toQueryParams({ ...DEFAULT_FILTERS, states: ["RUNNING", "FAILED"], namespace: "company", flow: "f-1", page: 3 }, NOW)).toEqual({
+      state: "RUNNING,FAILED",
+      namespace: "company",
+      flow_id: "f-1",
+      root_only: true,
+      limit: PAGE_SIZE,
+      offset: 2 * PAGE_SIZE,
+    });
+  });
+
+  it("sends the namespace as namespace_prefix, and not as namespace, when child namespaces are included", () => {
+    const q = toQueryParams({ ...DEFAULT_FILTERS, namespace: "company", subNamespaces: true }, NOW);
+    expect(q.namespace_prefix).toBe("company");
+    expect(q).not.toHaveProperty("namespace");
   });
 
   it("computes since from each preset against the clock it is given, and sends no until", () => {
     const expected = { "1h": "2026-10-11T11:00:00.000Z", "24h": "2026-10-10T12:00:00.000Z", "7d": "2026-10-04T12:00:00.000Z", "30d": "2026-09-11T12:00:00.000Z" };
     for (const [time, since] of Object.entries(expected)) {
-      const req = planRequests({ ...DEFAULT_FILTERS, time: time as ExecutionFilters["time"] }, NOW, []).requests[0];
+      const req = toQueryParams({ ...DEFAULT_FILTERS, time: time as ExecutionFilters["time"] }, NOW);
       expect(req.since).toBe(since);
       expect(req).not.toHaveProperty("until");
     }
     // Another clock, another window: the value is computed, not stored.
-    expect(planRequests({ ...DEFAULT_FILTERS, time: "1h" }, NOW + 60_000, []).requests[0].since).toBe("2026-10-11T11:01:00.000Z");
+    expect(toQueryParams({ ...DEFAULT_FILTERS, time: "1h" }, NOW + 60_000).since).toBe("2026-10-11T11:01:00.000Z");
   });
 
   it("sends a custom window's since and until as given, and either alone", () => {
     const both = { ...DEFAULT_FILTERS, time: "custom" as const, since: "2026-10-01T00:00:00.000Z", until: "2026-10-02T00:00:00.000Z" };
-    expect(planRequests(both, NOW, []).requests[0]).toMatchObject({ since: both.since, until: both.until });
-    const sinceOnly = planRequests({ ...both, until: "" }, NOW, []).requests[0];
+    expect(toQueryParams(both, NOW)).toMatchObject({ since: both.since, until: both.until });
+    const sinceOnly = toQueryParams({ ...both, until: "" }, NOW);
     expect(sinceOnly.since).toBe(both.since);
     expect(sinceOnly).not.toHaveProperty("until");
   });
 
-  it("pins the flow on the flow's own tab, whatever the URL's flow and namespace say", () => {
-    const req = planRequests({ ...DEFAULT_FILTERS, flow: "other", namespace: "x" }, NOW, [], { pinnedFlowId: "mine" }).requests[0];
+  it("pins the flow on the flow's own tab, whatever the filters say, and sends no namespace", () => {
+    const req = toQueryParams({ ...DEFAULT_FILTERS, flow: "other", namespace: "x", subNamespaces: true }, NOW, { pinnedFlowId: "mine" });
     expect(req.flow_id).toBe("mine");
     expect(req).not.toHaveProperty("namespace");
-  });
-
-  it("fans out one request per namespace when child namespaces are included, each from offset 0 deep enough for the page", () => {
-    const plan = planRequests({ ...DEFAULT_FILTERS, namespace: "a", subNamespaces: true, page: 2 }, NOW, ["a", "a.b"]);
-    expect(plan.merged).toBe(true);
-    expect(plan.offset).toBe(PAGE_SIZE);
-    expect(plan.requests).toEqual([
-      { namespace: "a", root_only: true, limit: 2 * PAGE_SIZE, offset: 0 },
-      { namespace: "a.b", root_only: true, limit: 2 * PAGE_SIZE, offset: 0 },
-    ]);
-  });
-
-  it("never asks a fanned-out namespace for more than the server serves", () => {
-    const plan = planRequests({ ...DEFAULT_FILTERS, namespace: "a", subNamespaces: true, page: 9 }, NOW, ["a", "a.b"]);
-    for (const r of plan.requests) expect(r.limit).toBe(MERGED_ROW_LIMIT);
-  });
-});
-
-function item(id: string, created_at: string): ExecutionListItemDto {
-  return { id, created_at } as ExecutionListItemDto;
-}
-
-describe("mergePages", () => {
-  it("passes a single page through", () => {
-    const page = { rows: [item("a", "2026-10-11T10:00:00Z")], total: 7, limit: 50, offset: 50 };
-    expect(mergePages([page], 50, false)).toEqual({ rows: page.rows, total: 7 });
-  });
-
-  it("interleaves fanned-out pages newest first, sums their totals, and slices the page out", () => {
-    const merged = mergePages(
-      [
-        { rows: [item("a3", "2026-10-11T10:03:00Z"), item("a1", "2026-10-11T10:01:00Z")], total: 2, limit: 2, offset: 0 },
-        { rows: [item("b4", "2026-10-11T10:04:00Z"), item("b2", "2026-10-11T10:02:00Z")], total: 5, limit: 2, offset: 0 },
-      ],
-      1,
-      true,
-    );
-    expect(merged.total).toBe(7);
-    expect(merged.rows.map((r) => r.id)).toEqual(["a3", "b2", "a1"]);
-  });
-
-  it("orders rows created at the same instant by id, so a page is stable between polls", () => {
-    const at = "2026-10-11T10:00:00Z";
-    const merged = mergePages(
-      [
-        { rows: [item("b", at)], total: 1, limit: 50, offset: 0 },
-        { rows: [item("a", at)], total: 1, limit: 50, offset: 0 },
-      ],
-      0,
-      true,
-    );
-    expect(merged.rows.map((r) => r.id)).toEqual(["b", "a"]);
+    expect(req).not.toHaveProperty("namespace_prefix");
   });
 });
 
 describe("pageCount", () => {
-  it("is ceil(total / page size), at least 1", () => {
-    expect(pageCount(0, false)).toBe(1);
-    expect(pageCount(50, false)).toBe(1);
-    expect(pageCount(51, false)).toBe(2);
-    expect(pageCount(1000, false)).toBe(20);
-  });
-
-  it("stops at what a fan-out can merge exactly", () => {
-    expect(pageCount(1000, true)).toBe(MERGED_ROW_LIMIT / PAGE_SIZE);
-    expect(pageCount(120, true)).toBe(3);
+  it("is ceil(total / page size), at least 1, at any depth", () => {
+    expect(pageCount(0)).toBe(1);
+    expect(pageCount(50)).toBe(1);
+    expect(pageCount(51)).toBe(2);
+    expect(pageCount(3000)).toBe(60);
   });
 });

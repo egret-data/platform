@@ -4,7 +4,6 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import type { ExecutionListItemDto } from "@/api/generated/model";
 
 vi.mock("@/components/monaco/MonacoEditor", () => import("./monacoStub"));
 vi.mock("@/components/workflows/editor/monacoYaml", () => ({ configureFlowYaml: vi.fn() }));
@@ -69,7 +68,6 @@ function liveFlow(live: string, draft = live) {
 describe("FlowDetail: the Executions tab", () => {
   it("lists this flow's executions, pinned to the flow, with the tab in the URL", async () => {
     server = new FakeWorkflowServer();
-    // `history` is an array on the wire; the generated type calls it an object.
     server.executions = [
       {
         id: "aaaaaaaa-0000-4000-8000-000000000001",
@@ -87,7 +85,7 @@ describe("FlowDetail: the Executions tab", () => {
         ended_at: "2026-10-11T10:01:10.000001Z",
         created_at: "2026-10-11T10:00:00.000001Z",
         updated_at: "2026-10-11T10:01:10.000001Z",
-      } as unknown as ExecutionListItemDto,
+      },
     ];
     renderAt();
     await editorBox();

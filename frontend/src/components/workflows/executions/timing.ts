@@ -23,8 +23,8 @@ import { fullTimestamp } from "@/lib/relativeTime";
  */
 export interface TimedExecution {
   state: string;
-  /** The state names as stored; typed loosely by the generated client. */
-  history: unknown;
+  /** The state names, in order (`ExecutionListItemDto.history`). */
+  history: readonly string[];
   started_at?: string | null;
   ended_at?: string | null;
   created_at: string;
@@ -41,8 +41,7 @@ export interface ExecutionDuration {
 
 /** Whether the execution ever entered `RUNNING`. A recorded start is proof enough. */
 export function hasRun(row: Pick<TimedExecution, "history" | "started_at">): boolean {
-  if (row.started_at) return true;
-  return Array.isArray(row.history) && row.history.includes("RUNNING");
+  return !!row.started_at || row.history.includes("RUNNING");
 }
 
 /** The execution's duration at `now` (ms since the epoch), or `null` when it never ran. */

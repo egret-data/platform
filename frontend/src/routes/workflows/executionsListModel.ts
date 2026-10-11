@@ -1,5 +1,4 @@
-import type { ExecutionListItemDto, ExecutionPageDto, WorkflowListExecutionsParams } from "@/api/generated/model";
-import { namespaceContains } from "@/components/workflows/namespaceTree";
+import type { WorkflowListExecutionsParams } from "@/api/generated/model";
 
 /**
  * THE EXECUTIONS LIST'S STATE: the URL, read into filters, turned into
@@ -11,11 +10,11 @@ import { namespaceContains } from "@/components/workflows/namespaceTree";
  * |---|---|---|
  * | `state` | states, one comma list | every state |
  * | `namespace` | one namespace | every namespace |
- * | `subns` | `1`: the namespace's known child namespaces too | that namespace only |
+ * | `subns` | `1`: the namespace's child namespaces too (`namespace_prefix`) | that namespace only |
  * | `flow` | a flow's uuid | every flow |
  * | `time` | `1h`, `24h`, `7d`, `30d` or `custom` | all time |
  * | `since`, `until` | UTC instants, with `time=custom` only | open |
- * | `child` | `1`: child executions too | root executions only |
+ * | `child` | `1`: child executions too | no loop iterations or subflow and flow-trigger children (retries stay) |
  * | `page` | 1-based page | 1 |
  */
 
@@ -24,13 +23,6 @@ export const PAGE_SIZE = 50;
 
 /** How often a page with a live row is read again (spec §4.1). */
 export const LIST_POLL_MS = 5000;
-
-/**
- * The most rows one request returns: the server clamps `limit` to 200
- * (`WorkflowListExecutionsParams.limit`). A fanned-out namespace query can
- * only merge pages exactly within this many rows of each namespace.
- */
-export const MERGED_ROW_LIMIT = 200;
 
 /** The seventeen Kestra execution states, in the state picker's order: pending, running, outcomes. */
 export const EXECUTION_STATE_NAMES = [
@@ -66,7 +58,7 @@ export const TIME_PRESETS: { value: TimePreset; label: string; ms: number }[] = 
 export interface ExecutionFilters {
   states: string[];
   namespace: string;
-  /** Include the namespace's known child namespaces. Meaningless without `namespace`. */
+  /** Include the namespace's child namespaces (`namespace_prefix`). Meaningless without `namespace`. */
   subNamespaces: boolean;
   /** A flow's uuid (`flow_id`), not its YAML id: those repeat across namespaces. */
   flow: string;
@@ -95,7 +87,15 @@ export const DEFAULT_FILTERS: ExecutionFilters = {
 const OWNED_KEYS = ["state", "namespace", "subns", "flow", "time", "since", "until", "child", "page"];
 const isTime = (v: string): v is ExecutionFilters["time"] => v === "custom" || TIME_PRESETS.some((p) => p.value === v);
 
-export function readFilters(params: URLSearchParams): ExecutionFilters {
+/**
+ * The filters `params` holds. On a flow's own Executions tab (`pinned`) the
+ * flow is fixed and the flow and namespace pickers are not shown, so a
+ * `flow`, `namespace` or `subns` left in the URL (a link copied from the list
+ * page, say) is read as absent: it neither narrows the request nor counts as
+ * a filter the page would have to offer to clear.
+ */
+export function readFilters(params: URLSearchParams, opts: { pinned?: boolean } = {}): ExecutionFilters {
+  if (opts.pinned) return { ...readFilters(params), namespace: "", subNamespaces: false, flow: "" };
   const states = [...new Set((params.get("state") ?? "").split(",").filter(Boolean))];
   const namespace = params.get("namespace") ?? "";
   const time = params.get("time") ?? "";
@@ -155,100 +155,43 @@ export function clearedFilters(f: ExecutionFilters): Partial<ExecutionFilters> {
 }
 
 /**
- * The namespaces to ask for: none (no filter), the chosen one, or, with its
- * child namespaces, every known flow namespace beneath it plus itself.
- *
- * The API matches a namespace exactly (`namespace = $3`), so "include
- * children" is a client-side expansion over the namespaces the client knows
- * from the flow list (spec §4.1, §15): a namespace whose every flow was deleted
- * is not known, and is not asked for.
- */
-export function namespacesToQuery(f: ExecutionFilters, flowNamespaces: readonly string[]): string[] {
-  if (!f.namespace) return [];
-  if (!f.subNamespaces) return [f.namespace];
-  const set = new Set([f.namespace, ...flowNamespaces.filter((ns) => namespaceContains(f.namespace, ns))]);
-  return [...set].sort((a, b) => a.localeCompare(b));
-}
-
-export interface RequestPlan {
-  requests: WorkflowListExecutionsParams[];
-  /** The page's offset into the whole match. */
-  offset: number;
-  /** Several namespaces were asked from offset 0; `mergePages` interleaves them. */
-  merged: boolean;
-}
-
-/**
- * The requests for one page at `now`.
+ * The request for one page at `now`.
  *
  * - A time preset is computed against `now` and sends `since` only: an
  *   `until` of now would cut off every execution that starts while the page
  *   polls.
- * - `pinnedFlowId` is the flow's own Executions tab: it replaces the flow and
- *   namespace filters.
- * - Several namespaces fan out, one request each, from offset 0 and as deep as
- *   the page reaches (capped at `MERGED_ROW_LIMIT`), so the merged rows before
- *   the page's end are exact.
+ * - A namespace is sent exactly, or with its child namespaces as
+ *   `namespace_prefix` (dot-anchored on the server; the user's ruling,
+ *   2026-10-11).
+ * - `pinnedFlowId` is the flow's own Executions tab: it replaces the flow
+ *   filter, and no namespace is sent.
  */
-export function planRequests(
+export function toQueryParams(
   f: ExecutionFilters,
   now: number,
-  namespaces: readonly string[],
   opts: { pinnedFlowId?: string } = {},
-): RequestPlan {
-  const common: WorkflowListExecutionsParams = {};
-  if (f.states.length) common.state = f.states.join(",");
+): WorkflowListExecutionsParams {
+  const q: WorkflowListExecutionsParams = {};
+  if (f.states.length) q.state = f.states.join(",");
+  if (!opts.pinnedFlowId && f.namespace) {
+    if (f.subNamespaces) q.namespace_prefix = f.namespace;
+    else q.namespace = f.namespace;
+  }
   const flowId = opts.pinnedFlowId ?? f.flow;
-  if (flowId) common.flow_id = flowId;
+  if (flowId) q.flow_id = flowId;
   const preset = TIME_PRESETS.find((p) => p.value === f.time);
-  if (preset) common.since = new Date(now - preset.ms).toISOString();
+  if (preset) q.since = new Date(now - preset.ms).toISOString();
   if (f.time === "custom") {
-    if (f.since) common.since = f.since;
-    if (f.until) common.until = f.until;
+    if (f.since) q.since = f.since;
+    if (f.until) q.until = f.until;
   }
-  if (!f.showChildren) common.root_only = true;
-
-  const offset = (f.page - 1) * PAGE_SIZE;
-  const scoped = opts.pinnedFlowId ? [] : namespaces;
-  if (scoped.length <= 1) {
-    const ns = scoped[0];
-    return { requests: [{ ...(ns ? { namespace: ns } : {}), ...common, limit: PAGE_SIZE, offset }], offset, merged: false };
-  }
-  const limit = Math.min(MERGED_ROW_LIMIT, offset + PAGE_SIZE);
-  return { requests: scoped.map((namespace) => ({ namespace, ...common, limit, offset: 0 })), offset, merged: true };
+  if (!f.showChildren) q.root_only = true;
+  q.limit = PAGE_SIZE;
+  q.offset = (f.page - 1) * PAGE_SIZE;
+  return q;
 }
 
-/** `created_at` as a sortable key: microseconds kept, which a JS `Date` would drop. */
-function createdKey(iso: string): string {
-  const m = /^(.*T\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)?$/.exec(iso);
-  if (!m) return iso;
-  const ms = Date.parse(`${m[1]}${m[3] ?? "Z"}`);
-  return `${String(ms).padStart(15, "0")}.${(m[2] ?? "").padEnd(9, "0")}`;
-}
-
-/**
- * One page out of the answers: a single answer as is, or fanned-out answers
- * interleaved in the server's own order (`created_at DESC, id DESC`, `repo.rs`)
- * with their totals summed.
- */
-export function mergePages(
-  pages: ExecutionPageDto[],
-  offset: number,
-  merged: boolean,
-): { rows: ExecutionListItemDto[]; total: number } {
-  if (!merged) return { rows: pages[0]?.rows ?? [], total: pages[0]?.total ?? 0 };
-  const all = pages.flatMap((p) => p.rows);
-  all.sort((a, b) => {
-    const ka = createdKey(a.created_at);
-    const kb = createdKey(b.created_at);
-    if (ka !== kb) return ka < kb ? 1 : -1;
-    return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
-  });
-  return { rows: all.slice(offset, offset + PAGE_SIZE), total: pages.reduce((n, p) => n + p.total, 0) };
-}
-
-/** How many pages the pager offers: at least one, and no more than a fan-out can merge exactly. */
-export function pageCount(total: number, merged: boolean): number {
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  return merged ? Math.min(pages, MERGED_ROW_LIMIT / PAGE_SIZE) : pages;
+/** How many pages the pager offers: at least one. */
+export function pageCount(total: number): number {
+  return Math.max(1, Math.ceil(total / PAGE_SIZE));
 }

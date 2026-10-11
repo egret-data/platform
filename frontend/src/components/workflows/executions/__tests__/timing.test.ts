@@ -28,10 +28,10 @@ describe("hasRun", () => {
     expect(hasRun(row({ state: "FAILED", history: ["CREATED", "RUNNING", "RETRYING", "RUNNING", "FAILED"] }))).toBe(true);
   });
 
-  it("is false for a row that never ran, and for a history that is not an array", () => {
+  it("is false for a row that never ran", () => {
     expect(hasRun(row({ state: "SKIPPED", history: ["CREATED", "SKIPPED"] }))).toBe(false);
     expect(hasRun(row({ state: "CANCELLED", history: ["CREATED", "CANCELLED"] }))).toBe(false);
-    expect(hasRun({ ...row({ state: "CREATED", history: [] }), history: { RUNNING: true } })).toBe(false);
+    expect(hasRun(row({ state: "CREATED", history: [] }))).toBe(false);
   });
 
   it("trusts a recorded start even when the history does not say RUNNING", () => {
