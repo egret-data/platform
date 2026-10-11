@@ -66,7 +66,7 @@
 | `crates/egret-ranger-eval/tests/differential.rs` | the migration corpus |
 | `frontend/src/api/policies.ts` | adapters for the new routes |
 | `frontend/src/App.tsx` (`GovernanceRoutes`) | one `<Route>` entry |
-| `frontend/src/components/layout/Sidebar.tsx` (`GOVERNANCE_GROUPS`) | one nav entry |
+| `frontend/src/routes/governance/ProfileDetailPage.tsx` | the page's one entry point: a "Migrate policies" link on the profile page (no sidebar entry — user ruling, 2026-10-11) |
 
 **Why `infra_names.rs` lives in `egret-policy` and not next to its users.** The predicate needs both the seeder's name prefixes (in `egret-policy`) and the two delegator names (in `egret-engine-mgmt`). `egret-engine-mgmt` depends on `egret-policy` (`Cargo.toml:84`) and `egret-perm-compile` depends on `egret-policy` (`Cargo.toml:25`), while `egret-policy` depends on neither. So `egret-policy` is the only crate all three guards can import from, and the DB guard lives there anyway. Putting it elsewhere would leave two copies of one list — the defect shape that appeared five times on the branch merged as #656.
 
@@ -1483,7 +1483,9 @@ git commit -m "test(ranger-eval): prove migrations against the real 2.5.0 and 2.
 - Create: `frontend/src/routes/governance/__tests__/PolicyMigrationPage.test.tsx`
 - Modify: `frontend/src/api/policies.ts`
 - Modify: `frontend/src/App.tsx` (`GovernanceRoutes`)
-- Modify: `frontend/src/components/layout/Sidebar.tsx` (`GOVERNANCE_GROUPS`)
+- Modify: `frontend/src/routes/governance/ProfileDetailPage.tsx` (the entry link)
+
+**Entry point (user ruling, 2026-10-11).** The page is reached from the profile it migrates: a "Migrate policies" link in `ProfileDetailPage`'s header, to `/governance/policies/:service/migrate`. There is **no sidebar entry** — the page is per profile, so a top-level nav item would have no profile to open, and `GOVERNANCE_GROUPS` in `Sidebar.tsx` is not touched.
 
 **Interfaces:**
 - Consumes: `policyAdmin*`-style generated functions for the two new routes, from `frontend/src/api/generated/…`; `FilterableTable<T>` and `Column<T>` from `@/components/explore/FilterableTable`
@@ -1538,7 +1540,7 @@ cd ..
 git add frontend/src/routes/governance/PolicyMigrationPage.tsx \
         frontend/src/routes/governance/__tests__/PolicyMigrationPage.test.tsx \
         frontend/src/api/policies.ts frontend/src/App.tsx \
-        frontend/src/components/layout/Sidebar.tsx
+        frontend/src/routes/governance/ProfileDetailPage.tsx
 git commit -m "feat(governance): a page that says what each policy is and migrates the ones it can"
 ```
 If `npm run lint` fails with `ERR_MODULE_NOT_FOUND: eslint-plugin-jsx-a11y-x`, run `npm ci` first — the package is declared and locked but can be missing from an older `node_modules`.
