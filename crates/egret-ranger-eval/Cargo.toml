@@ -19,3 +19,12 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+
+[features]
+# SP4d-3 Task 7 fix round 1 (review I-5): TEST-ONLY. With it on, every
+# unprepared entry point (`evaluate`, `evaluate_data_mask`,
+# `evaluate_row_filter`) also runs the prepared path over a freshly prepared
+# set and `assert_eq!`s the full result, so the crate's whole existing test
+# suite is a differential of the two paths:
+#   cargo test -p egret-ranger-eval --features crosscheck-prepared
+crosscheck-prepared = []

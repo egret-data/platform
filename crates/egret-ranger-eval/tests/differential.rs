@@ -5458,3 +5458,63 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
         total.compared
     );
 }
+
+/// SP4d-3 Task 7 fix round 1 (review I-5): the PREPARED path decides every
+/// corpus case exactly as the unprepared one — full results, all three
+/// questions, whatever the case's own policy type. Runs WITHOUT the JVM (the
+/// corpus generator needs none), on every `cargo test`.
+///
+/// One prepared set answers MANY requests in the gate, so each set is
+/// prepared once and asked the requests of the next `REUSE` cases too, then
+/// its own request again last — a matcher that carried state from one request
+/// to the next would show up as a difference on the repeat.
+#[test]
+fn the_prepared_path_decides_every_corpus_case_exactly_as_the_unprepared_one() {
+    use egret_ranger_eval::eval::{
+        evaluate_data_mask_prepared, evaluate_prepared, evaluate_row_filter_prepared,
+        PreparedPolicySet,
+    };
+    const REUSE: usize = 4;
+    let mut compared = 0usize;
+    for profile in [trino(), starrocks()] {
+        let (def_json, def, engine) = load_engine(&profile);
+        let tag_def_json = load_tag_def();
+        let mut rng =
+            Rng::new(DEFAULT_SEED ^ (profile.ranger_version.len() as u64) ^ profile.engine as u64);
+        let cases: Vec<Case> = (0..DEFAULT_CASES)
+            .map(|i| generate_case(&mut rng, &profile, &def_json, &tag_def_json, i))
+            .collect();
+        for (i, case) in cases.iter().enumerate() {
+            let set: ServicePolicySet =
+                serde_json::from_value(case.service_policies.clone()).expect("parse generated set");
+            let prepared = PreparedPolicySet::new(&set, &def);
+            let requests = cases[i..cases.len().min(i + 1 + REUSE)]
+                .iter()
+                .map(|c| &c.request)
+                .chain(std::iter::once(&case.request));
+            for request in requests {
+                assert_eq!(
+                    evaluate(&set, request, &def, &engine),
+                    evaluate_prepared(&prepared, request, &engine),
+                    "access: {} against {request:?}",
+                    case.id
+                );
+                assert_eq!(
+                    evaluate_data_mask(&set, request, &def, &engine),
+                    evaluate_data_mask_prepared(&prepared, request, &engine),
+                    "mask: {} against {request:?}",
+                    case.id
+                );
+                assert_eq!(
+                    evaluate_row_filter(&set, request, &def, &engine),
+                    evaluate_row_filter_prepared(&prepared, request, &engine),
+                    "row filter: {} against {request:?}",
+                    case.id
+                );
+                compared += 3;
+            }
+        }
+    }
+    eprintln!("prepared == unprepared on {compared} evaluations");
+    assert!(compared >= 2 * DEFAULT_CASES * 3, "{compared}");
+}

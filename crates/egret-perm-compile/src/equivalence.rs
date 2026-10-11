@@ -32,9 +32,9 @@
 //!
 //! | question | same when | never the same |
 //! |---|---|---|
-//! | access ([`evaluate`]) | both `Allowed`, or both `Denied` for the same [`egret_ranger_eval::eval::DenyReason`] | either side `Undecidable` |
-//! | mask ([`evaluate_data_mask`]) | both `NoMask`, or both `Masked` with equal `mask_type`, `masked_value` and `mask_condition` | either side `Undecidable` |
-//! | row filter ([`evaluate_row_filter`]) | both `NoFilter`, or both `Filtered` with an equal `filter_expr` | either side `Undecidable` |
+//! | access (`evaluate`) | both `Allowed`, or both `Denied` for the same [`egret_ranger_eval::eval::DenyReason`] | either side `Undecidable` |
+//! | mask (`evaluate_data_mask`) | both `NoMask`, or both `Masked` with equal `mask_type`, `masked_value` and `mask_condition` | either side `Undecidable` |
+//! | row filter (`evaluate_row_filter`) | both `NoFilter`, or both `Filtered` with an equal `filter_expr` | either side `Undecidable` |
 //!
 //! Policy ids and names are NOT compared — a migration renames by construction
 //! (a hand-written policy's answer becomes a `perm-grant-…` policy's) — but
@@ -83,9 +83,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use egret_ranger_eval::eval::{
-    evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, Decision, DenyReason,
-    EngineConfig, MaskDecision, MaskResult, PluginVersion, ResolvedTag, RowFilterDecision,
-    TagServiceResource, UnenrichedTags,
+    evaluate_data_mask_prepared, evaluate_prepared, evaluate_row_filter_prepared, AccessRequest,
+    Decision, DenyReason, EngineConfig, MaskDecision, MaskResult, PluginVersion, PreparedPolicySet,
+    ResolvedTag, RowFilterDecision, TagServiceResource, UnenrichedTags,
 };
 use egret_ranger_eval::model::{PolicyItem, RangerPolicy, ResourceLevel, ServicePolicySet};
 use egret_ranger_eval::resource::{MatchType, RequestResource};
@@ -717,6 +717,13 @@ pub fn compare(case: &ProfileCase<'_>) -> Result<Vec<Disagreement>, GateRefusal>
         });
     }
 
+    // Each side prepared ONCE for every probe and every version (Task 7 review
+    // I-5): the evaluator's per-set work — one matcher per policy, the
+    // implied grants, the parsed tag def — does not depend on the request or
+    // on the engine config, and `egret-ranger-eval`'s `tests/differential.rs`
+    // proves the prepared path decides exactly as the unprepared one.
+    let before = PreparedPolicySet::new(case.before, case.service_def);
+    let after = PreparedPolicySet::new(case.after, case.service_def);
     let mut out = Vec::new();
     for &version in &case.versions {
         let engine = EngineConfig {
@@ -750,20 +757,20 @@ pub fn compare(case: &ProfileCase<'_>) -> Result<Vec<Disagreement>, GateRefusal>
                 });
             };
 
-            let b = evaluate(case.before, probe, case.service_def, &engine);
-            let a = evaluate(case.after, probe, case.service_def, &engine);
+            let b = evaluate_prepared(&before, probe, &engine);
+            let a = evaluate_prepared(&after, probe, &engine);
             if !same_access(&b, &a) {
                 push(Check::Access, render_decision(&b), render_decision(&a));
             }
 
-            let b = evaluate_data_mask(case.before, probe, case.service_def, &engine);
-            let a = evaluate_data_mask(case.after, probe, case.service_def, &engine);
+            let b = evaluate_data_mask_prepared(&before, probe, &engine);
+            let a = evaluate_data_mask_prepared(&after, probe, &engine);
             if !same_mask(&b, &a) {
                 push(Check::DataMask, render_mask(&b), render_mask(&a));
             }
 
-            let b = evaluate_row_filter(case.before, probe, case.service_def, &engine);
-            let a = evaluate_row_filter(case.after, probe, case.service_def, &engine);
+            let b = evaluate_row_filter_prepared(&before, probe, &engine);
+            let a = evaluate_row_filter_prepared(&after, probe, &engine);
             if !same_filter(&b, &a) {
                 push(Check::RowFilter, render_filter(&b), render_filter(&a));
             }

@@ -589,10 +589,14 @@ async fn a_migrated_original_is_reported_as_migrated_not_as_switched_off() {
     .await;
     let grant_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO perm.migrated_from (service_id, policy_name, grant_ids, probes_proved, migrated_by) \
-         VALUES ($1, 'migrated away', ARRAY[$2]::uuid[], 330, 'steward@egret.local')",
+        "INSERT INTO perm.migrated_from \
+           (service_id, policy_id, policy_name, grant_ids, grant_hashes, original_hash, \
+            probes_proved, migrated_by) \
+         VALUES ($1, $2, 'migrated away', ARRAY[$3]::uuid[], ARRAY['h']::text[], 'h', 330, \
+                 'steward@egret.local')",
     )
     .bind(p)
+    .bind(migrated)
     .bind(grant_id)
     .execute(&f.db.pool)
     .await

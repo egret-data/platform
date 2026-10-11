@@ -120,17 +120,26 @@ use crate::trigger::{
 /// masking and row-filter questions of both downloads — six evaluator calls —
 /// inside a transaction holding every affected profile's lock.
 ///
-/// Measured 2026-10-11 (`compare` on one Trino profile of N single-user
-/// policies on distinct tables, `--release`, laptop): N=5 → 3 870 evaluations
-/// in 0.20 s; N=20 → 51 345 in 9.4 s; N=40 → 198 645 in 70 s. The cost per
-/// evaluation grows with the download's size (53 → 183 → 352 µs), and the
-/// probe count grows roughly with the square of it. The route fixtures in
-/// `tests/migrate_route.rs` run 330. 20 000 keeps the worst measured density
-/// near 4 s of locked transaction; above it the migration is REFUSED with the
-/// measured count (see the module doc) — on a profile of more than ~15
-/// policies that refusal is expected today, and it is the honest answer until
-/// the gate gets faster, not a reason to truncate.
-pub const MAX_PROBE_EVALUATIONS: usize = 20_000;
+/// Measured 2026-10-11, `--release`, one Trino profile of N single-user
+/// policies on distinct tables, `compare` over one version:
+///
+/// | N | probes | Task 7 (`b2c032c54`) | prepared sets (fix round 1) |
+/// |---|---|---|---|
+/// | 5 | 3 870 | 0.20 s | 0.05 s |
+/// | 20 | 51 345 | 9.4 s | 2.3 s |
+/// | 40 | 198 645 | 70 s | 19.4 s |
+/// | 5 + a tag mask | 9 030 | — | 0.20 s |
+/// | 20 + a tag mask | 102 630 | — | 5.9 s |
+///
+/// The cost per evaluation still grows with the download's size (each probe
+/// visits every policy), and the probe count roughly with its square, so the
+/// whole is still about N³ — preparing each side once removed a constant
+/// factor, not a power. 50 000 admits a ~20-policy profile at about 2.3 s of
+/// locked transaction (a tagged one at ~14 policies, about 3 s); above it the
+/// migration is REFUSED with the counted total before any probe is built
+/// (see the module doc). Coordinate pruning (review Fix 2) is what would
+/// remove a power, and the user deferred it.
+pub const MAX_PROBE_EVALUATIONS: usize = 50_000;
 
 /// The consequence the preview must state before the operator commits.
 pub const GENERATED_NOTICE: &str = "After this migration every listed profile is compiled by \

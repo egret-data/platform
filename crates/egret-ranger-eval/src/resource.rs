@@ -199,6 +199,55 @@ pub fn match_policy_resources(
     out
 }
 
+/// Every resource map of ONE policy, each matcher initialised ONCE, for
+/// matching many requests (SP4d-3 Task 7 fix round 1, review I-5).
+///
+/// [`match_policy_resources`] runs `RangerDefaultPolicyResourceMatcher.init`
+/// for every map on every call. `init` reads only the policy's resources, the
+/// def and the policy type — never the request — so building it once and
+/// asking it many times is Ranger's own lifecycle (the plugin builds one
+/// evaluator per policy at load, not per request). [`Self::matches`] returns
+/// exactly what `match_policy_resources` returns for the same
+/// `(policy, request, def)`; `tests/prepared.rs` checks that on the whole
+/// corpus.
+pub struct PreparedPolicyResources<'a> {
+    maps: Vec<(ResourceMapSource, PolicyResourceMatcher<'a>)>,
+}
+
+impl<'a> PreparedPolicyResources<'a> {
+    pub fn new(policy: &'a RangerPolicy, service_def: &'a ServiceDef) -> Self {
+        let policy_type = PolicyType::from_code(policy.policy_type);
+        let mut maps = vec![(
+            ResourceMapSource::Primary,
+            PolicyResourceMatcher::init(&policy.resources, service_def, policy_type),
+        )];
+        for (i, additional) in policy.additional_resources.iter().enumerate() {
+            maps.push((
+                ResourceMapSource::Additional(i),
+                PolicyResourceMatcher::init(additional, service_def, policy_type),
+            ));
+        }
+        PreparedPolicyResources { maps }
+    }
+
+    /// [`match_policy_resources`] for this policy, without re-initialising.
+    pub fn matches(&self, request: &RequestResource) -> Vec<ResourceMatch> {
+        self.maps
+            .iter()
+            .map(|(source, matcher)| ResourceMatch {
+                source: *source,
+                // `match_resource_of_type`'s own short-circuit, kept so the
+                // two paths agree by construction on the empty/empty case.
+                match_type: if matcher.policy_resources.is_empty() && request.is_empty() {
+                    MatchType::Self_
+                } else {
+                    matcher.match_type(request)
+                },
+            })
+            .collect()
+    }
+}
+
 /// Whether Ranger's `RangerResourceTrie` — for a **tag** request, the ONLY
 /// filter that decides which policies are evaluated — returns the same
 /// evaluator set that [`match_resource_of_type`] does for `policy_value`.
