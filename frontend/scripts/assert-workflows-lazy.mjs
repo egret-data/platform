@@ -101,6 +101,13 @@ const MARKERS = [
   ["src/components/workflows/executions/gantt/ganttModel.ts", "Cancelled before it started.", "editor"],
   ["src/components/workflows/executions/gantt/GanttView.tsx", "Close the task run", "editor"],
   ["src/components/workflows/executions/gantt/ExecutionGanttTab.tsx", "The link may be from another execution.", "editor"],
+  // The logs (W7b Task 5), in the execution detail's chunk: the cursor hook's refusal sentence, the
+  // view's note above "Load earlier", and the Logs tab's unknown-`?run=` note. `logRows.ts` has no
+  // literal of its own worth a marker (its one string is "execution") and is reached only through
+  // `LogView.tsx`, so it is NOT guarded here.
+  ["src/components/workflows/executions/logs/useLogFollow.ts", "The logs could not be read.", "editor"],
+  ["src/components/workflows/executions/logs/LogView.tsx", "Older lines were set aside to keep the view fast.", "editor"],
+  ["src/components/workflows/executions/logs/ExecutionLogsTab.tsx", "so every run is shown", "editor"],
 ];
 
 const entry = entryChunkName(DIST);

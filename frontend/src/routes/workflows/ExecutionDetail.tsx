@@ -1,15 +1,15 @@
-import { useId, useState, type ReactNode } from "react";
+import { useId, useMemo, useState, type ReactNode } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { FileOutput, History, Loader2, Play, RotateCw, ScrollText } from "lucide-react";
+import { FileOutput, History, Loader2, Play, RotateCw } from "lucide-react";
 import { ApiError } from "@/api/client";
 import {
   useWorkflowGetExecution,
   useWorkflowReplayExecution,
   useWorkflowResumeExecution,
 } from "@/api/generated/workflow/workflow";
-import type { ExecutionDto } from "@/api/generated/model";
+import type { ExecutionDto, TaskRunDto } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -28,6 +28,9 @@ import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButt
 import { StateChip } from "@/components/workflows/StateChip";
 import { formatDuration } from "@/components/workflows/executionState";
 import ExecutionGanttTab from "@/components/workflows/executions/gantt/ExecutionGanttTab";
+import type { GanttRunSlots } from "@/components/workflows/executions/gantt/GanttView";
+import ExecutionLogsTab from "@/components/workflows/executions/logs/ExecutionLogsTab";
+import { LogView } from "@/components/workflows/executions/logs/LogView";
 import { canReplay, canResume, resumeFeedback, showsResume } from "@/components/workflows/executions/actions";
 import { nextExecutionPollMs, staleNote, useNow } from "@/components/workflows/executions/polling";
 import {
@@ -143,6 +146,11 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
   const base = `/explore/${ws}/workflows`;
   const href = `${base}/executions/${encodeURIComponent(execution.id)}`;
   const now = useNow();
+  // Stable across polls: the Gantt renders a slot once per selected run (Task 4).
+  const ganttSlots = useMemo<GanttRunSlots>(
+    () => ({ logs: (run: TaskRunDto) => <RunLogs ws={ws} executionId={execution.id} run={run} /> }),
+    [ws, execution.id],
+  );
 
   return (
     <>
@@ -158,17 +166,34 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
           <ExecutionOverview ws={ws} execution={execution} now={now} />
         </TabsContent>
         <TabsContent value="gantt" className="min-h-0 flex-1 overflow-auto p-4">
-          <ExecutionGanttTab execution={execution} />
+          <ExecutionGanttTab execution={execution} slots={ganttSlots} />
         </TabsContent>
-        {/* Tasks 5 and 6 of W7b fill these two. */}
         <TabsContent value="logs" className="min-h-0 flex-1 overflow-auto p-4">
-          <EmptyState icon={ScrollText} title="Logs are not here yet" description="The execution's logs arrive in a later release." />
+          <ExecutionLogsTab ws={ws} execution={execution} />
         </TabsContent>
+        {/* Task 6 of W7b fills this one. */}
         <TabsContent value="outputs" className="min-h-0 flex-1 overflow-auto p-4">
           <EmptyState icon={FileOutput} title="Outputs are not here yet" description="Task outputs and files arrive in a later release." />
         </TabsContent>
       </Tabs>
     </>
+  );
+}
+
+/** A run's lines in the Gantt's run panel: the Logs tab's view, filtered to the run, ungrouped. */
+function RunLogs({ ws, executionId, run }: { ws: string; executionId: string; run: TaskRunDto }) {
+  const filters = useMemo(() => ({ taskRunId: run.id }), [run.id]);
+  const runs = useMemo(() => [run], [run]);
+  return (
+    <LogView
+      ws={ws}
+      executionId={executionId}
+      filters={filters}
+      runs={runs}
+      grouped={false}
+      heightClass="h-72"
+      label={`Logs of ${run.task_id} #${run.run_ix}`}
+    />
   );
 }
 
