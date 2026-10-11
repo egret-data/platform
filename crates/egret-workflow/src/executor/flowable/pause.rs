@@ -53,9 +53,11 @@
 //!
 //! `behavior:`, `onPause:`, a `Pause`'s own `tasks:` and its `errors:`. A
 //! `Pause` declaring any of them is not a [`TaskKind::Pause`] at all —
-//! [`plan::pause_gap`](crate::executor::plan) keeps it an opaque
-//! `TaskKind::Runnable`, so it reaches this module never rather than reaching
-//! it and being ignored.
+//! [`plan::pause_gap`](crate::executor::plan) flattens it an opaque
+//! `TaskKind::Runnable`, and since the 2026-10-11 ruling `spec::validate`
+//! refuses it (`unsupported_pause_property`), so `build_plan` returns no plan
+//! for it and it reaches this module never rather than reaching it and being
+//! ignored.
 
 use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx};

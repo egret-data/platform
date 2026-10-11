@@ -1558,20 +1558,27 @@ fn walk_task(
             }
         }
         // W8 Task 3. `tasks:` is NOT required -- `valids/pause-delay` writes
-        // none and the artifact published it with a 200 -- so the only check
-        // here is the honesty one: a `Pause` whose `behavior:`, `onPause:`,
-        // `tasks:` or `errors:` this executor does not reproduce must SAY so,
-        // which is the same thing the blanket row in `KESTRA_FLOW_CONTROL` used
-        // to say about every `Pause`.
+        // none and the artifact published it with a 200. A `Pause` whose
+        // `behavior:`, `onPause:`, `tasks:` or `errors:` this executor does not
+        // reproduce (`executor::pause_gap`, the single source of which four) is
+        // an ERROR -- the user's ruling of 2026-10-11. It was a
+        // `not_yet_enforced` warning until then, which let the flow publish and
+        // start, and every execution of it stalled in `RUNNING` for ever:
+        // `build_plan` planned the task an opaque runnable, the worker claimed
+        // it and failed with `NotALeaf` before recording an outcome, and the
+        // reaper released the claim on every working timeout. As an error it
+        // is in `validate_for_run`, so publish refuses it and so does every
+        // start path (`build_plan`'s third gate, inside
+        // `worker::start_execution_in_on` and the `Subflow` target's plan).
         TaskKind::Pause(p) => {
             if let Some(property) = crate::executor::pause_gap(p) {
-                report.warnings.push(Finding {
-                    code: "not_yet_enforced",
+                report.errors.push(Finding {
+                    code: "unsupported_pause_property",
                     message: format!(
-                        "task '{}' is a pause with '{property}', which egret does not run. \
-                         egret does not treat this task as a pause at all: it never pauses, no \
-                         worker can run it, and an execution that reaches it stalls there. \
-                         Remove '{property}' to get a pause egret runs",
+                        "task '{}' is a pause with '{property}', which egret does not \
+                         support: egret cannot run this task, so the flow cannot be \
+                         published or started. Remove '{property}', or use a plain Pause \
+                         (optionally bounded by pauseDuration or timeout)",
                         task.id
                     ),
                     path: format!("{path}.{property}"),
@@ -1926,7 +1933,7 @@ fn emit_not_yet_enforced(features: &FeaturePresence, report: &mut ValidationRepo
 #[cfg(test)]
 mod tests {
     use super::NOT_YET_ENFORCED;
-    use crate::spec::{parse, validate};
+    use crate::spec::{parse, validate, validate_for_run};
 
     // ---------- W3a Task 8: refusing what Kestra refuses ----------
     //
@@ -2792,43 +2799,43 @@ mod tests {
 
     // -- Fix round 1 --
 
-    /// Finding 1 (CRITICAL), **as W8 Task 3 left it.** The original test asserted
-    /// that a `Pause` warns unconditionally, because it had no `TaskKind`
-    /// variant and nothing ran it: a user pasting a Kestra flow whose `Pause` is
-    /// a manual-approval gate had to be told it gates nothing.
+    /// Finding 1 (CRITICAL), **as the 2026-10-11 ruling leaves it.** W8 Task 3
+    /// made a `Pause` run, bounded by `pauseDuration:`/`timeout:` or unbounded,
+    /// and kept a `not_yet_enforced` WARNING for a `Pause` declaring one of the
+    /// four properties `build_plan` does not reproduce. That warning let the
+    /// flow publish and start, and the execution then stalled in `RUNNING`
+    /// for ever: `pause_gap` planned the task an opaque runnable, no worker
+    /// could run it (`WorkerError::NotALeaf`), and the reaper released the
+    /// claim on every timeout.
     ///
-    /// It gates now. `executor::build_plan` runs the wait — bounded by
-    /// `pauseDuration:`/`timeout:`, unbounded otherwise, which is what the
-    /// pinned artifact does with each — so a blanket warning would be the
-    /// OPPOSITE lie, telling a user that a feature which works does not.
-    ///
-    /// What survives is the half that is still true, and the test now asserts
-    /// both directions of it because only the pair can fail for the right
-    /// reason: a `Pause` carrying one of the four properties `build_plan` does
-    /// not reproduce still warns and still names W8, and a plain one does not
-    /// warn at all. `executor::pause_gap` is the single predicate both this and
-    /// `build_plan` ask, so a flow warned here is exactly a flow planned opaque
-    /// there.
+    /// The ruling: such a `Pause` is a validation ERROR, so the editor shows
+    /// it, publish refuses it and every start path refuses it (they all go
+    /// through `build_plan`'s `validate_for_run` gate). Both directions are
+    /// asserted, because only the pair can fail for the right reason: a plain
+    /// pause (unbounded, `pauseDuration:`, `timeout:`) is valid and silent,
+    /// and each of the four is an error that names the property and says what
+    /// to do. `executor::pause_gap` stays the one predicate both sides ask.
     #[test]
-    fn a_pause_warns_only_for_the_properties_egret_does_not_run() {
+    fn a_pause_with_a_property_egret_does_not_run_is_an_error_and_a_plain_one_is_valid() {
         for spelling in ["io.kestra.plugin.core.flow.Pause", "core.pause"] {
-            // Silent: both shapes this executor reproduces.
-            for (label, props) in [("unbounded", ""), ("bounded", "    pauseDuration: PT1S\n")] {
+            // Valid and silent: the shapes this executor reproduces.
+            for (label, props) in [
+                ("unbounded", ""),
+                ("pauseDuration", "    pauseDuration: PT1S\n"),
+                ("timeout", "    timeout: PT1S\n"),
+            ] {
                 let yaml = format!(
                     "id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n{props}"
                 );
                 let r = validate(&parse(&yaml).unwrap());
-                assert!(
-                    !r.warnings
-                        .iter()
-                        .any(|w| w.code == "not_yet_enforced" && w.path.starts_with("tasks.gate")),
-                    "{spelling}/{label}: a pause egret runs must not be reported as \
-                     unenforced: {r:?}"
-                );
                 assert!(r.errors.is_empty(), "{spelling}/{label}: {r:?}");
+                assert!(
+                    !r.warnings.iter().any(|w| w.path.starts_with("tasks.gate")),
+                    "{spelling}/{label}: a pause egret runs must not be reported: {r:?}"
+                );
             }
 
-            // Loud: the four it does not.
+            // Refused: the four it does not.
             for (property, props) in [
                 ("behavior", "    behavior: FAIL\n"),
                 (
@@ -2847,37 +2854,47 @@ mod tests {
                 // NOT a `\`-continued literal: Rust's line continuation eats
                 // the next line's leading whitespace, and the first draft of
                 // this test lost the four spaces that make `pauseDuration:` a
-                // property of `gate` rather than a second mapping key. YAML
-                // refused it and the failure named a column, not a cause.
+                // property of `gate` rather than a second mapping key.
                 let yaml = format!(
                     "id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n    pauseDuration: PT1S\n{props}"
                 );
                 let f = parse(&yaml).unwrap_or_else(|e| panic!("{spelling}/{property}: {e:?}"));
                 let r = validate(&f);
-                let w = r
-                    .warnings
+                let e = r
+                    .errors
                     .iter()
-                    .find(|w| w.code == "not_yet_enforced" && w.path.starts_with("tasks.gate"))
+                    .find(|e| e.code == "unsupported_pause_property")
                     .unwrap_or_else(|| {
-                        panic!("{spelling}/{property}: no warning for 'gate': {r:?}")
+                        panic!("{spelling}/{property}: no error for 'gate': {r:?}")
                     });
+                assert_eq!(e.path, format!("tasks.gate.{property}"), "{spelling}/{property}");
                 assert!(
-                    w.message.contains(property),
-                    "{spelling}/{property}: the warning must name the property egret \
-                     does not run, not merely the task: {}",
-                    w.message
+                    e.message.contains(&format!("'{property}'")),
+                    "{spelling}/{property}: the error must name the property: {}",
+                    e.message
                 );
-                // What really happens (W7b Task 3 fix round 2, review N-3): the
-                // whole task is planned opaque (`plan::pause_gap`), so it never
-                // pauses and the execution stalls at it. The old text said the
-                // pause still waited and only the property was ignored.
-                assert!(w.message.contains("never pauses"), "{spelling}/{property}: {}", w.message);
-                assert!(w.message.contains("stalls"), "{spelling}/{property}: {}", w.message);
-                assert!(!w.message.contains("is ignored"), "{spelling}/{property}: {}", w.message);
+                // What to do: remove it, or use a plain pause.
                 assert!(
-                    r.errors.is_empty(),
-                    "{spelling}/{property}: an unenforced property is a warning, not an \
-                     error: {r:?}"
+                    e.message.contains(&format!("Remove '{property}'")),
+                    "{spelling}/{property}: {}",
+                    e.message
+                );
+                assert!(e.message.contains("plain Pause"), "{spelling}/{property}: {}", e.message);
+                // The stalling-run sentence of the old warning is gone: the
+                // flow can no longer reach a run, so it would be false.
+                assert!(!e.message.contains("stalls"), "{spelling}/{property}: {}", e.message);
+                assert!(
+                    !r.warnings.iter().any(|w| w.path.starts_with("tasks.gate")),
+                    "{spelling}/{property}: an error, not also a warning: {r:?}"
+                );
+                // The run-time gate refuses it too: it is not a save-only
+                // finding, so no start path can run it.
+                assert!(
+                    validate_for_run(&f)
+                        .errors
+                        .iter()
+                        .any(|e| e.code == "unsupported_pause_property"),
+                    "{spelling}/{property}: validate_for_run must refuse it"
                 );
             }
         }

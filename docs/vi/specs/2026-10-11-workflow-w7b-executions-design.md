@@ -33,6 +33,9 @@ Bộ rule frontend `docs/en/frontend-rules.md` ràng buộc mọi dòng code fro
 **Đã quyết với người dùng, 2026-10-11 (review Task 3):**
 - **Resume thật sự.** `POST …/executions/{id}/resume` giải phóng ngay mọi run `Pause` đang PAUSED của execution, bất kể `pauseDuration:` hay `timeout:`, và mỗi run kết thúc `SUCCESS`. Đó là `ExecutionService.resume` của Kestra, và `Pause.java` ghi rằng một pause được resume trước hạn "will always succeed". Trước quyết định này, route chỉ settle lại execution: nó chỉ kết thúc được pause đã quá hạn, việc mà bộ đánh thức (waker) của worker vẫn tự làm.
 
+**Đã quyết với người dùng, 2026-10-11 (Task 4b, một lỗi có từ trước W7b):**
+- **Một `Pause` mà egret không chạy được bị từ chối ngay ở bước validate.** `Pause` khai báo `behavior`, `onPause`, `tasks` hoặc `errors` là một lỗi validate, `unsupported_pause_property`, nêu tên thuộc tính và bảo người viết bỏ nó đi hoặc dùng một `Pause` thường. Trước quyết định này nó chỉ là cảnh báo `not_yet_enforced`: flow vẫn publish và chạy được, task bị lập kế hoạch thành một runnable mờ (opaque), worker báo `NotALeaf` trước khi ghi kết quả, và reaper nhả claim mãi mãi, nên execution kẹt ở `RUNNING` mà không có thông báo nào. Giờ editor hiện lỗi, publish từ chối, và không đường khởi chạy nào chạy được nó: API start, webhook, schedule, Flow trigger và lời gọi `Subflow` đều lập kế hoạch qua `build_plan`, mà cổng `validate_for_run` của nó vốn đã từ chối một bản nháp đã lưu có lỗi. `executor::pause_gap` vẫn là danh sách duy nhất của bốn thuộc tính, và flow schema xếp `behavior`, `onPause`, `errors` vào `refused`, nên editor không gợi ý chúng nữa.
+
 ## 1. Vì sao
 
 Từ W7a người dùng chạy được flow trên trình duyệt, nhưng chỉ theo dõi được qua một trang tối thiểu liệt kê state của các task run. W7b mang tới đúng những gì người dùng Kestra quen dùng cho một lần chạy:
@@ -428,3 +431,4 @@ Toàn bộ `docs/en/frontend-rules.md`. Những rule quan trọng nhất ở đ�
 
 - Execution ghi trước migration 0180 có thời gian ước tính (§6.3).
 - Một lần retry của một vòng lặp con hoặc của một execution con do subflow tạo ra hiện trong danh sách mặc định như một execution gốc. Execution thay thế do `CREATE_NEW_EXECUTION` tạo ra mang `parent_execution_id` (là execution con) nhưng không có `loop_index` và không có `trigger_execution_id`, đúng hình dạng của một lần retry của execution gốc, nên `root_only` giữ nó lại (§3.3). *(Phát hiện trong review Task 2.)*
+- Một `Pause` có `behavior`, `onPause`, `tasks` hoặc `errors` bị từ chối chứ không chạy (Kestra chạy cả bốn). Execution đã kẹt vì một `Pause` như vậy trước ngày 2026-10-11 vẫn kẹt; replay nó bị từ chối vì source đã đóng băng của nó không lập kế hoạch được nữa. *(Quyết định 2026-10-11, Task 4b.)*

@@ -9403,3 +9403,84 @@ async fn a_retry_attempt_overwrites_its_own_uris_without_a_unique_violation(pool
         "one row, overwritten by the second attempt"
     );
 }
+
+/// **The 2026-10-11 ruling, on a subflow call.** A `Subflow` whose target is a
+/// flow with a `Pause` declaring `behavior:` (one of the four properties
+/// egret does not run) creates no child: the target does not plan, so the
+/// `Subflow` run FAILS with `cannot execute an invalid flow` naming the
+/// property, and the parent ends `FAILED` instead of waiting on a child that
+/// would stall in `RUNNING` for ever. The control is the same call to a plain
+/// bounded `Pause`, which does create its child.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_to_a_pause_egret_does_not_run_creates_no_child_and_fails(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let pause = |id: &str, extra: &str| {
+        format!(
+            "id: {id}\nnamespace: t\ntasks:\n  - id: gate\n    \
+             type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1H\n{extra}"
+        )
+    };
+    file_flow(&db, ws, user, &pause("stalls", "    behavior: RESUME\n")).await;
+    file_flow(&db, ws, user, &pause("plain", "")).await;
+    let reg = Handlers::with_core_tasks(egret_workflow::storage::current());
+
+    let parent = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("caller", "stalls", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &reg).await;
+
+    let children: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workflow.executions WHERE flow_key = 'stalls'")
+            .fetch_one(&pool)
+            .await
+            .expect("count children");
+    assert_eq!(children, 0, "no child of a flow that does not plan");
+    let (state, message): (String, Option<String>) = sqlx::query_as(
+        "SELECT state, message FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'sub'",
+    )
+    .bind(parent)
+    .fetch_one(&pool)
+    .await
+    .expect("read the sub run");
+    assert_eq!(state, "FAILED");
+    let message = message.unwrap_or_default();
+    assert!(
+        message.contains("cannot execute an invalid flow 't'.'stalls'")
+            && message.contains("unsupported_pause_property")
+            && message.contains("tasks.gate.behavior"),
+        "{message}"
+    );
+    let parent_state: String =
+        sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
+            .bind(parent)
+            .fetch_one(&pool)
+            .await
+            .expect("read parent");
+    assert_eq!(parent_state, "FAILED");
+
+    // The control: the same call to a plain Pause creates its child.
+    start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("caller2", "plain", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &reg).await;
+    let children: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workflow.executions WHERE flow_key = 'plain'")
+            .fetch_one(&pool)
+            .await
+            .expect("count children");
+    assert_eq!(children, 1, "a plain Pause target is started");
+}

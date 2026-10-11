@@ -3543,7 +3543,11 @@ mod tests {
         // The two `Pause` probes. **Both**, because `pause_gap` has two
         // outcomes and a probe list holding only one of them would leave the
         // other classified by nothing -- which is exactly the lost-member
-        // asymmetry this test's own doc records one tier up.
+        // asymmetry this test's own doc records one tier up. Since the
+        // 2026-10-11 ruling the second outcome is not a TIER any more:
+        // `validate_for_run` refuses it, so `build_plan` answers an error and
+        // the probe is asserted for that below rather than driven through
+        // the loop.
         let pause_plain = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n";
         let pause_with_behavior = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    behavior: FAIL\n";
         // The other side of `loop_until_gap`, for the reason both sides of
@@ -3552,7 +3556,7 @@ mod tests {
         // a pure `build_plan` cannot read, so the task is planned opaque.
         let loop_until_unreadable = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.LoopUntil\n    condition: \"{{ true }}\"\n    checkFrequency:\n      maxIterations: \"{{ inputs.n }}\"\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n";
 
-        let probes: [(&str, String); 15] = [
+        let probes: [(&str, String); 14] = [
             (
                 "AllowFailure",
                 branch("io.kestra.plugin.core.flow.AllowFailure"),
@@ -3577,7 +3581,6 @@ mod tests {
             ("Loop", loop_src.to_string()),
             ("Subflow", subflow_src.to_string()),
             ("Pause", pause_plain.to_string()),
-            ("Pause", pause_with_behavior.to_string()),
             ("LoopUntil", loop_until_unreadable.to_string()),
             ("Leaf", leaf_src.to_string()),
         ];
@@ -3600,6 +3603,21 @@ mod tests {
             );
             arms_probed.insert(arm);
         }
+
+        // The other side of `pause_gap`: refused at plan, never a tier.
+        assert_eq!(
+            classify(&crate::spec::parse(pause_with_behavior).unwrap().tasks[0]),
+            PlannedAs::Opaque
+        );
+        let refused = match build_plan(pause_with_behavior) {
+            Ok(_) => panic!("a Pause with `behavior:` must not plan"),
+            Err(e) => e,
+        };
+        assert!(
+            refused.message.starts_with("unsupported_pause_property:"),
+            "{}",
+            refused.message
+        );
 
         // **The coverage gate, and it is the whole lesson of I1.** Round 3's
         // table was eleven arms and its probe list was five; the five agreed
@@ -3880,11 +3898,30 @@ mod tests {
                 "dependency_namespace_required",
             ],
         },
+        PublishedButRefused {
+            id: "valids/pause-behavior",
+            cause: "a `Pause` declaring `behavior:`. Kestra runs it; egret does not, and `executor::pause_gap` names it. Until the user's ruling of 2026-10-11 it planned an opaque runnable with a `not_yet_enforced` warning, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). The ruling made it the validation error `unsupported_pause_property`: a deliberate refusal, not an over-refusal to close, until egret runs `behavior:`. W8's",
+            codes: &["unsupported_pause_property"],
+        },
+        PublishedButRefused {
+            id: "valids/pause-errors-finally-after-execution",
+            cause: "a `Pause` declaring `errors:`. Kestra runs it; egret does not, and `executor::pause_gap` names it. Until the user's ruling of 2026-10-11 it planned an opaque runnable with a `not_yet_enforced` warning, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). The ruling made it the validation error `unsupported_pause_property`: a deliberate refusal, not an over-refusal to close, until egret runs `errors:`. W8's",
+            codes: &["unsupported_pause_property"],
+        },
+        PublishedButRefused {
+            id: "valids/pause_on_pause",
+            cause: "a `Pause` declaring `onPause:`. Kestra runs it; egret does not, and `executor::pause_gap` names it. Until the user's ruling of 2026-10-11 it planned an opaque runnable with a `not_yet_enforced` warning, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). The ruling made it the validation error `unsupported_pause_property`: a deliberate refusal, not an over-refusal to close, until egret runs `onPause:`. W8's",
+            codes: &["unsupported_pause_property"],
+        },
     ];
 
     /// **Every flow this Kestra published with 200 must plan, except two
     /// named over-refusals — swept over the whole corpus, not pinned by
     /// name.**
+    ///
+    /// *(2026-10-11, W7b Task 4b: the table holds five rows now. The three
+    /// added are not over-refusals to close but the user's ruling that a
+    /// `Pause` egret cannot run is refused; the test keeps its name.)*
     ///
     /// Over-refusal is the mirror of the divergence class the programme
     /// forbids shipping, and until the final review nothing in this package
@@ -7491,33 +7528,29 @@ tasks:
         );
     }
 
-    /// **A `Pause` this executor does not reproduce stays an opaque
-    /// `Runnable`**, and its children stay out of the plan with it.
+    /// **A `Pause` this executor does not reproduce is REFUSED, not planned.**
     ///
-    /// That is `build_plan`'s standing rule for an unimplemented flowable —
-    /// `AllowFailure` and `WorkingDirectory` take it — and the reason is
-    /// recorded there: an unimplemented construct mapped onto a construct that
-    /// nearly fits trades a visible mismatch for a plausible-looking wrong
-    /// trace, and only the first stays honestly baselined.
+    /// Until the 2026-10-11 ruling it was planned an opaque `Runnable` with a
+    /// `not_yet_enforced` warning, under `build_plan`'s standing rule for an
+    /// unimplemented flowable. For `AllowFailure` and `WorkingDirectory` that
+    /// rule is harmless: their opaque run is still claimed by nothing and the
+    /// warning says so. For a `Pause` it was not: the opaque run got a
+    /// `type_id`, the worker claimed it, `Claimed::input` failed with
+    /// `NotALeaf` before recording an outcome, and the reaper released it on
+    /// every working timeout, so the execution sat in `RUNNING` for ever. Now
+    /// `spec::validate` reports `unsupported_pause_property` and
+    /// `build_plan`'s `validate_for_run` gate refuses the flow, naming the
+    /// property, before any run exists.
+    ///
+    /// Five rows, one per property plus `behavior:` written as an EXPRESSION
+    /// (its value decides what the artifact does, and `pause_gap` decides at
+    /// plan time, so the dynamic form must be refused just like the literal).
     ///
     /// The control is the last row: the same flow with none of the four is a
     /// `TaskKind::Pause`. Without it every row would pass under a `build_plan`
-    /// that had no `Pause` arm at all.
-    ///
-    /// `spec::validate` is asserted in the same loop and against the same
-    /// predicate, because the two answers must not come apart: a publish that
-    /// says a `behavior:` is enforced over an executor that ignores it is the
-    /// over-acceptance this programme forbids.
+    /// that refused every `Pause`.
     #[test]
-    fn a_pause_this_executor_does_not_reproduce_stays_opaque() {
-        // **Five rows, and the fifth is the one fix round 1 got wrong.** That
-        // round narrowed `pause_gap`'s `behavior` arm to LITERALS on the theory
-        // that an expression always fails at resume, and this fixture could not
-        // see it: every row here writes a literal, so the whole dynamic half of
-        // the class was untested and the narrowing passed. Fix round 2 measured
-        // the artifact -- it honours the VALUE in every form, five runs each --
-        // and added the row. Naming the element of the class a fixture does not
-        // contain is the rule; this is what it costs when nobody does.
+    fn a_pause_this_executor_does_not_reproduce_is_refused_at_plan() {
         let rows: [(&str, &str); 5] = [
             (
                 "tasks",
@@ -7530,11 +7563,6 @@ tasks:
                  type: io.kestra.plugin.core.debug.Return\n        format: x\n",
             ),
             ("behavior", "    pauseDuration: PT1S\n    behavior: FAIL\n"),
-            // The same property written as an EXPRESSION. It must be just as
-            // opaque: its VALUE decides what the artifact does, the value is
-            // known at render time, and `pause_gap` decides at plan time — so
-            // there is no answer here that can be right for `WARN` and
-            // `CANCEL`, whose terminals `RunState` does not hold.
             (
                 "behavior",
                 "    pauseDuration: PT1S\n    behavior: \"{{ inputs.b }}\"\n",
@@ -7547,30 +7575,19 @@ tasks:
         ];
         for (property, props) in rows {
             let src = pause_flow(props);
-            let plan = build_plan(&src).unwrap_or_else(|e| panic!("{property}: {e}"));
-            assert_eq!(
-                plan.tasks[0].kind,
-                TaskKind::Runnable {
-                    type_id: "io.kestra.plugin.core.flow.Pause".to_string()
-                },
-                "{property}: a pause carrying it must stay opaque"
-            );
-            assert_eq!(
-                plan.tasks.len(),
-                2,
-                "{property}: `gate` and `after` only — an opaque flowable's children \
-                 are not in the plan"
-            );
-            let flow = crate::spec::parse(&src).expect("parses");
-            let report = crate::spec::validate(&flow);
-            let warned = report
-                .warnings
-                .iter()
-                .any(|w| w.code == "not_yet_enforced" && w.message.contains(property));
+            let err = match build_plan(&src) {
+                Ok(_) => panic!("{property}: a pause carrying it must not plan"),
+                Err(e) => e,
+            };
             assert!(
-                warned,
-                "{property}: publish must say it is not enforced: {:?}",
-                report.warnings
+                err.message.starts_with("unsupported_pause_property:"),
+                "{property}: refused by the right finding: {}",
+                err.message
+            );
+            assert!(
+                err.message.contains(&format!("[tasks.gate.{property}]")),
+                "{property}: the refusal names the property: {}",
+                err.message
             );
         }
 
@@ -7585,12 +7602,12 @@ tasks:
         );
         let report = crate::spec::validate(&crate::spec::parse(&src).unwrap());
         assert!(
-            !report
-                .warnings
-                .iter()
-                .any(|w| w.code == "not_yet_enforced" && w.path.starts_with("tasks.gate")),
-            "a pause this executor DOES reproduce must not warn: {:?}",
-            report.warnings
+            report.errors.is_empty()
+                && !report
+                    .warnings
+                    .iter()
+                    .any(|w| w.path.starts_with("tasks.gate")),
+            "a pause this executor DOES reproduce is valid and silent: {report:?}"
         );
     }
 

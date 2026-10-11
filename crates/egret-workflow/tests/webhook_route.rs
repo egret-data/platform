@@ -1913,3 +1913,69 @@ triggers:
          reaches its fixpoint"
     );
 }
+
+/// **The 2026-10-11 ruling, on the webhook.** A flow whose `Pause` declares
+/// `behavior:` (one of the four properties egret does not run) is refused when
+/// the webhook fires, with a 400 naming the property, and no execution is
+/// created. Before the ruling the webhook answered 200 and the execution
+/// stalled in `RUNNING` for ever. The control is the identical flow with a
+/// plain `Pause`, which fires: without it a handler that refuses every
+/// `Pause` would pass.
+#[tokio::test]
+async fn a_pause_egret_does_not_run_is_refused_and_starts_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let app = common::webhook_app(&db).await;
+    let flow = |ns: &str, extra: &str| {
+        format!(
+            "\
+id: fx-flow
+namespace: {ns}
+tasks:
+  - id: gate
+    type: io.kestra.plugin.core.flow.Pause
+    pauseDuration: PT1S
+{extra}triggers:
+  - id: fx-trigger
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: fx-key
+"
+        )
+    };
+
+    let ns = fresh_namespace();
+    common::seed_flow(&db, ws, user, &flow(&ns, "    behavior: RESUME\n"), "draft").await;
+    let res = common::anon(
+        &app,
+        "POST",
+        &hook_url(ws, &ns, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = common::body_text(res).await;
+    assert!(
+        body.contains("unsupported_pause_property") && body.contains("tasks.gate.behavior"),
+        "{body}"
+    );
+    assert_eq!(
+        common::execution_count(&db, ws).await,
+        0,
+        "a refused webhook must leave no execution behind"
+    );
+
+    // The control.
+    let ns = fresh_namespace();
+    common::seed_flow(&db, ws, user, &flow(&ns, ""), "draft").await;
+    let res = common::anon(
+        &app,
+        "POST",
+        &hook_url(ws, &ns, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK, "a plain Pause fires");
+    assert_eq!(common::execution_count(&db, ws).await, 1);
+}

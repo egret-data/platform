@@ -415,6 +415,40 @@ fn properties_egret_refuses_after_parsing_are_not_served() {
     }
 }
 
+/// The 2026-10-11 ruling: a `Pause` declaring `behavior`, `onPause` or
+/// `errors` is a validation error (`unsupported_pause_property`), so the
+/// measurement classifies the three `refused` and the editor stops offering
+/// them. (`tasks`, the fourth property `pause_gap` names, is not in Kestra's
+/// documented `Pause` schema, so there is no row to classify.) The control is
+/// `pauseDuration` and `timeout`, which are honoured and still offered.
+#[test]
+fn a_pause_does_not_offer_the_properties_egret_refuses() {
+    let schema = flow_schema(&ALL[3], &permissive_deployment());
+    let pause = "io.kestra.plugin.core.flow.Pause";
+    let props = &schema["$defs"][pause]["properties"];
+    assert!(props.is_object(), "Pause is served");
+    for prop in ["behavior", "onPause", "errors"] {
+        assert_eq!(
+            measured().properties[pause].get(prop),
+            Some(&Treatment::Refused),
+            "{prop}"
+        );
+        assert!(
+            props.get(prop).is_none(),
+            "Pause offers {prop}, which egret refuses"
+        );
+    }
+    assert_eq!(measured().properties[pause].get("tasks"), None);
+    for prop in ["pauseDuration", "timeout"] {
+        assert_eq!(
+            measured().properties[pause].get(prop),
+            Some(&Treatment::Honoured),
+            "{prop}"
+        );
+        assert!(props.get(prop).is_some(), "Pause must still offer {prop}");
+    }
+}
+
 /// Fix round 1, I2: an enum value refused at firing is not offered.
 #[test]
 fn webhook_fetch_type_does_not_offer_store() {

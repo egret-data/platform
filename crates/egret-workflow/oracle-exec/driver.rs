@@ -788,7 +788,18 @@ const CREATE_REFUSED: usize = 4;
 /// `io.kestra.plugin.core.kv.*` FQCNs, and `kv.Set` was the only type it
 /// lacked. An over-refusal closing; [`UNKNOWN_TYPE_REFUSED`] fell by 1. Its
 /// golden entry stays baselined: `AllowFailure` is still planned opaque.
-const LIVE: usize = 248;
+///
+/// # 248 → **245** at W7b Task 4b (the user's ruling of 2026-10-11)
+///
+/// `valids/pause-behavior`, `valids/pause-errors-finally-after-execution` and
+/// `valids/pause_on_pause`: a `Pause` declaring `behavior:`, `errors:` or
+/// `onPause:` is now the validation error `unsupported_pause_property`, so
+/// publish refuses it. **A deliberate refusal, not an over-refusal to close**:
+/// before the ruling such a flow published with a warning and every
+/// execution of it stalled in `RUNNING` for ever. They moved to
+/// [`VALIDATE_REFUSED`], and `executor`'s `PUBLISHED_BUT_REFUSED` names all
+/// three.
+const LIVE: usize = 245;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -863,7 +874,10 @@ const UNKNOWN_TYPE_REFUSED: usize = 65;
 ///
 /// **20 → 22 at W5b final fix round 1**: the two `secret()` flows [`LIVE`]
 /// names, refused by W5b spec §6's publish-time rule.
-const VALIDATE_REFUSED: usize = 22;
+///
+/// **22 → 25 at W7b Task 4b**: the three `Pause` flows [`LIVE`] names, refused
+/// by `unsupported_pause_property` (the user's ruling of 2026-10-11).
+const VALIDATE_REFUSED: usize = 25;
 
 /// Every corpus flow that has a draft row and no live version — the sum of the
 /// two above, derived rather than written down a third time.

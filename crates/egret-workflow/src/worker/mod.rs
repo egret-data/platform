@@ -695,7 +695,13 @@ pub enum WorkerError {
     ///
     /// It behaves exactly like [`WorkerError::NoHandler`]: the tick aborts for
     /// that run, the execution stalls, and the differential oracle's driver
-    /// carries on. Keeping it inside `Corrupt` is what stopped `Corrupt` from
+    /// carries on. **A `Pause` declaring `behavior:`, `onPause:`, `tasks:` or
+    /// `errors:` reached this arm until 2026-10-11** -- `plan::pause_gap`
+    /// planned it opaque -- and stalled every execution of it in `RUNNING`
+    /// silently, the reaper releasing and re-offering the claim for ever. The
+    /// user's ruling made it a validation error (`unsupported_pause_property`),
+    /// so `build_plan` refuses such a flow and no start path can create its
+    /// run. Keeping it inside `Corrupt` is what stopped `Corrupt` from
     /// ever being reportable as a driver failure.
     #[error("execution {0} claimed run {1:?}, whose task is not a leaf of its own source — the executor plans it opaque, so this worker has no properties for it")]
     NotALeaf(uuid::Uuid, String),

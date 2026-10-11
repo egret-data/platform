@@ -26,6 +26,9 @@ The frontend rulebook `docs/en/frontend-rules.md` binds every frontend line.
 **Decided with the user, 2026-10-11 (Task 3 review):**
 - **A real resume.** `POST …/executions/{id}/resume` releases every paused `Pause` run of the execution at once, whatever its `pauseDuration:` or `timeout:`, and each ends `SUCCESS`. That is Kestra's `ExecutionService.resume`, and `Pause.java` says a pause resumed before its duration "will always succeed". Until this ruling, the route only re-settled the execution: it ended a pause whose deadline had passed, which the worker's waker does by itself.
 
+**Decided with the user, 2026-10-11 (Task 4b, a defect that predates W7b):**
+- **A `Pause` egret cannot run is refused at validation.** A `Pause` that declares `behavior`, `onPause`, `tasks` or `errors` is a validation error, `unsupported_pause_property`, naming the property and saying to remove it or use a plain `Pause`. Until this ruling it was a `not_yet_enforced` warning: the flow published and started, the task was planned an opaque runnable, the worker failed it with `NotALeaf` before recording an outcome, and the reaper released the claim for ever, so the execution stalled in `RUNNING` with no message. The editor now shows the error, publish refuses it, and no start path can run it: the API start, the webhook, a schedule fire, a Flow trigger and a `Subflow` call all plan through `build_plan`, whose `validate_for_run` gate already refuses a saved draft with errors. `executor::pause_gap` remains the single list of the four properties, and the flow schema classifies `behavior`, `onPause` and `errors` as `refused`, so the editor no longer offers them.
+
 ## 1. Why
 
 Since W7a, a user can run a flow from the browser, but can follow it only on a minimal page that lists task-run states. W7b gives runs the surface Kestra users expect:
@@ -426,3 +429,4 @@ All of `docs/en/frontend-rules.md`. The rules most at stake:
 
 - Executions recorded before migration 0180 have estimated times (§6.3).
 - A retry of a loop iteration or of a subflow child appears in the default list as a root. Its `CREATE_NEW_EXECUTION` replacement carries `parent_execution_id` (the child) with no `loop_index` and no `trigger_execution_id`, which is exactly the shape of a retry of a root, so `root_only` keeps it (§3.3). *(Found in the Task 2 review.)*
+- A `Pause` with `behavior`, `onPause`, `tasks` or `errors` is refused, not run (Kestra runs all four). An execution already stalled on one before 2026-10-11 stays stalled; replaying it is refused because its frozen source no longer plans. *(Ruled 2026-10-11, Task 4b.)*

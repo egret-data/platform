@@ -3234,3 +3234,82 @@ async fn start_resume_and_replay_answer_can_manage_true() {
     let replayed = common::json(replayed).await;
     assert_eq!(replayed["can_manage"], true, "replay: {replayed}");
 }
+
+/// **The 2026-10-11 ruling, on the API start.** A `Pause` declaring
+/// `behavior`, `onPause`, `tasks` or `errors` is a validation error, and a
+/// saved draft carrying one is refused at start with a 400 that names the
+/// property -- before the ruling it was a warning, the start answered 201, and
+/// the execution stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed).
+/// The refusal is `build_plan`'s `validate_for_run` gate inside
+/// `worker::start_execution`, the one function every start path goes through.
+///
+/// Each of the four properties is driven, and the control is the same draft
+/// with a plain bounded `Pause`, which starts: without it the first half
+/// passes under a route that refuses every `Pause`.
+#[tokio::test]
+async fn a_start_refuses_a_draft_whose_pause_egret_does_not_run() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let app = common::app(&db).await;
+    let pause = |id: &str, extra: &str| {
+        format!(
+            "id: {id}\nnamespace: a.write\ntasks:\n  - id: gate\n    \
+             type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n{extra}"
+        )
+    };
+
+    for (property, extra) in [
+        ("behavior", "    behavior: RESUME\n"),
+        (
+            "onPause",
+            "    onPause:\n      id: hi\n      type: io.kestra.plugin.core.log.Log\n      message: hi\n",
+        ),
+        (
+            "tasks",
+            "    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+        ),
+        (
+            "errors",
+            "    errors:\n      - id: oops\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+        ),
+    ] {
+        let flow = common::seed_flow(
+            &db,
+            ws,
+            user,
+            &pause(&format!("pause-{}", property.to_lowercase()), extra),
+            "draft",
+        )
+        .await;
+        let res = common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+            user,
+        )
+        .await;
+        assert_eq!(res.status(), 400, "{property}");
+        let body = common::body_text(res).await;
+        assert!(
+            body.contains("unsupported_pause_property")
+                && body.contains(&format!("tasks.gate.{property}")),
+            "{property}: the refusal names the finding and the property: {body}"
+        );
+        assert_eq!(
+            common::execution_count(&db, ws).await,
+            0,
+            "{property}: a refused start leaves no execution behind"
+        );
+    }
+
+    // The control: a plain bounded Pause starts.
+    let ok = common::seed_flow(&db, ws, user, &pause("pause-plain", ""), "draft").await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{ok}/executions"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 201);
+    assert_eq!(common::execution_count(&db, ws).await, 1);
+}
