@@ -10,6 +10,11 @@
  * One `perm.migrated_from` row, as the classifier and the page read it.
  */
 export interface MigrationRecord {
+  /**
+     * The policy's name when it was migrated (it may have been renamed
+     * since; provenance is keyed by policy id).
+     */
+  policy_name: string;
   grant_ids: string[];
   rule_ids: string[];
   /** How many probe evaluations agreed when the migration was proved. */

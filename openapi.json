@@ -38743,6 +38743,7 @@
         "type": "object",
         "description": "One `perm.migrated_from` row, as the classifier and the page read it.",
         "required": [
+          "policy_name",
           "grant_ids",
           "rule_ids",
           "probes_proved",
@@ -38750,6 +38751,10 @@
           "migrated_at"
         ],
         "properties": {
+          "policy_name": {
+            "type": "string",
+            "description": "The policy's name when it was migrated (it may have been renamed\nsince; provenance is keyed by policy id)."
+          },
           "grant_ids": {
             "type": "array",
             "items": {
@@ -43299,7 +43304,8 @@
         "description": "What `undo` did.",
         "required": [
           "policies",
-          "compile"
+          "compile",
+          "notices"
         ],
         "properties": {
           "policies": {
@@ -43310,6 +43316,13 @@
           },
           "compile": {
             "$ref": "#/components/schemas/CompileResponse"
+          },
+          "notices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Consequences that outlive the undo (review I-2)."
           }
         }
       },
@@ -43332,7 +43345,7 @@
           },
           "grants_deleted": {
             "type": "integer",
-            "description": "Model objects provenance named that still existed and were deleted.",
+            "description": "Model objects the migration created, deleted by the undo.",
             "minimum": 0
           },
           "rules_deleted": {

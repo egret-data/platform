@@ -14,4 +14,6 @@ import type { UndonePolicy } from './undonePolicy';
 export interface UndoResponse {
   policies: UndonePolicy[];
   compile: CompileResponse;
+  /** Consequences that outlive the undo (review I-2). */
+  notices: string[];
 }

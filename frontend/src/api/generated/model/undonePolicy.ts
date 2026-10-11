@@ -13,7 +13,7 @@ export interface UndonePolicy {
   policy_id: number;
   policy_name: string;
   /**
-     * Model objects provenance named that still existed and were deleted.
+     * Model objects the migration created, deleted by the undo.
      * @minimum 0
      */
   grants_deleted: number;
