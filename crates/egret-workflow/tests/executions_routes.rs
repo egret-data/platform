@@ -2417,6 +2417,9 @@ async fn a_resume_and_the_waker_transition_a_pause_once(pool: sqlx::PgPool) {
     }
 }
 
+/// `task_id, state, resume_with, not_before_ms, updated_at` of one run.
+type RunRow = (String, String, Option<String>, Option<i64>, DateTime<Utc>);
+
 /// **An execution paused only by a waiting `LoopUntil` is a 409, and nothing
 /// changes** (W7b Task 3 fix round 2, review N-1). `pause_mark` puts the
 /// execution in `PAUSED` while a `LoopUntil` waits for its next iteration, but
@@ -2465,7 +2468,7 @@ async fn a_resume_of_an_execution_paused_only_by_a_loop_until_is_a_conflict(pool
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        let runs: Vec<(String, String, Option<String>, Option<i64>, DateTime<Utc>)> = sqlx::query_as(
+        let runs: Vec<RunRow> = sqlx::query_as(
             "SELECT task_id, state, resume_with, not_before_ms, updated_at FROM workflow.task_runs \
              WHERE execution_id = $1 ORDER BY run_ix",
         )
