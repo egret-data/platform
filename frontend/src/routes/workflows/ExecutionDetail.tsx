@@ -27,7 +27,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
 import { StateChip } from "@/components/workflows/StateChip";
 import { formatDuration } from "@/components/workflows/executionState";
-import { canReplay, resumeFeedback, showsResume } from "@/components/workflows/executions/actions";
+import { canReplay, canResume, resumeFeedback, showsResume } from "@/components/workflows/executions/actions";
 import { nextExecutionPollMs, staleNote, useNow } from "@/components/workflows/executions/polling";
 import {
   ESTIMATED_DURATION_TITLE,
@@ -284,6 +284,7 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
   const reasonsId = useId();
 
   const resumeShown = showsResume(execution);
+  const resumeState = canResume(execution);
   const replayState = canReplay(execution);
 
   const runResume = async () => {
@@ -312,11 +313,10 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
     <div className="flex flex-col items-end gap-1">
       <div className="flex flex-wrap items-center justify-end gap-2">
         {resumeShown ? (
-          // Always enabled while paused: the route releases every pause (spec §5.2).
-          <Button type="button" size="sm" onClick={() => setOpen("resume")}>
+          <ReasonButton enablement={resumeState} reasonId={`${reasonsId}-resume`} onClick={() => setOpen("resume")}>
             <Play aria-hidden />
             Resume
-          </Button>
+          </ReasonButton>
         ) : null}
         <ReasonButton
           enablement={replayState}
@@ -329,7 +329,10 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
         </ReasonButton>
       </div>
       <DisabledReasons
-        actions={[{ id: `${reasonsId}-replay`, label: "Replay", enablement: replayState }]}
+        actions={[
+          ...(resumeShown ? [{ id: `${reasonsId}-resume`, label: "Resume", enablement: resumeState }] : []),
+          { id: `${reasonsId}-replay`, label: "Replay", enablement: replayState },
+        ]}
       />
       <ConfirmAction
         open={open === "resume"}

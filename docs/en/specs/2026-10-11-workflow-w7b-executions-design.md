@@ -186,6 +186,9 @@ Both actions need `workflow:manage`. A user without it does not see them. The pa
 - The race with the worker's waker is decided by the execution's lock: whichever takes it first wins. A `timeout:` pause the waker ended first is `FAILED`, and the resume answers 409. A pause still `PAUSED` when the resume takes the lock ends `SUCCESS`.
 - On success the execution query is refreshed. The toast follows the state the route answered: "Resumed the execution" only when it is no longer paused; "Resumed, but the execution then ended Failed." (or Killed, Cancelled) for a bad end; and a defensive note if the answer is still `PAUSED`.
 - A 409 (not paused, or the waker won) shows the server's message in the dialog.
+- **Only a `Pause` is resumed** *(ruled 2026-10-11, Task 3 fix round 2, after review N-1)*. An execution is also `PAUSED` while a `LoopUntil` waits for its next iteration, and a resume does not end that wait, as in Kestra. So:
+  - the route answers 409 "Nothing to resume: no Pause task is waiting." when no `Pause` run is waiting, and writes nothing;
+  - the page enables Resume only when some `PAUSED` run has `resume_with` `NEVER` or `TERMINAL:*` (the engine's own record of a waiting `Pause`). Otherwise Resume is disabled with the reason "Waiting on a loop condition, not a Pause task".
 
 **Replay**
 - It is enabled only when the execution is terminal. Otherwise it is disabled with the reason "Replay is available when the execution has finished".
@@ -344,6 +347,12 @@ Differences go into §2.
 
 **Rust**
 - Timestamps on every state path: success, failure, retry (`RETRY_FAILED_TASK` and `CREATE_NEW_EXECUTION`), pause and resume, subflow (`wait` true and false), loop iterations, SLA cancel, and replay.
+- A manual resume:
+  - every bound of pause is released at once to `SUCCESS`, with its timestamps;
+  - several parallel pauses;
+  - the race with the waker (one transition);
+  - 409 when not paused, and 409 when only a `LoopUntil` waits, with nothing written;
+  - 404 for another workspace.
 - The invariants of §3.2.
 - The attempt end on retry.
 - `root_only` and `parent`, including another workspace's parent id giving an empty page, both filters together giving 400, and the indexes being used (`EXPLAIN`); a retry execution listed under `root_only`, a loop iteration and a subflow child not.

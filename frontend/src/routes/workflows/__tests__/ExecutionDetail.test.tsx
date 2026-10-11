@@ -304,8 +304,12 @@ describe("ExecutionDetail: permissions", () => {
 });
 
 describe("ExecutionDetail: Resume", () => {
+  // `resume_with` as the engine writes it for that pause (`executor::Resume::wire`).
   const paused = (props: string) =>
-    execution("PAUSED", { source: pauseSource(props), runs: [run("gate", "PAUSED", 0)] });
+    execution("PAUSED", {
+      source: pauseSource(props),
+      runs: [run("gate", "PAUSED", 0, { resume_with: props ? "TERMINAL:SUCCESS" : "NEVER", not_before_ms: props ? 60_000 : null })],
+    });
 
   it("is shown only while PAUSED", async () => {
     new Server(ok(execution("RUNNING")));
@@ -324,6 +328,47 @@ describe("ExecutionDetail: Resume", () => {
     await userEvent.click(button);
     const dialog = await screen.findByRole("alertdialog", { name: "Resume this execution?" });
     expect(dialog).toHaveTextContent("Every paused task ends now as a success, whatever its duration or timeout");
+  });
+
+  it("is disabled, saying why in visible text, when only a LoopUntil waits", async () => {
+    const loopSource =
+      "id: hello\nnamespace: company.team\ntasks:\n  - id: until\n    type: io.kestra.plugin.core.flow.LoopUntil\n    condition: \"{{ false }}\"\n";
+    const server = new Server(
+      ok(
+        execution("PAUSED", {
+          source: loopSource,
+          runs: [
+            run("until", "PAUSED", 0, { resume_with: "ITERATE", not_before_ms: 3_600_000 }),
+            run("work", "SUCCESS", 1, { parent_ix: 0 }),
+          ],
+        }),
+      ),
+    );
+    renderPage();
+    const button = await screen.findByRole("button", { name: "Resume" });
+    expect(button).toBeDisabled();
+    const reason = "Waiting on a loop condition, not a Pause task";
+    expect(screen.getByText(reason)).toBeVisible();
+    expect(button).toHaveAccessibleDescription(reason);
+    await userEvent.click(button);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(server.calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
+  it("is enabled when a Pause waits beside a waiting LoopUntil", async () => {
+    new Server(
+      ok(
+        execution("PAUSED", {
+          runs: [
+            run("until", "PAUSED", 0, { resume_with: "ITERATE", not_before_ms: 3_600_000 }),
+            run("gate", "PAUSED", 1, { resume_with: "TERMINAL:FAILED", not_before_ms: 60_000 }),
+          ],
+        }),
+      ),
+    );
+    renderPage();
+    expect(await screen.findByRole("button", { name: "Resume" })).toBeEnabled();
+    expect(screen.queryByText("Waiting on a loop condition, not a Pause task")).toBeNull();
   });
 
   it.each([

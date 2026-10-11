@@ -13,13 +13,35 @@ import { isTerminalState } from "@/components/workflows/executionState";
 export const REPLAY_NOT_FINISHED_REASON = "Replay is available when the execution has finished";
 
 /**
- * Resume is shown, and enabled, exactly while the execution waits (spec
- * §5.2). The route releases every paused `Pause` at once, whatever its bounds
- * (Kestra's `ExecutionService.resume`; the user's ruling of 2026-10-11), so
- * no pause is one it cannot resume.
+ * Resume is shown exactly while the execution waits (spec §5.2). The route
+ * releases every paused `Pause` at once, whatever its bounds (Kestra's
+ * `ExecutionService.resume`; the user's ruling of 2026-10-11); see
+ * `canResume` for the one wait it does not end.
  */
 export function showsResume(execution: Pick<ExecutionDto, "state">): boolean {
   return execution.state === "PAUSED";
+}
+
+/** Spec §5.2 (fix round 2), verbatim. */
+export const LOOP_WAIT_REASON = "Waiting on a loop condition, not a Pause task";
+
+/**
+ * Is a `Pause` task waiting? A `PAUSED` run whose `resume_with` the engine
+ * wrote for a `Pause` (`NEVER`, or `TERMINAL:*` for a bounded one) -- the
+ * engine's own answer (`executor::Resume::wire`), not a re-derivation from the
+ * source. A `LoopUntil` waiting for its next iteration carries `ITERATE` and
+ * puts the execution in `PAUSED` too, but a resume does not end it (Kestra
+ * resumes `Pause` tasks only), and the route answers 409.
+ */
+function aPauseIsWaiting(execution: Pick<ExecutionDto, "runs">): boolean {
+  return execution.runs.some(
+    (r) => r.state === "PAUSED" && (r.resume_with === "NEVER" || (r.resume_with ?? "").startsWith("TERMINAL:")),
+  );
+}
+
+/** Resume, for an execution that `showsResume`: enabled when a `Pause` task waits (spec §5.2). */
+export function canResume(execution: Pick<ExecutionDto, "runs">): Enablement {
+  return aPauseIsWaiting(execution) ? { ok: true } : { ok: false, reason: LOOP_WAIT_REASON };
 }
 
 /**

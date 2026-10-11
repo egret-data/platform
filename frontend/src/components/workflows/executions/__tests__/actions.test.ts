@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { canReplay, REPLAY_NOT_FINISHED_REASON, resumeFeedback, showsResume } from "@/components/workflows/executions/actions";
+import {
+  canReplay,
+  canResume,
+  LOOP_WAIT_REASON,
+  REPLAY_NOT_FINISHED_REASON,
+  resumeFeedback,
+  showsResume,
+} from "@/components/workflows/executions/actions";
 
 describe("showsResume and canReplay", () => {
   it("shows Resume only while PAUSED", () => {
@@ -36,5 +43,25 @@ describe("resumeFeedback", () => {
       tone: "warning",
       message: "Resume was sent, but the execution is still paused. Refresh to see its latest state.",
     });
+  });
+});
+
+describe("canResume", () => {
+  const run = (state: string, resume_with: string | null) => ({ state, resume_with }) as never;
+
+  it("is enabled when a PAUSED run is a Pause, unbounded or bounded", () => {
+    for (const rw of ["NEVER", "TERMINAL:SUCCESS", "TERMINAL:FAILED"]) {
+      expect(canResume({ runs: [run("SUCCESS", null), run("PAUSED", rw)] })).toEqual({ ok: true });
+    }
+  });
+
+  it("is disabled with the spec's reason when only a LoopUntil waits", () => {
+    expect(canResume({ runs: [run("PAUSED", "ITERATE"), run("SUCCESS", null)] })).toEqual({ ok: false, reason: LOOP_WAIT_REASON });
+    expect(LOOP_WAIT_REASON).toBe("Waiting on a loop condition, not a Pause task");
+  });
+
+  it("reads only PAUSED runs: a finished pause that kept its resume_with does not count", () => {
+    // A naturally ended Pause keeps `TERMINAL:SUCCESS` on its row.
+    expect(canResume({ runs: [run("SUCCESS", "TERMINAL:SUCCESS"), run("PAUSED", "ITERATE")] }).ok).toBe(false);
   });
 });

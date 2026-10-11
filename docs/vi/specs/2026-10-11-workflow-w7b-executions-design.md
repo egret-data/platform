@@ -196,6 +196,9 @@ Cả hai hành động cần quyền `workflow:manage`. Người dùng không c�
 - Cuộc đua với waker của worker được khoá của execution phân xử: bên nào lấy khoá trước thì thắng. Một pause có `timeout:` mà waker kết thúc trước thì là `FAILED`, và resume trả 409. Một pause vẫn `PAUSED` khi resume lấy được khoá thì kết thúc `SUCCESS`.
 - Thành công thì refresh query của execution. Toast theo state mà route trả về: "Resumed the execution" chỉ khi execution không còn pause; "Resumed, but the execution then ended Failed." (hoặc Killed, Cancelled) khi kết thúc xấu; và một ghi chú phòng hờ nếu câu trả lời vẫn là `PAUSED`.
 - 409 (không pause, hoặc waker thắng) thì hiện thông báo của server trong dialog.
+- **Chỉ resume `Pause`** *(quyết định 2026-10-11, Task 3 fix round 2, theo review N-1)*. Execution cũng ở `PAUSED` khi một `LoopUntil` đang chờ vòng lặp kế tiếp, và resume không kết thúc việc chờ đó, giống Kestra. Vì vậy:
+  - route trả 409 "Nothing to resume: no Pause task is waiting." khi không có run `Pause` nào đang chờ, và không ghi gì;
+  - trang chỉ bật Resume khi có một run `PAUSED` mang `resume_with` là `NEVER` hoặc `TERMINAL:*` (bản ghi của chính engine về một `Pause` đang chờ). Nếu không, Resume bị vô hiệu hoá kèm lý do "Waiting on a loop condition, not a Pause task".
 
 **Replay:**
 - Chỉ bật khi execution đã kết thúc; còn lại thì vô hiệu hoá với lý do "Replay is available when the execution has finished".
@@ -352,7 +355,7 @@ Khác biệt được đưa vào §2.
 
 **Rust:**
 - Mốc thời gian trên mọi đường đổi state: thành công, thất bại, retry (`RETRY_FAILED_TASK` và `CREATE_NEW_EXECUTION`), pause rồi resume, subflow (`wait` true và false), iteration của loop, SLA cancel, replay.
-- Resume thủ công: mọi loại pause được giải phóng ngay thành `SUCCESS` kèm mốc thời gian, nhiều pause song song, cuộc đua với waker (chỉ chuyển state một lần), 409 khi không pause, và 404 với workspace khác.
+- Resume thủ công: mọi loại pause được giải phóng ngay thành `SUCCESS` kèm mốc thời gian, nhiều pause song song, cuộc đua với waker (chỉ chuyển state một lần), 409 khi không pause, 409 khi chỉ có `LoopUntil` đang chờ (không ghi gì), và 404 với workspace khác.
 - Các bất biến ở §3.2.
 - Thời điểm kết thúc của attempt khi retry.
 - `root_only` và `parent`:
