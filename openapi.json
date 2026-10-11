@@ -6774,7 +6774,7 @@
             }
           },
           "409": {
-            "description": "The original policy no longer exists, so there is nothing to restore",
+            "description": "Nothing was changed: an object the migration created was edited or deleted since, or the original was edited or switched on (each change is named); or a profile became reachable from the migrated objects while undo waited for its locks (retry)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7834,6 +7834,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SeedResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The profile is not of type trino; the default set is Trino-shaped and its engine would reject it. Nothing is written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -37733,7 +37743,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Policy names the download now serves that it did not."
+            "description": "Policy names the download now serves that it did not. A compiled name\nembeds its grant or rule id (`perm-grant-<id>`), so when `committed` is\nfalse that id is the rolled-back write's and is never stored; the real\nmigration's compiled policies are named when written."
           }
         }
       },
@@ -38728,14 +38738,16 @@
             "items": {
               "type": "string",
               "format": "uuid"
-            }
+            },
+            "description": "The grants it became. When `committed` is false (a dry run, or a\nmigration the gate did not prove) these ids belong to a write that was\nrolled back and will never exist: a real migration assigns new ids when\nit writes. Use the count, not the ids, to describe a preview."
           },
           "rule_ids": {
             "type": "array",
             "items": {
               "type": "string",
               "format": "uuid"
-            }
+            },
+            "description": "The rules it became; the same caveat as `grant_ids`."
           }
         }
       },
@@ -39542,7 +39554,8 @@
           "permissions",
           "is_enabled",
           "description",
-          "labels"
+          "labels",
+          "managed_by"
         ],
         "properties": {
           "id": {
@@ -39584,6 +39597,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "managed_by": {
+            "type": "string",
+            "description": "Who owns the row (migration 0180): `\"operator\"`, `\"compiler\"` or\n`\"infra\"`. The server refuses edits, toggles and deletes of an\n`\"infra\"` row, so the profile page withholds those controls."
           }
         }
       },

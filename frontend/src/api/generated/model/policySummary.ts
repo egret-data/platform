@@ -20,4 +20,10 @@ export interface PolicySummary {
   is_enabled: boolean;
   description: string;
   labels: string[];
+  /**
+     * Who owns the row (migration 0180): `"operator"`, `"compiler"` or
+     * `"infra"`. The server refuses edits, toggles and deletes of an
+     * `"infra"` row, so the profile page withholds those controls.
+     */
+  managed_by: string;
 }

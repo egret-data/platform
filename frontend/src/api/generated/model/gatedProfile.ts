@@ -20,6 +20,11 @@ export interface GatedProfile {
   disagreements: number;
   /** Policy names (resource and tag) the download no longer serves. */
   removed_policies: string[];
-  /** Policy names the download now serves that it did not. */
+  /**
+     * Policy names the download now serves that it did not. A compiled name
+     * embeds its grant or rule id (`perm-grant-<id>`), so when `committed` is
+     * false that id is the rolled-back write's and is never stored; the real
+     * migration's compiled policies are named when written.
+     */
   added_policies: string[];
 }
