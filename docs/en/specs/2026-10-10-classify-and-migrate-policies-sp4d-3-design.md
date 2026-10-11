@@ -296,6 +296,16 @@ one — the "migrated from …" badge in the UI, and a mechanical rollback.
 true. This route exists **because** decision 2 chose disable over delete; under a delete it
 could not be written.
 
+(Task 7 fix round 1, the user's ruling of 2026-10-11.) Undo is guarded by content hashes:
+provenance records a SHA-256 of the canonical form (sorted keys, order-free principal lists) of
+every grant and rule the migration created and of the original (its body without `name`, plus
+its `enabled` column). Undo recomputes them in its own transaction and answers 409 naming each
+change — an object edited or deleted since, the original edited or switched back on — and
+writes nothing. Provenance is keyed by `policy_id`, so a renamed original is still migrated and
+is undone by its new name; deleting a migrated original is refused (undo first). The undo
+response states that every recompiled profile stays `generated`.
+
+
 ### Idempotency and refusal order
 
 A policy that already has a provenance row answers 409, never a duplicate. The order, over
