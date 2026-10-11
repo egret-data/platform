@@ -3198,7 +3198,7 @@ async fn migrate_service_policies(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such profile, or no migration on record for a named policy", body = ErrorBody),
-        (status = 409, description = "The original policy no longer exists, so there is nothing to restore", body = ErrorBody),
+        (status = 409, description = "Nothing was changed: an object the migration created was edited or deleted since, or the original was edited or switched on (each change is named); or a profile became reachable from the migrated objects while undo waited for its locks (retry)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

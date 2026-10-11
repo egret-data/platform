@@ -1203,3 +1203,102 @@ async fn a_profile_sharing_the_tag_service_is_gated_too() {
     assert_eq!(gated.len(), 3, "{body}");
     assert_eq!(body["committed"], false);
 }
+
+// ── final review I-2: a profile recompiled outside the gated set ─────────
+
+/// `write_grant` recomputes the profiles a grant reaches, inside the migration's
+/// transaction, AFTER the gate's `affected` set was computed. A catalog attached
+/// to another engine in between adds a profile that is recompiled but never
+/// gated. That was a `debug_assert!`, compiled out of release builds: the
+/// profile's new policy would commit ungated. It is now a refusal.
+///
+/// The race is forced deterministically: a trigger on `perm.grants`, scoped to
+/// this fixture's catalog, attaches the catalog to profile Q's engine when the
+/// FIRST migrated grant is inserted. The SECOND grant's `write_grant` then sees
+/// Q and recompiles it. Q is not in `affected`, so the gate alone would prove P
+/// and commit.
+#[tokio::test]
+async fn a_profile_recompiled_outside_the_gated_set_is_refused_and_nothing_is_written() {
+    let Some(f) = setup().await else { return };
+    let q = trino_profile_with_engine_and_config(&f.db, &f.policy, None, json!({})).await;
+    let q_engine: Uuid =
+        sqlx::query_scalar("SELECT id FROM engine_mgmt.engines WHERE authz_service_id = $1")
+            .bind(q)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("q engine");
+    let a = unique("alice reads sales");
+    let b = unique("alice reads hr");
+    let a_id = insert(
+        &f,
+        f.p,
+        &a,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+    let b_id = insert(
+        &f,
+        f.p,
+        &b,
+        "operator",
+        access_policy(&f.catalog, "hr", "alice"),
+    )
+    .await;
+
+    let tag = Uuid::new_v4().simple().to_string();
+    let func = format!("public.fw_attach_mid_migration_{tag}");
+    let trig = format!("fw_attach_mid_migration_{tag}");
+    // Audited: every interpolated value is a UUID this test minted.
+    let create_fn = format!(
+        "CREATE FUNCTION {func}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+           INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) \
+           VALUES ('{q_engine}'::uuid, NEW.catalog_id) ON CONFLICT DO NOTHING; \
+           RETURN NEW; END $$"
+    );
+    let create_trig = format!(
+        "CREATE TRIGGER {trig} AFTER INSERT ON perm.grants FOR EACH ROW \
+         WHEN (NEW.catalog_id = '{}'::uuid) EXECUTE FUNCTION {func}()",
+        f.catalog_id
+    );
+    for sql in [&create_fn, &create_trig] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
+            .execute(&f.db.pool)
+            .await
+            .unwrap_or_else(|e| panic!("{e}\n{sql}"));
+    }
+
+    let (status, body) = migrate(&f, f.p, &[&a, &b], false).await;
+
+    let drop_trig = format!("DROP TRIGGER {trig} ON perm.grants");
+    let drop_fn = format!("DROP FUNCTION {func}()");
+    for sql in [&drop_trig, &drop_fn] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
+            .execute(&f.db.pool)
+            .await
+            .unwrap_or_else(|e| panic!("{e}\n{sql}"));
+    }
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["committed"], false, "{body}");
+    let refusal = body["refusal"].as_str().expect("a refusal sentence");
+    assert!(
+        refusal.contains(&format!("recompiled profile(s) #{q},")) && refusal.contains("retry"),
+        "{refusal}"
+    );
+    // Nothing written, the attachment included (it ran in the rolled-back tx).
+    assert_eq!(grants_on_catalog(&f).await, 0);
+    assert!(provenance(&f, f.p).await.is_empty());
+    assert!(enabled(&f, a_id).await && enabled(&f, b_id).await);
+    let attached: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM registry.engine_catalog_attachments WHERE engine_id = $1",
+    )
+    .bind(q_engine)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("attachments");
+    assert_eq!(
+        attached, 0,
+        "the trigger's attachment rolled back with the migration"
+    );
+}

@@ -198,7 +198,12 @@ pub struct MigrateResponse {
 pub struct MigratedPolicy {
     pub policy_id: i64,
     pub policy_name: String,
+    /// The grants it became. When `committed` is false (a dry run, or a
+    /// migration the gate did not prove) these ids belong to a write that was
+    /// rolled back and will never exist: a real migration assigns new ids when
+    /// it writes. Use the count, not the ids, to describe a preview.
     pub grant_ids: Vec<Uuid>,
+    /// The rules it became; the same caveat as `grant_ids`.
     pub rule_ids: Vec<Uuid>,
 }
 
@@ -212,7 +217,10 @@ pub struct GatedProfile {
     pub disagreements: usize,
     /// Policy names (resource and tag) the download no longer serves.
     pub removed_policies: Vec<String>,
-    /// Policy names the download now serves that it did not.
+    /// Policy names the download now serves that it did not. A compiled name
+    /// embeds its grant or rule id (`perm-grant-<id>`), so when `committed` is
+    /// false that id is the rolled-back write's and is never stored; the real
+    /// migration's compiled policies are named when written.
     pub added_policies: Vec<String>,
 }
 
@@ -936,6 +944,15 @@ pub(crate) async fn migrate_in_tx(
         }
         response.policies.push(migrated);
     }
+    // Final review I-2: every profile a recompile wrote must be one the gate
+    // evaluates. `write_grant`/`write_rule` recompute their own service set,
+    // and a catalog attached concurrently since `affected` was computed adds a
+    // profile the gate never reads. A `debug_assert!` here was compiled out of
+    // release builds, which would commit that profile's new policy ungated.
+    if let Some(sentence) = ungated_recompile(&recompiled, &affected) {
+        response.refusal = Some(sentence);
+        return Ok(response);
+    }
 
     // ── step 3: switch every original off (the column) ────────────────────
     for m in &response.policies {
@@ -993,11 +1010,6 @@ pub(crate) async fn migrate_in_tx(
             Err(e) => return Err(PermHttpError::db(e)),
         }
     }
-    // Review M-7: every profile a recompile wrote is one the gate evaluates.
-    debug_assert!(
-        recompiled.iter().all(|s| affected.binary_search(s).is_ok()),
-        "recompiled {recompiled:?} ⊄ affected {affected:?}"
-    );
     response.compile = CompileResponse::from_summaries(recompiled, &summaries);
 
     // ── step 5: re-read every affected download and gate them all ─────────
@@ -1246,6 +1258,27 @@ async fn read_undo_state(
     })
 }
 
+/// The refusal when a recompile wrote a profile outside the gated set (final
+/// review I-2), or `None` when `recompiled ⊆ affected`. Pure, so the refusal
+/// can be driven directly; its call site in [`migrate_in_tx`] is pinned by a
+/// route test that attaches a catalog mid-transaction.
+fn ungated_recompile(recompiled: &[i64], affected: &[i64]) -> Option<String> {
+    let missed: Vec<String> = recompiled
+        .iter()
+        .filter(|id| !affected.contains(id))
+        .map(|id| format!("#{id}"))
+        .collect();
+    if missed.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "this migration recompiled profile(s) {}, which the equivalence gate does not \
+         evaluate: a catalog was attached to an engine while the migration ran. Nothing was \
+         written; retry the migration.",
+        missed.join(", ")
+    ))
+}
+
 fn undo_conflict(changed: &[String]) -> PermHttpError {
     PermHttpError::Conflict(format!(
         "undo refused, nothing was changed: {}. Undo deletes exactly what the migration \
@@ -1434,6 +1467,18 @@ mod tests {
         let after: BTreeMap<i64, ServicePolicySet> = BTreeMap::new();
         let err = build_cases(&[1], &before, &after, &["orig".into()], &[1]).unwrap_err();
         assert!(err.contains("not read on both sides"), "{err}");
+    }
+
+    #[test]
+    fn a_recompiled_profile_outside_the_gated_set_is_refused() {
+        assert_eq!(ungated_recompile(&[1, 3], &[1, 2, 3]), None);
+        assert_eq!(ungated_recompile(&[], &[1]), None);
+        let refused = ungated_recompile(&[1, 4, 7], &[1, 2, 3]).expect("refused");
+        assert!(
+            refused.contains("recompiled profile(s) #4, #7,"),
+            "{refused}"
+        );
+        assert!(refused.contains("Nothing was written; retry"), "{refused}");
     }
 
     #[test]
