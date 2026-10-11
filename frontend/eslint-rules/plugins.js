@@ -30,4 +30,8 @@ export const a11yRules = {
   ...a11yRulesFromFork,
   // Off by the user's ruling of 2026-10-10: a review rule, FE-A11Y-6.
   "jsx-a11y/no-autofocus": "off",
+  // Still an error, but `role="list"` on a `<ul>`/`<ol>` is allowed: Safari
+  // (VoiceOver) drops the implicit list role once CSS removes list styling,
+  // which the Tailwind reset does to every list (FE-A11Y-1; W7a final review).
+  "jsx-a11y/no-redundant-roles": ["error", { ul: ["list"], ol: ["list"] }],
 };

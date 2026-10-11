@@ -268,6 +268,46 @@ async fn app_with(
     .await
 }
 
+/// The real Cedar PDP, except that deciding `action` fails with an internal
+/// error -- a PDP outage on that one decision (W7a Task 5, `can_manage`).
+struct FailingOn {
+    inner: egret_auth::pdp::CedarPdp,
+    action: &'static str,
+}
+
+#[async_trait::async_trait]
+impl egret_core::authz::Pdp for FailingOn {
+    async fn authorize(
+        &self,
+        subject: &egret_core::authz::Subject,
+        action: &str,
+        resource: &egret_core::authz::Resource,
+    ) -> egret_core::Result<egret_core::authz::Decision> {
+        if action == self.action {
+            return Err(egret_core::Error::Internal(anyhow::anyhow!(
+                "test PDP outage on {action}"
+            )));
+        }
+        self.inner.authorize(subject, action, resource).await
+    }
+}
+
+/// [`app`], whose PDP fails whenever it is asked about `action`.
+pub async fn app_with_failing_pdp_action(db: &Db, action: &'static str) -> App {
+    let inner = egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+        .await
+        .expect("build CedarPdp");
+    app_with_dbs_and_pdp(
+        db,
+        db,
+        Default::default(),
+        egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+        egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
+        std::sync::Arc::new(FailingOn { inner, action }),
+    )
+}
+
 async fn app_with_dbs(
     db: &Db,
     workflow_db: &Db,
@@ -276,15 +316,35 @@ async fn app_with_dbs(
     upload_total_timeout: std::time::Duration,
     export_total_timeout: std::time::Duration,
 ) -> App {
-    let sessions = egret_auth::session::SessionService::new(
-        db.clone(),
-        chrono::Duration::hours(24),
-        chrono::Duration::minutes(60),
-    );
     let pdp: std::sync::Arc<dyn egret_core::authz::Pdp> = std::sync::Arc::new(
         egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
             .await
             .expect("build CedarPdp"),
+    );
+    app_with_dbs_and_pdp(
+        db,
+        workflow_db,
+        scripts,
+        upload_idle_timeout,
+        upload_total_timeout,
+        export_total_timeout,
+        pdp,
+    )
+}
+
+fn app_with_dbs_and_pdp(
+    db: &Db,
+    workflow_db: &Db,
+    scripts: egret_workflow::scripts::ScriptSettings,
+    upload_idle_timeout: std::time::Duration,
+    upload_total_timeout: std::time::Duration,
+    export_total_timeout: std::time::Duration,
+    pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+) -> App {
+    let sessions = egret_auth::session::SessionService::new(
+        db.clone(),
+        chrono::Duration::hours(24),
+        chrono::Duration::minutes(60),
     );
     let (audit_sink, audit_rx) = egret_audit::AuditSink::new(16);
     let state = egret_workflow::WorkflowState {

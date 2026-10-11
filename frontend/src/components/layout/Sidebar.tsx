@@ -2,9 +2,9 @@ import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
   Activity, ChevronDown, ChevronRight, Compass, EyeOff,
-  FolderKanban, Gauge, HardDrive, KeyRound, Library, ListChecks, type LucideIcon,
+  FolderKanban, Gauge, HardDrive, History, KeyRound, Library, ListChecks, type LucideIcon,
   PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Search, Server, Settings, Share2, ShieldCheck,
-  Tags, UserCheck, UserCog, Users, UsersRound,
+  Tags, UserCheck, UserCog, Users, UsersRound, Workflow,
 } from "lucide-react";
 import {
   Tooltip,
@@ -44,6 +44,17 @@ const EXPLORE_GROUPS: NavGroup[] = [
       { label: "Endpoints", icon: Plug, to: "data-api/endpoints", feature: "data_api" },
       { label: "Clients", icon: KeyRound, to: "data-api/clients", feature: "data_api" },
       { label: "Activity", icon: Activity, to: "data-api/activity", feature: "data_api" },
+    ],
+  },
+  {
+    heading: "Workflows",
+    // Its own group, like Data API and for the same reason: a module with
+    // several sections. Every item carries `feature: "workflows"`, so the
+    // whole group hides without the entitlement (spec §3). Not in
+    // `EXPLORE_MODULES`, which also decides the workspace's landing page.
+    items: [
+      { label: "Flows", icon: Workflow, to: "workflows/flows", feature: "workflows" },
+      { label: "Executions", icon: History, to: "workflows/executions", feature: "workflows" },
     ],
   },
   {

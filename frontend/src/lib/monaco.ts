@@ -11,9 +11,13 @@
  * Module evaluation is strictly before the lazy component can render, and
  * `init()` is called on mount, so the ordering here is deterministic.
  */
-import ReactEditor, { loader } from "@monaco-editor/react";
+import ReactEditor, { DiffEditor, loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor/editor";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
+// `monaco-yaml`'s language service. Its worker imports
+// `monaco-editor/esm/vs/editor/editor.worker.js`, which monaco 0.56's exports
+// map cannot resolve; `vite.config.ts` aliases it to the same file.
+import YamlWorker from "monaco-yaml/yaml.worker?worker";
 
 // Editor features (find/replace, folding, bracket matching, hover, context menu,
 // multi-cursor, …). `features/register.all` is the package's own list, but it
@@ -33,17 +37,26 @@ import "monaco-editor/editor/contrib/semanticTokens/browser/documentSemanticToke
 import "monaco-editor/editor/contrib/suggest/browser/suggestController";
 import "monaco-editor/editor/common/standaloneStrings";
 
-// Only the two languages egret edits: SQL (SQL Lab, Data API Query, dataset
-// detail) and Python (Data API Query/response scripting). The full entry
-// registers ~80 more plus the TypeScript, CSS, HTML and JSON language
-// services, which cost ~10MB of dist for nothing here.
+// Only the three languages egret edits: SQL (SQL Lab, Data API Query, dataset
+// detail), Python (Data API Query/response scripting) and YAML (the flow
+// editor; this is its highlighting, `monaco-yaml` adds the language service).
+// The full entry registers ~80 more plus the TypeScript, CSS, HTML and JSON
+// language services, which cost ~10MB of dist for nothing here.
 import "monaco-editor/languages/definitions/sql/register";
 import "monaco-editor/languages/definitions/python/register";
+import "monaco-editor/languages/definitions/yaml/register";
 
-self.MonacoEnvironment = { getWorker: () => new EditorWorker() };
+// `monaco-yaml` asks for its worker by the label `yaml`
+// (`components/workflows/editor/monacoYaml.ts` configures it).
+self.MonacoEnvironment = {
+  getWorker: (_moduleId: string, label: string) => (label === "yaml" ? new YamlWorker() : new EditorWorker()),
+};
 
 loader.config({ monaco });
 
 /** `React.lazy` resolves a module's default export, so this IS the component
  *  `MonacoEditor` renders once the chunk has landed. */
 export default ReactEditor;
+
+/** The diff editor (a flow's Revisions tab), reached through the same lazy import as the editor. */
+export { DiffEditor };

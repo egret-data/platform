@@ -20,6 +20,11 @@ pub use input::{DependsOn, Input, InputType};
 pub use property::Property;
 pub use state::State;
 pub(crate) use task::canonical_flow_type;
+/// The flowables' typed structs, for `spec::schema`'s property measurement.
+#[cfg(test)]
+pub(crate) use task::{
+    AllowFailure, Dag, If, Loop, Parallel, Sequential, Switch, WorkingDirectory,
+};
 pub use task::{
     CheckFrequency, LoopUntil, Pause, Retry, RetryBehavior, RetryCommon, Subflow, Task, TaskKind,
 };

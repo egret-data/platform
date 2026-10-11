@@ -80,7 +80,7 @@ const NOT_POSITIVE: &str = "duration: must be a positive duration";
 /// `Duration.parse` over the subset a flow can write.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-struct Spec {
+pub(crate) struct Spec {
     duration: Option<Property<String>>,
 }
 

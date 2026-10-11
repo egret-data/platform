@@ -24,6 +24,19 @@ export interface FlowListItemDto {
   live_version_id?: string | null;
   /** @nullable */
   created_by?: string | null;
+  /**
+     * The creator's display name: the profile name, else the email. Null
+     * when `created_by` is null or the user no longer exists (W7a spec §7.4).
+     * @nullable
+     */
+  created_by_name?: string | null;
+  /**
+     * The flow's highest version number; null when it has none. Versions
+     * are snapshots to compare and restore: executions run the saved draft
+     * (W7a spec §4, §5.3).
+     * @nullable
+     */
+  latest_version?: number | null;
   created_at: string;
   updated_at: string;
 }

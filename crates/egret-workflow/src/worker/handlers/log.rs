@@ -18,7 +18,7 @@ pub const TYPE_ID: &str = "io.kestra.plugin.core.log.Log";
 /// a real `Property<Level>` defaulting to `INFO`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-struct Spec {
+pub(crate) struct Spec {
     message: Option<serde_json::Value>,
     level: Option<Property<String>>,
 }

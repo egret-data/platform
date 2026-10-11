@@ -7,6 +7,7 @@
 
 mod parse;
 pub mod registry;
+pub mod schema;
 pub(crate) mod validate;
 
 pub use parse::{parse, ParseError};

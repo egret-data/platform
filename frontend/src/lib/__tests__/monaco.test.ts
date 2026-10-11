@@ -46,6 +46,7 @@ vi.mock("monaco-editor/editor/contrib/suggest/browser/suggestController", () => 
 vi.mock("monaco-editor/editor/common/standaloneStrings", () => ({}));
 vi.mock("monaco-editor/languages/definitions/sql/register", () => ({}));
 vi.mock("monaco-editor/languages/definitions/python/register", () => ({}));
+vi.mock("monaco-editor/languages/definitions/yaml/register", () => ({}));
 
 const SRC_DIR = resolve(__dirname, "../..");
 const SRC = resolve(SRC_DIR, "lib/monaco.ts");
@@ -91,14 +92,37 @@ describe("the Monaco loader setup module", () => {
     expect(typeof env?.getWorker).toBe("function");
   });
 
-  it("registers exactly the two languages the app edits", () => {
+  it("registers exactly the three languages the app edits", () => {
     // The full `monaco-editor` entry registers ~80 languages plus the TypeScript, CSS, HTML
     // and JSON language services, which cost ~14MB of dist here for nothing. Dropping a
     // language that IS used is the silent half of that trade: SQL Lab and the Data API Query
-    // editor need `sql`, notebook code cells need `python`.
+    // editor need `sql`, notebook code cells need `python`, the flow editor needs `yaml`.
     const src = readFileSync(SRC, "utf8");
-    expect(src).toContain('import "monaco-editor/languages/definitions/sql/register";');
-    expect(src).toContain('import "monaco-editor/languages/definitions/python/register";');
+    const registered = [...src.matchAll(/^import "monaco-editor\/languages\/definitions\/(\w+)\/register";$/gm)]
+      .map((m) => m[1]);
+    expect(registered).toEqual(["sql", "python", "yaml"]);
+  });
+
+  it("hands monaco-yaml its own worker and every other label the editor worker", async () => {
+    // jsdom has no Worker; record what each `?worker` constructor asks for instead.
+    const urls: string[] = [];
+    vi.stubGlobal("Worker", class {
+      constructor(url: URL | string) { urls.push(String(url)); }
+    });
+    try {
+      await import("../monaco");
+      const env = (self as unknown as { MonacoEnvironment: { getWorker: (id: string, label: string) => unknown } })
+        .MonacoEnvironment;
+      env.getWorker("x", "yaml");
+      env.getWorker("x", "editorWorkerService");
+      env.getWorker("x", "json");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(urls).toHaveLength(3);
+    expect(urls[0]).toMatch(/monaco-yaml\/yaml\.worker/);
+    expect(urls[1]).toMatch(/monaco-editor\/esm\/vs\/editor\/editor\.worker/);
+    expect(urls[2]).toBe(urls[1]);
   });
 
   it("carries every editor contribution the full monaco entry has", () => {

@@ -26,7 +26,26 @@ export interface FlowDto {
   live_version_id?: string | null;
   /** @nullable */
   created_by?: string | null;
+  /**
+     * The creator's display name: the profile name, else the email. Null
+     * when `created_by` is null or the user no longer exists (W7a spec §7.4).
+     * @nullable
+     */
+  created_by_name?: string | null;
+  /**
+     * The flow's highest version number; null when it has none. Versions
+     * are snapshots to compare and restore: executions run the saved draft
+     * (W7a spec §4, §5.3).
+     * @nullable
+     */
+  latest_version?: number | null;
   created_at: string;
   updated_at: string;
   validation: ValidationReportDto;
+  /**
+     * Whether the caller may save, publish, run and delete this flow: they
+     * hold `workflow:manage` in this workspace. An editor opens read-only
+     * when this is false; every mutating route still checks for itself.
+     */
+  can_manage: boolean;
 }

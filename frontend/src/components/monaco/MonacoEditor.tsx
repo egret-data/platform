@@ -1,5 +1,5 @@
 import React, { Suspense, lazy } from "react";
-import type { EditorProps } from "@monaco-editor/react";
+import type { DiffEditorProps, EditorProps } from "@monaco-editor/react";
 
 /**
  * The single lazy boundary for Monaco, and the only module allowed to reach
@@ -22,6 +22,8 @@ import type { EditorProps } from "@monaco-editor/react";
  * that renders an editor, so the component tests stub this module instead.
  */
 const Editor = lazy(() => import("@/lib/monaco"));
+/** Monaco's diff editor, from the same chunk: the same `import()`, so no second Monaco. */
+const DiffEditor = lazy(() => import("@/lib/monaco").then((m) => ({ default: m.DiffEditor })));
 
 /**
  * Catches a failed chunk fetch so it costs the editor, not the page.
@@ -75,6 +77,21 @@ export default function MonacoEditor(props: EditorProps) {
     <MonacoErrorBoundary>
       <Suspense fallback={<div className="h-full w-full" aria-hidden="true" />}>
         <Editor {...props} />
+      </Suspense>
+    </MonacoErrorBoundary>
+  );
+}
+
+/**
+ * Monaco's diff editor behind the same lazy boundary and error boundary as
+ * {@link MonacoEditor}. Components import this, never `DiffEditor` from
+ * `@monaco-editor/react`, for the same reasons.
+ */
+export function MonacoDiffEditor(props: DiffEditorProps) {
+  return (
+    <MonacoErrorBoundary>
+      <Suspense fallback={<div className="h-full w-full" aria-hidden="true" />}>
+        <DiffEditor {...props} />
       </Suspense>
     </MonacoErrorBoundary>
   );

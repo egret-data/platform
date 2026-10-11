@@ -28118,6 +28118,87 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/flows/validate": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "validate_unsaved_flow",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidateFlowRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The validation report of a source that belongs to no saved flow yet (the create page). The same report `POST /flows/{id}/validate` gives for the same source; nothing is written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationReportDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The YAML does not parse; the message carries the line and column",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/flows/{id}": {
       "get": {
         "tags": [
@@ -28210,6 +28291,8 @@
         "tags": [
           "workflow"
         ],
+        "summary": "Replace a flow's draft.",
+        "description": "With `if_updated_at`, the save happens only if the draft is still the one the editor opened; otherwise it is refused with\n409 and nothing is written. Saving and publishing both move `updated_at`,\nso after a publish the editor reads the draft again before saving.",
         "operationId": "update_flow",
         "parameters": [
           {
@@ -28302,7 +28385,7 @@
             }
           },
           "409": {
-            "description": "Another flow already claims this namespace and id in the workspace",
+            "description": "Another flow already claims this namespace and id in the workspace, or `if_updated_at` was sent and the draft was changed since (`code` is `draft_changed`; the other conflict carries no code); nothing was written",
             "content": {
               "application/json": {
                 "schema": {
@@ -30924,6 +31007,70 @@
           },
           "503": {
             "description": "Internal storage is not configured, or the database is unavailable; the request can be retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/schema": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "get_flow_schema",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The JSON Schema (draft 2020-12) of one flow document as this workspace may publish it: Kestra's definitions filtered to the types and properties egret honours, egret's own types, and the script and plugin types only when this workspace's features allow them. Carries a strong `ETag` and `Cache-Control: private, no-cache`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "`If-None-Match` names the current `ETag`"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
             "content": {
               "application/json": {
                 "schema": {
@@ -37147,7 +37294,8 @@
           "state",
           "created_at",
           "updated_at",
-          "validation"
+          "validation",
+          "can_manage"
         ],
         "properties": {
           "id": {
@@ -37190,6 +37338,21 @@
             ],
             "format": "uuid"
           },
+          "created_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The creator's display name: the profile name, else the email. Null\nwhen `created_by` is null or the user no longer exists (W7a spec §7.4)."
+          },
+          "latest_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The flow's highest version number; null when it has none. Versions\nare snapshots to compare and restore: executions run the saved draft\n(W7a spec §4, §5.3)."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -37200,6 +37363,10 @@
           },
           "validation": {
             "$ref": "#/components/schemas/ValidationReportDto"
+          },
+          "can_manage": {
+            "type": "boolean",
+            "description": "Whether the caller may save, publish, run and delete this flow: they\nhold `workflow:manage` in this workspace. An editor opens read-only\nwhen this is false; every mutating route still checks for itself."
           }
         }
       },
@@ -37249,6 +37416,21 @@
             ],
             "format": "uuid"
           },
+          "created_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The creator's display name: the profile name, else the email. Null\nwhen `created_by` is null or the user no longer exists (W7a spec §7.4)."
+          },
+          "latest_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The flow's highest version number; null when it has none. Versions\nare snapshots to compare and restore: executions run the saved draft\n(W7a spec §4, §5.3)."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -37295,6 +37477,13 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "created_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The publisher's display name: the profile name, else the email. Null\nwhen `created_by` is null or the user no longer exists (W7a spec §7.4)."
           },
           "created_at": {
             "type": "string",
@@ -42985,6 +43174,14 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "if_updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The draft's `updated_at` as the editor last read it (RFC 3339, the\nexact string `FlowDto.updated_at` carried -- microseconds included).\nWhen present and no longer the row's, the save is refused with 409\nand nothing is written; absent, the save is unconditional. Publishing\nalso moves `updated_at`."
           }
         }
       },

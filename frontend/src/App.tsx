@@ -1,3 +1,4 @@
+import { lazy } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import {
   BrowserRouter,
@@ -29,6 +30,26 @@ import { queryClient } from "@/api/queryClient";
 import { RequireFeature } from "@/components/explore/RequireFeature";
 import { exploreRedirectTo, useDefaultExplorePath } from "@/hooks/useWorkspaceFeatures";
 import PrintObject from "@/routes/print/PrintObject";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { LazyRouteArea } from "@/components/layout/LazyRouteArea";
+
+/**
+ * The Workflows area, code-split (FE-ROUTE-2): the first lazy route area in
+ * this file. Nothing under `routes/workflows/` or `components/workflows/` may
+ * be imported statically from here or from anything the entry chunk reaches;
+ * `npm run test:bundle:workflows` (`scripts/assert-workflows-lazy.mjs`)
+ * fails the build's check if it is.
+ */
+const WorkflowsRoutes = lazy(() => import("@/routes/workflows/WorkflowsRoutes"));
+
+/** What the Workflows area shows while its chunk loads: a list skeleton in the page frame. */
+function WorkflowsFallback() {
+  return (
+    <div className="p-4" data-testid="workflows-loading">
+      <ListSkeleton cols={4} />
+    </div>
+  );
+}
 
 function LoginRoute() {
   const { me, isLoading } = useAuth();
@@ -261,6 +282,16 @@ function ExploreRoutes() {
             element={
               <RequireFeature feature="alerts">
                 <ScheduleDetail />
+              </RequireFeature>
+            }
+          />
+          <Route
+            path="workflows/*"
+            element={
+              <RequireFeature feature="workflows">
+                <LazyRouteArea area="Workflows" fallback={<WorkflowsFallback />}>
+                  <WorkflowsRoutes />
+                </LazyRouteArea>
               </RequireFeature>
             }
           />

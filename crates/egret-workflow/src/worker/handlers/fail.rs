@@ -22,7 +22,7 @@ const CONDITIONAL_MESSAGE: &str = "Fail on a condition";
 /// (`:127`).
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-struct Spec {
+pub(crate) struct Spec {
     condition: Option<Property<String>>,
     #[serde(rename = "errorMessage")]
     error_message: Option<Property<String>>,
