@@ -7345,7 +7345,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input, missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter policy that would be served alongside another one selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)",
+            "description": "Invalid editor input, missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7385,7 +7385,7 @@
             }
           },
           "409": {
-            "description": "A policy with this name already exists, or the target profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
+            "description": "A policy with this name already exists, the target profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or a mask/row-filter policy would be served at the same priority as another one that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the body names both and suggests Override)",
             "content": {
               "application/json": {
                 "schema": {
@@ -8089,7 +8089,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input, missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter body that would be served alongside another policy selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)",
+            "description": "Invalid editor input, missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)",
             "content": {
               "application/json": {
                 "schema": {
@@ -8129,7 +8129,7 @@
             }
           },
           "409": {
-            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
+            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the mask/row-filter body would be served at the same priority as another policy that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the body names both and suggests Override)",
             "content": {
               "application/json": {
                 "schema": {

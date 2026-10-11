@@ -66,10 +66,12 @@
 //!
 //! # The collision key, spelled one-for-one with the evaluator's own band
 //!
-//! Two policies collide when they land in the SAME evaluator band for the SAME
-//! request, which `egret_ranger_eval` spells as `(policy_priority, has_deny)`
-//! within one `policyType` list. This module's key is
-//! `(service, policy_type, has_deny, policy_priority, resources)`:
+//! Two policies collide when they land in the SAME evaluator band and MAY both
+//! decide one request, which `egret_ranger_eval` spells as `(policy_priority,
+//! has_deny)` within one `policyType` list. This module's band key is
+//! `(service, policy_type, has_deny, policy_priority)`, and inside a band every
+//! pair is compared with [`resources_may_intersect`] (see "Why different
+//! resources are refused too" below):
 //!
 //! * `policy_type` ∈ {1, 2} only. `RangerPolicyRepository.init` files policies
 //!   into three disjoint evaluator lists by the raw code, so a mask can never
@@ -90,39 +92,65 @@
 //!   (`default = "default_true"` / `null_as_true`, `null_as_default`), because
 //!   two guards that must agree written to different shapes has produced a
 //!   defect in this programme five times.
-//! * `resources` is canonicalised by [`canonical_resources`]: levels sorted by
+//! * `resources` are read through [`canonical_resources`]: levels sorted by
 //!   name, values sorted and de-duplicated (Ranger builds one matcher per value
 //!   and matches if ANY matches, so their order cannot matter), and a level
 //!   whose `values` is empty treated as ABSENT, because
 //!   `RangerAbstractResourceMatcher.init()` drops an empty policy value before
 //!   building a matcher for it and a level with no matchers is `isMatchAny` —
-//!   the same reading `CompileError::EmptyScopeLevel` rests on. Treating the
-//!   two as equal is the fail-CLOSED direction (it finds more collisions);
-//!   nothing this compiler emits can reach it anyway, since
-//!   `ranger_json::resources_object` drops empty levels and migration `0178`
-//!   forbids an empty scope level upstream of it.
+//!   the same reading `CompileError::EmptyScopeLevel` rests on. An absent level
+//!   may-intersect anything, which is the fail-CLOSED direction (it finds more
+//!   collisions); nothing this compiler emits can reach the empty case anyway,
+//!   since `ranger_json::resources_object` drops empty levels and migration
+//!   `0178` forbids an empty scope level upstream of it.
 //!
-//! # Why this is NARROWER than the evaluator's refusal, deliberately
+//! # Why different resources are refused too (SP4d-4 Part A)
 //!
-//! `EvalOrderAmbiguous` is raised per REQUEST: the evaluator refuses whenever
-//! two policies in one band both DECIDE the request in front of it, whether or
-//! not their resource maps are equal. A mask on `cat.sch.*.*` and a mask on
-//! `cat.sch.tbl.col` both decide a request for that column, and the evaluator
-//! refuses that pair too.
+//! Until SP4d-4 the key above carried `canonical_resources`, so two policies
+//! collided only when their resource maps were EQUAL, on the argument that a
+//! mask on `cat.sch.*.col` and a mask on `cat.sch.tbl.col` carry different
+//! specificity, that `getEvalOrder()` separates them, and that the engine's
+//! choice is therefore "determined by the artifact". The first two halves are
+//! true. The conclusion a steward would draw from them is not:
 //!
-//! This guard does **not** refuse it, and that is not an oversight. Those two
-//! policies carry DIFFERENT resource specificity, so `getEvalOrder()` separates
-//! them and the engine's choice is determined by the artifact — the evaluator
-//! refuses because it does not reproduce that score, which is a modelling gap
-//! in the reader, not a defect in the thing written. Refusing it here would
-//! make an ordinary, correct configuration (a schema-wide mask plus a
-//! column-specific one) unwritable.
+//! * **The arithmetic.** `RangerOptimizedPolicyEvaluator.computeEvalOrder()`,
+//!   read at both deployed tags (`release-ranger-2.5.0`, lines 55 and 193-228;
+//!   byte-identical arithmetic at `release-ranger-2.8.0`): `evalOrder = 10000 −
+//!   min(100, Σ resource discounts) − principal discount − access discount −
+//!   condition discount`, where a level whose values contain the match-any `*`
+//!   earns a discount of **25**, a level with any other `*` earns 10, and `?`
+//!   earns 5. A level the policy does not name earns NO discount.
+//! * **The sort.** `RangerPolicyEvaluator.PolicyEvalOrderComparator` (lines
+//!   203-222 at both tags) orders `evalOrder` **ascending** — the policy with
+//!   MORE wildcard values sorts FIRST.
+//! * **The arbitration.** Masks and row filters are arbitrated with `>=`
+//!   (`egret_ranger_eval::eval`, the mask/row-filter walk), so the FIRST
+//!   matching evaluator in a band is final.
+//! * **The consequence.** For two compiled rules every other discount is equal
+//!   (both carry the `public` group, `select` only, no conditions), so the
+//!   BROADER policy wins, and the narrower one never applies to anyone the
+//!   broader one's items cover. A steward who writes `(sales, *, email) → MASK`
+//!   and `(sales, orders, email) → MASK_NULL` gets `MASK` on `orders.email`.
 //!
-//! ⚠ The consequence, stated rather than hidden: **egret can still emit an
-//! artifact its own evaluator declines.** The two must not be "tidied" into one
-//! predicate — they answer different questions, and the day somebody reproduces
-//! `computeEvalOrder()` the evaluator's refusal shrinks and this one does not
-//! move at all.
+//! Measured, not only read: `docs/en/plans/2026-10-11-sp4d-4-task1-levels-
+//! result.md` §4, pin 1 — on both jars and under both service-defs the broad
+//! policy's mask is served, robust to swapping the two policies' names, ids,
+//! download order and mask types. "Broader" there means more match-any `*`
+//! values with equal principal/access/condition discounts — NOT "fewer levels
+//! named", since an omitted level earns no discount (§4, §8 item 1).
+//!
+//! So the outcome of such a pair is decided by a score the steward did not
+//! author and that inverts what the configuration reads as. The key no longer
+//! carries the resources: inside one band, every pair whose resources
+//! [`resources_may_intersect`] and whose decisive items differ is refused.
+//! `resources_may_intersect` over-approximates (a wildcard it does not
+//! evaluate, or an `isExcludes` level, is ASSUMED to intersect) — the
+//! fail-closed direction for a refusal.
+//!
+//! ⚠ What is still true, stated rather than hidden: **egret can still emit an
+//! artifact its own evaluator declines.** `EvalOrderAmbiguous` is raised for an
+//! AGREEING tie too (see the next section), which this guard admits. The two
+//! must not be "tidied" into one predicate — they answer different questions.
 //!
 //! # Why agreeing ties are admitted
 //!
@@ -301,58 +329,92 @@ pub struct AmbiguousArbitration {
     /// same sentence whichever order the caller iterated in.
     pub first: String,
     pub second: String,
-    /// The resource both policies select, rendered from the canonical key so
-    /// the message and the comparison cannot describe different things.
-    pub resource: String,
+    /// Where the two may both decide one request. The rendered INTERSECTION of
+    /// the two resource maps where this module can compute it exactly (every
+    /// level is named by one side only, is the same on both sides, or is a
+    /// literal value set on both), else both maps' renderings joined by
+    /// `" ∩ "` — so the sentence never names a coordinate narrower than what
+    /// was compared.
+    pub coordinate_hint: String,
     pub priority: i64,
+    /// The `policy.authz_services` id the pair is served under (one download).
+    pub service: i64,
 }
+
+/// The remedy only the policy editor can offer: a hand-written policy can
+/// author its priority (`isOverride` → `policyPriority 1`, `ranger_json`), a
+/// compiled rule cannot.
+const EDITOR_OVERRIDE_REMEDY: &str =
+    ", or set Override on the one that should win (an override is evaluated first)";
 
 impl AmbiguousArbitration {
     /// **The refusal, and it is the same sentence from every write path** — one
     /// message, so the surfaces cannot describe the same state differently.
     ///
-    /// It names both policies, the resource, the priority, what they disagree
-    /// about, and the remedy. It deliberately does NOT say the outcome is
-    /// random: see this module's doc on what the comparator actually does. What
-    /// it says is that the artifact does not express which rule wins, which is
-    /// true under every reading of the jar and is the part a steward can fix.
+    /// It names both policies, where they may both decide a request, the
+    /// priority, what they disagree about, and the remedy. It deliberately does
+    /// NOT say the outcome is random: see this module's doc on what the
+    /// comparator actually does. What it says is that the order the engine uses
+    /// is not something either policy expresses, which is true under every
+    /// reading of the jar and is the part a steward can fix.
     ///
     /// Asserted by substring rather than against a golden string: a golden copy
     /// of the sentence is a second place to edit it.
     pub fn refusal(&self) -> String {
+        self.sentence("")
+    }
+
+    /// [`Self::refusal`] with the one remedy only the policy editor has —
+    /// setting Override on the policy that should win.
+    pub fn editor_refusal(&self) -> String {
+        self.sentence(EDITOR_OVERRIDE_REMEDY)
+    }
+
+    fn sentence(&self, extra_remedy: &str) -> String {
         let Self {
             arbitrated,
             first,
             second,
-            resource,
+            coordinate_hint,
             priority,
+            service: _,
         } = self;
         let noun = arbitrated.noun();
         let disagreement = arbitrated.disagreement();
         format!(
-            "two {noun} policies would be served at policyPriority {priority} selecting the same \
-             resource ({resource}) with {disagreement}: {first:?} and {second:?}. Ranger \
-             arbitrates {noun}s with `>=`, so the FIRST evaluator in its band is final, and \
-             within a band two policies on one resource score the same `getEvalOrder()` — which \
-             one applies falls through to a tie-break this artifact does not express (the policy \
-             name, i.e. a rule's uuid). Narrow one of the two so they no longer select the same \
-             resource, or delete one, or make them agree."
+            "two {noun} policies would be served at policyPriority {priority} that may both \
+             decide one request ({coordinate_hint}) with {disagreement}: {first:?} and \
+             {second:?}. Ranger arbitrates {noun}s with `>=`, so the FIRST evaluator in its band \
+             is final, and within a band the order is `getEvalOrder()` (a wildcard-count score: \
+             with equal items the broader policy runs first and wins wherever both match) and \
+             then the policy name, i.e. a rule's uuid — neither of which says which of the two \
+             should win. Narrow one of the two so they no longer select a common resource, or \
+             delete one, or make them agree{extra_remedy}."
         )
     }
 }
 
-/// The canonical form of a policy's `resources` map — the collision key's
-/// resource half, and the thing the refusal renders.
+/// One resource level as compared: sorted, de-duplicated values, then
+/// `isExcludes`, then `isRecursive`.
+type Level = (Vec<String>, bool, bool);
+
+/// The canonical form of a policy's `resources` map — what the comparison
+/// reads and what the refusal renders.
 ///
 /// Levels sorted by name; each level's values sorted and de-duplicated (Ranger
 /// builds one matcher per value and matches if ANY matches); a level whose
 /// `values` is empty or absent treated as ABSENT, because
 /// `RangerAbstractResourceMatcher.init()` drops an empty policy value and a
-/// level with no matchers is `isMatchAny`. `isExcludes` and `isRecursive` are
-/// part of the key because they change what the level matches.
-fn canonical_resources(body: &Value) -> BTreeMap<String, (Vec<String>, bool, bool)> {
+/// level with no matchers is `isMatchAny`.
+fn canonical_resources(body: &Value) -> BTreeMap<String, Level> {
+    canonical_resource_map(body.get("resources"))
+}
+
+/// [`canonical_resources`] over a bare `resources` map (or an
+/// `additionalResources` entry).
+fn canonical_resource_map(resources: Option<&Value>) -> BTreeMap<String, Level> {
     let mut out = BTreeMap::new();
-    let Some(obj) = body.get("resources").and_then(Value::as_object) else {
+    let Some(obj) = resources.and_then(Value::as_object) else {
         return out;
     };
     for (level, spec) in obj {
@@ -380,16 +442,16 @@ fn canonical_resources(body: &Value) -> BTreeMap<String, (Vec<String>, bool, boo
     out
 }
 
-/// `canonical_resources` rendered for a human: `catalog=[wh] table=[report]`,
-/// with `!` marking `isExcludes` and `/r` marking `isRecursive`.
+/// Resources rendered for a human: `catalog=[wh] table=[report]`, with `!`
+/// marking `isExcludes` and `/r` marking `isRecursive`.
 ///
-/// Rendered from the KEY rather than from the body, so the sentence cannot name
-/// a resource the comparison did not use. Deliberately not
+/// Rendered from the canonical form rather than from the body, so the sentence
+/// cannot name a resource the comparison did not use. Deliberately not
 /// `admin::summarize_policy`'s `resource_path`: that one takes the FIRST value
 /// of each of four hard-coded trino level names, which drops StarRocks'
 /// `database` level and every value after the first — fine for a list view,
 /// wrong for a refusal that has to be precise about what collided.
-fn render_resources(key: &BTreeMap<String, (Vec<String>, bool, bool)>) -> String {
+fn render_resources(key: &BTreeMap<String, Level>) -> String {
     if key.is_empty() {
         return "no resource levels".to_string();
     }
@@ -401,6 +463,132 @@ fn render_resources(key: &BTreeMap<String, (Vec<String>, bool, bool)>) -> String
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// A value this module does not evaluate as a pattern: Ranger wildcards (`*`,
+/// `?`), and the brace / escape characters of Ranger's token and request
+/// expression syntax (`{USER}`, `${{…}}`, `\`), whose expansion is per request.
+/// Any value containing one is ASSUMED to intersect, unless it is the one shape
+/// [`trailing_star_prefix`] evaluates.
+fn is_unevaluated(v: &str) -> bool {
+    v.contains(['*', '?', '{', '\\'])
+}
+
+/// `Some(prefix)` when `v` is exactly `prefix*`: one trailing `*` and nothing
+/// unevaluated before it. `"*"` itself is the empty prefix — the match-any.
+fn trailing_star_prefix(v: &str) -> Option<&str> {
+    let prefix = v.strip_suffix('*')?;
+    (!is_unevaluated(prefix)).then_some(prefix)
+}
+
+/// Whether two single resource values may match one request value. Every level
+/// of both service-defs egret serves is `ignoreCase: true`, so the comparison
+/// is under ASCII case folding.
+fn values_may_intersect(a: &str, b: &str) -> bool {
+    let (a, b) = (a.to_ascii_lowercase(), b.to_ascii_lowercase());
+    if a == b {
+        return true;
+    }
+    match (trailing_star_prefix(&a), trailing_star_prefix(&b)) {
+        (Some(pa), Some(pb)) => pa.starts_with(pb) || pb.starts_with(pa),
+        (Some(p), None) => is_unevaluated(&b) || b.starts_with(p),
+        (None, Some(p)) => is_unevaluated(&a) || a.starts_with(p),
+        (None, None) => is_unevaluated(&a) || is_unevaluated(&b),
+    }
+}
+
+/// Whether two levels of the same name may both match one request value. A
+/// level absent from either side matches anything; so, ASSUMED, does a level
+/// carrying `isExcludes` (its complement is not evaluated here).
+fn levels_may_intersect(a: Option<&Level>, b: Option<&Level>) -> bool {
+    let (Some((av, aex, _)), Some((bv, bex, _))) = (a, b) else {
+        return true;
+    };
+    if *aex || *bex {
+        return true;
+    }
+    av.iter()
+        .any(|x| bv.iter().any(|y| values_may_intersect(x, y)))
+}
+
+fn maps_may_intersect(a: &BTreeMap<String, Level>, b: &BTreeMap<String, Level>) -> bool {
+    a.keys()
+        .chain(b.keys())
+        .all(|level| levels_may_intersect(a.get(level), b.get(level)))
+}
+
+/// **Whether two Ranger resource maps may select a common request
+/// coordinate.** `a` and `b` are the `resources` objects themselves (not the
+/// policy bodies).
+///
+/// Over-approximates; `true` is the fail-closed answer. For every level name in
+/// the union of both maps, the two levels must may-intersect: a level that is
+/// absent, empty (read as absent, as [`canonical_resources`] reads it) or
+/// carries `isExcludes: true` may-intersect anything; otherwise some value pair
+/// may-intersect — equal under ASCII case folding; or one is exactly `prefix*`
+/// and the other starts with that prefix (two such: either prefix starts with
+/// the other); or either value holds any other wildcard or token character,
+/// which is ASSUMED to intersect.
+pub fn resources_may_intersect(a: &Value, b: &Value) -> bool {
+    maps_may_intersect(
+        &canonical_resource_map(Some(a)),
+        &canonical_resource_map(Some(b)),
+    )
+}
+
+/// [`resources_may_intersect`] over every resource map of two policy bodies:
+/// `resources`, then each `additionalResources` entry (Ranger matches a policy
+/// if ANY of them matches). Neither surface emits `additionalResources` on a
+/// mask or a row filter today; reading them is the fail-closed answer if one
+/// ever does.
+fn bodies_may_intersect(a: &Value, b: &Value) -> bool {
+    fn maps(body: &Value) -> Vec<&Value> {
+        let mut out = vec![body.get("resources").unwrap_or(&Value::Null)];
+        if let Some(extra) = body.get("additionalResources").and_then(Value::as_array) {
+            out.extend(extra);
+        }
+        out
+    }
+    let (am, bm) = (maps(a), maps(b));
+    am.iter()
+        .any(|x| bm.iter().any(|y| resources_may_intersect(x, y)))
+}
+
+/// The coordinate the refusal names: the exact intersection where every level
+/// can be intersected exactly, else both renderings joined by `" ∩ "`.
+fn coordinate_hint(a: &Value, b: &Value) -> String {
+    let (ra, rb) = (canonical_resources(a), canonical_resources(b));
+    let exact = |x: &BTreeMap<String, Level>, y: &BTreeMap<String, Level>| {
+        let mut out = BTreeMap::new();
+        for level in x.keys().chain(y.keys()) {
+            let merged = match (x.get(level), y.get(level)) {
+                (Some(l), None) | (None, Some(l)) => l.clone(),
+                (Some(l), Some(r)) if l == r => l.clone(),
+                (Some((lv, false, false)), Some((rv, false, false)))
+                    if !lv.iter().chain(rv).any(|v| is_unevaluated(v)) =>
+                {
+                    let common: Vec<String> = lv
+                        .iter()
+                        .filter(|v| rv.iter().any(|w| v.eq_ignore_ascii_case(w)))
+                        .cloned()
+                        .collect();
+                    (common, false, false)
+                }
+                _ => return None,
+            };
+            out.insert(level.clone(), merged);
+        }
+        Some(out)
+    };
+    let single_maps = a
+        .get("additionalResources")
+        .is_none_or(|v| v.as_array().is_none_or(Vec::is_empty))
+        && b.get("additionalResources")
+            .is_none_or(|v| v.as_array().is_none_or(Vec::is_empty));
+    match exact(&ra, &rb) {
+        Some(key) if single_maps => render_resources(&key),
+        _ => format!("{} ∩ {}", render_resources(&ra), render_resources(&rb)),
+    }
 }
 
 /// `RangerAbstractPolicyEvaluator.hasDeny()`: `policy.getIsDenyAllElse() ||
@@ -432,31 +620,24 @@ fn int_field(body: &Value, field: &str) -> i64 {
     body.get(field).and_then(Value::as_i64).unwrap_or(0)
 }
 
-/// The band one policy lands in, within one download.
-type Band = (
-    i64,
-    i64,
-    bool,
-    i64,
-    BTreeMap<String, (Vec<String>, bool, bool)>,
-);
+/// The band one policy lands in, within one download:
+/// `(service, policy_type, has_deny, policy_priority)`.
+type Band = (i64, i64, bool, i64);
 
-/// **The whole rule.** `Some(_)` means the set would be served with a pair
-/// whose arbitration the artifact does not express; the caller turns it into
-/// its own refusal carrying [`AmbiguousArbitration::refusal`].
+/// **The whole rule.** Every pair in `policies` that would be served in one
+/// band, may decide one request, and decides it differently — in a
+/// deterministic order (by kind, then the pair's two names, then service and
+/// priority). Empty = nothing to refuse.
 ///
-/// Pure: no I/O, no clock, no ordering requirement on the input. The result is
-/// the lexicographically first offending pair regardless of the order the
-/// caller iterated in, so two surfaces checking the same set report the same
-/// pair.
+/// Pure: no I/O, no clock, no ordering requirement on the input, so two
+/// surfaces checking the same set report the same pairs in the same order.
 ///
 /// Disabled policies, and policies of any `policyType` but 1 and 2, are not in
 /// any band and are skipped — see this module's doc for both rulings.
-pub fn ambiguous_arbitration_in<'a>(
+pub fn ambiguous_arbitrations_in<'a>(
     policies: impl IntoIterator<Item = PolicyUnderWrite<'a>>,
-) -> Option<AmbiguousArbitration> {
-    // (band → the names and decisive items of every policy in it). Collected
-    // first and scanned after, so the answer does not depend on input order.
+) -> Vec<AmbiguousArbitration> {
+    // (band → the name, body and decisive items of every policy in it).
     //
     // ⚠ The items are kept as a `Value` and compared with `==`, NOT rendered to
     // a string. `serde_json`'s `preserve_order` feature is ON in this workspace
@@ -474,7 +655,7 @@ pub fn ambiguous_arbitration_in<'a>(
     // row filters, which would have made the guard refuse the harmless half of
     // SP4d-1's F2. Array order is still significant, which is what
     // `decisive_item_order_counts_as_a_difference` wants.
-    let mut bands: BTreeMap<Band, Vec<(String, Value)>> = BTreeMap::new();
+    let mut bands: BTreeMap<Band, Vec<(&'a str, &'a Value, Value)>> = BTreeMap::new();
     for p in policies {
         if !is_enabled(p.body) {
             continue;
@@ -496,37 +677,64 @@ pub fn ambiguous_arbitration_in<'a>(
                 arbitrated.policy_type(),
                 has_deny(p.body),
                 int_field(p.body, "policyPriority"),
-                canonical_resources(p.body),
             ))
             .or_default()
-            .push((p.name.to_string(), items));
+            .push((p.name, p.body, items));
     }
 
-    for ((_, policy_type, _, priority, resources), mut members) in bands {
-        if members.len() < 2 {
-            continue;
-        }
-        // By NAME only — `Value` is not `Ord`, and the name is what the
-        // comparator's own last tie-break uses.
-        members.sort_by(|a, b| a.0.cmp(&b.0));
-        // Compare every member against the first. If the first k agree, the
-        // first disagreement is found against the representative; if none
-        // disagrees, the whole band agrees and there is nothing undetermined.
-        let (first_name, first_items) = members[0].clone();
-        for (name, items) in members.into_iter().skip(1) {
-            if items != first_items {
-                return Some(AmbiguousArbitration {
+    let mut out = Vec::new();
+    for ((service, policy_type, _, priority), members) in bands {
+        // Every pair, not each against a representative: with resources that
+        // only PARTLY overlap there is no representative — `a` and `c` can
+        // intersect while neither intersects `b`.
+        for (i, (an, ab, ai)) in members.iter().enumerate() {
+            for (bn, bb, bi) in &members[i + 1..] {
+                if ai == bi || !bodies_may_intersect(ab, bb) {
+                    continue;
+                }
+                let ((first, fb), (second, sb)) = if an <= bn {
+                    ((an, ab), (bn, bb))
+                } else {
+                    ((bn, bb), (an, ab))
+                };
+                out.push(AmbiguousArbitration {
                     arbitrated: Arbitrated::from_policy_type(policy_type)
                         .expect("band keys are built from Arbitrated::policy_type"),
-                    first: first_name,
-                    second: name,
-                    resource: render_resources(&resources),
+                    first: first.to_string(),
+                    second: second.to_string(),
+                    coordinate_hint: coordinate_hint(fb, sb),
                     priority,
+                    service,
                 });
             }
         }
     }
-    None
+    out.sort_by(|x, y| {
+        (
+            x.arbitrated.policy_type(),
+            &x.first,
+            &x.second,
+            x.service,
+            x.priority,
+        )
+            .cmp(&(
+                y.arbitrated.policy_type(),
+                &y.first,
+                &y.second,
+                y.service,
+                y.priority,
+            ))
+    });
+    out
+}
+
+/// The first of [`ambiguous_arbitrations_in`], for write paths that report
+/// one. `None` means the set would be served with no pair whose arbitration
+/// the artifact does not express.
+pub fn ambiguous_arbitration_in<'a>(
+    policies: impl IntoIterator<Item = PolicyUnderWrite<'a>>,
+) -> Option<AmbiguousArbitration> {
+    ambiguous_arbitrations_in(policies).into_iter().next()
 }
 
 #[cfg(test)]
@@ -573,6 +781,20 @@ mod tests {
                 "policyItems": [], "denyPolicyItems": [],
             }),
         )
+    }
+
+    /// `p` with one resource level's values replaced.
+    fn at(level: &str, value: &str, (name, mut body): (String, Value)) -> (String, Value) {
+        body["resources"][level]["values"] = json!([value]);
+        (name, body)
+    }
+
+    fn check_all(set: &[(String, Value)]) -> Vec<AmbiguousArbitration> {
+        ambiguous_arbitrations_in(set.iter().map(|(name, body)| PolicyUnderWrite {
+            service: 1,
+            name,
+            body,
+        }))
     }
 
     fn check(set: &[(String, Value)]) -> Option<AmbiguousArbitration> {
@@ -679,8 +901,8 @@ mod tests {
     /// Ranger orders the two deterministically (or they never meet at all).
     #[test]
     fn policies_ranger_orders_deterministically_are_admitted() {
-        // 1. Different resource: different `getEvalOrder()`, and anyway no
-        //    request is decided by both on the same column.
+        // 1. Two literal columns that differ: no request coordinate is
+        //    selected by both, so the two never meet in one evaluation.
         assert_eq!(
             check(&[
                 mask("a-mask", "item", "MASK"),
@@ -819,18 +1041,26 @@ mod tests {
         );
     }
 
-    /// `isExcludes` and `isRecursive` DO change what a level matches, so they
-    /// split the band.
+    /// ⚠ **Changed in SP4d-4 Task 2, and the one existing test that was.** This
+    /// was `excludes_and_recursive_split_a_band`, asserting `None`: under the
+    /// old EQUAL-resources key a flag difference made two keys, so the pair was
+    /// never compared. Under "may decide the same request" neither flag
+    /// separates them — `isExcludes` is assumed to intersect (its complement is
+    /// not evaluated here), and `isRecursive` on a literal value still selects
+    /// that value — so the same fixtures are now a refusal.
     #[test]
-    fn excludes_and_recursive_split_a_band() {
+    fn excludes_and_recursive_do_not_separate_two_policies_on_one_column() {
         for flag in ["isExcludes", "isRecursive"] {
             let (an, a) = mask("a-mask", "item", "MASK");
             let (bn, mut b) = mask("b-mask", "item", "MASK_NULL");
             b["resources"]["column"][flag] = json!(true);
-            assert_eq!(
-                check(&[(an, a), (bn, b)]),
-                None,
-                "{flag} changes what the level matches, so it is a different resource"
+            let got = check(&[(an, a), (bn, b)])
+                .unwrap_or_else(|| panic!("{flag} must not hide a pair that may intersect"));
+            // Not an exact intersection, so the hint names both sides.
+            assert!(
+                got.coordinate_hint.contains(" ∩ "),
+                "{flag}: {}",
+                got.coordinate_hint
             );
         }
     }
@@ -899,5 +1129,227 @@ mod tests {
     fn one_policy_and_no_policy_are_not_pairs() {
         assert_eq!(check(&[]), None);
         assert_eq!(check(&[mask("only", "item", "MASK")]), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // SP4d-4 Task 2: "may decide the same request", not "equal resources".
+    // -----------------------------------------------------------------------
+
+    /// **The case the old equality key admitted.** A table-wildcard mask and a
+    /// named-table mask on one column, at one priority, with different mask
+    /// types. Task 1 measured (both jars, both service-defs) that the BROADER
+    /// one is served on `orders.email` — `getEvalOrder()` sorts the policy with
+    /// more match-any `*` values first and the first matching mask is final —
+    /// which nothing in the two policies says.
+    #[test]
+    fn a_wildcard_mask_and_a_named_mask_on_one_column_are_refused() {
+        let set = [
+            at("table", "*", mask("m-broad", "email", "MASK")),
+            mask("m-narrow", "email", "MASK_NULL"),
+        ];
+        let got = check(&set).expect("a wildcard and a name on one column may meet");
+        assert_eq!(got.arbitrated, Arbitrated::Mask);
+        assert_eq!(
+            (got.first.as_str(), got.second.as_str()),
+            ("m-broad", "m-narrow")
+        );
+        let msg = got.refusal();
+        assert!(
+            msg.contains("Narrow one of the two"),
+            "names the remedy: {msg}"
+        );
+        assert!(
+            !msg.to_lowercase().contains("more specific"),
+            "Task 1 measured the BROADER policy winning; the sentence must not say \
+             otherwise: {msg}"
+        );
+    }
+
+    /// A `prefix*` intersects exactly the names that start with the prefix,
+    /// case-folded (every level of both service-defs is `ignoreCase: true`).
+    #[test]
+    fn a_prefix_glob_and_a_disjoint_name_are_admitted() {
+        let disjoint = [
+            at("table", "ord*", mask("a-mask", "email", "MASK")),
+            at("table", "items", mask("b-mask", "email", "MASK_NULL")),
+        ];
+        assert_eq!(check(&disjoint), None, "`ord*` cannot select `items`");
+
+        let case_folded = [
+            at("table", "ord*", mask("a-mask", "email", "MASK")),
+            at("table", "ORDERS", mask("b-mask", "email", "MASK_NULL")),
+        ];
+        assert!(
+            check(&case_folded).is_some(),
+            "`ord*` selects `ORDERS` under ignoreCase"
+        );
+    }
+
+    /// Accept-control 1 of `policies_ranger_orders_deterministically_are_admitted`,
+    /// restated under the new rule: two literal columns never meet.
+    #[test]
+    fn two_different_columns_still_do_not_overlap() {
+        assert_eq!(
+            check(&[
+                mask("a-mask", "item", "MASK"),
+                mask("b-mask", "price", "MASK_NULL"),
+            ]),
+            None
+        );
+    }
+
+    /// **Exemptions are part of the decision.** Both policies mask the column
+    /// with `MASK` for `public`, but A carries the compiler's exempt idiom — a
+    /// `MASK_NONE` item for `vip` AHEAD of the `public` one — and B does not.
+    /// For `vip`, A answers `MASK_NONE` and B answers `MASK`, and which of the
+    /// two `vip` gets is the tie-break. o5 (decisive arrays differ) catches it;
+    /// this test exists so a "compare only the mask type" simplification
+    /// cannot pass.
+    #[test]
+    fn different_exemptions_with_the_same_mask_are_refused() {
+        let (an, mut a) = mask("a-mask", "item", "MASK");
+        let general = a["dataMaskPolicyItems"][0].clone();
+        let exempt = json!({
+            "users": ["vip"], "groups": [], "roles": [],
+            "accesses": [{"type": "select", "isAllowed": true}],
+            "dataMaskInfo": {"dataMaskType": "MASK_NONE"},
+        });
+        a["dataMaskPolicyItems"] = json!([exempt, general]);
+        let b = mask("b-mask", "item", "MASK");
+        assert!(check(&[(an, a), b]).is_some());
+    }
+
+    /// **Identical buckets are admitted even when the resources differ** — the
+    /// agreeing tie of F2, generalised: whichever of the two runs first, every
+    /// principal gets the same mask.
+    #[test]
+    fn identical_buckets_on_intersecting_resources_are_admitted() {
+        let set = [
+            at("table", "*", mask("a-mask", "email", "MASK")),
+            mask("b-mask", "email", "MASK"),
+        ];
+        assert_eq!(check(&set), None, "an agreeing pair is not undetermined");
+    }
+
+    /// `isExcludes` selects the COMPLEMENT of its values, which this module does
+    /// not evaluate — assumed to intersect, the fail-closed answer. Under the
+    /// old key `{table!=[orders]}` and `{table=[orders]}` were simply two keys.
+    #[test]
+    fn an_excluded_level_is_assumed_to_intersect() {
+        let (an, mut a) = at("table", "orders", mask("a-mask", "email", "MASK"));
+        a["resources"]["table"]["isExcludes"] = json!(true);
+        let b = at("table", "items", mask("b-mask", "email", "MASK_NULL"));
+        let got = check(&[(an, a), b]).expect("an excluded level may meet anything");
+        assert_eq!(got.arbitrated, Arbitrated::Mask);
+    }
+
+    /// Every pair, in one order whatever the caller's: three masks on one
+    /// column, pairwise different.
+    #[test]
+    fn every_pair_is_returned_in_a_stable_order() {
+        let forward = [
+            mask("a-mask", "item", "MASK"),
+            mask("b-mask", "item", "MASK_NULL"),
+            mask("c-mask", "item", "MASK_HASH"),
+        ];
+        let mut backward = forward.clone();
+        backward.reverse();
+        let names = |v: Vec<AmbiguousArbitration>| {
+            v.into_iter()
+                .map(|p| (p.first, p.second))
+                .collect::<Vec<_>>()
+        };
+        let expected = vec![
+            ("a-mask".to_string(), "b-mask".to_string()),
+            ("a-mask".to_string(), "c-mask".to_string()),
+            ("b-mask".to_string(), "c-mask".to_string()),
+        ];
+        assert_eq!(names(check_all(&forward)), expected);
+        assert_eq!(names(check_all(&backward)), expected);
+    }
+
+    /// The editor's sentence is the shared one plus the remedy only a
+    /// hand-written policy has.
+    #[test]
+    fn the_editor_refusal_adds_override_as_a_remedy() {
+        let got = check(&[
+            mask("a-mask", "item", "MASK"),
+            mask("b-mask", "item", "MASK_NULL"),
+        ])
+        .expect("refused");
+        assert!(!got.refusal().contains("Override"));
+        let editor = got.editor_refusal();
+        assert!(editor.starts_with(got.refusal().trim_end_matches('.')));
+        assert!(
+            editor.contains("or set Override on the one that should win"),
+            "{editor}"
+        );
+    }
+
+    /// Value-level may-intersect, the cases the route-level tests above do not
+    /// spell out one by one.
+    #[test]
+    fn value_level_may_intersect_cases() {
+        let lvl = |v: &str| json!({"t": {"values": [v]}});
+        for (a, b, want) in [
+            ("orders", "orders", true),
+            ("orders", "ORDERS", true),
+            ("orders", "items", false),
+            ("*", "anything", true),
+            ("ord*", "or*", true),
+            ("ord*", "ix*", false),
+            ("ord*", "x?z", true),
+            ("o*s", "items", true),
+            ("{USER}", "alice", true),
+        ] {
+            assert_eq!(
+                resources_may_intersect(&lvl(a), &lvl(b)),
+                want,
+                "{a:?} vs {b:?}"
+            );
+            assert_eq!(
+                resources_may_intersect(&lvl(b), &lvl(a)),
+                want,
+                "symmetric: {b:?} vs {a:?}"
+            );
+        }
+        // A level named by one side only, or an empty one, matches anything.
+        assert!(resources_may_intersect(&lvl("orders"), &json!({})));
+        assert!(resources_may_intersect(
+            &lvl("orders"),
+            &json!({"t": {"values": []}})
+        ));
+        // Every level must may-intersect.
+        assert!(!resources_may_intersect(
+            &json!({"s": {"values": ["sales"]}, "t": {"values": ["orders"]}}),
+            &json!({"s": {"values": ["sales"]}, "t": {"values": ["items"]}}),
+        ));
+    }
+
+    /// The hint is the exact intersection where it can be computed, and both
+    /// sides otherwise.
+    #[test]
+    fn the_coordinate_hint_is_exact_only_where_it_can_be() {
+        let exact = check(&[
+            at("table", "ORDERS", mask("a-mask", "email", "MASK")),
+            mask("b-mask", "email", "MASK_NULL"),
+        ])
+        .expect("refused");
+        assert_eq!(
+            exact.coordinate_hint,
+            "catalog=[wh] column=[email] schema=[sales] table=[ORDERS]"
+        );
+        let both = check(&[
+            at("table", "*", mask("a-mask", "email", "MASK")),
+            mask("b-mask", "email", "MASK_NULL"),
+        ])
+        .expect("refused");
+        assert!(
+            both.coordinate_hint.contains("table=[*]")
+                && both.coordinate_hint.contains(" ∩ ")
+                && both.coordinate_hint.contains("table=[orders]"),
+            "{}",
+            both.coordinate_hint
+        );
     }
 }

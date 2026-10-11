@@ -1170,7 +1170,8 @@ fn tag_mask_addresses(body: &Value) -> Vec<&str> {
 
 /// **The editor's half of SP4d debt Task 6's one rule.** Would storing `pol`
 /// under `service_id` leave that profile serving two mask (or two row-filter)
-/// policies that arbitrate one request differently? The rule itself is
+/// policies that may decide one request and would decide it differently? The
+/// rule itself is
 /// [`crate::ambiguous_arbitration::ambiguous_arbitration_in`], spelled once and
 /// shared with `egret_perm_compile::trigger::compile_desired`; the refusal is
 /// the same sentence from both.
@@ -1187,7 +1188,7 @@ fn tag_mask_addresses(body: &Value) -> Vec<&str> {
 /// download route and `explain` use, so the set compared is the set served.
 ///
 /// Runs BEFORE the insert/update, so a refusal has written nothing and the route
-/// returns a plain 400 rather than rolling anything back — the same shape
+/// returns a plain 409 rather than rolling anything back — the same shape
 /// `unreadable_table_mask_for`'s callers have.
 async fn refuse_ambiguous_arbitration(
     st: &PolicyAdminState,
@@ -1230,7 +1231,10 @@ async fn refuse_ambiguous_arbitration(
             },
         ))
     {
-        return Err(PolicyHttpError::BadRequest(pair.refusal()));
+        // 409, not 400: the body is well-formed; it conflicts with a policy
+        // already stored (SP4d-4 Part A, "The refusal"). The editor's sentence
+        // adds the one remedy only a hand-written policy has: Override.
+        return Err(PolicyHttpError::Conflict(pair.editor_refusal()));
     }
     Ok(())
 }
@@ -1369,11 +1373,11 @@ fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
     request_body = Object,
     responses(
         (status = 200, description = "Policy created", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input, missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter policy that would be served alongside another one selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)", body = ErrorBody),
+        (status = 400, description = "Invalid editor input, missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:create permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
-        (status = 409, description = "A policy with this name already exists, or the target profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
+        (status = 409, description = "A policy with this name already exists, the target profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or a mask/row-filter policy would be served at the same priority as another one that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the body names both and suggests Override)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1466,11 +1470,11 @@ async fn create_policy(
     request_body = Object,
     responses(
         (status = 200, description = "Policy replaced", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input, missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter body that would be served alongside another policy selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)", body = ErrorBody),
+        (status = 400, description = "Invalid editor input, missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
-        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
+        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the mask/row-filter body would be served at the same priority as another policy that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the body names both and suggests Override)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

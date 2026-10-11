@@ -1575,8 +1575,9 @@ async fn a_second_row_filter_on_one_table_is_refused_only_when_it_disagrees() {
     let (status, body) = post(filter("rf-id", "orders", "id > 2")).await;
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
-        "a disagreeing second filter on one table must be refused; body={body}"
+        StatusCode::CONFLICT,
+        "a disagreeing second filter on one table must be refused with 409 (SP4d-4 \
+         Part A: the body is well-formed, it conflicts with a stored policy); body={body}"
     );
     let msg = body["error"]
         .as_str()
@@ -1591,13 +1592,18 @@ async fn a_second_row_filter_on_one_table_is_refused_only_when_it_disagrees() {
         msg.contains("\"rf-id\""),
         "the refusal must name the policy being written: {body}"
     );
+    assert!(
+        msg.contains("or set Override on the one that should win"),
+        "the editor's refusal must offer Override, the remedy only a hand-written \
+         policy has: {body}"
+    );
 
     // ⚠ **A PUT must not pair the new body against the row it REPLACES.**
     // `rf-other` is the ONLY filter on `invoices`, so changing its expression
     // is one policy changing and nothing else is in its band — the only thing
     // that can tie with it is its own stored version. Without
-    // `refuse_ambiguous_arbitration`'s `replacing` argument this 400s, and
-    // every retry 400s the same way, so the steward can never edit a row
+    // `refuse_ambiguous_arbitration`'s `replacing` argument this 409s, and
+    // every retry 409s the same way, so the steward can never edit a row
     // filter's expression again. Deliberately done on `invoices` and not on
     // `orders`: editing `rf-us` while `rf-us-again` still carries the old
     // expression really WOULD create a new disagreeing pair, so that version
@@ -2334,9 +2340,15 @@ async fn editing_a_tag_policy_runs_the_same_refusals_as_creating_one() {
     .await;
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
+        StatusCode::CONFLICT,
         "an EDIT onto a tag another mask already selects, with different items, must be \
-         refused; body={body}"
+         refused with 409 (SP4d-4 Part A); body={body}"
+    );
+    assert!(
+        body.to_string()
+            .contains("or set Override on the one that should win"),
+        "the refusal must be the arbitration guard's, carrying the editor's Override \
+         remedy; body={body}"
     );
 
     // ── ACCEPT control, and the one that proves `replacing: Some(id)` is
@@ -2522,10 +2534,12 @@ async fn put_policies_refuses_a_service_that_is_not_the_policys_own() {
 
 /// A human `POST`/`PUT` of an infrastructure name whose body ALSO trips the
 /// ambiguous-arbitration guard must answer 409 `InfrastructureOwned`, not the
-/// guard's 400: the store's own refusal sits inside `create_policy`/
+/// guard's refusal: the store's own refusal sits inside `create_policy`/
 /// `update_policy`, after the guards, so the route needs the pre-flights.
-/// Controls: the same disagreeing body under an ordinary name IS the 400 (so
-/// the guard is genuinely armed and the 409 is not a vacuous pass).
+/// Controls: the same disagreeing body under an ordinary name IS the guard's
+/// refusal (so the guard is genuinely armed and the infra 409 is not a
+/// vacuous pass). Since SP4d-4 the guard answers 409 too, so the two are told
+/// apart by their messages, which both arms assert.
 #[tokio::test]
 async fn an_infra_name_is_refused_with_409_before_the_authoring_guards_can_say_400() {
     let Some(f) = setup().await else {
@@ -2581,9 +2595,16 @@ async fn an_infra_name_is_refused_with_409_before_the_authoring_guards_can_say_4
     let b_id = body["id"].as_i64().expect("id");
     let rows = count().await;
 
-    // Control: an ordinary name with the disagreeing body is the guard's 400.
+    // Control: an ordinary name with the disagreeing body is the guard's 409.
+    // Since SP4d-4 both refusals are 409, so the status alone no longer tells
+    // them apart — the guard's own remedy does.
     let (status, body) = send("POST", "/policies".into(), filter("rf-id", "id > 2")).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "armed guard; body={body}");
+    assert_eq!(status, StatusCode::CONFLICT, "armed guard; body={body}");
+    assert!(
+        body.to_string()
+            .contains("or set Override on the one that should win"),
+        "the control must be the arbitration guard's refusal: {body}"
+    );
 
     // POST: infra names + a guard-tripping body -> 409, nothing created.
     for name in ["egret-query-timeout", "all - catalog, schema, table"] {
@@ -2593,6 +2614,10 @@ async fn an_infra_name_is_refused_with_409_before_the_authoring_guards_can_say_4
             body.to_string()
                 .contains("reserved for egret's own plumbing"),
             "{name}: must carry the InfrastructureOwned message: {body}"
+        );
+        assert!(
+            !body.to_string().contains("set Override"),
+            "{name}: must be the infra refusal, not the arbitration guard's: {body}"
         );
     }
     assert_eq!(count().await, rows, "no row created");

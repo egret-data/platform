@@ -16,7 +16,8 @@ pub use admin::{
     PolicyHttpError,
 };
 pub use ambiguous_arbitration::{
-    ambiguous_arbitration_in, AmbiguousArbitration, Arbitrated, PolicyUnderWrite,
+    ambiguous_arbitration_in, ambiguous_arbitrations_in, resources_may_intersect,
+    AmbiguousArbitration, Arbitrated, PolicyUnderWrite,
 };
 // Declared in the leaf contract crate so `egret-engine-mgmt` can reach it in
 // production; re-exported so the canonical path stays `egret_policy::infra_names`.
