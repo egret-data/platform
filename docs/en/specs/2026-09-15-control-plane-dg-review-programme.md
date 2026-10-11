@@ -1,10 +1,13 @@
 # Control Plane & Data Governance — review findings and programme
 
-**Status:** review complete; SP1 and SP2 designed, SP3–SP5 not yet designed
+**Status:** review complete; SP1–SP4d-3 merged; **SP4d-4 is the last package** (designed 2026-10-11);
+**SP5 dropped** from this programme by the user on 2026-10-11 (see §3)
 **Date:** 2026-09-15
 **Specs in this programme:**
 - SP1 `docs/{en,vi}/specs/2026-09-15-engine-lifecycle-hardening-design.md`
 - SP2 `docs/{en,vi}/specs/2026-09-15-governance-app-split-design.md`
+- SP4d-3 `docs/en/specs/2026-10-10-classify-and-migrate-policies-sp4d-3-design.md` (merged #660)
+- SP4d-4 `docs/en/specs/2026-10-11-sp4d-4-closing-the-review-design.md` — the closing package
 
 ## 1. What the user asked for
 
@@ -73,11 +76,16 @@ Root cause of the user's 500 and fifteen further defects — see SP1 §2.
 | **SP2** | Governance app split: `/governance/*` next to Control Plane; audit log → Control Plane → System | — | designed |
 | **SP3** | Catalog registry under Infra: typed connections (database, iceberg, …), warehouses become iceberg catalogs, engines attach registry catalogs (Trino and StarRocks) | — | to design |
 | **SP4** | One egret data-permission model over registry catalogs, replacing the three systems in §2.3; compiles to Ranger profiles; egret-provisioned engines bound to the default profile; hand-written Ranger profiles kept for external engines | SP3 | to design |
-| **SP5** | Egret-enforced engines (Postgres first): connector, SQL parser, policy evaluator, filter/mask rewrite, principal plumbing through every execution path | SP4 | to design |
+| **SP4d-4** | Closing the review: refuse and report overlapping mask/row-filter rules (409 naming the other rule); measure what an absent resource level grants on the real 2.5.0/2.8.0 jars and fix the editor or the grammar accordingly; register an EXTERNAL Trino/StarRocks engine (API + UI), bind it to a profile, declare its catalogs, show its Ranger plugin config; coordinate pruning for the SP4d-3 equivalence gate | SP4d-3 | designed 2026-10-11 |
+| ~~**SP5**~~ | ~~Egret-enforced engines (Postgres first): connector, SQL parser, policy evaluator, filter/mask rewrite, principal plumbing through every execution path~~ | — | **dropped 2026-10-11** (user): egret's own enforcement engine will be a separate engine, peer to Trino and StarRocks — a different story, not part of this programme |
 
 SP1 and SP2 are independent of each other and of SP3–SP5.
 
-## 4. Positions already taken for SP3–SP5 (to confirm when designing them)
+**Item 6.3 of §1 ("extend to engines without Ranger") is therefore NOT delivered by this programme.** §4's
+positions on SQL-rewrite enforcement are kept below as the record of what was decided, for whoever designs
+that separate engine; nothing in SP1–SP4d-4 depends on them.
+
+## 4. Positions already taken for SP3–SP5 (to confirm when designing them; the SP5 ones are historical since 2026-10-11)
 
 - **Masking and row filters must be applied by SQL rewrite, not by post-processing results.** Post-processing masks the projection only: `WHERE email = 'x'`, `GROUP BY email`, joins and `count(DISTINCT email)` still read the real value and leak it. Ranger in Trino also rewrites (it wraps the table reference). Post-processing is acceptable only as defence in depth.
 - **The egret model is the source of truth; Ranger JSON is a compiled artefact.** A generated profile is read-only in the Ranger editor; hand-written profiles remain a separate kind.
