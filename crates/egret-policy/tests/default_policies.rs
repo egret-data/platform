@@ -15,29 +15,17 @@ fn uniq(p: &str) -> String {
     format!("{p}_{}", uuid::Uuid::new_v4().simple())
 }
 
-fn def_id_from_name(name: &str) -> i64 {
-    // derive a stable i64 from a unique name so each test run uses a fresh service_def id
-    let mut h: i64 = 0xcbf29ce484222325_u64 as i64;
-    for b in name.bytes() {
-        h ^= b as i64;
-        h = h.wrapping_mul(0x100000001b3_u64 as i64);
-    }
-    h.abs()
-}
-
 #[tokio::test]
 async fn seed_default_trino_policies_is_idempotent_and_faithful() {
     let Some(s) = store().await else {
         eprintln!("skip");
         return;
     };
-    let defname = uniq("trino_seed");
-    let def_id = def_id_from_name(&defname);
-    s.upsert_service_def(def_id, &defname, &json!({"name": defname}))
-        .await
-        .unwrap();
+    // The real `trino` def: seed-defaults refuses any other type (SP4d-3
+    // final review I-1), and a fresh service per run keeps it isolated.
+    egret_policy::seed_trino(&s).await.unwrap();
     let svc = s
-        .create_service(&uniq("svc"), &defname, &json!({}))
+        .create_service(&uniq("svc"), "trino", &json!({}))
         .await
         .unwrap();
 

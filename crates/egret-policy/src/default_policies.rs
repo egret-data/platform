@@ -13,7 +13,9 @@
 //! map. This produces all 13 hierarchies in the def (the catalog/schema/
 //! table/column chain plus the 9 standalone/attached admin resources).
 
-use crate::infra_names::{ADMIN_ALL_ACCESS_NAME_PREFIX, DEFAULT_ALL_ACCESS_NAME_PREFIX};
+use crate::infra_names::{
+    ADMIN_ALL_ACCESS_NAME_PREFIX, DEFAULT_ALL_ACCESS_NAME_PREFIX, DEFAULT_ALL_ACCESS_SERVICE_TYPE,
+};
 use crate::service_def::{starrocks_service_def, trino_service_def};
 use crate::{PolicyStore, PolicyStoreError};
 // The hierarchy walker lives in `egret-ranger-eval` (SP4d Task 4), which
@@ -122,6 +124,19 @@ impl PolicyStore {
         // has run, so without this ordering the guard would never fire here
         // and this call would just silently no-op instead of refusing.
         self.refuse_if_generated_pooled(service_id).await?;
+        // SP4d-3 final review I-1: the set below is built from the Trino
+        // service-def only. On any other type the real plugin rejects every row
+        // on every refresh, so refuse here — the single enforcement point, so
+        // no caller can seed a non-Trino profile. After the generated-profile
+        // check, so that 409 still wins.
+        let svc = self.get_service_by_id(service_id).await?;
+        if svc.r#type != DEFAULT_ALL_ACCESS_SERVICE_TYPE {
+            return Err(PolicyStoreError::BadRequest(format!(
+                "seed-defaults seeds the Trino default policy set; profile {:?} is of type {:?}, \
+                 whose engine would reject every one of those policies",
+                svc.name, svc.r#type
+            )));
+        }
         if !self.list_policies(service_id).await?.is_empty() {
             return Ok(0);
         }
@@ -186,6 +201,16 @@ impl PolicyStore {
 mod tests {
     use super::*;
     use egret_ranger_eval::servicedef::ResourceDef;
+
+    /// `infra_names` lives in a leaf crate that cannot import the def name, so
+    /// its copy of "trino" is pinned to the real one here.
+    #[test]
+    fn the_default_set_is_infrastructure_on_the_trino_def_name() {
+        assert_eq!(
+            DEFAULT_ALL_ACCESS_SERVICE_TYPE,
+            crate::service_def::TRINO_DEF_NAME
+        );
+    }
 
     #[test]
     fn computes_all_13_trino_hierarchies() {

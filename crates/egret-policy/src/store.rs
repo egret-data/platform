@@ -1,6 +1,6 @@
 use crate::PolicyStoreError;
 use egret_metastore::Db;
-use egret_policy_api::infra_names::is_egret_infrastructure_policy_name;
+use egret_policy_api::infra_names::is_egret_infrastructure_policy;
 use egret_policy_api::TAG_SERVICE_CONFIG_KEY;
 use egret_ranger_eval::resource::MatchType;
 use serde_json::Value;
@@ -153,14 +153,31 @@ fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
     }
     Ok(())
 }
+
+/// A profile's `type`, read on the caller's connection (inside its transaction
+/// where there is one), for the type-aware [`is_egret_infrastructure_policy`].
+/// A missing profile is `NotFound`: every caller is about to write under it.
+async fn service_type_of(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<String, PolicyStoreError> {
+    sqlx::query_scalar::<_, String>("SELECT type FROM policy.authz_services WHERE id = $1")
+        .bind(service_id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .ok_or_else(|| PolicyStoreError::NotFound(format!("service id {service_id}")))
+}
+
 /// The infra writers' own guard: they stamp `managed_by = 'infra'`, so they may
-/// only be given a name `egret_policy_api::infra_names` recognises. A hard
-/// error, not a `debug_assert`, so the writer cannot drift from the predicate.
-fn refuse_non_infrastructure_name(name: &str) -> Result<(), PolicyStoreError> {
-    if !is_egret_infrastructure_policy_name(name) {
+/// only be given a name `egret_policy_api::infra_names` recognises on a profile
+/// of `service_type`. A hard error, not a `debug_assert`, so the writer cannot
+/// drift from the predicate. This is also what refuses a Trino-shaped
+/// `all - …` name aimed at a StarRocks profile.
+fn refuse_non_infrastructure_name(service_type: &str, name: &str) -> Result<(), PolicyStoreError> {
+    if !is_egret_infrastructure_policy(service_type, name) {
         return Err(PolicyStoreError::BadRequest(format!(
-            "policy name {name:?} is not an egret infrastructure policy name; \
-             refusing to stamp it managed_by = 'infra'"
+            "policy name {name:?} is not an egret infrastructure policy name on a \
+             {service_type:?} profile; refusing to stamp it managed_by = 'infra'"
         )));
     }
     Ok(())
@@ -168,8 +185,9 @@ fn refuse_non_infrastructure_name(name: &str) -> Result<(), PolicyStoreError> {
 
 /// SP4d-3 Task 2: the HUMAN paths' reservation of egret's infrastructure names.
 /// A human create, or a rename INTO such a name, would mint an `'operator'` row
-/// under a name [`is_egret_infrastructure_policy_name`] claims, so the column
-/// and the predicate would disagree from the first write.
+/// under a name [`is_egret_infrastructure_policy`] claims on this profile's
+/// type, so the column and the predicate would disagree from the first write.
+/// On a non-Trino profile an `all - …` name is an ordinary human name.
 ///
 /// Its own variant rather than [`PolicyStoreError::CompilerOwned`]: that one's
 /// message names the SP4a permission model's `perm-*` prefixes, and an operator
@@ -177,8 +195,8 @@ fn refuse_non_infrastructure_name(name: &str) -> Result<(), PolicyStoreError> {
 /// Both map to 409 — the request is well-formed, the name belongs to someone
 /// else. The infra writers do NOT call this; they call
 /// [`refuse_non_infrastructure_name`], its inverse.
-fn refuse_infrastructure_name(name: &str) -> Result<(), PolicyStoreError> {
-    if is_egret_infrastructure_policy_name(name) {
+fn refuse_infrastructure_name(service_type: &str, name: &str) -> Result<(), PolicyStoreError> {
+    if is_egret_infrastructure_policy(service_type, name) {
         return Err(PolicyStoreError::InfrastructureOwned(format!(
             "policy name {name:?} is reserved for egret's own plumbing (delegator and default \
              access policies) — choose a different name"
@@ -661,8 +679,9 @@ impl PolicyStore {
     ) -> Result<(), PolicyStoreError> {
         // First, exactly where `create_policy` puts it. Not inside
         // `refuse_before_policy_insert`: the infra writers share that one.
-        refuse_infrastructure_name(name)?;
         let mut conn = self.db.pool.acquire().await?;
+        let service_type = service_type_of(&mut conn, service_id).await?;
+        refuse_infrastructure_name(&service_type, name)?;
         refuse_before_policy_insert(&mut conn, service_id, name).await
     }
 
@@ -679,17 +698,19 @@ impl PolicyStore {
         name: &str,
     ) -> Result<(), PolicyStoreError> {
         let mut conn = self.db.pool.acquire().await?;
-        let current: Option<String> =
-            sqlx::query_scalar("SELECT name FROM policy.authz_policies WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&mut *conn)
-                .await?;
-        let Some(current_name) = current else {
+        let current: Option<(String, String)> = sqlx::query_as(
+            "SELECT p.name, s.type FROM policy.authz_policies p \
+             JOIN policy.authz_services s ON s.id = p.service_id WHERE p.id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some((current_name, service_type)) = current else {
             return Err(PolicyStoreError::NotFound(format!("policy {id}")));
         };
         refuse_if_infrastructure_owned(&mut conn, id).await?;
         if name != current_name {
-            refuse_infrastructure_name(name)?;
+            refuse_infrastructure_name(&service_type, name)?;
         }
         Ok(())
     }
@@ -2024,6 +2045,10 @@ pub struct PolicyRow {
     pub policy_jsonb: Value,
     pub enabled: bool,
     pub version: i64,
+    /// Who owns the row: `'operator'`, `'compiler'` or `'infra'` (migration
+    /// 0180). The profile page reads it to withhold edit controls the server
+    /// would refuse.
+    pub managed_by: String,
 }
 
 impl PolicyStore {
@@ -2034,7 +2059,6 @@ impl PolicyStore {
         name: &str,
         policy: &Value,
     ) -> Result<i64, PolicyStoreError> {
-        refuse_infrastructure_name(name)?;
         self.insert_policy_owned_by(service_id, name, policy, "operator")
             .await
     }
@@ -2042,15 +2066,15 @@ impl PolicyStore {
     /// [`create_policy`](Self::create_policy) for egret's OWN infrastructure
     /// policies (the delegator's two): same guards and errors, but the row is
     /// stamped `managed_by = 'infra'`. Refuses a name that
-    /// [`is_egret_infrastructure_policy_name`] does not recognise, so this
-    /// writer cannot drift from the predicate that defines the owner.
+    /// [`is_egret_infrastructure_policy`] does not recognise on the profile's
+    /// type, so this writer cannot drift from the predicate that defines the
+    /// owner.
     pub async fn create_infra_policy(
         &self,
         service_id: i64,
         name: &str,
         policy: &Value,
     ) -> Result<i64, PolicyStoreError> {
-        refuse_non_infrastructure_name(name)?;
         self.insert_policy_owned_by(service_id, name, policy, "infra")
             .await
     }
@@ -2067,7 +2091,17 @@ impl PolicyStore {
         // `refuse_before_policy_insert`, and shared with
         // `preflight_policy_insert`. The reserved-name reason wins; see that
         // function's doc comment for the ruling and for the test that pins it.
+        //
+        // First, the SP4d-3 owner/name agreement, which needs the profile's
+        // type: a human writer may not take an infrastructure name, and the
+        // infra writer may take nothing else. A refusal drops `tx` (rollback).
         let mut tx = self.db.pool.begin().await?;
+        let service_type = service_type_of(&mut tx, service_id).await?;
+        if managed_by == "infra" {
+            refuse_non_infrastructure_name(&service_type, name)?;
+        } else {
+            refuse_infrastructure_name(&service_type, name)?;
+        }
         if let Err(e) = refuse_before_policy_insert(&mut tx, service_id, name).await {
             tx.rollback().await?;
             return Err(e);
@@ -2109,9 +2143,10 @@ impl PolicyStore {
         name: &str,
         policy: &Value,
     ) -> Result<i64, PolicyStoreError> {
-        refuse_non_infrastructure_name(name)?;
         refuse_reserved_name(name)?;
         let mut tx = self.db.pool.begin().await?;
+        let service_type = service_type_of(&mut tx, service_id).await?;
+        refuse_non_infrastructure_name(&service_type, name)?;
         let id: i64 = sqlx::query_scalar::<_, i64>(
             r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by)
                VALUES ($1,$2,$3,'infra')
@@ -2161,8 +2196,9 @@ impl PolicyStore {
         policy: &Value,
     ) -> Result<i64, PolicyStoreError> {
         refuse_reserved_name(name)?;
-        refuse_infrastructure_name(name)?;
         let mut tx = self.db.pool.begin().await?;
+        let service_type = service_type_of(&mut tx, service_id).await?;
+        refuse_infrastructure_name(&service_type, name)?;
         let id: i64 = sqlx::query_scalar::<_, i64>(
             r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb)
                VALUES ($1,$2,$3)
@@ -2198,13 +2234,14 @@ impl PolicyStore {
         // Fetch the policy's CURRENT name — ownership (Task 8 fix round 2,
         // I-1) is decided by what this policy IS today, not by the new name
         // the caller is trying to write.
-        let row: Option<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
-            r#"SELECT service_id, name FROM policy.authz_policies WHERE id = $1"#,
+        let row: Option<(i64, String, String)> = sqlx::query_as::<_, (i64, String, String)>(
+            r#"SELECT p.service_id, p.name, s.type FROM policy.authz_policies p
+               JOIN policy.authz_services s ON s.id = p.service_id WHERE p.id = $1"#,
         )
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((service_id, current_name)) = row else {
+        let Some((service_id, current_name, service_type)) = row else {
             tx.rollback().await?;
             return Err(PolicyStoreError::NotFound(format!("policy {id}")));
         };
@@ -2237,7 +2274,7 @@ impl PolicyStore {
         // and a row that already carries one (it is `'operator'` here, since an
         // `'infra'` row was refused above) must stay editable.
         if name != current_name {
-            if let Err(e) = refuse_infrastructure_name(name) {
+            if let Err(e) = refuse_infrastructure_name(&service_type, name) {
                 tx.rollback().await?;
                 return Err(e);
             }
@@ -2327,7 +2364,7 @@ impl PolicyStore {
 
     pub async fn get_policy(&self, id: i64) -> Result<PolicyRow, PolicyStoreError> {
         sqlx::query_as::<_, PolicyRow>(
-            r#"SELECT id, service_id, name, policy_jsonb, enabled, version FROM policy.authz_policies WHERE id = $1"#,
+            r#"SELECT id, service_id, name, policy_jsonb, enabled, version, managed_by FROM policy.authz_policies WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(&self.db.pool)
@@ -2340,7 +2377,7 @@ impl PolicyStore {
     /// this does not inject id/version into the body (the caller/summary does that).
     pub async fn list_policies(&self, service_id: i64) -> Result<Vec<PolicyRow>, PolicyStoreError> {
         Ok(sqlx::query_as::<_, PolicyRow>(
-            r#"SELECT id, service_id, name, policy_jsonb, enabled, version
+            r#"SELECT id, service_id, name, policy_jsonb, enabled, version, managed_by
                FROM policy.authz_policies WHERE service_id = $1 ORDER BY id DESC"#,
         )
         .bind(service_id)

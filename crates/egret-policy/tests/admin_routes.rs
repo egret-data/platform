@@ -2611,3 +2611,134 @@ async fn an_infra_name_is_refused_with_409_before_the_authoring_guards_can_say_4
 
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
+
+/// SP4d-3 final review I-1: seed-defaults builds the Trino default set, so on a
+/// StarRocks profile it is refused with a sentence and writes nothing. The
+/// control (a Trino profile, same caller, same route) seeds, so the 400 is the
+/// type check and not a broken route.
+#[tokio::test]
+async fn seed_defaults_refuses_a_starrocks_profile_and_writes_nothing() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "seed_sr", true).await;
+    egret_policy::seed_starrocks(&f.store)
+        .await
+        .expect("seed starrocks def");
+    let sr = format!("sr-seed-{}", Uuid::new_v4().simple());
+    let sr_id = f
+        .store
+        .create_service(&sr, "starrocks", &serde_json::json!({}))
+        .await
+        .expect("create starrocks profile")
+        .id;
+
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                &format!("/policies/services/{sr}/seed-defaults"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    let msg = body.to_string();
+    assert!(
+        msg.contains("Trino default policy set") && msg.contains("starrocks"),
+        "the refusal must say what seed-defaults seeds and the profile's type; body={body}"
+    );
+    assert!(
+        f.store.list_policies(sr_id).await.expect("list").is_empty(),
+        "a refused seed wrote rows"
+    );
+
+    // Control: the same call on a Trino profile seeds the default set.
+    let (trino, trino_id) = seed_service(&f).await;
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                &format!("/policies/services/{trino}/seed-defaults"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(body["created"], serde_json::json!(13), "body={body}");
+
+    f.store.delete_service(sr_id).await.expect("cleanup");
+    f.store.delete_service(trino_id).await.expect("cleanup");
+}
+
+/// SP4d-3 final review I-1: the profile page's list carries `managed_by`, so it
+/// can withhold the toggle and trash the server would refuse on infra rows.
+#[tokio::test]
+async fn the_policy_list_carries_each_rows_owner() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "list_owner", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    f.store
+        .create_infra_policy(
+            svc_id,
+            "egret-query-timeout",
+            &serde_json::json!({"name": "egret-query-timeout"}),
+        )
+        .await
+        .expect("infra row");
+    f.store
+        .create_policy(
+            svc_id,
+            "sales can read",
+            &serde_json::json!({"name": "sales can read"}),
+        )
+        .await
+        .expect("operator row");
+
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "GET",
+                &format!("/policies?service={svc_name}"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let mut owners: Vec<(String, String)> = body
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|s| {
+            (
+                s["name"].as_str().unwrap().to_string(),
+                s["managed_by"]
+                    .as_str()
+                    .expect("managed_by present")
+                    .to_string(),
+            )
+        })
+        .collect();
+    owners.sort();
+    assert_eq!(
+        owners,
+        vec![
+            ("egret-query-timeout".to_string(), "infra".to_string()),
+            ("sales can read".to_string(), "operator".to_string()),
+        ]
+    );
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}

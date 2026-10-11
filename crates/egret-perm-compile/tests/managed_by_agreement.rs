@@ -7,23 +7,28 @@
 //! re-typed here) over a fixture whose rows start with the column default, and
 //! then compares the result with the expected owner and with the Rust
 //! predicates. A broken backfill (say `LIKE 'all%'` without the ` - `
-//! separator) therefore fails here.
+//! separator, or the `all - ` arm without its `type = 'trino'` join) therefore
+//! fails here.
 //!
-//! Scoped to this fixture's own `service_id`: the test database is shared with
-//! every other concurrently-running test in this binary, so an unscoped
-//! `SELECT` or `UPDATE` would touch their rows. The fixture therefore carries
-//! one row of EVERY shape — all three owners plus the near-misses — because
-//! shapes, not row counts, are what the predicates can disagree about. The
-//! whole-table check belongs against a real cluster (plan Task 10 Step 6).
+//! Scoped to this fixture's own two `service_id`s (one Trino, one StarRocks):
+//! other tests in this binary write into the same per-process database, so an
+//! unscoped `SELECT` or `UPDATE` would touch their rows. The fixture therefore
+//! carries one row of EVERY shape on each type — all three owners plus the
+//! near-misses — because shapes, not row counts, are what the predicates can
+//! disagree about. The whole-table check belongs against a real cluster (plan
+//! Task 10 Step 6).
+//!
+//! The extractor strips only WHOLE-LINE `--` comments (0180 says so too): a
+//! trailing comment on a SQL line would comment out the scoping appended here.
 
 use egret_metastore::Db;
-use egret_policy::infra_names::is_egret_infrastructure_policy_name;
+use egret_policy::infra_names::is_egret_infrastructure_policy;
 use egret_policy::is_compiler_owned_policy_name;
 
 const MIGRATION: &str = include_str!("../../../migrations/0180_policy_managed_by.sql");
 
 /// The migration's `UPDATE policy.authz_policies ... ;` statements, each with
-/// its `WHERE` predicate wrapped and restricted to `service_id = $1`.
+/// its `WHERE` predicate wrapped and restricted to `service_id = ANY($1)`.
 fn scoped_backfill_statements() -> Vec<String> {
     let without_comments: String = MIGRATION
         .lines()
@@ -38,7 +43,7 @@ fn scoped_backfill_statements() -> Vec<String> {
             let at = stmt.find("WHERE").expect("backfill UPDATE has a WHERE");
             let (head, predicate) = stmt.split_at(at);
             let predicate = predicate.trim_start_matches("WHERE").trim();
-            format!("{head}WHERE ({predicate}) AND service_id = $1")
+            format!("{head}WHERE ({predicate}) AND service_id = ANY($1)")
         })
         .collect()
 }
@@ -52,9 +57,13 @@ async fn the_column_and_the_name_predicates_agree_on_every_shape() {
     db.migrate().await.expect("migrate");
     let pool = db.pool.clone();
     // `authz_services.type` is a foreign key to the service-def table.
-    egret_policy::seed_trino(&egret_policy::PolicyStore::new(db.clone()))
+    let store = egret_policy::PolicyStore::new(db.clone());
+    egret_policy::seed_trino(&store)
         .await
         .expect("seed trino service-def");
+    egret_policy::seed_starrocks(&store)
+        .await
+        .expect("seed starrocks service-def");
 
     // A parsing change must not be able to make this test run nothing.
     let backfill = scoped_backfill_statements();
@@ -64,16 +73,22 @@ async fn the_column_and_the_name_predicates_agree_on_every_shape() {
         "expected exactly the compiler and infra backfill UPDATEs: {backfill:#?}"
     );
 
-    let service_id: i64 = sqlx::query_scalar(
-        "INSERT INTO policy.authz_services (name, type, config_jsonb) \
-         VALUES ($1, 'trino', '{}'::jsonb) RETURNING id",
-    )
-    .bind(format!("t-agree-{}", uuid::Uuid::new_v4().simple()))
-    .fetch_one(&pool)
-    .await
-    .expect("service");
+    let mut service_ids = std::collections::BTreeMap::new();
+    for ty in ["trino", "starrocks"] {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO policy.authz_services (name, type, config_jsonb) \
+             VALUES ($1, $2, '{}'::jsonb) RETURNING id",
+        )
+        .bind(format!("t-agree-{ty}-{}", uuid::Uuid::new_v4().simple()))
+        .bind(ty)
+        .fetch_one(&pool)
+        .await
+        .expect("service");
+        service_ids.insert(ty, id);
+    }
+    let ids: Vec<i64> = service_ids.values().copied().collect();
 
-    let fixture = [
+    let trino_fixture = [
         (
             "perm-grant-11111111-1111-1111-1111-111111111111",
             "compiler",
@@ -91,13 +106,32 @@ async fn the_column_and_the_name_predicates_agree_on_every_shape() {
         ("egret-admin-notes", "operator"),
         ("sales can read orders", "operator"),
     ];
+    // SP4d-3 final review I-1 (USER RULING, narrowed): on StarRocks only the
+    // `all - ` shape changes owner. The default set is Trino-shaped, so a
+    // StarRocks `all - …` row is an operator's (deletable); the per-admin set
+    // and the delegator's names stay egret's on every type.
+    let starrocks_fixture = [
+        ("all - catalog, database, table", "operator"),
+        ("egret-admin - catalog, database, table", "infra"),
+        ("egret-query-timeout", "infra"),
+        (
+            "perm-grant-44444444-4444-4444-4444-444444444444",
+            "compiler",
+        ),
+        ("sales can read orders", "operator"),
+    ];
+    let fixture: Vec<(&str, &str, &str)> = trino_fixture
+        .iter()
+        .map(|(n, e)| ("trino", *n, *e))
+        .chain(starrocks_fixture.iter().map(|(n, e)| ("starrocks", *n, *e)))
+        .collect();
     // Rows take the column DEFAULT; only the backfill may move them off it.
-    for (name, _) in fixture {
+    for (ty, name, _) in &fixture {
         sqlx::query(
             "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb) \
              VALUES ($1, $2, '{}'::jsonb)",
         )
-        .bind(service_id)
+        .bind(service_ids[ty])
         .bind(name)
         .execute(&pool)
         .await
@@ -108,16 +142,18 @@ async fn the_column_and_the_name_predicates_agree_on_every_shape() {
         // Audited: the text is the repo's own migration, read at compile time;
         // the only runtime value (`service_id`) is a bind parameter.
         sqlx::query(sqlx::AssertSqlSafe(stmt.as_str()))
-            .bind(service_id)
+            .bind(&ids)
             .execute(&pool)
             .await
             .unwrap_or_else(|e| panic!("backfill statement failed: {e}\n{stmt}"));
     }
 
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT name, managed_by FROM policy.authz_policies WHERE service_id = $1 ORDER BY id",
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT s.type, p.name, p.managed_by FROM policy.authz_policies p \
+         JOIN policy.authz_services s ON s.id = p.service_id \
+         WHERE p.service_id = ANY($1) ORDER BY p.id",
     )
-    .bind(service_id)
+    .bind(&ids)
     .fetch_all(&pool)
     .await
     .expect("read back");
@@ -125,26 +161,32 @@ async fn the_column_and_the_name_predicates_agree_on_every_shape() {
     // The control that makes a zero meaningful: if the fixture had not landed,
     // or the WHERE were wrong, this would be 0 and the loop below would assert
     // nothing at all while still reporting `ok`.
-    assert_eq!(rows.len(), 10, "fixture did not land");
+    assert_eq!(rows.len(), 15, "fixture did not land");
 
     let mut disagreements = Vec::new();
-    for ((name, managed_by), (fixture_name, expected)) in rows.iter().zip(fixture) {
-        assert_eq!(name, fixture_name, "row order changed");
+    for ((ty, name, managed_by), (fixture_ty, fixture_name, expected)) in
+        rows.iter().zip(fixture.iter().copied())
+    {
+        assert_eq!(
+            (ty.as_str(), name.as_str()),
+            (fixture_ty, fixture_name),
+            "row order changed"
+        );
         let from_names = if is_compiler_owned_policy_name(name) {
             "compiler"
-        } else if is_egret_infrastructure_policy_name(name) {
+        } else if is_egret_infrastructure_policy(ty, name) {
             "infra"
         } else {
             "operator"
         };
         if managed_by != expected {
             disagreements.push(format!(
-                "{name:?}: backfilled column={managed_by} expected={expected}"
+                "{ty}/{name:?}: backfilled column={managed_by} expected={expected}"
             ));
         }
         if managed_by != from_names {
             disagreements.push(format!(
-                "{name:?}: backfilled column={managed_by} predicates={from_names}"
+                "{ty}/{name:?}: backfilled column={managed_by} predicates={from_names}"
             ));
         }
     }

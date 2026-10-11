@@ -103,7 +103,7 @@ async fn an_infra_policy_cannot_be_updated_disabled_or_deleted_and_an_operator_o
 }
 
 /// The reservation: a human cannot mint, or rename a row INTO, a name
-/// `is_egret_infrastructure_policy_name` recognises — otherwise the column
+/// `is_egret_infrastructure_policy` recognises — otherwise the column
 /// (`'operator'`) and the predicate drift apart. Allow cells: a near-miss
 /// operator name, and the explicit infra writers, which must keep working.
 #[tokio::test]
@@ -178,4 +178,62 @@ async fn a_human_cannot_create_or_rename_into_an_infra_name_but_the_infra_writer
             ("egret-query-timeout".to_string(), "infra".to_string()),
         ]
     );
+}
+
+/// SP4d-3 final review I-1: on a StarRocks profile `all - …` is NOT reserved —
+/// egret never mints that shape there — so a human may create it (stamped
+/// `'operator'`), rename into it, and delete it. `egret-admin - …` stays
+/// reserved on every type. The Trino cells are the test above.
+#[tokio::test]
+async fn on_a_starrocks_profile_all_dash_is_a_human_name_but_egret_admin_is_not() {
+    let Some((store, pool, _trino, _infra, _operator)) = fixture().await else {
+        return;
+    };
+    egret_policy::seed_starrocks(&store)
+        .await
+        .expect("seed starrocks def");
+    let sr = store
+        .create_service(
+            &format!("sr-infra-{}", uuid::Uuid::new_v4().simple()),
+            "starrocks",
+            &json!({}),
+        )
+        .await
+        .expect("starrocks service")
+        .id;
+    let body = json!({"name": "x", "policyItems": []});
+
+    let id = store
+        .create_policy(sr, "all - catalog, database, table", &body)
+        .await
+        .expect("all - … is a human name on starrocks");
+    let owner: String =
+        sqlx::query_scalar("SELECT managed_by FROM policy.authz_policies WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("owner");
+    assert_eq!(owner, "operator");
+    store
+        .update_policy(id, "all - catalog", &body, false)
+        .await
+        .expect("a rename into all - … is legal on starrocks");
+    store
+        .set_policy_enabled(id, true)
+        .await
+        .expect("an operator row toggles");
+    store
+        .delete_policy(id)
+        .await
+        .expect("and is deletable — the point of the ruling");
+
+    let err = store
+        .create_policy(sr, "egret-admin - catalog, database", &body)
+        .await
+        .expect_err("egret-admin - … stays reserved on starrocks");
+    assert!(
+        matches!(err, PolicyStoreError::InfrastructureOwned(_)),
+        "{err:?}"
+    );
+    assert!(names_in(&pool, sr).await.is_empty());
 }

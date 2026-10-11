@@ -82,7 +82,7 @@ pub trait PolicyPort: Send + Sync {
     /// [`create_policy`](Self::create_policy) for egret's OWN infrastructure
     /// policies: same semantics (`AlreadyExists` on a clash), but the row is
     /// stamped `managed_by = 'infra'`. Errors `Backend` for a name that
-    /// `infra_names::is_egret_infrastructure_policy_name` does not recognise.
+    /// `infra_names::is_egret_infrastructure_policy` does not recognise on the profile's type.
     /// Used by engine provisioning for the delegator's two fixed policies.
     async fn create_infra_policy(
         &self,

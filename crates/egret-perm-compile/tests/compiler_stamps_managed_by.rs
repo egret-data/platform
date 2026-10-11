@@ -10,7 +10,7 @@
 use egret_metastore::Db;
 use egret_perm::{PermStore, PrincipalSet, Rule, RuleKind, Selector};
 use egret_perm_compile::recompile_service;
-use egret_policy::infra_names::is_egret_infrastructure_policy_name;
+use egret_policy::infra_names::is_egret_infrastructure_policy;
 use egret_policy::{is_compiler_owned_policy_name, PolicyStore};
 use uuid::Uuid;
 
@@ -84,6 +84,7 @@ async fn compiled_policies_are_stamped_compiler() {
     for (name, managed_by) in &rows {
         assert_eq!(managed_by, "compiler", "{name:?} was not stamped compiler");
         assert!(is_compiler_owned_policy_name(name), "{name:?}");
-        assert!(!is_egret_infrastructure_policy_name(name), "{name:?}");
+        // "trino" is the type on which the predicate claims the most names.
+        assert!(!is_egret_infrastructure_policy("trino", name), "{name:?}");
     }
 }

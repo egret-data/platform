@@ -1,6 +1,7 @@
 //! The ONLY place egret's own infrastructure policy names are spelled.
 //!
-//! Four shapes exist, from two producers:
+//! Four shapes exist, from two producers. The `all - …` shape is egret's only
+//! on Trino profiles; see [`is_egret_infrastructure_policy`].
 //!
 //! 1. `egret_policy::default_policies::build_default_policies` mints
 //!    `"{prefix} - {resource, chain, ...}"`, once per resource hierarchy, with
@@ -53,12 +54,32 @@ pub const QUERY_TIMEOUT_POLICY_NAME: &str = "egret-query-timeout";
 /// infrastructure and lock them out of it.
 const SEEDED_NAME_SEPARATOR: &str = " - ";
 
-/// Whether `name` is a policy egret's own plumbing minted.
-pub fn is_egret_infrastructure_policy_name(name: &str) -> bool {
+/// The one service type the [`DEFAULT_ALL_ACCESS_NAME_PREFIX`] set is
+/// infrastructure on. `seed_default_trino_policies` builds that set from the
+/// Trino service-def only, and refuses any other profile type, so an
+/// `all - …` row on a StarRocks (or any other) profile was never minted by
+/// egret: it is an operator's policy, or a pre-0180 leftover of the old
+/// unguarded seeder that the real plugin rejects and the operator must be able
+/// to delete. Equal to `egret_policy::service_def::TRINO_DEF_NAME`, which a
+/// test in `egret-policy` pins (this leaf crate cannot import it).
+pub const DEFAULT_ALL_ACCESS_SERVICE_TYPE: &str = "trino";
+
+/// Whether a policy named `name` on a profile of type `service_type` is one
+/// egret's own plumbing minted.
+///
+/// The type matters for one shape only. The delegator's two names and the
+/// `egret-admin - …` per-admin set are infrastructure on EVERY type (the
+/// per-admin set is seeded StarRocks-shaped on StarRocks profiles by
+/// `seed_admin_all_access(…, "starrocks", …)`, and unlocking it would let an
+/// operator lock every admin out). The `all - …` default set is
+/// infrastructure only on [`DEFAULT_ALL_ACCESS_SERVICE_TYPE`]. There is
+/// deliberately no name-only variant: two predicates would be two spellings.
+pub fn is_egret_infrastructure_policy(service_type: &str, name: &str) -> bool {
     name == IMPERSONATE_POLICY_NAME
         || name == QUERY_TIMEOUT_POLICY_NAME
         || is_seeded_hierarchy_name(name, ADMIN_ALL_ACCESS_NAME_PREFIX)
-        || is_seeded_hierarchy_name(name, DEFAULT_ALL_ACCESS_NAME_PREFIX)
+        || (service_type == DEFAULT_ALL_ACCESS_SERVICE_TYPE
+            && is_seeded_hierarchy_name(name, DEFAULT_ALL_ACCESS_NAME_PREFIX))
 }
 
 fn is_seeded_hierarchy_name(name: &str, prefix: &str) -> bool {

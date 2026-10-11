@@ -19,7 +19,7 @@ pub enum PolicyStoreError {
     CompilerOwned(String),
     /// SP4d-3: a human write aimed at a row egret's own plumbing owns
     /// (`managed_by = 'infra'`), or a human create/rename into a name
-    /// `is_egret_infrastructure_policy_name` recognises. Mapped to 409, like
+    /// `is_egret_infrastructure_policy` recognises. Mapped to 409, like
     /// [`Self::CompilerOwned`] — the request is well-formed and names a real
     /// policy or name; what is wrong is who owns it.
     #[error("{0}")]
