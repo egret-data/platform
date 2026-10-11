@@ -28,3 +28,18 @@ serde_json.workspace = true
 # suite is a differential of the two paths:
 #   cargo test -p egret-ranger-eval --features crosscheck-prepared
 crosscheck-prepared = []
+
+# SP4d-3 Task 8: `tests/differential.rs` asks the REAL Java engines whether a
+# migration the grammar accepts decides identically before and after. The
+# after-state must be what egret really compiles, so the test drives the
+# grammar (`egret-perm-compile::grammar`) and the compiler (`compile_grant` +
+# `access_to_ranger_json`, `compile_rule`) themselves rather than a second
+# copy of either. DEV-only, and a dev-dependency cycle on purpose
+# (`egret-perm-compile` depends on this crate's library): Cargo permits it, the
+# integration test links ONE build of this library, and the library itself
+# stays `serde` + `serde_json` only — the discipline above is about `src/`.
+[dev-dependencies]
+egret-perm.workspace = true
+egret-perm-compile.workspace = true
+egret-policy.workspace = true
+uuid.workspace = true
