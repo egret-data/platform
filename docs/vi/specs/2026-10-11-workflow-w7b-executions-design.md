@@ -237,7 +237,8 @@ Mọi hành động bị vô hiệu hoá đều hiện lý do thành chữ (FE-A
 
 Execution ghi trước migration 0180 có `started_at`/`ended_at` null. Khi đó gantt dùng lại cách tính cũ (`gantt_rows` trong `tests/executions_routes.rs`):
 - bắt đầu là `created_at` của execution cộng `attempts[0].started_at`;
-- kết thúc là `updated_at` của run, khi `ended_seq` đã có giá trị.
+- kết thúc là `updated_at` của run, khi `ended_seq` đã có giá trị hoặc khi state của run đã kết thúc. Run có chip báo đã xong không bao giờ bị vẽ kéo dài tới hiện tại; `updated_at` của nó là lần ghi kết thúc, vì claim và reap chỉ chạm vào run đang `RUNNING`. *(Thêm 2026-10-11, Task 4.)*
+- trong một execution đã xong, run chưa kết thúc được cắt tại thời điểm kết thúc của execution và đánh dấu là ước tính.
 
 Các thanh này vẽ gạch chéo, có nhãn "estimated", và đầu tab có một ghi chú giải thích.
 

@@ -231,7 +231,8 @@ Every disabled action shows its reason as visible text (FE-ACTION-4), using W7a'
 
 For an execution recorded before migration 0180, `started_at` and `ended_at` are null. The gantt then uses the old recipe (`tests/executions_routes.rs` `gantt_rows`):
 - start is the execution's `created_at` plus `attempts[0].started_at`;
-- end is the run's `updated_at` once `ended_seq` is set.
+- end is the run's `updated_at` once `ended_seq` is set, or once the run's state is terminal. A run whose chip says it finished is never drawn open to now; its `updated_at` is its ending write, because claim and reap only touch `RUNNING` runs. *(Added 2026-10-11, Task 4.)*
+- in a finished execution, a run that has not ended is capped at the execution's end and marked estimated.
 
 These bars are drawn hatched, with an "estimated" label and a note at the top of the tab.
 
