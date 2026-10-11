@@ -2474,7 +2474,7 @@ fn upload_refusal(
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed", body = egret_core::http::ErrorBody),
-        (status = 409, description = "The execution is not PAUSED. Resuming something that is not waiting is a no-op that would answer 200, and a silent success is the answer this route must not give.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "The execution is not PAUSED (or its pause ended before the resume took the execution's lock), or it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting. A resume that changes nothing must not answer 200.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -2508,10 +2508,21 @@ async fn resume_execution(
             before.execution.state
         )));
     }
-    if crate::worker::resume_by_hand(&st.db.pool, id).await? == crate::worker::Resumed::NotPaused {
-        return Err(Error::Conflict(format!(
-            "execution {id} is no longer PAUSED; its pause ended before the resume reached it"
-        )));
+    match crate::worker::resume_by_hand(&st.db.pool, id).await? {
+        crate::worker::Resumed::Released(_) => {}
+        crate::worker::Resumed::NotPaused => {
+            return Err(Error::Conflict(format!(
+                "execution {id} is no longer PAUSED; its pause ended before the resume reached it"
+            )));
+        }
+        // An execution paused only by a waiting `LoopUntil` (W7b Task 3 fix
+        // round 2): a 409, never a 200 that changed nothing.
+        crate::worker::Resumed::NoPauseWaiting => {
+            return Err(Error::Conflict(
+                "Nothing to resume: no Pause task is waiting. The execution is waiting on a loop condition, which ends on its own schedule."
+                    .to_string(),
+            ));
+        }
     }
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,

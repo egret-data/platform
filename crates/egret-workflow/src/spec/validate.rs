@@ -1568,9 +1568,10 @@ fn walk_task(
                 report.warnings.push(Finding {
                     code: "not_yet_enforced",
                     message: format!(
-                        "task '{}' is a pause with '{property}', which egret parses but does \
-                         not run: the pause itself waits, and '{property}' is ignored. \
-                         Enforcement lands in W8",
+                        "task '{}' is a pause with '{property}', which egret does not run. \
+                         egret does not treat this task as a pause at all: it never pauses, no \
+                         worker can run it, and an execution that reaches it stalls there. \
+                         Remove '{property}' to get a pause egret runs",
                         task.id
                     ),
                     path: format!("{path}.{property}"),
@@ -2862,11 +2863,17 @@ mod tests {
                     });
                 assert!(
                     w.message.contains(property),
-                    "{spelling}/{property}: the warning must name the property that is \
-                     ignored, not merely the task: {}",
+                    "{spelling}/{property}: the warning must name the property egret \
+                     does not run, not merely the task: {}",
                     w.message
                 );
-                assert!(w.message.contains("W8"), "{spelling}/{property}: {}", w.message);
+                // What really happens (W7b Task 3 fix round 2, review N-3): the
+                // whole task is planned opaque (`plan::pause_gap`), so it never
+                // pauses and the execution stalls at it. The old text said the
+                // pause still waited and only the property was ignored.
+                assert!(w.message.contains("never pauses"), "{spelling}/{property}: {}", w.message);
+                assert!(w.message.contains("stalls"), "{spelling}/{property}: {}", w.message);
+                assert!(!w.message.contains("is ignored"), "{spelling}/{property}: {}", w.message);
                 assert!(
                     r.errors.is_empty(),
                     "{spelling}/{property}: an unenforced property is a warning, not an \

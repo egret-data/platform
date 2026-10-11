@@ -2417,6 +2417,103 @@ async fn a_resume_and_the_waker_transition_a_pause_once(pool: sqlx::PgPool) {
     }
 }
 
+/// **An execution paused only by a waiting `LoopUntil` is a 409, and nothing
+/// changes** (W7b Task 3 fix round 2, review N-1). `pause_mark` puts the
+/// execution in `PAUSED` while a `LoopUntil` waits for its next iteration, but
+/// a resume releases `Pause` tasks only (Kestra too), so there is nothing for
+/// it to do -- and a 200 that changed nothing would be a silent success.
+///
+/// The control is the same route on a real `Pause` (above), which answers 200.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_resume_of_an_execution_paused_only_by_a_loop_until_is_a_conflict(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let source = "id: until\nnamespace: a.write\ntasks:\n  - id: loop\n    \
+                  type: io.kestra.plugin.core.flow.LoopUntil\n    \
+                  condition: \"{{ false }}\"\n    \
+                  checkFrequency:\n      interval: PT1H\n      maxIterations: 3\n    \
+                  tasks:\n      \
+                  - id: work\n        type: io.kestra.plugin.core.log.Log\n        \
+                  message: hi\n";
+    let flow = common::seed_flow(&db, ws, user, source, "draft").await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 201);
+    let id: Uuid = common::json(res).await["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    // The body's one task runs; the condition is false; the loop waits an hour.
+    drain_with(&pool).await;
+    assert_eq!(
+        state_of(&db, id).await,
+        "PAUSED",
+        "the fixture must reach the loop's wait"
+    );
+    let rows = |pool: sqlx::PgPool| async move {
+        let ex: (Value, DateTime<Utc>) =
+            sqlx::query_as("SELECT history, updated_at FROM workflow.executions WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let runs: Vec<(String, String, Option<String>, Option<i64>, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT task_id, state, resume_with, not_before_ms, updated_at FROM workflow.task_runs \
+             WHERE execution_id = $1 ORDER BY run_ix",
+        )
+        .bind(id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        (ex, runs)
+    };
+    let before = rows(pool.clone()).await;
+    assert!(
+        before
+            .1
+            .iter()
+            .any(|r| r.0 == "loop" && r.1 == "PAUSED" && r.2.as_deref() == Some("ITERATE")),
+        "the loop is what waits: {before:?}"
+    );
+
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{id}/resume"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 409);
+    let body = common::json(res).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("Nothing to resume: no Pause task is waiting"),
+        "{body}"
+    );
+    assert_eq!(rows(pool.clone()).await, before, "nothing was written");
+    assert_eq!(
+        egret_workflow::worker::resume_by_hand(&pool, id)
+            .await
+            .unwrap(),
+        egret_workflow::worker::Resumed::NoPauseWaiting
+    );
+    assert!(
+        common::audit_mutations(&app)
+            .iter()
+            .all(|(a, _, _)| a != "workflow_execution:resume"),
+        "a refused resume leaves no audit record"
+    );
+}
+
 // ── Fix round 1 ─────────────────────────────────────────────────────────────
 
 /// **Replay closes the same THREE doors start does.** Fix round 1's shipped

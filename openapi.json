@@ -28256,7 +28256,7 @@
             }
           },
           "409": {
-            "description": "The execution is not PAUSED. Resuming something that is not waiting is a no-op that would answer 200, and a silent success is the answer this route must not give.",
+            "description": "The execution is not PAUSED (or its pause ended before the resume took the execution's lock), or it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting. A resume that changes nothing must not answer 200.",
             "content": {
               "application/json": {
                 "schema": {

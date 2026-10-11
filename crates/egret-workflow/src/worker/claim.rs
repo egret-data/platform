@@ -2747,9 +2747,14 @@ pub async fn resume(pool: &PgPool, execution_id: Uuid) -> Result<()> {
 /// What a manual resume found under the execution's lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resumed {
-    /// The execution was `PAUSED`; this many `Pause` runs were released and
-    /// the execution settled on from there.
+    /// The execution was `PAUSED`; this many `Pause` runs (at least one)
+    /// were released and the execution settled on from there.
     Released(usize),
+    /// The execution is `PAUSED`, but no `Pause` task is waiting: only a
+    /// `LoopUntil` waits for its next iteration, which a resume does not end
+    /// (Kestra resumes `Pause` tasks only). Nothing written. (W7b Task 3 fix
+    /// round 2: this used to settle and answer `Released(0)`, a silent success.)
+    NoPauseWaiting,
     /// The execution was no longer `PAUSED` when the lock was taken -- the
     /// waker ended the pause first, or it was never paused. Nothing written.
     NotPaused,
@@ -2780,6 +2785,10 @@ pub async fn resume_by_hand(pool: &PgPool, execution_id: Uuid) -> Result<Resumed
         }
         let before = state.clone();
         let released = crate::executor::release_paused_pauses(&mut state, now).len();
+        if released == 0 {
+            // Before any write: the transaction commits nothing.
+            return Ok(Resumed::NoPauseWaiting);
+        }
         settle(conn, &ctx, &before, state, now, None).await?;
         Ok(Resumed::Released(released))
     })
