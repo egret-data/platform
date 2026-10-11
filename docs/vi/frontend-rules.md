@@ -128,7 +128,9 @@ API client được sinh lại bằng `npm run gen:api`, không bao giờ bằng
 
 #### FE-DATA-2 — Hook của orval và một factory key cho mỗi domain · PHẢI
 Endpoint mới được dùng qua hook do orval sinh ra. Query key tự viết lấy từ một factory key theo domain (`queryKeys.ts` trong thư mục của domain), có tiền tố là tên domain.
-**Làm thế này:** `frontend/src/routes/control-plane/queryKeys.ts`. **Kiểm bằng:** review.
+- **Ngoại lệ.** Có thể gọi thẳng một hàm fetch do orval sinh ra (không bao giờ là `fetch` tự viết) khi lời gọi cần con trỏ (cursor) qua nhiều trang, một abort signal cho mỗi request, hoặc tham số tính lúc fetch. Mỗi chỗ gọi như vậy có một dòng chú thích nêu lý do.
+
+**Làm thế này:** `frontend/src/routes/control-plane/queryKeys.ts`; một ngoại lệ: `frontend/src/components/workflows/executions/logs/useLogFollow.ts` (con trỏ qua nhiều trang). **Kiểm bằng:** review.
 
 #### FE-DATA-3 — `localStorage` chỉ giữ tuỳ chọn · PHẢI
 Dữ liệu từ server không bao giờ được cache trong `localStorage`. `localStorage` chỉ giữ tuỳ chọn của từng người xem (theme, một panel đang thu gọn), và mọi lần truy cập đều được bọc để trang vẫn chạy khi không có nó.
@@ -151,7 +153,7 @@ URL viết kebab-case và thuộc workspace, dưới `/explore/:workspace/…`.
 ## 8. Truy cập (FE-A11Y)
 
 #### FE-A11Y-1 — Qua bộ rule recommended của jsx-a11y · PHẢI
-Code qua được bộ rule recommended của `eslint-plugin-jsx-a11y-x` (bản fork được bảo trì của `eslint-plugin-jsx-a11y`; mã rule viết là `jsx-a11y/…`). `jsx-a11y/no-autofocus` tắt; xem FE-A11Y-6. `jsx-a11y/no-redundant-roles` cho phép `role="list"` trên `<ul>` và `<ol>`: Safari với VoiceOver bỏ role list của một danh sách khi CSS bỏ kiểu danh sách của nó, như bộ reset của Tailwind làm.
+Code qua được bộ rule recommended của `eslint-plugin-jsx-a11y-x` (bản fork được bảo trì của `eslint-plugin-jsx-a11y`; mã rule viết là `jsx-a11y/…`). `jsx-a11y/no-autofocus` tắt; xem FE-A11Y-6. `jsx-a11y/no-redundant-roles` cho phép `role="list"` trên `<ul>` và `<ol>`: Safari với VoiceOver bỏ role list của một danh sách khi CSS bỏ kiểu danh sách của nó, như bộ reset của Tailwind làm. `jsx-a11y/no-noninteractive-tabindex` cũng cho phép `tabIndex` trên `role="log"`, cho vùng log cuộn được của FE-A11Y-3.
 **Làm thế này:** sửa những gì lint báo; cấu hình nằm ở `frontend/eslint-rules/plugins.js`. **Kiểm bằng:** lint (jsx-a11y).
 
 #### FE-A11Y-2 — Ring focus dùng chung, đạt 3:1 · PHẢI
@@ -159,8 +161,8 @@ Focus dùng ring chung (`focus-visible:ring-2 focus-visible:ring-ring`). Chỉ b
 **Làm thế này:** ring như trong `frontend/src/components/ui/button.tsx`. **Kiểm bằng:** test (`frontend/src/__tests__/focusIndicatorContrast.test.ts`).
 
 #### FE-A11Y-3 — Mọi thứ bấm được đều dùng được bằng bàn phím · PHẢI
-Mọi phần tử bấm được đều dùng được bằng bàn phím. Phần tử không phải nút mà được cho bấm thì có role, `tabIndex` và xử lý Enter/Space. Nút chỉ có icon thì có `aria-label`.
-**Làm thế này:** `frontend/src/components/ui/icon-button.tsx` cho nút chỉ có icon. **Kiểm bằng:** review.
+Mọi phần tử bấm được đều dùng được bằng bàn phím. Phần tử không phải nút mà được cho bấm thì có role, `tabIndex` và xử lý Enter/Space. Nút chỉ có icon thì có `aria-label`. Vùng `role="log"` cuộn được có `tabIndex={0}`, để bàn phím cuộn được nó (`scrollable-region-focusable` của axe); danh sách có windowing giữ cho dòng đang giữ focus luôn được render.
+**Làm thế này:** `frontend/src/components/ui/icon-button.tsx` cho nút chỉ có icon; `frontend/src/components/workflows/executions/logs/LogView.tsx` cho vùng log cuộn được. **Kiểm bằng:** review.
 
 #### FE-A11Y-4 — Không bao giờ chỉ dùng màu · PHẢI
 Thông tin không bao giờ chỉ truyền bằng màu; chart giữ kiểu đường, marker và mô tả `aria` của nó (FE-VISUAL-6).
@@ -258,13 +260,13 @@ Mọi rule mà reviewer phải xác nhận đều ở đây: hoặc lint không 
 - [ ] FE-FORM-3 — Tập giá trị đã biết thì dùng picker hoặc combobox có trợ giúp.
 - [ ] FE-FORM-4 — Lỗi validate nằm cạnh field, bằng lời của server nếu lỗi do server trả về.
 - [ ] FE-DATA-1 — API client được sinh lại bằng `npm run gen:api`.
-- [ ] FE-DATA-2 — Endpoint mới qua hook của orval; key tự viết lấy từ factory key của domain.
+- [ ] FE-DATA-2 — Endpoint mới qua hook của orval, hoặc một hàm fetch do orval sinh ra kèm một dòng chú thích nêu ngoại lệ; key tự viết lấy từ factory key của domain.
 - [ ] FE-DATA-3 — Không có dữ liệu server trong `localStorage`; mọi lần truy cập đều được bọc.
 - [ ] FE-ROUTE-1 — Route trong `App.tsx` hoặc trong module khu vực lazy mà nó mount, sau guard của khu vực; redirect dùng đường dẫn tuyệt đối.
 - [ ] FE-ROUTE-2 — Khu vực tính năng mới được lazy-load với fallback là skeleton, và có bundle test giữ điều đó (W7 thêm test đầu tiên).
 - [ ] FE-ROUTE-3 — URL kebab-case dưới `/explore/:workspace/…`.
 - [ ] FE-A11Y-2 — Focus dùng ring chung, đạt 3:1 trên mọi bề mặt nó xuất hiện; token bề mặt mới được thêm vào `focusIndicatorContrast.test.ts`.
-- [ ] FE-A11Y-3 — Mọi thứ bấm được đều dùng được bằng bàn phím; nút chỉ có icon có `aria-label`.
+- [ ] FE-A11Y-3 — Mọi thứ bấm được đều dùng được bằng bàn phím; nút chỉ có icon có `aria-label`; vùng `role="log"` cuộn được có `tabIndex={0}`.
 - [ ] FE-A11Y-4 — Không thông tin nào chỉ truyền bằng màu.
 - [ ] FE-A11Y-5 — Chuyển động tôn trọng `prefers-reduced-motion`.
 - [ ] FE-A11Y-6 — `autoFocus` chỉ trên ô do chính thao tác của người dùng làm hiện ra.

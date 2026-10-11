@@ -126,7 +126,9 @@ The API client is regenerated with `npm run gen:api`, never with bare `orval`, w
 
 #### FE-DATA-2 — Orval hooks and a key factory per domain · MUST
 A new endpoint is consumed through its orval-generated hook. A hand-written query key comes from a per-domain key factory (`queryKeys.ts` in the domain's folder), prefixed with the domain's name.
-**Do this:** `frontend/src/routes/control-plane/queryKeys.ts`. **Checked by:** review.
+- **Exception.** A generated orval fetcher (never a hand-written `fetch`) may be called directly when the call needs a cursor across pages, an abort signal per request, or parameters computed at fetch time. Each such call site carries a one-line comment naming its reason.
+
+**Do this:** `frontend/src/routes/control-plane/queryKeys.ts`; an exception: `frontend/src/components/workflows/executions/logs/useLogFollow.ts` (a cursor across pages). **Checked by:** review.
 
 #### FE-DATA-3 — `localStorage` holds preferences only · MUST
 Server data is never cached in `localStorage`. `localStorage` holds per-viewer preferences only (theme, a collapsed panel), and every access is wrapped so the page works without it.
@@ -149,7 +151,7 @@ URLs are kebab-case and workspace-scoped under `/explore/:workspace/…`.
 ## 8. Accessibility (FE-A11Y)
 
 #### FE-A11Y-1 — Pass the jsx-a11y recommended rules · MUST
-The code passes the recommended rules of `eslint-plugin-jsx-a11y-x` (the maintained fork of `eslint-plugin-jsx-a11y`; rule ids read `jsx-a11y/…`). `jsx-a11y/no-autofocus` is off; see FE-A11Y-6. `jsx-a11y/no-redundant-roles` allows `role="list"` on `<ul>` and `<ol>`: Safari with VoiceOver drops a list's role once CSS removes its list styling, as the Tailwind reset does.
+The code passes the recommended rules of `eslint-plugin-jsx-a11y-x` (the maintained fork of `eslint-plugin-jsx-a11y`; rule ids read `jsx-a11y/…`). `jsx-a11y/no-autofocus` is off; see FE-A11Y-6. `jsx-a11y/no-redundant-roles` allows `role="list"` on `<ul>` and `<ol>`: Safari with VoiceOver drops a list's role once CSS removes its list styling, as the Tailwind reset does. `jsx-a11y/no-noninteractive-tabindex` also allows `tabIndex` on `role="log"`, for FE-A11Y-3's scrollable log.
 **Do this:** fix what lint reports; the configuration is `frontend/eslint-rules/plugins.js`. **Checked by:** lint (jsx-a11y).
 
 #### FE-A11Y-2 — The shared focus ring, at 3:1 · MUST
@@ -157,8 +159,8 @@ Focus uses the shared ring (`focus-visible:ring-2 focus-visible:ring-ring`). A f
 **Do this:** the ring as in `frontend/src/components/ui/button.tsx`. **Checked by:** test (`frontend/src/__tests__/focusIndicatorContrast.test.ts`).
 
 #### FE-A11Y-3 — Everything clickable works from the keyboard · MUST
-Every clickable element works from the keyboard. A non-button element made clickable gets a role, `tabIndex` and Enter/Space handling. An icon-only button has an `aria-label`.
-**Do this:** `frontend/src/components/ui/icon-button.tsx` for an icon-only button. **Checked by:** review.
+Every clickable element works from the keyboard. A non-button element made clickable gets a role, `tabIndex` and Enter/Space handling. An icon-only button has an `aria-label`. A scrollable `role="log"` region takes `tabIndex={0}`, so the keyboard can scroll it (axe's `scrollable-region-focusable`); a windowed list keeps the row holding focus rendered.
+**Do this:** `frontend/src/components/ui/icon-button.tsx` for an icon-only button; `frontend/src/components/workflows/executions/logs/LogView.tsx` for a scrollable log. **Checked by:** review.
 
 #### FE-A11Y-4 — Never colour alone · MUST
 Information is never carried by colour alone; charts keep their line styles, markers and `aria` description (FE-VISUAL-6).
@@ -256,13 +258,13 @@ Every rule a reviewer must confirm is here: either lint cannot check it, or its 
 - [ ] FE-FORM-3 — Known value sets get a picker or combobox with help.
 - [ ] FE-FORM-4 — Validation errors sit beside their field, in the server's words when the server produced it.
 - [ ] FE-DATA-1 — The API client was regenerated with `npm run gen:api`.
-- [ ] FE-DATA-2 — New endpoints through orval hooks; hand-written keys from the domain's key factory.
+- [ ] FE-DATA-2 — New endpoints through orval hooks, or a generated fetcher with a one-line comment naming the exception; hand-written keys from the domain's key factory.
 - [ ] FE-DATA-3 — No server data in `localStorage`; every access wrapped.
 - [ ] FE-ROUTE-1 — Routes in `App.tsx` or in a lazy area module it mounts, behind their area's guard; redirects are absolute.
 - [ ] FE-ROUTE-2 — A new feature area is lazy with a skeleton fallback, and a bundle test guards it (W7 adds the first).
 - [ ] FE-ROUTE-3 — URLs are kebab-case under `/explore/:workspace/…`.
 - [ ] FE-A11Y-2 — Focus uses the shared ring, at 3:1 against every surface it lands on; a new surface token is added to `focusIndicatorContrast.test.ts`.
-- [ ] FE-A11Y-3 — Everything clickable works from the keyboard; icon-only buttons have an `aria-label`.
+- [ ] FE-A11Y-3 — Everything clickable works from the keyboard; icon-only buttons have an `aria-label`; a scrollable `role="log"` has `tabIndex={0}`.
 - [ ] FE-A11Y-4 — No information carried by colour alone.
 - [ ] FE-A11Y-5 — Motion respects `prefers-reduced-motion`.
 - [ ] FE-A11Y-6 — `autoFocus` only on a field the user's own action revealed.

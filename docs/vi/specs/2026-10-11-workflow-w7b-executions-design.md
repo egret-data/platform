@@ -59,6 +59,7 @@ Gantt cần thời điểm bắt đầu và kết thúc thật, nhưng engine ch
 | Danh sách hiện mọi execution | Mặc định chỉ execution gốc, có công tắc "Show child executions" | Phán quyết của người dùng: iteration của loop và execution con của subflow sẽ làm ngập danh sách |
 | Outputs có expression debugger | Không có expression debugger | Không có endpoint đánh giá biểu thức |
 | Xuất CSV danh sách | Không có trong W7b | Không được yêu cầu |
+| Bộ lọc mức log mặc định là INFO (một tuỳ chọn hiển thị lưu theo người dùng) | Mặc định không lọc mức: hiện mọi mức, URL không có `?level=` | FE-STATE-3: "trống" nghĩa là log khi chưa lọc, nên một log toàn dòng DEBUG không được hiện "No logs"; FE-PAGE-2: không có `?level=` nghĩa là không lọc. Mặc định gọn hơn của Kestra nếu muốn sẽ là một tuỳ chọn, và trạng thái trống phải nói rằng bộ lọc mức đang ẩn dòng. Quyết định ngày 2026-10-11 (review Task 5) |
 
 Khác biệt nào tìm thấy khi đối chiếu với một Kestra đang chạy (§11) sẽ được thêm vào đây, kèm lý do.
 
@@ -334,8 +335,9 @@ Một component Logs duy nhất phục vụ cả tab Logs và panel run trong Ga
 **Query key:** `workflowsKeys` có thêm:
 - `executions(ws, params)`;
 - `execution(id)` (đã có);
-- `executionLogs(id, params)`;
 - `executionFile(id, path)`.
+
+Log không có query key. `useLogFollow` giữ con trỏ (cursor) qua nhiều trang, điều mà một query key không giữ được, nên nó gọi thẳng hàm fetch do orval sinh ra `workflowGetExecutionLogs`, theo ngoại lệ của FE-DATA-2 cho con trỏ qua nhiều trang (phán quyết của người dùng, 2026-10-11, review Task 5).
 
 **Polling:** `nextPollMs` của W7a được tổng quát hoá cho mọi kết quả query; các test của W7a vẫn phải xanh.
 

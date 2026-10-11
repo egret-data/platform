@@ -52,6 +52,7 @@ The gantt needs real start and end times, and the engine does not record them. T
 | The list shows every execution | Root executions by default, with a "Show child executions" switch | The user's ruling: loop iterations and subflow children would flood the list |
 | Outputs has an expression debugger | No expression debugger | No expression-evaluation endpoint |
 | CSV export of the list | Not in W7b | Not asked for |
+| The log level filter defaults to INFO (a stored per-user display preference) | No level filter by default: every level is shown, and `?level=` is absent | FE-STATE-3: "empty" means the unfiltered log, so a log of DEBUG lines must not read "No logs"; FE-PAGE-2: no `?level=` means no filter. Kestra's quieter default would be a preference, with the empty state saying a level filter hides lines. Decided 2026-10-11 (Task 5 review) |
 
 Differences found while comparing against a running Kestra (§11) are added here, each with its reason.
 
@@ -326,8 +327,9 @@ The Logs component serves both the Logs tab and the Gantt's run panel.
 **Query keys:** `workflowsKeys` gains
 - `executions(ws, params)`;
 - `execution(id)` (existing);
-- `executionLogs(id, params)`;
 - `executionFile(id, path)`.
+
+The logs have no query key. `useLogFollow` keeps a cursor across pages, which one query key cannot hold, so it calls the generated fetcher `workflowGetExecutionLogs` directly, under FE-DATA-2's exception for a cursor across pages (the user's ruling, 2026-10-11, Task 5 review).
 
 **Polling:** W7a's `nextPollMs` is generalised to any query result, and W7a's tests stay green.
 
