@@ -961,17 +961,22 @@ macro_rules! execution_list_where {
     };
 }
 
-/// [`ExecutionRepo::list`]'s page statement, whole. Public, and hidden from
-/// the docs, for one reader: `tests/execution_timestamps.rs` `EXPLAIN`s this
-/// exact text to show the `parent=` filter is served by migration 0180's
-/// indexes. `$10`/`$11` are `LIMIT`/`OFFSET`.
-#[doc(hidden)]
-pub const EXECUTION_LIST_SQL: &str = concat!(
+/// [`ExecutionRepo::list`]'s page statement, whole. `$10`/`$11` are
+/// `LIMIT`/`OFFSET`.
+const LIST_SQL: &str = concat!(
     "SELECT ",
     execution_cols!(),
     execution_list_where!(),
     " ORDER BY created_at DESC, id DESC LIMIT $10 OFFSET $11"
 );
+
+/// Test-only (`test-util`): [`ExecutionRepo::list`]'s page statement, for
+/// `tests/execution_timestamps.rs`, which `EXPLAIN`s this exact text to show
+/// that the `parent=` filter is served by the partial indexes of migrations
+/// 0135/0138. Migration 0180 builds none.
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+pub const EXECUTION_LIST_SQL: &str = LIST_SQL;
 
 /// The window [`ExecutionRepo::list`] returns, in rows.
 #[derive(Debug, Clone, Copy)]
@@ -1091,7 +1096,7 @@ impl ExecutionRepo {
         page: Page,
     ) -> Result<ExecutionPage> {
         let (limit, offset) = page.clamped();
-        let rows: Vec<ExecutionRow> = sqlx::query_as(EXECUTION_LIST_SQL)
+        let rows: Vec<ExecutionRow> = sqlx::query_as(LIST_SQL)
             .bind(ws)
             .bind(filter.flow_id)
             .bind(&filter.namespace)

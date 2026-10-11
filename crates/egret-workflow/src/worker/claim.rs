@@ -3445,6 +3445,36 @@ fn note_create_beside_a_created_sibling(state: &ExecutionState, cmds: &[Command]
     }
 }
 
+/// `persist`'s write of an EXISTING run, `$1`..`$15` as bound there.
+/// `$14`/`$15` are [`stamps::Entered`]'s two booleans.
+///
+/// A `const` rather than inline for one reader besides `persist`:
+/// `tests/execution_timestamps.rs` drives this exact text against a terminal
+/// row to show that a later write does not move its `ended_at`. It is
+/// exported under `test-util`.
+pub const RUN_STATE_UPDATE: &str = concat!(
+    "UPDATE workflow.task_runs \
+        SET state = $1, history = $2, attempts = $3, rendered = $4, \
+            rendered_run_if = $5, not_before_ms = $6, \
+            claimed_at = CASE WHEN $7 THEN NULL ELSE claimed_at END, \
+            ended_seq = $10, \
+            created_seq = COALESCE($12, created_seq), \
+            resume_with = $13, ",
+    stamp_set!("$1", "$2", "$14", "$15"),
+    ", updated_at = now() \
+      WHERE execution_id = $8 AND run_ix = $9 \
+        AND ($11::timestamptz IS NULL OR claimed_at = $11)",
+);
+
+/// `persist`'s write of the execution's state: `$1` the state, `$2` the
+/// history, `$3` the id, and `$4`/`$5` [`stamps::Entered`]'s booleans.
+/// Exported under `test-util` for [`RUN_STATE_UPDATE`]'s reason.
+pub const EXECUTION_STATE_UPDATE: &str = concat!(
+    "UPDATE workflow.executions SET state = $1, history = $2, ",
+    stamp_set!("$1", "$2", "$4", "$5"),
+    ", updated_at = now() WHERE id = $3",
+);
+
 /// Write the difference between `before` and `after`.
 ///
 /// `release` names the run whose lease this write clears — `None` at
@@ -3472,37 +3502,6 @@ fn note_create_beside_a_created_sibling(state: &ExecutionState, cmds: &[Command]
 /// write this run's output" and "may it write this run's state" — and W4's
 /// worker pool is the caller that reaches `settle` with a lease and no
 /// `outputs` write in front of it.
-/// `persist`'s write of an EXISTING run, `$1`..`$13` as bound there.
-///
-/// A `const` rather than inline for one reader besides `persist`:
-/// `tests/execution_timestamps.rs` drives this exact text against a terminal
-/// row to show a later write does not move its `ended_at` (exported under
-/// `test-util`). `stamp_set!` reads the row's OLD `state`/`history` on the
-/// right-hand side, which is why it is safe beside `state = $1`: every
-/// expression of an `UPDATE` sees the row as it was.
-pub const RUN_STATE_UPDATE: &str = concat!(
-    "UPDATE workflow.task_runs \
-        SET state = $1, history = $2, attempts = $3, rendered = $4, \
-            rendered_run_if = $5, not_before_ms = $6, \
-            claimed_at = CASE WHEN $7 THEN NULL ELSE claimed_at END, \
-            ended_seq = $10, \
-            created_seq = COALESCE($12, created_seq), \
-            resume_with = $13, ",
-    stamp_set!("$1", "$2"),
-    ", updated_at = now() \
-      WHERE execution_id = $8 AND run_ix = $9 \
-        AND ($11::timestamptz IS NULL OR claimed_at = $11)",
-);
-
-/// `persist`'s write of the execution's state: `$1` the state, `$2` the
-/// history, `$3` the id. Exported under `test-util` for
-/// [`RUN_STATE_UPDATE`]'s reason.
-pub const EXECUTION_STATE_UPDATE: &str = concat!(
-    "UPDATE workflow.executions SET state = $1, history = $2, ",
-    stamp_set!("$1", "$2"),
-    ", updated_at = now() WHERE id = $3",
-);
-
 #[allow(clippy::too_many_arguments)]
 async fn persist(
     conn: &mut PgConnection,
@@ -3533,6 +3532,13 @@ async fn persist(
             // is NULL for every other run, and `claimed_at IS NOT DISTINCT
             // FROM NULL` would be the wrong reading of that — so the term is
             // written as "`$11` is null, OR it equals the row's lease".
+            // An EXISTING run in `marks.created` was emptied and built back in
+            // this settle (`Marks::observe`'s second loop). See `stamps`.
+            let entered = stamps::Entered::of(
+                &before.runs[ix].history,
+                &run.history,
+                marks.created.contains_key(&ix),
+            );
             let hit = sqlx::query(RUN_STATE_UPDATE)
                 .bind(state)
                 .bind(&history)
@@ -3571,6 +3577,8 @@ async fn persist(
                 // `PAUSED`. A `COALESCE` here would leave a stale discriminant
                 // beside a NULL deadline, which migration 0141 refuses.
                 .bind(run.resume_with.as_ref().map(Resume::wire))
+                .bind(entered.running)
+                .bind(entered.terminal)
                 .execute(&mut *conn)
                 .await
                 .map_err(db_err)?;
@@ -3647,6 +3655,7 @@ async fn persist(
         .map_err(db_err)?;
 
     if before.history != after.history {
+        let entered = stamps::Entered::of(&before.history, &after.history, false);
         sqlx::query(EXECUTION_STATE_UPDATE)
             .bind(
                 after
@@ -3658,6 +3667,8 @@ async fn persist(
             )
             .bind(states_json(&after.history))
             .bind(execution_id)
+            .bind(entered.running)
+            .bind(entered.terminal)
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;

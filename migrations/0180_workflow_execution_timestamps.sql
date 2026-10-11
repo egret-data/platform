@@ -12,17 +12,21 @@
 -- WHO WRITES THESE COLUMNS
 --
 -- Every write is part of the same statement that writes `state`, through the
--- two macros in `crates/egret-workflow/src/worker/stamps.rs`; there is no
--- read-then-write. `tests/execution_timestamps.rs` fails if a statement that
--- writes `state` on either table does not use one of them.
+-- macros in `crates/egret-workflow/src/worker/stamps.rs`, which hold the full
+-- rule. In short, the rule is judged PER TRANSITION, not by "is":
 --
--- * `started_at`: `COALESCE(started_at, now())` while the row's history holds
---   `RUNNING`, so it is set the first time the row runs and a resumed pause or
---   a retry does not move it. `NULL` when the history does not hold `RUNNING`
---   (a `SKIPPED` run, or a `LoopUntil` descendant that `RestartLoop` emptied).
--- * `ended_at`: `COALESCE(ended_at, …)` while `state` is terminal, so a later
---   write to a terminal row (outputs, `updated_at`) cannot move it; `NULL`
---   when the row leaves a terminal state (a `RETRY_FAILED_TASK` reopen).
+-- * `started_at` is set to `now()` by the write that takes the row into
+--   `RUNNING` for the FIRST time. It is kept after that, so a resumed pause
+--   or a retry does not move it. It is `NULL` when the history does not hold
+--   `RUNNING` (a `SKIPPED` run, or a `LoopUntil` descendant that
+--   `RestartLoop` emptied).
+-- * `ended_at` is set by the write in which the row goes from a non-terminal
+--   state to a terminal one. It is kept while the row stays terminal (an
+--   outputs write, a terminal-to-terminal move). It is `NULL` when the row is
+--   not terminal (a `RETRY_FAILED_TASK` reopen clears it).
+--
+-- A write that only touches a row that was already running or terminal does
+-- NOT stamp it. That is what keeps the rows below honest.
 --
 -- Existing rows keep `NULL` in all four columns. Nothing is guessed from
 -- `updated_at`; the UI marks such times as estimated (spec §6.3).
@@ -35,20 +39,24 @@ ALTER TABLE workflow.task_runs
   ADD COLUMN started_at timestamptz,
   ADD COLUMN ended_at   timestamptz;
 
--- The one terminal list in SQL. `RunState::is_terminal` is the authority and
--- `tests/execution_timestamps.rs` asserts this function agrees with it for
--- every variant of `RunState::ALL`, so a terminal state added in Rust and not
--- here fails a test rather than a write in production.
+-- The one terminal list in SQL. It is exactly `models::State::is_terminated`
+-- (spec §3.2's authority), which is `RunState::is_terminal` plus
+-- `RESUBMITTED`. No `RunState` spells `RESUBMITTED`, so no writer produces it
+-- today. `tests/execution_timestamps.rs` pins this function against every
+-- variant of both enums, so a terminal state added in Rust and not here fails
+-- a test rather than a write in production.
 CREATE FUNCTION workflow.state_is_terminal(state text) RETURNS boolean
   LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
   AS $$ SELECT state IN ('SUCCESS', 'FAILED', 'RETRIED', 'KILLED', 'SKIPPED',
-                         'WARNING', 'CANCELLED') $$;
+                         'WARNING', 'CANCELLED', 'RESUBMITTED') $$;
 
 -- Only a terminal row has an end, and an end is never before the start. The
--- writers cannot break either (the helper's `GREATEST` covers a transaction
+-- writers cannot break either: the helper's `GREATEST` covers a transaction
 -- whose `now()` predates the one that set `started_at`, which a lock wait can
--- produce); these make a NEW writer that bypasses the helper fail loudly.
--- Existing rows hold NULLs and satisfy both.
+-- produce. These catch PART of a bypass, an end on a live row or an end
+-- before its start. They do not catch a bypass that writes a terminal state
+-- and leaves `ended_at` NULL; that row is indistinguishable from a pre-0180
+-- one. Existing rows hold NULLs and satisfy both.
 ALTER TABLE workflow.executions
   ADD CONSTRAINT workflow_executions_ended_only_when_terminal
     CHECK (ended_at IS NULL OR workflow.state_is_terminal(state)),

@@ -693,6 +693,55 @@ async fn a_run_skipped_by_run_if_has_an_end_and_no_start(pool: sqlx::PgPool) {
     assert_invariants(&pool, true).await;
 }
 
+// ── Review minor 2: leave and re-enter a terminal state in one settle ─────
+
+/// A `LoopUntil` descendant that `runIf` skips is SKIPPED on every
+/// iteration. Each new iteration's settle empties it (`RestartLoop`),
+/// rebuilds it (`RecreateRun`) and skips it again, so the stored row is
+/// terminal before that settle and terminal after it. Its end must still be
+/// the new iteration's, not the first one's. The old row-against-row rule
+/// kept the first end.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_until_descendant_skipped_again_gets_a_new_end(pool: sqlx::PgPool) {
+    let (_db, ws, _) = seed(&pool).await;
+    let source = "id: until\nnamespace: t\ntasks:\n  - id: loop\n    \
+                  type: io.kestra.plugin.core.flow.LoopUntil\n    \
+                  condition: \"{{ false }}\"\n    \
+                  checkFrequency:\n      interval: PT0.2S\n      maxIterations: 3\n    \
+                  tasks:\n      \
+                  - id: skipped\n        type: io.kestra.plugin.core.log.Log\n        \
+                  message: never\n        runIf: \"false\"\n      \
+                  - id: work\n        type: io.kestra.plugin.core.log.Log\n        \
+                  message: hi\n";
+    let ex = start(&pool, ws, source).await;
+    drain(&pool, &Succeeds).await;
+    let mut ends = vec![run(&pool, ex, "skipped").await];
+    for _ in 0..4 {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        worker::wake(&pool, 16).await.expect("wake");
+        drain(&pool, &Succeeds).await;
+        ends.push(run(&pool, ex, "skipped").await);
+    }
+    let msgs: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT task_id, state, message FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix",
+    )
+    .bind(ex)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(execution(&pool, ex).await.state, "SUCCESS", "{msgs:?}");
+    for r in &ends {
+        assert_eq!((r.state.as_str(), r.started_at), ("SKIPPED", None), "{r:?}");
+    }
+    let mut distinct: Vec<DateTime<Utc>> = ends.iter().map(|r| r.ended_at.unwrap()).collect();
+    distinct.dedup();
+    assert!(
+        distinct.len() >= 2 && distinct.windows(2).all(|w| w[0] < w[1]),
+        "each iteration's skip has its own, later end: {ends:?}"
+    );
+    assert_invariants(&pool, true).await;
+}
+
 // ── 11. The invariant under later writes ────────────────────────────────────
 
 /// Once terminal, a row's end does not move — not on an outputs write, not on
@@ -754,7 +803,27 @@ async fn a_terminal_rows_end_does_not_move_on_later_writes(pool: sqlx::PgPool) {
     rewrite_execution(&pool, ex, "FAILED", Some("FAILED")).await;
     assert!(execution(&pool, ex).await.ended_at.unwrap() > e_end);
     rewrite_run(&pool, ex, 0, "FAILED", Some("FAILED")).await;
-    assert!(run(&pool, ex, "a").await.ended_at.unwrap() > r_end);
+    let failed_end = run(&pool, ex, "a").await.ended_at.unwrap();
+    assert!(failed_end > r_end);
+
+    // Review minor 2: leave a terminal state and re-enter one inside ONE
+    // write. The stored row is terminal before and after; the end must still
+    // be the new one, not the stale one.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    rewrite_run(
+        &pool,
+        ex,
+        0,
+        "FAILED",
+        Some("RETRYING,CREATED,RUNNING,FAILED"),
+    )
+    .await;
+    let again = run(&pool, ex, "a").await;
+    assert!(again.ended_at.unwrap() > failed_end, "{again:?}");
+    assert_eq!(
+        again.started_at, r0.started_at,
+        "a retry keeps the first start"
+    );
     assert_invariants(&pool, true).await;
 }
 
@@ -809,6 +878,31 @@ async fn a_row_from_before_the_migration_is_not_guessed(pool: sqlx::PgPool) {
     assert_invariants(&pool, false).await;
 }
 
+/// `history` with `extra`'s comma-separated states appended.
+fn extended(history: &Value, extra: Option<&str>) -> Value {
+    let mut h = history.clone();
+    for s in extra.into_iter().flat_map(|e| e.split(',')) {
+        h.as_array_mut().unwrap().push(Value::from(s));
+    }
+    h
+}
+
+/// What `persist` would bind for this write: the production rule,
+/// `worker::stamps_entered`, over the loaded and the written history.
+fn entered(loaded: &Value, written: &Value) -> (bool, bool) {
+    let names = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect()
+    };
+    let (a, b) = (names(loaded), names(written));
+    let a: Vec<&str> = a.iter().map(String::as_str).collect();
+    let b: Vec<&str> = b.iter().map(String::as_str).collect();
+    worker::stamps_entered(&a, &b)
+}
+
 /// The columns of a run that `persist`'s run `UPDATE` re-sends.
 #[derive(sqlx::FromRow)]
 struct RunColumns {
@@ -834,10 +928,8 @@ async fn rewrite_run(pool: &sqlx::PgPool, ex: Uuid, run_ix: i32, state: &str, ex
     .fetch_one(pool)
     .await
     .unwrap();
-    let mut history = row.history;
-    if let Some(s) = extra {
-        history.as_array_mut().unwrap().push(Value::from(s));
-    }
+    let history = extended(&row.history, extra);
+    let (running, terminal) = entered(&row.history, &history);
     let hit = sqlx::query(worker::RUN_STATE_UPDATE)
         .bind(state)
         .bind(&history)
@@ -852,6 +944,8 @@ async fn rewrite_run(pool: &sqlx::PgPool, ex: Uuid, run_ix: i32, state: &str, ex
         .bind(None::<DateTime<Utc>>)
         .bind(None::<i64>)
         .bind(row.resume_with)
+        .bind(running)
+        .bind(terminal)
         .execute(pool)
         .await
         .expect("persist's run UPDATE");
@@ -859,14 +953,15 @@ async fn rewrite_run(pool: &sqlx::PgPool, ex: Uuid, run_ix: i32, state: &str, ex
 }
 
 async fn rewrite_execution(pool: &sqlx::PgPool, ex: Uuid, state: &str, extra: Option<&str>) {
-    let mut history = execution(pool, ex).await.history;
-    if let Some(s) = extra {
-        history.as_array_mut().unwrap().push(Value::from(s));
-    }
+    let loaded = execution(pool, ex).await.history;
+    let history = extended(&loaded, extra);
+    let (running, terminal) = entered(&loaded, &history);
     let hit = sqlx::query(worker::EXECUTION_STATE_UPDATE)
         .bind(state)
         .bind(&history)
         .bind(ex)
+        .bind(running)
+        .bind(terminal)
         .execute(pool)
         .await
         .expect("persist's execution UPDATE");
@@ -875,26 +970,80 @@ async fn rewrite_execution(pool: &sqlx::PgPool, ex: Uuid, state: &str, extra: Op
 
 // ── The migration ───────────────────────────────────────────────────────────
 
-/// `workflow.state_is_terminal` -- the one SQL copy of the terminal list, read
-/// by the stamp helper and by 0180's CHECKs -- agrees with
-/// `RunState::is_terminal` on every variant, and on a spelling it does not know.
-#[sqlx::test(migrations = "../../migrations")]
-async fn the_sql_terminal_list_is_run_states(pool: sqlx::PgPool) {
-    egret_test_db::assert_database_url_is_exported();
-    for s in egret_workflow::executor::RunState::ALL {
-        let sql: bool = sqlx::query_scalar("SELECT workflow.state_is_terminal($1)")
-            .bind(s.wire())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(sql, s.is_terminal(), "{s:?}");
+/// Every `models::State`, all 17. The `match` makes an 18th variant a compile
+/// error here rather than a state this pin silently skips.
+fn all_model_states() -> Vec<egret_workflow::models::State> {
+    use egret_workflow::models::State::{self, *};
+    fn _exhaustive(s: State) {
+        match s {
+            Created | Submitted | Running | Paused | Restarted | Killing | Success | Warning
+            | Failed | Killed | Cancelled | Queued | Retrying | Retried | Skipped | Breakpoint
+            | Resubmitted => {}
+        }
     }
-    let unknown: bool = sqlx::query_scalar("SELECT workflow.state_is_terminal('NOPE')")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert!(!unknown);
-    // The constant this file's own invariant scan uses is the same list.
+    vec![
+        Created,
+        Submitted,
+        Running,
+        Paused,
+        Restarted,
+        Killing,
+        Success,
+        Warning,
+        Failed,
+        Killed,
+        Cancelled,
+        Queued,
+        Retrying,
+        Retried,
+        Skipped,
+        Breakpoint,
+        Resubmitted,
+    ]
+}
+
+/// `workflow.state_is_terminal`, the one SQL copy of the terminal list used
+/// by the stamp helper and by 0180's CHECKs, is EXACTLY
+/// `models::State::is_terminated` (spec §3.2's authority) on all 17 states.
+/// It agrees with `RunState::is_terminal` on every variant, and answers false
+/// for a spelling it does not know.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_sql_terminal_list_is_the_models_terminated_list(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let sql_terminal = |wire: String| {
+        let pool = pool.clone();
+        async move {
+            let t: bool = sqlx::query_scalar("SELECT workflow.state_is_terminal($1)")
+                .bind(&wire)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            t
+        }
+    };
+    let states = all_model_states();
+    assert_eq!(states.len(), 17);
+    for s in states {
+        let wire = serde_json::to_value(s)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            sql_terminal(wire.clone()).await,
+            s.is_terminated(),
+            "{wire}"
+        );
+    }
+    for s in egret_workflow::executor::RunState::ALL {
+        assert_eq!(
+            sql_terminal(s.wire().to_string()).await,
+            s.is_terminal(),
+            "{s:?}"
+        );
+    }
+    assert!(!sql_terminal("NOPE".to_string()).await);
+    // The constant this file uses is `RunState`'s list.
     let mut want: Vec<&str> = egret_workflow::executor::RunState::ALL
         .iter()
         .filter(|s| s.is_terminal())
@@ -1052,12 +1201,15 @@ async fn insert_child(
 struct Write {
     at: String,
     text: String,
+    /// The statement is the argument of a `format!`. Its SQL is assembled at
+    /// runtime, so this scan cannot read it.
+    formatted: bool,
 }
 
 /// Every `UPDATE`/`INSERT INTO` of the two tables in `text`, each with its
-/// statement text: from the keyword to the first `.bind(`, `.execute(`,
-/// `.fetch…` or `);` after it -- i.e. the whole string (or `concat!`) the
-/// statement is built from, macro invocations included.
+/// statement text. The text runs from the keyword to the first `.bind(`,
+/// `.execute(`, `.fetch…` or `);` after it, which is the whole string (or
+/// `concat!`) the statement is built from, macro invocations included.
 fn writes_in(file: &str, text: &str) -> Vec<Write> {
     let table = regex::Regex::new(
         r#"(?i)\b(UPDATE|INSERT\s+INTO)[\s\\"]+workflow\s*\.\s*(executions|task_runs)\b"#,
@@ -1073,44 +1225,103 @@ fn writes_in(file: &str, text: &str) -> Vec<Write> {
                 .min()
                 .unwrap_or(rest.len());
             let line = 1 + text[..m.start()].matches('\n').count();
+            // The opening of the call this literal sits in: a `format!(` up
+            // to one line before the keyword.
+            let lead = &text[text[..m.start()]
+                .rfind('\n')
+                .map_or(0, |i| text[..i].rfind('\n').map_or(0, |j| j + 1))
+                ..m.start()];
             Write {
                 at: format!("{file}:{line}"),
                 text: rest[..end].to_string(),
+                formatted: lead.contains("format!("),
             }
         })
         .collect()
 }
 
+/// `text` with every string literal's CONTENTS and every `//` comment removed,
+/// so what remains is the Rust around the SQL. `text` is a [`Write`]'s, which
+/// begins inside a string literal. A macro name counts only as a
+/// call that the compiler will expand, not as words inside the SQL or inside
+/// a comment.
+fn code_only(text: &str) -> String {
+    let strings = regex::Regex::new(r#"(?s)"(?:[^"\\]|\\.)*""#).unwrap();
+    let comments = regex::Regex::new(r"//[^\n]*").unwrap();
+    // A statement's text starts INSIDE the literal that holds its keyword,
+    // so the opening quote is supplied.
+    let quoted = format!("\"{text}");
+    comments
+        .replace_all(&strings.replace_all(&quoted, "\"\""), "")
+        .into_owned()
+}
+
+/// The `SET` list of an `UPDATE`, which runs from `SET` to `WHERE`.
+fn set_list(t: &str) -> &str {
+    let set = regex::Regex::new(r"(?i)\bSET\b").unwrap();
+    let start = set.find(t).map_or(0, |m| m.end());
+    let stop = regex::Regex::new(r"(?i)\bWHERE\b")
+        .unwrap()
+        .find(&t[start..])
+        .map_or(t.len(), |m| start + m.start());
+    &t[start..stop]
+}
+
 /// Does this statement write the `state` column?
 ///
-/// - an `UPDATE`: `state =` inside its `SET` list (before `WHERE`) — a
-///   `WHERE … state = 'RUNNING'` reads it and is not a write;
-/// - an `INSERT`: `state` in its column list.
+/// - An `UPDATE` writes it when `state =` appears in its `SET` list, or
+///   `state` appears in a row-constructor target `(…, state, …) = (…)`. A
+///   `WHERE … state = 'RUNNING'` only reads it.
+/// - An `INSERT` writes it when `state` is in its column list.
 fn writes_state(w: &Write) -> bool {
-    let assign = regex::Regex::new(r"(?i)\bstate\s*=").unwrap();
-    let column = regex::Regex::new(r"(?i)\bstate\b").unwrap();
     let t = &w.text;
-    if t.to_ascii_uppercase().starts_with("UPDATE") {
-        let upper = t.to_ascii_uppercase();
-        let set = upper.find(" SET ").map(|i| i + 5).unwrap_or(0);
-        let stop = upper[set..]
-            .find("WHERE")
-            .map(|i| set + i)
-            .unwrap_or(t.len());
-        assign.is_match(&t[set..stop])
+    if t.trim_start().to_ascii_uppercase().starts_with("UPDATE") {
+        let set = set_list(t);
+        let assign = regex::Regex::new(r"(?i)\bstate\s*=").unwrap();
+        let tuple = regex::Regex::new(r"(?is)\([^()]*\bstate\b[^()]*\)\s*=").unwrap();
+        assign.is_match(set) || tuple.is_match(set)
     } else {
         let open = t.find('(').unwrap_or(0);
         let close = t[open..].find(')').map(|i| open + i).unwrap_or(t.len());
-        column.is_match(&t[open..close])
+        regex::Regex::new(r"(?i)\bstate\b")
+            .unwrap()
+            .is_match(&t[open..close])
     }
 }
 
 /// Does it stamp the timestamps through `worker::stamps`?
+///
+/// - The macro must be a CALL: it must appear in the code around the SQL, not
+///   inside a string or a comment (review mutation M4).
+/// - For an `UPDATE`, `stamp_set!`'s first two arguments must be the
+///   placeholders that `state =` and `history =` bind (review mutation M5).
 fn stamps(w: &Write) -> bool {
-    if w.text.to_ascii_uppercase().starts_with("UPDATE") {
-        w.text.contains("stamp_set!(")
+    let code = code_only(&w.text);
+    if w.text
+        .trim_start()
+        .to_ascii_uppercase()
+        .starts_with("UPDATE")
+    {
+        if !code.contains("stamp_set!(") {
+            return false;
+        }
+        let set = set_list(&w.text);
+        let placeholder = |col: &str| {
+            regex::Regex::new(&format!(r"(?i)\b{col}\s*=\s*(\$\d+)"))
+                .unwrap()
+                .captures(set)
+                .map(|c| c[1].to_string())
+        };
+        let args = regex::Regex::new(r#"stamp_set!\(\s*"(\$\d+)"\s*,\s*"(\$\d+)""#)
+            .unwrap()
+            .captures(&w.text)
+            .map(|c| (c[1].to_string(), c[2].to_string()));
+        match (placeholder("state"), placeholder("history"), args) {
+            (Some(s), Some(h), Some((a, b))) => s == a && h == b,
+            _ => false,
+        }
     } else {
-        w.text.contains("stamp_columns!(") && w.text.contains("stamp_values!(")
+        code.contains("stamp_columns!(") && code.contains("stamp_values!(")
     }
 }
 
@@ -1128,32 +1339,93 @@ fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 /// **Test 12: a statement that writes `state` on either table and does not
 /// stamp the timestamps fails here, by file and line.**
 ///
-/// Scans the `src/` of EVERY crate in the workspace (a writer of these tables
-/// outside this crate would bypass the rule just as well). Its own reach is
-/// checked twice, so a scanner that silently finds nothing cannot pass:
+/// It scans the `src/` of EVERY crate in the workspace, because a writer of
+/// these tables outside this crate would bypass the rule just as well. Its own
+/// reach is checked twice, so a scanner that silently finds nothing cannot
+/// pass:
 ///
 /// - the seven writers enumerated in the W7b Task 1 report must each be
 ///   found and classified as state writers;
-/// - the classifier is run on hand-written statements, a bypassing one
-///   among them, and must flag exactly that one.
+/// - the classifier is run on hand-written statements, including every
+///   bypass the Task 1 review built, and must flag each one.
+///
+/// # What it refuses
+///
+/// - `SET state =` with any spacing, and a row-constructor
+///   `SET (…, state, …) = (…)`, without `stamp_set!`;
+/// - a `stamp_set!` that appears only inside the SQL string or a comment;
+/// - a `stamp_set!` whose first two arguments are not the placeholders that
+///   `state =` and `history =` bind;
+/// - an `INSERT` with `state` in its columns but without both
+///   `stamp_columns!` and `stamp_values!`;
+/// - ANY `UPDATE`/`INSERT` of these tables built with `format!`, and any
+///   `UPDATE {…}`/`INSERT INTO {…}` whose table name is interpolated, in
+///   every crate. None exists today; a new one is refused rather than
+///   trusted.
+///
+/// # What it cannot see (honest limits)
+///
+/// It is LEXICAL. It does not see:
+/// - SQL that reaches these tables some other way: a table name held in a
+///   `const` or a variable, a view, a function, a trigger, or `sqlx::query!`
+///   with an external file;
+/// - whether `stamp_set!`'s two booleans are bound to `stamps::Entered`'s
+///   values (the binds are Rust, not SQL);
+/// - whether an `INSERT`'s `stamp_values!` arguments are the placeholders
+///   of its `state`/`history` values;
+/// - an `UPDATE` whose state write it cannot recognise as one.
+///
+/// Migration 0180's CHECKs catch only part of a bypass at runtime: an end on
+/// a live row, or an end before its start. A bypass that writes a terminal
+/// state and leaves `ended_at` NULL passes both, and looks like a pre-0180
+/// row. The scenario tests in this file are what catch a wrong VALUE on the
+/// paths that exist.
 #[test]
 fn every_state_write_stamps_the_timestamps() {
-    // The classifier's own controls.
+    // The classifier's own controls: the review's five bypasses (M1..M5)
+    // and the forms that must pass.
     let probe = |text: &str| Write {
         at: "probe".into(),
         text: text.into(),
+        formatted: false,
     };
-    let bare = probe("UPDATE workflow.task_runs SET state = $1, updated_at = now() WHERE id = $2");
+    let refused = [
+        // M1: a bare SET state.
+        "UPDATE workflow.executions SET state = 'KILLED' WHERE id = $1",
+        "UPDATE workflow.task_runs\n    SET   state=$1, updated_at = now() WHERE id = $2",
+        // M2: a row constructor.
+        "UPDATE workflow.task_runs SET (state, history) = ($1, $2) WHERE id = $3",
+        // M4: the macro name only inside the SQL, or inside a comment.
+        "UPDATE workflow.task_runs SET state = $1, history = $2 /* stamp_set!( */ WHERE id = $3\"",
+        "UPDATE workflow.task_runs SET state = $1, history = $2, \",\n // stamp_set!(\"$1\", \"$2\", \"$4\", \"$5\"),\n \" WHERE id = $3\"",
+        // M5: swapped arguments.
+        "UPDATE workflow.executions SET state = $1, history = $2, \", stamp_set!(\"$2\", \"$1\", \"$4\", \"$5\"), \" WHERE id = $3\"",
+        // An INSERT with state and no stamps.
+        "INSERT INTO workflow.executions (id, state) VALUES ($1, 'CREATED')",
+    ];
+    for text in refused {
+        let w = probe(text);
+        assert!(writes_state(&w) && !stamps(&w), "must be refused: {text}");
+    }
     let read = probe("UPDATE workflow.task_runs SET claimed_at = NULL WHERE state = 'RUNNING'");
-    let insert = probe("INSERT INTO workflow.executions (id, state) VALUES ($1, 'CREATED')");
-    let good = probe("UPDATE workflow.executions SET state = $1, \", stamp_set!(\"$1\", \"$2\"), \" WHERE id = $3");
-    assert!(writes_state(&bare) && !stamps(&bare));
     assert!(
         !writes_state(&read),
         "a WHERE that reads `state` is not a write"
     );
-    assert!(writes_state(&insert) && !stamps(&insert));
+    let good = probe(
+        "UPDATE workflow.executions SET state = $1, history = $2, \", \
+         stamp_set!(\"$1\", \"$2\", \"$4\", \"$5\"), \" WHERE id = $3\"",
+    );
     assert!(writes_state(&good) && stamps(&good));
+    // M3: `format!` is recognised as such.
+    let formatted = writes_in(
+        "probe",
+        "let q = format!(\n    \"UPDATE workflow.task_runs SET {col} = $1\");",
+    );
+    assert!(
+        formatted.len() == 1 && formatted[0].formatted,
+        "{formatted:?}"
+    );
 
     // The scan.
     let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -1164,12 +1436,33 @@ fn every_state_write_stamps_the_timestamps() {
             rust_files(&src, &mut files);
         }
     }
+    let interpolated = regex::Regex::new(r#"(?i)\b(UPDATE|INSERT\s+INTO)[\s\\"]+\{"#).unwrap();
     let mut state_writes = Vec::new();
+    let mut dynamic = Vec::new();
     for f in &files {
         let text = std::fs::read_to_string(f).unwrap();
         let name = f.strip_prefix(&crates).unwrap().display().to_string();
-        state_writes.extend(writes_in(&name, &text).into_iter().filter(writes_state));
+        for m in interpolated.find_iter(&text) {
+            let line = 1 + text[..m.start()].matches('\n').count();
+            dynamic.push(format!(
+                "{name}:{line}: an UPDATE/INSERT whose table is interpolated"
+            ));
+        }
+        for w in writes_in(&name, &text) {
+            if w.formatted {
+                dynamic.push(format!(
+                    "{}: a write to these tables built with format!",
+                    w.at
+                ));
+            } else if writes_state(&w) {
+                state_writes.push(w);
+            }
+        }
     }
+    assert!(
+        dynamic.is_empty(),
+        "SQL this guard cannot read; build it with `concat!` and the `stamps` macros: {dynamic:#?}"
+    );
 
     let unstamped: Vec<&Write> = state_writes.iter().filter(|w| !stamps(w)).collect();
     assert!(

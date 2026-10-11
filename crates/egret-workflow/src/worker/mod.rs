@@ -108,6 +108,21 @@ pub use claim::{
 /// terminal row.
 #[cfg(any(test, feature = "test-util"))]
 pub use claim::{EXECUTION_STATE_UPDATE, RUN_STATE_UPDATE};
+
+/// Test-only (`test-util`; W7b Task 1 cleanup): `persist`'s per-transition
+/// stamp rule, `(entered_running, entered_terminal)` for a write that takes
+/// the loaded history `before` to `after`, both given as wire names. The test
+/// that re-sends the two statements above binds what production would bind.
+#[cfg(any(test, feature = "test-util"))]
+pub fn stamps_entered(before: &[&str], after: &[&str]) -> (bool, bool) {
+    let parse = |h: &[&str]| -> Vec<RunState> {
+        h.iter()
+            .map(|s| from_wire(s).unwrap_or_else(|| panic!("unknown state {s}")))
+            .collect()
+    };
+    let e = stamps::Entered::of(&parse(before), &parse(after), false);
+    (e.running, e.terminal)
+}
 pub use reaper::reap;
 pub use registry::Handlers;
 pub use render::execution_render_context;

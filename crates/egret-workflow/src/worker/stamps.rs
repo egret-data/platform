@@ -5,69 +5,90 @@
 //! # The rule every state write follows
 //!
 //! A statement that writes `state` on either table writes `started_at` and
-//! `ended_at` in the SAME statement, from the same values, through one of the
-//! two macros here:
+//! `ended_at` in the SAME statement, through one of the macros here:
 //!
 //! - [`stamp_set!`] in an `UPDATE … SET`;
 //! - [`stamp_values!`] in an `INSERT … VALUES`, beside [`stamp_columns!`] in
 //!   the column list.
 //!
-//! There is no read-then-write: the decision is a `CASE` over the bound new
-//! state and history and the row's OLD `state` and `history` columns, which an
-//! `UPDATE`'s right-hand side reads before the assignment.
-//!
 //! `tests/execution_timestamps.rs::every_state_write_stamps_the_timestamps`
-//! scans the source for every `UPDATE`/`INSERT` of either table that writes
-//! `state` and fails naming the one that does not use these macros, and
-//! migration 0180's two CHECKs make a writer that bypasses them fail at the
-//! first wrong write rather than drift quietly.
+//! scans the source for statements that write `state` on either table and
+//! fails naming one that does not use these macros. That guard is lexical,
+//! and its doc lists what it cannot see. Migration 0180's CHECKs catch only
+//! part of a bypass: an end on a live row, or an end before the start. A
+//! bypass that writes a terminal state and leaves `ended_at` NULL passes both.
 //!
-//! # What the `CASE` says
+//! # What is written, and when
 //!
-//! - **`started_at`** is set when the row's history FIRST holds `RUNNING`
-//!   (new history has it, old history does not), and kept while it holds it —
-//!   so a resumed pause and a `RETRY_FAILED_TASK` reopen do not move it. It is
-//!   cleared when the history no longer holds `RUNNING`, which only
-//!   `Command::RestartLoop` does, to the descendants it empties.
-//! - **`ended_at`** is set when the row ENTERS a terminal state (new state
-//!   terminal, old state not), kept while it stays terminal — so an outputs
-//!   write or a terminal-to-terminal move does not move it — and cleared when
-//!   the row leaves a terminal state (`retry::reopen_due` takes a `FAILED` run
-//!   back to `CREATED`).
+//! The rule is judged **per transition, across the whole settle**, by
+//! [`Entered::of`]. It compares the history the settle LOADED (under the
+//! execution's `FOR NO KEY UPDATE`, in this same transaction) with the
+//! history it writes, and the `UPDATE` receives two booleans:
 //!
-//! **Entering, not "is", and that is what keeps a pre-0180 row honest.** A row
-//! that was already `RUNNING` or already terminal when the migration ran has
-//! `NULL`s, and a later write does not stamp it with an instant that is not
-//! its start or its end: nothing is guessed (spec §3.1).
+//! - **`entered_running`**: this write takes the row into `RUNNING` for the
+//!   FIRST time. `started_at` becomes `now()`. Otherwise it is kept while the
+//!   new history holds `RUNNING`, so a resumed pause and a `RETRY_FAILED_TASK`
+//!   reopen do not move it, and cleared when the history does not hold it.
+//! - **`entered_terminal`**: somewhere in this settle the row went from a
+//!   non-terminal state to a terminal one, and it ends terminal. `ended_at`
+//!   becomes `GREATEST(now(), started_at)`. Otherwise it is kept while the row
+//!   stays terminal (an outputs write, a lease release, a terminal-to-terminal
+//!   move), and cleared when the row is not terminal (a retry reopen).
+//!
+//! **Per transition, not "old row against new row".** The first version
+//! compared the stored state with the new one. A row that left a terminal
+//! state and re-entered one INSIDE one settle then kept its previous end:
+//! a `LoopUntil` descendant that `RestartLoop` empties, `RecreateRun` builds
+//! back and `runIf` skips again, all in one settle. Here, a history that the
+//! write does not merely extend (an emptied and rebuilt one) is judged from
+//! scratch.
+//!
+//! The history alone is not enough for a run. `RestartLoop` can empty a
+//! `LoopUntil` descendant and the walk can rebuild it to the SAME history in
+//! one settle (`[CREATED, SKIPPED]` both times). So `persist` also passes
+//! `reborn`, read from `Marks::created`, which `Marks::observe` records PER
+//! ROUND. `Marks::ended` (`$10`, the reviewer's suggestion) is also per
+//! round and would give the same end. One rule, [`Entered::of`], serves both
+//! columns and both tables instead.
+//!
+//! **This is not a read-then-write.** The booleans come from the state this
+//! transaction loaded under the row lock, the same way `history` and
+//! `attempts` themselves are written.
+//!
+//! **A pre-0180 row is never guessed.** A row that was already running or
+//! terminal when the migration ran has an unchanged prefix, so neither
+//! boolean fires and its NULLs stay NULL (spec §3.1).
 //!
 //! **`GREATEST(now(), started_at)`, not `now()`.** `now()` is the
-//! TRANSACTION's start. A transaction that began, then waited on the
-//! execution's `FOR NO KEY UPDATE` while another one started the row, would
-//! otherwise write an end before the start the other one committed; migration
-//! 0180's `…_ends_after_it_starts` CHECK would then refuse the write.
+//! TRANSACTION's start. A transaction that began, then waited on the lock
+//! while another one started the row, would otherwise write an end before the
+//! committed start.
 //!
-//! The terminal list is `workflow.state_is_terminal`, migration 0180's one SQL
-//! copy of [`RunState::is_terminal`]; a test asserts the two agree for every
-//! variant of [`RunState::ALL`].
+//! The SQL terminal list is `workflow.state_is_terminal`, which matches
+//! `models::State::is_terminated` (a superset of [`RunState::is_terminal`]
+//! by `RESUBMITTED`, which no `RunState` spells). A test pins it against
+//! every variant of both.
 
 use crate::executor::{ExecutionState, RunState, Tick};
 
-/// The two timestamp assignments of an `UPDATE`, for a statement whose new
-/// state is bound at `$state` and whose new history (a jsonb array of state
-/// names) is bound at `$history`. Both are placeholder literals, e.g.
-/// `stamp_set!("$1", "$2")`.
+/// The two timestamp assignments of an `UPDATE`. The new state is bound at
+/// `$state` and the new history (a jsonb array of state names) at `$history`.
+/// `$entered_running` and `$entered_terminal` are the two booleans of
+/// [`Entered`]. All four are placeholder literals, for example
+/// `stamp_set!("$1", "$2", "$4", "$5")`.
 macro_rules! stamp_set {
-    ($state:literal, $history:literal) => {
+    ($state:literal, $history:literal, $entered_running:literal, $entered_terminal:literal) => {
         concat!(
             "started_at = CASE WHEN (",
             $history,
-            ")::jsonb ? 'RUNNING' THEN \
-               CASE WHEN history ? 'RUNNING' THEN started_at ELSE now() END END, \
+            ")::jsonb ? 'RUNNING' THEN CASE WHEN ",
+            $entered_running,
+            "::boolean THEN now() ELSE started_at END END, \
              ended_at = CASE WHEN workflow.state_is_terminal(",
             $state,
-            ") THEN \
-               CASE WHEN workflow.state_is_terminal(state) THEN ended_at \
-                    ELSE GREATEST(now(), started_at) END END"
+            ") THEN CASE WHEN ",
+            $entered_terminal,
+            "::boolean THEN GREATEST(now(), started_at) ELSE ended_at END END"
         )
     };
 }
@@ -80,7 +101,7 @@ macro_rules! stamp_columns {
 }
 
 /// The two timestamp values of an `INSERT`, in [`stamp_columns!`]'s order. A
-/// new row has no old state, so it is "entering" whatever it is inserted in.
+/// new row has no earlier life, so it enters whatever it is inserted in.
 macro_rules! stamp_values {
     ($state:literal, $history:literal) => {
         concat!(
@@ -92,6 +113,49 @@ macro_rules! stamp_values {
             ") THEN now() END"
         )
     };
+}
+
+/// Which of the two timestamps a write must STAMP, judged per transition
+/// across one settle. See this module's doc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Entered {
+    pub(crate) running: bool,
+    pub(crate) terminal: bool,
+}
+
+impl Entered {
+    /// `before` is the history the settle loaded. `after` is the history it
+    /// writes. `reborn` says the settle emptied the row and built it back
+    /// (`RestartLoop` then `RecreateRun`). For a run, that is
+    /// `Marks::created` holding an EXISTING run. An execution is never
+    /// reborn.
+    ///
+    /// `reborn` is needed because the history alone cannot show it. A
+    /// `LoopUntil` descendant that `runIf` skips is `[CREATED, SKIPPED]`
+    /// before the settle and `[CREATED, SKIPPED]` after it, yet it was
+    /// emptied, rebuilt and skipped again in between. Measured by
+    /// `tests/execution_timestamps.rs::a_loop_until_descendant_skipped_again_gets_a_new_end`.
+    pub(crate) fn of(before: &[RunState], after: &[RunState], reborn: bool) -> Self {
+        // A write that EXTENDS the loaded history only adds the suffix. One
+        // that does not, or a reborn row, is a new life judged from scratch.
+        let (prior, suffix) = if !reborn && after.starts_with(before) {
+            (before, &after[before.len()..])
+        } else {
+            (&[][..], after)
+        };
+        let running = suffix.contains(&RunState::Running) && !prior.contains(&RunState::Running);
+        let mut was_terminal = prior.last().is_some_and(|s| s.is_terminal());
+        let mut entered_terminal = false;
+        for s in suffix {
+            let is = s.is_terminal();
+            entered_terminal |= is && !was_terminal;
+            was_terminal = is;
+        }
+        Self {
+            running,
+            terminal: entered_terminal && after.last().is_some_and(|s| s.is_terminal()),
+        }
+    }
 }
 
 pub(crate) use {stamp_columns, stamp_set, stamp_values};
@@ -209,11 +273,17 @@ mod tests {
     /// so what the macro SAYS has to be checked somewhere.
     #[test]
     fn the_macros_spell_the_rule() {
-        let set = stamp_set!("$1", "$2");
+        let set = stamp_set!("$1", "$2", "$4", "$5");
         assert!(set.contains("($2)::jsonb ? 'RUNNING'"), "{set}");
+        assert!(
+            set.contains("$4::boolean THEN now() ELSE started_at"),
+            "{set}"
+        );
         assert!(set.contains("workflow.state_is_terminal($1)"), "{set}");
-        assert!(set.contains("THEN ended_at"), "{set}");
-        assert!(set.contains("GREATEST(now(), started_at)"), "{set}");
+        assert!(
+            set.contains("$5::boolean THEN GREATEST(now(), started_at) ELSE ended_at"),
+            "{set}"
+        );
         let values = stamp_values!("$10", "$11");
         assert!(
             values.contains("($11)::jsonb ? 'RUNNING' THEN now()"),
@@ -224,5 +294,52 @@ mod tests {
             "{values}"
         );
         assert_eq!(stamp_columns!(), "started_at, ended_at");
+    }
+
+    fn entered(before: &[RunState], after: &[RunState]) -> (bool, bool) {
+        let e = Entered::of(before, after, false);
+        (e.running, e.terminal)
+    }
+
+    use RunState::{Paused as P, Retrying as Y, Warning as W};
+
+    /// Every transition shape the rule distinguishes, by `(running, terminal)`.
+    #[test]
+    fn entered_is_judged_per_transition() {
+        // A first run and a first end.
+        assert_eq!(entered(&[C], &[C, R]), (true, false));
+        assert_eq!(entered(&[C, R], &[C, R, S]), (false, true));
+        assert_eq!(entered(&[C], &[C, R, S]), (true, true));
+        // A rewrite with nothing new (lease release, pre-0180 row).
+        assert_eq!(entered(&[C, R, S], &[C, R, S]), (false, false));
+        assert_eq!(entered(&[C, R], &[C, R]), (false, false));
+        // Terminal to terminal does not re-enter.
+        assert_eq!(entered(&[C, R, S], &[C, R, S, W]), (false, false));
+        // A pause resumed, and a retry reopened then finished: the start is
+        // kept, and the end is new.
+        assert_eq!(entered(&[C, R, P], &[C, R, P, R]), (false, false));
+        assert_eq!(
+            entered(&[C, R, F, Y], &[C, R, F, Y, C, R, S]),
+            (false, true)
+        );
+        // Leave and re-enter INSIDE one settle: terminal, reopened and
+        // terminal again. The old row-vs-row rule kept the stale end.
+        assert_eq!(entered(&[C, R, F], &[C, R, F, Y, C, R, F]), (false, true));
+        // `RestartLoop` emptied the history and the walk rebuilt it: a new
+        // life, judged from scratch, whether skipped or run.
+        assert_eq!(entered(&[C, K], &[C, K]), (false, false));
+        assert_eq!(entered(&[C, R, S], &[C, K]), (false, true));
+        assert_eq!(entered(&[C, R, S], &[C, R, S][..2]), (true, false));
+        assert_eq!(entered(&[C, R, S], &[]), (false, false));
+        // Born skipped (an INSERT never asks, but the rule agrees).
+        assert_eq!(entered(&[], &[C, K]), (false, true));
+        // Reborn with an IDENTICAL history: only `reborn` can tell.
+        let reborn = |b: &[RunState], a: &[RunState]| {
+            let e = Entered::of(b, a, true);
+            (e.running, e.terminal)
+        };
+        assert_eq!(reborn(&[C, K], &[C, K]), (false, true));
+        assert_eq!(reborn(&[C, R, S], &[C, R, S]), (true, true));
+        assert_eq!(reborn(&[C, R, S], &[C, R]), (true, false));
     }
 }
