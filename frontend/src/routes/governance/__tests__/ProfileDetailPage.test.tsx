@@ -30,6 +30,9 @@ let profileOrigin: string = "manual";
  *  are two `authz_services` rows and the compiler can have written to one and
  *  not the other. */
 let tagServiceOrigin: string = "manual";
+/** The main profile's type (default "trino"). Seed and the Trino config are
+ *  offered only on a Trino profile (SP4d-3 final review I-1). */
+let profileType: string = "trino";
 
 vi.mock("@/api/policies", async (orig) => ({
   ...(await orig<typeof import("@/api/policies")>()),
@@ -37,7 +40,7 @@ vi.mock("@/api/policies", async (orig) => ({
     {
       id: 1,
       name: "trino-prod",
-      type: "trino",
+      type: profileType,
       policy_version: 3,
       engines: [{ id: "e1", name: "prod", status: "running" }],
       origin: profileOrigin,
@@ -67,6 +70,7 @@ vi.mock("@/api/policies", async (orig) => ({
       is_enabled: true,
       description: "grants select to analysts",
       labels: ["pii"],
+      managed_by: "operator",
     },
     {
       id: 43,
@@ -79,6 +83,21 @@ vi.mock("@/api/policies", async (orig) => ({
       is_enabled: true,
       description: "compiled from a grant",
       labels: [],
+      managed_by: "compiler",
+    },
+    // egret's own plumbing: the server refuses every write to it.
+    {
+      id: 44,
+      name: "egret-query-timeout",
+      service: "trino-prod",
+      policy_type: "access",
+      resource_path: "queryid: *",
+      principals: ["egret-delegator"],
+      permissions: ["execute"],
+      is_enabled: true,
+      description: "",
+      labels: [],
+      managed_by: "infra",
     },
   ]),
   deletePolicy: vi.fn(() => Promise.resolve(undefined)),
@@ -121,6 +140,7 @@ describe("ProfileDetailPage", () => {
   beforeEach(() => {
     profileOrigin = "manual";
     tagServiceOrigin = "manual";
+    profileType = "trino";
   });
 
   it("renders the profile name and a policy row", async () => {
@@ -368,5 +388,53 @@ describe("ProfileDetailPage — the Tags tab guards on the TAG service's origin 
     await screen.findByRole("heading", { name: /Tag policies/ });
 
     expect(screen.getByRole("link", { name: "perm-grant-abc123" })).toBeInTheDocument();
+  });
+});
+
+describe("ProfileDetailPage — SP4d-3 final review I-1", () => {
+  beforeEach(() => {
+    profileOrigin = "manual";
+    tagServiceOrigin = "manual";
+    profileType = "trino";
+  });
+
+  /** The seeded default set and the downloadable config are both Trino-only;
+   *  the server answers 400 to a seed on any other type. */
+  it("offers neither Seed default policies nor the Trino config on a StarRocks profile", async () => {
+    profileType = "starrocks";
+    wrap(<ProfileDetailPage />);
+    await screen.findByText("allow-analysts");
+    expect(await screen.findByText("starrocks")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /seed default policies/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /download trino config/i })).not.toBeInTheDocument();
+  });
+
+  /** The control: the same admin on a Trino profile is offered both. */
+  it("offers both on a Trino profile", async () => {
+    wrap(<ProfileDetailPage />);
+    await screen.findByText("allow-analysts");
+    expect(await screen.findByRole("button", { name: /seed default policies/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /download trino config/i })).toBeInTheDocument();
+  });
+
+  /** An infra row (`managed_by: "infra"`) offers no edit link, an enabled
+   *  toggle or a delete — each says why — while an operator row in the same
+   *  table keeps all three. Even for a platform_admin, because the server
+   *  refuses the write for everyone. */
+  it("withholds edit, toggle and delete on an infra row and says why", async () => {
+    wrap(<ProfileDetailPage />);
+    await screen.findByText("egret-query-timeout");
+
+    expect(screen.queryByRole("link", { name: "egret-query-timeout" })).not.toBeInTheDocument();
+    const toggle = screen.getByRole("switch", { name: /toggle egret-query-timeout/i });
+    expect(toggle).toBeDisabled();
+    expect(toggle).toHaveAttribute("title", expect.stringMatching(/Managed by egret/));
+    const del = screen.getByRole("button", { name: "Delete egret-query-timeout" });
+    expect(del).toBeDisabled();
+    expect(del).toHaveAttribute("title", expect.stringMatching(/cannot be changed here/));
+
+    expect(screen.getByRole("link", { name: "allow-analysts" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: /toggle allow-analysts/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Delete allow-analysts" })).not.toBeDisabled();
   });
 });

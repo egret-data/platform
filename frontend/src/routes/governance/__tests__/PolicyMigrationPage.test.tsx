@@ -314,6 +314,26 @@ describe("PolicyMigrationPage — preview before migrate", () => {
     expect(screen.getByText(GENERATED_NOTICE)).toBeInTheDocument();
   });
 
+  /** Final review (Task 10 Minor 1): a preview is rolled back, so the compiled
+   *  policy's `perm-grant-<id>` name carries an id that will never exist. The
+   *  preview counts it by kind instead of presenting that id as a fact. */
+  it("counts a preview's compiled policies by kind instead of naming the rolled-back id", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await rowOf("allow-analysts");
+    await user.click(screen.getByRole("checkbox", { name: "Select allow-analysts" }));
+    await user.click(screen.getByRole("button", { name: "Preview migration" }));
+
+    const panel = await screen.findByRole("region", { name: "Affected profiles" });
+    const self = within(panel).getByText("trino-prod").closest("tr") as HTMLElement;
+    expect(
+      within(self).getByText("1 compiled grant policy (named when written)"),
+    ).toBeInTheDocument();
+    expect(within(panel).queryByText(/perm-grant-9a/)).toBeNull();
+    // The removed side is a stored policy's real name, and stays named.
+    expect(within(self).getByText("allow-analysts")).toBeInTheDocument();
+  });
+
   it("renders a disagreement as the disagreeing probe, and does not enable Migrate", async () => {
     const user = userEvent.setup();
     vi.mocked(migrateServicePolicies).mockResolvedValue(

@@ -509,6 +509,37 @@ function VerdictBadge({ verdict }: { verdict: Verdict }) {
   }
 }
 
+/** The compiler's name prefixes, with what a policy under each one is. */
+const COMPILED_KINDS: readonly (readonly [string, string, string])[] = [
+  ["perm-grant-", "compiled grant policy", "compiled grant policies"],
+  ["perm-rule-", "compiled rule policy", "compiled rule policies"],
+  ["perm-clearance-", "compiled clearance policy", "compiled clearance policies"],
+];
+
+/**
+ * What a profile's download now serves. A compiled policy's name embeds its
+ * grant or rule id, and an unwritten preview's ids belong to a write that was
+ * rolled back — they will never exist. So until the migration is written, the
+ * compiled policies are counted by kind, not named.
+ */
+function describeServed(names: string[], written: boolean): string {
+  if (written) return names.join(", ") || "—";
+  const counts = COMPILED_KINDS.map(() => 0);
+  const others: string[] = [];
+  for (const name of names) {
+    const kind = COMPILED_KINDS.findIndex(([prefix]) => name.startsWith(prefix));
+    if (kind >= 0) counts[kind] += 1;
+    else others.push(name);
+  }
+  const compiled = COMPILED_KINDS.flatMap(([, one, many], i) =>
+    counts[i] > 0 ? [plural(counts[i], one, many)] : [],
+  );
+  const parts = [...compiled, ...others];
+  if (parts.length === 0) return "—";
+  const text = parts.join(", ");
+  return compiled.length > 0 ? `${text} (named when written)` : text;
+}
+
 function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`;
 }
@@ -609,7 +640,11 @@ function PreviewResult({
       )}
 
       {preview.profiles.length > 0 && (
-        <AffectedProfiles profiles={preview.profiles} currentServiceId={currentServiceId} />
+        <AffectedProfiles
+          profiles={preview.profiles}
+          currentServiceId={currentServiceId}
+          written={preview.committed}
+        />
       )}
 
       {preview.disagreements.length > 0 && <Disagreements rows={preview.disagreements} />}
@@ -640,9 +675,11 @@ function PreviewResult({
 function AffectedProfiles({
   profiles,
   currentServiceId,
+  written,
 }: {
   profiles: GatedProfile[];
   currentServiceId: number | undefined;
+  written: boolean;
 }) {
   const n = profiles.length;
   return (
@@ -685,7 +722,7 @@ function AffectedProfiles({
                 <TableCell className="text-right tabular-nums">{p.probes}</TableCell>
                 <TableCell className="text-right tabular-nums">{p.disagreements}</TableCell>
                 <TableCell className="whitespace-normal font-mono text-xs">
-                  {p.added_policies.join(", ") || "—"}
+                  {describeServed(p.added_policies, written)}
                 </TableCell>
                 <TableCell className="whitespace-normal font-mono text-xs">
                   {p.removed_policies.join(", ") || "—"}
