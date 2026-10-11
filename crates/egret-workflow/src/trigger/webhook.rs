@@ -332,6 +332,34 @@ pub enum Unsupported {
     ResponseCode,
 }
 
+/// The declarations of `webhook` this port parses and cannot honour,
+/// **refused by name** rather than accepted and ignored: the first one, or
+/// `None`. The webhook route answers it with a 409 on every firing, after the
+/// key has matched; `spec::schema`'s measurement calls it too, so none of
+/// these properties is offered by the flow editor.
+///
+/// `returnOutputs`, `responseContentType` and `responseCode` were once parsed
+/// into `models::Webhook` and then silently dropped (webhook fix round 1,
+/// Important 3) -- the `lateMaximumDelay` shape: a field an author can write,
+/// that validates, and that changes nothing.
+pub fn declared_unsupported(webhook: &Webhook) -> Option<Unsupported> {
+    [
+        webhook.wait.then_some(Unsupported::Wait),
+        webhook.return_outputs.then_some(Unsupported::ReturnOutputs),
+        webhook
+            .response_content_type
+            .is_some()
+            .then_some(Unsupported::ResponseContentType),
+        webhook
+            .response_code
+            .is_some()
+            .then_some(Unsupported::ResponseCode),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+}
+
 impl Unsupported {
     /// The message the route turns into a 409.
     pub fn message(&self, trigger_id: &str) -> String {

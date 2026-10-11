@@ -509,6 +509,7 @@ export * from './workflowDownloadExecutionFileParams';
 export * from './workflowDownloadNamespaceFileParams';
 export * from './workflowExecutionFileMetasParams';
 export * from './workflowGetExecutionLogsParams';
+export * from './workflowGetFlowSchema200';
 export * from './workflowGetKvValueParams';
 export * from './workflowListExecutionsParams';
 export * from './workflowListFlowsParams';

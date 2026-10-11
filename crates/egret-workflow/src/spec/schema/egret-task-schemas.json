@@ -1,0 +1,153 @@
+{
+ "$comment": "Hand-written JSON schemas for what Kestra's export cannot describe: egret's own task types, and the script tasks' taskRunner, whose Kestra definition offers Process (refused by egret) and lacks Kubernetes (Enterprise-only in Kestra, implemented by egret). spec::schema adds the base task properties (id, type, description, retry, timeout, disabled, runIf, allowFailure, allowWarning) to every type here, and `id`/`type` to its `required`. See README.md.",
+ "types": {
+  "egret.sql": {
+   "title": "Run one SQL statement on a database connection registered in this workspace.",
+   "markdownDescription": "egret's own task. `database` names a connection registered in this workspace; publish resolves it and refuses a name that does not exist here. Every `{{ }}` in `sql` is bound as a parameter, never spliced into the text.\n\n`fetch` decides the outputs: `NONE` gives `{}`, `FETCH_ONE` gives `size` and `row`, `FETCH` gives `size` and `rows` (at most 10,000 rows; more fails the task), `STORE` writes the rows to internal storage as Ion and gives `size` and `uri`.",
+   "properties": {
+    "database": {
+     "type": "string",
+     "minLength": 1,
+     "title": "The registered database connection, by name or id.",
+     "markdownDescription": "Resolved at publish within this workspace."
+    },
+    "sql": {
+     "type": "string",
+     "minLength": 1,
+     "$language": "sql",
+     "title": "The statement to run.",
+     "markdownDescription": "A template: every `{{ … }}` in it is bound as a parameter."
+    },
+    "fetch": {
+     "type": "string",
+     "enum": ["NONE", "FETCH_ONE", "FETCH", "STORE"],
+     "default": "NONE",
+     "title": "What the task does with the rows.",
+     "markdownDescription": "Kestra's JDBC `fetchType` spellings, under egret's own key.\n\nDefault value is : `NONE`"
+    }
+   },
+   "required": ["database", "sql"],
+   "x-egret-outputs": [
+    {"name": "row", "type": "object", "description": "The first row, with `fetch: FETCH_ONE` and a statement that returned one."},
+    {"name": "rows", "type": "array", "description": "Every row, with `fetch: FETCH`."},
+    {"name": "size", "type": "integer", "description": "How many rows the statement returned (`FETCH_ONE`, `FETCH`, `STORE`)."},
+    {"name": "uri", "type": "string", "description": "The internal-storage URI of the Ion file, with `fetch: STORE`."}
+   ]
+  },
+  "egret.dataapi.call": {
+   "title": "Call a Data API endpoint of this workspace.",
+   "markdownDescription": "egret's own task. Publish resolves `endpoint` within this workspace and refuses a name that does not exist here.\n\n**This egret build registers no handler for this type**: a flow using it publishes, and its run does not progress past this task.",
+   "properties": {
+    "endpoint": {
+     "type": "string",
+     "minLength": 1,
+     "title": "The Data API endpoint, by name or id."
+    }
+   },
+   "required": ["endpoint"]
+  },
+  "egret.dataset.refresh": {
+   "title": "Refresh a dataset of this workspace.",
+   "markdownDescription": "egret's own task. Publish resolves `dataset` within this workspace and refuses a name that does not exist here.\n\n**This egret build registers no handler for this type**: a flow using it publishes, and its run does not progress past this task.",
+   "properties": {
+    "dataset": {
+     "type": "string",
+     "minLength": 1,
+     "title": "The dataset, by name or id."
+    }
+   },
+   "required": ["dataset"]
+  },
+  "egret.report.send": {
+   "title": "Send a chart of this workspace as a report.",
+   "markdownDescription": "egret's own task. Publish resolves `chart` within this workspace and refuses a name that does not exist here.\n\n**This egret build registers no handler for this type**: a flow using it publishes, and its run does not progress past this task.",
+   "properties": {
+    "chart": {
+     "type": "string",
+     "minLength": 1,
+     "title": "The chart, by name or id."
+    }
+   },
+   "required": ["chart"]
+  },
+  "core.http": {
+   "title": "An HTTP request (reserved).",
+   "markdownDescription": "A type egret's registry accepts and publishes. It has no properties yet, because nothing reads any: **this egret build registers no handler for it**, so a flow using it publishes and its run does not progress past this task. For an HTTP call today, use a script task."
+  },
+  "core.slack": {
+   "title": "A Slack message (reserved).",
+   "markdownDescription": "A type egret's registry accepts and publishes. It has no properties yet, because nothing reads any: **this egret build registers no handler for it**, so a flow using it publishes and its run does not progress past this task."
+  }
+ },
+ "property_overrides": {
+  "io.kestra.plugin.scripts.shell.Commands": {"taskRunner": {"$ref": "#/$defs/egret.taskRunner"}},
+  "io.kestra.plugin.scripts.shell.Script": {"taskRunner": {"$ref": "#/$defs/egret.taskRunner"}},
+  "io.kestra.plugin.scripts.python.Commands": {"taskRunner": {"$ref": "#/$defs/egret.taskRunner"}},
+  "io.kestra.plugin.scripts.python.Script": {"taskRunner": {"$ref": "#/$defs/egret.taskRunner"}}
+ },
+ "$defs": {
+  "egret.taskRunner": {
+   "title": "The task runner to use.",
+   "markdownDescription": "Absent: the runner this egret is configured with (`workflow.container_runner`). Written: it must be that same runner. `io.kestra.plugin.core.runner.Process` is refused, because it would run the commands inside egret's own server.",
+   "oneOf": [
+    {
+     "type": "object",
+     "title": "Docker",
+     "properties": {
+      "type": {"const": "io.kestra.plugin.scripts.runner.docker.Docker"},
+      "pullPolicy": {"$ref": "#/$defs/egret.taskRunner.pullPolicy"},
+      "delete": {"type": "boolean", "default": true, "title": "Whether the container is deleted when it completes."},
+      "cpu": {
+       "type": "object",
+       "title": "Limits the CPU usage.",
+       "properties": {"cpus": {"type": "number", "title": "How many CPUs the container may use, e.g. 1.5."}},
+       "additionalProperties": false
+      },
+      "memory": {
+       "type": "object",
+       "title": "Limits the memory usage.",
+       "properties": {"memory": {"type": "string", "title": "The hard memory limit, e.g. 512m or 2g."}},
+       "additionalProperties": false
+      }
+     },
+     "required": ["type"],
+     "additionalProperties": false
+    },
+    {
+     "type": "object",
+     "title": "Kubernetes",
+     "properties": {
+      "type": {"const": "io.kestra.plugin.ee.kubernetes.runner.Kubernetes"},
+      "pullPolicy": {"$ref": "#/$defs/egret.taskRunner.pullPolicy"},
+      "delete": {"type": "boolean", "default": true, "title": "Whether the pod is deleted when it completes."},
+      "resources": {
+       "type": "object",
+       "title": "The pod's resource requests and limits.",
+       "properties": {
+        "request": {"$ref": "#/$defs/egret.taskRunner.amounts"},
+        "limit": {"$ref": "#/$defs/egret.taskRunner.amounts"}
+       },
+       "additionalProperties": false
+      }
+     },
+     "required": ["type"],
+     "additionalProperties": false
+    }
+   ]
+  },
+  "egret.taskRunner.pullPolicy": {
+   "type": "string",
+   "enum": ["IF_NOT_PRESENT", "ALWAYS", "NEVER"],
+   "default": "IF_NOT_PRESENT",
+   "title": "When the image is pulled."
+  },
+  "egret.taskRunner.amounts": {
+   "type": "object",
+   "properties": {
+    "cpu": {"type": "string", "title": "CPU, e.g. 500m or 1."},
+    "memory": {"type": "string", "title": "Memory, e.g. 256Mi or 1Gi."}
+   },
+   "additionalProperties": false
+  }
+ }
+}

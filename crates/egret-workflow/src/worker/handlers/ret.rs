@@ -12,7 +12,7 @@ pub const TYPE_ID: &str = "io.kestra.plugin.core.debug.Return";
 /// `@NotNull`. An absent `format:` is legal and the run succeeds.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-struct Spec {
+pub(crate) struct Spec {
     format: Option<Property<String>>,
 }
 

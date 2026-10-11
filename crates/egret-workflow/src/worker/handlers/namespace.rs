@@ -338,7 +338,7 @@ pub async fn readable_execution_files(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct UploadSpec {
+pub(crate) struct UploadSpec {
     #[serde(default)]
     namespace: Option<Property<String>>,
     #[serde(default)]
@@ -906,7 +906,7 @@ impl TaskHandler for UploadFiles {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct DownloadSpec {
+pub(crate) struct DownloadSpec {
     namespace: Property<String>,
     files: Value,
     #[serde(default)]
@@ -1092,7 +1092,7 @@ impl TaskHandler for DownloadFiles {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct DeleteSpec {
+pub(crate) struct DeleteSpec {
     #[serde(default)]
     namespace: Option<Property<String>>,
     files: Value,
@@ -1249,7 +1249,7 @@ impl TaskHandler for DeleteFiles {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct PurgeSpec {
+pub(crate) struct PurgeSpec {
     #[serde(rename = "filePattern", default)]
     file_pattern: Option<Property<String>>,
     #[serde(default)]
@@ -1267,7 +1267,7 @@ struct PurgeSpec {
 /// `before`, never both (`FilesVersionBehaviorValidator`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BehaviorSpec {
+pub(crate) struct BehaviorSpec {
     #[serde(rename = "type", default)]
     kind: Option<String>,
     #[serde(rename = "keepAmount", default)]

@@ -2,8 +2,10 @@
 //! versions (W1 Task 7, spec §10).
 //!
 //! ```text
+//! GET    /api/ws/{workspace}/workflows/schema
 //! GET    /api/ws/{workspace}/workflows/flows
 //! POST   /api/ws/{workspace}/workflows/flows
+//! POST   /api/ws/{workspace}/workflows/flows/validate
 //! GET    /api/ws/{workspace}/workflows/flows/{id}
 //! PUT    /api/ws/{workspace}/workflows/flows/{id}
 //! DELETE /api/ws/{workspace}/workflows/flows/{id}
@@ -124,7 +126,14 @@ pub enum WriteError {
     Core(Error),
     /// The source calls `secret()` and the caller lacks [`WF_USE_SECRETS`].
     SecretsNotAllowed,
+    /// `if_updated_at` no longer matches the draft (W7a spec §7.3): a 409
+    /// with [`DRAFT_CHANGED_CODE`], so a client tells it from the other 409
+    /// (a namespace and id another flow holds) without reading the prose.
+    DraftChanged,
 }
+
+/// `ErrorBody.code` of [`WriteError::DraftChanged`].
+pub const DRAFT_CHANGED_CODE: &str = "draft_changed";
 
 impl From<Error> for WriteError {
     fn from(e: Error) -> Self {
@@ -141,6 +150,14 @@ impl axum::response::IntoResponse for WriteError {
                 Json(egret_core::http::ErrorBody {
                     error: USE_SECRETS_REFUSAL.to_string(),
                     code: None,
+                }),
+            )
+                .into_response(),
+            WriteError::DraftChanged => (
+                StatusCode::CONFLICT,
+                Json(egret_core::http::ErrorBody {
+                    error: Error::Conflict(crate::repo::DRAFT_CHANGED.into()).to_string(),
+                    code: Some(DRAFT_CHANGED_CODE.to_string()),
                 }),
             )
                 .into_response(),
@@ -303,9 +320,22 @@ pub struct FlowDto {
     pub state: String,
     pub live_version_id: Option<Uuid>,
     pub created_by: Option<Uuid>,
+    /// The creator's display name: the profile name, else the email. Null
+    /// when `created_by` is null or the user no longer exists (W7a spec §7.4).
+    pub created_by_name: Option<String>,
+    /// The flow's highest version number; null when it has none. Versions
+    /// are snapshots to compare and restore: executions run the saved draft
+    /// (W7a spec §4, §5.3).
+    pub latest_version: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub validation: ValidationReportDto,
+    /// Whether the caller may save, publish, run and delete this flow: they
+    /// hold `workflow:manage` in this workspace. An editor opens read-only
+    /// when this is false; every mutating route still checks for itself.
+    // W7a spec §5.2. The PDP's answer to the check the mutating routes make.
+    // `workflow:manage` is workspace-scoped, so `/auth/me` cannot say it.
+    pub can_manage: bool,
 }
 
 /// A flow draft as `GET /flows` lists it — no `source`/`plan`/`validation`:
@@ -322,6 +352,13 @@ pub struct FlowListItemDto {
     pub state: String,
     pub live_version_id: Option<Uuid>,
     pub created_by: Option<Uuid>,
+    /// The creator's display name: the profile name, else the email. Null
+    /// when `created_by` is null or the user no longer exists (W7a spec §7.4).
+    pub created_by_name: Option<String>,
+    /// The flow's highest version number; null when it has none. Versions
+    /// are snapshots to compare and restore: executions run the saved draft
+    /// (W7a spec §4, §5.3).
+    pub latest_version: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -336,6 +373,8 @@ impl From<FlowRow> for FlowListItemDto {
             state: r.state,
             live_version_id: r.live_version_id,
             created_by: r.created_by,
+            created_by_name: r.created_by_name,
+            latest_version: r.latest_version,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }
@@ -352,6 +391,9 @@ pub struct FlowVersionDto {
     pub snapshot: serde_json::Value,
     pub note: String,
     pub created_by: Option<Uuid>,
+    /// The publisher's display name: the profile name, else the email. Null
+    /// when `created_by` is null or the user no longer exists (W7a spec §7.4).
+    pub created_by_name: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -364,6 +406,7 @@ impl From<FlowVersionRow> for FlowVersionDto {
             snapshot: r.snapshot,
             note: r.note,
             created_by: r.created_by,
+            created_by_name: r.created_by_name,
             created_at: r.created_at,
         }
     }
@@ -399,6 +442,13 @@ pub struct CreateFlowRequest {
 pub struct UpdateFlowRequest {
     pub source: String,
     pub folder_id: Option<Uuid>,
+    /// The draft's `updated_at` as the editor last read it (RFC 3339, the
+    /// exact string `FlowDto.updated_at` carried -- microseconds included).
+    /// When present and no longer the row's, the save is refused with 409
+    /// and nothing is written; absent, the save is unconditional. Publishing
+    /// also moves `updated_at`.
+    #[serde(default)]
+    pub if_updated_at: Option<DateTime<Utc>>,
 }
 
 /// `POST /flows/{id}/validate` body — the UNSAVED source being checked. See
@@ -424,7 +474,7 @@ pub struct PublishFlowRequest {
 /// [`update_flow`] — so it is mapped to `Error::Internal` rather than
 /// `InvalidInput`, which would misattribute a storage-layer inconsistency to
 /// the current request.
-fn draft_dto(row: FlowRow) -> EgretResult<FlowDto> {
+fn draft_dto(row: FlowRow, can_manage: bool) -> EgretResult<FlowDto> {
     let parsed = parse(&row.source).map_err(|e| {
         Error::Internal(anyhow::anyhow!(
             "stored draft {} no longer parses: {} (line {:?}, column {:?})",
@@ -445,9 +495,12 @@ fn draft_dto(row: FlowRow) -> EgretResult<FlowDto> {
         state: row.state,
         live_version_id: row.live_version_id,
         created_by: row.created_by,
+        created_by_name: row.created_by_name,
+        latest_version: row.latest_version,
         created_at: row.created_at,
         updated_at: row.updated_at,
         validation: ValidationReportDto::from(&report),
+        can_manage,
     })
 }
 
@@ -608,7 +661,8 @@ async fn create_flow(
             "flow_id": created.flow_id,
         }),
     ));
-    Ok((StatusCode::CREATED, Json(draft_dto(created)?)))
+    // The caller just passed `workflow:manage` to get here.
+    Ok((StatusCode::CREATED, Json(draft_dto(created, true)?)))
 }
 
 #[utoipa::path(
@@ -634,7 +688,15 @@ async fn get_flow(
 ) -> EgretResult<Json<FlowDto>> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
     let row = st.repo.get(ctx.workspace_id.0, id).await?;
-    Ok(Json(draft_dto(row)?))
+    // The check the mutating routes make, so the editor and the routes
+    // cannot disagree about who may write.
+    // A PDP that failed is an error, not a "no": only a refusal reads as false.
+    let can_manage = match egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await {
+        Ok(()) => true,
+        Err(Error::Forbidden) => false,
+        Err(e) => return Err(e),
+    };
+    Ok(Json(draft_dto(row, can_manage)?))
 }
 
 #[utoipa::path(
@@ -652,10 +714,38 @@ async fn get_flow(
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace, or the flow calls secret() and the caller lacks workflow:use_secrets", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such flow in this workspace", body = egret_core::http::ErrorBody),
-        (status = 409, description = "Another flow already claims this namespace and id in the workspace", body = egret_core::http::ErrorBody),
+        (status = 409, description = "Another flow already claims this namespace and id in the workspace, or `if_updated_at` was sent and the draft was changed since (`code` is `draft_changed`; the other conflict carries no code); nothing was written", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
+/// Replace a flow's draft.
+///
+/// With `if_updated_at`, the save happens only if the draft is still the one the editor opened; otherwise it is refused with
+/// 409 and nothing is written. Saving and publishing both move `updated_at`,
+/// so after a publish the editor reads the draft again before saving.
+//
+// # `if_updated_at` (W7a spec §7.3) -- internal notes, not API text
+//
+// The comparison is inside the `UPDATE`'s own `WHERE` (`FlowRepo::update`),
+// so two concurrent saves of the same draft cannot both pass: the second
+// waits on the first's row lock, re-reads the row, no longer matches, and is
+// refused with 409.
+//
+// The precondition means "nobody saved or published this draft since you
+// read it" only because these are **every** writer of
+// `workflow.flows.updated_at` (`grep -rn updated_at` over `crates/` and
+// `migrations/`, 2026-10-10):
+//
+// * `FlowRepo::create` -- the `INSERT`, through the column's `DEFAULT now()`
+//   (migration 0132);
+// * `FlowRepo::update` -- this route, `updated_at = now()`;
+// * `FlowRepo::set_live` -- publish (`POST /flows/{id}/publish`),
+//   `updated_at = now()`.
+//
+// Writes to the row that do **not** move it: `FlowRepo::soft_delete`
+// (`deleted_at` only; a trashed draft is not updatable anyway), and the
+// `ON DELETE SET NULL` foreign keys on `folder_id` and `live_version_id`
+// (migration 0132). No database trigger writes it.
 async fn update_flow(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
@@ -683,9 +773,16 @@ async fn update_flow(
                 source: Some(body.source),
                 plan: Some(plan),
                 folder_id: Some(body.folder_id),
+                if_updated_at: body.if_updated_at,
             },
         )
-        .await?;
+        .await
+        // The repo names a failed precondition with this crate's own constant
+        // (`FlowRepo::update`, its only writer); it becomes the coded 409 here.
+        .map_err(|e| match e {
+            Error::Conflict(m) if m == crate::repo::DRAFT_CHANGED => WriteError::DraftChanged,
+            e => WriteError::Core(e),
+        })?;
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
         Some(ctx.workspace_id.0),
@@ -697,7 +794,8 @@ async fn update_flow(
             "flow_id": updated.flow_id,
         }),
     ));
-    Ok(Json(draft_dto(updated)?))
+    // The caller just passed `workflow:manage` to get here.
+    Ok(Json(draft_dto(updated, true)?))
 }
 
 #[utoipa::path(
@@ -765,14 +863,101 @@ async fn validate_flow(
     // about IT is read below -- the source checked is the body's, per this
     // module's doc comment.
     let _ = st.repo.get(ctx.workspace_id.0, id).await?;
-    let flow = parse(&body.source).map_err(|e| {
+    Ok(Json(validate_flow_source(&body.source)?))
+}
+
+/// The report both validate routes answer for `source`: parse (a YAML that
+/// does not parse is a 400 whose message carries the line and column), then
+/// [`validate`]. Writes nothing.
+fn validate_flow_source(source: &str) -> EgretResult<ValidationReportDto> {
+    let flow = parse(source).map_err(|e| {
         Error::InvalidInput(match (e.line, e.column) {
             (Some(l), Some(c)) => format!("{} (line {l}, column {c})", e.message),
             _ => e.message,
         })
     })?;
     let report = validate(&flow);
-    Ok(Json(ValidationReportDto::from(&report)))
+    Ok(ValidationReportDto::from(&report))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/flows/validate",
+    tag = "workflow",
+    params(WorkspacePath),
+    request_body = ValidateFlowRequest,
+    responses(
+        (status = 200, description = "The validation report of a source that belongs to no saved flow yet (the create page). The same report `POST /flows/{id}/validate` gives for the same source; nothing is written", body = ValidationReportDto),
+        (status = 400, description = "The YAML does not parse; the message carries the line and column", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn validate_unsaved_flow(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<ValidateFlowRequest>,
+) -> EgretResult<Json<ValidationReportDto>> {
+    // `:manage`, as the by-id route: validating is an authoring action.
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    Ok(Json(validate_flow_source(&body.source)?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/schema",
+    tag = "workflow",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "The JSON Schema (draft 2020-12) of one flow document as this workspace may publish it: Kestra's definitions filtered to the types and properties egret honours, egret's own types, and the script and plugin types only when this workspace's features allow them. Carries a strong `ETag` and `Cache-Control: private, no-cache`", body = Object),
+        (status = 304, description = "`If-None-Match` names the current `ETag`"),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn get_flow_schema(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    headers: axum::http::HeaderMap,
+) -> EgretResult<axum::response::Response> {
+    use axum::http::header;
+    use axum::response::IntoResponse as _;
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    // The same effective feature set `publish_flow` gates with.
+    let disabled = st.workspaces.disabled_features(ctx.workspace_id).await?;
+    let features = crate::spec::schema::SchemaFeatures {
+        kestra_plugins: !disabled.contains(crate::plugins::FEATURE_KEY),
+        containers: !disabled.contains(crate::scripts::FEATURE_KEY),
+    };
+    let served = crate::spec::schema::served(&features, &st.scripts);
+    let cache = [
+        (header::ETAG, served.etag.clone()),
+        (header::CACHE_CONTROL, "private, no-cache".to_string()),
+    ];
+    if if_none_match(&headers, &served.etag) {
+        return Ok((StatusCode::NOT_MODIFIED, cache).into_response());
+    }
+    Ok((
+        StatusCode::OK,
+        cache,
+        [(header::CONTENT_TYPE, "application/json".to_string())],
+        served.bytes.clone(),
+    )
+        .into_response())
+}
+
+/// Whether `If-None-Match` names `etag` (or is `*`). RFC 9110 §13.1.2 uses
+/// the weak comparison here, so a `W/` prefix on a listed tag is ignored.
+fn if_none_match(headers: &axum::http::HeaderMap, etag: &str) -> bool {
+    headers
+        .get_all(axum::http::header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .any(|t| t == "*" || t.strip_prefix("W/").unwrap_or(t) == etag)
 }
 
 #[utoipa::path(
@@ -1866,7 +2051,9 @@ async fn start_flow_execution(
         // client orval generates for this route's two content types sends no
         // `Content-Type`. So a headerless body is read as JSON: empty is `{}`
         // as before, anything else is parsed (and refused if it is not JSON).
-        // An explicit type that is neither JSON nor multipart stays 415.
+        // An explicit type that is neither JSON nor multipart stays 415 --
+        // and a browser's `fetch` labels a string body `text/plain`, so the
+        // web UI says `application/json` itself (W7a Task 8, `RunFlow.tsx`).
         let req = if req.headers().contains_key(axum::http::header::CONTENT_TYPE) {
             req
         } else {
@@ -2395,9 +2582,14 @@ async fn replay_execution(
 /// the feature-gate convention that depends on it.
 pub fn management_router() -> Router<WorkflowState> {
     Router::new()
+        .route("/ws/{workspace}/workflows/schema", get(get_flow_schema))
         .route(
             "/ws/{workspace}/workflows/flows",
             get(list_flows).post(create_flow),
+        )
+        .route(
+            "/ws/{workspace}/workflows/flows/validate",
+            post(validate_unsaved_flow),
         )
         .route(
             "/ws/{workspace}/workflows/flows/{id}",
@@ -2533,6 +2725,8 @@ pub fn management_router() -> Router<WorkflowState> {
         update_flow,
         delete_flow,
         validate_flow,
+        validate_unsaved_flow,
+        get_flow_schema,
         publish_flow,
         list_flow_versions,
         get_flow_version,
