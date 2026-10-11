@@ -862,6 +862,8 @@ async fn every_repository_column_reaches_the_wire() {
         "updated_at",
         "source",
         "runs",
+        // Not a repository column: the PDP's `workflow:manage` answer (W7b Task 3).
+        "can_manage",
     ];
     let got: std::collections::BTreeSet<&str> = detail
         .as_object()
@@ -980,7 +982,10 @@ async fn every_repository_column_reaches_the_wire() {
         "{detail}"
     );
 
-    // ---- and the list row: the same execution fields, WITHOUT source/runs ----
+    // `can_manage` is the caller's, on the detail only: a list row answers no PDP question.
+    assert_eq!(detail["can_manage"], false, "a reader: {detail}");
+
+    // ---- and the list row: the same execution fields, WITHOUT source/runs/can_manage ----
     let page = list(&app, ws, user, "namespace=a.keys").await;
     let row = &page["rows"][0];
     let got_list: std::collections::BTreeSet<&str> = row
@@ -992,7 +997,7 @@ async fn every_repository_column_reaches_the_wire() {
     let want_list: std::collections::BTreeSet<&str> = want_execution
         .iter()
         .copied()
-        .filter(|k| *k != "source" && *k != "runs")
+        .filter(|k| !matches!(*k, "source" | "runs" | "can_manage"))
         .collect();
     assert_eq!(got_list, want_list, "the list DTO's key set: {page}");
     // The flattened parent's fields carry the same values through the list
