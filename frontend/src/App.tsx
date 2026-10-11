@@ -85,6 +85,7 @@ import MaskFilterRules from "@/routes/governance/MaskFilterRules";
 import ExplainAccess from "@/routes/governance/ExplainAccess";
 import Policies from "@/routes/governance/Policies";
 import ProfileDetailPage from "@/routes/governance/ProfileDetailPage";
+import PolicyMigrationPage from "@/routes/governance/PolicyMigrationPage";
 import PolicyEditorPage from "@/routes/governance/PolicyEditorPage";
 import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import Catalogs from "@/routes/control-plane/catalogs/Catalogs";
@@ -475,6 +476,9 @@ function GovernanceRoutes() {
           <Route path="explain-access" element={<RequirePermission perm="policy:read"><ExplainAccess /></RequirePermission>} />
           <Route path="policies" element={<RequirePermission perm="policy:read"><Policies /></RequirePermission>} />
           <Route path="policies/:service" element={<RequirePermission perm="policy:read"><ProfileDetailPage /></RequirePermission>} />
+          {/* SP4d-3: reading is `policy:read`; Preview, Migrate and Undo need
+              `policy:update`, which the page checks per control. */}
+          <Route path="policies/:service/migrate" element={<RequirePermission perm="policy:read"><PolicyMigrationPage /></RequirePermission>} />
           <Route path="policies/:service/:kind/new" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
           <Route path="policies/:service/:kind/:id" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
           <Route path="classifications" element={<RequirePermission perm="tag:read"><Classifications /></RequirePermission>} />

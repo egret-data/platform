@@ -144,6 +144,15 @@ describe("ProfileDetailPage", () => {
     expect(screen.getByRole("link", { name: "Policies" })).toHaveAttribute("href", "/governance/policies");
   });
 
+  it("links to the profile's migrate page, for a policy:read account too", async () => {
+    wrap(<ProfileDetailPage />, READER);
+    await screen.findByText("allow-analysts");
+    expect(screen.getByRole("link", { name: "Migrate policies" })).toHaveAttribute(
+      "href",
+      "/governance/policies/trino-prod/migrate",
+    );
+  });
+
   it("calls setPolicyEnabled when the enable toggle is clicked", async () => {
     const user = userEvent.setup();
     wrap(<ProfileDetailPage />);

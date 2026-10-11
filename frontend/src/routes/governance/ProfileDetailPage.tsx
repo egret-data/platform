@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Cog, Download, Loader2, Lock, Plus, ShieldCheck, Sprout, Trash2 } from "lucide-react";
+import { ArrowLeft, ArrowRightLeft, Cog, Download, Loader2, Lock, Plus, ShieldCheck, Sprout, Trash2 } from "lucide-react";
 import {
   type Profile,
   type PolicySummary,
@@ -161,6 +161,17 @@ export default function ProfileDetailPage() {
                 <Sprout className="mr-1 h-4 w-4" />
               )}
               Seed default policies
+            </Button>
+          )}
+          {/* SP4d-3: a read-only page too (it says what each policy is), so
+              offered on `policy:read`; its write controls check
+              `policy:update` themselves. A link, per FE-PAGE-3. */}
+          {service && (
+            <Button size="sm" variant="outline" asChild>
+              <Link to={`/governance/policies/${encodeURIComponent(service)}/migrate`}>
+                <ArrowRightLeft className="mr-1 h-4 w-4" />
+                Migrate policies
+              </Link>
             </Button>
           )}
           {/* The downloadable config is the Trino coordinator's Ranger-plugin
