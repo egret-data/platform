@@ -8,15 +8,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-
-function download(name: string, content: string) {
-  const url = URL.createObjectURL(new Blob([content], { type: "text/plain" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.click();
-  URL.revokeObjectURL(url);
-}
+import { downloadTextFile } from "@/lib/downloadTextFile";
 
 interface Props {
   open: boolean;
@@ -50,7 +42,7 @@ export function TrinoConfigDialog({ open, service, onOpenChange }: Props) {
           <div key={file.name} className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="font-mono text-sm">{file.name}</span>
-              <Button size="sm" variant="outline" onClick={() => download(file.name, file.content)}>
+              <Button size="sm" variant="outline" onClick={() => downloadTextFile(file.name, file.content)}>
                 Download
               </Button>
             </div>

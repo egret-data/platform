@@ -141,6 +141,35 @@ function renderDetail(entry = `/control-plane/engines/${ENGINE.id}`, me: Me | nu
   );
 }
 
+describe("EngineDetail — a provisioned engine (control for the external branch)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetEngine(ENGINE.spec);
+    mockRegistryList([]);
+    vi.mocked(wsApi.useAdminWorkspacesListWs).mockReturnValue(
+      query([WS_A]) as unknown as ReturnType<typeof wsApi.useAdminWorkspacesListWs>,
+    );
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<typeof engineApi.useControlPlaneEnginesListEngineWorkspaces>,
+    );
+  });
+
+  test("keeps today's tabs and its Restart action, and shows no External chip or Plugin config tab", async () => {
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual([
+      "Overview",
+      "Catalogs",
+      "Workspaces",
+      "Settings",
+      "Monitor",
+    ]);
+    expect(screen.getByRole("button", { name: "Restart" })).toBeInTheDocument();
+    expect(screen.queryByText("External")).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Plugin config" })).not.toBeInTheDocument();
+  });
+});
+
 describe("EngineDetail — Workspaces tab", () => {
   beforeEach(() => {
     vi.clearAllMocks();

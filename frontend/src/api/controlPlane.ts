@@ -549,6 +549,15 @@ export interface Engine {
   namespace: string;
   status: string;
   spec: EngineSpec;
+  /**
+   * `external` for an engine egret only holds a row for (SP4d-4); absent on
+   * older payloads, which means `provisioned`. The fields below are external only.
+   */
+  origin?: string;
+  host?: string | null;
+  port?: number | null;
+  rangerPluginVersion?: string | null;
+  rangerPluginVersionModelled?: boolean | null;
 }
 
 /** Live status read back from the operator + pods. */
