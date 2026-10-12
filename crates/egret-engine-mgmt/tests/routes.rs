@@ -213,6 +213,32 @@ fn build_app(
     starrocks_ddl: FakeStarRocksDdl,
     perm_compiler: Option<Arc<dyn egret_engine_mgmt::ProfileCompilerPort>>,
 ) -> axum::Router {
+    build_app_with_bearer(
+        db,
+        sessions,
+        engine_provisioner,
+        kube,
+        pdp,
+        ranger_enabled,
+        starrocks_ddl,
+        perm_compiler,
+        false,
+    )
+}
+
+/// `build_app`, with whether egret's Ranger `/service` requires a bearer token.
+#[allow(clippy::too_many_arguments)]
+fn build_app_with_bearer(
+    db: &Db,
+    sessions: &SessionService,
+    engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
+    kube: Option<Arc<dyn KubeClient>>,
+    pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+    ranger_enabled: bool,
+    starrocks_ddl: FakeStarRocksDdl,
+    perm_compiler: Option<Arc<dyn egret_engine_mgmt::ProfileCompilerPort>>,
+    ranger_bearer_configured: bool,
+) -> axum::Router {
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
     let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
@@ -241,7 +267,7 @@ fn build_app(
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
             ranger_enabled,
-            ranger_bearer_configured: false,
+            ranger_bearer_configured,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(starrocks_ddl),
             perm_compiler,
@@ -12764,4 +12790,47 @@ async fn the_plugin_config_of_a_provisioned_or_unbound_engine_is_409_and_needs_e
     assert_eq!(status, StatusCode::OK, "{j}");
     let (status, j) = call(&f, "GET", &path(Uuid::new_v4()), &admin, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{j}");
+}
+
+#[tokio::test]
+async fn a_configured_bearer_token_is_reported_as_the_auth_mode_and_the_token_is_not() {
+    let Some(mut f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cfg_bearer_admin", true).await;
+    let profile = starrocks_profile(&f).await;
+    let (id, _name) = register_external(&f, &token, "starrocks", "2.8.0", Some(profile), &[]).await;
+    f.app = build_app_with_bearer(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+        true,
+    );
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/ranger-plugin-config"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["authMode"], "bearer-configured", "{j}");
+    assert!(j["warnings"].to_string().contains("cannot send"), "{j}");
+    assert!(
+        j["adminMustSupply"].to_string().contains("bearer token"),
+        "{j}"
+    );
+    assert!(!j["warnings"].to_string().contains("anonymous"), "{j}");
+    // The plugin files carry no credential in either mode.
+    assert!(
+        !j["files"].to_string().to_lowercase().contains("bearer"),
+        "{j}"
+    );
 }

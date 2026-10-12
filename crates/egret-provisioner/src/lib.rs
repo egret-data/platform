@@ -6,13 +6,16 @@
 pub mod ingress;
 pub mod kube_client;
 pub mod provisioner;
-pub mod ranger_config;
 pub mod spec;
 pub mod starrocks;
 pub mod trino;
 
 pub use kube_client::{KubeClient, LiveKube};
 pub use provisioner::EngineProvisioner;
+// The renderer lives in `egret-engine-mgmt-api` (the lowest crate both the
+// provisioner and the policy admin route can reach); re-exported so there is one
+// spelling and the provisioner's callers keep their paths.
+pub use egret_engine_mgmt_api::ranger_config;
 pub use ranger_config::{ranger_plugin_files, RangerPluginFiles};
 pub use spec::{
     Affinity, Auth, Autoscaling, CatalogSpec, ContainerPort, CronTrigger, DeploymentStrategy,

@@ -1379,18 +1379,25 @@ mod tests {
         }
         assert_eq!(
             cm["data"][RANGER_SECURITY_XML_KEY].as_str().unwrap(),
-            include_str!("../tests/golden/starrocks.ranger-starrocks-security.xml")
+            include_str!(
+                "../../egret-engine-mgmt-api/tests/golden/starrocks.ranger-starrocks-security.xml"
+            )
         );
         assert_eq!(
             cm["data"][RANGER_AUDIT_XML_KEY].as_str().unwrap(),
-            include_str!("../tests/golden/starrocks.ranger-starrocks-audit.xml")
+            include_str!(
+                "../../egret-engine-mgmt-api/tests/golden/starrocks.ranger-starrocks-audit.xml"
+            )
         );
         // The whole fe.conf, byte for byte, and the admin-facing line inside it.
         let conf = starrocks_fe_configmap(&spec)["data"]["fe.conf"]
             .as_str()
             .unwrap()
             .to_string();
-        assert_eq!(conf, include_str!("../tests/golden/starrocks.fe.conf"));
+        assert_eq!(
+            conf,
+            include_str!("../../egret-engine-mgmt-api/tests/golden/starrocks.fe.conf")
+        );
         assert!(conf.contains(rendered.get(STARROCKS_FE_CONF_LINE).unwrap()));
     }
 

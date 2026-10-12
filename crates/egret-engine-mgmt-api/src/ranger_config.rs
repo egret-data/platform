@@ -13,7 +13,7 @@
 //! The files carry no credential: the plugin is configured with a URL and a
 //! service name only. egret's optional bearer token is never rendered here.
 
-use egret_engine_mgmt_api::EngineKind;
+use crate::EngineKind;
 
 /// Trino: the access-control selector file.
 pub const TRINO_ACCESS_CONTROL: &str = "access-control.properties";

@@ -595,6 +595,39 @@ async fn admin_gets_trino_config_for_profile() {
                 .as_str()
                 .unwrap()
                 .contains("ranger.plugin.trino.policy.rest.url")));
+    // The whole response, byte for byte (profile name normalised to `SVC`).
+    let content = |name: &str| {
+        files
+            .iter()
+            .find(|file| file["name"] == name)
+            .and_then(|file| file["content"].as_str())
+            .unwrap_or_default()
+            .replace(&svc_name, "SVC")
+    };
+    let (props, xml) = (
+        content("access-control.properties"),
+        content("ranger-trino-security.xml"),
+    );
+    assert_eq!(
+        props,
+        include_str!("golden/trino-config.access-control.properties")
+    );
+    assert_eq!(
+        xml,
+        include_str!("golden/trino-config.ranger-trino-security.xml")
+    );
+    // What changed against the response captured BEFORE the route moved onto the
+    // shared renderer (`golden/pre-sp4d4-*`): every property the old file set is
+    // still set, and the old file's keys are a subset of the new one's.
+    let old_xml = include_str!("golden/pre-sp4d4-trino-config.ranger-trino-security.xml");
+    for name in old_xml.split("<name>").skip(1) {
+        let key = name.split("</name>").next().unwrap();
+        assert!(xml.contains(&format!("<name>{key}</name>")), "lost {key}");
+    }
+    assert_ne!(
+        props,
+        include_str!("golden/pre-sp4d4-trino-config.access-control.properties")
+    );
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 

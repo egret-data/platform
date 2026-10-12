@@ -3,6 +3,8 @@
 //! `egret-provisioner` (k8s rendering) depend on these — neither owns the model.
 //! Kube-free by construction: this crate has no dependencies.
 
+pub mod ranger_config;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;

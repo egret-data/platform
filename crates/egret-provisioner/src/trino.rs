@@ -1371,11 +1371,15 @@ mod tests {
         }
         assert_eq!(
             cm["data"]["access-control.properties"].as_str().unwrap(),
-            include_str!("../tests/golden/trino.access-control.properties")
+            include_str!(
+                "../../egret-engine-mgmt-api/tests/golden/trino.access-control.properties"
+            )
         );
         assert_eq!(
             cm["data"]["ranger-trino-security.xml"].as_str().unwrap(),
-            include_str!("../tests/golden/trino.ranger-trino-security.xml")
+            include_str!(
+                "../../egret-engine-mgmt-api/tests/golden/trino.ranger-trino-security.xml"
+            )
         );
     }
 

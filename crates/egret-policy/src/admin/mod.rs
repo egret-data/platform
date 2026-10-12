@@ -816,13 +816,16 @@ pub struct ConfigFile {
 
 /// GET /policies/services/{service}/trino-config — the two files a Trino
 /// coordinator needs to enforce this profile via the native ranger plugin.
+///
+/// Rendered by `egret_engine_mgmt_api::ranger_config::ranger_plugin_files`, the
+/// same code that writes the files egret mounts into its own engines.
 #[utoipa::path(
     get,
     path = "/api/control-plane/policies/services/{service}/trino-config",
     tag = "policy-admin",
     params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
     responses(
-        (status = 200, description = "The Trino coordinator config files for this profile's native ranger plugin", body = Vec<ConfigFile>),
+        (status = 200, description = "The Trino coordinator config files for this profile's native ranger plugin, from the same renderer that writes the files egret mounts into its own engines (`access-control.properties` and `ranger-trino-security.xml`). Since SP4d-4 the security file also carries the policy source, cache directory and client timeouts, the properties file points at `/etc/trino/ranger-trino-security.xml`, and the poll interval is 30000 ms; earlier responses omitted those keys and used a relative resource path", body = Vec<ConfigFile>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
@@ -836,41 +839,22 @@ async fn trino_config(
 ) -> Result<Json<Vec<ConfigFile>>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let _ = st.store.get_service(&service).await?; // 404 if the profile doesn't exist
-    let base = st.engine_egret_url.trim_end_matches('/');
 
-    let props = format!(
-        "access-control.name=ranger\n\
-         ranger.service.name={service}\n\
-         ranger.plugin.config.resource=ranger-trino-security.xml\n"
+    // ONE renderer: the same code that writes the files egret mounts into its own
+    // engines (SP4d-4 Task 9). The poll interval is the provisioner's default.
+    let rendered = egret_engine_mgmt_api::ranger_config::ranger_plugin_files(
+        egret_engine_mgmt_api::EngineKind::Trino,
+        &service,
+        &st.engine_egret_url,
+        30_000,
     );
-    let xml = format!(
-        "<?xml version=\"1.0\"?>\n\
-         <?xml-stylesheet type=\"text/xsl\" href=\"configuration.xsl\"?>\n\
-         <configuration>\n\
-         \x20 <property>\n\
-         \x20   <name>ranger.plugin.trino.policy.rest.url</name>\n\
-         \x20   <value>{base}</value>\n\
-         \x20 </property>\n\
-         \x20 <property>\n\
-         \x20   <name>ranger.plugin.trino.service.name</name>\n\
-         \x20   <value>{service}</value>\n\
-         \x20 </property>\n\
-         \x20 <property>\n\
-         \x20   <name>ranger.plugin.trino.policy.pollIntervalMs</name>\n\
-         \x20   <value>30000</value>\n\
-         \x20 </property>\n\
-         </configuration>\n"
-    );
-    Ok(Json(vec![
-        ConfigFile {
-            name: "access-control.properties".into(),
-            content: props,
-        },
-        ConfigFile {
-            name: "ranger-trino-security.xml".into(),
-            content: xml,
-        },
-    ]))
+    Ok(Json(
+        rendered
+            .files
+            .into_iter()
+            .map(|(name, content)| ConfigFile { name, content })
+            .collect(),
+    ))
 }
 
 /// POST /policies/services/{service}/seed-defaults — seed default "admin has

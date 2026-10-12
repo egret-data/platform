@@ -11,6 +11,7 @@ license.workspace = true
 egret-core = { workspace = true, features = ["http"] }
 egret-metastore.workspace = true
 egret-policy-api.workspace = true
+egret-engine-mgmt-api.workspace = true
 # The admin Policies router (E2d) needs the Auth extractor + identity repos
 # (principal picker) from the core hub; gates run through
 # `egret_core::authz::require` against the injected PDP (B1b-2).
