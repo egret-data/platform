@@ -323,6 +323,8 @@ export * from './rangerDownloadTagsParams';
 export * from './rangerErrorBody';
 export * from './rangerGetDef200';
 export * from './rangerGetPolicy200';
+export * from './rangerPluginConfigDto';
+export * from './rangerPluginFileDto';
 export * from './rangerServiceDefs';
 export * from './rangerServiceDefsServiceDefsItem';
 export * from './rangerServicePolicies';

@@ -5311,6 +5311,89 @@
         }
       }
     },
+    "/api/control-plane/engines/{id}/ranger-plugin-config": {
+      "get": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "summary": "`GET /api/control-plane/engines/{id}/ranger-plugin-config`.",
+        "operationId": "ranger_plugin_config",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The Ranger plugin files to install on this external engine, rendered by the same code that renders the files egret mounts into its own engines. No credential is included or minted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerPluginConfigDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is provisioned (egret mounts these files itself), or it is bound to no policy profile (bind one first)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/engines/{id}/restart": {
       "post": {
         "tags": [
@@ -40849,6 +40932,89 @@
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          }
+        }
+      },
+      "RangerPluginConfigDto": {
+        "type": "object",
+        "description": "The Ranger plugin configuration an external engine's admin installs.",
+        "required": [
+          "serviceName",
+          "downloadUrl",
+          "authMode",
+          "rangerPluginVersionModelled",
+          "warnings",
+          "assumptions",
+          "adminMustSupply",
+          "files"
+        ],
+        "properties": {
+          "serviceName": {
+            "type": "string",
+            "description": "The bound policy profile: the Ranger service name the plugin asks for."
+          },
+          "downloadUrl": {
+            "type": "string",
+            "description": "`{public_url}/service/plugins/policies/download/{serviceName}`: where the\nplugin's download lands. The files below carry `public_url` itself (the\nplugin appends the path)."
+          },
+          "authMode": {
+            "type": "string",
+            "description": "`anonymous`, or `bearer-configured` (egret requires a bearer token on\n`/service`; the token is never shown here)."
+          },
+          "rangerPluginVersion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The plugin version the engine was DECLARED to run."
+          },
+          "rangerPluginVersionModelled": {
+            "type": "boolean",
+            "description": "Whether egret's evaluator models the (type, version) pair. When `false`,\nmigrations into this profile are refused."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Things that make the install not work, or not safe, as configured."
+          },
+          "assumptions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What egret's `explain` and migration gate assume about the plugin and\ncannot check on an external engine."
+          },
+          "adminMustSupply": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the admin must supply themselves. egret renders no credential and\ninvents none."
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RangerPluginFileDto"
+            }
+          }
+        }
+      },
+      "RangerPluginFileDto": {
+        "type": "object",
+        "description": "One file the admin of an external engine installs.",
+        "required": [
+          "name",
+          "content"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "File name; for StarRocks `fe.conf (add this line)` is a line to add to\nthe FE's existing `fe.conf`, not a file to replace it with."
+          },
+          "content": {
+            "type": "string"
           }
         }
       },

@@ -40,6 +40,7 @@ import type {
   PodLogsDto,
   QueryDetailDto,
   QueryDto,
+  RangerPluginConfigDto,
   RegisterExternalEngine,
   SetWorkspacesBody,
   UpdateExternalEngine,
@@ -2403,7 +2404,146 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getControlPlaneEnginesKillQueryMutationOptions(options), queryClient);
     }
-    export type controlPlaneEnginesRestartEngineResponse200 = {
+    export type controlPlaneEnginesRangerPluginConfigResponse200 = {
+  data: RangerPluginConfigDto
+  status: 200
+}
+
+export type controlPlaneEnginesRangerPluginConfigResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesRangerPluginConfigResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesRangerPluginConfigResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesRangerPluginConfigResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesRangerPluginConfigResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesRangerPluginConfigResponseSuccess = (controlPlaneEnginesRangerPluginConfigResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesRangerPluginConfigResponseError = (controlPlaneEnginesRangerPluginConfigResponse401 | controlPlaneEnginesRangerPluginConfigResponse403 | controlPlaneEnginesRangerPluginConfigResponse404 | controlPlaneEnginesRangerPluginConfigResponse409 | controlPlaneEnginesRangerPluginConfigResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesRangerPluginConfigResponse = (controlPlaneEnginesRangerPluginConfigResponseSuccess | controlPlaneEnginesRangerPluginConfigResponseError)
+
+export const getControlPlaneEnginesRangerPluginConfigUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/ranger-plugin-config`
+}
+
+/**
+ * @summary `GET /api/control-plane/engines/{id}/ranger-plugin-config`.
+ */
+export const controlPlaneEnginesRangerPluginConfig = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesRangerPluginConfigResponse> => {
+
+  return customInstance<controlPlaneEnginesRangerPluginConfigResponse>(getControlPlaneEnginesRangerPluginConfigUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesRangerPluginConfigQueryKey = (id: string,) => {
+    return [
+    `/api/control-plane/engines/${encodeURIComponent(id)}/ranger-plugin-config`
+    ] as const;
+    }
+
+
+export const getControlPlaneEnginesRangerPluginConfigQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneEnginesRangerPluginConfigQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>> = ({ signal }) => controlPlaneEnginesRangerPluginConfig(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneEnginesRangerPluginConfigQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>>
+export type ControlPlaneEnginesRangerPluginConfigQueryError = ErrorBody
+
+
+export function useControlPlaneEnginesRangerPluginConfig<TData = Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesRangerPluginConfig<TData = Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesRangerPluginConfig<TData = Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary `GET /api/control-plane/engines/{id}/ranger-plugin-config`.
+ */
+
+export function useControlPlaneEnginesRangerPluginConfig<TData = Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneEnginesRangerPluginConfigQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneEnginesRestartEngineResponse200 = {
   data: void
   status: 200
 }
