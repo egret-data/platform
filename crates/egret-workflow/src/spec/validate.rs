@@ -41,17 +41,30 @@
 //!    violating value is rejected. When you add a bean-validation debt to a
 //!    `models/` type, add its check here and a test for it in the SAME
 //!    change -- do not rely on a later "sweep" to find the tag.
-//! 3. **Not-yet-enforced** -- features that parse and validate cleanly but
-//!    that no package in this branch actually acts on yet
-//!    (`NOT_YET_ENFORCED` and, for Kestra control-flow classes this crate
-//!    hasn't ported to a `TaskKind` variant -- `Pause` today --
-//!    `KESTRA_FLOW_CONTROL`, both below). These are warnings, never errors:
-//!    a declared-but-unimplemented feature must still publish, or a green
-//!    publish would lie about what the product does. This layer is why an
-//!    unported control-flow type must never be left to fall silently through
-//!    to `Leaf`: a `Pause` a user believes is a manual-approval gate that
-//!    quietly runs straight through it is worse than refusing to publish the
-//!    flow at all.
+//! 3. **Not-yet-enforced** -- FLOW-LEVEL features that parse and validate
+//!    cleanly but that no package in this branch actually acts on yet
+//!    (`NOT_YET_ENFORCED`, below: `concurrency`, `sla`, `checks`, `quotas`,
+//!    triggers). These are warnings, never errors: the flow still runs, it
+//!    just runs without the feature, and the warning is what stops a green
+//!    publish lying about that.
+//!
+//!    **A TASK egret cannot run is not this layer any more, and that is
+//!    no-silent-stall Task 1** (spec §3). A task-level construct egret has no
+//!    executor for does not run "without the feature": `build_plan` plans it
+//!    an opaque runnable no handler serves, and every execution that reached
+//!    it stalled in `RUNNING` for ever. So each is an ERROR, in
+//!    `validate_for_run`, which publish and every start path ask:
+//!    `unsupported_allow_failure`, `unsupported_working_directory`,
+//!    `unsupported_loop_until_property` (a bound `executor::loop_until_gap`
+//!    names), `unsupported_pause_property` (`executor::pause_gap`, W7b),
+//!    `unsupported_foreach` (W7b), `unsupported_flow_task` (a type spelled
+//!    like Kestra control flow that egret does not implement -- it was the
+//!    task-level `not_yet_enforced` warning) and `unknown_task_type` (a
+//!    warning until then). A draft still SAVES with any of them; only
+//!    publish and start refuse. This is why an unported control-flow type
+//!    must never be left to fall silently through to `Leaf`: a `Pause` a user
+//!    believes is a manual-approval gate that quietly runs straight through
+//!    it is worse than refusing to publish the flow at all.
 
 use std::collections::{HashMap, HashSet};
 
@@ -211,7 +224,16 @@ const NOT_YET_ENFORCED: &[(&str, &str)] = &[
 /// **The publish hole is closed and the class is now empty.** Of the 70
 /// distinct `type:` strings in the corpus, the names that reach `Leaf` through
 /// `canonical_flow_type` are `Sleep` and `WorkingDirectoryTest$LocalFiles`,
-/// both `RunnableTask` at the pin and correctly accepted. There is no third.
+/// both `RunnableTask` at the pin. There is no third.
+///
+/// **"Accepted" was the word here, and since no-silent-stall Task 1 it holds
+/// for `Sleep` only.** `Sleep` is a registered type with a handler.
+/// `WorkingDirectoryTest$LocalFiles` is a Kestra TEST class with no handler
+/// (its five flows were 422 at harvest, `task-type-not-in-image`), and a
+/// `Leaf` spelled like control flow that no registry row names is now the
+/// ERROR `unsupported_flow_task` rather than a `not_yet_enforced` warning,
+/// because a run reaching it stalled with `NoHandler`. Neither outcome reads
+/// this table.
 ///
 /// `#[cfg(test)]` because a production constant nothing reads is a lie about
 /// where the authority lives; the authority is `kind_for`, and this is the
@@ -602,8 +624,8 @@ pub fn validate_for_run(flow: &Flow) -> ValidationReport {
 /// W5a: every script task (`crate::scripts`) is parsed, and each property,
 /// runner or value W5a does not implement is an ERROR naming it -- never
 /// ignored (W5a spec §3). Walks `children()` AND `error_children()` through
-/// `scripts::script_tasks`, unlike `walk_task`, so a script task inside a
-/// flowable's `errors:` is refused too.
+/// `scripts::script_tasks` -- as `walk_task` does too since no-silent-stall
+/// Task 1 -- so a script task inside a flowable's `errors:` is refused too.
 ///
 /// The governance gate (feature, allowlist) is NOT here: it needs the
 /// workspace and the platform configuration, which this pure function does
@@ -630,9 +652,11 @@ fn validate_script_tasks(flow: &Flow, report: &mut ValidationReport) {
 /// is parsed against the embedded catalog, and each refusal is an ERROR
 /// naming it (spec §4). A bare catalog FQCN is an error carrying the prefixed
 /// spelling. Both walk `children()` AND `error_children()`
-/// (`plugins::plugin_tasks`), unlike `walk_task`, so a plugin task inside a
-/// flowable's `errors:` is refused too -- which is also why the bare-FQCN
-/// error is raised here rather than in `walk_task`'s `Leaf` arm.
+/// (`plugins::plugin_tasks`), so a plugin task inside a flowable's `errors:`
+/// is refused too. The bare-FQCN error is raised here rather than in
+/// `walk_task`'s `Leaf` arm because `walk_task` did not reach `errors:` when it
+/// was written; it does since no-silent-stall Task 1, and the arm still leaves
+/// both plugin spellings to this function, so nothing is reported twice.
 ///
 /// (`pluginDefaults:` is NOT here: it is a save-only finding, see
 /// [`save_only_findings`].)
@@ -1195,7 +1219,11 @@ fn sla_common(sla: &Sla) -> &SlaCommon {
 /// - the two remaining structural checks, `dag_cycle` and `self_subflow`.
 ///
 /// Recurses through `Task::children()`, not `flow.tasks` -- this is the
-/// walk Step 7's mutation proves is load-bearing.
+/// walk Step 7's mutation proves is load-bearing -- and, since
+/// no-silent-stall Task 1, through `Task::error_children()` as well, so every
+/// check here (the refusals of tasks egret cannot run, the duplicate-id
+/// record, the semantic checks) reaches a flowable's own `errors:`, which
+/// `build_plan` flattens.
 fn walk_task(
     flow: &Flow,
     task: &Task,
@@ -1462,6 +1490,25 @@ fn walk_task(
                     path: format!("{path}.tasks"),
                 });
             }
+            // no-silent-stall Task 1 (spec §3). A bound `build_plan` cannot
+            // read without a `RunContext` plans the task an opaque runnable
+            // (`executor::loop_until_gap`, the one predicate both ask), which
+            // no handler runs: every execution of it stalled in `RUNNING`
+            // (`NotALeaf`, reaped, reclaimed). So it is an ERROR, at the
+            // field's path, as `unsupported_pause_property` is.
+            if let Some(field) = crate::executor::loop_until_gap(l) {
+                report.errors.push(Finding {
+                    code: "unsupported_loop_until_property",
+                    message: format!(
+                        "task '{}' is a loopUntil whose '{field}' is not a literal, which egret \
+                         does not support: egret reads it when the flow is planned, before \
+                         anything is rendered, so it cannot run this task and the flow cannot \
+                         be published or started. '{field}' must be a literal value",
+                        task.id
+                    ),
+                    path: format!("{path}.{field}"),
+                });
+            }
         }
         // Fix round 3: `Subflow::namespace` is `@NotEmpty` and
         // `Subflow::flow_id` is `@NotNull` in Java, both bean-validation-
@@ -1556,6 +1603,21 @@ fn walk_task(
                     path: format!("{path}.tasks"),
                 });
             }
+            // no-silent-stall Task 1 (spec §3). `build_plan` plans it an
+            // opaque runnable -- it turns a child's failure into `WARNING`,
+            // which `RunState` cannot hold -- and no handler runs that, so
+            // every execution of it stalled in `RUNNING`. An ERROR now, beside
+            // `allow_failure_tasks_required`, which stays.
+            report.errors.push(Finding {
+                code: "unsupported_allow_failure",
+                message: format!(
+                    "task '{}' has type '{}', which egret does not run, so the flow cannot be \
+                     published or started. To let a child task fail without failing the \
+                     flow, set `allowFailure: true` on each child task instead",
+                    task.id, task.r#type
+                ),
+                path: path.clone(),
+            });
         }
         // W8 Task 3. `tasks:` is NOT required -- `valids/pause-delay` writes
         // none and the artifact published it with a 200. A `Pause` whose
@@ -1624,11 +1686,12 @@ fn walk_task(
             // in that worker, so there is no way for it to run there at all.
             //
             // **`is_runnable_child` is fail-OPEN, and the asymmetry is
-            // deliberate.** `KESTRA_FLOW_CONTROL`'s other use --- the
-            // `not_yet_enforced` warning below --- is fail-CLOSED, warning
-            // for anything spelled like `io.kestra.plugin.core.flow.*`,
-            // because a spurious warning costs a reader one line. This is a
-            // REFUSAL, and the same fail-closed spelling test would refuse
+            // deliberate.** The `Leaf` arm below is fail-CLOSED, reporting
+            // anything spelled like `io.kestra.plugin.core.flow.*` that is not
+            // a registered type -- an error, `unsupported_flow_task`, since
+            // no-silent-stall Task 1, because no handler could run it. This
+            // check is about something else, being a CHILD of a
+            // `WorkingDirectory`, and the same fail-closed spelling test would refuse
             // `io.kestra.plugin.core.flow.Sleep` and
             // `io.kestra.plugin.core.flow.PurgeFlows` --- the two classes in
             // that Java package that ARE `RunnableTask`s (measured at the
@@ -1652,7 +1715,27 @@ fn walk_task(
                     });
                 }
             }
+            // no-silent-stall Task 1 (spec §3). `build_plan` plans it an
+            // opaque runnable -- it hands its whole subtree to one worker --
+            // and no handler runs that, so every execution of it stalled in
+            // `RUNNING`. An ERROR now, pushed LAST in this arm: the three checks
+            // above stay and keep their order, so a flow Kestra refuses for one
+            // of them is still refused by `build_plan` for that cause first
+            // (`invalids/workingdirectory-invalid`'s `RefusalGroup`).
+            report.errors.push(Finding {
+                code: "unsupported_working_directory",
+                message: format!(
+                    "task '{}' has type '{}', which egret does not run, so the flow cannot be \
+                     published or started. To share files between tasks, pass files between \
+                     script tasks with `outputFiles` and `inputFiles`",
+                    task.id, task.r#type
+                ),
+                path: path.clone(),
+            });
         }
+        // (Wherever this comment says "warns", read "is refused": both
+        // findings below are ERRORS since no-silent-stall Task 1, spec §3.)
+        //
         // Fix round 2: round 1's version of this check only warned when the
         // task's canonical type had a row in `KESTRA_FLOW_CONTROL` --
         // fail-OPEN, reproducing the exact bug it was meant to fix, one
@@ -1716,30 +1799,37 @@ fn walk_task(
                 // would port an `Unported` row, and since W8 Task 3 ported
                 // `pause` — the last one — every row is ported, so that arm
                 // could not be reached and the `Unported` variant could not be
-                // constructed. Deleted rather than left behind an
-                // `#[allow(dead_code)]`, which is what this crate did with the
-                // two `isRetrying` guards W3a measured unreachable: a branch
-                // nobody can drive is a branch nobody can check.
+                // constructed.
                 //
                 // The FAIL-CLOSED design it existed inside is untouched and is
-                // the half that matters: anything spelled like Kestra
-                // control flow that reaches `Leaf` and is not a registered
-                // type warns, whether or not a table has a row for it. That
-                // test is `canonical_flow_type(...).is_some()`, right here,
-                // and it never read the table.
-                report.warnings.push(Finding {
-                    code: "not_yet_enforced",
+                // the half that matters: anything spelled like Kestra control
+                // flow that reaches `Leaf` and is not a registered type is
+                // reported, whether or not a table has a row for it. That test
+                // is `canonical_flow_type(...).is_some()`, right here, and it
+                // never read the table.
+                //
+                // **An ERROR since no-silent-stall Task 1** (spec §3), where it
+                // was the task-level `not_yet_enforced` warning: no handler
+                // serves such a type, so a draft that started stalled in
+                // `RUNNING` with `NoHandler`. The flow-level `not_yet_enforced`
+                // warnings (`emit_not_yet_enforced`) are a different thing and
+                // stay warnings.
+                report.errors.push(Finding {
+                    code: "unsupported_flow_task",
                     message: format!(
                         "task '{}' has type '{}', which is spelled like a Kestra control-flow \
                          task (a `io.kestra.plugin.core.flow.*` FQCN or its `core.` alias) but \
-                         egret does not implement it yet; no handler serves it, so a run that \
-                         reaches it stalls instead of doing what it declares",
+                         egret does not implement it: egret cannot run this task, so the flow \
+                         cannot be published or started",
                         task.id, task.r#type
                     ),
                     path: path.clone(),
                 });
             } else {
-                report.warnings.push(Finding {
+                // An ERROR since no-silent-stall Task 1 (spec §3): no handler
+                // serves an unknown type, so a draft that started stalled in
+                // `RUNNING` with `NoHandler`. Publish already refused it.
+                report.errors.push(Finding {
                     code: "unknown_task_type",
                     message: format!(
                         "task '{}' has type '{}', which egret does not recognise as a task type; \
@@ -1763,7 +1853,17 @@ fn walk_task(
         TaskKind::Leaf { .. } => {}
     }
 
-    for child in task.children() {
+    // no-silent-stall Task 1 (spec §3): `error_children()` too, which
+    // `build_plan` flattens (a `Sequential`/`Parallel`/`If`/`Switch`/`Dag`'s
+    // own `errors:`), so a construct this walk refuses cannot slip in under
+    // one. Every check of the walk reaches those tasks now, the duplicate-id
+    // one included: an `errors:` handler's id joins `seen_ids`, as it is in
+    // Kestra's `allTasks()` (`AbstractBranch.allChildTasks()` is `tasks +
+    // errors + finally`). It is also what keeps `worker::claim::leaf`
+    // unambiguous: that lookup finds a task BY ID through `children()` and
+    // `error_children()`, first match wins, so two tasks sharing an id there
+    // would hand a worker whichever came first.
+    for child in task.children().into_iter().chain(task.error_children()) {
         let child_path = format!("{path}.{}", child.id);
         walk_task(flow, child, child_path, seen_ids, report);
     }
@@ -1973,7 +2073,7 @@ mod tests {
             "id: f\nnamespace: a.b\ntasks:\n  - id: wd\n    type: core.workingdirectory\n    \
              tasks:\n      - id: log\n        type: io.kestra.plugin.core.log.Log\n        \
              message: hi\n      - id: par\n        type: core.parallel\n        tasks:\n          \
-             - id: inner\n            type: x\n",
+             - id: inner\n            type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -2119,7 +2219,7 @@ mod tests {
     fn a_schedule_that_cannot_supply_an_input_without_a_default_is_an_error() {
         let f = parse(
             "id: f\nnamespace: a.b\ninputs:\n  - id: user\n    type: STRING\n    defaults: John\n  \
-             - id: user2\n    type: STRING\ntasks:\n  - id: t\n    type: x\ntriggers:\n  \
+             - id: user2\n    type: STRING\ntasks:\n  - id: t\n    type: core.log\ntriggers:\n  \
              - id: every_minute\n    type: io.kestra.plugin.core.trigger.Schedule\n    \
              cron: \"*/1 * * * *\"\n",
         )
@@ -2146,7 +2246,7 @@ mod tests {
         //    field as "deprecated", which the checkout does not say.
         let supplied = parse(
             "id: f\nnamespace: a.b\ninputs:\n  - id: user2\n    type: STRING\ntasks:\n  \
-             - id: t\n    type: x\ntriggers:\n  - id: s\n    \
+             - id: t\n    type: core.log\ntriggers:\n  - id: s\n    \
              type: io.kestra.plugin.core.trigger.Schedule\n    cron: \"* * * * *\"\n    \
              inputs:\n      user2: bob\n",
         )
@@ -2154,7 +2254,7 @@ mod tests {
         // 2. every input has a default.
         let defaulted = parse(
             "id: f\nnamespace: a.b\ninputs:\n  - id: user2\n    type: STRING\n    \
-             defaults: bob\ntasks:\n  - id: t\n    type: x\ntriggers:\n  - id: s\n    \
+             defaults: bob\ntasks:\n  - id: t\n    type: core.log\ntriggers:\n  - id: s\n    \
              type: io.kestra.plugin.core.trigger.Schedule\n    cron: \"* * * * *\"\n",
         )
         .unwrap();
@@ -2163,7 +2263,7 @@ mod tests {
         //    fire time.
         let webhook = parse(
             "id: f\nnamespace: a.b\ninputs:\n  - id: user2\n    type: STRING\ntasks:\n  \
-             - id: t\n    type: x\ntriggers:\n  - id: w\n    \
+             - id: t\n    type: core.log\ntriggers:\n  - id: w\n    \
              type: io.kestra.plugin.core.trigger.Webhook\n    key: k\n",
         )
         .unwrap();
@@ -2188,7 +2288,7 @@ mod tests {
             for outer in ["ARRAY", "MULTISELECT"] {
                 let f = parse(&format!(
                     "id: f\nnamespace: a.b\ninputs:\n  - id: i\n    type: {outer}\n    \
-                     itemType: {item}\ntasks:\n  - id: t\n    type: x\n"
+                     itemType: {item}\ntasks:\n  - id: t\n    type: core.log\n"
                 ))
                 .unwrap();
                 let r = validate(&f);
@@ -2216,7 +2316,7 @@ mod tests {
         let src = |ty: &str, list: &str| {
             parse(&format!(
                 "id: f\nnamespace: a.b\ninputs:\n  - id: up\n    type: {ty}\n    \
-                 allowedFileExtensions: {list}\ntasks:\n  - id: t\n    type: x\n"
+                 allowedFileExtensions: {list}\ntasks:\n  - id: t\n    type: core.log\n"
             ))
             .unwrap()
         };
@@ -2258,7 +2358,7 @@ mod tests {
         ] {
             let f = parse(&format!(
                 "id: f\nnamespace: a.b\ninputs:\n  - id: i\n    type: {outer}\n    \
-                 itemType: {item}\ntasks:\n  - id: t\n    type: x\n"
+                 itemType: {item}\ntasks:\n  - id: t\n    type: core.log\n"
             ))
             .unwrap();
             let r = validate(&f);
@@ -2371,7 +2471,7 @@ mod tests {
     #[test]
     fn duplicate_task_ids_are_an_error() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n  - id: t\n    type: y\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n  - id: t\n    type: y\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -2385,7 +2485,7 @@ mod tests {
     #[test]
     fn duplicate_task_ids_are_found_inside_control_flow() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n  - id: outer\n    type: core.parallel\n    tasks:\n      - id: t\n        type: y\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n  - id: outer\n    type: core.parallel\n    tasks:\n      - id: t\n        type: y\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -2402,7 +2502,7 @@ mod tests {
     fn publish_refuses_a_files_segment_namespace_by_name() {
         for ns in ["a._files", "a._files.b", "_x._files"] {
             let f = parse(&format!(
-                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: x\n"
+                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: core.log\n"
             ))
             .unwrap();
             let found: Vec<_> = validate(&f)
@@ -2426,7 +2526,7 @@ mod tests {
         // The controls: `_files` inside a segment is not the segment.
         for ns in ["a.files", "a.x_files", "a._filesx"] {
             let f = parse(&format!(
-                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: x\n"
+                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: core.log\n"
             ))
             .unwrap();
             assert!(
@@ -2443,7 +2543,7 @@ mod tests {
     fn an_empty_namespace_segment_still_publishes() {
         for ns in ["a..b", "a.", "a.b..c"] {
             let f = parse(&format!(
-                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: x\n"
+                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: core.log\n"
             ))
             .unwrap();
             assert!(
@@ -2461,7 +2561,7 @@ mod tests {
     fn a_flow_id_of_files_is_refused() {
         for id in ["_files", "_Files", "_files.x"] {
             let f = parse(&format!(
-                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: x\n"
+                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: core.log\n"
             ))
             .unwrap();
             let found: Vec<_> = validate(&f)
@@ -2476,7 +2576,7 @@ mod tests {
         // The control: `files` and `x_files` are legal ids.
         for id in ["files", "x_files"] {
             let f = parse(&format!(
-                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: x\n"
+                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: core.log\n"
             ))
             .unwrap();
             assert!(!validate(&f).errors.iter().any(|e| e.path == "id"), "{id}");
@@ -2490,7 +2590,7 @@ mod tests {
     fn publish_refuses_a_kv_segment_namespace_by_name() {
         for ns in ["a._kv", "a._kv.b", "x.y._kv", "_kv.a"] {
             let f = parse(&format!(
-                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: x\n"
+                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: core.log\n"
             ))
             .unwrap();
             let found: Vec<_> = validate(&f)
@@ -2512,7 +2612,8 @@ mod tests {
             );
         }
         // Both markers: the `_files` finding alone, named once.
-        let f = parse("id: f\nnamespace: a._files._kv\ntasks:\n  - id: t\n    type: x\n").unwrap();
+        let f = parse("id: f\nnamespace: a._files._kv\ntasks:\n  - id: t\n    type: core.log\n")
+            .unwrap();
         let found: Vec<_> = validate(&f)
             .errors
             .into_iter()
@@ -2523,7 +2624,7 @@ mod tests {
         // The controls: `_kv` inside a segment is not the segment.
         for ns in ["a.kv", "a.x_kv", "a._kvx", "a.b_kv.c", "kv"] {
             let f = parse(&format!(
-                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: x\n"
+                "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: core.log\n"
             ))
             .unwrap();
             assert!(
@@ -2540,7 +2641,7 @@ mod tests {
     fn a_flow_id_of_kv_is_refused() {
         for id in ["_kv", "_KV", "_kv.x"] {
             let f = parse(&format!(
-                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: x\n"
+                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: core.log\n"
             ))
             .unwrap();
             let found: Vec<_> = validate(&f)
@@ -2554,7 +2655,7 @@ mod tests {
         }
         for id in ["kv", "x_kv"] {
             let f = parse(&format!(
-                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: x\n"
+                "id: {id}\nnamespace: a\ntasks:\n  - id: t\n    type: core.log\n"
             ))
             .unwrap();
             assert!(!validate(&f).errors.iter().any(|e| e.path == "id"), "{id}");
@@ -2578,7 +2679,8 @@ mod tests {
 
     #[test]
     fn a_bad_namespace_is_an_error() {
-        let f = parse("id: f\nnamespace: Not-Valid\ntasks:\n  - id: t\n    type: x\n").unwrap();
+        let f =
+            parse("id: f\nnamespace: Not-Valid\ntasks:\n  - id: t\n    type: core.log\n").unwrap();
         let r = validate(&f);
         assert!(
             r.errors.iter().any(|e| e.code == "invalid_namespace"),
@@ -2593,7 +2695,7 @@ mod tests {
     #[test]
     fn declared_but_unimplemented_features_warn_and_name_their_package() {
         let f = parse(
-            "id: f\nnamespace: a.b\nconcurrency:\n  limit: 1\ntasks:\n  - id: t\n    type: x\n",
+            "id: f\nnamespace: a.b\nconcurrency:\n  limit: 1\ntasks:\n  - id: t\n    type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -2652,7 +2754,7 @@ mod tests {
         // `validate`'s two collection points can reintroduce one alone.
         let enforced = parse(
             "id: f\nnamespace: a.b\nretry:\n  type: constant\n  interval: PT1S\n\
-             tasks:\n  - id: t\n    type: x\n    timeout: PT1S\n    retry:\n\
+             tasks:\n  - id: t\n    type: core.log\n    timeout: PT1S\n    retry:\n\
              \x20     type: constant\n      interval: PT1S\n",
         )
         .unwrap();
@@ -2670,7 +2772,7 @@ mod tests {
         // through the same code path, on a flow of the same shape.
         let unenforced = parse(
             "id: f\nnamespace: a.b\nconcurrency:\n  limit: 1\ntasks:\n\
-             \x20 - id: t\n    type: x\n    timeout: PT1S\n",
+             \x20 - id: t\n    type: core.log\n    timeout: PT1S\n",
         )
         .unwrap();
         let r = validate(&unenforced);
@@ -2708,7 +2810,7 @@ mod tests {
             "  - id: f\n    type: io.kestra.plugin.core.trigger.Flow\n    conditions: []\n",
             "  - id: s\n    type: core.schedule\n    cron: \"0 * * * *\"\n",
         ] {
-            let yaml = format!("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\ntriggers:\n{kind}");
+            let yaml = format!("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\ntriggers:\n{kind}");
             assert_eq!(
                 triggers_warning(&yaml),
                 Vec::<String>::new(),
@@ -2723,7 +2825,7 @@ mod tests {
             "  - id: s\n    type: core.schedule\n    cron: \"0 * * * *\"\n",
         ] {
             let yaml = format!(
-                "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\ntriggers:\n{leaf}{extra}"
+                "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\ntriggers:\n{leaf}{extra}"
             );
             let found = triggers_warning(&yaml);
             assert_eq!(found.len(), 1, "{yaml}");
@@ -2749,7 +2851,7 @@ mod tests {
     fn an_execution_assertion_only_sla_does_not_warn_and_a_max_duration_does() {
         let assertion_only = parse(
             "id: f\nnamespace: a.b\nsla:\n  - id: a\n    type: EXECUTION_ASSERTION\n    \
-             behavior: CANCEL\n    assert: \"{{ false }}\"\ntasks:\n  - id: t\n    type: x\n",
+             behavior: CANCEL\n    assert: \"{{ false }}\"\ntasks:\n  - id: t\n    type: core.log\n",
         )
         .unwrap();
         let r = validate(&assertion_only);
@@ -2768,7 +2870,7 @@ mod tests {
             "id: f\nnamespace: a.b\nsla:\n  - id: a\n    type: EXECUTION_ASSERTION\n    \
              behavior: CANCEL\n    assert: \"{{ false }}\"\n  - id: d\n    \
              type: MAX_DURATION\n    behavior: FAIL\n    duration: PT1S\ntasks:\n  \
-             - id: t\n    type: x\n",
+             - id: t\n    type: core.log\n",
         )
         .unwrap();
         let r = validate(&has_max_duration);
@@ -2789,7 +2891,7 @@ mod tests {
             "id: f\nnamespace: a.b\nsla:\n  - id: d\n    type: MAX_DURATION\n    \
              behavior: FAIL\n    duration: PT1S\n  - id: a\n    \
              type: EXECUTION_ASSERTION\n    behavior: CANCEL\n    assert: \"{{ false }}\"\n\
-             tasks:\n  - id: t\n    type: x\n",
+             tasks:\n  - id: t\n    type: core.log\n",
         )
         .unwrap();
         assert!(validate(&reversed)
@@ -2801,7 +2903,7 @@ mod tests {
     #[test]
     fn a_dag_cycle_is_an_error() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: a\n          type: x\n        dependsOn: [b]\n      - task:\n          id: b\n          type: x\n        dependsOn: [a]\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: a\n          type: core.log\n        dependsOn: [b]\n      - task:\n          id: b\n          type: core.log\n        dependsOn: [a]\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3034,7 +3136,7 @@ mod tests {
     #[test]
     fn dag_dependency_naming_a_missing_task_is_an_error() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: a\n          type: x\n        dependsOn: [nope]\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: a\n          type: core.log\n        dependsOn: [nope]\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3052,7 +3154,7 @@ mod tests {
     #[test]
     fn dag_dependency_naming_a_real_task_is_not_an_error() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: a\n          type: x\n      - task:\n          id: b\n          type: x\n        dependsOn: [a]\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: a\n          type: core.log\n      - task:\n          id: b\n          type: core.log\n        dependsOn: [a]\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3069,7 +3171,7 @@ mod tests {
     #[test]
     fn duplicate_input_ids_are_an_error() {
         let f = parse(
-            "id: f\nnamespace: a.b\ninputs:\n  - id: x\n    type: STRING\n  - id: x\n    type: STRING\ntasks:\n  - id: t\n    type: x\n",
+            "id: f\nnamespace: a.b\ninputs:\n  - id: x\n    type: STRING\n  - id: x\n    type: STRING\ntasks:\n  - id: t\n    type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3083,7 +3185,7 @@ mod tests {
     #[test]
     fn distinct_input_ids_are_not_an_error() {
         let f = parse(
-            "id: f\nnamespace: a.b\ninputs:\n  - id: x\n    type: STRING\n  - id: y\n    type: STRING\ntasks:\n  - id: t\n    type: x\n",
+            "id: f\nnamespace: a.b\ninputs:\n  - id: x\n    type: STRING\n  - id: y\n    type: STRING\ntasks:\n  - id: t\n    type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3114,7 +3216,7 @@ mod tests {
     #[test]
     fn switch_with_only_defaults_is_not_an_error() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.switch\n    value: x\n    defaults:\n      - id: d\n        type: x\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.switch\n    value: x\n    defaults:\n      - id: d\n        type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3131,7 +3233,7 @@ mod tests {
     #[test]
     fn switch_with_only_cases_is_not_an_error() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.switch\n    value: x\n    cases:\n      a:\n        - id: c\n          type: x\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.switch\n    value: x\n    cases:\n      a:\n        - id: c\n          type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3159,72 +3261,73 @@ mod tests {
 
     /// The test that would have caught round 1's regression: a Kestra
     /// control-flow FQCN this crate has never heard of -- not in
-    /// `KESTRA_FLOW_CONTROL` at all -- must still warn, because the whole
-    /// point is catching the next class Kestra adds BEFORE anyone notices it
-    /// and adds a row for it.
+    /// `KESTRA_FLOW_CONTROL` at all -- must still be reported, because the
+    /// whole point is catching the next class Kestra adds BEFORE anyone
+    /// notices it and adds a row for it.
+    ///
+    /// **An error since no-silent-stall Task 1 (spec §3), and no longer a
+    /// warning**: no handler serves such a type, so a run that reached it
+    /// stalled. `unsupported_flow_task` replaces the task-level
+    /// `not_yet_enforced`; the flow-level `not_yet_enforced` warnings are
+    /// untouched (`declared_but_unimplemented_features_warn_and_name_their_package`).
     #[test]
-    fn a_fictional_kestra_flow_control_fqcn_warns_even_with_no_table_row() {
+    fn a_fictional_kestra_flow_control_fqcn_is_refused_even_with_no_table_row() {
         let f = parse(
             "id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: io.kestra.plugin.core.flow.NotARealClass\n",
         )
         .unwrap();
         let r = validate(&f);
-        let w = r
-            .warnings
+        let e = r
+            .errors
             .iter()
-            .find(|w| w.code == "not_yet_enforced" && w.path == "tasks.gate")
+            .find(|e| e.code == "unsupported_flow_task" && e.path == "tasks.gate")
             .unwrap_or_else(|| {
-                panic!("a Kestra flow-control FQCN with no table row must still warn: {r:?}")
+                panic!("a Kestra flow-control FQCN with no table row must still be refused: {r:?}")
             });
         assert!(
-            !w.message.contains("W1")
-                && !w.message.contains("W3")
-                && !w.message.contains("W6")
-                && !w.message.contains("W8"),
+            !e.message.contains("W1")
+                && !e.message.contains("W3")
+                && !e.message.contains("W6")
+                && !e.message.contains("W8"),
             "a class with no table row must not fabricate a package name: {}",
-            w.message
+            e.message
         );
-        assert!(
-            r.errors.is_empty(),
-            "still a warning, never an error: {r:?}"
-        );
+        assert!(r.warnings.is_empty(), "an error, not also a warning: {r:?}");
     }
 
     /// The same failure mode via the `core.` alias space: an unregistered
     /// alias that looks like it could be a Kestra control-flow shorthand
-    /// must warn too, not just the FQCN spelling.
+    /// is refused too, not just the FQCN spelling.
     #[test]
-    fn an_unregistered_core_alias_also_warns() {
+    fn an_unregistered_core_alias_is_refused_too() {
         let f = parse("id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: core.somenewgate\n")
             .unwrap();
         let r = validate(&f);
         assert!(
-            r.warnings
+            r.errors
                 .iter()
-                .any(|w| w.code == "not_yet_enforced" && w.path == "tasks.gate"),
+                .any(|e| e.code == "unsupported_flow_task" && e.path == "tasks.gate"),
             "{r:?}"
         );
     }
 
     /// Anything that is neither a `TaskKind` variant nor
     /// `registry::known_type(...)`, and does not even look like Kestra's
-    /// control-flow namespace, still warns -- under its own code, so a typo
-    /// like `egret.sqll` is visible to the author before Task 6 turns it
-    /// into a hard publish refusal.
+    /// control-flow namespace, is refused under its own code, so a typo like
+    /// `egret.sqll` is visible to the author. **An error since no-silent-stall
+    /// Task 1** (spec §3): a warning let a draft start, and the run stalled
+    /// with `NoHandler`.
     #[test]
-    fn a_completely_unknown_type_warns_as_unknown_task_type() {
+    fn a_completely_unknown_type_is_the_error_unknown_task_type() {
         let f = parse("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: egret.sqll\n").unwrap();
         let r = validate(&f);
         assert!(
-            r.warnings
+            r.errors
                 .iter()
-                .any(|w| w.code == "unknown_task_type" && w.path == "tasks.t"),
+                .any(|e| e.code == "unknown_task_type" && e.path == "tasks.t"),
             "{r:?}"
         );
-        assert!(
-            r.errors.is_empty(),
-            "an unknown type is a warning today, not an error -- Task 6 hard-refuses it at publish: {r:?}"
-        );
+        assert!(r.warnings.is_empty(), "an error, not also a warning: {r:?}");
     }
 
     /// The false-positive guard the fix round asked for by name: egret's own
@@ -3233,9 +3336,13 @@ mod tests {
     /// aliases), an ordinary `egret.*` leaf, and every ported control-flow
     /// type must all stay completely silent -- "neither a control-flow
     /// variant nor a registered type", not "starts with `core.`".
+    ///
+    /// `core.allowfailure` and `core.workingdirectory` left this flow at
+    /// no-silent-stall Task 1: they are typed variants egret does NOT run, so
+    /// each is an error now (`every_static_refusal_is_an_error_at_its_path_under_every_spelling_and_position`).
     #[test]
     fn registered_leaf_types_and_every_ported_control_flow_type_stay_silent() {
-        let yaml = "id: f\nnamespace: a.b\ntasks:\n  - id: log\n    type: core.log\n  - id: http\n    type: core.http\n  - id: slack\n    type: core.slack\n  - id: sql\n    type: egret.sql\n    sql: SELECT 1\n  - id: seq\n    type: core.sequential\n    tasks:\n      - id: seq_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: par\n    type: core.parallel\n    tasks:\n      - id: par_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: cond\n    type: core.if\n    condition: \"true\"\n    then:\n      - id: cond_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: sw\n    type: core.switch\n    value: x\n    defaults:\n      - id: sw_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: d_child\n          type: egret.sql\n          sql: SELECT 1\n  - id: lp\n    type: core.loop\n    values: [1]\n    tasks:\n      - id: lp_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: lpu\n    type: core.loopuntil\n    condition: x\n    tasks:\n      - id: lpu_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: sf\n    type: core.subflow\n    namespace: a.b\n    flowId: other\n  - id: af\n    type: core.allowfailure\n    tasks:\n      - id: af_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: wd\n    type: core.workingdirectory\n    tasks:\n      - id: wd_child\n        type: egret.sql\n        sql: SELECT 1\n";
+        let yaml = "id: f\nnamespace: a.b\ntasks:\n  - id: log\n    type: core.log\n  - id: http\n    type: core.http\n  - id: slack\n    type: core.slack\n  - id: sql\n    type: egret.sql\n    sql: SELECT 1\n  - id: seq\n    type: core.sequential\n    tasks:\n      - id: seq_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: par\n    type: core.parallel\n    tasks:\n      - id: par_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: cond\n    type: core.if\n    condition: \"true\"\n    then:\n      - id: cond_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: sw\n    type: core.switch\n    value: x\n    defaults:\n      - id: sw_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: d_child\n          type: egret.sql\n          sql: SELECT 1\n  - id: lp\n    type: core.loop\n    values: [1]\n    tasks:\n      - id: lp_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: lpu\n    type: core.loopuntil\n    condition: x\n    tasks:\n      - id: lpu_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: sf\n    type: core.subflow\n    namespace: a.b\n    flowId: other\n";
         let f = parse(yaml).unwrap();
         let r = validate(&f);
         assert!(
@@ -3270,7 +3377,7 @@ mod tests {
     #[test]
     fn sequential_tasks_present_is_silent() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.sequential\n    tasks:\n      - id: c\n        type: x\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.sequential\n    tasks:\n      - id: c\n        type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3291,7 +3398,7 @@ mod tests {
     #[test]
     fn parallel_tasks_present_is_silent() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: core.parallel\n    tasks:\n      - id: c\n        type: x\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: core.parallel\n    tasks:\n      - id: c\n        type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3301,7 +3408,7 @@ mod tests {
     #[test]
     fn if_condition_absent_is_a_semantic_error_not_a_parse_error() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: i\n    type: core.if\n    then:\n      - id: c\n        type: x\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: i\n    type: core.if\n    then:\n      - id: c\n        type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3314,7 +3421,7 @@ mod tests {
     #[test]
     fn if_condition_present_is_silent() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: i\n    type: core.if\n    condition: \"true\"\n    then:\n      - id: c\n        type: x\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: i\n    type: core.if\n    condition: \"true\"\n    then:\n      - id: c\n        type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3334,7 +3441,7 @@ mod tests {
     #[test]
     fn dag_tasks_present_is_silent() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: c\n          type: x\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: c\n          type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3360,7 +3467,7 @@ mod tests {
     #[test]
     fn dag_node_task_present_is_silent() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: c\n          type: x\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: c\n          type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3383,7 +3490,7 @@ mod tests {
     #[test]
     fn loop_tasks_present_is_silent() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: core.loop\n    values: [1]\n    tasks:\n      - id: c\n        type: x\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: core.loop\n    values: [1]\n    tasks:\n      - id: c\n        type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3408,7 +3515,7 @@ mod tests {
     #[test]
     fn loop_until_tasks_present_is_silent() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: core.loopuntil\n    condition: x\n    tasks:\n      - id: c\n        type: x\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: core.loopuntil\n    condition: x\n    tasks:\n      - id: c\n        type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3535,13 +3642,17 @@ mod tests {
     }
 
     #[test]
-    fn allow_failure_tasks_present_is_silent() {
+    fn allow_failure_tasks_present_draws_only_the_refusal() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: a\n    type: core.allowfailure\n    tasks:\n      - id: c\n        type: x\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: a\n    type: core.allowfailure\n    tasks:\n      - id: c\n        type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
-        assert!(r.errors.is_empty(), "{r:?}");
+        // Since no-silent-stall Task 1 the construct itself is refused; the
+        // pair this test belongs to is about `tasks:`, so "silent" is now
+        // "the refusal and nothing else".
+        let codes: Vec<&str> = r.errors.iter().map(|e| e.code).collect();
+        assert_eq!(codes, ["unsupported_allow_failure"], "{r:?}");
     }
 
     #[test]
@@ -3559,13 +3670,17 @@ mod tests {
     }
 
     #[test]
-    fn working_directory_tasks_present_is_silent() {
+    fn working_directory_tasks_present_draws_only_the_refusal() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: w\n    type: core.workingdirectory\n    tasks:\n      - id: c\n        type: x\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: w\n    type: core.workingdirectory\n    tasks:\n      - id: c\n        type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
-        assert!(r.errors.is_empty(), "{r:?}");
+        // Since no-silent-stall Task 1 the construct itself is refused; the
+        // pair this test belongs to is about `tasks:`, so "silent" is now
+        // "the refusal and nothing else".
+        let codes: Vec<&str> = r.errors.iter().map(|e| e.code).collect();
+        assert_eq!(codes, ["unsupported_working_directory"], "{r:?}");
     }
 
     /// Secondary item: `Loop::concurrency_limit` accepted absence (it has a
@@ -3575,7 +3690,7 @@ mod tests {
     #[test]
     fn loop_concurrency_limit_explicit_null_is_a_semantic_error_not_a_parse_error() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: core.loop\n    values: [1]\n    concurrencyLimit: null\n    tasks:\n      - id: c\n        type: x\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: core.loop\n    values: [1]\n    concurrencyLimit: null\n    tasks:\n      - id: c\n        type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3590,7 +3705,7 @@ mod tests {
     #[test]
     fn loop_concurrency_limit_absent_key_defaults_and_is_silent() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: core.loop\n    values: [1]\n    tasks:\n      - id: c\n        type: x\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: core.loop\n    values: [1]\n    tasks:\n      - id: c\n        type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3750,8 +3865,10 @@ mod tests {
 
     #[test]
     fn flow_id_containing_a_slash_is_an_error() {
-        let f = parse("id: 'bad id/with slash'\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n")
-            .unwrap();
+        let f = parse(
+            "id: 'bad id/with slash'\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n",
+        )
+        .unwrap();
         let r = validate(&f);
         assert!(
             r.errors.iter().any(|e| e.code == "invalid_flow_id"),
@@ -3761,7 +3878,7 @@ mod tests {
 
     #[test]
     fn flow_id_empty_is_an_error() {
-        let f = parse("id: ''\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n").unwrap();
+        let f = parse("id: ''\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n").unwrap();
         let r = validate(&f);
         assert!(
             r.errors.iter().any(|e| e.code == "invalid_flow_id"),
@@ -3771,8 +3888,9 @@ mod tests {
 
     #[test]
     fn flow_id_valid_is_silent() {
-        let f = parse("id: nightly_rollup.v2\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n")
-            .unwrap();
+        let f =
+            parse("id: nightly_rollup.v2\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n")
+                .unwrap();
         let r = validate(&f);
         assert!(
             !r.errors.iter().any(|e| e.code == "invalid_flow_id"),
@@ -3784,8 +3902,10 @@ mod tests {
 
     #[test]
     fn quota_missing_fields_are_errors() {
-        let f = parse("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\nquotas:\n  - {}\n")
-            .unwrap();
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\nquotas:\n  - {}\n",
+        )
+        .unwrap();
         let r = validate(&f);
         for code in [
             "quota_duration_required",
@@ -3799,7 +3919,7 @@ mod tests {
     #[test]
     fn quota_present_fields_are_silent() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n\
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n\
              quotas:\n  - duration: PT1H\n    limit: 5\n    behavior: FAIL\n",
         )
         .unwrap();
@@ -3812,8 +3932,10 @@ mod tests {
 
     #[test]
     fn check_when_absent_is_an_error() {
-        let f = parse("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\nchecks:\n  - {}\n")
-            .unwrap();
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\nchecks:\n  - {}\n",
+        )
+        .unwrap();
         let r = validate(&f);
         assert!(
             r.errors.iter().any(|e| e.code == "check_when_required"),
@@ -3824,7 +3946,7 @@ mod tests {
     #[test]
     fn check_when_empty_string_is_an_error() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\nchecks:\n  - when: \"\"\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\nchecks:\n  - when: \"\"\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3837,7 +3959,7 @@ mod tests {
     #[test]
     fn check_when_present_is_silent() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n\
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n\
              checks:\n  - when: \"{{ outputs.t.value == true }}\"\n",
         )
         .unwrap();
@@ -3856,7 +3978,7 @@ mod tests {
     #[test]
     fn check_message_absent_is_not_an_error() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n\
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n\
              checks:\n  - when: \"true\"\n",
         )
         .unwrap();
@@ -3885,7 +4007,7 @@ mod tests {
     #[test]
     fn if_then_present_is_silent() {
         let f = parse(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: i\n    type: core.if\n    condition: \"true\"\n    then:\n      - id: t\n        type: x\n",
+            "id: f\nnamespace: a.b\ntasks:\n  - id: i\n    type: core.if\n    condition: \"true\"\n    then:\n      - id: t\n        type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3899,7 +4021,7 @@ mod tests {
 
     fn flow_with_dependency(dep_yaml: &str) -> String {
         format!(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: x\n\
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n\
              triggers:\n  - id: chain\n    type: core.flow\n    dependsOn:\n      - {dep_yaml}\n"
         )
     }
@@ -4489,5 +4611,381 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---------- no-silent-stall Task 1: static refusals (spec §3) ----------
+    //
+    // Every construct `build_plan` plans as an opaque `Runnable` because egret
+    // has no executor for it is a validation ERROR: publish refuses it and,
+    // because `validate_for_run` is `build_plan`'s third gate, so does every
+    // start path. Before this, each of them published (clean, or with a
+    // warning) and every execution of it stalled in `RUNNING` for ever.
+
+    /// One construct of §3's table: the code it must draw, the spellings it
+    /// must draw it under, the property lines of one task (`id: c`), the path
+    /// suffix the finding sits at below the task's own path, and the words the
+    /// message must contain.
+    struct Refused {
+        code: &'static str,
+        spellings: &'static [&'static str],
+        body: fn(&str) -> Vec<String>,
+        suffix: &'static str,
+        hints: &'static [&'static str],
+    }
+
+    fn branch_body(ty: &str) -> Vec<String> {
+        vec![
+            "id: c".into(),
+            format!("type: {ty}"),
+            "tasks:".into(),
+            "  - id: inner".into(),
+            "    type: core.log".into(),
+            "    message: hi".into(),
+        ]
+    }
+
+    fn loop_until_gap_body(ty: &str) -> Vec<String> {
+        vec![
+            "id: c".into(),
+            format!("type: {ty}"),
+            "condition: \"{{ true }}\"".into(),
+            "checkFrequency:".into(),
+            "  maxIterations: \"{{ inputs.n }}\"".into(),
+            "tasks:".into(),
+            "  - id: inner".into(),
+            "    type: core.log".into(),
+            "    message: hi".into(),
+        ]
+    }
+
+    fn leaf_body(ty: &str) -> Vec<String> {
+        vec!["id: c".into(), format!("type: {ty}")]
+    }
+
+    const REFUSED: &[Refused] = &[
+        Refused {
+            code: "unsupported_allow_failure",
+            spellings: &[
+                "io.kestra.plugin.core.flow.AllowFailure",
+                "core.allowfailure",
+                "io.kestra.plugin.core.flow.allowFAILURE",
+                "core.AllowFailure",
+            ],
+            body: branch_body,
+            suffix: "",
+            hints: &["set `allowFailure: true` on each child task instead"],
+        },
+        Refused {
+            code: "unsupported_working_directory",
+            spellings: &[
+                "io.kestra.plugin.core.flow.WorkingDirectory",
+                "core.workingdirectory",
+                "io.kestra.plugin.core.flow.workingDIRECTORY",
+                "core.WorkingDirectory",
+            ],
+            body: branch_body,
+            suffix: "",
+            hints: &["pass files between script tasks with `outputFiles` and `inputFiles`"],
+        },
+        Refused {
+            code: "unsupported_loop_until_property",
+            spellings: &[
+                "io.kestra.plugin.core.flow.LoopUntil",
+                "core.loopuntil",
+                "io.kestra.plugin.core.flow.WaitFor",
+                "core.waitfor",
+                "io.kestra.plugin.core.flow.LOOPUNTIL",
+                "core.WaitFor",
+            ],
+            body: loop_until_gap_body,
+            suffix: ".checkFrequency.maxIterations",
+            hints: &["'checkFrequency.maxIterations'", "literal"],
+        },
+        Refused {
+            code: "unsupported_flow_task",
+            spellings: &[
+                "io.kestra.plugin.core.flow.NotARealClass",
+                "core.somenewgate",
+                "io.kestra.plugin.core.flow.PurgeFlows",
+                "core.NotARealClass",
+            ],
+            body: leaf_body,
+            suffix: "",
+            hints: &[],
+        },
+        Refused {
+            code: "unknown_task_type",
+            spellings: &["egret.sqll", "io.kestra.plugin.core.output.OutputValues"],
+            body: leaf_body,
+            suffix: "",
+            hints: &["check for a typo"],
+        },
+    ];
+
+    /// The task's lines as a list item at `indent` (`- id: c` ...).
+    fn item(lines: &[String], indent: &str) -> String {
+        lines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                if i == 0 {
+                    format!("{indent}- {l}\n")
+                } else {
+                    format!("{indent}  {l}\n")
+                }
+            })
+            .collect()
+    }
+
+    /// The task's lines as a mapping at `indent` (a `Dag` node's `task:`).
+    fn mapping(lines: &[String], indent: &str) -> String {
+        lines.iter().map(|l| format!("{indent}{l}\n")).collect()
+    }
+
+    /// The five nested positions of the brief, plus the top level, as
+    /// `(label, flow source, the task's path)`.
+    fn positions(lines: &[String]) -> Vec<(&'static str, String, &'static str)> {
+        let head = "id: f\nnamespace: a.b\n";
+        vec![
+            (
+                "top level",
+                format!("{head}tasks:\n{}", item(lines, "  ")),
+                "tasks.c",
+            ),
+            (
+                "a Sequential's tasks:",
+                format!(
+                    "{head}tasks:\n  - id: seq\n    type: core.sequential\n    tasks:\n{}",
+                    item(lines, "      ")
+                ),
+                "tasks.seq.c",
+            ),
+            (
+                "a Sequential's errors:",
+                format!(
+                    "{head}tasks:\n  - id: seq\n    type: core.sequential\n    tasks:\n      \
+                     - id: ok\n        type: core.log\n        message: hi\n    errors:\n{}",
+                    item(lines, "      ")
+                ),
+                "tasks.seq.c",
+            ),
+            (
+                "an If's then:",
+                format!(
+                    "{head}tasks:\n  - id: cond\n    type: core.if\n    condition: \"{{{{ true }}}}\"\n    then:\n{}",
+                    item(lines, "      ")
+                ),
+                "tasks.cond.c",
+            ),
+            (
+                "a Dag node",
+                format!(
+                    "{head}tasks:\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n{}",
+                    mapping(lines, "          ")
+                ),
+                "tasks.d.c",
+            ),
+            (
+                "the flow's finally:",
+                format!(
+                    "{head}tasks:\n  - id: ok\n    type: core.log\n    message: hi\nfinally:\n{}",
+                    item(lines, "  ")
+                ),
+                "finally.c",
+            ),
+        ]
+    }
+
+    /// Every construct of §3, under every spelling, at every position: an
+    /// ERROR with its own code, at the task's path (or the field's, for a
+    /// `LoopUntil`), whose message carries §3's hint and the type, and which
+    /// is not ALSO a warning. `validate_for_run` carries it too, which is what
+    /// makes `build_plan` and every start path refuse the flow.
+    #[test]
+    fn every_static_refusal_is_an_error_at_its_path_under_every_spelling_and_position() {
+        for c in REFUSED {
+            for spelling in c.spellings {
+                let lines = (c.body)(spelling);
+                for (label, yaml, path) in positions(&lines) {
+                    let at = format!("{}/{spelling}/{label}", c.code);
+                    let f = parse(&yaml).unwrap_or_else(|e| panic!("{at}: {e:?}\n{yaml}"));
+                    let r = validate(&f);
+                    let want = format!("{path}{}", c.suffix);
+                    let e = r
+                        .errors
+                        .iter()
+                        .find(|e| e.code == c.code)
+                        .unwrap_or_else(|| panic!("{at}: no `{}` error: {r:?}", c.code));
+                    assert_eq!(e.path, want, "{at}");
+                    assert!(
+                        e.message.contains("'c'"),
+                        "{at}: names the task: {}",
+                        e.message
+                    );
+                    if c.code != "unsupported_loop_until_property" {
+                        assert!(
+                            e.message.contains(spelling),
+                            "{at}: names the type: {}",
+                            e.message
+                        );
+                    }
+                    for hint in c.hints {
+                        assert!(
+                            e.message.contains(hint),
+                            "{at}: hint {hint:?}: {}",
+                            e.message
+                        );
+                    }
+                    assert_eq!(
+                        r.errors.iter().filter(|e| e.code == c.code).count(),
+                        1,
+                        "{at}: reported exactly once: {r:?}"
+                    );
+                    assert!(
+                        !r.warnings.iter().any(|w| w.path.starts_with(path)),
+                        "{at}: an error, not also a warning: {r:?}"
+                    );
+                    assert!(
+                        validate_for_run(&f).errors.iter().any(|e| e.code == c.code),
+                        "{at}: validate_for_run must refuse it"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `loop_until_gap` names four fields; each is refused at its own path,
+    /// and the same `LoopUntil` with all four written as literals is valid
+    /// and silent -- the control that shows the error is about the
+    /// expression and not about the construct.
+    #[test]
+    fn each_loop_until_field_egret_cannot_read_is_refused_by_name_and_literals_are_valid() {
+        for (field, lines) in [
+            (
+                "checkFrequency.interval",
+                "    checkFrequency:\n      interval: \"{{ inputs.i }}\"\n",
+            ),
+            (
+                "checkFrequency.maxDuration",
+                "    checkFrequency:\n      maxDuration: \"{{ inputs.d }}\"\n",
+            ),
+            (
+                "checkFrequency.maxIterations",
+                "    checkFrequency:\n      maxIterations: \"{{ inputs.n }}\"\n",
+            ),
+            (
+                "failOnMaxReached",
+                "    failOnMaxReached: \"{{ inputs.f }}\"\n",
+            ),
+        ] {
+            let yaml = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: lu\n    type: core.loopuntil\n    \
+                 condition: \"{{{{ true }}}}\"\n{lines}    tasks:\n      - id: inner\n        \
+                 type: core.log\n        message: hi\n"
+            );
+            let r = validate(&parse(&yaml).unwrap_or_else(|e| panic!("{field}: {e:?}")));
+            let e = r
+                .errors
+                .iter()
+                .find(|e| e.code == "unsupported_loop_until_property")
+                .unwrap_or_else(|| panic!("{field}: {r:?}"));
+            assert_eq!(e.path, format!("tasks.lu.{field}"));
+            assert!(e.message.contains(&format!("'{field}'")), "{}", e.message);
+            assert!(e.message.contains("literal"), "{}", e.message);
+        }
+        let literal = "id: f\nnamespace: a.b\ntasks:\n  - id: lu\n    type: core.loopuntil\n    \
+                       condition: \"{{ true }}\"\n    checkFrequency:\n      interval: PT1S\n      \
+                       maxDuration: PT1M\n      maxIterations: 3\n    failOnMaxReached: true\n    \
+                       tasks:\n      - id: inner\n        type: core.log\n        message: hi\n";
+        let r = validate(&parse(literal).unwrap());
+        assert!(r.errors.is_empty() && r.warnings.is_empty(), "{r:?}");
+    }
+
+    /// The paths that keep their errors (§3): an `AllowFailure` or a
+    /// `WorkingDirectory` with no `tasks:` draws its `*_tasks_required` AND
+    /// the new refusal.
+    #[test]
+    fn an_empty_allow_failure_or_working_directory_keeps_its_old_error_too() {
+        for (ty, old, new) in [
+            (
+                "core.allowfailure",
+                "allow_failure_tasks_required",
+                "unsupported_allow_failure",
+            ),
+            (
+                "core.workingdirectory",
+                "working_directory_tasks_required",
+                "unsupported_working_directory",
+            ),
+        ] {
+            let r = validate(
+                &parse(&format!(
+                    "id: f\nnamespace: a.b\ntasks:\n  - id: c\n    type: {ty}\n"
+                ))
+                .unwrap(),
+            );
+            let codes: Vec<&str> = r.errors.iter().map(|e| e.code).collect();
+            assert!(
+                codes.contains(&old) && codes.contains(&new),
+                "{ty}: {codes:?}"
+            );
+        }
+    }
+
+    /// A typo is reported ONCE, as an error, wherever it sits -- including
+    /// under a flowable's `errors:`, which the walk now descends into, and
+    /// which `validate_script_tasks`/`validate_plugin_tasks` already walk.
+    #[test]
+    fn an_unknown_type_is_one_error_wherever_it_sits() {
+        for (label, yaml, _) in positions(&leaf_body("egret.sqll")) {
+            let r = validate(&parse(&yaml).unwrap());
+            let all: Vec<_> = r
+                .errors
+                .iter()
+                .chain(r.warnings.iter())
+                .filter(|f| f.code == "unknown_task_type")
+                .collect();
+            assert_eq!(all.len(), 1, "{label}: {r:?}");
+            assert!(
+                r.errors.iter().any(|e| e.code == "unknown_task_type"),
+                "{label}: an error now, not a warning: {r:?}"
+            );
+        }
+    }
+
+    /// The descent into `error_children()` reaches the walk's OTHER checks
+    /// too, and this is the one that changes what is refused: a task under a
+    /// flowable's `errors:` now takes part in the duplicate-id check, as it
+    /// does in Kestra's `allTasks()` (`AbstractBranch.allChildTasks()` is
+    /// `tasks + errors + finally`). Before, the second `a` below was invisible
+    /// to `seen_ids`. The control: distinct ids stay clean.
+    #[test]
+    fn a_task_under_a_flowables_errors_takes_part_in_every_walk_check() {
+        let dup =
+            "id: f\nnamespace: a.b\ntasks:\n  - id: a\n    type: core.log\n    message: hi\n  \
+                   - id: seq\n    type: core.sequential\n    tasks:\n      - id: b\n        \
+                   type: core.log\n        message: hi\n    errors:\n      - id: a\n        \
+                   type: core.log\n        message: hi\n";
+        let r = validate(&parse(dup).unwrap());
+        let e = r
+            .errors
+            .iter()
+            .find(|e| e.code == "duplicate_task_id")
+            .unwrap_or_else(|| panic!("{r:?}"));
+        assert!(e.message.contains("tasks.seq.a"), "{}", e.message);
+
+        let empty = "id: f\nnamespace: a.b\ntasks:\n  - id: seq\n    type: core.sequential\n    \
+                     tasks:\n      - id: b\n        type: core.log\n        message: hi\n    \
+                     errors:\n      - id: inner\n        type: core.sequential\n";
+        let r = validate(&parse(empty).unwrap());
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "sequential_tasks_required" && e.path == "tasks.seq.inner.tasks"),
+            "a semantic check reaches a task under errors: {r:?}"
+        );
+
+        let clean = dup.replace("errors:\n      - id: a\n", "errors:\n      - id: c\n");
+        assert!(validate(&parse(&clean).unwrap()).errors.is_empty());
     }
 }

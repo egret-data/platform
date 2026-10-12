@@ -1100,12 +1100,19 @@ async fn a_task_that_produced_no_output_renders_as_an_empty_map_not_an_absent_ke
 /// author's flow as wrong when it is egret that has no handler. `OutputValues`
 /// is not a hypothetical — Task 1 measured it on 23 corpus entries, and 6 of
 /// the 11 "at risk" entries are its.
+///
+/// **The probe is `egret.sql` since no-silent-stall Task 1.** `OutputValues`
+/// is not in `spec::registry`, so it is the validation error
+/// `unknown_task_type` now and no start path plans it. `egret.sql` IS
+/// registered and `Handlers::with_core_tasks` has no handler for it, which is
+/// the case this test is about: a type that passes validation and that the
+/// worker cannot serve.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_type_with_no_handler_aborts_the_tick(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
     let source = "id: unhandled\nnamespace: t\ntasks:\n\
-         \x20 - id: o\n    type: io.kestra.plugin.core.output.OutputValues\n    values:\n      k: v\n";
+         \x20 - id: o\n    type: egret.sql\n    sql: SELECT 1\n";
     let ex = start_execution(&pool, ws, None, source, serde_json::json!({}))
         .await
         .expect("start execution");
@@ -1118,8 +1125,7 @@ async fn a_type_with_no_handler_aborts_the_tick(pool: sqlx::PgPool) {
     .await
     .expect_err("an unhandled type must not report a finished run");
     assert!(
-        err.to_string()
-            .contains("io.kestra.plugin.core.output.OutputValues"),
+        err.to_string().contains("egret.sql"),
         "the refusal names the type, got {err}"
     );
     assert_eq!(

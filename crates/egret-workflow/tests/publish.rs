@@ -573,9 +573,11 @@ fn working_directory(id: &str, block: &str) -> String {
 
 /// W9b Task 5 (spec §7, the user's ruling): a `WorkingDirectory`'s
 /// `namespaceFiles` is parsed at publish by the script tasks' own parse; a
-/// malformed block is refused naming the property, a valid one publishes.
+/// malformed block is refused naming the property, a valid one draws no
+/// `namespaceFiles` finding. (It published until no-silent-stall Task 1, which
+/// refuses every `WorkingDirectory` as `unsupported_working_directory`.)
 #[tokio::test]
-async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name_and_a_valid_one_publishes(
+async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name_and_a_valid_one_is_not(
 ) {
     let Some(db) = common::db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
@@ -606,7 +608,11 @@ async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name
             other => panic!("{id}: {other:?}"),
         }
     }
-    // The control: the corpus flow's block, and a templated one, publish.
+    // The control: the corpus flow's block, and a templated one, raise no
+    // `namespaceFiles` finding. Since no-silent-stall Task 1 a
+    // `WorkingDirectory` does not PUBLISH at all -- egret cannot run it, so it
+    // is refused as `unsupported_working_directory` at the task's own path --
+    // so the control is that the refusal is that one alone.
     for (id, block) in [
         (
             "good",
@@ -624,9 +630,16 @@ async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name
         ),
     ] {
         let good = common::draft(&repo, ws, user, &working_directory(id, block)).await;
-        egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, good.id, "")
+        let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, good.id, "")
             .await
-            .unwrap_or_else(|e| panic!("{id} publishes: {e:?}"));
+            .expect_err("a WorkingDirectory is refused: egret cannot run it");
+        match err {
+            egret_core::Error::InvalidInput(m) => {
+                assert!(m.contains("(tasks.wd)") && m.contains("outputFiles"), "{id}: {m}");
+                assert!(!m.contains("namespaceFiles"), "{id}: a valid block: {m}");
+            }
+            other => panic!("{id}: {other:?}"),
+        }
     }
 }
 
@@ -712,20 +725,33 @@ async fn a_secret_in_a_kv_value_is_refused_at_publish_by_its_own_message() {
 /// W9c Task 4: the corpus's `valids/kv` (two `kv()` calls in `Return`
 /// tasks) publishes. `valids/retry-with-flowable-errors` carries no
 /// `secret()` either; it stopped only at the unknown `kv.Set` type until W9c
-/// Task 5 registered the six KV tasks, and it publishes now (it still needs
-/// the `AllowFailure` flowable to run as Kestra ran it).
+/// Task 5 registered the six KV tasks, and it published from then until
+/// no-silent-stall Task 1, which refuses its `AllowFailure` flowable
+/// (`unsupported_allow_failure`: egret cannot run it, and every execution of it
+/// stalled). So it is refused now, and for that reason alone.
 #[tokio::test]
-async fn valids_kv_and_retry_with_flowable_errors_publish() {
+async fn valids_kv_publishes_and_retry_with_flowable_errors_is_refused_only_for_its_allow_failure()
+{
     let Some(db) = common::db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
-    for source in [
-        include_str!("../oracle-exec/corpus/valids/kv.yaml"),
-        include_str!("../oracle-exec/corpus/valids/retry-with-flowable-errors.yaml"),
-    ] {
-        let draft = common::draft(&repo, ws, user, source).await;
-        egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "")
-            .await
-            .unwrap_or_else(|e| panic!("{e}: {source}"));
+    let kv = include_str!("../oracle-exec/corpus/valids/kv.yaml");
+    let draft = common::draft(&repo, ws, user, kv).await;
+    egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "")
+        .await
+        .unwrap_or_else(|e| panic!("{e}: {kv}"));
+
+    let af = include_str!("../oracle-exec/corpus/valids/retry-with-flowable-errors.yaml");
+    let draft = common::draft(&repo, ws, user, af).await;
+    match egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "").await {
+        Err(egret_core::Error::InvalidInput(m)) => {
+            assert!(
+                m.contains("set `allowFailure: true` on each child task instead")
+                    && m.contains("(tasks.retry_block)"),
+                "{m}"
+            );
+            assert_eq!(m.matches("; ").count(), 0, "the only finding: {m}");
+        }
+        other => panic!("{other:?}"),
     }
 }

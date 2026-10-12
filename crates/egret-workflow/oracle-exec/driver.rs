@@ -799,7 +799,24 @@ const CREATE_REFUSED: usize = 4;
 /// execution of it stalled in `RUNNING` for ever. They moved to
 /// [`VALIDATE_REFUSED`], and `executor`'s `PUBLISHED_BUT_REFUSED` names all
 /// three.
-const LIVE: usize = 245;
+///
+/// # 245 → **237** at no-silent-stall Task 1 (2026-10-12)
+///
+/// Four `AllowFailure` flows (`valids/allow-failure`,
+/// `-allow-failure-with-retry`, `valids/finally-allowfailure`,
+/// `valids/retry-with-flowable-errors`) and four `WorkingDirectory` flows
+/// (`valids/task-runif-workingdirectory`,
+/// `valids/working-directory-invalid-runif`,
+/// `valids/working-directory-taskrun`, `-taskrun-nested`). egret plans both
+/// constructs an opaque runnable no handler serves, so every execution of
+/// them stalled; they are the validation errors `unsupported_allow_failure`
+/// and `unsupported_working_directory` now, and publish refuses them. **A
+/// deliberate refusal, not an over-refusal to close.** They moved to
+/// [`VALIDATE_REFUSED`], and `executor`'s `PUBLISHED_BUT_REFUSED` names all
+/// eight. `unknown_task_type` becoming an error moved nothing here: publish
+/// already refused every flow it names, through reference resolution, and
+/// [`publish_class`] still files them under [`UNKNOWN_TYPE_REFUSED`].
+const LIVE: usize = 237;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -877,7 +894,10 @@ const UNKNOWN_TYPE_REFUSED: usize = 65;
 ///
 /// **22 → 25 at W7b Task 4b**: the three `Pause` flows [`LIVE`] names, refused
 /// by `unsupported_pause_property` (the user's ruling of 2026-10-11).
-const VALIDATE_REFUSED: usize = 25;
+///
+/// **25 → 33 at no-silent-stall Task 1**: the eight flows [`LIVE`] names,
+/// refused by `unsupported_allow_failure` and `unsupported_working_directory`.
+const VALIDATE_REFUSED: usize = 33;
 
 /// Every corpus flow that has a draft row and no live version — the sum of the
 /// two above, derived rather than written down a third time.
@@ -966,14 +986,35 @@ fn census(filed: &BTreeMap<String, Filed>) {
 
 /// Group a publish refusal by its cause, so the census names classes rather
 /// than 300 individual messages.
+///
+/// **Two spellings of "unported type" since no-silent-stall Task 1.** Until
+/// then publish's reference resolution was the first to say it (`unknown type
+/// 'X'`). Now `validate` says it first, as the error `unknown_task_type` (or
+/// `unsupported_flow_task`, for an unregistered type spelled like Kestra
+/// control flow), and anywhere in the joined message rather than first: a flow
+/// whose `AllowFailure` or `WorkingDirectory` holds an unported child reports
+/// the flowable's refusal before the child's. Both are the same finding the
+/// [`UNKNOWN_TYPE_REFUSED`] bucket has always counted, so they keep landing
+/// in it, and that constant does not move.
 fn publish_class(message: &str) -> String {
-    match message.split_once("unknown type '") {
-        Some((_, rest)) => format!(
+    if let Some((_, rest)) = message.split_once("unknown type '") {
+        return format!(
             "unknown task type '{}'",
             rest.split_once('\'').map(|(t, _)| t).unwrap_or(rest)
-        ),
-        None => message.chars().take(60).collect(),
+        );
     }
+    let mut rest = message;
+    while let Some((_, after)) = rest.split_once("has type '") {
+        if let Some((ty, tail)) = after.split_once('\'') {
+            if tail.starts_with(", which egret does not recognise as a task type")
+                || tail.starts_with(", which is spelled like a Kestra control-flow task")
+            {
+                return format!("unknown task type '{ty}'");
+            }
+        }
+        rest = after;
+    }
+    message.chars().take(60).collect()
 }
 
 /// `RefKind::DataApiEndpoint` is structurally unreachable from this corpus,

@@ -237,7 +237,9 @@ pub struct PlanTask {
     /// `WaitFor`, which is Kestra's alias for it and **not** egret's — see
     /// [`build_plan`]) and `WorkingDirectory` are planned
     /// [`TaskKind::Runnable`], so their children
-    /// get no run and a field on them would indeed be unreadable.
+    /// get no run and a field on them would indeed be unreadable. (Since
+    /// no-silent-stall Task 1 every such task is also a validation error, so
+    /// [`build_plan`] refuses the flow; see its doc.)
     /// **`Pause` was the fourth name in that list until W8 Task 3**, which gave
     /// it [`TaskKind::Pause`] — and a `Pause`'s `errors:` is still unreadable
     /// here, for a different reason that must not be merged with the one above:
@@ -524,10 +526,13 @@ pub enum TaskKind {
     /// 2026-10-11 `spec::validate` reports it as the error
     /// `unsupported_pause_property`, so [`build_plan`]'s validation gate
     /// returns `Err` and no plan holding one is ever returned. The opaque
-    /// planning alone (the rule `AllowFailure` and `WorkingDirectory` get) was
-    /// not enough for a `Pause`: the opaque run got a `type_id`, the worker
-    /// claimed it and failed with `NotALeaf` before recording an outcome, and
-    /// the execution stalled in `RUNNING` for ever.
+    /// planning alone was not enough for a `Pause`: the opaque run got a
+    /// `type_id`, the worker claimed it and failed with `NotALeaf` before
+    /// recording an outcome, and the execution stalled in `RUNNING` for ever.
+    /// **The same was true of `AllowFailure` and `WorkingDirectory`**, which
+    /// published with no finding at all; no-silent-stall Task 1 refuses them
+    /// the same way (`unsupported_allow_failure`,
+    /// `unsupported_working_directory`).
     Pause {
         duration: Option<String>,
     },
@@ -549,10 +554,12 @@ pub enum TaskKind {
     /// (`Property<Duration>`, `Property<Integer>`, `Property<Boolean>`).
     /// [`build_plan`] is pure, so it reads literals — and a `LoopUntil`
     /// declaring an expression for any of them is planned opaque instead, by
-    /// [`loop_until_gap`], exactly as a `Pause` with a `behavior:` is. That is
-    /// measured unreachable from this corpus by
-    /// `every_corpus_loop_until_bound_is_a_literal`, so the fallback is a
-    /// stated limit rather than a guess.
+    /// [`loop_until_gap`], exactly as a `Pause` with a `behavior:` is -- and,
+    /// since no-silent-stall Task 1, refused by `spec::validate` as
+    /// `unsupported_loop_until_property`, so [`build_plan`] returns `Err` for
+    /// it rather than a plan that would stall. That is measured unreachable
+    /// from this corpus by `every_corpus_loop_until_bound_is_a_literal`, so the
+    /// refusal is a stated limit rather than a guess.
     ///
     /// `condition` is the author's expression and is **unrendered**, like an
     /// [`If`](TaskKind::If)'s: the caller renders it and writes the answer into
@@ -752,8 +759,9 @@ const WAIT_FOR_TYPE: &str = "waitfor";
 /// **One rule, two readers.** [`build_plan`] uses it to decide whether a
 /// `Pause` becomes a [`TaskKind::Pause`] or stays an opaque
 /// [`TaskKind::Runnable`], and `spec::validate` uses it to decide whether the
-/// author still gets the `not_yet_enforced` warning that a `Pause` used to get
-/// unconditionally. Two copies of this predicate would be two answers to "is
+/// flow is refused with `unsupported_pause_property` (since 2026-10-11; it was
+/// the `not_yet_enforced` warning before, which a `Pause` used to get
+/// unconditionally). Two copies of this predicate would be two answers to "is
 /// this pause reproduced", and a publish that says yes over an executor that
 /// says no is exactly the over-acceptance this programme forbids.
 ///
@@ -889,13 +897,18 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
 /// per cause so a refusal that becomes a *different* refusal is visible, and
 /// the ratchet fails in both directions so an over-refusal is a regression.
 ///
-/// Only `report.errors` refuses. A warning — `not_yet_enforced`,
-/// `unknown_task_type` — must not, and that asymmetry is the whole reason
-/// `unknown_task_type` cannot close `invalids/invalid-task`: egret's
-/// `spec::registry` is not Kestra's classpath, so promoting it would refuse
-/// every plugin egret has not registered. See
-/// `egret_refuses_every_flow_kestra_refuses`'s `STILL_OVER_ACCEPTED`, which
-/// carries that reason and four more, each with an owner.
+/// Only `report.errors` refuses. A warning — the flow-level `not_yet_enforced`
+/// — must not.
+///
+/// **`unknown_task_type` was named here as a warning, and it is an error since
+/// no-silent-stall Task 1.** This paragraph said promoting it "would refuse
+/// every plugin egret has not registered", and that is exactly what it does,
+/// on purpose: a type no handler serves stalled every execution that reached
+/// it, which is worse than a refusal that says why. It closed
+/// `invalids/invalid-task`, which now sits in
+/// `egret_refuses_every_flow_kestra_refuses`'s groups rather than its
+/// `STILL_OVER_ACCEPTED`, and it refuses 44 flows this Kestra published
+/// (`executor::PUBLISHED_BUT_REFUSED`, each with the type it lacks).
 ///
 /// # What this builder refuses before `validate` gets to see it
 ///
@@ -921,10 +934,26 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
 /// The `Dag` pair is Task 4's and is exactly the two checks Kestra's own
 /// `DagTaskValidator` makes.
 ///
-/// # What it deliberately does NOT refuse
+/// # What its FLATTENING deliberately does not refuse
 ///
-/// It does not refuse a flow because it uses a flowable no task has implemented
-/// yet, and that restraint is load-bearing rather than lazy.
+/// The flattening ([`flatten_flow`], the first two gates) does not refuse a
+/// flow because it uses a flowable no task has implemented yet, and that
+/// restraint is load-bearing rather than lazy.
+///
+/// **The third gate does, since no-silent-stall Task 1, and the two are not
+/// in tension.** An opaque `Runnable` that is not a `Leaf` is a task no
+/// handler can run, and every execution of it stalled in `RUNNING`; so
+/// `spec::validate` refuses each such construct BY NAME
+/// (`unsupported_allow_failure`, `unsupported_working_directory`,
+/// `unsupported_loop_until_property`, `unsupported_pause_property`, and for a
+/// `Leaf`, `unsupported_flow_task` and `unknown_task_type`). That is not M8's
+/// rule below: M8 refused by SPELLING, in the builder, and its refusals landed
+/// on flows Kestra refused for other reasons. Measured at Task 1, the named
+/// refusals banked one ratchet entry, `invalids/invalid-task`, which Kestra
+/// refuses for the same reason (an unknown type), and moved no other line;
+/// the flows Kestra ran that they refuse are named one by one in
+/// `executor::PUBLISHED_BUT_REFUSED`. The corpus guard
+/// `every_task_planned_opaque_is_refused_at_its_path` holds the rule.
 ///
 /// The oracle's `refused` verdict compares one thing: that `build_plan` returns
 /// `Err`. A builder that refused every unimplemented flowable would return
@@ -936,8 +965,8 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
 /// [`TaskKind::Runnable`], which produces a visibly wrong trace — the parent is
 /// there and its children are not — and so stays honestly baselined.
 ///
-/// That opacity is applied to `AllowFailure` and `WorkingDirectory`, even
-/// though each would "work" if mapped to
+/// That opacity is applied to `AllowFailure` and `WorkingDirectory` (and the
+/// third gate then refuses both), even though each would "work" if mapped to
 /// [`TaskKind::Sequential`]: the first turns a child's failure into `WARNING`,
 /// which `RunState` cannot hold, and the second hands its whole subtree to one
 /// worker. Mapping either would trade a visible mismatch for a
@@ -949,8 +978,10 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
 /// builder can read is a [`TaskKind::LoopUntil`] (W8 Task 4); one that declares
 /// something the executor does not reproduce is still a `Runnable` — see
 /// [`pause_gap`] and [`loop_until_gap`], each of which is the single predicate
-/// both this builder and `spec::validate`'s `not_yet_enforced` warning ask, so
-/// a flow warned at publish is exactly a flow planned opaque here.
+/// both this builder and `spec::validate`'s refusal ask
+/// (`unsupported_pause_property`, `unsupported_loop_until_property`), so a
+/// flow refused at publish is exactly a flow that would be planned opaque here
+/// -- and this function returns `Err` for it.
 ///
 /// **A fourth kind of opacity exists below all of this**, where a flowable
 /// Kestra has and `kind_for` does not reaches `ModelKind::Leaf` with its
@@ -990,16 +1021,15 @@ pub fn build_plan(source: &str) -> Result<Plan, PlanError> {
         },
     })?;
 
-    let mut tasks = Vec::new();
-    let roots = flatten_list(&mut tasks, &flow.tasks, 1)?;
-    let errors = flatten_list(&mut tasks, &flow.errors, 1)?;
+    let plan = flatten_flow(&flow)?;
 
     // W1's `validate`, as the third gate -- its RUN-TIME half,
     // `validate_for_run`, which omits the save-only findings (W5b fix round
     // 1: a version published before W5b with `pluginDefaults:` must still
     // run, applying nothing; spec §4.1). `errors` only: a warning is a
-    // warning, and refusing on one would turn `unknown_task_type` into a ban on
-    // every plugin egret has not registered.
+    // warning, and refusing on one would turn a flow-level `not_yet_enforced`
+    // (`concurrency:`, `sla:`, ...) into a ban. (`unknown_task_type` was this
+    // comment's example until no-silent-stall Task 1 made it an error.)
     let report = crate::spec::validate_for_run(&flow);
     if let Some(first) = report.errors.first() {
         return Err(PlanError {
@@ -1016,6 +1046,21 @@ pub fn build_plan(source: &str) -> Result<Plan, PlanError> {
         });
     }
 
+    Ok(plan)
+}
+
+/// [`build_plan`]'s first two gates without its third: the flattening alone,
+/// over an already-parsed flow, with no `validate_for_run`.
+///
+/// `pub(crate)` for one reader beside [`build_plan`]: the corpus guard
+/// `executor::tests::every_task_planned_opaque_is_refused_at_its_path`, which
+/// has to see what this builder WOULD plan opaque for a flow that the third
+/// gate now refuses (no-silent-stall Task 1). Asking `build_plan` instead
+/// would answer `Err` for exactly the flows the guard is about.
+pub(crate) fn flatten_flow(flow: &crate::models::Flow) -> Result<Plan, PlanError> {
+    let mut tasks = Vec::new();
+    let roots = flatten_list(&mut tasks, &flow.tasks, 1)?;
+    let errors = flatten_list(&mut tasks, &flow.errors, 1)?;
     Ok(Plan {
         tasks,
         roots,
@@ -1232,7 +1277,8 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         // `pauseDuration:` unrendered and its `timeout:` parsed; one that
         // declares anything else falls through to the opaque `Runnable` this
         // function already assigned above, which is the same answer
-        // `AllowFailure` and `WorkingDirectory` get and for the same reason.
+        // `AllowFailure` and `WorkingDirectory` get and for the same reason --
+        // and, like theirs, the third gate refuses it.
         //
         // **`timeout:` is read HERE and nowhere else in `advance()`'s half of
         // the crate**, and it is a literal parse rather than a render for the
@@ -1325,13 +1371,16 @@ const DEFAULT_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_se
 /// worst direction the ratchet cannot see (such an execution never settles, so
 /// it is `Broken` rather than a mismatch). Planning the task opaque instead
 /// produces a visibly wrong trace, which is the answer `AllowFailure`,
-/// `WorkingDirectory` and a gapped `Pause` already get.
+/// `WorkingDirectory` and a gapped `Pause` already get -- and, since
+/// no-silent-stall Task 1, `spec::validate` refuses it as
+/// `unsupported_loop_until_property` at the field this returns, so
+/// [`build_plan`] answers `Err` instead of a plan that would stall.
 ///
 /// `condition:` is deliberately NOT in here: it is unrendered by design and the
 /// caller renders it, exactly as an `If`'s is.
 ///
-/// The order decides only which name a warning prints; the decision is the same
-/// for any non-`None`.
+/// The order decides only which field the `unsupported_loop_until_property`
+/// error names; the decision is the same for any non-`None`.
 pub fn loop_until_gap(l: &crate::models::LoopUntil) -> Option<&'static str> {
     let cf = l.check_frequency.as_ref();
     if let Some(p) = cf.and_then(|c| c.interval.as_ref()) {

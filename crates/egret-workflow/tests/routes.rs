@@ -353,6 +353,55 @@ async fn update_replaces_the_draft() {
     assert_eq!(updated["namespace"], "a.after");
 }
 
+/// **Drafts still save** (no-silent-stall §3): a `PUT` of a flow holding an
+/// `AllowFailure` -- which egret cannot run, so publish and every start path
+/// refuse it -- answers 200 and stores the draft, and the report it carries
+/// holds the ERROR `unsupported_allow_failure` at the task's path.
+#[tokio::test]
+async fn a_draft_with_an_allow_failure_saves_and_its_report_carries_the_error() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+
+    let app = common::app(&db).await;
+    let created = common::json(
+        common::post(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows"),
+            user,
+            serde_json::json!({ "source": minimal_flow("a.allowfailure") }),
+        )
+        .await,
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+
+    let source = "id: f\nnamespace: a.allowfailure\ntasks:\n  - id: risky\n    \
+                  type: io.kestra.plugin.core.flow.AllowFailure\n    tasks:\n      \
+                  - id: t\n        type: core.log\n        message: hi\n";
+    let res = common::put(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{id}"),
+        user,
+        serde_json::json!({ "source": source, "folder_id": null }),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "a draft saves whatever its report says"
+    );
+    let updated = common::json(res).await;
+    let errors = updated["validation"]["errors"].as_array().unwrap();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e["code"] == "unsupported_allow_failure" && e["path"] == "tasks.risky"),
+        "{errors:?}"
+    );
+    assert_eq!(updated["source"], source, "and the draft is the one sent");
+}
+
 /// Delete soft-deletes: `FlowRepo::get` (and therefore `GET /flows/{id}`)
 /// does not filter on `deleted_at`, matching `EndpointStore::get`'s
 /// identical choice in `egret-dataapi` -- a trashed row is still viewable,
@@ -983,8 +1032,10 @@ async fn validate_without_an_id_answers_the_by_id_report_and_writes_nothing() {
     let id = created["id"].as_str().unwrap();
     let before = flow_count(&db, ws).await;
 
-    // Errors AND warnings, so both halves of the report are compared.
-    let source = "id: f\nnamespace: BAD NAMESPACE\ntasks:\n  - id: t\n    type: egret.sqll\n";
+    // Errors AND warnings, so both halves of the report are compared. The
+    // warning is a flow-level `concurrency:` (`not_yet_enforced`): the typo'd
+    // type that supplied it until no-silent-stall Task 1 is an error now.
+    let source = "id: f\nnamespace: BAD NAMESPACE\nconcurrency:\n  limit: 1\ntasks:\n  - id: t\n    type: egret.sqll\n";
     let by_id = common::post(
         &app,
         &format!("/api/ws/{ws}/workflows/flows/{id}/validate"),

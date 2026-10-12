@@ -779,13 +779,15 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
     let matching: BTreeSet<String> = ids.difference(&baselined).cloned().collect();
     assert_eq!(
         (golden.len(), matching.len(), baselined.len()),
-        (294, 186, 108),
+        (294, 187, 107),
         "294 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
          `allowFailure:`/`allowWarning:` entries, W8 Task 6 banked the two \
-         `sla:` `EXECUTION_ASSERTION`s and W9a Task 11 banked \
-         `valids/loop-values-from-uri`"
+         `sla:` `EXECUTION_ASSERTION`s, W9a Task 11 banked \
+         `valids/loop-values-from-uri` and no-silent-stall Task 1 banked \
+         `invalids/invalid-task` (an unknown type is refused now, as Kestra \
+         refuses it)"
     );
 
     // ---- the sixteen, by name and by derivation ----------------------------
@@ -2283,7 +2285,11 @@ async fn the_ordered_pairs_inside_spawned_are_reachable_now() {
 
 /// 39 through W9a Task 10; **41 since W9a Task 11** -- every entry with a
 /// `spawned`: the two whose `Loop` iterates an ION file were the last two.
-const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 41;
+///
+/// **38 since no-silent-stall Task 1**: three entries with a `spawned` are
+/// refused at start now (`RUNS_REFUSED`), so egret produces no trace for them
+/// at all.
+const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 38;
 // +15 at W6 Task 3: the `Subflow` entries that used to stall at their first
 // `Subflow` run now finish, so the runs after it exist and have endpoints.
 // The nested figure does not move -- a `Subflow` child is linked by
@@ -2299,8 +2305,12 @@ const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 41;
 /// `valids/loop-outputs-auto`'s three, whose `Loop` used to fail at `CREATED`
 /// and now runs (the second still fails at `end`, on the `Loop`'s own
 /// `outputs:`, which egret does not produce).
-const EGRET_TOP_LEVEL_PAIRS: usize = 625;
-const EGRET_NESTED_PAIRS: usize = 126;
+///
+/// **623 and 121 since no-silent-stall Task 1**: the entries it refuses at
+/// start (`RUNS_REFUSED`) produce no trace, so the pairs they produced are
+/// gone from both sides.
+const EGRET_TOP_LEVEL_PAIRS: usize = 623;
+const EGRET_NESTED_PAIRS: usize = 121;
 
 /// **KEPT is not ASSERTED, and the line between them is the baseline rather
 /// than the nesting** — W3b Task 7.
@@ -2950,7 +2960,10 @@ const RESTRICTION_REMOVES_ENTRIES: usize = 9;
 /// endpoints.
 ///
 /// **836 since W9a Task 11**: the four `EGRET_TOP_LEVEL_PAIRS` gained.
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 836;
+///
+/// **829 since no-silent-stall Task 1**: the seven pairs (two top-level, five
+/// nested) the entries it refuses at start used to produce.
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 829;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -3996,21 +4009,33 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
         );
     }
 
-    // The ONE deliberate refusal of a flow Kestra ran: the user's ruling of
-    // 2026-10-11 (W7b Task 4b). A `Pause` declaring `behavior:`, `errors:` or
-    // `onPause:` is `unsupported_pause_property`, because egret ran it as an
-    // opaque runnable no worker could claim and the execution stalled for
-    // ever. Named, so any OTHER refusal still fails here.
+    // The deliberate refusals of flows Kestra ran: the user's ruling of
+    // 2026-10-11 (W7b Task 4b) for a `Pause` declaring `behavior:`, `errors:`
+    // or `onPause:`, and no-silent-stall Task 1 (2026-10-12) for an
+    // `AllowFailure`, a `WorkingDirectory` or a type egret does not register.
+    // Each was a task egret ran as an opaque runnable no worker could serve,
+    // and the execution stalled for ever. Named, so any OTHER refusal still
+    // fails here, and each must be refused by one of the static refusals.
     assert_eq!(
         refused_ids
             .iter()
             .map(|(id, _)| id.as_str())
             .collect::<Vec<_>>(),
-        PAUSE_REFUSED,
+        RUNS_REFUSED,
         "{refused_ids:?}"
     );
     for (id, why) in &refused_ids {
-        assert!(why.contains("unsupported_pause_property"), "{id}: {why}");
+        assert!(
+            [
+                "unsupported_pause_property",
+                "unsupported_allow_failure",
+                "unsupported_working_directory",
+                "unknown_task_type",
+            ]
+            .iter()
+            .any(|c| why.contains(c)),
+            "{id}: {why}"
+        );
     }
     assert_eq!(
         (execution, runs, order, spawned, refused, broken, total),
@@ -4019,7 +4044,7 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
             MISMATCH_ON_RUNS,
             MISMATCH_ON_ORDER,
             MISMATCH_ON_SPAWNED,
-            PAUSE_REFUSED.len(),
+            RUNS_REFUSED.len(),
             0,
             MISMATCHING_RUNS_ENTRIES
         ),
@@ -4105,9 +4130,13 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 ///
 /// **71 since W9a Task 11**: `valids/loop-values-from-uri` banked.
 ///
-/// **68 since W7b Task 4b**: the three `Pause` entries of [`PAUSE_REFUSED`]
+/// **68 since W7b Task 4b**: the three `Pause` entries of [`RUNS_REFUSED`]
 /// are refused now, so they differ on no field and count as `refused`.
-const MISMATCH_ON_EXECUTION: usize = 68;
+///
+/// **26 since no-silent-stall Task 1**: the 49 entries it added to
+/// [`RUNS_REFUSED`] are refused rather than run, and 42 of them differed on
+/// the execution history.
+const MISMATCH_ON_EXECUTION: usize = 26;
 /// **112 through W8 Task 2, 104 after W8 Task 3, 103 after W8 Task 4, 96 after
 /// W8 Task 5, 94 now** -- the same eight, then `valids/waitfor-nested`, then
 /// the seven `allow*` entries, then W8 Task 6's two. The last pair differ on
@@ -4117,8 +4146,11 @@ const MISMATCH_ON_EXECUTION: usize = 68;
 ///
 /// **93 since W9a Task 11**: `valids/loop-values-from-uri` banked.
 ///
-/// **90 since W7b Task 4b**: the three of [`PAUSE_REFUSED`].
-const MISMATCH_ON_RUNS: usize = 90;
+/// **90 since W7b Task 4b**: the three of [`RUNS_REFUSED`] then.
+///
+/// **41 since no-silent-stall Task 1**: the 49 it added, every one of which
+/// differed on `runs`.
+const MISMATCH_ON_RUNS: usize = 41;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
@@ -4133,20 +4165,82 @@ const MISMATCH_ON_RUNS: usize = 90;
 /// `order` and `spawned`, because its `Loop` iterates the ION file instead of
 /// failing at `CREATED`.
 ///
-/// **53 since W7b Task 4b**: two of the three of [`PAUSE_REFUSED`] carried an
-/// ordered pair.
-const MISMATCH_ON_ORDER: usize = 53;
-/// The `runs` entries egret refuses on purpose (the user's ruling of
-/// 2026-10-11, W7b Task 4b): a `Pause` declaring `behavior:`, `errors:` or
-/// `onPause:` is the validation error `unsupported_pause_property` rather
-/// than an opaque runnable that stalled its execution for ever. In golden
-/// order.
-const PAUSE_REFUSED: [&str; 3] = [
+/// **53 since W7b Task 4b**: two of the three `Pause` entries of
+/// [`RUNS_REFUSED`] carried an ordered pair.
+///
+/// **19 since no-silent-stall Task 1**: 34 of the 49 entries it added.
+const MISMATCH_ON_ORDER: usize = 19;
+/// The `runs` entries egret refuses on purpose, in golden order: each is a
+/// flow Kestra ran holding a task egret cannot run, which before its refusal
+/// was an opaque runnable that stalled the execution for ever.
+///
+/// * three since the user's ruling of 2026-10-11 (W7b Task 4b): a `Pause`
+///   declaring `behavior:`, `errors:` or `onPause:`
+///   (`unsupported_pause_property`);
+/// * forty-nine since no-silent-stall Task 1 (2026-10-12): four `AllowFailure`
+///   (`unsupported_allow_failure`), four `WorkingDirectory`
+///   (`unsupported_working_directory`) and forty-one holding a type
+///   `spec::registry` does not name (`unknown_task_type`: `OutputValues`,
+///   `Labels`, `SetVariables`, `UnsetVariables`, `Exit`, `Assert`,
+///   `PurgeLogs`). `executor`'s `PUBLISHED_BUT_REFUSED` holds each with its
+///   cause; it has three more rows, flows with no golden entry.
+const RUNS_REFUSED: [&str; 52] = [
+    "valids/after-execution",
+    "valids/after-execution-error",
+    "valids/after-execution-finally",
+    "valids/allow-failure",
+    "valids/allow-failure-with-retry",
+    "valids/assert",
+    "valids/exit",
+    "valids/exit-cancelled",
+    "valids/exit-killed",
+    "valids/exit-nested",
+    "valids/finally-allowfailure",
+    "valids/flow-concurrency-queue-after-execution",
+    "valids/flow-concurrency-queue-killed-after-execution",
+    "valids/flow-with-array-outputs",
+    "valids/if-in-parallel",
+    "valids/labels-update-nested-value-list",
+    "valids/labels-update-nested-value-map",
+    "valids/labels-update-task",
+    "valids/labels-update-task-deduplicate",
+    "valids/labels-update-task-empty",
+    "valids/npe-labels-update-task",
+    "valids/output-values",
     "valids/pause-behavior",
     "valids/pause-errors-finally-after-execution",
     "valids/pause_on_pause",
+    "valids/primitive-labels-flow",
+    "valids/purge_logs_execution_only",
+    "valids/purge_logs_full_arguments",
+    "valids/purge_logs_no_arguments",
+    "valids/purge_logs_trigger_only",
+    "valids/purge_logs_with_batch_size",
+    "valids/replay",
+    "valids/retry-with-flowable-errors",
+    "valids/set-variables",
+    "valids/set-variables-duplicate",
+    "valids/sleep-long",
+    "valids/task-runif",
+    "valids/task-runif-executionupdating",
+    "valids/task-runif-taskswithstate",
+    "valids/task-runif-workingdirectory",
+    "valids/unset-variables",
+    "valids/waitfor",
+    "valids/waitfor-child-task-warning",
+    "valids/waitfor-max-iterations",
+    "valids/waitfor-multiple-tasks",
+    "valids/waitfor-multiple-tasks-failed",
+    "valids/waitfor-no-success",
+    "valids/webhook-outputs",
+    "valids/webhook-wait",
+    "valids/working-directory-invalid-runif",
+    "valids/working-directory-taskrun",
+    "valids/working-directory-taskrun-nested",
 ];
-const MISMATCH_ON_SPAWNED: usize = 13;
+/// **11 since no-silent-stall Task 1**: two of the 49 entries it added to
+/// [`RUNS_REFUSED`] carried a sub-execution.
+const MISMATCH_ON_SPAWNED: usize = 11;
 /// **122 through W8 Task 2, 114 after W8 Task 3, 113 now** -- the eight `Pause`
 /// entries Task 3 banked and the one `LoopUntil` entry Task 4 did. The
 /// `refused` half of the golden is untouched by either: no `Pause` or
@@ -4229,10 +4323,20 @@ const MISMATCHING_RUNS_ENTRIES: usize = 103;
 /// `io.kestra.plugin.core.storage.Write` the driver had no handler for; both
 /// finish now.
 ///
-/// **42 since W7b Task 4b**: the three of [`PAUSE_REFUSED`] stalled at their
-/// opaque `Pause` run (the worker's `NotALeaf`, the very defect the user's
-/// ruling of 2026-10-11 closes) and are refused at start now.
-const ENTRIES_LEFT_UNFINISHED: usize = 42;
+/// **42 since W7b Task 4b**: the three `Pause` entries of [`RUNS_REFUSED`]
+/// stalled at their opaque `Pause` run (the worker's `NotALeaf`, the very
+/// defect the user's ruling of 2026-10-11 closes) and are refused at start now.
+///
+/// **0 since no-silent-stall Task 1, and that is the package's point measured
+/// on the corpus.** Every one of the 42 stalled on a task no handler serves:
+/// an `OutputValues`/`Labels`/`SetVariables`/... leaf (`unknown_task_type`), or
+/// an `AllowFailure`/`WorkingDirectory` planned opaque. Each of those is a
+/// static refusal now, so the flow is refused at start ([`RUNS_REFUSED`]) and
+/// no execution is left mid-flight. The derivation above, "every one holds a
+/// type this worker has no handler for", now runs over an empty population;
+/// the count is what keeps it honest, because the first entry to stall again
+/// moves it.
+const ENTRIES_LEFT_UNFINISHED: usize = 0;
 
 /// **The guard W3a deleted did NOT come back, and this is why — measured, not
 /// assumed.**
@@ -4556,10 +4660,12 @@ async fn no_run_is_ever_created_for_a_task_inside_a_loop() {
 
     assert_eq!(
         (entries_with_a_body, loop_bodies),
-        (39, 81),
-        "the population: 39 comparable entries hold a `Loop`, with 81 tasks \
-         inside a loop body between them. Both are derived; if they move, the \
-         `Loop` slice of the corpus has changed. It moved once, from 82: the \
+        (36, 75),
+        "the population: 36 comparable entries hold a `Loop` that egret plans, \
+         with 75 tasks inside a loop body between them. Both are derived; if \
+         they move, the `Loop` slice of the corpus has changed. It was (39, 81) \
+         until no-silent-stall Task 1, which refuses three `Loop`-holding \
+         entries at start. It moved once before, from 82: the \
          final review's `disabled:` deletes `valids/disable-flowable`'s \
          `1-each-2` from the plan, so the body it is in has one task fewer. The \
          golden half of this test is unchanged, because Kestra never created a \
@@ -4625,11 +4731,12 @@ async fn every_sub_execution_egret_runs_is_one_kestra_ran() {
         (
             TOP_LEVEL_SPAWN_KEYS_IDENTICAL,
             TOP_LEVEL_SPAWN_KEYS_DIFFER,
-            41
+            38
         ),
         "the totals asserted beside the parts. Both figures are what W3b Task 4 \
          built the spawner for and could not measure, because the oracle still \
-         drove a harness that spawned nothing."
+         drove a harness that spawned nothing. 41 compared until no-silent-stall \
+         Task 1 refused three of them at start."
     );
 }
 
@@ -4888,7 +4995,10 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
 // W9a Task 11: +2 identical / -2 differing, `valids/loop-values-from-uri` and
 // `valids/loop-outputs-auto`: their `Loop` iterates its ION file now, where it
 // failed at `CREATED` and spawned nothing.
-const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 34;
+// no-silent-stall Task 1: -3 identical, three entries whose keys matched and
+// that are refused at start now (`RUNS_REFUSED`), so egret produces no key
+// list for them at all.
+const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 31;
 const TOP_LEVEL_SPAWN_KEYS_DIFFER: usize = 7;
 
 /// **`concurrencyLimit` defaults to 1, and the corpus can tell** — the one
@@ -4975,9 +5085,10 @@ fn the_default_concurrency_limit_is_one_and_the_corpus_can_tell() {
          times"
     );
     assert_eq!(
-        defaulted, 24,
+        defaulted, 23,
         "the population: top-level `Loop`s in the comparable corpus that write no \
-         `concurrencyLimit` and resolve at least one value"
+         `concurrencyLimit` and resolve at least one value, in a flow egret plans \
+         (24 until no-silent-stall Task 1 refused one such flow at start)"
     );
 }
 
@@ -5029,7 +5140,25 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         let trace = Trace::from(entry);
-        let planned = build_plan(&corpus_source(&entry.id));
+        // **no-silent-stall Task 1's refusals are reconstructed away**, unlike
+        // W7b's `Pause` one above: the 49 entries they refuse at start were
+        // planned by every builder this test reconstructs, so they are read
+        // from the flattening alone (`plan_unvalidated`) and every figure below
+        // stays the one its package committed.
+        let planned = match build_plan(&corpus_source(&entry.id)) {
+            Err(e)
+                if [
+                    "unsupported_allow_failure:",
+                    "unsupported_working_directory:",
+                    "unknown_task_type:",
+                ]
+                .iter()
+                .any(|c| e.message.starts_with(c)) =>
+            {
+                egret_workflow::executor::plan_unvalidated(&corpus_source(&entry.id))
+            }
+            other => other,
+        };
         if let Err(e) = &planned {
             if e.message.starts_with("unsupported_pause_property:") {
                 // The pause's own runs: those were `fed` and over-fed. Every
@@ -6072,6 +6201,17 @@ const REFUSAL_GROUPS: &[RefusalGroup] = &[
         message: "self_subflow:",
         ids: &["invalids/recursive-flow"],
     },
+    // no-silent-stall Task 1. This was `STILL_OVER_ACCEPTED`'s first row
+    // ("`unknown_task_type` is a WARNING, and promoting it to an error would
+    // refuse every plugin egret has not registered"). The product decision
+    // that row waited for was taken (spec §3): a type no handler serves
+    // stalled every run that reached it, so it is refused, and Kestra's reason
+    // and egret's are now the same one.
+    RefusalGroup {
+        cause: "a task type that does not exist (`Invalid type: ...MissingTwo`)",
+        message: "unknown_task_type:",
+        ids: &["invalids/invalid-task"],
+    },
     RefusalGroup {
         cause: "a `WorkingDirectory` with no children",
         message: "working_directory_tasks_required:",
@@ -6115,13 +6255,6 @@ const REFUSAL_GROUPS: &[RefusalGroup] = &[
 /// test and force the record to be corrected, exactly as the ratchet's
 /// `banked` arm does for the other direction.
 const STILL_OVER_ACCEPTED: &[(&str, &str)] = &[
-    (
-        "invalids/invalid-task",
-        "`Invalid type: io.kestra.plugin.core.debug.MissingTwo` — Kestra refuses a type \
-         that is not on its classpath. egret's `spec::registry` is not Kestra's classpath: \
-         `unknown_task_type` is a WARNING, and promoting it to an error would refuse every \
-         plugin egret has not registered. Owner: the registry, and a product decision.",
-    ),
     (
         "invalids/invalid-property",
         "`Unrecognized field \"invalid\" (class ...debug.Return)` — needs the plugin's own \
@@ -6547,10 +6680,6 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         (
             "invalids/invalid-property",
             "over-accepted: an unrecognised plugin property",
-        ),
-        (
-            "invalids/invalid-task",
-            "over-accepted: a type not on Kestra's classpath",
         ),
         (
             "valids/dag",
@@ -7041,8 +7170,10 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     );
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (2, 106, 108),
-        "the baselined population that declares a `timeout:`, and the rest. It \
+        (2, 105, 107),
+        "the baselined population that declares a `timeout:`, and the rest \
+         ((2, 106, 108) until no-silent-stall Task 1 banked \
+         `invalids/invalid-task`, which declares none). It \
          was (4, 139, 143) through W5 and (4, 123, 127) through W8 Task 2: W6 \
          Task 3 banked 12 and W6 Task 4 banked 4, and not one of the 16 \
          declares a `timeout:` anywhere, so the numerator did not move through \

@@ -50,12 +50,30 @@ mod state;
 
 pub use command::Command;
 pub use plan::{
-    build_plan, pause_gap, DagNode, Plan, PlanError, PlanTask, RetryBehavior, RetryDelay,
-    RetryPolicy, TaskIx, TaskKind,
+    build_plan, loop_until_gap, pause_gap, DagNode, Plan, PlanError, PlanTask, RetryBehavior,
+    RetryDelay, RetryPolicy, TaskIx, TaskKind,
 };
 pub use state::{
     apply, Attempt, ExecutionMeta, ExecutionState, Resume, RunIx, RunState, TaskRun, Tick,
 };
+
+/// Test-only (`test-util`): [`build_plan`] WITHOUT its third gate -- the parse
+/// and the flattening, and no `validate_for_run`.
+///
+/// For the oracle's historical reconstructions in `tests/executor.rs`, which
+/// rebuild what an earlier builder planned for a flow. Since no-silent-stall
+/// Task 1 the third gate refuses flows the flattening still plans (an
+/// `AllowFailure`, a `WorkingDirectory`, a type egret does not register), and a
+/// reconstruction of an earlier package's figures must not lose them for a
+/// reason that package did not have. Never a start path: every one of those
+/// goes through [`build_plan`].
+#[cfg(any(test, feature = "test-util"))]
+pub fn plan_unvalidated(source: &str) -> Result<Plan, PlanError> {
+    let flow = crate::spec::parse(source).map_err(|e| PlanError {
+        message: format!("cannot parse flow: {}", e.message),
+    })?;
+    plan::flatten_flow(&flow)
+}
 
 /// Kestra's `FlowableUtils.resolveValues`, over a rendered `Loop.values`.
 ///
@@ -356,9 +374,17 @@ mod tests {
     /// Defined ONCE, here. Tasks 4-8 use it and must not fork a second copy.
     /// Both extensions, because `oracle-exec/corpus/valids/` holds 261 `.yaml`
     /// and 56 `.yml` and the id carries neither.
+    ///
+    /// **It is [`plan::flatten_flow`], not `build_plan`, since no-silent-stall
+    /// Task 1**: the third gate now refuses 52 flows this Kestra ran (an
+    /// `OutputValues` child, an `AllowFailure`, ...), and a test of `advance()`
+    /// over one of them -- `valids/waitfor` -- is a test of the executor, which
+    /// is downstream of the gate. For every flow `build_plan` plans the two
+    /// answers are the same plan.
     fn plan_of(corpus_id: &str) -> Plan {
-        build_plan(&corpus_source(corpus_id))
-            .unwrap_or_else(|e| panic!("build_plan refused {corpus_id}: {e}"))
+        let flow = crate::spec::parse(&corpus_source(corpus_id))
+            .unwrap_or_else(|e| panic!("cannot parse {corpus_id}: {e:?}"));
+        plan::flatten_flow(&flow).unwrap_or_else(|e| panic!("cannot flatten {corpus_id}: {e}"))
     }
 
     fn corpus_source(corpus_id: &str) -> String {
@@ -2696,14 +2722,17 @@ mod tests {
         }
         assert_eq!(
             (wide, narrow),
-            (88, 63),
-            "88 tasks are inside a loop by the shipped reading and 63 by the \
-             direct-children one. The 25 between them are why this is a test: \
+            (78, 55),
+            "78 tasks are inside a loop by the shipped reading and 55 by the \
+             direct-children one (88 and 63 until no-silent-stall Task 1, which \
+             refuses four `Loop`-holding flows -- `valids/if-in-parallel`, \
+             `valids/working-directory-loop`, `valids/working-directory-taskrun` \
+             and `-taskrun-nested` -- so `build_plan` no longer plans them). The 23 between them are why this is a test: \
              `advance()` never calls `is_loop_body`, so nothing else in the crate \
              can tell the two apart. Both were one higher until the final \
              review implemented `disabled:`, which deletes \
              `valids/disable-flowable`'s `1-each-2` -- a direct child of a \
-             `Loop` -- from the plan; the gap of 25 is unchanged, because the \
+             `Loop` -- from the plan; the gap is unchanged by that, because the \
              task left both readings at once"
         );
     }
@@ -3270,6 +3299,14 @@ mod tests {
     /// that mapped them would trade a visible mismatch for a plausible-looking
     /// wrong trace.
     ///
+    /// **"Planned" here means the flattening, not `build_plan`'s answer**, since
+    /// no-silent-stall Task 1. Every construct this test classifies `Opaque`
+    /// except a `Leaf` is now a validation ERROR (`unsupported_allow_failure`,
+    /// `unsupported_working_directory`, `unsupported_loop_until_property`), so
+    /// `build_plan`'s third gate answers `Err` for it, as it already did for a
+    /// gapped `Pause`. The tiers are read off [`plan::flatten_flow`], the first
+    /// two gates alone, and the refusal is asserted beside each.
+    ///
     /// **This doc named those two and the loop below has always driven four**,
     /// which is the doc-contradicted-by-its-own-test shape.
     ///
@@ -3321,11 +3358,22 @@ mod tests {
             "io.kestra.plugin.core.flow.AllowFailure",
             "io.kestra.plugin.core.flow.WorkingDirectory",
         ] {
-            let plan = build_plan(&branch(ty)).unwrap_or_else(|e| panic!("{ty}: {e}"));
+            let flow = crate::spec::parse(&branch(ty)).unwrap_or_else(|e| panic!("{ty}: {e:?}"));
+            let plan = plan::flatten_flow(&flow).unwrap_or_else(|e| panic!("{ty}: {e}"));
             assert_eq!(
                 plan.tasks.len(),
                 1,
                 "{ty} is opaque, so `inner` must not be in the plan at all"
+            );
+            // And refused, because no handler can run the opaque task.
+            let refused = build_plan(&branch(ty)).expect_err("an opaque flowable must not plan");
+            assert!(
+                refused.message.starts_with("unsupported_allow_failure:")
+                    || refused
+                        .message
+                        .starts_with("unsupported_working_directory:"),
+                "{ty}: {}",
+                refused.message
             );
             assert_eq!(
                 plan.tasks[0].kind,
@@ -3587,7 +3635,7 @@ mod tests {
         let mut arms_probed: BTreeSet<&'static str> = BTreeSet::new();
         for (declared, src) in &probes {
             let flow = crate::spec::parse(src).unwrap_or_else(|e| panic!("{declared}: {e:?}"));
-            let plan = build_plan(src).unwrap_or_else(|e| panic!("{declared}: {e}"));
+            let plan = plan::flatten_flow(&flow).unwrap_or_else(|e| panic!("{declared}: {e}"));
             let arm = arm_name(&flow.tasks[0].kind);
             assert_eq!(
                 arm, *declared,
@@ -3660,7 +3708,8 @@ mod tests {
         let tiers: BTreeSet<&str> = probes
             .iter()
             .map(|(_, src)| {
-                let plan = build_plan(src).expect("probe must plan");
+                let flow = crate::spec::parse(src).expect("probe parses");
+                let plan = plan::flatten_flow(&flow).expect("probe must flatten");
                 match observed(&plan.tasks[0].kind) {
                     PlannedAs::Opaque => "Opaque",
                     PlannedAs::Executable => "Executable",
@@ -3857,6 +3906,212 @@ mod tests {
         );
     }
 
+    /// **`build_plan` refuses every construct of no-silent-stall §3, by its
+    /// code** -- every spelling `canonical_flow_type` folds, the FQCN and the
+    /// `core.` alias in any case. Each used to plan (an opaque `Runnable`, or
+    /// a `Leaf` no handler serves) and every execution of it stalled.
+    #[test]
+    fn build_plan_refuses_every_static_refusal_by_its_code() {
+        let branch = |ty: &str| {
+            format!(
+                "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
+            )
+        };
+        let gapped = |ty: &str| {
+            format!(
+                "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n    condition: \"{{{{ true }}}}\"\n    checkFrequency:\n      interval: \"{{{{ inputs.i }}}}\"\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
+            )
+        };
+        let leaf = |ty: &str| {
+            format!("id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n")
+        };
+        let mut probes: Vec<(&str, String)> = Vec::new();
+        for ty in [
+            "io.kestra.plugin.core.flow.AllowFailure",
+            "core.allowfailure",
+            "core.AllowFailure",
+        ] {
+            probes.push(("unsupported_allow_failure", branch(ty)));
+        }
+        for ty in [
+            "io.kestra.plugin.core.flow.WorkingDirectory",
+            "core.workingdirectory",
+            "io.kestra.plugin.core.flow.workingdirectory",
+        ] {
+            probes.push(("unsupported_working_directory", branch(ty)));
+        }
+        for ty in [
+            "io.kestra.plugin.core.flow.LoopUntil",
+            "io.kestra.plugin.core.flow.WaitFor",
+            "core.loopuntil",
+            "core.WAITFOR",
+        ] {
+            probes.push(("unsupported_loop_until_property", gapped(ty)));
+        }
+        for ty in [
+            "io.kestra.plugin.core.flow.NotARealClass",
+            "core.somenewgate",
+        ] {
+            probes.push(("unsupported_flow_task", leaf(ty)));
+        }
+        for ty in ["egret.sqll", "io.kestra.plugin.core.output.OutputValues"] {
+            probes.push(("unknown_task_type", leaf(ty)));
+        }
+        for (code, src) in &probes {
+            let err = build_plan(src).expect_err(code);
+            assert!(
+                err.message.starts_with(&format!("{code}:")),
+                "{code}: the PlanError must carry the code: {}",
+                err.message
+            );
+        }
+    }
+
+    /// Every task [`plan::flatten_flow`] plans as a [`TaskKind::Runnable`]
+    /// while its `models::TaskKind` is NOT a `Leaf` -- a flowable egret has no
+    /// executor for, handed to a worker that has no handler for it -- as
+    /// `(path, type)`, the path spelled the way `spec::validate` spells it.
+    ///
+    /// A planned task carries its id and not its path, so it is matched to the
+    /// model by id AND type over the two lists the builder flattens (`tasks:`
+    /// and `errors:`, through `children()` and `error_children()`).
+    fn opaque_tasks(flow: &crate::models::Flow, plan: &Plan) -> Vec<(String, String)> {
+        use crate::models::{Task, TaskKind as K};
+        fn walk<'a>(t: &'a Task, path: String, out: &mut Vec<(String, &'a Task)>) {
+            for c in t.children().into_iter().chain(t.error_children()) {
+                walk(c, format!("{path}.{}", c.id), out);
+            }
+            out.push((path, t));
+        }
+        let mut all = Vec::new();
+        for (list, tasks) in [("tasks", &flow.tasks), ("errors", &flow.errors)] {
+            for t in tasks {
+                walk(t, format!("{list}.{}", t.id), &mut all);
+            }
+        }
+        let mut out: Vec<(String, String)> = plan
+            .tasks
+            .iter()
+            .filter_map(|pt| match &pt.kind {
+                TaskKind::Runnable { type_id } => Some((pt.id.as_str(), type_id.as_str())),
+                _ => None,
+            })
+            .flat_map(|(id, ty)| {
+                all.iter()
+                    .filter(move |(_, t)| {
+                        t.id == id && t.r#type == ty && !matches!(t.kind, K::Leaf { .. })
+                    })
+                    .map(|(p, t)| (p.clone(), t.r#type.clone()))
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The `(path, type)`s of `src` planned opaque with no `validate_for_run`
+    /// error at that path or below it, and how many were planned opaque.
+    fn unrefused_opaque(src: &str) -> Option<(Vec<(String, String)>, usize)> {
+        let flow = crate::spec::parse(src).ok()?;
+        let plan = plan::flatten_flow(&flow).ok()?;
+        let errors = crate::spec::validate_for_run(&flow).errors;
+        let opaque = opaque_tasks(&flow, &plan);
+        let n = opaque.len();
+        let unrefused = opaque
+            .into_iter()
+            .filter(|(path, _)| {
+                !errors
+                    .iter()
+                    .any(|e| e.path == *path || e.path.starts_with(&format!("{path}.")))
+            })
+            .collect();
+        Some((unrefused, n))
+    }
+
+    /// **Opaque implies refused (no-silent-stall §3), over the whole corpus.**
+    ///
+    /// For every corpus flow that parses: every task the builder plans as a
+    /// `Runnable` while `models::TaskKind` is not `Leaf` has a
+    /// `validate_for_run` error at its path or below it. Such a task is one no
+    /// handler can run, and before Task 1 every execution of it stalled in
+    /// `RUNNING` (`NotALeaf`, reaped, reclaimed, for ever). A future flowable
+    /// planned opaque without a refusal fails this test by flow and path.
+    ///
+    /// "Planned" is [`plan::flatten_flow`], not `build_plan`: the third gate
+    /// now refuses these flows, so `build_plan` would hide exactly the tasks
+    /// this is about. A `Leaf` is out of scope here -- whether a deployment
+    /// serves its type is the per-deployment refusal of §4.
+    ///
+    /// The population is asserted, so the guard cannot pass by seeing
+    /// nothing: the corpus holds 6 `AllowFailure`, 13 `WorkingDirectory` and 3
+    /// gapped `Pause` tasks the builder reaches (measured at Task 1; a
+    /// `WorkingDirectory` inside an opaque `AllowFailure` is not reached,
+    /// because the builder does not descend into it), and no gapped
+    /// `LoopUntil` (`every_corpus_loop_until_bound_is_a_literal`), so that one
+    /// is driven by the synthetic flows below, under a flowable's `errors:`.
+    #[test]
+    fn every_task_planned_opaque_is_refused_at_its_path() {
+        let mut unrefused = Vec::new();
+        let mut by_type: BTreeMap<String, usize> = BTreeMap::new();
+        for (id, src) in every_corpus_flow() {
+            let Some((missing, _)) = unrefused_opaque(&src) else {
+                continue;
+            };
+            let flow = crate::spec::parse(&src).expect("parsed above");
+            let plan = plan::flatten_flow(&flow).expect("flattened above");
+            for (_, ty) in opaque_tasks(&flow, &plan) {
+                *by_type
+                    .entry(crate::models::canonical_flow_type(&ty).unwrap_or(ty))
+                    .or_default() += 1;
+            }
+            unrefused.extend(missing.into_iter().map(|(p, t)| format!("{id}: {p} ({t})")));
+        }
+
+        // The constructs the corpus cannot show, nested where the builder
+        // reaches them: a `LoopUntil` and a `WaitFor` with a bound it cannot
+        // read, a `Pause` with `behavior:`, under a `Sequential`'s `errors:`.
+        let synthetic = |inner: &str| {
+            format!(
+                "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: ok\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n    errors:\n{inner}"
+            )
+        };
+        for (label, inner) in [
+            (
+                "LoopUntil",
+                "      - id: lu\n        type: io.kestra.plugin.core.flow.LoopUntil\n        condition: \"{{ true }}\"\n        checkFrequency:\n          maxIterations: \"{{ inputs.n }}\"\n        tasks:\n          - id: body\n            type: io.kestra.plugin.core.debug.Return\n            format: x\n",
+            ),
+            (
+                "WaitFor",
+                "      - id: lu\n        type: io.kestra.plugin.core.flow.WaitFor\n        condition: \"{{ true }}\"\n        failOnMaxReached: \"{{ inputs.f }}\"\n        tasks:\n          - id: body\n            type: io.kestra.plugin.core.debug.Return\n            format: x\n",
+            ),
+            (
+                "Pause",
+                "      - id: lu\n        type: io.kestra.plugin.core.flow.Pause\n        behavior: FAIL\n",
+            ),
+        ] {
+            let (missing, n) = unrefused_opaque(&synthetic(inner)).expect(label);
+            assert_eq!(n, 1, "{label}: the synthetic task must be planned opaque");
+            unrefused.extend(missing.into_iter().map(|(p, t)| format!("synthetic {label}: {p} ({t})")));
+        }
+
+        assert!(
+            unrefused.is_empty(),
+            "planned opaque, so no handler can run it, and NOT refused by \
+             `validate_for_run` -- every execution of it would stall:\n  {}",
+            unrefused.join("\n  ")
+        );
+        assert_eq!(
+            by_type,
+            BTreeMap::from([
+                ("allowfailure".to_string(), 6),
+                ("pause".to_string(), 3),
+                ("workingdirectory".to_string(), 13),
+            ]),
+            "the corpus population this guard judges; if it moves, re-measure \
+             and say why"
+        );
+    }
+
     /// A flow this pinned Kestra published with **200** and `build_plan`
     /// refuses anyway: an OVER-REFUSAL, with the cause and the code that says
     /// egret refuses it for *that* cause.
@@ -3875,7 +4130,10 @@ mod tests {
         codes: &'static [&'static str],
     }
 
-    /// **The two, and the sweep below asserts there is no third.**
+    /// **The two over-refusals, and the sweep below asserts there is no
+    /// third.** The rows after them are not over-refusals but refusals of
+    /// constructs egret cannot run: three `Pause` rows (W7b, 2026-10-11) and
+    /// fifty-two from no-silent-stall Task 1 (2026-10-12).
     ///
     /// There were three. `valids/switch-impossible` was the first row and the
     /// only one of them with a golden entry — refused over a single
@@ -3913,6 +4171,274 @@ mod tests {
             cause: "a `Pause` declaring `onPause:`. Kestra runs it; egret does not, and `executor::pause_gap` names it. Until the user's ruling of 2026-10-11 it planned an opaque runnable with a `not_yet_enforced` warning, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). The ruling made it the validation error `unsupported_pause_property`: a deliberate refusal, not an over-refusal to close, until egret runs `onPause:`. W8's",
             codes: &["unsupported_pause_property"],
         },
+        // no-silent-stall Task 1 (spec §3): 52 rows, one per flow this Kestra
+        // published with 200 that the static refusals now refuse -- 4
+        // `AllowFailure`, 4 `WorkingDirectory`, and 44 a type Kestra ships and
+        // egret does not register (`unknown_task_type`, an error since Task
+        // 1). Measured, not argued: the corpus has no gapped `LoopUntil` and no
+        // unported control-flow type among its published flows. Each would
+        // otherwise start and stall; every one is a deliberate refusal, as the
+        // three `Pause` rows above are.
+        PublishedButRefused {
+            id: "valids/after-execution-error",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/after-execution-finally",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/after-execution",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/allow-failure-with-retry",
+            cause: "an `AllowFailure` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it turns a child's failure into `WARNING`, which `RunState` cannot hold. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_allow_failure`: a deliberate refusal, not an over-refusal to close, until egret runs `AllowFailure`. W8's",
+            codes: &["unsupported_allow_failure"],
+        },
+        PublishedButRefused {
+            id: "valids/allow-failure",
+            cause: "an `AllowFailure` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it turns a child's failure into `WARNING`, which `RunState` cannot hold. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_allow_failure`: a deliberate refusal, not an over-refusal to close, until egret runs `AllowFailure`. W8's",
+            codes: &["unsupported_allow_failure"],
+        },
+        PublishedButRefused {
+            id: "valids/assert",
+            cause: "a task of type `io.kestra.plugin.core.execution.Assert`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/exit-cancelled",
+            cause: "a task of type `io.kestra.plugin.core.execution.Exit`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/exit-killed",
+            cause: "a task of type `io.kestra.plugin.core.execution.Exit`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/exit-nested",
+            cause: "a task of type `io.kestra.plugin.core.execution.Exit`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/exit",
+            cause: "a task of type `io.kestra.plugin.core.execution.Exit`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/finally-allowfailure",
+            cause: "an `AllowFailure` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it turns a child's failure into `WARNING`, which `RunState` cannot hold. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_allow_failure`: a deliberate refusal, not an over-refusal to close, until egret runs `AllowFailure`. W8's",
+            codes: &["unsupported_allow_failure"],
+        },
+        PublishedButRefused {
+            id: "valids/flow-concurrency-queue-after-execution",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/flow-concurrency-queue-killed-after-execution",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/flow-with-array-outputs",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/if-in-parallel",
+            cause: "a task of type `io.kestra.plugin.core.execution.Assert`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/labels-update-nested-value-list",
+            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/labels-update-nested-value-map",
+            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/labels-update-task-deduplicate",
+            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/labels-update-task-empty",
+            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/labels-update-task",
+            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/npe-labels-update-task",
+            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/output-values",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/pause_on_resume",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/pause_on_resume_optional",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/primitive-labels-flow",
+            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/purge_logs_execution_only",
+            cause: "a task of type `io.kestra.plugin.core.log.PurgeLogs`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/purge_logs_full_arguments",
+            cause: "a task of type `io.kestra.plugin.core.log.PurgeLogs`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/purge_logs_no_arguments",
+            cause: "a task of type `io.kestra.plugin.core.log.PurgeLogs`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/purge_logs_trigger_only",
+            cause: "a task of type `io.kestra.plugin.core.log.PurgeLogs`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/purge_logs_with_batch_size",
+            cause: "a task of type `io.kestra.plugin.core.log.PurgeLogs`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/replay",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/retry-with-flowable-errors",
+            cause: "an `AllowFailure` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it turns a child's failure into `WARNING`, which `RunState` cannot hold. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_allow_failure`: a deliberate refusal, not an over-refusal to close, until egret runs `AllowFailure`. W8's",
+            codes: &["unsupported_allow_failure"],
+        },
+        PublishedButRefused {
+            id: "valids/set-variables-duplicate",
+            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/set-variables",
+            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/sleep-long",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/task-runif-executionupdating",
+            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, `io.kestra.plugin.core.execution.UnsetVariables`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/task-runif-taskswithstate",
+            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/task-runif-workingdirectory",
+            cause: "a `WorkingDirectory` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it hands its whole subtree to one worker. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_working_directory`: a deliberate refusal, not an over-refusal to close, until egret runs `WorkingDirectory`. Unclaimed",
+            codes: &["unsupported_working_directory"],
+        },
+        PublishedButRefused {
+            id: "valids/task-runif",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/unset-variables",
+            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, `io.kestra.plugin.core.execution.UnsetVariables`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/waitfor-child-task-warning",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/waitfor-max-duration",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/waitfor-max-iterations",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/waitfor-multiple-tasks-failed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/waitfor-multiple-tasks",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/waitfor-no-success",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/waitfor",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/webhook-outputs",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/webhook-wait",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            codes: &["unknown_task_type"],
+        },
+        PublishedButRefused {
+            id: "valids/working-directory-invalid-runif",
+            cause: "a `WorkingDirectory` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it hands its whole subtree to one worker. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_working_directory`: a deliberate refusal, not an over-refusal to close, until egret runs `WorkingDirectory`. Unclaimed",
+            codes: &["unsupported_working_directory"],
+        },
+        PublishedButRefused {
+            id: "valids/working-directory-taskrun-nested",
+            cause: "a `WorkingDirectory` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it hands its whole subtree to one worker. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_working_directory`: a deliberate refusal, not an over-refusal to close, until egret runs `WorkingDirectory`. Unclaimed",
+            codes: &["unsupported_working_directory"],
+        },
+        PublishedButRefused {
+            id: "valids/working-directory-taskrun",
+            cause: "a `WorkingDirectory` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it hands its whole subtree to one worker. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_working_directory`: a deliberate refusal, not an over-refusal to close, until egret runs `WorkingDirectory`. Unclaimed",
+            codes: &["unsupported_working_directory"],
+        },
     ];
 
     /// **Every flow this Kestra published with 200 must plan, except two
@@ -3923,6 +4449,11 @@ mod tests {
     /// added are not over-refusals to close but the user's ruling that a
     /// `Pause` egret cannot run is refused. Renamed at W7b Task 7b from
     /// `…_except_two_named_over_refusals`, which had stopped being true.)*
+    ///
+    /// *(2026-10-12, no-silent-stall Task 1: fifty-seven rows. The fifty-two
+    /// added are the static refusals of that package's spec §3 -- a construct
+    /// egret cannot run is refused rather than left to stall -- so the
+    /// over-refusals proper are still the first two.)*
     ///
     /// Over-refusal is the mirror of the divergence class the programme
     /// forbids shipping, and until the final review nothing in this package
@@ -4969,9 +5500,11 @@ mod tests {
         );
         assert_eq!(
             (flows, declared, planned),
-            (25, 26, 26),
-            "25 corpus flows declare a `retry:` on a task `build_plan` plans (or \
-             on the flow), 26 policies between them, and every one of them is \
+            (23, 24, 24),
+            "23 corpus flows declare a `retry:` on a task `build_plan` plans (or \
+             on the flow), 24 policies between them (25 and 26 until \
+             no-silent-stall Task 1, whose static refusals made two more flows \
+             refusable), and every one of them is \
              readable as literals. If this moves, the corpus moved -- OR a flow \
              left the population by becoming refusable, which is what took this \
              from (26, 27, 27) at Task 7: `invalids/duplicate-parallel` declares \
@@ -5346,11 +5879,12 @@ tasks:
         }
         assert_eq!(
             (flows, wide),
-            (43, 88),
-            "the 43 corpus flows holding a `Loop` and the 88 tasks the wide \
-             reading names inside one -- the same 88 \
+            (39, 78),
+            "the 39 corpus flows holding a `Loop` that `build_plan` plans and the \
+             78 tasks the wide reading names inside one -- the same 78 \
              `the_two_readings_of_inside_a_loop_differ_by_a_measured_amount` \
-             derives. 43 flows and not 42: the flow count is over the YAML and \
+             derives (43 and 88 until no-silent-stall Task 1 refused four of \
+             those flows). 39 flows and not 38: the flow count is over the YAML and \
              `disabled:` does not change it"
         );
         assert_eq!(
@@ -9564,10 +10098,16 @@ tasks:
                 }
             }
         }
+        // **5, and it was 12 until no-silent-stall Task 1.** Seven corpus
+        // `WaitFor` flows hold an `io.kestra.plugin.core.output.OutputValues`
+        // child, an unregistered type and so the error `unknown_task_type`
+        // now: `build_plan` refuses them, and a refused flow cannot put a
+        // `LoopUntil` in front of `drive_concurrent` either. What is left is
+        // still not zero, which is what keeps the assertions below non-vacuous.
         assert!(
-            planned_loops >= 12,
+            planned_loops >= 5,
             "only {planned_loops} corpus `LoopUntil`s reach a `TaskKind::LoopUntil`, \
-             which is fewer than the twelve the ten corpus flows of this construct \
+             which is fewer than the five the corpus flows `build_plan` still plans \
              declare between them — the walk has stopped reaching them and every \
              assertion below is vacuous"
         );
