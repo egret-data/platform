@@ -1641,6 +1641,124 @@ async fn a_second_row_filter_on_one_table_is_refused_only_when_it_disagrees() {
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 
+/// **SP4d-4 Task 2 review I2: the editor refuses only a pair the write
+/// CREATES.** Part A promises that "the writes that remove the pair still
+/// succeed — deleting or narrowing one rule". With the editor refusing ANY pair
+/// in the profile, two stored pairs deadlocked it: narrowing a member of one
+/// was refused on the other.
+///
+/// The two stored pairs are built the one way a route can still build them —
+/// create the second half DISABLED (a disabled policy is in no band), then
+/// re-enable it through the deliberately unguarded `PUT …/enabled`.
+///
+/// ⚠ Refusal controls in the same test: a NEW policy overlapping a stored pair
+/// is still refused, and so is moving the narrowed policy back onto its old
+/// partner (the pair is new again, because it no longer exists in BEFORE).
+#[tokio::test]
+async fn narrowing_one_stored_pair_succeeds_while_another_pair_is_stored() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ambigpairs", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let filter = |name: &str, table: &str, expr: &str, enabled: bool| {
+        serde_json::json!({
+            "kind": "rowfilter", "name": name, "service": svc_name, "isEnabled": enabled,
+            "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                          "table": {"values": [table]}},
+            "items": [{"groups": ["public"], "filterExpr": expr}]
+        })
+    };
+    let send = |method: &'static str, uri: String, body: serde_json::Value| {
+        let app = f.app_empty();
+        let token = token.clone();
+        async move {
+            into_json(
+                app.oneshot(req(method, &uri, &token, Some(body)))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        }
+    };
+
+    // Two stored differing pairs: (pa, pb) on t1 and (pc, pd) on t2.
+    let mut ids = std::collections::BTreeMap::new();
+    for (name, table, expr) in [
+        ("pa", "t1", "x = 1"),
+        ("pb", "t1", "x = 2"),
+        ("pc", "t2", "y = 1"),
+        ("pd", "t2", "y = 2"),
+    ] {
+        let (status, body) =
+            send("POST", "/policies".into(), filter(name, table, expr, false)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "create {name} disabled; body={body}"
+        );
+        ids.insert(name, body["id"].as_i64().expect("id"));
+    }
+    for name in ["pa", "pb", "pc", "pd"] {
+        let (status, body) = send(
+            "PUT",
+            format!("/policies/{}/enabled", ids[name]),
+            serde_json::json!({"enabled": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "enable {name}; body={body}");
+    }
+
+    // The write that REMOVES (pa, pb): narrow pa onto t3. Before the fix this
+    // was refused on the unrelated (pc, pd).
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{}", ids["pa"]),
+        filter("pa", "t3", "x = 1", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "narrowing one member of a stored pair must succeed while another stored pair \
+         exists; body={body}"
+    );
+
+    // Refusal control 1: a NEW policy overlapping the stored (pc, pd).
+    let (status, body) = send(
+        "POST",
+        "/policies".into(),
+        filter("pe", "t2", "y = 9", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a new overlapping policy must still be refused; body={body}"
+    );
+    let msg = body.to_string();
+    assert!(
+        msg.contains("\\\"pe\\\"") && msg.contains("or set Override on the one that should win"),
+        "the refusal must name the policy being written and offer Override: {body}"
+    );
+
+    // Refusal control 2: moving pa back onto t1 re-creates (pa, pb).
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{}", ids["pa"]),
+        filter("pa", "t1", "x = 1", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "re-creating a removed pair must be refused; body={body}"
+    );
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
 // ---------------------------------------------------------------------------
 // SP4d debt Task 9 — the same "silently inert" symptom on the LEGITIMATE type.
 // ---------------------------------------------------------------------------
@@ -2541,7 +2659,7 @@ async fn put_policies_refuses_a_service_that_is_not_the_policys_own() {
 /// vacuous pass). Since SP4d-4 the guard answers 409 too, so the two are told
 /// apart by their messages, which both arms assert.
 #[tokio::test]
-async fn an_infra_name_is_refused_with_409_before_the_authoring_guards_can_say_400() {
+async fn an_infra_name_is_refused_with_409_before_the_arbitration_guard() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;

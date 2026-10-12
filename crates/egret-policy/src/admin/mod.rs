@@ -1176,10 +1176,13 @@ fn tag_mask_addresses(body: &Value) -> Vec<&str> {
 /// shared with `egret_perm_compile::trigger::compile_desired`; the refusal is
 /// the same sentence from both.
 ///
-/// `replacing` is the policy id a `PUT` is about to overwrite, excluded from the
-/// comparison set — **without it a `PUT` would pair the new body against the OLD
+/// `replacing` is the policy id a `PUT` is about to overwrite, swapped out of
+/// the AFTER set — **without it a `PUT` would pair the new body against the OLD
 /// version of itself**, which is a refusal that cannot be escaped (every retry
 /// hits the same stored row) and the first thing a reviewer should check here.
+///
+/// Only pairs the write CREATES are refused (the AFTER set's pairs minus the
+/// stored set's); see the body for why.
 ///
 /// Reads nothing when the body is not a mask or a row filter, which is the
 /// common case: an access policy is not in this class at all (its arbitration
@@ -1202,34 +1205,64 @@ async fn refuse_ambiguous_arbitration(
     ) {
         return Ok(());
     }
-    let existing: Vec<Value> = st
-        .store
-        .enabled_policies_for_service(service_id)
-        .await?
-        .into_iter()
-        .filter(|p| replacing.is_none_or(|id| p.get("id").and_then(Value::as_i64) != Some(id)))
-        .collect();
-    let candidates: Vec<(String, &Value)> = existing
+    let stored: Vec<Value> = st.store.enabled_policies_for_service(service_id).await?;
+    let name_of = |p: &Value| {
+        p.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let is_replaced =
+        |p: &Value| replacing.is_some_and(|id| p.get("id").and_then(Value::as_i64) == Some(id));
+    // BEFORE: the profile as stored. The row a PUT replaces is in it, under
+    // the name it will carry AFTER the write, so a rename alone does not make
+    // a stored pair look new.
+    let before: Vec<(String, &Value)> = stored
         .iter()
         .map(|p| {
-            (
-                p.get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                p,
-            )
+            let name = if is_replaced(p) {
+                pol.name.clone()
+            } else {
+                name_of(p)
+            };
+            (name, p)
         })
+        .collect();
+    // AFTER: the stored set with the replaced row swapped for the new body.
+    let after: Vec<(String, &Value)> = stored
+        .iter()
+        .filter(|p| !is_replaced(p))
+        .map(|p| (name_of(p), p))
         .chain(std::iter::once((pol.name.clone(), &pol.body)))
         .collect();
-    if let Some(pair) =
-        crate::ambiguous_arbitration::ambiguous_arbitration_in(candidates.iter().map(
-            |(name, body)| crate::ambiguous_arbitration::PolicyUnderWrite {
+    let pairs = |set: &[(String, &Value)]| {
+        crate::ambiguous_arbitration::ambiguous_arbitrations_in(set.iter().map(|(name, body)| {
+            crate::ambiguous_arbitration::PolicyUnderWrite {
                 service: service_id,
                 name,
                 body,
-            },
-        ))
+            }
+        }))
+    };
+    // **Refuse only a pair this write CREATES** (SP4d-4 Task 2 review I2).
+    // Refusing any pair in the profile broke Part A's promise that a write
+    // REMOVING a pair succeeds: with stored pairs (A,B) and (C,D), narrowing A
+    // was refused on (C,D) and narrowing C on (A,B), so the editor could never
+    // fix either. A pair already stored is left to the compile wedge and to
+    // `GET /perm/overlaps`; a pair the write creates or completes — a new
+    // overlapping policy, an edit that widens into another policy, an edit that
+    // turns an agreeing pair into a differing one — is not in BEFORE and is
+    // refused. Identity is `(kind, first, second)`: an edit that keeps a stored
+    // pair but changes its coordinate does not create it. Because every
+    // refused pair is new by construction, the sentence never names a pair
+    // unrelated to this write.
+    let existed: std::collections::BTreeSet<_> = pairs(&before)
+        .into_iter()
+        .map(|p| (p.arbitrated as u8, p.first, p.second))
+        .collect();
+    if let Some(pair) = pairs(&after)
+        .into_iter()
+        .find(|p| !existed.contains(&(p.arbitrated as u8, p.first.clone(), p.second.clone())))
     {
         // 409, not 400: the body is well-formed; it conflicts with a policy
         // already stored (SP4d-4 Part A, "The refusal"). The editor's sentence

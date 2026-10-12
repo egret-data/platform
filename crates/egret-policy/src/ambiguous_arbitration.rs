@@ -51,8 +51,9 @@
 //!
 //! That is a TOTAL order, so the engine's answer is **deterministic**. It is
 //! not, however, anything the steward authored: `getEvalOrder()` is a
-//! resource-specificity score, so two policies selecting the SAME resource
-//! score the same, and the decision falls through to the policy NAME — which
+//! wildcard-count score (more match-any `*` levels sort FIRST — see "Why
+//! different resources are refused too"), so two policies selecting the SAME
+//! resource score the same, and the decision falls through to the policy NAME — which
 //! for a compiled policy is `perm-rule-<rule uuid>` (`COMPILER_RULE_PREFIX`).
 //! The winner is therefore a uuid lottery, stable until somebody deletes and
 //! re-creates a rule. (And if the jar's final key turns out to be the stable
@@ -198,7 +199,9 @@
 //!   rejects every `tag-*` kind on the PUT path with "unknown policy kind", so
 //!   a tag mask cannot be *replaced* into the shape, only created). Both
 //!   compare the body being written against the profile's other ENABLED
-//!   policies.
+//!   policies, and refuse only a pair the write CREATES — pairs after the
+//!   write minus pairs already stored — so a write that narrows one stored
+//!   pair is never refused because of another (SP4d-4 Task 2 review I2).
 //! * **`PUT /policies/{id}/enabled` is NOT guarded, and that is a ruling.**
 //!   Re-enabling a policy can complete the pair. The reason it is left alone is
 //!   that it is also the only way OUT of a pair that already exists in an
@@ -339,6 +342,10 @@ pub struct AmbiguousArbitration {
     pub priority: i64,
     /// The `policy.authz_services` id the pair is served under (one download).
     pub service: i64,
+    /// Which of the two Ranger serves TODAY wherever both match, when this
+    /// module can compute it — see [`served_today`]. `None` means the order
+    /// falls to something this module does not compute (or to the name).
+    pub served_today: Option<String>,
 }
 
 /// The remedy only the policy editor can offer: a hand-written policy can
@@ -378,18 +385,27 @@ impl AmbiguousArbitration {
             coordinate_hint,
             priority,
             service: _,
+            served_today,
         } = self;
         let noun = arbitrated.noun();
         let disagreement = arbitrated.disagreement();
+        let today = match served_today {
+            Some(winner) => format!(
+                " Today Ranger serves {winner:?} wherever both match, because it has more \
+                 match-any `*` levels with the same users, groups and accesses — a score, not \
+                 something either policy says."
+            ),
+            None => String::new(),
+        };
         format!(
             "two {noun} policies would be served at policyPriority {priority} that may both \
              decide one request ({coordinate_hint}) with {disagreement}: {first:?} and \
              {second:?}. Ranger arbitrates {noun}s with `>=`, so the FIRST evaluator in its band \
              is final, and within a band the order is `getEvalOrder()` (a wildcard-count score: \
-             with equal items the broader policy runs first and wins wherever both match) and \
-             then the policy name, i.e. a rule's uuid — neither of which says which of the two \
-             should win. Narrow one of the two so they no longer select a common resource, or \
-             delete one, or make them agree{extra_remedy}."
+             with the same users, groups and accesses the broader policy runs first and wins \
+             wherever both match) and then the policy name, i.e. a rule's uuid — neither of \
+             which says which of the two should win.{today} Narrow one of the two so they no \
+             longer select a common resource, or delete one, or make them agree{extra_remedy}."
         )
     }
 }
@@ -424,6 +440,16 @@ fn canonical_resource_map(resources: Option<&Value>) -> BTreeMap<String, Level> 
             .map(|a| {
                 a.iter()
                     .filter_map(Value::as_str)
+                    // ⚠ An EMPTY-STRING value is dropped here, before the
+                    // emptiness check, exactly as `RangerAbstractResourceMatcher
+                    // .init()` drops it before building a matcher — reproduced
+                    // by `egret_ranger_eval::resource::LevelMatcher::build`
+                    // (`if value.is_empty() { continue }`, then `is_match_any:
+                    // value_matchers.is_empty()`). So `values: [""]` is a
+                    // MATCH-ANY level, not a literal `""` that meets nothing;
+                    // reading it as a literal admitted a fail-open pair (SP4d-4
+                    // Task 2 review C1).
+                    .filter(|v| !v.is_empty())
                     .map(str::to_string)
                     .collect()
             })
@@ -433,7 +459,17 @@ fn canonical_resource_map(resources: Option<&Value>) -> BTreeMap<String, Level> 
         }
         values.sort();
         values.dedup();
-        let flag = |k: &str| spec.get(k).and_then(Value::as_bool).unwrap_or(false);
+        // Absent / `null` is `false` (Ranger's default). ANY other non-boolean
+        // — `"true"`, `1`, `"false"` — is read as `true`: for `isExcludes` that
+        // means "assume it intersects", the fail-closed answer, where reading
+        // the string `"true"` as `false` took a complement for a literal
+        // (review M5). `isRecursive` never narrows what a level meets; reading
+        // it as `true` only makes the coordinate hint non-exact.
+        let flag = |k: &str| match spec.get(k) {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => true,
+        };
         out.insert(
             level.clone(),
             (values, flag("isExcludes"), flag("isRecursive")),
@@ -481,19 +517,46 @@ fn trailing_star_prefix(v: &str) -> Option<&str> {
     (!is_unevaluated(prefix)).then_some(prefix)
 }
 
-/// Whether two single resource values may match one request value. Every level
-/// of both service-defs egret serves is `ignoreCase: true`, so the comparison
-/// is under ASCII case folding.
+/// The case folds a value is compared under — FULL Unicode, not ASCII (SP4d-4
+/// Task 2 review I1: `ĐƠN_HÀNG` and `đơn_hàng` are one table to Ranger).
+///
+/// Every level of both service-defs egret serves is `ignoreCase: true`, and
+/// Ranger compares those with `String.equalsIgnoreCase` / `IOCase.INSENSITIVE`,
+/// which fold per UTF-16 unit as `toLowerCase(toUpperCase(c))`.
+/// `egret_ranger_eval`'s own `fold` (`resource.rs`, private) is
+/// `str::to_lowercase()` and documents a small residue where the two differ
+/// (`ϑ`/`ϴ`, characters whose lowercase is longer than one code point). A
+/// refusal must over-approximate BOTH, so two values are taken to be equal when
+/// they agree under EITHER fold: the evaluator's `to_lowercase()`, or Java's
+/// per-character upper-then-lower.
+fn folds(v: &str) -> [String; 2] {
+    [
+        v.to_lowercase(),
+        v.chars()
+            .flat_map(char::to_uppercase)
+            .flat_map(char::to_lowercase)
+            .collect(),
+    ]
+}
+
+/// Whether two single resource values may match one request value, under
+/// [`folds`].
 fn values_may_intersect(a: &str, b: &str) -> bool {
-    let (a, b) = (a.to_ascii_lowercase(), b.to_ascii_lowercase());
+    let (fa, fb) = (folds(a), folds(b));
+    fa.iter()
+        .zip(fb.iter())
+        .any(|(a, b)| folded_values_may_intersect(a, b))
+}
+
+fn folded_values_may_intersect(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
-    match (trailing_star_prefix(&a), trailing_star_prefix(&b)) {
+    match (trailing_star_prefix(a), trailing_star_prefix(b)) {
         (Some(pa), Some(pb)) => pa.starts_with(pb) || pb.starts_with(pa),
-        (Some(p), None) => is_unevaluated(&b) || b.starts_with(p),
-        (None, Some(p)) => is_unevaluated(&a) || a.starts_with(p),
-        (None, None) => is_unevaluated(&a) || is_unevaluated(&b),
+        (Some(p), None) => is_unevaluated(b) || b.starts_with(p),
+        (None, Some(p)) => is_unevaluated(a) || a.starts_with(p),
+        (None, None) => is_unevaluated(a) || is_unevaluated(b),
     }
 }
 
@@ -523,9 +586,11 @@ fn maps_may_intersect(a: &BTreeMap<String, Level>, b: &BTreeMap<String, Level>) 
 ///
 /// Over-approximates; `true` is the fail-closed answer. For every level name in
 /// the union of both maps, the two levels must may-intersect: a level that is
-/// absent, empty (read as absent, as [`canonical_resources`] reads it) or
+/// absent, empty or holding only empty strings (read as absent, as
+/// [`canonical_resources`] and Ranger's `init()` read it) or
 /// carries `isExcludes: true` may-intersect anything; otherwise some value pair
-/// may-intersect — equal under ASCII case folding; or one is exactly `prefix*`
+/// may-intersect — equal under Ranger's full-Unicode ignore-case comparison
+/// ([`folds`]); or one is exactly `prefix*`
 /// and the other starts with that prefix (two such: either prefix starts with
 /// the other); or either value holds any other wildcard or token character,
 /// which is ASSUMED to intersect.
@@ -569,7 +634,7 @@ fn coordinate_hint(a: &Value, b: &Value) -> String {
                 {
                     let common: Vec<String> = lv
                         .iter()
-                        .filter(|v| rv.iter().any(|w| v.eq_ignore_ascii_case(w)))
+                        .filter(|v| rv.iter().any(|w| values_may_intersect(v, w)))
                         .cloned()
                         .collect();
                     (common, false, false)
@@ -588,6 +653,88 @@ fn coordinate_hint(a: &Value, b: &Value) -> String {
     match exact(&ra, &rb) {
         Some(key) if single_maps => render_resources(&key),
         _ => format!("{} ∩ {}", render_resources(&ra), render_resources(&rb)),
+    }
+}
+
+/// The number of levels whose values carry the match-any `*`, when that is
+/// the WHOLE of the policy's resource discount: one map, no `isExcludes`, and
+/// every value either a literal or exactly `*`. `None` when any other wildcard
+/// or token is present (it earns 10 or 5, or is expanded per request), which
+/// this module does not reproduce.
+fn match_any_levels(body: &Value) -> Option<u32> {
+    if body
+        .get("additionalResources")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty())
+    {
+        return None;
+    }
+    let mut n = 0;
+    for (values, excludes, _) in canonical_resources(body).values() {
+        if *excludes {
+            return None;
+        }
+        if values.iter().any(|v| v == "*") {
+            n += 1;
+        } else if values.iter().any(|v| is_unevaluated(v)) {
+            return None;
+        }
+    }
+    Some(n)
+}
+
+/// The decisive bucket with each item's decision (`dataMaskInfo` /
+/// `rowFilterInfo`) removed — what is left is the users, groups, roles,
+/// accesses and conditions `computeEvalOrder()` discounts.
+fn principal_shape(items: Option<&Value>) -> Option<Vec<Value>> {
+    let items = items?.as_array()?;
+    Some(
+        items
+            .iter()
+            .map(|it| {
+                let mut it = it.clone();
+                if let Some(m) = it.as_object_mut() {
+                    m.remove("dataMaskInfo");
+                    m.remove("rowFilterInfo");
+                }
+                it
+            })
+            .collect(),
+    )
+}
+
+/// **Which of a refused pair Ranger serves today, when it can be computed.**
+///
+/// `computeEvalOrder()` (both tags): `10000 − min(100, Σ resource discounts) −
+/// principal − access − condition discounts`; a level holding the match-any `*`
+/// earns 25; the comparator sorts ascending and the first matching mask/filter
+/// is final (module doc, "Why different resources are refused too"; measured
+/// in `docs/en/plans/2026-10-11-sp4d-4-task1-levels-result.md` §4). So when the
+/// two carry the SAME users, groups, roles, accesses and conditions (their
+/// buckets differ only in the decision) and every resource discount is a
+/// match-any one, the policy with more `*` levels — the BROADER one — is
+/// evaluated first and wins wherever both match. A level the policy does not
+/// name earns nothing, so it does not count. Equal discounts fall to the name,
+/// which is not reported as a winner.
+fn served_today<'n>(
+    (an, ab): (&'n str, &Value),
+    (bn, bb): (&'n str, &Value),
+    key: &str,
+) -> Option<String> {
+    let same_shape = principal_shape(ab.get(key))? == principal_shape(bb.get(key))?
+        && ab.get("conditions") == bb.get("conditions");
+    if !same_shape {
+        return None;
+    }
+    let discount = |n: u32| (25 * n).min(100);
+    let (da, db) = (
+        discount(match_any_levels(ab)?),
+        discount(match_any_levels(bb)?),
+    );
+    match da.cmp(&db) {
+        std::cmp::Ordering::Greater => Some(an.to_string()),
+        std::cmp::Ordering::Less => Some(bn.to_string()),
+        std::cmp::Ordering::Equal => None,
     }
 }
 
@@ -705,6 +852,7 @@ pub fn ambiguous_arbitrations_in<'a>(
                     coordinate_hint: coordinate_hint(fb, sb),
                     priority,
                     service,
+                    served_today: served_today((first, fb), (second, sb), item_key(policy_type)),
                 });
             }
         }
@@ -1301,6 +1449,15 @@ mod tests {
             ("ord*", "x?z", true),
             ("o*s", "items", true),
             ("{USER}", "alice", true),
+            // Review C1: Ranger drops an empty value, so `[""]` is match-any.
+            ("", "items", true),
+            // Review I1: full Unicode folding, as Ranger's ignoreCase does.
+            ("ĐƠN_HÀNG", "đơn_hàng", true),
+            ("Đ*", "đơn_hàng", true),
+            ("ĐƠN_HÀNG", "hóa_đơn", false),
+            // Java's per-char `toLowerCase(toUpperCase(c))` equates these;
+            // `to_lowercase()` alone does not.
+            ("ϑ", "ϴ", true),
         ] {
             assert_eq!(
                 resources_may_intersect(&lvl(a), &lvl(b)),
@@ -1351,5 +1508,110 @@ mod tests {
             "{}",
             both.coordinate_hint
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // SP4d-4 Task 2, fix round 1.
+    // -----------------------------------------------------------------------
+
+    /// Review C1: `values: [""]` is a MATCH-ANY level to Ranger (`init()` drops
+    /// the empty value; `LevelMatcher::build` reproduces it), so it decides
+    /// `orders.email` just as `orders` does.
+    #[test]
+    fn a_level_of_only_empty_strings_is_match_any() {
+        let set = [
+            at("table", "", mask("a-mask", "email", "MASK")),
+            mask("b-mask", "email", "MASK_NULL"),
+        ];
+        assert!(check(&set).is_some(), "`[\"\"]` must not read as a literal");
+        // …and an empty string BESIDE a real value is just dropped.
+        let (an, mut a) = mask("a-mask", "email", "MASK");
+        a["resources"]["table"]["values"] = json!(["orders", ""]);
+        let b = at("table", "items", mask("b-mask", "email", "MASK_NULL"));
+        assert_eq!(
+            check(&[(an, a), b]),
+            None,
+            "`[orders, \"\"]` is `{{orders}}`"
+        );
+    }
+
+    /// Review I1: a Vietnamese table name in two cases is one table to Ranger.
+    #[test]
+    fn vietnamese_names_fold_as_ranger_folds_them() {
+        let set = [
+            at("table", "ĐƠN_HÀNG", mask("a-mask", "email", "MASK")),
+            at("table", "đơn_hàng", mask("b-mask", "email", "MASK_NULL")),
+        ];
+        let got = check(&set).expect("ĐƠN_HÀNG and đơn_hàng are one table");
+        assert!(
+            got.coordinate_hint.contains("table=[ĐƠN_HÀNG]"),
+            "the exact intersection names it: {}",
+            got.coordinate_hint
+        );
+    }
+
+    /// Review M5: a NON-boolean `isExcludes` (the string `"true"`) is read as
+    /// excluding — assumed to intersect — not as `false`.
+    #[test]
+    fn a_non_boolean_is_excludes_is_assumed_to_intersect() {
+        for flag in [json!("true"), json!("false"), json!(1)] {
+            let (an, mut a) = at("table", "orders", mask("a-mask", "email", "MASK"));
+            a["resources"]["table"]["isExcludes"] = flag.clone();
+            let b = at("table", "items", mask("b-mask", "email", "MASK_NULL"));
+            assert!(
+                check(&[(an, a), b]).is_some(),
+                "isExcludes = {flag} must fail closed"
+            );
+        }
+    }
+
+    /// Review M1: when the two carry the same users, groups and accesses and
+    /// every resource discount is a match-any one, the sentence names the
+    /// policy Ranger serves today — the BROADER one (Task 1 pin 1) — and
+    /// otherwise names none.
+    #[test]
+    fn the_refusal_names_the_policy_served_today_when_it_can() {
+        let got = check(&[
+            mask("m-narrow", "email", "MASK_NULL"),
+            at("table", "*", mask("m-broad", "email", "MASK")),
+        ])
+        .expect("refused");
+        assert_eq!(got.served_today.as_deref(), Some("m-broad"));
+        let msg = got.refusal();
+        assert!(
+            msg.contains("Today Ranger serves \"m-broad\"")
+                && msg.contains("same users, groups and accesses"),
+            "{msg}"
+        );
+
+        // Same resources: the order falls to the name — no winner named.
+        let tie = check(&[
+            mask("a-mask", "item", "MASK"),
+            mask("b-mask", "item", "MASK_NULL"),
+        ])
+        .expect("refused");
+        assert_eq!(tie.served_today, None);
+        assert!(!tie.refusal().contains("Today Ranger serves"));
+
+        // Different principals (an exempt item): the discounts may differ —
+        // no winner named.
+        let (an, mut a) = at("table", "*", mask("m-broad", "email", "MASK"));
+        let general = a["dataMaskPolicyItems"][0].clone();
+        a["dataMaskPolicyItems"] = json!([{
+            "users": ["vip"], "groups": [], "roles": [],
+            "accesses": [{"type": "select", "isAllowed": true}],
+            "dataMaskInfo": {"dataMaskType": "MASK_NONE"},
+        }, general]);
+        let shaped = check(&[(an, a), mask("m-narrow", "email", "MASK_NULL")]).expect("refused");
+        assert_eq!(shaped.served_today, None);
+
+        // A non-match-any wildcard earns a discount this module does not
+        // reproduce — no winner named.
+        let prefix = check(&[
+            at("table", "ord*", mask("m-prefix", "email", "MASK")),
+            mask("m-narrow", "email", "MASK_NULL"),
+        ])
+        .expect("refused");
+        assert_eq!(prefix.served_today, None);
     }
 }

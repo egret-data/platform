@@ -193,11 +193,18 @@ the following hold:
 **"May decide" (o4)**, computed so it over-approximates — the direction that is sound for a
 refusal:
 
-- **Path vs path.** Per level, the two value sets *may intersect*: equal under ASCII case folding
-  (every level of both service-defs is `ignoreCase: true`), or one is a `prefix*` and the other
-  starts with that prefix (case-folded), or either value contains any other `*`/`?` — then assume
-  they intersect. An absent level, or `*`, intersects everything. All levels must may-intersect.
-  `isExcludes` on either side → assume they intersect.
+- **Path vs path.** Per level, the two value sets *may intersect*: equal under Ranger's own
+  ignore-case comparison — **full Unicode, not ASCII** (every level of both service-defs is
+  `ignoreCase: true`, and Ranger compares with `String.equalsIgnoreCase` / `IOCase.INSENSITIVE`,
+  per UTF-16 unit as `toLowerCase(toUpperCase(c))`; the guard takes two values as equal when they
+  agree under that fold OR under `egret_ranger_eval`'s `to_lowercase()`, so it over-approximates
+  both, and `ĐƠN_HÀNG` meets `đơn_hàng`) — or one is a `prefix*` and the other starts with that
+  prefix (folded the same way), or either value contains any other `*`/`?` (or a `{`/`\` token
+  character) — then assume they intersect. An absent level, a level whose values are all empty
+  strings (Ranger's `init()` drops an empty value, so such a level is match-any), or `*`,
+  intersects everything. All levels must may-intersect. `isExcludes` on either side — including
+  any non-boolean value such as the string `"true"` — → assume they intersect. *(Amended in Task 2
+  fix round 1, review C1/I1/M5; the user ruled full Unicode folding.)*
 - **Tag vs anything.** A tag policy applies at a coordinate when a tag its `resources.tag` values
   cover (Ranger wildcard match, case-folded) is **resolved there from the profile's
   `catalog_tag_assignments`**: a column-level assignment applies to that column; a table-level
@@ -264,7 +271,9 @@ rules and the column, which is the moment the steward can act.
   **the other rule by name** (not `perm-rule-<uuid>`; `DesiredPolicy.rule_id` already carries the
   id, `trigger.rs:278-283`). For a tag assignment the same 409 comes back through `egret-bi`.
 - The editor's refusal becomes **409** too, and its sentence suggests `isOverride` as a remedy, since
-  hand-written policies *can* author priority.
+  hand-written policies *can* author priority. The editor refuses only a pair its write **creates**
+  (pairs after the write minus pairs already stored), so a write that narrows or removes one stored
+  pair succeeds while another stored pair exists *(Task 2 fix round 1, review I2)*.
 - The sentence keeps the existing discipline: it does not say "random", "undefined" or "may change
   between queries" (`ambiguous_arbitration.rs:611-634`), and says which one wins today when the
   evaluator can say so (broader wins within a band).
