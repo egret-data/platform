@@ -478,3 +478,334 @@ async fn catalog_secret_refs_cascade_with_the_catalog() {
     .unwrap();
     assert_eq!(left, 0);
 }
+
+// -- migration 0184: external engines and declared attachments ---------------
+
+const EXTERNAL_INSERT: &str = "INSERT INTO engine_mgmt.engines \
+       (name, type, namespace, spec, status, origin, external_host, external_port, \
+        ranger_plugin_version, root_secret_id) \
+     VALUES ($1, $2, $3, $4, 'running', $5, $6, $7, $8, $9)";
+
+/// One INSERT into `engine_mgmt.engines`, every column the shape CHECK reads
+/// spelled out by the caller.
+#[allow(clippy::too_many_arguments)]
+async fn insert_engine_row(
+    db: &Db,
+    name: &str,
+    ty: &str,
+    namespace: &str,
+    spec: serde_json::Value,
+    origin: &str,
+    host: Option<&str>,
+    port: Option<i32>,
+    version: Option<&str>,
+    root_secret: Option<Uuid>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(EXTERNAL_INSERT)
+        .bind(name)
+        .bind(ty)
+        .bind(namespace)
+        .bind(spec)
+        .bind(origin)
+        .bind(host)
+        .bind(port)
+        .bind(version)
+        .bind(root_secret)
+        .execute(&db.pool)
+        .await
+        .map(|_| ())
+}
+
+/// Every outcome is collected first and asserted after the rows are removed, so
+/// a failed assertion cannot leave this test's engines behind.
+#[tokio::test]
+async fn the_external_shape_check_admits_one_shape_and_names_itself_refusing_the_rest() {
+    let db = harness_or_skip!();
+    let tag = Uuid::new_v4().simple().to_string();
+    let n = |s: &str| format!("ext-shape-{s}-{tag}");
+    let empty = serde_json::json!({});
+
+    let missing_version = insert_engine_row(
+        &db,
+        &n("nover"),
+        "starrocks",
+        "",
+        empty.clone(),
+        "external",
+        Some("sr.example.com"),
+        Some(9030),
+        None,
+        None,
+    )
+    .await;
+    let bad_version = insert_engine_row(
+        &db,
+        &n("badver"),
+        "starrocks",
+        "",
+        empty.clone(),
+        "external",
+        Some("sr.example.com"),
+        Some(9030),
+        Some("2.8"),
+        None,
+    )
+    .await;
+    let with_root_secret = insert_engine_row(
+        &db,
+        &n("secret"),
+        "starrocks",
+        "",
+        empty.clone(),
+        "external",
+        Some("sr.example.com"),
+        Some(9030),
+        Some("2.8.0"),
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    let with_namespace = insert_engine_row(
+        &db,
+        &n("ns"),
+        "starrocks",
+        "egret-engines",
+        empty.clone(),
+        "external",
+        Some("sr.example.com"),
+        Some(9030),
+        Some("2.8.0"),
+        None,
+    )
+    .await;
+    let with_spec = insert_engine_row(
+        &db,
+        &n("spec"),
+        "starrocks",
+        "",
+        serde_json::json!({"a": 1}),
+        "external",
+        Some("sr.example.com"),
+        Some(9030),
+        Some("2.8.0"),
+        None,
+    )
+    .await;
+    let port_zero = insert_engine_row(
+        &db,
+        &n("port0"),
+        "starrocks",
+        "",
+        empty.clone(),
+        "external",
+        Some("sr.example.com"),
+        Some(0),
+        Some("2.8.0"),
+        None,
+    )
+    .await;
+    let empty_host = insert_engine_row(
+        &db,
+        &n("nohost"),
+        "starrocks",
+        "",
+        empty.clone(),
+        "external",
+        Some(""),
+        Some(9030),
+        Some("2.8.0"),
+        None,
+    )
+    .await;
+    let risingwave = insert_engine_row(
+        &db,
+        &n("rw"),
+        "risingwave",
+        "",
+        empty.clone(),
+        "external",
+        Some("rw.example.com"),
+        Some(4566),
+        Some("2.8.0"),
+        None,
+    )
+    .await;
+    let provisioned_with_host = insert_engine_row(
+        &db,
+        &n("provhost"),
+        "trino",
+        "egret-engines",
+        empty.clone(),
+        "provisioned",
+        Some("trino.example.com"),
+        None,
+        None,
+        None,
+    )
+    .await;
+    let provisioned_with_version = insert_engine_row(
+        &db,
+        &n("provver"),
+        "trino",
+        "egret-engines",
+        empty.clone(),
+        "provisioned",
+        None,
+        None,
+        Some("2.5.0"),
+        None,
+    )
+    .await;
+    let unknown_origin = insert_engine_row(
+        &db,
+        &n("origin"),
+        "trino",
+        "egret-engines",
+        empty.clone(),
+        "managed",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let well_formed = insert_engine_row(
+        &db,
+        &n("ok"),
+        "starrocks",
+        "",
+        empty.clone(),
+        "external",
+        Some("sr.example.com"),
+        Some(9030),
+        Some("2.8.0"),
+        None,
+    )
+    .await;
+    let provisioned_ok = insert_engine_row(
+        &db,
+        &n("provok"),
+        "trino",
+        "egret-engines",
+        empty,
+        "provisioned",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    sqlx::query("DELETE FROM engine_mgmt.engines WHERE name LIKE $1")
+        .bind(format!("%-{tag}"))
+        .execute(&db.pool)
+        .await
+        .expect("cleanup");
+
+    for (what, outcome) in [
+        ("external without a plugin version", &missing_version),
+        ("external with a malformed plugin version", &bad_version),
+        ("external carrying a root secret", &with_root_secret),
+        ("external with a namespace", &with_namespace),
+        ("external with a spec", &with_spec),
+        ("external with port 0", &port_zero),
+        ("external with an empty host", &empty_host),
+        ("external risingwave", &risingwave),
+        (
+            "provisioned carrying an external host",
+            &provisioned_with_host,
+        ),
+        (
+            "provisioned carrying a plugin version",
+            &provisioned_with_version,
+        ),
+    ] {
+        let err = outcome.as_ref().expect_err(what);
+        assert!(
+            is_check_violation(err, "engines_external_shape"),
+            "{what}: {err:?}"
+        );
+    }
+    let err = unknown_origin.expect_err("origin outside the closed set");
+    assert!(is_check_violation(&err, "engines_origin_check"), "{err:?}");
+    well_formed.expect("a well-formed external row is accepted");
+    provisioned_ok.expect("a provisioned row with none of the external fields is accepted");
+}
+
+#[tokio::test]
+async fn a_declared_attachment_holds_nothing_and_the_check_names_itself() {
+    let db = harness_or_skip!();
+    let tag = Uuid::new_v4().simple().to_string();
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines \
+           (name, type, namespace, spec, status, origin, external_host, external_port, \
+            ranger_plugin_version) \
+         VALUES ($1, 'trino', '', '{}'::jsonb, 'running', 'external', 'trino.example.com', \
+                 8080, '2.5.0') RETURNING id",
+    )
+    .bind(format!("ext-decl-{tag}"))
+    .fetch_one(&db.pool)
+    .await
+    .expect("external engine");
+    let mut catalogs = Vec::new();
+    for i in 0..4 {
+        catalogs.push(
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO registry.catalogs (name, kind, config) \
+                 VALUES ($1, 'generic', '{}'::jsonb) RETURNING id",
+            )
+            .bind(format!("ext_decl_{i}_{tag}"))
+            .fetch_one(&db.pool)
+            .await
+            .expect("catalog"),
+        );
+    }
+    let insert = |catalog: Uuid, minted: bool, primary: bool, status: &'static str| {
+        let pool = db.pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO registry.engine_catalog_attachments \
+                   (engine_id, catalog_id, minted_client, is_primary, apply_status) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(engine_id)
+            .bind(catalog)
+            .bind(minted)
+            .bind(primary)
+            .bind(status)
+            .execute(&pool)
+            .await
+        }
+    };
+    let minted = insert(catalogs[0], true, false, "declared").await;
+    let primary = insert(catalogs[1], false, true, "declared").await;
+    let ok = insert(catalogs[2], false, false, "declared").await;
+    let unknown_status = insert(catalogs[3], false, false, "guessed").await;
+
+    sqlx::query("DELETE FROM engine_mgmt.engines WHERE id = $1")
+        .bind(engine_id)
+        .execute(&db.pool)
+        .await
+        .expect("cleanup engine (cascades attachments)");
+    sqlx::query("DELETE FROM registry.catalogs WHERE id = ANY($1)")
+        .bind(&catalogs)
+        .execute(&db.pool)
+        .await
+        .expect("cleanup catalogs");
+
+    let err = minted.expect_err("a declared attachment that minted a client");
+    assert!(
+        is_check_violation(&err, "attachments_declared_holds_nothing"),
+        "{err:?}"
+    );
+    let err = primary.expect_err("a declared attachment that is primary");
+    assert!(
+        is_check_violation(&err, "attachments_declared_holds_nothing"),
+        "{err:?}"
+    );
+    let err = unknown_status.expect_err("a status outside the closed set");
+    assert!(
+        is_check_violation(&err, "engine_catalog_attachments_apply_status_check"),
+        "{err:?}"
+    );
+    ok.expect("a well-formed declared attachment is accepted");
+}
