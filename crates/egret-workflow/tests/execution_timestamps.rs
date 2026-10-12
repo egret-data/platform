@@ -1,5 +1,5 @@
 //! Real start and end times for executions, task runs and attempts (W7b
-//! Task 1, migration 0180; spec
+//! Task 1, migration 0183; spec
 //! `docs/en/specs/2026-10-11-workflow-w7b-executions-design.md` §3).
 //!
 //! Every test here drives the **real worker** on a private database
@@ -214,8 +214,8 @@ const TERMINAL: [&str; 7] = [
 
 /// §3.2's invariants, over EVERY row the test produced: an end is never
 /// before its start, and only a terminal row has an end. With `strict`, every
-/// terminal row also HAS one -- true of every row a post-0180 writer produced,
-/// and false by construction of a row made to look pre-0180.
+/// terminal row also HAS one -- true of every row a post-0183 writer produced,
+/// and false by construction of a row made to look pre-0183.
 ///
 /// **Not asserted: "no execution leaves a terminal state".** Spec §3.2 says
 /// nothing does today, and that was measured false here: a
@@ -827,7 +827,7 @@ async fn a_terminal_rows_end_does_not_move_on_later_writes(pool: sqlx::PgPool) {
     assert_invariants(&pool, true).await;
 }
 
-/// A row from BEFORE migration 0180 -- terminal or running, with no times --
+/// A row from BEFORE migration 0183 -- terminal or running, with no times --
 /// is not given a start or an end it did not have. Only a transition it
 /// actually makes afterwards is stamped.
 #[sqlx::test(migrations = "../../migrations")]
@@ -835,7 +835,7 @@ async fn a_row_from_before_the_migration_is_not_guessed(pool: sqlx::PgPool) {
     let (_db, ws, _) = seed(&pool).await;
     let ex = start(&pool, ws, &two_logs("legacy")).await;
     drain(&pool, &Succeeds).await;
-    // Make it look like a pre-0180 row: same states, no times.
+    // Make it look like a pre-0183 row: same states, no times.
     sqlx::query("UPDATE workflow.executions SET started_at = NULL, ended_at = NULL WHERE id = $1")
         .bind(ex)
         .execute(&pool)
@@ -1003,7 +1003,7 @@ fn all_model_states() -> Vec<egret_workflow::models::State> {
 }
 
 /// `workflow.state_is_terminal`, the one SQL copy of the terminal list used
-/// by the stamp helper and by 0180's CHECKs, is EXACTLY
+/// by the stamp helper and by 0183's CHECKs, is EXACTLY
 /// `models::State::is_terminated` (spec §3.2's authority) on all 17 states.
 /// It agrees with `RunState::is_terminal` on every variant, and answers false
 /// for a spelling it does not know.
@@ -1093,7 +1093,7 @@ async fn the_schema_refuses_an_end_on_a_live_row_and_an_end_before_the_start(poo
 /// link columns -- `workflow_executions_loop_run_idx` (0135/0138) and
 /// `workflow_executions_trigger_idx` (0138) -- and never by a scan.
 ///
-/// **This is why migration 0180 builds no index.** The spec asked for
+/// **This is why migration 0183 builds no index.** The spec asked for
 /// `(workspace_id, parent_execution_id)` and `(workspace_id,
 /// trigger_execution_id)`; with both built, this same `EXPLAIN` chose neither
 /// (the first run of this test, recorded in the W7b Task 1 report).
@@ -1375,9 +1375,9 @@ fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 ///   of its `state`/`history` values;
 /// - an `UPDATE` whose state write it cannot recognise as one.
 ///
-/// Migration 0180's CHECKs catch only part of a bypass at runtime: an end on
+/// Migration 0183's CHECKs catch only part of a bypass at runtime: an end on
 /// a live row, or an end before its start. A bypass that writes a terminal
-/// state and leaves `ended_at` NULL passes both, and looks like a pre-0180
+/// state and leaves `ended_at` NULL passes both, and looks like a pre-0183
 /// row. The scenario tests in this file are what catch a wrong VALUE on the
 /// paths that exist.
 #[test]

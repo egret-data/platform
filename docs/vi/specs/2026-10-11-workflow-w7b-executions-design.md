@@ -17,7 +17,7 @@ Bộ rule frontend `docs/en/frontend-rules.md` ràng buộc mọi dòng code fro
 **Spec W7a:** `docs/{en,vi}/specs/2026-10-10-workflow-w7a-flows-design.md`. Các phán quyết trong đó vẫn còn hiệu lực, nhất là: mọi execution chạy bản draft đã lưu.
 
 **Đã quyết với người dùng, 2026-10-11:**
-- **Mốc thời gian thật.** Execution và task run có `started_at` và `ended_at` thật; attempt có thời điểm kết thúc. Tất cả được ghi ngay khi state đổi (migration 0180).
+- **Mốc thời gian thật.** Execution và task run có `started_at` và `ended_at` thật; attempt có thời điểm kết thúc. Tất cả được ghi ngay khi state đổi (migration 0183).
 - **API danh sách.** Danh sách execution có thêm bộ lọc "chỉ execution gốc" và bộ lọc "con của execution X". `replayed_from_execution_id` được đưa ra API.
 - **Ngoài phạm vi.** Kill, restart, labels, metrics và output cấp execution không làm, vì backend chưa có.
 - **Trang chi tiết dùng tab như Kestra:** Overview, Gantt, Logs, Outputs; tab nằm trên URL.
@@ -85,7 +85,7 @@ Gantt cần thời điểm bắt đầu và kết thúc thật, nhưng engine ch
 
 ## 3. Backend: mốc thời gian thật
 
-### 3.1 Migration 0180
+### 3.1 Migration 0183
 
 ```sql
 ALTER TABLE workflow.executions
@@ -261,7 +261,7 @@ Mọi hành động bị vô hiệu hoá đều hiện lý do thành chữ (FE-A
 
 ### 6.3 Thời gian ước tính
 
-Execution ghi trước migration 0180 có `started_at`/`ended_at` null. Khi đó gantt dùng lại cách tính cũ (`gantt_rows` trong `tests/executions_routes.rs`):
+Execution ghi trước migration 0183 có `started_at`/`ended_at` null. Khi đó gantt dùng lại cách tính cũ (`gantt_rows` trong `tests/executions_routes.rs`):
 - bắt đầu là `created_at` của execution cộng `attempts[0].started_at`;
 - kết thúc là `updated_at` của run, khi `ended_seq` đã có giá trị hoặc khi state của run đã kết thúc. Run có chip báo đã xong không bao giờ bị vẽ kéo dài tới hiện tại; `updated_at` của nó là lần ghi kết thúc, vì claim và reap chỉ chạm vào run đang `RUNNING`. *(Thêm 2026-10-11, Task 4.)*
 - trong một execution đã xong, run chưa kết thúc được cắt tại thời điểm kết thúc của execution và đánh dấu là ước tính.
@@ -447,7 +447,7 @@ Spec được chạy đỏ với ba mutation (`root_only` không bao giờ đư�
 
 ## 13. Hình dạng plan
 
-1. Backend: migration 0180, ghi mốc thời gian ở mọi chỗ đổi state, thời điểm kết thúc của attempt, `root_only`/`parent` (không thêm index mới, §3.3), trường mới trong DTO, sinh lại API.
+1. Backend: migration 0183, ghi mốc thời gian ở mọi chỗ đổi state, thời điểm kết thúc của attempt, `root_only`/`parent` (không thêm index mới, §3.3), trường mới trong DTO, sinh lại API.
 2. Danh sách execution và tab Executions trong trang flow.
 3. Khung trang chi tiết: route, header, polling, tab, Overview, hành động.
 4. Gantt.
@@ -470,7 +470,7 @@ Toàn bộ `docs/en/frontend-rules.md`. Những rule quan trọng nhất ở đ�
 
 ## 15. Giới hạn đã biết
 
-- Execution ghi trước migration 0180 có thời gian ước tính (§6.3).
+- Execution ghi trước migration 0183 có thời gian ước tính (§6.3).
 - Một lần retry của một vòng lặp con hoặc của một execution con do subflow tạo ra hiện trong danh sách mặc định như một execution gốc. Execution thay thế do `CREATE_NEW_EXECUTION` tạo ra mang `parent_execution_id` (là execution con) nhưng không có `loop_index` và không có `trigger_execution_id`, đúng hình dạng của một lần retry của execution gốc, nên `root_only` giữ nó lại (§3.3). *(Phát hiện trong review Task 2.)*
 - Một `Pause` có `behavior`, `onPause`, `tasks` hoặc `errors` bị từ chối chứ không chạy (Kestra chạy cả bốn). Execution đã kẹt vì một `Pause` như vậy trước ngày 2026-10-11 vẫn kẹt; replay nó bị từ chối vì source đã đóng băng của nó không lập kế hoạch được nữa. *(Quyết định 2026-10-11, Task 4b.)*
 - **Tìm thấy trong Task 7, 2026-10-12**, bằng cách đo trên trình duyệt:

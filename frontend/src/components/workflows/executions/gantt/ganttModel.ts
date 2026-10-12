@@ -15,7 +15,7 @@ import { hasRun } from "@/components/workflows/executions/timing";
  * |---|---|---|
  * | never ran (no `RUNNING` in `history`, no `started_at`): `CREATED`, `SKIPPED`, cancelled at `CREATED` | — a marker, never a bar | — |
  * | ran, `started_at` recorded | `started_at` | `ended_at`; else now while live |
- * | ran, `started_at` null (before migration 0180, or in flight when it was deployed) | `created_at` + `attempts[0].started_at`, else the run's own `created_at` (a flowable has no attempts) — estimated | as above |
+ * | ran, `started_at` null (before migration 0183, or in flight when it was deployed) | `created_at` + `attempts[0].started_at`, else the run's own `created_at` (a flowable has no attempts) — estimated | as above |
  *
  * **The end, for any run that ran:** `ended_at` when recorded (real); else
  * `updated_at` once `ended_seq` is set or the run's state is terminal —

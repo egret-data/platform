@@ -283,7 +283,7 @@ pub struct Attempt {
     pub started_at: Tick,
     /// When this attempt reached a terminal state, on the same clock as
     /// [`Self::started_at`]; `None` while it is open, and for an attempt
-    /// written before migration 0180.
+    /// written before migration 0183.
     ///
     /// **[`apply`] never writes it, and [`advance`](super::advance) never
     /// reads it.** It is a fact about when the environment committed the end,

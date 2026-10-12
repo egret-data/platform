@@ -1,4 +1,4 @@
--- 0180_workflow_execution_timestamps.sql
+-- 0183_workflow_execution_timestamps.sql
 --
 -- W7b Task 1 (spec `docs/en/specs/2026-10-11-workflow-w7b-executions-design.md`
 -- §3): real start and end times for executions and task runs. The executions
@@ -57,7 +57,7 @@ CREATE FUNCTION workflow.state_is_terminal(state text) RETURNS boolean
 -- whose `now()` predates the one that set `started_at`, which a lock wait can
 -- produce. These catch PART of a bypass, an end on a live row or an end
 -- before its start. They do not catch a bypass that writes a terminal state
--- and leaves `ended_at` NULL; that row is indistinguishable from a pre-0180
+-- and leaves `ended_at` NULL; that row is indistinguishable from a pre-0183
 -- one. Existing rows hold NULLs and satisfy both.
 ALTER TABLE workflow.executions
   ADD CONSTRAINT workflow_executions_ended_only_when_terminal

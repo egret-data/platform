@@ -23,7 +23,7 @@ export interface AttemptDto {
   started_at: number;
   /**
      * Milliseconds after the execution's `created_at`. Absent while the
-     * attempt is open, and on an attempt recorded before migration 0180.
+     * attempt is open, and on an attempt recorded before migration 0183.
      * @nullable
      */
   ended_at?: number | null;

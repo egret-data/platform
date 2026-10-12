@@ -807,7 +807,7 @@ async fn every_repository_column_reaches_the_wire() {
     let id = insert_execution(&db, ws, None, "a.keys", "f", "RUNNING", at(1)).await;
     insert_wired_task_run(&db, id).await;
     // W7b Task 1's three execution columns, each with a value of its own. A
-    // RUNNING row cannot carry an `ended_at` (migration 0180's CHECK), so the
+    // RUNNING row cannot carry an `ended_at` (migration 0183's CHECK), so the
     // end is asserted `null` -- still distinct from the start beside it, which
     // is what would show a crossed wire.
     let replayed_from =

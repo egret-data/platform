@@ -822,10 +822,10 @@ pub struct ExecutionRow {
     pub origin_offset_ms: i64,
     /// The execution a manual replay was started from (migration 0166).
     pub replayed_from_execution_id: Option<Uuid>,
-    /// The first time the execution entered `RUNNING` (migration 0180);
+    /// The first time the execution entered `RUNNING` (migration 0183);
     /// `NULL` before that, and for a row that predates the column.
     pub started_at: Option<DateTime<Utc>>,
-    /// When the execution entered a terminal state (migration 0180); `NULL`
+    /// When the execution entered a terminal state (migration 0183); `NULL`
     /// while it has not, and for a row that predates the column.
     pub ended_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -865,11 +865,11 @@ pub struct TaskRunRow {
     pub created_seq: Option<i64>,
     pub ended_seq: Option<i64>,
     pub resume_with: Option<String>,
-    /// The first time the run entered `RUNNING` (migration 0180). `NULL` for a
+    /// The first time the run entered `RUNNING` (migration 0183). `NULL` for a
     /// run that never ran (`SKIPPED`, or not yet started) and for a row that
     /// predates the column.
     pub started_at: Option<DateTime<Utc>>,
-    /// When the run entered a terminal state (migration 0180); `NULL` while
+    /// When the run entered a terminal state (migration 0183); `NULL` while
     /// it has not.
     pub ended_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -989,7 +989,7 @@ const LIST_SQL: &str = concat!(
 /// Test-only (`test-util`): [`ExecutionRepo::list`]'s page statement, for
 /// `tests/execution_timestamps.rs`, which `EXPLAIN`s this exact text to show
 /// that the `parent=` filter is served by the partial indexes of migrations
-/// 0135/0138. Migration 0180 builds none.
+/// 0135/0138. Migration 0183 builds none.
 #[cfg(any(test, feature = "test-util"))]
 #[doc(hidden)]
 pub const EXECUTION_LIST_SQL: &str = LIST_SQL;

@@ -1,4 +1,4 @@
-//! Real start and end times (W7b Task 1, migration 0180) — **the one place
+//! Real start and end times (W7b Task 1, migration 0183) — **the one place
 //! the timestamp columns of `workflow.executions` and `workflow.task_runs`
 //! are spelled**, and the attempt end beside them.
 //!
@@ -14,7 +14,7 @@
 //! `tests/execution_timestamps.rs::every_state_write_stamps_the_timestamps`
 //! scans the source for statements that write `state` on either table and
 //! fails naming one that does not use these macros. That guard is lexical,
-//! and its doc lists what it cannot see. Migration 0180's CHECKs catch only
+//! and its doc lists what it cannot see. Migration 0183's CHECKs catch only
 //! part of a bypass: an end on a live row, or an end before the start. A
 //! bypass that writes a terminal state and leaves `ended_at` NULL passes both.
 //!
@@ -55,7 +55,7 @@
 //! transaction loaded under the row lock, the same way `history` and
 //! `attempts` themselves are written.
 //!
-//! **A pre-0180 row is never guessed.** A row that was already running or
+//! **A pre-0183 row is never guessed.** A row that was already running or
 //! terminal when the migration ran has an unchanged prefix, so neither
 //! boolean fires and its NULLs stay NULL (spec §3.1).
 //!
@@ -171,7 +171,7 @@ pub(crate) use {stamp_columns, stamp_set, stamp_values};
 ///
 /// "Ended in this settle" is: terminal now, no end yet, and not the attempt
 /// `before` held at the same position. The last term is what keeps a
-/// pre-0180 attempt, terminal with no `ended_at`, from being given an end it
+/// pre-0183 attempt, terminal with no `ended_at`, from being given an end it
 /// did not have — it is unchanged, so it is skipped. `advance()` never writes
 /// this field; it is a fact about the environment, not about the executor's
 /// decisions.
@@ -234,7 +234,7 @@ mod tests {
     /// Every branch of the rule, each beside its control.
     #[test]
     fn an_attempt_is_stamped_exactly_when_this_settle_ended_it() {
-        // Arrange: four runs. 0 ends now; 1 stays open; 2 is a pre-0180
+        // Arrange: four runs. 0 ends now; 1 stays open; 2 is a pre-0183
         // terminal attempt with no end, unchanged; 3 already has an end.
         let before = state(vec![
             run(vec![attempt(&[C, R], 10, None)]),
@@ -310,7 +310,7 @@ mod tests {
         assert_eq!(entered(&[C], &[C, R]), (true, false));
         assert_eq!(entered(&[C, R], &[C, R, S]), (false, true));
         assert_eq!(entered(&[C], &[C, R, S]), (true, true));
-        // A rewrite with nothing new (lease release, pre-0180 row).
+        // A rewrite with nothing new (lease release, pre-0183 row).
         assert_eq!(entered(&[C, R, S], &[C, R, S]), (false, false));
         assert_eq!(entered(&[C, R], &[C, R]), (false, false));
         // Terminal to terminal does not re-enter.

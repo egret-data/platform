@@ -1225,7 +1225,7 @@ pub struct AttemptDto {
     /// Milliseconds after the execution's `created_at`.
     pub started_at: i64,
     /// Milliseconds after the execution's `created_at`. Absent while the
-    /// attempt is open, and on an attempt recorded before migration 0180.
+    /// attempt is open, and on an attempt recorded before migration 0183.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<i64>,
 }

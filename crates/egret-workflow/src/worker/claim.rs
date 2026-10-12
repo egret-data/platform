@@ -3741,7 +3741,7 @@ fn attempts_json(attempts: &[Attempt]) -> serde_json::Value {
             .iter()
             .map(|a| {
                 // `ended_at` only once there is one: an attempt written before
-                // migration 0180, or one still open, has no key rather than a
+                // migration 0183, or one still open, has no key rather than a
                 // `null` that reads like a measurement.
                 let mut o = serde_json::json!({
                     "history": states_json(&a.history),
@@ -3821,7 +3821,7 @@ fn parse_attempts(owner: Uuid, v: &serde_json::Value) -> Result<Vec<Attempt>> {
                     ))
                 })?;
             // Absent on an open attempt and on one written before
-            // migration 0180; a present key that is not an integer is
+            // migration 0183; a present key that is not an integer is
             // corruption, like a missing `started_at`.
             let ended_at = match a.get("ended_at") {
                 None | Some(serde_json::Value::Null) => None,

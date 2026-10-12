@@ -5,15 +5,15 @@ import { fullTimestamp } from "@/lib/relativeTime";
  * WHEN AN EXECUTION RAN, AND FOR HOW LONG: the one place the list, the detail
  * header and the gantt read it from (W7b spec §3.2, §6.3).
  *
- * Migration 0180 added `started_at` and `ended_at`. Each null means something
+ * Migration 0183 added `started_at` and `ended_at`. Each null means something
  * different, so each field is judged on its own, never "both null means old":
  *
  * | `started_at` | `ended_at` | history has `RUNNING` | what it is |
  * |---|---|---|---|
  * | set | set | — | exact |
  * | set | null | — | still running or paused (ticks to now) |
- * | null | set | yes | in flight when 0180 was deployed: the end is real, the start is not |
- * | null | null | yes, row terminal | recorded before 0180 (legacy) |
+ * | null | set | yes | in flight when 0183 was deployed: the end is real, the start is not |
+ * | null | null | yes, row terminal | recorded before 0183 (legacy) |
  * | null | null | yes, row live | in flight at deploy and still going |
  * | null | any | no | never ran: CREATED/QUEUED, SKIPPED, or cancelled by an SLA at CREATED |
  *

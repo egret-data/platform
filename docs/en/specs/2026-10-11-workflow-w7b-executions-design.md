@@ -15,7 +15,7 @@ The frontend rulebook `docs/en/frontend-rules.md` binds every frontend line.
 **W7a spec:** `docs/{en,vi}/specs/2026-10-10-workflow-w7a-flows-design.md`. Its rulings still hold. In particular, every execution runs the saved draft.
 
 **Decided with the user, 2026-10-11:**
-- **Real timestamps.** Executions and task runs get real `started_at` and `ended_at`, and attempts get an end, each written when the state changes (migration 0180). The executions list gains a root-only filter and a children-of filter, and `replayed_from_execution_id` is exposed. Kill, restart, labels, metrics and execution-level outputs stay out, because the backend has none of them.
+- **Real timestamps.** Executions and task runs get real `started_at` and `ended_at`, and attempts get an end, each written when the state changes (migration 0183). The executions list gains a root-only filter and a children-of filter, and `replayed_from_execution_id` is exposed. Kill, restart, labels, metrics and execution-level outputs stay out, because the backend has none of them.
 - **Kestra's tabs.** The execution detail has the tabs Overview, Gantt, Logs and Outputs, with the tab in the URL. Clicking a run in the Gantt opens that run's logs and outputs. Metrics and Dependencies are left out because there is no data for them. W7c adds Topology.
 - **The list.** It shows root executions by default, with a "Show child executions" switch. There are no bulk actions, because the backend replays and resumes one execution at a time.
 
@@ -78,7 +78,7 @@ The gantt needs real start and end times, and the engine does not record them. T
 
 ## 3. Backend: real timestamps
 
-### 3.1 Migration 0180
+### 3.1 Migration 0183
 
 ```sql
 ALTER TABLE workflow.executions
@@ -255,7 +255,7 @@ Every disabled action shows its reason as visible text (FE-ACTION-4), using W7a'
 
 ### 6.3 Estimated times
 
-For an execution recorded before migration 0180, `started_at` and `ended_at` are null. The gantt then uses the old recipe (`tests/executions_routes.rs` `gantt_rows`):
+For an execution recorded before migration 0183, `started_at` and `ended_at` are null. The gantt then uses the old recipe (`tests/executions_routes.rs` `gantt_rows`):
 - start is the execution's `created_at` plus `attempts[0].started_at`;
 - end is the run's `updated_at` once `ended_seq` is set, or once the run's state is terminal. A run whose chip says it finished is never drawn open to now; its `updated_at` is its ending write, because claim and reap only touch `RUNNING` runs. *(Added 2026-10-11, Task 4.)*
 - in a finished execution, a run that has not ended is capped at the execution's end and marked estimated.
@@ -445,7 +445,7 @@ It was run red against three mutations (`root_only` never sent, log polling neve
 
 ## 13. Plan shape
 
-1. Backend: migration 0180, timestamp writes at every state site, attempt ends, `root_only`/`parent` (no new index, §3.3), DTO fields, and the regenerated API.
+1. Backend: migration 0183, timestamp writes at every state site, attempt ends, `root_only`/`parent` (no new index, §3.3), DTO fields, and the regenerated API.
 2. The executions list and the flow's Executions tab.
 3. The execution detail frame: routes, header, polling, tabs, Overview, and the actions.
 4. The Gantt.
@@ -468,7 +468,7 @@ All of `docs/en/frontend-rules.md`. The rules most at stake:
 
 ## 15. Known limits
 
-- Executions recorded before migration 0180 have estimated times (§6.3).
+- Executions recorded before migration 0183 have estimated times (§6.3).
 - A retry of a loop iteration or of a subflow child appears in the default list as a root. Its `CREATE_NEW_EXECUTION` replacement carries `parent_execution_id` (the child) with no `loop_index` and no `trigger_execution_id`, which is exactly the shape of a retry of a root, so `root_only` keeps it (§3.3). *(Found in the Task 2 review.)*
 - A `Pause` with `behavior`, `onPause`, `tasks` or `errors` is refused, not run (Kestra runs all four). An execution already stalled on one before 2026-10-11 stays stalled; replaying it is refused because its frozen source no longer plans. *(Ruled 2026-10-11, Task 4b.)*
 - **Found in Task 7, 2026-10-12**, by measuring in the browser:

@@ -5,7 +5,7 @@
 **Goal:** In the browser, a user lists executions (root executions by default), opens one, and sees four tabs (Overview, Gantt, Logs, Outputs). They can resume or replay it. The gantt draws real start and end times, recorded by the engine on every state change.
 
 **Architecture:**
-- **Backend** (`crates/egret-workflow` plus migration 0180):
+- **Backend** (`crates/egret-workflow` plus migration 0183):
   - `started_at`/`ended_at` on executions and task runs, and `ended_at` on each attempt. All are written inside the same `UPDATE` that changes state.
   - `root_only` and `parent` filters on the list.
   - New DTO fields.
@@ -26,7 +26,7 @@
 
 - **The frontend rulebook binds every frontend line:** `docs/en/frontend-rules.md`. Every task review answers its reviewer checklist.
 - **User decisions (spec header, 2026-10-11)**, in effect verbatim:
-  - Real timestamps come from migration 0180, written when the state changes.
+  - Real timestamps come from migration 0183, written when the state changes.
   - The list gets `root_only` and `parent` filters, and `replayed_from_execution_id` in the DTO.
   - There is no kill, restart, labels, metrics or execution-level outputs.
   - The detail page has the tabs Overview, Gantt, Logs and Outputs, with the tab in the URL. Clicking a run in the Gantt opens its logs and outputs.
@@ -46,7 +46,7 @@
 - **List page size:** 50.
 - **Log page size:** 500, virtualised.
 - **Query keys:** `workflowsKeys`. Workspace-scoped keys carry the slug.
-- **Migration number:** 0180. Check `ls migrations | sort | tail -1` first; if 0180 is taken on main, use the next free number and say so.
+- **Migration number:** 0183. Check `ls migrations | sort | tail -1` first; if 0183 is taken on main, use the next free number and say so.
 - **Never touch the shared dev stack.**
   - Backend tests use this branch's Postgres container `egret-w7b-postgres` on :5442, via `source .superpowers/sdd/2026-10-11-workflow-w7b-executions/w7b-env.sh`.
   - Playwright runs on a private stack.
@@ -71,7 +71,7 @@
 ### Task 1: Backend — real timestamps, list filters, DTO fields
 
 **Files:**
-- Create: `migrations/0180_workflow_execution_timestamps.sql`
+- Create: `migrations/0183_workflow_execution_timestamps.sql`
 - Modify:
   - every state-writing site of `workflow.executions` and `workflow.task_runs` (executor, worker, subflow, loop, retry, resume, SLA cancel, replay; enumerate them with grep: `UPDATE workflow.executions`, `UPDATE workflow.task_runs`, `SET state`)
   - `repo.rs`: the list query
@@ -112,7 +112,7 @@
   15. **Index.** `EXPLAIN` for `parent=` uses the new index.
 
 - [ ] **Step 3: Implement.**
-  - **Migration 0180:** the four columns, plus the two partial indexes `(workspace_id, parent_execution_id) WHERE parent_execution_id IS NOT NULL` and the same for `trigger_execution_id`.
+  - **Migration 0183:** the four columns, plus the two partial indexes `(workspace_id, parent_execution_id) WHERE parent_execution_id IS NOT NULL` and the same for `trigger_execution_id`.
   - **One SQL fragment helper** for the timestamp CASE, used by every writer.
   - **The attempt `ended_at`** is set at the same write that ends the attempt.
   - **No read-then-write anywhere.**
