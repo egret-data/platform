@@ -1276,12 +1276,6 @@ fn a_changed_tag_policy_keeps_the_probes_that_carry_its_tag() {
     let (plan, ds, _) = pruned_agrees(&before, &after, &assignments, &BOTH);
     assert_eq!(plan.fallback, None);
     assert!(!ds.is_empty());
-    assert!(plan.probes.iter().all(|p| p
-        .request
-        .resolved_tags
-        .as_ref()
-        .is_some_and(|t| !t.as_slice().is_empty())
-        || true));
     // Every probe is at a tagging that carries `phi`.
     let carrying = |p: &Probe| {
         p.request
@@ -1673,7 +1667,7 @@ fn random_policy(rng: &mut Rng, name: &str) -> Value {
             });
             p["dataMaskPolicyItems"] = json!([
                 mask_item(&["alice"], &[], "MASK_NONE"),
-                mask_item(&[], &["public"], *rng.pick(&["MASK_NULL", "MASK_HASH"]))
+                mask_item(&[], &["public"], rng.pick(&["MASK_NULL", "MASK_HASH"]))
             ]);
         }
         _ => {
@@ -1698,7 +1692,7 @@ fn random_tag_policy(rng: &mut Rng) -> Value {
     if rng.chance(50) {
         tag_deny_pii()
     } else {
-        tag_mask(*rng.pick(&["MASK_NULL", "MASK_HASH"]))
+        tag_mask(rng.pick(&["MASK_NULL", "MASK_HASH"]))
     }
 }
 
@@ -1722,7 +1716,7 @@ fn corpus() -> Vec<(ServicePolicySet, ServicePolicySet, Vec<TagAssignment>)> {
             let mut tag_after = tag_before.clone();
             for _ in 0..1 + rng.below(2) {
                 match rng.below(6) {
-                    0 | 1 | 2 if !after.is_empty() => {
+                    0..=2 if !after.is_empty() => {
                         let i = rng.below(after.len());
                         let name = format!("p{i}");
                         after[i] = random_policy(&mut rng, &name);
@@ -1761,8 +1755,8 @@ fn corpus() -> Vec<(ServicePolicySet, ServicePolicySet, Vec<TagAssignment>)> {
                     "wh",
                     "sales",
                     "orders",
-                    *rng.pick(&["email", ""]),
-                    *rng.pick(&["pii", "phi"]),
+                    rng.pick(&["email", ""]),
+                    rng.pick(&["pii", "phi"]),
                 )]
             } else {
                 vec![]
