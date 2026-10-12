@@ -10950,6 +10950,21 @@ item necessary rather than what makes it unnecessary.** Four things a green
   `core.http`, `core.slack`. The four script rows are served when a runner is
   configured and refused at publish when it is not; a draft run of one under
   `none` still reaches this loop. See the W5a section.)*
+  *(No-silent-stall, 2026-10-12: **(a) is closed.** Tasks 2–3 refuse a type
+  this deployment does not serve at validate, publish and every start
+  (`task_type_not_served`), so no new execution of one is created; Task 4
+  makes the worker FAIL a run that reaches it anyway -- an execution started
+  on an older binary, or under a configuration that served the type -- with
+  the run-log line "egret cannot run task type `X` on this deployment: no
+  handler is registered for it. This is not an error in the flow.", through
+  the normal commit, so `retry:` and `errors:` apply and the execution
+  settles. `WorkerError::NotALeaf` fails the same way. The "somewhere to
+  record *tried, no handler*" below turned out to be the attempt itself: a
+  `FAILED` attempt is the record. What is NOT closed: an old execution whose
+  stored source `build_plan` now refuses (an unregistered type, an
+  `AllowFailure`, a `WorkingDirectory`) stops at `WorkerError::Unplannable`
+  in `claim::load` before any handler is looked up, and that still aborts the
+  tick, keeps the lease and cycles through the reaper exactly as (a) did.)*
 
   **(b) A handler that OUTRUNS `working_timeout`** — and this is a *slow*
   handler, not a *missing* one. `DEFAULT_WORKING_TIMEOUT` is 3600 s;
@@ -10983,6 +10998,13 @@ item necessary rather than what makes it unnecessary.** Four things a green
   driver error. With `BATCH == 1` the refusal concerns only the run it names,
   the driver carries on, and the trace still compares. **The ratchet cannot
   score either cause in either direction.**
+  *(No-silent-stall Task 4, 2026-10-12: a `NoHandler` or `NotALeaf` run no
+  longer stalls the driver -- it is FAILED like any failed task and the trace
+  carries that `FAILED`. A worker error the driver still carries on past is
+  now an abort that is not one of those two, e.g. `Unplannable`. Measured:
+  **no `baseline.txt` line moved.** Task 1 had already brought
+  `ENTRIES_LEFT_UNFINISHED` to 0 and Task 3 refuses an unserved type at
+  start, so no corpus entry reaches either arm in the driver.)*
 - **Kill has no mechanism, and the endpoint is absent for that reason.**
   `RunState::Killed` has **zero** producing sites — no
   `Command::SetRunState { state: RunState::Killed }`, no `SetExecutionState`

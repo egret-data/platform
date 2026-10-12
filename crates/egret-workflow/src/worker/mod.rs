@@ -621,11 +621,22 @@ pub enum WorkerError {
 
     /// No handler is registered for a claimed run's `type_id`.
     ///
-    /// **A refusal, and it aborts the tick for that run** rather than
-    /// completing it in some state. An unknown type that "succeeded" would be
-    /// the over-acceptance shape spec §7 forbids, and an unknown type that
-    /// "failed" would be worse: it would look like the author's flow was
-    /// wrong.
+    /// **The run FAILS, with a line that says it is not the flow's fault**
+    /// (no-silent-stall spec §5). `claim::run_one` downcasts this out of the
+    /// handler's `Err` and commits `Outcome::failed_with` the run-log line
+    /// *"egret cannot run task type `X` on this deployment: no handler is
+    /// registered for it. This is not an error in the flow."*, at `ERROR`,
+    /// through the same commit, fence, `ended_at` stamp and retry evaluation
+    /// as any handler's failure; `retry:` and `errors:` apply as for any
+    /// `FAILED`, and the server log still gets a `warn`.
+    ///
+    /// **Until no-silent-stall Task 4 it aborted the tick for that run**, on
+    /// the argument that a `SUCCESS` would be the over-acceptance spec §7
+    /// forbids and a `FAILED` would make the author's flow look wrong. The
+    /// first half stands. The second was answered by the line, and the
+    /// abort's cost was worse than either: the run kept its lease, the reaper
+    /// released it, the next tick refused it again, and the execution never
+    /// ended. `Registry::cancel` still refuses with this error on a miss.
     #[error("no handler is registered for task type {0:?}")]
     NoHandler(String),
 
@@ -693,9 +704,26 @@ pub enum WorkerError {
     /// top-level `Subflow` were in this population for that reason and none is
     /// now**, so read it as *40-odd, of which 21 left at W6 Task 3*.
     ///
-    /// It behaves exactly like [`WorkerError::NoHandler`]: the tick aborts for
-    /// that run, the execution stalls, and the differential oracle's driver
-    /// carries on. **A `Pause` declaring `behavior:`, `onPause:`, `tasks:` or
+    /// **It now behaves exactly like [`WorkerError::NoHandler`]: the run
+    /// FAILS** (no-silent-stall spec §5). `Claimed::input` hands `run_one` a
+    /// `Budget::Refused` carrying the line *"egret cannot run task `id`: it is
+    /// a control-flow task (`X`) that egret does not execute. This is not an
+    /// error in the flow."*, so no handler is called and the outcome commits
+    /// through the path a refused `timeout:` takes. Until no-silent-stall Task
+    /// 4 the tick aborted for that run, the execution stalled, and the
+    /// differential oracle's driver carried on past it.
+    ///
+    /// **What still reaches it is narrower than the three constructs above.**
+    /// `claim::load` rebuilds the plan with `build_plan`, whose third gate
+    /// refuses `AllowFailure`, `WorkingDirectory` and an expression-bounded
+    /// `LoopUntil` since no-silent-stall Task 1, so an execution of one of
+    /// them stops one gate EARLIER, at [`WorkerError::Unplannable`], which
+    /// still aborts the tick. This arm is reached by a claimable run whose
+    /// task the stored source holds as a flowable in a source that plans --
+    /// `tests/worker.rs::a_run_whose_task_is_not_a_leaf_fails_with_a_system_line`
+    /// constructs one.
+    ///
+    /// **A `Pause` declaring `behavior:`, `onPause:`, `tasks:` or
     /// `errors:` reached this arm until 2026-10-11** -- `plan::pause_gap`
     /// planned it opaque -- and stalled every execution of it in `RUNNING`
     /// silently, the reaper releasing and re-offering the claim for ever. The

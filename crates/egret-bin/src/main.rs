@@ -1807,8 +1807,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `egret.sql` is not registered: it needs an `Arc<dyn QueryExecPort>`
     // that nothing here provides.
     //
-    // **A flow whose task type is unregistered HANGS** -- in the worker, for
-    // what reaches it. Since no-silent-stall Task 2 the set this deployment
+    // **A flow whose task type has no handler here no longer HANGS** (a
+    // `TASK_TYPES` type this deployment does not wire in). Since
+    // no-silent-stall Task 2 the set this deployment
     // serves is installed above (`runtime::served_for`, the same keys these
     // handlers are registered under) and `spec::unrunnable` names each task
     // it lacks (`task_type_not_served`). Since Task 3 every validation report
@@ -1816,12 +1817,20 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // trigger, replay) and a `Subflow` target refuse it, so no NEW execution
     // of such a flow is created. What still reaches the worker is an
     // execution started before that refusal (on an older binary, or under a
-    // configuration that served the type). The worker failing the run instead
-    // of hanging is that package's Task 4, which rewrites this paragraph.
-    // Until then: `WorkerError::NoHandler` does not fail the run: it propagates out of `run_one`, the run keeps its
-    // lease, `reap` clears only `claimed_at` a `working_timeout` later, `claim`
-    // re-selects it, and the cycle repeats for ever with one `warn` per cycle.
-    // `oracle-exec/README.md` item 19 carries this. **Six of twenty-three
+    // configuration that served the type), and since Task 4 the worker FAILS
+    // that run (`WorkerError::NoHandler`, spec §5) with the run-log line "egret
+    // cannot run task type `X` on this deployment: no handler is registered
+    // for it. This is not an error in the flow.", a `warn` in the server log,
+    // and `retry:`/`errors:` applied as for any `FAILED`. Until Task 4 the
+    // error propagated out of `run_one`, the run kept its lease, `reap`
+    // cleared only `claimed_at` a `working_timeout` later, `claim` re-selected
+    // it, and the cycle repeated for ever; `oracle-exec/README.md` item 19
+    // records that history. **Not covered:** an old execution whose stored
+    // source `build_plan` now refuses (a type with no `TASK_TYPES` row, an
+    // `AllowFailure`, a `WorkingDirectory`, ...) stops at
+    // `WorkerError::Unplannable` before any handler is looked up, and that
+    // still aborts the tick and keeps the lease, as spec §5 leaves it.
+    // **Six of twenty-three
     // registered types have no handler, whatever the runner**, and since
     // Task 3 none of them publishes or starts (`egret.sql`,
     // `egret.dataapi.call`, `egret.dataset.refresh`,

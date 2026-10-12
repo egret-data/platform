@@ -240,6 +240,11 @@ pub(super) enum Budget {
     /// started**, carrying this message. The artifact does the same: all three
     /// bad spellings produce a FAILED task run whose only attempt never ran
     /// the task body.
+    ///
+    /// **Also the run whose task is not a leaf** (`WorkerError::NotALeaf`,
+    /// no-silent-stall spec §5): `Claimed::input` builds this with the §5 line,
+    /// because "fail without calling a handler, through the normal commit" is
+    /// exactly this variant's path, and there is no `timeout:` to read.
     Refused(String),
 }
 

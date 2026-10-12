@@ -48,11 +48,14 @@
 //! The harness completed every `Runnable` from the golden, so an execution that
 //! could not finish meant the state machine was spinning, and it was reported
 //! as `Broken` — an unbaselineable failure. With real handlers that is no
-//! longer true: a flow whose task type has no handler *stalls*, because
+//! longer true: a flow whose task type had no handler *stalled*, because
 //! `Registry::run` refuses an unknown type rather than inventing a state for
-//! it, and stalling is what the shipping worker really does. So this driver
+//! it, and stalling was what the shipping worker really did. So this driver
 //! returns the **partial trace** when nothing can move, and only a run that
-//! exceeds [`STEP_BOUND`] or panics is `Broken`.
+//! exceeds [`STEP_BOUND`] or panics is `Broken`. *(Since no-silent-stall Task
+//! 4 the worker FAILS a run with no handler, or whose task is not a leaf, so
+//! such an entry's trace carries that `FAILED` rather than stopping; the
+//! partial trace remains for any other abort, e.g. `WorkerError::Unplannable`.)*
 //! `every_mismatching_entry_is_attributed_to_the_field_it_differs_on` in
 //! `tests/executor.rs` counts and names them, which keeps
 //! that population from growing silently.
@@ -1077,11 +1080,15 @@ pub async fn run(
                 "did not settle within {STEP_BOUND} steps; execution {id}"
             ));
         }
-        // A worker error is NOT a driver error. `Registry::run` refuses a type
-        // it has no handler for, which leaves that one run leased and unmoved —
-        // exactly what the shipping worker does — and the driver carries on so
-        // that the rest of the execution still produces the trace it produces.
-        // With `BATCH == 1` the refusal can only ever concern the run it names.
+        // A worker error is NOT a driver error. A tick that aborts leaves that
+        // one run leased and unmoved — exactly what the shipping worker does —
+        // and the driver carries on so that the rest of the execution still
+        // produces the trace it produces. With `BATCH == 1` the abort can only
+        // ever concern the run it names. **A type with no handler is no longer
+        // such an abort** (no-silent-stall Task 4): the worker fails that run
+        // with a system line, as it fails a task that is not a leaf, and the
+        // tick returns `Ok`. What still arrives here is the rest, e.g.
+        // `WorkerError::Unplannable`.
         //
         // **`WorkerError::Corrupt` is the exception, and it used to be swallowed
         // with everything else.** It means a stored row cannot be read back into

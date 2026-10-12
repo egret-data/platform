@@ -94,6 +94,39 @@ fn worker_err(e: WorkerError) -> Error {
     Error::Internal(anyhow::anyhow!(e))
 }
 
+/// The run-log line of a run failed for [`WorkerError::NoHandler`]
+/// (no-silent-stall spec §5, verbatim). It says whose fault it is, which is
+/// what made failing the run acceptable: the deployment's, not the flow's.
+fn no_handler_line(type_id: &str) -> String {
+    format!(
+        "egret cannot run task type `{type_id}` on this deployment: no handler is registered \
+         for it. This is not an error in the flow."
+    )
+}
+
+/// The run-log line of a run failed for [`WorkerError::NotALeaf`]
+/// (no-silent-stall spec §5, verbatim).
+fn not_a_leaf_line(task_id: &str, type_id: &str) -> String {
+    format!(
+        "egret cannot run task `{task_id}`: it is a control-flow task (`{type_id}`) that egret \
+         does not execute. This is not an error in the flow."
+    )
+}
+
+/// The type a [`WorkerError::NoHandler`] names, if `e` is one. A downcast, as
+/// `oracle-exec/driver.rs`'s `corrupt` does: the error reaches here inside
+/// `Error::Internal(anyhow::Error)`, and `anyhow!` over a `std::error::Error`
+/// keeps the concrete type, so a reworded message cannot change the answer.
+fn no_handler_type(e: &Error) -> Option<&str> {
+    let Error::Internal(a) = e else {
+        return None;
+    };
+    match a.downcast_ref::<WorkerError>() {
+        Some(WorkerError::NoHandler(type_id)) => Some(type_id),
+        _ => None,
+    }
+}
+
 /// A task run this worker has taken a lease on.
 ///
 /// Everything a handler needs plus everything [`apply_outcome`] needs, read in
@@ -194,17 +227,35 @@ impl Claimed {
     ) -> Result<(TaskInput, Budget)> {
         let flow = crate::spec::parse(&self.source)
             .map_err(|e| worker_err(WorkerError::Unplannable(self.execution_id, e.message)))?;
-        let leaf = leaf(&flow, &self.task_id).ok_or_else(|| {
-            worker_err(WorkerError::NotALeaf(
-                self.execution_id,
-                self.task_id.clone(),
-            ))
-        })?;
-        let budget = timeout::defaulted(
-            timeout::resolve(leaf.timeout, &render),
-            &self.type_id,
-            script_default,
-        );
+        // No-silent-stall spec §5: a task that is not a leaf of its source
+        // FAILS its run, through the path a refused budget takes -- no handler
+        // is called, the line is the run's failed-attempt line, and the
+        // outcome commits in `run_one`'s transaction. The `spec` handed on is
+        // `null` because there is none, and nothing reads it: a
+        // `Budget::Refused` never reaches a handler.
+        let (spec, budget) = match leaf(&flow, &self.task_id) {
+            Some(leaf) => (
+                leaf.spec.clone(),
+                timeout::defaulted(
+                    timeout::resolve(leaf.timeout, &render),
+                    &self.type_id,
+                    script_default,
+                ),
+            ),
+            None => {
+                let refusal = WorkerError::NotALeaf(self.execution_id, self.task_id.clone());
+                tracing::warn!(
+                    execution = %self.execution_id,
+                    run = %self.id,
+                    task_id = %self.task_id,
+                    "{refusal}; the run is failed"
+                );
+                (
+                    serde_json::Value::Null,
+                    Budget::Refused(not_a_leaf_line(&self.task_id, &self.type_id)),
+                )
+            }
+        };
         Ok((
             TaskInput {
                 workspace_id: self.workspace_id,
@@ -214,7 +265,7 @@ impl Claimed {
                 type_id: self.type_id.clone(),
                 value: self.value.clone(),
                 attempt: self.attempt.max(0) as usize,
-                spec: leaf.spec.clone(),
+                spec,
                 render,
                 timeout: budget.duration(),
                 principal: self.principal_id.map(egret_core::UserId),
@@ -312,9 +363,12 @@ struct Leaf<'a> {
 ///
 /// **The arm this function's `None` reaches** — to say it after a paragraph
 /// about `Pause`, which reaches neither — is
-/// [`WorkerError::NotALeaf`], which aborts the tick for that run exactly as an
-/// unregistered type does, and [`WorkerError::Corrupt`] is left meaning what
-/// its own doc says.
+/// [`WorkerError::NotALeaf`], which since no-silent-stall Task 4 FAILS the run
+/// with a system line, exactly as a type with no handler does (it aborted the
+/// tick until then), and [`WorkerError::Corrupt`] is left meaning what its own
+/// doc says. Since no-silent-stall Task 1 the three constructs above reach
+/// [`WorkerError::Unplannable`] in `load` first, before this function runs;
+/// see `NotALeaf`'s doc.
 fn leaf<'a>(flow: &'a crate::models::Flow, task_id: &str) -> Option<Leaf<'a>> {
     fn walk<'a>(task: &'a crate::models::Task, want: &str) -> Option<Leaf<'a>> {
         if task.id == want {
@@ -788,6 +842,11 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 ///
 /// # Two ways a run HANGS FOR EVER, both shipped and neither bounded
 ///
+/// **Cause 3 is closed since no-silent-stall Task 4** and is kept below as
+/// history: a run whose type has no handler is now FAILED by [`run_one`] with
+/// a system line (spec §5), so its attempt ends and the execution settles;
+/// publish and start refuse such a type first (Tasks 2–3). Cause 4 stands.
+///
 /// Recorded by W10 Task 5 fix round 2 at the whole-branch review's request, and
 /// **deliberately not fixed there** — they are liveness, not correctness, and
 /// the fix for either changes this function's contract.
@@ -1168,7 +1227,11 @@ pub async fn tick_with(
 ///    because all three arrive here as the same `Outcome`. A handler `Err` is
 ///    egret's outage and not the task's, and records no outcome, so it writes
 ///    no line; a dropped future cannot write one, as Kestra's killed callable
-///    does not;
+///    does not. **Except [`WorkerError::NoHandler`]** (no-silent-stall spec
+///    §5): it is turned into `Outcome::failed_with` the line naming the type,
+///    before this point, so it is logged and committed like any `Failed` --
+///    and a [`WorkerError::NotALeaf`] arrives as a refused budget, so it
+///    takes the refused budget's path;
 /// 2. **`finish()`** — the cap summary, if anything was withheld.
 ///
 /// Both come after the handler's own lines and before `pool.begin()`, so no
@@ -1256,6 +1319,27 @@ async fn run_one(
             input.log.finish().await;
             return Ok(Committed::LeaseLost);
         }
+    };
+    // No-silent-stall spec §5: no handler for the type is not a refusal of the
+    // tick any more. The run FAILS with a line that says it is the
+    // deployment's fault, through the same failed-attempt line, commit, fence,
+    // `ended_at` stamp and retry evaluation as any handler's failure. Until
+    // then it aborted the tick, kept its lease, was released by the reaper and
+    // refused again, for ever.
+    let outcome = match outcome {
+        Err(e) => match no_handler_type(&e) {
+            Some(type_id) => {
+                tracing::warn!(
+                    execution = %c.execution_id,
+                    run = %c.id,
+                    task_id = %c.task_id,
+                    "{e}; the run is failed"
+                );
+                Ok(Outcome::failed_with(no_handler_line(type_id)))
+            }
+            None => Err(e),
+        },
+        ok => ok,
     };
     // Spec §11 (fix round 1, I2): a read this handler's render made met a
     // store OUTAGE. The outcome it produced (a failed render, as a rule) is not

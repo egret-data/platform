@@ -197,7 +197,8 @@ pub fn check_script_tasks(flow: &Flow, gate: &ScriptGate<'_>) -> Result<()> {
         // (W5a Task 5 fix round 1). Without this a flow naming the other
         // runner published and failed every run -- and with
         // `container_runner = none` it published a task nothing is
-        // registered for, which `WorkerError::NoHandler` re-claims for ever.
+        // registered for, which `WorkerError::NoHandler` re-claimed for ever
+        // (since no-silent-stall Task 4 it fails the run instead).
         match gate.default_runner {
             None => {
                 return Err(Error::InvalidInput(format!(
