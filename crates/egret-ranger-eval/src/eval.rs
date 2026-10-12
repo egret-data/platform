@@ -5752,7 +5752,8 @@ mod tests {
     #[test]
     fn may_be_candidate_is_true_for_an_ancestor_and_false_for_a_provably_absent_sibling() {
         let def = trino_def_for_candidacy();
-        let schema_policy = policy_on(&[("catalog", &["wh"], false), ("schema", &["sales"], false)]);
+        let schema_policy =
+            policy_on(&[("catalog", &["wh"], false), ("schema", &["sales"], false)]);
         let orders = request_of(&[
             ("catalog", "wh"),
             ("schema", "sales"),
@@ -5766,18 +5767,38 @@ mod tests {
             ("column", "email"),
         ]);
         // ANCESTOR: the policy declares fewer levels than the request.
-        assert!(may_be_candidate(&schema_policy, &orders, &def, PolicyType::Access));
+        assert!(may_be_candidate(
+            &schema_policy,
+            &orders,
+            &def,
+            PolicyType::Access
+        ));
         // A sibling schema with plain literal values: the trie proves absence.
-        assert!(!may_be_candidate(&schema_policy, &other, &def, PolicyType::Access));
+        assert!(!may_be_candidate(
+            &schema_policy,
+            &other,
+            &def,
+            PolicyType::Access
+        ));
 
         // `isExcludes` on `schema`: the matcher says the sibling schema
         // matches (anything but `sales`), and the trie cannot prove absence.
         let excluding = policy_on(&[("catalog", &["wh"], false), ("schema", &["sales"], true)]);
-        assert!(may_be_candidate(&excluding, &other, &def, PolicyType::Access));
+        assert!(may_be_candidate(
+            &excluding,
+            &other,
+            &def,
+            PolicyType::Access
+        ));
         // ...and `sales` itself, which the matcher rejects, is still not
         // provably absent from Ranger's list: the trie holds an excludes
         // level as an inherited evaluator.
-        assert!(may_be_candidate(&excluding, &orders, &def, PolicyType::Access));
+        assert!(may_be_candidate(
+            &excluding,
+            &orders,
+            &def,
+            PolicyType::Access
+        ));
     }
 
     /// Tag candidacy: Ranger's wildcard, case-folded.

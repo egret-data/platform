@@ -156,6 +156,17 @@ pub struct RangerPolicy {
     /// the decision and isn't in the round-tripped set above, it is
     /// reported here instead of being dropped.
     pub unmodelled: Vec<Unmodelled>,
+    /// The policy body exactly as it was read (SP4d-4 Task 5 fix round 1).
+    ///
+    /// The fields above are what the evaluator MODELS; several constructs
+    /// (`conditions`, `validitySchedules`, item `conditions`, `delegateAdmin`,
+    /// a mask's `conditionExpr`) are reduced to content-free
+    /// [`Unmodelled`] markers, so two bodies that differ only in that content
+    /// parse to EQUAL typed fields. A caller asking "did this policy change?"
+    /// must compare this value (map equality is order-insensitive, so `jsonb`
+    /// key reordering is not a change), never the typed fields alone. Not read
+    /// by the evaluator.
+    pub source: serde_json::Value,
 }
 
 /// One resource-type selector inside a policy's `resources` (or
@@ -929,8 +940,11 @@ impl<'de> Deserialize<'de> for RangerPolicy {
     where
         D: Deserializer<'de>,
     {
-        let raw = RawRangerPolicy::deserialize(deserializer)?;
-        Ok(RangerPolicy::from_raw(raw))
+        let source = serde_json::Value::deserialize(deserializer)?;
+        let raw = RawRangerPolicy::deserialize(&source).map_err(serde::de::Error::custom)?;
+        let mut policy = RangerPolicy::from_raw(raw);
+        policy.source = source;
+        Ok(policy)
     }
 }
 
@@ -1003,6 +1017,7 @@ impl RangerPolicy {
             data_mask_policy_items,
             row_filter_policy_items,
             unmodelled,
+            source: serde_json::Value::Null,
         }
     }
 }

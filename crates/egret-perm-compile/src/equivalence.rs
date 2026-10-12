@@ -356,6 +356,12 @@ pub enum FallbackReason {
     /// decision is then `Undecidable` on both sides and pruning would only
     /// change WHICH of them are reported.
     EnvelopeUnmodelled,
+    /// Either side holds a policy carrying a construct the reader keeps only
+    /// as a content-free marker (`conditions`, `validitySchedules`, item
+    /// `conditions`, `delegateAdmin`, a mask `conditionExpr`). Δ now compares
+    /// raw bodies and sees their content, but the evaluator cannot decide
+    /// around them, so the gate keeps asking every question.
+    ContentFreeConstruct,
     /// No policy differs. Nothing to prune towards; the gate keeps asking
     /// every question, as before.
     EmptyDelta,
@@ -379,9 +385,8 @@ pub struct ProbePlan {
 /// sets, or that exist on one side only — BOTH versions of a changed policy.
 /// Resource policies first, then tag policies.
 ///
-/// Bodies are compared as parsed values (`RangerPolicy: PartialEq`, whose maps
-/// are `BTreeMap`s and whose scalars are typed), never through a rendered
-/// string: the stored body is `jsonb`, which reorders keys, and two equivalent
+/// Bodies are compared as values — the raw body and the typed fields — never
+/// through a rendered string: the stored body is `jsonb`, which reorders keys, and two equivalent
 /// bodies must not read as "changed".
 pub fn changed_policies<'a>(
     before: &'a ServicePolicySet,
@@ -391,13 +396,57 @@ pub fn changed_policies<'a>(
     resource.into_iter().chain(tag).collect()
 }
 
+/// Bookkeeping Ranger (or the store) stamps on a body; none of it reaches a
+/// decision, and all of it moves on a rewrite.
+const POLICY_METADATA: [&str; 7] = [
+    "id",
+    "version",
+    "guid",
+    "createTime",
+    "updateTime",
+    "createdBy",
+    "updatedBy",
+];
+
+fn comparable_source(p: &RangerPolicy) -> serde_json::Value {
+    let mut v = p.source.clone();
+    if let Some(o) = v.as_object_mut() {
+        for k in POLICY_METADATA {
+            o.remove(k);
+        }
+    }
+    v
+}
+
+/// Equal `(name, body)`. The body is compared as the RAW policy value
+/// (`RangerPolicy::source`, map equality is order-insensitive) AND as the typed
+/// fields: the reader reduces `conditions`, `validitySchedules`, item
+/// `conditions`, `delegateAdmin` and a mask `conditionExpr` to content-free
+/// markers, so the typed fields alone cannot see a change of their content.
 fn same_policy(a: &RangerPolicy, b: &RangerPolicy) -> bool {
-    a.name == b.name && {
+    a.name == b.name && comparable_source(a) == comparable_source(b) && {
         let (mut a, mut b) = (a.clone(), b.clone());
         a.id = None;
         b.id = None;
+        a.source = serde_json::Value::Null;
+        b.source = serde_json::Value::Null;
         a == b
     }
+}
+
+/// Whether the reader kept only a content-free marker for something in this
+/// policy (see [`FallbackReason::ContentFreeConstruct`]).
+fn has_content_free_marker(p: &RangerPolicy) -> bool {
+    p.unmodelled.iter().any(|c| {
+        matches!(
+            c,
+            Unmodelled::PolicyConditions
+                | Unmodelled::ValiditySchedules
+                | Unmodelled::ItemConditions { .. }
+                | Unmodelled::DelegateAdmin { .. }
+                | Unmodelled::MaskConditionExpr { .. }
+        )
+    })
 }
 
 /// Policies of `before` with no equal in `after`, then policies of `after`
@@ -478,6 +527,8 @@ fn envelopes_equal(before: &ServicePolicySet, after: &ServicePolicySet) -> bool 
 ///    ([`FallbackReason::NonZeroPriorityInDelta`]) — not needed by the theorem,
 ///    but cheap, and the SP4d-3 grammar produces neither.
 /// 3. Δ empty ([`FallbackReason::EmptyDelta`]).
+/// 4. Any policy on either side with a content-free marker
+///    ([`FallbackReason::ContentFreeConstruct`]).
 ///
 /// A pruned set that is empty while Δ is not is returned empty with no
 /// fallback: [`compare`] then refuses with [`GateRefusal::NoProbes`], never
@@ -533,6 +584,12 @@ fn pruning<'a>(
         Some(FallbackReason::EnvelopeDiffers)
     } else if !envelope_constructs(before).is_empty() {
         Some(FallbackReason::EnvelopeUnmodelled)
+    } else if [before, after]
+        .iter()
+        .flat_map(|set| set.policies.iter().chain(&set.tag_policies))
+        .any(has_content_free_marker)
+    {
+        Some(FallbackReason::ContentFreeConstruct)
     } else if resource.is_empty() && tag.is_empty() {
         Some(FallbackReason::EmptyDelta)
     } else if resource.iter().chain(&tag).any(|p| p.is_deny_all_else) {
