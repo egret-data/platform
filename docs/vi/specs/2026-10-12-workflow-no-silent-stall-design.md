@@ -2,7 +2,11 @@
 
 > Bản tham khảo tiếng Việt. Bản chính là `docs/en/specs/2026-10-12-workflow-no-silent-stall-design.md`; khi hai bản khác nhau, bản tiếng Anh thắng.
 
-**Trạng thái:** thiết kế, 2026-10-12.
+**Trạng thái:** đã cài đặt, 2026-10-12. Đo sống trên một stack riêng (`container_runner = none`, `working_timeout_s = 20`, `reaper_interval_secs = 5`), trình duyệt được lái bằng tay qua Playwright, không phải test tự động:
+- Một draft có `type: egret.sql` được start dưới main `ee8194af` đứng ở `RUNNING` với log rỗng, và server ghi `workflow tick failed error=no handler is registered for task type "egret.sql"` mỗi chu kỳ một lần (16:46:03, 16:46:25, 16:46:50 UTC). Sau khi đổi sang binary của nhánh này trên cùng database, lần claim kế tiếp cho nó thất bại: `FAILED` lúc 16:47:12, khoảng 5 giây sau khi khởi động, và tab Logs của W7b hiện dòng `ERROR` của §5 trên run `q #0`.
+- Một flow mới dùng `egret.sql` liệt kê `task_type_not_served` là lỗi trong Problems, và Save trả 201 với lỗi đó trong báo cáo. Nút Run của editor bị vô hiệu ("Fix 1 error to run"), nên editor không bao giờ gửi lệnh start. Route start trả 400 "the flow cannot run on this deployment: …" và không ghi execution nào; publish trả 400; Replay execution cũ hiện cùng thông điệp trong hộp thoại của nó.
+- Một flow có `AllowFailure` liệt kê `unsupported_allow_failure` trong Problems.
+- Schema không có type nào trong sáu type chưa nối, và gợi ý `type:` của editor không đưa ra `egret.sql`.
 
 **Phụ thuộc:** W7b (#662), đã từ chối `Pause` bị kẹt (`unsupported_pause_property`) và `ForEach` (`unsupported_foreach`), và ghi phần còn lại của lớp lỗi này ở §15 của nó.
 
@@ -36,7 +40,7 @@ Dấu vết duy nhất là một `warn` mỗi chu kỳ trong log server. UI củ
 | Trường hợp | Từ chối lúc chạy | Lúc publish hiện nay |
 |---|---|---|
 | `AllowFailure`, `WorkingDirectory` (được lập kế hoạch là opaque) | `NotALeaf` | sạch, không cảnh báo |
-| `LoopUntil`/`WaitFor` có cận là biểu thức (`loop_until_gap`) | `NotALeaf` | cảnh báo `not_yet_enforced` |
+| `LoopUntil`/`WaitFor` có cận là biểu thức (`loop_until_gap`) | `NotALeaf` | sạch, không cảnh báo (đo ở Task 1; bảng này lúc đầu ghi một cảnh báo `not_yet_enforced`, mà `validate` chưa từng phát cho nó) |
 | Một type viết giống control flow của Kestra mà egret không cài | `NoHandler` | cảnh báo `not_yet_enforced`; bị từ chối là unknown lúc publish, nhưng draft vẫn start được |
 | Một type không xác định | `NoHandler` | cảnh báo `unknown_task_type`; bị từ chối lúc publish, nhưng draft vẫn start được |
 | `egret.sql`, `egret.dataapi.call`, `egret.dataset.refresh`, `egret.report.send`, `core.http`, `core.slack` | `NoHandler` | **sạch**: chúng có dòng trong `TASK_TYPES` và không deployment nào đăng ký handler (`egret-bin/src/main.rs`, "Six of twenty-three publishable types hang in production") |
@@ -56,7 +60,7 @@ Mọi construct mà `build_plan` lập kế hoạch là một `Runnable` opaque 
 |---|---|---|
 | `io.kestra.plugin.core.flow.AllowFailure` (và `core.allowfailure`) | `unsupported_allow_failure` | egret không chạy nó; hãy đặt `allowFailure: true` trên từng task con |
 | `io.kestra.plugin.core.flow.WorkingDirectory` (và `core.workingdirectory`) | `unsupported_working_directory` | egret không chạy nó; hãy chuyển file giữa các task script bằng `outputFiles` và `inputFiles` |
-| `LoopUntil`/`WaitFor` có trường `loop_until_gap` | `unsupported_loop_until_property`, thay cho cảnh báo `not_yet_enforced` | nêu tên trường (`checkFrequency.interval`, …) và nói nó phải là literal |
+| `LoopUntil`/`WaitFor` có trường `loop_until_gap` | `unsupported_loop_until_property`; không có cảnh báo nào để thay: flow như vậy publish sạch (đo ở Task 1) | nêu tên trường (`checkFrequency.interval`, …) và nói nó phải là literal |
 | Một type viết giống control flow của Kestra mà egret không cài (`canonical_flow_type(..).is_some()`, không phải `foreach`) | `unsupported_flow_task`, thay cho cảnh báo `not_yet_enforced` | nêu tên type |
 | Một type không xác định | `unknown_task_type`, từ cảnh báo thành lỗi | không đổi: kiểm tra lỗi gõ |
 
@@ -67,8 +71,9 @@ Mọi construct mà `build_plan` lập kế hoạch là một `Runnable` opaque 
 - **Cả `errors:` lồng nhau.** `walk_task` chỉ đi xuống qua `children()`. `validate_script_tasks` ghi lại sự khác biệt đó, còn `build_plan` thì làm phẳng `errors:` riêng của một flowable (`Sequential`, `Parallel`, `If`, `Switch`, `Dag`). Vì vậy các kiểm tra của bảng này cũng phải chạm tới các task dưới `error_children()`; nếu không, một `AllowFailure` trong `errors:` của một `Sequential` sẽ lọt qua. Kế hoạch chọn việc để chính `walk_task` đi xuống hay để một lượt đi thứ hai làm, và nêu điều đó làm đổi gì với các kiểm tra khác.
 - **Một lưới chắn trên corpus: opaque kéo theo bị từ chối.** Với mọi flow trong `oracle-exec/corpus`, mọi task mà `build_plan` lập kế hoạch là `TaskKind::Runnable` trong khi `models::TaskKind` không phải `Leaf` phải mang một lỗi `validate_for_run` tại path của nó. Một flowable tương lai được lập kế hoạch là opaque mà không có từ chối sẽ làm một test fail đích danh.
 - **Oracle.**
-  - Các `valids` của corpus dùng `AllowFailure` hoặc `WorkingDirectory`, hoặc một `LoopUntil` có gap, giờ không lập kế hoạch được. Mỗi cái vào `PUBLISHED_BUT_REFUSED` với `cause` riêng, viết như các dòng `Pause` của W7b.
-  - Grep `valids` thấy 6 file nhắc `AllowFailure` và 13 file nhắc `WorkingDirectory`; kế hoạch tính lại tập chính xác.
+  - Các flow của corpus mà Kestra publish với 200 và giờ bị một từ chối trong bảng này bắt thì không lập kế hoạch được. Mỗi cái vào `PUBLISHED_BUT_REFUSED` với `cause` riêng, viết như các dòng `Pause` của W7b.
+  - Đo ở Task 1: **52 dòng mới**. 4 `unsupported_allow_failure`, 4 `unsupported_working_directory`, và 44 `unknown_task_type` cho các task Kestra mà egret không có (`OutputValues`, `Labels`, `SetVariables`, `UnsetVariables`, `Exit`, `Assert`, `PurgeLogs`). Corpus không có `LoopUntil` nào có gap, nên không dòng nào mang `unsupported_loop_until_property`. Bảng có tổng cộng 57 dòng.
+  - Grep `valids` thấy 6 file nhắc `AllowFailure` và 13 file nhắc `WorkingDirectory`; chỉ 4 và 4 ở trên được publish với 200, số còn lại vốn đã bị trả 422 hoặc bị từ chối.
   - Ratchet (`baseline.txt`) được đo lại. Không entry nào được chuyển từ khớp sang lệch vì lý do khác.
 
 ## 4. Từ chối theo deployment

@@ -1,6 +1,10 @@
 # No silent stall: refuse what egret cannot run, and fail what slips through
 
-**Status:** design, 2026-10-12.
+**Status:** implemented, 2026-10-12. Measured live on a private stack (`container_runner = none`, `working_timeout_s = 20`, `reaper_interval_secs = 5`), the browser driven by hand through Playwright, not an automated test:
+- A draft with `type: egret.sql` started under main `ee8194af` stayed `RUNNING` with an empty log, and the server logged `workflow tick failed error=no handler is registered for task type "egret.sql"` once per cycle (16:46:03, 16:46:25, 16:46:50 UTC). After the switch to this branch's binary on the same database, the next claim failed it: `FAILED` at 16:47:12, about 5 s after start-up, and W7b's Logs tab shows the `ERROR` line of §5 on run `q #0`.
+- A new flow using `egret.sql` lists `task_type_not_served` as an error in Problems, and Save answers 201 with that error in the report. The editor's Run button is disabled ("Fix 1 error to run"), so the editor never sends the start. The start route answers 400 "the flow cannot run on this deployment: …" and writes no execution; publish answers 400; Replay of the old execution shows the same message in its dialog.
+- A flow with `AllowFailure` lists `unsupported_allow_failure` in Problems.
+- The schema has none of the six unwired types, and the editor's `type:` completion does not offer `egret.sql`.
 
 **Depends on:** W7b (#662), which refused the stalling `Pause` (`unsupported_pause_property`) and `ForEach` (`unsupported_foreach`) and recorded the rest of the class in its §15.
 
@@ -34,7 +38,7 @@ Measured on main `ee8194af`, these cases reach the loop:
 | Case | Refusal at run | At publish today |
 |---|---|---|
 | `AllowFailure`, `WorkingDirectory` (planned opaque) | `NotALeaf` | clean, no warning |
-| `LoopUntil`/`WaitFor` whose bounds are expressions (`loop_until_gap`) | `NotALeaf` | `not_yet_enforced` warning |
+| `LoopUntil`/`WaitFor` whose bounds are expressions (`loop_until_gap`) | `NotALeaf` | clean, no warning (measured in Task 1; this table first said a `not_yet_enforced` warning, which `validate` never emitted for it) |
 | A type spelled like Kestra control flow that egret does not implement | `NoHandler` | `not_yet_enforced` warning; refused as unknown at publish, but a draft starts |
 | An unknown type | `NoHandler` | `unknown_task_type` warning; refused at publish, but a draft starts |
 | `egret.sql`, `egret.dataapi.call`, `egret.dataset.refresh`, `egret.report.send`, `core.http`, `core.slack` | `NoHandler` | **clean**: they have `TASK_TYPES` rows and no deployment registers a handler (`egret-bin/src/main.rs`, "Six of twenty-three publishable types hang in production") |
@@ -54,7 +58,7 @@ Every construct `build_plan` plans as an opaque `Runnable` because egret has no 
 |---|---|---|
 | `io.kestra.plugin.core.flow.AllowFailure` (and `core.allowfailure`) | `unsupported_allow_failure` | egret does not run it; set `allowFailure: true` on each child task instead |
 | `io.kestra.plugin.core.flow.WorkingDirectory` (and `core.workingdirectory`) | `unsupported_working_directory` | egret does not run it; pass files between script tasks with `outputFiles` and `inputFiles` |
-| `LoopUntil`/`WaitFor` with a `loop_until_gap` field | `unsupported_loop_until_property`, which replaces the `not_yet_enforced` warning | names the field (`checkFrequency.interval`, …) and says it must be a literal |
+| `LoopUntil`/`WaitFor` with a `loop_until_gap` field | `unsupported_loop_until_property`; there was no warning to replace: such a flow published clean (measured in Task 1) | names the field (`checkFrequency.interval`, …) and says it must be a literal |
 | A type spelled like Kestra control flow that egret does not implement (`canonical_flow_type(..).is_some()`, not `foreach`) | `unsupported_flow_task`, which replaces the `not_yet_enforced` warning | names the type |
 | An unknown type | `unknown_task_type`, from a warning to an error | unchanged: check for a typo |
 
@@ -65,8 +69,9 @@ Every construct `build_plan` plans as an opaque `Runnable` because egret has no 
 - **Nested `errors:` too.** `walk_task` descends through `children()` only. `validate_script_tasks` documents that difference, and `build_plan` does flatten a flowable's own `errors:` (`Sequential`, `Parallel`, `If`, `Switch`, `Dag`). So the checks of this table must also reach tasks under `error_children()`; otherwise an `AllowFailure` inside a `Sequential`'s `errors:` slips through. The plan chooses whether `walk_task` itself descends or a second walk does it, and states what that changes for the other checks.
 - **A guard over the corpus: opaque implies refused.** For every flow in `oracle-exec/corpus`, every task that `build_plan` plans as `TaskKind::Runnable` while `models::TaskKind` is not `Leaf` must carry a `validate_for_run` error at its path. A future flowable planned opaque without a refusal then fails a test by name.
 - **The oracle.**
-  - The corpus `valids` that use `AllowFailure` or `WorkingDirectory`, or a `LoopUntil` with a gap, now fail to plan. Each joins `PUBLISHED_BUT_REFUSED` with its own `cause`, written as W7b's `Pause` rows were.
-  - A grep of `valids` finds 6 files that mention `AllowFailure` and 13 that mention `WorkingDirectory`; the plan re-derives the exact set.
+  - The corpus flows Kestra published with 200 that a refusal of this table now catches fail to plan. Each joins `PUBLISHED_BUT_REFUSED` with its own `cause`, written as W7b's `Pause` rows were.
+  - Measured in Task 1: **52 new rows**. 4 `unsupported_allow_failure`, 4 `unsupported_working_directory`, and 44 `unknown_task_type` for Kestra tasks egret lacks (`OutputValues`, `Labels`, `SetVariables`, `UnsetVariables`, `Exit`, `Assert`, `PurgeLogs`). The corpus holds no `LoopUntil` with a gap, so no row carries `unsupported_loop_until_property`. The table holds 57 rows in all.
+  - A grep of `valids` finds 6 files that mention `AllowFailure` and 13 that mention `WorkingDirectory`; only the 4 and 4 above published with 200, and the rest were already answered 422 or refused.
   - The ratchet (`baseline.txt`) is re-measured. No entry may move from match to mismatch for any other reason.
 
 ## 4. Per-deployment refusals
