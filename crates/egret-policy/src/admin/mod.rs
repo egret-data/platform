@@ -160,7 +160,9 @@ pub fn summarize_policy(
 ) -> PolicySummary {
     let policy_type = body.get("policyType").and_then(Value::as_i64).unwrap_or(0);
 
-    // resource_path = catalog.schema.table.column, joining the first value of each level present.
+    // resource_path = catalog.schema.table.column, joining the first value of each level
+    // present. A service names its second level `schema` (Trino) or `database` (StarRocks),
+    // never both, so listing both keeps either in position.
     let res = body.get("resources").and_then(Value::as_object);
     let level = |k: &str| -> Option<String> {
         res.and_then(|r| r.get(k))
@@ -170,7 +172,7 @@ pub fn summarize_policy(
             .and_then(Value::as_str)
             .map(str::to_string)
     };
-    let mut resource_path = ["catalog", "schema", "table", "column"]
+    let mut resource_path = ["catalog", "schema", "database", "table", "column"]
         .iter()
         .filter_map(|k| level(k))
         .collect::<Vec<_>>()
@@ -1896,6 +1898,27 @@ mod tests {
         assert!(s.principals.contains(&"analysts".to_string()));
         assert_eq!(s.permissions, vec!["select".to_string()]);
         assert!(s.is_enabled);
+    }
+
+    #[test]
+    fn summarize_starrocks_policy_keeps_the_database_level() {
+        // StarRocks names its second level `database`, not `schema`.
+        let body = json!({
+            "name": "sr-read",
+            "policyType": 0,
+            "isEnabled": true,
+            "resources": {
+                "catalog":  {"values": ["lake"]},
+                "database": {"values": ["sales"]},
+                "table":    {"values": ["items"]},
+                "column":   {"values": ["*"]}
+            },
+            "policyItems": [
+                {"users": ["dave"], "accesses": [{"type": "select"}]}
+            ]
+        });
+        let s = summarize_policy(7, "sr4live", true, "operator", &body);
+        assert_eq!(s.resource_path, "lake.sales.items.*");
     }
 
     #[test]
