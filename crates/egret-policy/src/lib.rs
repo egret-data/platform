@@ -10,6 +10,7 @@ mod port_impl;
 pub mod ranger;
 pub mod service_def;
 pub mod store;
+pub mod unit_overlap;
 pub mod unreadable_table_mask;
 pub use admin::{
     policy_admin_router, EngineBinding, EngineBindingReader, EngineReadError, PolicyAdminState,
@@ -27,6 +28,10 @@ pub use ranger::{ranger_router, RangerState};
 pub use service_def::{
     seed_starrocks, seed_tag, seed_trino, starrocks_service_def, tag_service_def,
     trino_service_def, STARROCKS_DEF_NAME, TAG_DEF_NAME, TRINO_DEF_NAME,
+};
+pub use unit_overlap::{
+    created_overlaps, load_unit_via, unit_overlaps, units_for_service_via, units_for_services_via,
+    AssignedTag, OverlapIdentity, OverlapShape, StoredUnit, UnitIds, UnitOverlap, UnitPolicy,
 };
 pub use unreadable_table_mask::{
     unreadable_table_mask_for, MaskOrigin, TagRef, TagWrite, UnreadableTableMask,

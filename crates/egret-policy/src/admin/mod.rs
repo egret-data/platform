@@ -1169,12 +1169,13 @@ fn tag_mask_addresses(body: &Value) -> Vec<&str> {
 }
 
 /// **The editor's half of SP4d debt Task 6's one rule.** Would storing `pol`
-/// under `service_id` leave that profile serving two mask (or two row-filter)
-/// policies that may decide one request and would decide it differently? The
-/// rule itself is
-/// [`crate::ambiguous_arbitration::ambiguous_arbitration_in`], spelled once and
-/// shared with `egret_perm_compile::trigger::compile_desired`; the refusal is
-/// the same sentence from both.
+/// under `service_id` leave an evaluation unit it lands in — the profile and
+/// its tag service, with the tag assignments that place tag policies (SP4d-4
+/// Task 3) — serving two mask (or two row-filter) policies that may decide one
+/// request and would decide it differently? The rule itself is
+/// [`crate::unit_overlap::unit_overlaps`] (which takes every within-download
+/// pair from [`crate::ambiguous_arbitration::ambiguous_arbitrations_in`]),
+/// spelled once and shared with `egret_perm_compile::trigger::compile_desired`.
 ///
 /// `replacing` is the policy id a `PUT` is about to overwrite, swapped out of
 /// the AFTER set — **without it a `PUT` would pair the new body against the OLD
@@ -1205,69 +1206,89 @@ async fn refuse_ambiguous_arbitration(
     ) {
         return Ok(());
     }
-    let stored: Vec<Value> = st.store.enabled_policies_for_service(service_id).await?;
-    let name_of = |p: &Value| {
-        p.get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    };
-    let is_replaced =
-        |p: &Value| replacing.is_some_and(|id| p.get("id").and_then(Value::as_i64) == Some(id));
-    // BEFORE: the profile as stored. The row a PUT replaces is in it, under
-    // the name it will carry AFTER the write, so a rename alone does not make
-    // a stored pair look new.
-    let before: Vec<(String, &Value)> = stored
-        .iter()
-        .map(|p| {
-            let name = if is_replaced(p) {
-                pol.name.clone()
-            } else {
-                name_of(p)
-            };
-            (name, p)
-        })
-        .collect();
-    // AFTER: the stored set with the replaced row swapped for the new body.
-    let after: Vec<(String, &Value)> = stored
-        .iter()
-        .filter(|p| !is_replaced(p))
-        .map(|p| (name_of(p), p))
-        .chain(std::iter::once((pol.name.clone(), &pol.body)))
-        .collect();
-    let pairs = |set: &[(String, &Value)]| {
-        crate::ambiguous_arbitration::ambiguous_arbitrations_in(set.iter().map(|(name, body)| {
-            crate::ambiguous_arbitration::PolicyUnderWrite {
+    // **Every unit this write lands in** (SP4d-4 Task 3, user ruling): the
+    // profile plus its tag service, or — for a tag service — each Trino
+    // profile that names it, with the tag assignments that decide where a tag
+    // policy applies. `crate::unit_overlap::unit_overlaps` is the ONE rule the
+    // compiler calls too; here it is handed the stored set and the body.
+    for unit in st.store.stored_units_for_service(service_id).await? {
+        let is_replaced = |sid: i64, p: &Value| {
+            sid == service_id
+                && replacing.is_some_and(|id| p.get("id").and_then(Value::as_i64) == Some(id))
+        };
+        let is_tag_written = unit.ids.and_then(|u| u.tag_service) == Some(service_id);
+        // BEFORE: the unit as stored. The row a PUT replaces is in it, under
+        // the name it will carry AFTER the write, so a rename alone does not
+        // make a stored pair look new.
+        let before_names: Vec<String> = unit
+            .policies
+            .iter()
+            .map(|(sid, _, p)| {
+                if is_replaced(*sid, p) {
+                    pol.name.clone()
+                } else {
+                    p.get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                }
+            })
+            .collect();
+        let before: Vec<crate::unit_overlap::UnitPolicy<'_>> = unit
+            .policies
+            .iter()
+            .zip(&before_names)
+            .map(
+                |((sid, is_tag, body), name)| crate::unit_overlap::UnitPolicy {
+                    service: *sid,
+                    is_tag_service: *is_tag,
+                    name,
+                    body,
+                },
+            )
+            .collect();
+        // AFTER: the stored unit with the replaced row swapped for the body.
+        let after: Vec<crate::unit_overlap::UnitPolicy<'_>> = unit
+            .unit_policies()
+            .into_iter()
+            .filter(|p| !is_replaced(p.service, p.body))
+            .chain(std::iter::once(crate::unit_overlap::UnitPolicy {
                 service: service_id,
-                name,
-                body,
-            }
-        }))
-    };
-    // **Refuse only a pair this write CREATES** (SP4d-4 Task 2 review I2).
-    // Refusing any pair in the profile broke Part A's promise that a write
-    // REMOVING a pair succeeds: with stored pairs (A,B) and (C,D), narrowing A
-    // was refused on (C,D) and narrowing C on (A,B), so the editor could never
-    // fix either. A pair already stored is left to the compile wedge and to
-    // `GET /perm/overlaps`; a pair the write creates or completes — a new
-    // overlapping policy, an edit that widens into another policy, an edit that
-    // turns an agreeing pair into a differing one — is not in BEFORE and is
-    // refused. Identity is `(kind, first, second)`: an edit that keeps a stored
-    // pair but changes its coordinate does not create it. Because every
-    // refused pair is new by construction, the sentence never names a pair
-    // unrelated to this write.
-    let existed: std::collections::BTreeSet<_> = pairs(&before)
-        .into_iter()
-        .map(|p| (p.arbitrated as u8, p.first, p.second))
-        .collect();
-    if let Some(pair) = pairs(&after)
-        .into_iter()
-        .find(|p| !existed.contains(&(p.arbitrated as u8, p.first.clone(), p.second.clone())))
-    {
-        // 409, not 400: the body is well-formed; it conflicts with a policy
-        // already stored (SP4d-4 Part A, "The refusal"). The editor's sentence
-        // adds the one remedy only a hand-written policy has: Override.
-        return Err(PolicyHttpError::Conflict(pair.editor_refusal()));
+                is_tag_service: is_tag_written,
+                name: &pol.name,
+                body: &pol.body,
+            }))
+            .collect();
+        // **Refuse only a pair this write CREATES** (SP4d-4 Task 2 review I2).
+        // Refusing any pair in the unit broke Part A's promise that a write
+        // REMOVING a pair succeeds: with stored pairs (A,B) and (C,D), narrowing
+        // A was refused on (C,D) and narrowing C on (A,B), so the editor could
+        // never fix either. A pair of hand-written policies that is already
+        // stored is therefore left alone by this guard; the rule compiler never
+        // sees such a pair either (it refuses only pairs with a compiled
+        // member), so it is reported, not refused — by `explain`
+        // (`EvalOrderAmbiguous`) and by the read-only overlap report SP4d-4
+        // Task 4 adds (`GET /perm/overlaps`). A pair the write creates or
+        // completes — a new overlapping policy, an edit that widens into
+        // another policy, a re-enable through this route — is not in BEFORE
+        // and is refused.
+        //
+        // Identity is `(kind, first, first's items, second, second's items,
+        // coordinate)` (SP4d-4 Task 3): an edit that keeps a stored partner but
+        // changes what either side decides, or where they meet, makes a
+        // DIFFERENT pair and is refused; an edit that touches neither (a
+        // rename, a description) keeps the identity and passes.
+        let created = crate::unit_overlap::created_overlaps(
+            &crate::unit_overlap::unit_overlaps(&before, &unit.assignments),
+            crate::unit_overlap::unit_overlaps(&after, &unit.assignments),
+        );
+        if let Some(pair) = created.into_iter().next() {
+            // 409, not 400: the body is well-formed; it conflicts with a policy
+            // already stored (SP4d-4 Part A, "The refusal"). The editor's
+            // sentence adds the one remedy only a hand-written policy has,
+            // Override, wherever an authored priority can fix the pair.
+            return Err(PolicyHttpError::Conflict(pair.refusal(true)));
+        }
     }
     Ok(())
 }

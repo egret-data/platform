@@ -181,8 +181,9 @@
 //!
 //! Stated BY CODE PATH and not by authorship, because five such claims in this
 //! programme have been wrong while the behaviour claim beside them was right.
-//! The rule lives in ONE function, [`ambiguous_arbitration_in`], and every
-//! surface calls it rather than re-deriving it:
+//! The rule lives in ONE function, [`ambiguous_arbitrations_in`] — widened to
+//! a profile plus its tag service by `crate::unit_overlap::unit_overlaps`,
+//! which calls it — and every surface calls that rather than re-deriving it:
 //!
 //! * **The rule compiler.** `egret_perm_compile::trigger::compile_desired`
 //!   checks the whole desired set of one profile before it is diffed, and
@@ -192,16 +193,23 @@
 //!   /api/control-plane/perm/preview` (which runs the real write in a
 //!   rolled-back transaction, so the steward is refused BEFORE Save), the
 //!   grant/role/clearance writes, and the tag, role-membership and
-//!   workspace-membership writes that recompile on their own triggers.
+//!   workspace-membership writes that recompile on their own triggers. Since
+//!   SP4d-4 Task 3 it checks the profile's whole unit — the desired set plus
+//!   the stored hand-written policies of the services it sweeps, through the
+//!   tag assignments — and refuses every pair with a compiled member, stored
+//!   or new (the wedge Part A accepts). A tag assignment additionally refuses
+//!   any pair it CREATES among hand-written policies (`egret-bi`'s
+//!   `catalog_tags`, through `egret_perm_compile::overlap`).
 //! * **The policy editor.** `POST /api/control-plane/policies` with `kind:
 //!   "masking"`/`"rowfilter"`/`"tag-masking"`/`"tag-rowfilter"`, and `PUT
-//!   /policies/{id}` with the two non-tag kinds (`editor_to_ranger_json`
-//!   rejects every `tag-*` kind on the PUT path with "unknown policy kind", so
-//!   a tag mask cannot be *replaced* into the shape, only created). Both
-//!   compare the body being written against the profile's other ENABLED
-//!   policies, and refuse only a pair the write CREATES — pairs after the
-//!   write minus pairs already stored — so a write that narrows one stored
-//!   pair is never refused because of another (SP4d-4 Task 2 review I2).
+//!   /policies/{id}` with the same four kinds (SP4d debt Task 16 gave the PUT
+//!   its tag branch, through `guard_tag_policy_authoring`). Both
+//!   compare the body being written against the other ENABLED policies of
+//!   every evaluation unit it lands in (`crate::unit_overlap`, SP4d-4 Task 3),
+//!   and refuse only a pair the write CREATES — pairs after the write minus
+//!   pairs already stored, identified by both names, both decisive item
+//!   arrays and the coordinate — so a write that narrows one stored pair is
+//!   never refused because of another (SP4d-4 Task 2 review I2).
 //! * **`PUT /policies/{id}/enabled` is NOT guarded, and that is a ruling.**
 //!   Re-enabling a policy can complete the pair. The reason it is left alone is
 //!   that it is also the only way OUT of a pair that already exists in an
@@ -209,9 +217,14 @@
 //!   and update paths already refuse the pair whether or not the body is
 //!   enabled would be a different rule from the one above — this guard reads
 //!   `isEnabled`, so a DISABLED policy is simply not part of any band. A pair
-//!   that gets completed by re-enabling is therefore reachable, loudly refused
-//!   by the next compile or editor write, and never silent: `explain` answers
-//!   `EvalOrderAmbiguous` over the served artifact the moment it exists.
+//!   that gets completed by re-enabling is therefore reachable and is NOT
+//!   refused by any later write: the editor refuses only a pair its own write
+//!   creates (and re-enabling through `PUT /policies/{id}` with `isEnabled:
+//!   true` IS such a write, and is refused), and the rule compiler refuses only
+//!   pairs with a compiled member, which a hand-written pair has none of. It is
+//!   never silent: `explain` answers `EvalOrderAmbiguous` over the served
+//!   artifact the moment it exists, and SP4d-4 Task 4's read-only
+//!   `GET /perm/overlaps` is to report every stored pair.
 //! * **Everything that is not a route** — `psql`, an import, a route added
 //!   later — can still create the pair. `refuse_if_generated` and
 //!   `unreadable_table_mask_for` have the same shape of reach and the same
@@ -272,14 +285,14 @@ pub enum Arbitrated {
 impl Arbitrated {
     /// The raw Ranger `policyType` code — the value
     /// `RangerPolicyRepository.init` files the evaluator lists by.
-    fn policy_type(self) -> i64 {
+    pub(crate) fn policy_type(self) -> i64 {
         match self {
             Arbitrated::Mask => 1,
             Arbitrated::RowFilter => 2,
         }
     }
 
-    fn from_policy_type(code: i64) -> Option<Self> {
+    pub(crate) fn from_policy_type(code: i64) -> Option<Self> {
         match code {
             1 => Some(Arbitrated::Mask),
             2 => Some(Arbitrated::RowFilter),
@@ -289,7 +302,7 @@ impl Arbitrated {
 
     /// The noun a steward reads. "mask" and "row filter" are what the
     /// Governance UI calls a rule's two kinds.
-    fn noun(self) -> &'static str {
+    pub(crate) fn noun(self) -> &'static str {
         match self {
             Arbitrated::Mask => "mask",
             Arbitrated::RowFilter => "row filter",
@@ -297,7 +310,7 @@ impl Arbitrated {
     }
 
     /// What the two policies disagree about, in the message.
-    fn disagreement(self) -> &'static str {
+    pub(crate) fn disagreement(self) -> &'static str {
         match self {
             Arbitrated::Mask => "different dataMaskPolicyItems",
             Arbitrated::RowFilter => "different rowFilterPolicyItems",
@@ -346,13 +359,24 @@ pub struct AmbiguousArbitration {
     /// module can compute it — see [`served_today`]. `None` means the order
     /// falls to something this module does not compute (or to the name).
     pub served_today: Option<String>,
+    /// The decisive item arrays of `first` and `second`, as compared. Part of
+    /// a pair's IDENTITY for the editor's "only a pair this write creates"
+    /// rule (SP4d-4 Task 3): an edit that keeps the same partner but changes
+    /// what either side decides is a different pair.
+    pub first_items: Value,
+    pub second_items: Value,
 }
 
 /// The remedy only the policy editor can offer: a hand-written policy can
 /// author its priority (`isOverride` → `policyPriority 1`, `ranger_json`), a
 /// compiled rule cannot.
-const EDITOR_OVERRIDE_REMEDY: &str =
+pub(crate) const EDITOR_OVERRIDE_REMEDY: &str =
     ", or set Override on the one that should win (an override is evaluated first)";
+
+/// The default rendering of a policy name in a refusal: the name, quoted.
+pub(crate) fn quoted(name: &str) -> String {
+    format!("{name:?}")
+}
 
 impl AmbiguousArbitration {
     /// **The refusal, and it is the same sentence from every write path** — one
@@ -368,16 +392,24 @@ impl AmbiguousArbitration {
     /// Asserted by substring rather than against a golden string: a golden copy
     /// of the sentence is a second place to edit it.
     pub fn refusal(&self) -> String {
-        self.sentence("")
+        self.sentence_with(&quoted, "")
     }
 
     /// [`Self::refusal`] with the one remedy only the policy editor has —
     /// setting Override on the policy that should win.
     pub fn editor_refusal(&self) -> String {
-        self.sentence(EDITOR_OVERRIDE_REMEDY)
+        self.sentence_with(&quoted, EDITOR_OVERRIDE_REMEDY)
     }
 
-    fn sentence(&self, extra_remedy: &str) -> String {
+    /// The one sentence, with each policy NAME rendered by `label` — the
+    /// compiler names a compiled policy by its RULE (`rule "mask emails"`),
+    /// the editor by the policy name it shows. `extra_remedy` is
+    /// [`EDITOR_OVERRIDE_REMEDY`] or empty.
+    pub(crate) fn sentence_with(
+        &self,
+        label: &dyn Fn(&str) -> String,
+        extra_remedy: &str,
+    ) -> String {
         let Self {
             arbitrated,
             first,
@@ -386,21 +418,25 @@ impl AmbiguousArbitration {
             priority,
             service: _,
             served_today,
+            first_items: _,
+            second_items: _,
         } = self;
+        let (first, second) = (label(first), label(second));
         let noun = arbitrated.noun();
         let disagreement = arbitrated.disagreement();
         let today = match served_today {
             Some(winner) => format!(
-                " Today Ranger serves {winner:?} wherever both match, because it has more \
+                " Today Ranger serves {} wherever both match, because it has more \
                  match-any `*` levels with the same users, groups and accesses — a score, not \
-                 something either policy says."
+                 something either policy says.",
+                label(winner)
             ),
             None => String::new(),
         };
         format!(
             "two {noun} policies would be served at policyPriority {priority} that may both \
-             decide one request ({coordinate_hint}) with {disagreement}: {first:?} and \
-             {second:?}. Ranger arbitrates {noun}s with `>=`, so the FIRST evaluator in its band \
+             decide one request ({coordinate_hint}) with {disagreement}: {first} and \
+             {second}. Ranger arbitrates {noun}s with `>=`, so the FIRST evaluator in its band \
              is final, and within a band the order is `getEvalOrder()` (a wildcard-count score: \
              with the same users, groups and accesses the broader policy runs first and wins \
              wherever both match) and then the policy name, i.e. a rule's uuid — neither of \
@@ -412,7 +448,7 @@ impl AmbiguousArbitration {
 
 /// One resource level as compared: sorted, de-duplicated values, then
 /// `isExcludes`, then `isRecursive`.
-type Level = (Vec<String>, bool, bool);
+pub(crate) type Level = (Vec<String>, bool, bool);
 
 /// The canonical form of a policy's `resources` map — what the comparison
 /// reads and what the refusal renders.
@@ -428,7 +464,7 @@ fn canonical_resources(body: &Value) -> BTreeMap<String, Level> {
 
 /// [`canonical_resources`] over a bare `resources` map (or an
 /// `additionalResources` entry).
-fn canonical_resource_map(resources: Option<&Value>) -> BTreeMap<String, Level> {
+pub(crate) fn canonical_resource_map(resources: Option<&Value>) -> BTreeMap<String, Level> {
     let mut out = BTreeMap::new();
     let Some(obj) = resources.and_then(Value::as_object) else {
         return out;
@@ -487,7 +523,7 @@ fn canonical_resource_map(resources: Option<&Value>) -> BTreeMap<String, Level> 
 /// of each of four hard-coded trino level names, which drops StarRocks'
 /// `database` level and every value after the first — fine for a list view,
 /// wrong for a refusal that has to be precise about what collided.
-fn render_resources(key: &BTreeMap<String, Level>) -> String {
+pub(crate) fn render_resources(key: &BTreeMap<String, Level>) -> String {
     if key.is_empty() {
         return "no resource levels".to_string();
     }
@@ -522,26 +558,47 @@ fn trailing_star_prefix(v: &str) -> Option<&str> {
 ///
 /// Every level of both service-defs egret serves is `ignoreCase: true`, and
 /// Ranger compares those with `String.equalsIgnoreCase` / `IOCase.INSENSITIVE`,
-/// which fold per UTF-16 unit as `toLowerCase(toUpperCase(c))`.
-/// `egret_ranger_eval`'s own `fold` (`resource.rs`, private) is
-/// `str::to_lowercase()` and documents a small residue where the two differ
-/// (`ϑ`/`ϴ`, characters whose lowercase is longer than one code point). A
-/// refusal must over-approximate BOTH, so two values are taken to be equal when
-/// they agree under EITHER fold: the evaluator's `to_lowercase()`, or Java's
-/// per-character upper-then-lower.
+/// which fold per UTF-16 unit as `Character.toLowerCase(Character.toUpperCase(c))`
+/// — Java's SIMPLE (one char to one char) case mappings. `egret_ranger_eval`'s
+/// own `fold` (`resource.rs`, private) is `str::to_lowercase()` and documents
+/// the residue where the two differ (`resource.rs`, `chars_equal`'s doc: 104
+/// ordered pairs in 21 classes, every one Java-true and Rust-false; adding an
+/// uppercase step closes 96, and the 8 survivors are the six pairs involving
+/// `İ` and `ϑ`/`ϴ`). A refusal must over-approximate BOTH, so two values are
+/// taken to be equal when they agree under EITHER fold: the evaluator's
+/// `to_lowercase()`, or [`java_fold_char`] per character.
 fn folds(v: &str) -> [String; 2] {
-    [
-        v.to_lowercase(),
-        v.chars()
-            .flat_map(char::to_uppercase)
-            .flat_map(char::to_lowercase)
-            .collect(),
-    ]
+    [v.to_lowercase(), v.chars().map(java_fold_char).collect()]
+}
+
+/// `Character.toLowerCase(Character.toUpperCase(c))`, one char to one char.
+///
+/// Rust exposes only the FULL case mappings, which can be longer than one code
+/// point; Java's `Character` methods use the SIMPLE ones, which never are. The
+/// two differ in exactly two shapes, and both are reproduced:
+///
+/// * a full UPPERCASE longer than one code point (`ß` → `SS`, `ŉ` → `ʼN`,
+///   `ᾀ` → `ἈΙ`): Java's simple mapping either leaves the char alone or maps
+///   it to a char whose lowercase is the original (`ᾀ` → `ᾈ` → `ᾀ`), so
+///   keeping `c` reaches the same lowercase;
+/// * a full LOWERCASE longer than one code point — only `İ` (U+0130), whose
+///   full lowercase is `i` + U+0307 and whose simple lowercase is `i`. The
+///   first code point IS the simple mapping. Taking the whole two-code-point
+///   string instead (the fold before SP4d-4 Task 3) folded `İSTANBUL` to
+///   `i̇stanbul`, so `("İSTANBUL", "istanbul")` — equal to Java — was admitted
+///   as two tables: a fail-open.
+fn java_fold_char(c: char) -> char {
+    let mut up = c.to_uppercase();
+    let upper = match (up.next(), up.next()) {
+        (Some(u), None) => u,
+        _ => c,
+    };
+    upper.to_lowercase().next().unwrap_or(upper)
 }
 
 /// Whether two single resource values may match one request value, under
 /// [`folds`].
-fn values_may_intersect(a: &str, b: &str) -> bool {
+pub(crate) fn values_may_intersect(a: &str, b: &str) -> bool {
     let (fa, fb) = (folds(a), folds(b));
     fa.iter()
         .zip(fb.iter())
@@ -741,7 +798,7 @@ fn served_today<'n>(
 /// `RangerAbstractPolicyEvaluator.hasDeny()`: `policy.getIsDenyAllElse() ||
 /// isNotEmpty(policy.getDenyPolicyItems())`. One spelling, the same one
 /// `egret_ranger_eval::eval::PolicyView` reproduces.
-fn has_deny(body: &Value) -> bool {
+pub(crate) fn has_deny(body: &Value) -> bool {
     let deny_all = body
         .get("isDenyAllElse")
         .and_then(Value::as_bool)
@@ -755,7 +812,7 @@ fn has_deny(body: &Value) -> bool {
 
 /// Absent or `null` means ENABLED — `RawRangerPolicy`'s `default_true` /
 /// `null_as_true`.
-fn is_enabled(body: &Value) -> bool {
+pub(crate) fn is_enabled(body: &Value) -> bool {
     match body.get("isEnabled") {
         None | Some(Value::Null) => true,
         Some(v) => v.as_bool().unwrap_or(true),
@@ -763,7 +820,7 @@ fn is_enabled(body: &Value) -> bool {
 }
 
 /// Absent or `null` means 0 — `RawRangerPolicy`'s `null_as_default`.
-fn int_field(body: &Value, field: &str) -> i64 {
+pub(crate) fn int_field(body: &Value, field: &str) -> i64 {
     body.get(field).and_then(Value::as_i64).unwrap_or(0)
 }
 
@@ -839,10 +896,10 @@ pub fn ambiguous_arbitrations_in<'a>(
                 if ai == bi || !bodies_may_intersect(ab, bb) {
                     continue;
                 }
-                let ((first, fb), (second, sb)) = if an <= bn {
-                    ((an, ab), (bn, bb))
+                let ((first, fb, fi), (second, sb, si)) = if an <= bn {
+                    ((an, ab, ai), (bn, bb, bi))
                 } else {
-                    ((bn, bb), (an, ab))
+                    ((bn, bb, bi), (an, ab, ai))
                 };
                 out.push(AmbiguousArbitration {
                     arbitrated: Arbitrated::from_policy_type(policy_type)
@@ -853,6 +910,8 @@ pub fn ambiguous_arbitrations_in<'a>(
                     priority,
                     service,
                     served_today: served_today((first, fb), (second, sb), item_key(policy_type)),
+                    first_items: fi.clone(),
+                    second_items: si.clone(),
                 });
             }
         }
@@ -1458,6 +1517,18 @@ mod tests {
             // Java's per-char `toLowerCase(toUpperCase(c))` equates these;
             // `to_lowercase()` alone does not.
             ("ϑ", "ϴ", true),
+            // SP4d-4 Task 3 (N1): `İ` folds to ONE `i` under Java's simple
+            // mappings — the evaluator's residue lists six ordered pairs
+            // involving it (`İ` with `i`, `I` and `ı`).
+            ("İSTANBUL", "istanbul", true),
+            ("İ", "i", true),
+            ("İ", "I", true),
+            ("İ", "ı", true),
+            // …and the uppercase-step class it lists beside them.
+            ("ς", "σ", true),
+            ("ſ", "s", true),
+            ("µ", "μ", true),
+            ("ß", "ss", false),
         ] {
             assert_eq!(
                 resources_may_intersect(&lvl(a), &lvl(b)),

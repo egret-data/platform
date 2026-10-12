@@ -2393,6 +2393,20 @@ impl PolicyStore {
         let mut conn = self.db.pool.acquire().await?;
         enabled_policies_for_service_via(&mut conn, service_id).await
     }
+
+    /// Every evaluation unit a write to `service_id` lands in, loaded as stored
+    /// (SP4d-4 Task 3; see [`crate::unit_overlap`]).
+    pub async fn stored_units_for_service(
+        &self,
+        service_id: i64,
+    ) -> Result<Vec<crate::unit_overlap::StoredUnit>, PolicyStoreError> {
+        let mut conn = self.db.pool.acquire().await?;
+        let mut out = Vec::new();
+        for ids in crate::unit_overlap::units_for_service_via(&mut conn, service_id).await? {
+            out.push(crate::unit_overlap::load_unit_via(&mut conn, ids).await?);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

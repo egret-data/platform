@@ -196,7 +196,9 @@ refusal:
 - **Path vs path.** Per level, the two value sets *may intersect*: equal under Ranger's own
   ignore-case comparison — **full Unicode, not ASCII** (every level of both service-defs is
   `ignoreCase: true`, and Ranger compares with `String.equalsIgnoreCase` / `IOCase.INSENSITIVE`,
-  per UTF-16 unit as `toLowerCase(toUpperCase(c))`; the guard takes two values as equal when they
+  per UTF-16 unit as `Character.toLowerCase(Character.toUpperCase(c))` — Java's SIMPLE,
+  one-char-to-one-char mappings, so `İ` folds to a single `i` and `("İSTANBUL", "istanbul")` is one
+  name *(Task 3, N1)*; the guard takes two values as equal when they
   agree under that fold OR under `egret_ranger_eval`'s `to_lowercase()`, so it over-approximates
   both, and `ĐƠN_HÀNG` meets `đơn_hàng`) — or one is a `prefix*` and the other starts with that
   prefix (folded the same way), or either value contains any other `*`/`?` (or a `{`/`\` token

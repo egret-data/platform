@@ -2885,3 +2885,387 @@ async fn the_policy_list_carries_each_rows_owner() {
     );
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
+
+// ---------------------------------------------------------------------------
+// SP4d-4 Task 3 — the editor's half, widened to the evaluation unit.
+// ---------------------------------------------------------------------------
+
+/// N3: `PUT /policies/{id}` with `isEnabled: true` is a guarded write, unlike
+/// `PUT …/enabled` — a re-enable through it that completes a differing pair is
+/// refused, and one that completes an AGREEING tie is not.
+#[tokio::test]
+async fn re_enabling_through_put_policies_that_completes_a_pair_is_409() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t3reenable", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let filter = |name: &str, expr: &str, enabled: bool| {
+        serde_json::json!({
+            "kind": "rowfilter", "name": name, "service": svc_name, "isEnabled": enabled,
+            "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                          "table": {"values": ["t1"]}},
+            "items": [{"groups": ["public"], "filterExpr": expr}]
+        })
+    };
+    let send = |method: &'static str, uri: String, body: serde_json::Value| {
+        let app = f.app_empty();
+        let token = token.clone();
+        async move {
+            into_json(
+                app.oneshot(req(method, &uri, &token, Some(body)))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        }
+    };
+    let (status, body) = send("POST", "/policies".into(), filter("ra", "x = 1", false)).await;
+    assert_eq!(status, StatusCode::OK, "ra disabled; body={body}");
+    let ra = body["id"].as_i64().expect("id");
+    let (status, body) = send("POST", "/policies".into(), filter("rb", "x = 2", true)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "rb, nothing enabled to pair with; body={body}"
+    );
+
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{ra}"),
+        filter("ra", "x = 1", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "re-enabling ra through PUT /policies/{{id}} completes (ra, rb); body={body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(msg.contains("\"ra\"") && msg.contains("\"rb\""), "{msg}");
+    // Accept-control: the same re-enable with an AGREEING expression.
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{ra}"),
+        filter("ra", "x = 2", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an agreeing tie is admitted; body={body}"
+    );
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// The pair identity carries both decisive arrays and the coordinate: an edit
+/// that keeps its stored partner but changes WHAT it decides, or WHERE the two
+/// meet, is a different pair and is refused; an edit that touches neither, or
+/// that removes the pair, passes.
+#[tokio::test]
+async fn an_edit_that_keeps_its_partner_but_changes_the_pair_is_409() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t3partner", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let filter = |name: &str, table: &str, expr: &str, enabled: bool| {
+        serde_json::json!({
+            "kind": "rowfilter", "name": name, "service": svc_name, "isEnabled": enabled,
+            "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                          "table": {"values": [table]}},
+            "items": [{"groups": ["public"], "filterExpr": expr}]
+        })
+    };
+    let send = |method: &'static str, uri: String, body: serde_json::Value| {
+        let app = f.app_empty();
+        let token = token.clone();
+        async move {
+            into_json(
+                app.oneshot(req(method, &uri, &token, Some(body)))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        }
+    };
+    // A stored differing pair (pa, pb) on t1, built through the unguarded
+    // `PUT …/enabled`.
+    let mut ids = std::collections::BTreeMap::new();
+    for (name, expr) in [("pa", "x = 1"), ("pb", "x = 2")] {
+        let (status, body) =
+            send("POST", "/policies".into(), filter(name, "t1", expr, false)).await;
+        assert_eq!(status, StatusCode::OK, "create {name}; body={body}");
+        ids.insert(name, body["id"].as_i64().expect("id"));
+    }
+    for name in ["pa", "pb"] {
+        let (status, body) = send(
+            "PUT",
+            format!("/policies/{}/enabled", ids[name]),
+            serde_json::json!({"enabled": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "enable {name}; body={body}");
+    }
+
+    // Control: an edit that changes neither side's decision nor the coordinate.
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{}", ids["pa"]),
+        filter("pa", "t1", "x = 1", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unchanged pair is not new; body={body}"
+    );
+
+    // Cell 1: same partner, different decisive items.
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{}", ids["pa"]),
+        filter("pa", "t1", "x = 3", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "changing what pa decides while it still meets pb is a new pair; body={body}"
+    );
+
+    // Cell 2: same partner, different coordinate.
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{}", ids["pa"]),
+        filter("pa", "t*", "x = 1", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "moving where pa meets pb is a new pair; body={body}"
+    );
+
+    // The write that REMOVES the pair still passes.
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{}", ids["pa"]),
+        filter("pa", "t3", "x = 3", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "removing the pair passes; body={body}"
+    );
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// A Trino profile with a tag service, one engine bound to it, and one registry
+/// catalog (named `catalog`) attached — the shape `catalogs_for_service_via`
+/// resolves tag assignments through. Returns `(profile name, profile id, tag
+/// service id, warehouse id, catalog name)`.
+async fn trino_unit(f: &Fixture, label: &str) -> (String, i64, i64, Uuid, String) {
+    egret_policy::seed_trino(&f.store)
+        .await
+        .expect("seed trino");
+    egret_policy::seed_tag(&f.store).await.expect("seed tag");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tag_svc_name = format!("{label}tag-{suffix}");
+    let tag_svc = f
+        .store
+        .create_service(&tag_svc_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("tag service");
+    let trino_name = format!("{label}trino-{suffix}");
+    let trino = f
+        .store
+        .create_service(
+            &trino_name,
+            "trino",
+            &serde_json::json!({ "tagService": tag_svc_name }),
+        )
+        .await
+        .expect("trino profile");
+    let pool = &f.db.pool;
+    let ws: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,'T3 WS') RETURNING id")
+            .bind(format!("{label}-ws-{suffix}"))
+            .fetch_one(pool)
+            .await
+            .expect("workspace");
+    let sc: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','egret-t3','AKIATEST') RETURNING id",
+    )
+    .bind(format!("{label}-sc-{suffix}"))
+    .fetch_one(pool)
+    .await
+    .expect("storage connection");
+    let wh: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(format!("{label}_wh_{suffix}"))
+    .bind(ws)
+    .bind(sc)
+    .fetch_one(pool)
+    .await
+    .expect("warehouse");
+    let engine: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
+    )
+    .bind(format!("{label}-eng-{suffix}"))
+    .bind(trino.id)
+    .fetch_one(pool)
+    .await
+    .expect("engine");
+    let catalog = format!("{label}_cat_{}", &suffix[..12]);
+    let catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+         RETURNING id",
+    )
+    .bind(&catalog)
+    .bind(wh)
+    .fetch_one(pool)
+    .await
+    .expect("catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine)
+    .bind(catalog_id)
+    .execute(pool)
+    .await
+    .expect("attach");
+    (trino_name, trino.id, tag_svc.id, wh, catalog)
+}
+
+async fn new_tag_on(f: &Fixture, wh: Uuid, label: &str, columns: &[&str]) -> String {
+    let name = format!("{label}-{}", Uuid::new_v4().simple());
+    let id: Uuid = sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+        .bind(name.to_lowercase())
+        .bind(&name)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("tag");
+    for column in columns {
+        sqlx::query(
+            "INSERT INTO catalog_tag_assignments \
+                 (tag_id, warehouse_id, schema_name, table_name, column_name) \
+             VALUES ($1, $2, 'sales', 'orders', $3)",
+        )
+        .bind(id)
+        .bind(wh)
+        .bind(column)
+        .execute(&f.db.pool)
+        .await
+        .expect("assignment");
+    }
+    name
+}
+
+/// User ruling (SP4d-4 Task 3): hand-written TAG policies on a manual profile
+/// were treated as never overlapping, but a column carrying both tags is
+/// decided by both. The editor now refuses the write that forms such a pair
+/// given the current assignments — tag ↔ tag and tag ↔ path — and admits a tag
+/// policy whose tag shares no column with the other.
+#[tokio::test]
+async fn hand_written_tag_masks_meeting_on_a_tagged_column_are_409() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t3tags", true).await;
+    let (trino, trino_id, tag_svc, wh, catalog) = trino_unit(&f, "t3h").await;
+    let pii = new_tag_on(&f, wh, "PII", &["email"]).await;
+    let gdpr = new_tag_on(&f, wh, "GDPR", &["email"]).await;
+    let phone = new_tag_on(&f, wh, "PHONE", &["phone"]).await;
+    let send = |body: serde_json::Value| {
+        let app = f.app_empty();
+        let token = token.clone();
+        async move {
+            into_json(
+                app.oneshot(req("POST", "/policies", &token, Some(body)))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        }
+    };
+    let tag_mask = |name: &str, tag: &str, mask: &str| {
+        serde_json::json!({
+            "kind": "tag-masking", "name": name, "service": trino, "tag": tag,
+            "isEnabled": true, "items": [{"groups": ["public"], "maskType": mask}]
+        })
+    };
+
+    let (status, body) = send(tag_mask("tm-pii", &pii, "MASK")).await;
+    assert_eq!(status, StatusCode::OK, "the first tag mask; body={body}");
+    // Accept-control: a tag on another column only.
+    let (status, body) = send(tag_mask("tm-phone", &phone, "MASK_HASH")).await;
+    assert_eq!(status, StatusCode::OK, "no shared column; body={body}");
+
+    // Tag ↔ tag: `email` carries both PII and GDPR.
+    let (status, body) = send(tag_mask("tm-gdpr", &gdpr, "MASK_NULL")).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "tag ↔ tag on email; body={body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("\"tm-gdpr\"")
+            && msg.contains("\"tm-pii\"")
+            && msg.contains(&format!("{catalog}.sales.orders.email")),
+        "names both policies and the column: {msg}"
+    );
+    assert_eq!(
+        f.store
+            .enabled_policies_for_service(tag_svc)
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "the refused tag mask was not stored"
+    );
+
+    // Tag ↔ path: a hand-written resource mask on the tagged column.
+    let path = serde_json::json!({
+        "kind": "masking", "name": "pm-email", "service": trino, "isEnabled": true,
+        "resources": {"catalog": {"values": [catalog]}, "schema": {"values": ["sales"]},
+                      "table": {"values": ["orders"]}, "column": {"values": ["email"]}},
+        "items": [{"groups": ["public"], "maskType": "MASK_NULL"}]
+    });
+    let (status, body) = send(path).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "tag ↔ path on email; body={body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("\"tm-pii\"") && msg.contains("\"pm-email\"") && msg.contains("tag phase"),
+        "{msg}"
+    );
+    // Accept-control: the same resource mask on an untagged column.
+    let untagged = serde_json::json!({
+        "kind": "masking", "name": "pm-sku", "service": trino, "isEnabled": true,
+        "resources": {"catalog": {"values": [catalog]}, "schema": {"values": ["sales"]},
+                      "table": {"values": ["orders"]}, "column": {"values": ["sku"]}},
+        "items": [{"groups": ["public"], "maskType": "MASK_NULL"}]
+    });
+    let (status, body) = send(untagged).await;
+    assert_eq!(status, StatusCode::OK, "an untagged column; body={body}");
+
+    f.store.delete_service(trino_id).await.expect("cleanup");
+    f.store.delete_service(tag_svc).await.expect("cleanup");
+}
