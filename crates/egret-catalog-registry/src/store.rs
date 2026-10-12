@@ -667,8 +667,9 @@ impl RegistryStore {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         a: &NewAttachment,
     ) -> Result<AttachmentRow, RegistryError> {
-        insert_attachment_row(&mut **tx, a).await.map_err(|e| {
-            match unique_constraint(&e).as_deref() {
+        insert_attachment_row(tx, a)
+            .await
+            .map_err(|e| match unique_constraint(&e).as_deref() {
                 Some("engine_catalog_attachments_pkey") => RegistryError::AlreadyExists(
                     "the catalog is already attached to this engine".into(),
                 ),
@@ -676,8 +677,7 @@ impl RegistryStore {
                     RegistryError::AlreadyExists("this engine already has a primary catalog".into())
                 }
                 _ => RegistryError::Db(e),
-            }
-        })
+            })
     }
 
     pub async fn insert_attachment(
