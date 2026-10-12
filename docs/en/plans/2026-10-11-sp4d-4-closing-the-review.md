@@ -379,7 +379,7 @@ Write the list into `overlap.rs`'s module doc (by code path). From the lock func
 4. `two_tag_rules_with_no_shared_column_are_admitted` — the two rules exist, `pii` on `email`, `gdpr` on `phone` → both assignments succeed. (The compile-time-only case: refused only when co-occurrence becomes real.)
 5. `a_tag_rule_and_a_path_rule_on_one_tagged_column_are_409` (Trino) — path rule on `('sales','orders','email') MASK_NULL`, tag rule on `pii MASK`, `pii` assigned to `orders.email` → whichever write completes the pair (test both orders: rule-after-assignment and assignment-after-rule) is 409.
 6. `the_same_pair_on_starrocks_is_caught_by_the_path_rule_alone` — StarRocks profile; tag rule expands per column (`rules.rs:5-14`), so the pair is two path policies → 409 (via Task 2's function).
-7. `a_preexisting_pair_wedges_unrelated_writes_and_its_removal_is_allowed` — insert the pair **bypassing** the routes (direct `PermStore` inserts, then no recompile), then: an unrelated grant write on that profile → 409 naming the pair; `DELETE` one of the two rules → 204 (the recompile no longer sees the pair).
+7. ~~`a_preexisting_pair_wedges_unrelated_writes_and_its_removal_is_allowed`~~ — **superseded by the user ruling of 2026-10-12** (spec Part A, "Pre-existing overlaps: reported, not refused"): a stored pair no longer makes recompiles fail. As built (fix round 2): `a_stored_compiled_pair_does_not_block_unrelated_writes_but_an_edit_into_it_is_409` — a stored compiled pair, then an unrelated grant write → 201; an edit of one member into a different overlapping shape → 409; `DELETE` one → 204. Plus the compiled × hand-written cells with an unrelated rule and with a tag rule (installation-wide recompile) → 201.
 8. `migration_of_a_policy_that_would_overlap_is_refused` — an SP4d-3 `POST …/migrate` whose produced rule overlaps an existing rule → the migration answers the overlap refusal and writes nothing (assert `perm.rules`, `perm.migrated_from`, and the original's `enabled` unchanged).
 9. `different_exemptions_on_one_tagged_column_are_409` — tag ↔ path, same `MASK`, different exempt sets.
 
@@ -433,7 +433,7 @@ git commit -m "feat(perm-compile): refuse overlapping rules across tag and path,
 - [ ] **Step 1: Failing tests**
 
 Backend (`tests/overlap.rs`):
-1. `the_report_lists_every_pair_and_writes_nothing` — two pre-existing pairs on two profiles (inserted bypassing routes, as in Task 3 test 7) → the report lists both, each naming its profile; `policy.authz_policies` and every profile's `policy_version` are byte-identical before and after (compare the rows as `Value`s, not strings).
+1. `the_report_lists_every_pair_and_writes_nothing` — two pre-existing pairs on two profiles (stored bypassing the checks, as Task 3's fix-round-2 test 7 does with `move_rule_column_unchecked`; note the report must list every pair PRESENT in each stored unit through `egret_policy::unit_overlaps`, not the compiler's created-only check, which by the 2026-10-12 ruling returns nothing for a stored pair) → the report lists both, each naming its profile; `policy.authz_policies` and every profile's `policy_version` are byte-identical before and after (compare the rows as `Value`s, not strings).
 2. `the_report_is_empty_on_a_clean_profile` — with a control: the same fixture plus one pair is non-empty, so an always-empty implementation fails.
 3. `the_report_needs_policy_read` — a session without it → 403.
 

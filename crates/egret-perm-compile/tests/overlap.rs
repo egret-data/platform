@@ -24,7 +24,7 @@ use axum::http::{Request as HttpRequest, StatusCode};
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
 use egret_metastore::Db;
-use egret_perm::{PermStore, PrincipalSet, Rule, RuleKind, Scope, Selector};
+use egret_perm::PermStore;
 use egret_perm_compile::{perm_router, PermState};
 use egret_policy::PolicyStore;
 use http_body_util::BodyExt;
@@ -80,7 +80,6 @@ fn unique(prefix: &str) -> String {
 
 struct Env {
     db: Db,
-    perm: PermStore,
     policy: PolicyStore,
     app: axum::Router,
     token: String,
@@ -159,7 +158,6 @@ async fn env() -> Option<Env> {
         .merge(admin);
     Some(Env {
         db,
-        perm,
         policy,
         app,
         token,
@@ -535,36 +533,89 @@ async fn the_same_pair_on_starrocks_is_caught_by_the_path_rule_alone() {
     );
 }
 
-/// Test 7: a pair stored by a write that bypassed the routes wedges every
-/// recompile of the profile (an unrelated grant), and the write that removes
-/// it (deleting one rule) passes.
+/// Move a compiled path rule onto `column` behind the routes' back: the
+/// `perm.rules` row and its compiled policy's `column` level together, so the
+/// stored download holds exactly what a compile of the moved rule would emit —
+/// the state an older compile, or a `psql` write, leaves behind. (Items are
+/// untouched, so they are byte-identical to the compiler's own output.)
+async fn move_rule_column_unchecked(e: &Env, rule_id: &str, column: &str) {
+    let id: Uuid = rule_id.parse().expect("rule id");
+    sqlx::query("UPDATE perm.rules SET column_name = $2 WHERE id = $1")
+        .bind(id)
+        .bind(column)
+        .execute(&e.db.pool)
+        .await
+        .expect("move the rule");
+    let moved = sqlx::query(
+        "UPDATE policy.authz_policies \
+            SET policy_jsonb = jsonb_set(policy_jsonb, '{resources,column,values}', to_jsonb(ARRAY[$2::text])) \
+          WHERE name LIKE $1",
+    )
+    .bind(format!("perm-rule-{id}%"))
+    .bind(column)
+    .execute(&e.db.pool)
+    .await
+    .expect("move the compiled body")
+    .rows_affected();
+    assert!(moved >= 1, "the rule's compiled policy was moved");
+}
+
+/// A hand-written path mask stored by raw SQL (the profile is `generated`, so
+/// the editor would refuse to create it) — the state a profile the compiler
+/// claimed after it held hand-written policies is left in.
+async fn hand_mask_unchecked(e: &Env, p: &Profile, name: &str, column: &str, mask: &str) -> i64 {
+    let lvl = |v: &str| json!({"values": [v], "isExcludes": false, "isRecursive": false});
+    sqlx::query_scalar(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+         VALUES ($1, $2, $3, true, 'operator') RETURNING id",
+    )
+    .bind(p.service_id)
+    .bind(name)
+    .bind(json!({
+        "name": name, "policyType": 1, "isEnabled": true,
+        "resources": {"catalog": lvl(&p.catalog), "schema": lvl("sales"),
+                      "table": lvl("orders"), "column": lvl(column)},
+        "dataMaskPolicyItems": [{
+            "users": [], "groups": ["public"], "roles": [],
+            "accesses": [{"type": "select", "isAllowed": true}],
+            "dataMaskInfo": {"dataMaskType": mask}
+        }],
+        "policyItems": [], "denyPolicyItems": []
+    }))
+    .fetch_one(&e.db.pool)
+    .await
+    .expect("insert hand-written")
+}
+
+/// Test 7, as re-ruled (user ruling 2026-10-12, fix round 2): a stored
+/// compiled × compiled pair is REPORTED, not refused — an unrelated grant
+/// write on the profile passes; (d) an edit that changes one member's items
+/// while it still meets the other makes a different pair and is refused;
+/// deleting one half passes.
 #[tokio::test]
-async fn a_preexisting_pair_wedges_unrelated_writes_and_its_removal_is_allowed() {
+async fn a_stored_compiled_pair_does_not_block_unrelated_writes_but_an_edit_into_it_is_409() {
     let _serial = SERIAL.lock().await;
     let Some(e) = env().await else { return };
     let p = profile(&e, "starrocks").await;
-    let rule = |name: &str, mask: &str| Rule {
-        id: Uuid::nil(),
-        name: name.to_string(),
-        kind: RuleKind::Mask {
-            mask_type: mask.to_string(),
-            value_expr: None,
-        },
-        selector: Selector::Path(Scope {
-            catalog_id: p.catalog_id,
-            schema: Some("sales".into()),
-            table: Some("orders".into()),
-            column: Some("email".into()),
-        }),
-        exempt: PrincipalSet::default(),
-    };
     let (a_name, b_name) = (unique("stored a"), unique("stored b"));
-    let _a = e.perm.create_rule(&rule(&a_name, "MASK")).await.expect("a");
-    let b = e
-        .perm
-        .create_rule(&rule(&b_name, "MASK_NULL"))
-        .await
-        .expect("b");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/rules",
+        Some(path_mask(&a_name, &p, "orders", "email", "MASK")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/rules",
+        Some(path_mask(&b_name, &p, "orders", "phone", "MASK_NULL")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let b = body["id"].as_str().expect("id").to_string();
+    move_rule_column_unchecked(&e, &b, "email").await;
 
     let grant = json!({
         "effect": "allow",
@@ -573,20 +624,89 @@ async fn a_preexisting_pair_wedges_unrelated_writes_and_its_removal_is_allowed()
         "principals": { "include": [{ "kind": "user", "ref": "analyst" }], "exclude": [] }
     });
     let (status, body) = send(&e, "POST", "/perm/grants", Some(grant)).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a stored pair blocks nothing: {body}"
+    );
+
+    // (d) B's mask changes while it still meets A on `email`: a new pair.
+    let (status, body) = send(
+        &e,
+        "PATCH",
+        &format!("/perm/rules/{b}"),
+        Some(path_mask(&b_name, &p, "orders", "email", "MASK_HASH")),
+    )
+    .await;
     assert_overlap(status, &body, &[&a_name, &b_name]);
-    let grants: i64 = sqlx::query_scalar("SELECT count(*) FROM perm.grants WHERE catalog_id = $1")
-        .bind(p.catalog_id)
-        .fetch_one(&e.db.pool)
-        .await
-        .unwrap();
-    assert_eq!(grants, 0, "the wedged grant write stored nothing");
 
     let (status, body) = send(&e, "DELETE", &format!("/perm/rules/{b}"), None).await;
     assert!(
         status.is_success(),
-        "deleting one half removes the pair, so its recompile passes: {status} {body}"
+        "deleting one half removes the pair: {status} {body}"
     );
     assert_eq!(path_rules(&e, &p).await, vec![a_name]);
+}
+
+/// (a) A stored compiled × HAND-WRITTEN pair does not block an unrelated rule
+/// write on that profile (round 1 refused it: the wedge).
+#[tokio::test]
+async fn a_stored_compiled_and_hand_written_pair_does_not_block_an_unrelated_rule() {
+    let _serial = SERIAL.lock().await;
+    let Some(e) = env().await else { return };
+    let p = profile(&e, "trino").await;
+    let compiled = unique("mask email");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/rules",
+        Some(path_mask(&compiled, &p, "orders", "email", "MASK")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let hand = hand_mask_unchecked(&e, &p, &unique("hand email"), "email", "MASK_NULL").await;
+
+    let other = unique("null sku");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/rules",
+        Some(path_mask(&other, &p, "orders", "sku", "MASK_NULL")),
+    )
+    .await;
+    e.policy.delete_policy(hand).await.expect("cleanup");
+    assert_eq!(status, StatusCode::CREATED, "unrelated rule: {body}");
+}
+
+/// (b) The same stored pair does not block a TAG-rule write, which recompiles
+/// every engine-bound profile in the installation.
+#[tokio::test]
+async fn a_stored_compiled_and_hand_written_pair_does_not_block_a_tag_rule() {
+    let _serial = SERIAL.lock().await;
+    let Some(e) = env().await else { return };
+    let p = profile(&e, "trino").await;
+    let compiled = unique("mask email");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/rules",
+        Some(path_mask(&compiled, &p, "orders", "email", "MASK")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let hand = hand_mask_unchecked(&e, &p, &unique("hand email"), "email", "MASK_NULL").await;
+    let key = tag_on(&e, &p, "elsewhere", &["sku"]).await;
+
+    let tag_rule = unique("mask elsewhere");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/rules",
+        Some(tag_mask(&tag_rule, &key, "MASK", &[])),
+    )
+    .await;
+    e.policy.delete_policy(hand).await.expect("cleanup");
+    assert_eq!(status, StatusCode::CREATED, "tag rule: {body}");
 }
 
 /// Test 8: a migration whose produced rule overlaps an existing rule answers
@@ -638,6 +758,24 @@ async fn migration_of_a_policy_that_would_overlap_is_refused() {
         Some(json!({"policy_names": [original], "dry_run": false})),
     )
     .await;
+    // Read every observation, THEN remove the fixture, THEN assert (fix round
+    // 2, N1): the original beside `existing` is a stored compiled ×
+    // hand-written pair, and no assert may leave it behind for this binary's
+    // later tests.
+    let rules_after = path_rules(&e, &p).await;
+    let migrated: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM perm.migrated_from WHERE policy_id = $1")
+            .bind(id)
+            .fetch_one(&e.db.pool)
+            .await
+            .unwrap();
+    let enabled: bool =
+        sqlx::query_scalar("SELECT enabled FROM policy.authz_policies WHERE id = $1")
+            .bind(id)
+            .fetch_one(&e.db.pool)
+            .await
+            .unwrap();
+    e.policy.delete_policy(id).await.expect("cleanup");
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "rule_overlap", "{body}");
     assert!(
@@ -647,25 +785,9 @@ async fn migration_of_a_policy_that_would_overlap_is_refused() {
             .contains(&format!("rule {existing:?}")),
         "{body}"
     );
-    assert_eq!(path_rules(&e, &p).await, rules_before, "no rule written");
-    let migrated: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM perm.migrated_from WHERE policy_id = $1")
-            .bind(id)
-            .fetch_one(&e.db.pool)
-            .await
-            .unwrap();
+    assert_eq!(rules_after, rules_before, "no rule written");
     assert_eq!(migrated, 0, "no provenance written");
-    let enabled: bool =
-        sqlx::query_scalar("SELECT enabled FROM policy.authz_policies WHERE id = $1")
-            .bind(id)
-            .fetch_one(&e.db.pool)
-            .await
-            .unwrap();
     assert!(enabled, "the original is still on");
-    // The original beside `existing` is a stored compiled × hand-written pair,
-    // which (fix round 1, C1) wedges every recompile of this profile — and a
-    // tag rule in another test recompiles every Trino profile. Remove it.
-    e.policy.delete_policy(id).await.expect("cleanup");
 }
 
 /// Test 9: tag ↔ path with the SAME mask but different exemptions — different

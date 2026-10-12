@@ -22,7 +22,7 @@ one package:
 
 | | Item | User ruling (binding) |
 |---|---|---|
-| **A** | Two mask (or two row-filter) rules that select one coordinate with different expressions leave the engine's choice to a tie-break nobody authored | **Refuse overlap at write time** (409 naming the other rule), and the compiler refuses pre-existing overlaps and **reports** them |
+| **A** | Two mask (or two row-filter) rules that select one coordinate with different expressions leave the engine's choice to a tie-break nobody authored | **Refuse overlap at write time** (409 naming the other rule) — every surface, the compiler included, refuses only the pairs its write creates — and **report** pre-existing overlaps |
 | **B** | The policy editor drops empty resource levels on save; Ranger does not read an absent level as `*` | **Measure on the real engines first**, then decide between B1 (fix the editor) and B2 (keep it, correct the grammar) |
 | **C** | egret knows only engines it provisions; SP4d-3's live check had to `INSERT` an engine row and an attachment by SQL | **API + UI** to register an external engine, bind it to a profile, attach catalogs, and show the plugin config; egret never provisions, scales or deletes the cluster |
 | **D** | The SP4d-3 equivalence gate is about O(N³) and its budget admits ~20-policy profiles | **Coordinate pruning**, with a soundness argument and a fallback where the argument fails; re-measure and raise the budget only as far as measured |
@@ -239,12 +239,10 @@ data either way". It is **not** sound against:
 - writes that do not go through a route (`psql`, an import) — the same reach limit
   `ambiguous_arbitration.rs:185-188` already records;
 - `PUT /policies/{id}/enabled`, which is deliberately unguarded so a pair can be broken
-  (`ambiguous_arbitration.rs:175-184`) — a pair completed by re-enabling is refused by the next
-  compile when one member is compiled, and is shown by the report below either way;
-- a pair of two HAND-WRITTEN policies that is already stored (completed by a re-enable or a write
-  outside the routes): the editor and the tag assignment refuse only pairs their write creates,
-  and the compiler refuses only pairs with a compiled member, so such a pair is reported, not
-  refused, and wedges nothing;
+  (`ambiguous_arbitration.rs:175-184`) — a pair completed by re-enabling is already stored when the
+  next write reads its "before", so it is shown by the report below and refused by nothing;
+- any pair that is already stored (see "Pre-existing overlaps" below): every surface refuses only
+  the pairs its write creates, so a stored pair is reported, not refused;
 - a recompile whose caller does not take the profile locks before compiling reads the model and
   the tag assignments before `apply_diff_in_tx` locks the rows, so its check runs on a snapshot a
   concurrent transaction may still change (the rule and grant routes, the migration and the tag
@@ -253,7 +251,8 @@ data either way". It is **not** sound against:
 *(Amended in Task 3 fix round 1.)* What this list used to name and is now closed: recompiles of two
 profiles sharing a tag service serialise (`lock_services_in_tx` locks the expanded, sorted set, and
 `apply_diff_in_tx` re-takes it); the compiler reads the enabled hand-written masks and row filters of
-the profile and its tag service and refuses every pair with a compiled member, so a rule write, a
+the profile and its tag service and refuses every pair with a compiled member that the write
+creates (fix round 2), so a rule write, a
 migration (whose originals are switched off before its rule writes) or a membership-driven recompile
 cannot complete a compiled × hand-written pair (review C1); and the policy editor checks and writes
 in one transaction under the same row locks, through the same lock helper, so it serialises with
@@ -295,21 +294,41 @@ rules and the column, which is the moment the steward can act.
   between queries" (`ambiguous_arbitration.rs:611-634`), and says which one wins today when the
   evaluator can say so (broader wins within a band).
 
-### Pre-existing overlaps: refused, and reported
+### Pre-existing overlaps: reported, not refused
 
-A pair that already exists (compiled before #656, completed by a re-enable, or created by a write
-outside the routes) makes **every** recompile of that profile fail — the compiler refuses to compile
-it, as ruled. That is a wedge for unrelated writes on that profile, accepted because the
-alternatives are worse: skipping either rule serves the column unmasked (fail-open), and keeping the
-last artifact serves exactly the ambiguity. The writes that *remove* the pair still succeed — deleting
-or narrowing one rule, or unassigning the tag — because their recompile no longer sees the pair.
+*(User ruling 2026-10-12, superseding the earlier acceptance of a wedge; Task 3 fix round 2.)* A pair
+that already exists — compiled before #656, completed by a re-enable, created by a write outside
+the routes, or a compiled × hand-written pair stored before Task 3 closed that gap — is **reported,
+not refused**. The compiler, like the editor and the tag assignment, compares the unit as stored
+(compiled and hand-written, as the download holds it before the write) with the unit after its
+compile, and refuses only a pair whose identity is new
+(`egret_perm_compile::overlap::refuse_created_by_compile_via`, through the one
+`egret_policy::created_overlaps`). Nothing is ever skipped from compilation, so the "skipping serves
+the column unmasked" argument is untouched: a stored pair keeps being served exactly as it was.
 
-To make the wedge visible before someone trips it:
+Why not refuse it: a wedge's reach is the whole installation. A tag-rule write and a tag rename
+recompile **every** engine-bound Trino and StarRocks profile in one transaction, so one stored pair in
+any profile — possibly another team's — would refuse them all, naming a pair the writer cannot see.
+And live data could already hold compiled × hand-written pairs (the gap Task 3 closed was open until
+then), so the wedge would have fired on deploy.
+
+What is still refused: a pair's identity is both names, both decisive item arrays and the **set** of
+coordinates where the two meet. A write that changes a stored pair's items, or where it meets —
+including an edit that *narrows* one member but leaves the two still meeting on fewer columns — makes
+a different pair, and is refused. The ways out of a stored pair are therefore: narrow one member until
+the two no longer meet at all, delete one, make them agree, unassign the tag (unchecked: it can only
+remove pairs), or switch one off through `PUT /policies/{id}/enabled`.
+
+A limit of comparing stored bodies: a tag RENAME re-reads the assignments under the new name while the
+stored compiled tag policy still carries the old one, so a stored pair that meets *through the
+renamed tag* reads as new and the rename is refused (fail-closed). A rename of any other tag passes.
+
+To make stored pairs visible:
 
 - `GET /api/control-plane/perm/overlaps` (`policy:read`, the permission `list_rules` uses,
-  `routes.rs:1388`) runs the compiler's overlap check over every profile **without writing**, and
-  returns every overlapping pair (not only the first), each naming its profile, kind, coordinate and
-  both rules.
+  `routes.rs:1388`) runs the overlap rule (`egret_policy::unit_overlaps`) over every profile's
+  STORED unit **without writing** — every pair present, not only created ones — and returns every
+  overlapping pair (not only the first), each naming its profile, kind, coordinate and both rules.
 - The Mask & filter rules page (`frontend/src/routes/governance/MaskFilterRules.tsx`) shows a banner
   when the list is non-empty, naming each pair with links to both rules.
 

@@ -178,9 +178,9 @@ impl CatalogTagRepo {
     ///
     /// Runs no overlap check of its own (SP4d-4 Task 3): removing a tag from a
     /// coordinate can only shrink where a tag policy applies, so it can remove
-    /// a pair but never create one. Its recompile still refuses if a compiled
-    /// pair REMAINS stored — the wedge Part A accepts — and passes when the
-    /// unassignment is what removes it.
+    /// a pair but never create one. Its recompile refuses only a pair the
+    /// compile itself creates; a pair that remains stored is reported, not
+    /// refused (user ruling 2026-10-12).
     /// Bumps the bound services' `tag_version` and recompiles them in the same
     /// transaction (see [`Self::assign_catalog`]).
     pub async fn unassign_catalog(

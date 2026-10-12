@@ -41,19 +41,25 @@
 //!   (`recompile_catalog_assignment`, `recompile_one_profile`, and the
 //!   `recompile_services_in_tx` port method).
 //!
-//! **The compiler reads the hand-written policies it sweeps past** (fix round
-//! 1, review C1). Every recompile loads the enabled, non-compiler-owned mask
-//! and row-filter policies of the profile and its tag service and refuses
-//! every pair with at least one COMPILED member
-//! ([`overlaps_with_hand_written`]) — so a rule write, a migration and a
-//! membership-driven recompile that complete a pair with a hand-written policy
-//! are refused, and a pre-existing compiled × hand-written pair wedges the
-//! profile's recompiles like a compiled × compiled one (the accepted wedge). A
-//! hand-written × hand-written pair is not the compiler's output and is left to
-//! the policy editor and the tag assignment ([`refuse_created_overlaps_via`]),
-//! which refuse it where it is created. A migration switches its originals off
-//! BEFORE its rule writes (`migrate.rs`, step 1), so the compiled twin is never
-//! paired with the policy it replaces.
+//! **The compiler refuses only the pairs a compile CREATES** (user ruling
+//! 2026-10-12, fix round 2). It compares the stored unit — compiled AND
+//! hand-written policies, as served before the write — with the unit after its
+//! compile ([`refuse_created_by_compile_via`]). So a rule write, a migration or
+//! a membership-driven recompile that completes a pair, or changes a stored
+//! pair's decisive items or coordinates, is refused; a pair already stored is
+//! reported (`explain`, `GET /perm/overlaps`) and blocks nothing. (Round 1
+//! refused every pair present after the compile; with tag-rule writes and tag
+//! renames recompiling every engine-bound profile, one stored pair anywhere
+//! refused them installation-wide, and live data could already hold such
+//! pairs on deploy.) A migration switches its originals off BEFORE its rule
+//! writes (`migrate.rs`, step 1), so the compiled twin is never paired with
+//! the policy it replaces.
+//!
+//! **A limit of the stored-body comparison:** a tag RENAME re-reads the
+//! assignments under the new name while the stored compiled tag policy still
+//! names the old one, so a stored pair that meets through the renamed tag is
+//! absent from BEFORE and present AFTER, and the rename is refused. Fail-closed
+//! and narrow; break the pair first.
 //!
 //! # Do two recompiles of profiles sharing one tag service serialise?
 //!
@@ -84,8 +90,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use egret_perm::{CompileError, OverlapKind, OverlapRule};
 use egret_policy::{
-    get_service_by_id_via, load_unit_via, units_for_services_via, Arbitrated, AssignedTag, UnitIds,
-    UnitOverlap, UnitPolicy,
+    get_service_by_id_via, is_compiler_owned_policy_name, load_unit_via, unit_overlaps,
+    units_for_services_via, Arbitrated, AssignedTag, UnitIds, UnitOverlap, UnitPolicy,
 };
 use serde_json::{json, Value};
 
@@ -184,49 +190,94 @@ fn overlaps_where(
         .collect()
 }
 
-/// One stored, enabled, HAND-WRITTEN mask or row-filter policy of a service the
-/// compile sweeps, as [`overlaps_with_hand_written`] reads it.
-#[derive(Debug, Clone)]
-pub struct HandWritten {
-    pub service: i64,
-    pub is_tag_service: bool,
-    /// The stored body (`name` inside it is the policy name).
-    pub body: Value,
-}
-
-/// **The compiler's check, completed with the hand-written policies it sweeps
-/// past** (SP4d-4 Task 3 fix round 1, review C1). [`overlaps`] over the desired
-/// set PLUS `hand_written`, keeping only pairs with at least one COMPILED
-/// member: a compiled × hand-written pair is created (or kept) by this
-/// recompile, so it is this recompile's to refuse; a hand-written × hand-written
-/// pair is not the compiler's output, and stays the policy editor's and the tag
-/// assignment's (refused where created, reported by `GET /perm/overlaps`), so a
-/// stored hand-written pair does not wedge the compiler.
+/// **The compiler's check: refuse only the pairs THIS compile creates** (user
+/// ruling 2026-10-12, superseding the wedge; SP4d-4 Task 3 fix round 2).
 ///
-/// The hand-written members are named `policy "<name>"` with no rule id.
-pub fn overlaps_with_hand_written(
+/// For every evaluation unit the compile writes into — the profile and its tag
+/// service, plus, when that tag service is shared, every other profile naming
+/// it (its resource policies as stored) — compare:
+///
+/// * BEFORE: the unit as stored ([`egret_policy::load_unit_via`]: compiled AND
+///   hand-written, enabled, as the download holds them before this write);
+/// * AFTER: the same unit with the compiler-owned policies of the profile and
+///   its tag service replaced by `desired`,
+///
+/// and refuse the first pair in AFTER whose identity is not in BEFORE
+/// ([`egret_policy::created_overlaps`], the same comparison the policy editor
+/// and the tag assignment make). Identity is both names, both decisive item
+/// arrays and the SET of coordinates, so a compile that changes a stored
+/// pair's items or where it meets is "creating" it and is refused. A pair that
+/// is already stored is NOT refused: it is reported (`explain`, `GET
+/// /perm/overlaps`) and blocks nothing. Nothing is skipped either way.
+///
+/// The shared-tag-service units matter for soundness, not reach: two profiles
+/// recompiled in one transaction write one shared tag service, so the SECOND
+/// profile's BEFORE already holds the first one's new tag policy. Checking
+/// every unit of that tag service at the FIRST write means a pair between the
+/// new tag policy and any profile's stored path policy is seen while it is
+/// still new.
+///
+/// Hand-written × hand-written pairs cannot be created here (both bodies and
+/// the assignments are the same on both sides); they stay the editor's and
+/// the tag assignment's.
+pub async fn refuse_created_by_compile_via(
+    conn: &mut sqlx::PgConnection,
+    profile: &str,
+    profile_id: i64,
+    tag_service: Option<i64>,
     desired: &[CompiledForOverlap<'_>],
-    hand_written: &[HandWritten],
-    assignments: &[AssignedTag],
-) -> Vec<Overlap> {
-    let compiled: BTreeSet<&str> = desired.iter().map(|d| d.policy_name).collect();
-    let mut all: Vec<CompiledForOverlap<'_>> = desired.to_vec();
-    all.extend(hand_written.iter().map(|h| {
-        CompiledForOverlap {
-            service: h.service,
-            is_tag_service: h.is_tag_service,
-            policy_name: h
-                .body
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            body: &h.body,
-            rule: None,
-        }
-    }));
-    overlaps_where(&all, assignments, |o| {
-        compiled.contains(o.first.as_str()) || compiled.contains(o.second.as_str())
-    })
+) -> Result<(), CompileError> {
+    let db = |e: egret_policy::PolicyStoreError| CompileError::Db(e.to_string());
+    let mut units: BTreeSet<UnitIds> = BTreeSet::from([UnitIds {
+        resource: Some(profile_id),
+        tag_service,
+    }]);
+    if let Some(t) = tag_service {
+        units.extend(
+            egret_policy::units_for_service_via(conn, t)
+                .await
+                .map_err(db)?,
+        );
+    }
+    let written = |sid: i64| sid == profile_id || Some(sid) == tag_service;
+    for ids in units {
+        let stored = load_unit_via(conn, ids).await.map_err(db)?;
+        let before = stored.overlaps();
+        let mut after: Vec<UnitPolicy<'_>> = stored
+            .unit_policies()
+            .into_iter()
+            .filter(|p| !(written(p.service) && is_compiler_owned_policy_name(p.name)))
+            .collect();
+        after.extend(
+            desired
+                .iter()
+                .filter(|d| Some(d.service) == ids.resource || Some(d.service) == ids.tag_service)
+                .map(|d| UnitPolicy {
+                    service: d.service,
+                    is_tag_service: Some(d.service) == ids.tag_service,
+                    name: d.policy_name,
+                    body: d.body,
+                }),
+        );
+        let Some(o) =
+            egret_policy::created_overlaps(&before, unit_overlaps(&after, &stored.assignments))
+                .into_iter()
+                .next()
+        else {
+            continue;
+        };
+        let mut rules: HashMap<String, OverlapRule> = desired
+            .iter()
+            .filter_map(|d| Some((d.policy_name.to_string(), d.rule.clone()?)))
+            .collect();
+        let missing: BTreeSet<&str> = [o.first.as_str(), o.second.as_str()]
+            .into_iter()
+            .filter(|n| !rules.contains_key(*n))
+            .collect();
+        rules.extend(rules_for_names_via(conn, &missing).await?);
+        return Err(into_compile_error(profile, named(o, &rules)));
+    }
+    Ok(())
 }
 
 /// The refusal for `profile`.
@@ -314,9 +365,11 @@ async fn rules_for_names_via(
 /// **A tag assignment's own check** (user ruling, SP4d-4 Task 3): after the
 /// write and its recompile, refuse the first pair in any unit of the snapshot
 /// that was not stored before — between hand-written tag policies, compiled
-/// rules, or one of each. Pairs that existed before are left to the compiler's
-/// wedge (compiled ones) and to the overlap report (hand-written ones); an
-/// unassignment can only remove pairs, so it passes.
+/// rules, or one of each. Pairs that existed before are reported, not refused
+/// (`GET /perm/overlaps`; user ruling 2026-10-12); an unassignment can only
+/// remove pairs, so it passes. (The compile this write runs reads the
+/// assignments as already changed on both of its sides, so the pair an
+/// assignment completes is this check's to see, not the compiler's.)
 pub async fn refuse_created_overlaps_via(
     conn: &mut sqlx::PgConnection,
     snapshot: &UnitSnapshot,

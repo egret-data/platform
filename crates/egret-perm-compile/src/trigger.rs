@@ -572,8 +572,7 @@ async fn compile_desired(
     // for the measurement and for why an AGREEING tie is admitted) and adds
     // the pairs only the tag assignments reveal — a tag rule and a path rule on
     // one tagged column, two tag rules whose tags share a column. See
-    // `crate::overlap` for the write paths this covers and what it does not
-    // read (hand-written policies).
+    // `crate::overlap` for the write paths this covers.
     //
     // ⚠ It runs BEFORE `apply_diff_in_tx`, so a refusal writes nothing at all
     // — the caller's transaction is intact and its route returns the refusal
@@ -581,71 +580,25 @@ async fn compile_desired(
     // `POST /perm/preview` report it before the steward presses Save, since
     // preview runs the real `write_rule` in a rolled-back transaction.
     //
-    // ⚠ A pair already stored refuses EVERY recompile of this profile (the
-    // wedge Part A accepts: skipping either rule serves the column unmasked);
-    // the writes that remove it still pass, because their recompile no longer
-    // sees it.
+    // **Only pairs THIS compile creates are refused** (user ruling
+    // 2026-10-12, SP4d-4 Task 3 fix round 2 — superseding the wedge round 1
+    // widened). The stored unit (compiled and hand-written, as served now) is
+    // the BEFORE; the unit with this profile's compiler-owned policies
+    // replaced by `desired` is the AFTER; a pair whose identity (names, both
+    // item arrays, the set of coordinates) is new is refused. A stored pair is
+    // reported, not refused, so it no longer blocks unrelated writes — which
+    // for a tag-rule write or a tag rename meant every engine-bound profile in
+    // the installation. A migration's originals are switched off before its
+    // rule writes (`migrate.rs`, step 1), so they are in neither set. See
+    // `crate::overlap::refuse_created_by_compile_via`.
     let tag_service_id = sweep.iter().copied().find(|&id| id != service_id);
-    let in_tag_service = |sid: i64| Some(sid) == tag_service_id;
-    let is_mask_or_filter = |body: &Value| {
-        matches!(
-            body.get("policyType").and_then(Value::as_i64),
-            Some(1) | Some(2)
-        )
-    };
-    // **SP4d-4 Task 3 fix round 1 (review C1): the HAND-WRITTEN policies this
-    // recompile sweeps past.** Every enabled, non-compiler-owned mask or row
-    // filter stored under a service in `sweep` (the profile and its tag
-    // service) is served beside the compiled set, so a pair between one of
-    // them and a compiled policy is one this recompile creates or keeps — the
-    // rule write, the migration and the membership-driven recompile all reach
-    // it here and nowhere else. Only pairs with a compiled member are refused
-    // (`overlap::overlaps_with_hand_written`); a hand × hand pair stays the
-    // editor's. A migration's ORIGINALS are switched off before its rule
-    // writes (`migrate.rs`, step 1), so they are not read here and the
-    // compiled twin is never paired with the policy it replaces.
-    let mut hand_written: Vec<crate::overlap::HandWritten> = Vec::new();
-    for &sid in &sweep {
-        for body in egret_policy::enabled_policies_for_service_via(conn, sid)
-            .await
-            .map_err(db_err)?
-        {
-            let name = body.get("name").and_then(Value::as_str).unwrap_or_default();
-            if egret_policy::is_compiler_owned_policy_name(name) || !is_mask_or_filter(&body) {
-                continue;
-            }
-            hand_written.push(crate::overlap::HandWritten {
-                service: sid,
-                is_tag_service: in_tag_service(sid),
-                body,
-            });
-        }
-    }
-    // The assignments are read only when a tag mask or row filter is in the
-    // unit — without one, no pair can need them (and StarRocks never has one).
-    let needs_assignments = desired
-        .iter()
-        .any(|((sid, _), dp)| in_tag_service(*sid) && is_mask_or_filter(&dp.body))
-        || hand_written.iter().any(|h| h.is_tag_service);
-    let assignments = match tag_service_id {
-        Some(tag_service) if needs_assignments => egret_policy::unit_assignments_via(
-            conn,
-            egret_policy::UnitIds {
-                resource: Some(service_id),
-                tag_service: Some(tag_service),
-            },
-        )
-        .await
-        .map_err(db_err)?,
-        _ => Vec::new(),
-    };
     let rule_names: HashMap<Uuid, &str> =
         all_rules.iter().map(|r| (r.id, r.name.as_str())).collect();
     let for_overlap: Vec<crate::overlap::CompiledForOverlap<'_>> = desired
         .iter()
         .map(|((sid, name), dp)| crate::overlap::CompiledForOverlap {
             service: *sid,
-            is_tag_service: in_tag_service(*sid),
+            is_tag_service: Some(*sid) == tag_service_id,
             policy_name: name,
             body: &dp.body,
             rule: dp.rule_id.map(|id| egret_perm::OverlapRule {
@@ -656,13 +609,14 @@ async fn compile_desired(
             }),
         })
         .collect();
-    if let Some(first) =
-        crate::overlap::overlaps_with_hand_written(&for_overlap, &hand_written, &assignments)
-            .into_iter()
-            .next()
-    {
-        return Err(crate::overlap::into_compile_error(&svc.name, first));
-    }
+    crate::overlap::refuse_created_by_compile_via(
+        conn,
+        &svc.name,
+        service_id,
+        tag_service_id,
+        &for_overlap,
+    )
+    .await?;
 
     Ok(Some(Compiled {
         desired,

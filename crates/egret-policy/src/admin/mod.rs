@@ -1381,7 +1381,10 @@ async fn refuse_ambiguous_arbitration(
             .await?;
             let label = |n: &str| match rules.get(n) {
                 Some((_, rule)) => format!("rule {rule:?}"),
-                None => crate::ambiguous_arbitration::quoted(n),
+                // One label for a hand-written member on every surface (fix
+                // round 2, N3): the compiler and the tag assignment write
+                // `policy "H"` too.
+                None => format!("policy {}", crate::ambiguous_arbitration::quoted(n)),
             };
             let member = |n: &str| match rules.get(n) {
                 Some((id, rule)) => json!({ "id": id, "name": rule }),

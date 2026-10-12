@@ -196,10 +196,11 @@
 //!   workspace-membership writes that recompile on their own triggers. Since
 //!   SP4d-4 Task 3 it checks the desired set as one unit — the profile's
 //!   download and its tag service's, through the profile's tag assignments —
-//!   and refuses every compiled pair, stored or new (the wedge Part A
-//!   accepts). It does NOT read hand-written policies: a migration recompiles
-//!   while the policy it migrates is still enabled, so pairing the two would
-//!   refuse the migration on its own original. A tag assignment additionally
+//!   with the hand-written policies stored there, and refuses every pair with
+//!   a compiled member that the compile CREATES (fix round 2, user ruling
+//!   2026-10-12: a stored pair is reported, not refused). A migration switches
+//!   its originals off before its rule writes, so the compiled twin is not
+//!   paired with its own original. A tag assignment additionally
 //!   refuses any pair it CREATES across the whole stored unit — hand-written,
 //!   compiled, or one of each (`egret-bi`'s `catalog_tags`, through
 //!   `egret_perm_compile::overlap`).
@@ -225,8 +226,9 @@
 //!   refuses only a pair its own write creates (and re-enabling through
 //!   `PUT /policies/{id}` with `isEnabled: true` IS such a write, and is
 //!   refused), and the rule compiler refuses only pairs with a compiled
-//!   member. Re-enabled beside a COMPILED policy, it wedges that profile's next
-//!   recompile (SP4d-4 Task 3 fix round 1). It is never silent: `explain` answers `EvalOrderAmbiguous` over the served
+//!   member that its compile creates — a re-enabled policy is already stored
+//!   when the next compile reads its BEFORE, so that pair is reported, not
+//!   refused (SP4d-4 Task 3 fix round 2). It is never silent: `explain` answers `EvalOrderAmbiguous` over the served
 //!   artifact the moment it exists, and SP4d-4 Task 4's read-only
 //!   `GET /perm/overlaps` is to report every stored pair.
 //! * **Everything that is not a route** — `psql`, an import, a route added
