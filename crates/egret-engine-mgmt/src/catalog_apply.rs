@@ -920,7 +920,7 @@ pub(crate) async fn attach_to_engine(
             .await
             .map_err(CatalogOpError::Http);
     }
-    refuse_attach_that_creates_overlap(st, engine, catalog).await?;
+    let pre_apply = refuse_attach_that_creates_overlap(st, engine, catalog).await?;
     let out = attach_to_engine_inner(st, engine, catalog, role_from_client).await;
     if out.is_ok() {
         // **An attachment change is a recompile trigger** (whole-branch
@@ -937,8 +937,54 @@ pub(crate) async fn attach_to_engine(
         // on the three routes that reach it, so a fourth caller cannot miss
         // it, and it never fails its caller — the attach has happened.
         crate::profile_compiler::recompile_bound_profile(st, engine.id, &engine.name).await;
+        // **The same comparison again, against the PRE-APPLY snapshot** (fix
+        // round 1, I2). The dry run above looks ahead of the write; whatever was
+        // committed between it and the real recompile (the apply takes seconds
+        // to minutes) is only visible here. A pair created since the snapshot is
+        // refused and the attachment undone.
+        if let Some(snapshot) = pre_apply.as_ref() {
+            if let Err(e) = recheck_attach_against_snapshot(st, snapshot).await {
+                undo_refused_attach(st, engine, catalog).await;
+                return Err(CatalogOpError::Http(e));
+            }
+        }
     }
     out
+}
+
+/// Compare the unit as it is now with the pre-apply `snapshot`. Fail-closed: a
+/// read that cannot complete refuses like an overlap does.
+async fn recheck_attach_against_snapshot(
+    st: &CpState,
+    snapshot: &crate::profile_compiler::OverlapSnapshot,
+) -> Result<(), CpError> {
+    let Some(compiler) = st.perm_compiler.clone() else {
+        return Ok(());
+    };
+    let mut tx = st
+        .engine_mgmt
+        .pool()
+        .begin()
+        .await
+        .map_err(crate::http_error::db_error)?;
+    let out = compiler.refuse_created_overlaps_in_tx(&mut tx, snapshot).await;
+    drop(tx);
+    out.map_err(CpError::from)
+}
+
+/// Reverse an attach the post-apply comparison refused: the full detach, so the
+/// cluster, the row, the minted credential and the compiled profile all go back.
+/// If even that fails the attachment stays, and the error names the repair.
+async fn undo_refused_attach(st: &CpState, engine: &Engine, catalog: &CatalogRow) {
+    if let Err(e) = detach_from_engine(st, engine, catalog).await {
+        let reason = match e {
+            CatalogOpError::Http(e) => e.to_string(),
+            CatalogOpError::Apply(e) => format!("{e:?}"),
+        };
+        tracing::error!(engine = %engine.name, catalog = %catalog.name, error = %reason,
+            "an attach created an order-ambiguous pair and was refused, but undoing it failed; \
+             the attachment (and the catalog on the cluster) remain: detach it by hand");
+    }
 }
 
 /// **A dry run of the attachment's recompile, refusing the pairs it would
@@ -954,16 +1000,16 @@ pub(crate) async fn attach_to_engine(
 /// profile, and refuse what the recompile creates. Nothing it writes survives.
 ///
 /// **Its limit is the usual one for a check made ahead of a write:** another
-/// transaction may change the unit between this and the real recompile. A
-/// failure of the dry run that is NOT an overlap is logged and does not refuse —
-/// the real recompile reports it, exactly as before.
+/// transaction may change the unit between this and the real recompile, so it
+/// hands back the PRE-APPLY snapshot and `attach_to_engine` compares against it
+/// again after the real recompile. A dry run that fails for any reason refuses.
 async fn refuse_attach_that_creates_overlap(
     st: &CpState,
     engine: &Engine,
     catalog: &CatalogRow,
-) -> Result<(), CatalogOpError> {
+) -> Result<Option<crate::profile_compiler::OverlapSnapshot>, CatalogOpError> {
     let (Some(sid), Some(_)) = (engine.authz_service_id, st.perm_compiler.as_ref()) else {
-        return Ok(());
+        return Ok(None);
     };
     let mut tx = st
         .engine_mgmt
@@ -971,8 +1017,11 @@ async fn refuse_attach_that_creates_overlap(
         .begin()
         .await
         .map_err(crate::http_error::db_error)?;
+    let before = match crate::profile_compiler::snapshot_overlaps(st, &mut tx, Some(sid)).await {
+        Ok(b) => b,
+        Err(e) => return Err(CatalogOpError::Http(refusal_for_dry_run(engine, catalog, e))),
+    };
     let outcome: Result<(), egret_perm::CompileError> = async {
-        let before = crate::profile_compiler::snapshot_overlaps(st, &mut tx, Some(sid)).await?;
         if let Err(e) = st
             .engine_mgmt
             .registry()
@@ -1010,14 +1059,25 @@ async fn refuse_attach_that_creates_overlap(
     // Dropped, never committed: the stand-in row and the recompile go with it.
     drop(tx);
     match outcome {
-        Ok(()) => Ok(()),
-        Err(e) if e.rule_overlap_body().is_some() => Err(CatalogOpError::Http(e.into())),
-        Err(e) => {
-            tracing::warn!(engine = %engine.name, catalog = %catalog.name, error = %e,
-                "overlap dry run for an attachment could not complete; attaching without it");
-            Ok(())
-        }
+        Ok(()) => Ok(before),
+        Err(e) => Err(CatalogOpError::Http(refusal_for_dry_run(engine, catalog, e))),
     }
+}
+
+/// A dry run that cannot complete REFUSES (it used to log and attach anyway):
+/// an overlap is the caller's 409, anything else a 500 naming nothing the
+/// caller can act on, with the cause logged.
+fn refusal_for_dry_run(
+    engine: &Engine,
+    catalog: &CatalogRow,
+    e: egret_perm::CompileError,
+) -> CpError {
+    if e.rule_overlap_body().is_none() {
+        tracing::error!(engine = %engine.name, catalog = %catalog.name, error = %e,
+            "overlap dry run for an attachment could not complete; the attach is refused \
+             rather than made unchecked");
+    }
+    e.into()
 }
 
 async fn attach_to_engine_inner(

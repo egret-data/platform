@@ -246,17 +246,24 @@ data either way". It is **not** sound against:
 - a write that changes which catalogs — and so which tag assignments — a profile's unit resolves,
   with no before-snapshot of its own *(Task 3 fix round 3, re-review M-2; closed in Task 7)*: every
   overlap check compares stored and compiled policies under the assignments as they are when it
-  runs, so the pair such a change completes would read as already stored. **Every such write now
-  takes its own snapshot and refuses the pairs it creates:** the tag assignment and the tag rename
-  (`egret-bi`); a profile bind — `PUT /engines/{id}` and external-engine registration — which takes
-  `ProfileCompilerPort::overlap_snapshot_in_tx` before `set_engine_authz_service_in_tx` and
-  `refuse_created_overlaps_in_tx` after the recompile in the same transaction; and an engine ↔
-  catalog attachment — an external engine's declared attachment in one transaction the same way, a
-  provisioned engine's through a **dry run** on a rolled-back transaction before anything is
-  applied (a Trino attach applies to the cluster first, so it cannot share a transaction with its
-  recompile; the dry run's own limit is the usual one for a check made ahead of a write — another
-  transaction may change the unit before the real recompile, and a dry run that fails for a reason
-  other than an overlap is logged and does not refuse). No input change at all: catalog workspace
+  runs, so the pair such a change completes would read as already stored. **These writes take their
+  own snapshot and refuse the pairs they create** *(exactly what is covered; Task 7 fix round 1)*:
+  the tag assignment and the tag rename (`egret-bi`); every profile bind — `PUT /engines/{id}`,
+  external-engine registration, `POST /engines` for Trino (adopting an existing profile or making
+  one) and for StarRocks with `authzServiceId`, and the late-bind inside an apply — which takes
+  `overlap_snapshot_in_tx` before the `authz_service_id` write and `refuse_created_overlaps_in_tx`
+  after the recompile in one transaction (a refused create is undone by `compensate_failed_create`
+  and answers 409; the best-effort late-bind is SKIPPED with a warning that names the pair, never
+  made into a new ambiguity); and an engine ↔ catalog attachment — an external engine's declared
+  attachment in one transaction, a provisioned engine's through a **dry run** on a rolled-back
+  transaction before anything is applied (a Trino attach applies to the cluster first, so it cannot
+  share a transaction with its recompile) **plus the same comparison against the pre-apply
+  snapshot after the real recompile**, which catches a write committed in between (the attachment
+  is then undone by the ordinary detach); a dry run that fails for any reason refuses, never
+  attaches unchecked. **Not covered:** the extras a create attaches are covered only because the
+  engine is already bound by then (they go through the provisioned attach above); a recompile
+  after the check that reads a later write is the usual limit of a check made ahead of a write. No
+  input change at all: catalog workspace
   assignment (grants only), catalog/warehouse delete and unassign (they can only remove pairs),
   membership and role writes (they change compiled bodies, which the compiler compares).
   `tagService` has no `UPDATE` path;
@@ -452,9 +459,10 @@ or deletes the cluster of. It exists so that:
   (the before-snapshot is taken after the row exists and before the bind and the attachments); a
   failure anywhere rolls the whole registration back, so no engine claims a profile the compiler
   never filled. `rangerPluginVersion` is one of the Ranger 2.x releases egret knows (a typo is a
-  400); only `2.5.0` and `2.8.0` are *modelled* by the evaluator, and the response says so
-  (`rangerPluginVersionModelled`): any other is stored as declared and migrations to its profile are
-  refused, never evaluated at a guessed version.
+  400); only the (type, version) pairs **Trino@2.5.0 and StarRocks@2.8.0** are *modelled* by the
+  evaluator (user ruling 2026-10-12), and the response says so (`rangerPluginVersionModelled`): any
+  other pair is stored as declared and migrations to its profile are refused, and `explain`
+  refuses, never evaluated with the wrong semantics.
 - `GET /engines`, `GET /engines/{id}` carry `origin`, `host`, `port`, `rangerPluginVersion`, and for
   an external engine never call the provisioner.
 - `PUT /engines/{id}` for an external engine accepts only `authzServiceId`, `host`, `port`,
@@ -482,8 +490,9 @@ or deletes the cluster of. It exists so that:
 
 One function, `engine_plugin_version(row) -> Result<PluginVersion, String>`, in
 `egret-perm-compile`: a provisioned engine maps its type as today; an external engine maps its
-declared version if it is one `egret-ranger-eval` models (`2.5.0`, `2.8.0` — `eval.rs:670-680`
-makes any other unrepresentable), else returns a sentence. `bound_plugin_versions`
+declared version if the pair (engine type, version) is one `egret-ranger-eval` models — Trino@2.5.0
+and StarRocks@2.8.0 only, `egret_perm::ranger_plugin_is_modelled`, the one predicate behind the DTO
+flag, the 400 text, the gate and `explain` — else returns a sentence naming the pair. `bound_plugin_versions`
 (`migrate.rs:377-411`) and `explain` (`routes.rs:1832-1836`) both call it. An unmeasured version
 makes the migration gate refuse on that profile and `explain` answer a refusal that names the
 version — never an evaluation at a guessed version.

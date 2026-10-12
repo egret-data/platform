@@ -67,13 +67,34 @@ pub struct OverlapRule {
     pub name: String,
 }
 
-/// The Ranger plugin versions `egret-ranger-eval` has been read against
-/// (`PluginVersion::Ranger2_5_0` / `Ranger2_8_0`). Spelled here, in the crate
-/// both `egret-engine-mgmt` (registering an external engine) and
-/// `egret-perm-compile` (`engine_plugin_version`) already depend on, so the
-/// list an operator may declare as MODELLED and the list the gate can prove on
-/// are one list; `egret-perm-compile` pins that every entry maps.
-pub const MODELLED_RANGER_PLUGIN_VERSIONS: [&str; 2] = ["2.5.0", "2.8.0"];
+/// The (engine type, Ranger plugin version) pairs `egret-ranger-eval` has been
+/// read against: Trino at 2.5.0 and StarRocks at 2.8.0, and nothing else (user
+/// ruling 2026-10-12). "Modelled" is a PAIR, never a version alone: the
+/// evaluator's `PluginVersion` and `EngineType` are measured together, so a
+/// Trino engine declaring 2.8.0 is not covered by the StarRocks measurement.
+///
+/// Spelled here, in the crate both `egret-engine-mgmt` (registering an external
+/// engine) and `egret-perm-compile` (`engine_plugin_version`) already depend
+/// on, so the answer the API reports (`rangerPluginVersionModelled`), the one
+/// the migration gate proves on and the one `explain` evaluates at are ONE
+/// predicate, [`ranger_plugin_is_modelled`].
+pub const MODELLED_RANGER_PLUGINS: [(&str, &str); 2] =
+    [("trino", "2.5.0"), ("starrocks", "2.8.0")];
+
+/// Whether `engine_type` (`trino` / `starrocks`) at Ranger plugin `version` is a
+/// modelled pair.
+pub fn ranger_plugin_is_modelled(engine_type: &str, version: &str) -> bool {
+    MODELLED_RANGER_PLUGINS.contains(&(engine_type, version))
+}
+
+/// `Trino@2.5.0 and StarRocks@2.8.0`, for sentences.
+pub fn modelled_ranger_plugins_sentence() -> String {
+    MODELLED_RANGER_PLUGINS
+        .iter()
+        .map(|(t, v)| format!("{}@{v}", if *t == "trino" { "Trino" } else { "StarRocks" }))
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
 
 /// A grant the compiler cannot express against the target engine, or cannot
 /// express *correctly* — every variant here exists because a silent

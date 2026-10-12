@@ -1347,10 +1347,40 @@ async fn an_external_engine_declaring_an_unmeasured_plugin_version_refuses_the_m
     assert!(enabled(&f, id).await, "the original stays on");
 }
 
+/// User ruling 2026-10-12: "modelled" is a (type, version) PAIR. A Trino engine
+/// declaring 2.8.0 is a real Ranger release but not one the evaluator was read
+/// against for Trino, so the gate refuses rather than evaluating it with the
+/// wrong semantics. (The StarRocks half is in `tests/routes.rs`' explain test.)
 #[tokio::test]
-async fn an_external_trino_declaring_2_8_0_is_proved_on_2_8_0() {
+async fn an_external_trino_declaring_2_8_0_refuses_the_migration_naming_the_pair() {
     let Some(f) = setup().await else { return };
     make_bound_engine_external(&f, "2.8.0").await;
+    let name = unique("alice reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], true).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let refusal = body["refusal"].as_str().expect("refusal");
+    assert!(
+        refusal.contains("2.8.0") && refusal.contains("trino") && refusal.contains("Trino@2.5.0"),
+        "the sentence must name the pair and what is modelled: {refusal}"
+    );
+    assert_eq!(grants_on_catalog(&f).await, 0, "nothing is written");
+    assert!(enabled(&f, id).await, "the original stays on");
+}
+
+/// The accept cell of the pair: Trino declaring 2.5.0 is proved on 2.5.0.
+#[tokio::test]
+async fn an_external_trino_declaring_2_5_0_is_proved_on_2_5_0() {
+    let Some(f) = setup().await else { return };
+    make_bound_engine_external(&f, "2.5.0").await;
     let name = unique("alice reads orders");
     insert(
         &f,
@@ -1363,9 +1393,5 @@ async fn an_external_trino_declaring_2_8_0_is_proved_on_2_8_0() {
 
     let (status, body) = migrate(&f, f.p, &[&name], true).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        body["profiles"][0]["plugin_versions"],
-        json!(["ranger_2_8_0"]),
-        "the declared version decides, not the engine's type: {body}"
-    );
+    assert_eq!(body["profiles"][0]["plugin_versions"], json!(["ranger_2_5_0"]));
 }

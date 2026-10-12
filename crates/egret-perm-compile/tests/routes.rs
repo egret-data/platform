@@ -2779,6 +2779,25 @@ async fn explain_refuses_an_external_engine_declaring_an_unmeasured_plugin_versi
         "the refusal must name the declared version: {body}"
     );
 
+    // The pair, not the version: StarRocks declaring 2.5.0 (the version only
+    // Trino is modelled at) is refused too, and the sentence names the pair and
+    // what is modelled (the migration gate refuses the other off-diagonal pair,
+    // Trino@2.8.0, with the same derivation: `migrate_route.rs`).
+    assert_eq!(declare("2.5.0").await, 1);
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", &token, Some(ask())))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("2.5.0") && error.contains("StarRocks@2.8.0"),
+        "the refusal must name the pair: {body}"
+    );
+
     // Accept cell: the same engine declaring the version StarRocks ships.
     assert_eq!(declare("2.8.0").await, 1);
     let (status, body) = into_json(

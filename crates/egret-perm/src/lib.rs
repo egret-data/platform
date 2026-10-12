@@ -23,7 +23,7 @@ pub mod store;
 
 pub use actions::{
     engine_accesses, CompileError, EngineType, OverlapKind, OverlapRule,
-    MODELLED_RANGER_PLUGIN_VERSIONS,
+    modelled_ranger_plugins_sentence, ranger_plugin_is_modelled, MODELLED_RANGER_PLUGINS,
 };
 pub use assignment::{sync_assignment_grants, sync_assignment_grants_in_tx};
 pub use error::PermError;

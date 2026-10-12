@@ -26,10 +26,10 @@ export interface RegisterExternalEngine {
   port: number;
   /**
      * The Ranger plugin version installed on the engine, `x.y.z`, one of the
-     * Ranger 2.x releases. **Only 2.5.0 and 2.8.0 are modelled by egret's
-     * evaluator**: any other is stored as declared, and a migration to a
-     * profile bound to this engine is then refused rather than evaluated at a
-     * guessed version.
+     * Ranger 2.x releases. **Only Trino@2.5.0 and StarRocks@2.8.0 are
+     * modelled by egret's evaluator** (a type and version PAIR): any other is
+     * stored as declared, and a migration to a profile bound to this engine is
+     * then refused rather than evaluated with the wrong semantics.
      */
   rangerPluginVersion: string;
   /**

@@ -23,7 +23,8 @@
 //! **The plugin version egret can PROVE a migration on is not the version an
 //! operator may DECLARE.** Registration accepts any Ranger release in
 //! [`KNOWN_RANGER_PLUGIN_VERSIONS`] and says, on the response, whether egret's
-//! evaluator models it (`rangerPluginVersionModelled`). A version the evaluator
+//! evaluator models the (type, version) PAIR (`rangerPluginVersionModelled`; only
+//! Trino@2.5.0 and StarRocks@2.8.0 are). A pair the evaluator
 //! does not model is stored as declared — recording a different one would be
 //! wrong — and `egret_perm_compile::engine_plugin_version` then makes the SP4d-3
 //! migration gate refuse on that profile, naming the version. It is never
@@ -35,7 +36,6 @@ use axum::routing::post;
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
 use egret_core::http::ErrorBody;
-use egret_perm::MODELLED_RANGER_PLUGIN_VERSIONS;
 use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -54,9 +54,11 @@ pub const KNOWN_RANGER_PLUGIN_VERSIONS: [&str; 9] = [
     "2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0",
 ];
 
-/// Whether egret's Ranger evaluator has been read against `version`.
-pub fn plugin_version_is_modelled(version: &str) -> bool {
-    MODELLED_RANGER_PLUGIN_VERSIONS.contains(&version)
+/// Whether egret's Ranger evaluator has been read against `engine_type` at
+/// `version` (a PAIR: Trino@2.5.0 and StarRocks@2.8.0 only). The same predicate
+/// the migration gate and `explain` use.
+pub fn plugin_version_is_modelled(engine_type: &str, version: &str) -> bool {
+    egret_perm::ranger_plugin_is_modelled(engine_type, version)
 }
 
 pub fn is_external(e: &Engine) -> bool {
@@ -91,10 +93,10 @@ pub struct RegisterExternalEngine {
     /// Trino's HTTP port or StarRocks' FE query port.
     pub port: u16,
     /// The Ranger plugin version installed on the engine, `x.y.z`, one of the
-    /// Ranger 2.x releases. **Only 2.5.0 and 2.8.0 are modelled by egret's
-    /// evaluator**: any other is stored as declared, and a migration to a
-    /// profile bound to this engine is then refused rather than evaluated at a
-    /// guessed version.
+    /// Ranger 2.x releases. **Only Trino@2.5.0 and StarRocks@2.8.0 are
+    /// modelled by egret's evaluator** (a type and version PAIR): any other is
+    /// stored as declared, and a migration to a profile bound to this engine is
+    /// then refused rather than evaluated with the wrong semantics.
     pub ranger_plugin_version: String,
     /// A policy profile to bind. Its type must equal `type`, no other engine may
     /// bind it, and a Trino profile needs a usable `tagService`.
@@ -158,11 +160,11 @@ fn validate_plugin_version(version: &str) -> Result<(), CpError> {
     } else {
         Err(CpError::BadRequest(format!(
             "rangerPluginVersion {version:?} is not a Ranger 2.x release egret knows; one of \
-             {}. Only {} are modelled by egret's evaluator: another version is accepted as \
-             declared, and a migration to its profile is then refused, never evaluated at a \
-             guessed version",
+             {}. Only {} are modelled by egret's evaluator: any other (type, version) pair is \
+             accepted as declared, and a migration to its profile is then refused, never \
+             evaluated with the wrong semantics",
             KNOWN_RANGER_PLUGIN_VERSIONS.join(", "),
-            MODELLED_RANGER_PLUGIN_VERSIONS.join(" and "),
+            egret_perm::modelled_ranger_plugins_sentence(),
         )))
     }
 }
@@ -244,7 +246,7 @@ pub(crate) async fn declare_attached_and_recompile(
     tag = "control-plane-engines",
     request_body = RegisterExternalEngine,
     responses(
-        (status = 201, description = "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to a policy profile, with the given catalogs declared attached (`applyStatus: declared`). The bound profile was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the declared version: a migration to that profile is then refused, never evaluated at a guessed version", body = EngineDto),
+        (status = 201, description = "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to a policy profile, with the given catalogs declared attached (`applyStatus: declared`). The bound profile was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the (type, declared version) pair (only Trino@2.5.0 and StarRocks@2.8.0 are): a migration to that profile is then refused, never evaluated at a guessed version", body = EngineDto),
         (status = 400, description = "Invalid name, type, host, port or plugin version; a catalog the engine cannot read; `authzServiceId` naming no policy profile or a Trino profile with no usable tag service; or Kubernetes-free registration was malformed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:create permission", body = ErrorBody),

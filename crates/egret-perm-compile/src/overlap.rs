@@ -67,16 +67,17 @@
 //! completes read as already stored, so it needs its own before-snapshot
 //! ([`unit_snapshot_via`] + [`refuse_created_overlaps_via`]). Every such
 //! caller takes one: the tag assignment and the tag rename (`egret-bi`), and
-//! (SP4d-4 Task 7) the two writes that change which catalogs — and so which
-//! assignments — a unit resolves, through `egret-engine-mgmt`'s
+//! (SP4d-4 Task 7, fix round 1) the writes that change which catalogs — and so
+//! which assignments — a unit resolves, through `egret-engine-mgmt`'s
 //! `ProfileCompilerPort::{overlap_snapshot_in_tx, refuse_created_overlaps_in_tx}`:
-//! a profile bind (`PUT /engines/{id}` and external-engine registration,
-//! snapshot before `set_engine_authz_service_in_tx`, check after the recompile,
-//! one transaction) and an engine ↔ catalog attachment (an external engine's
-//! declared attachment the same way; a provisioned engine's, which applies to
-//! the cluster before it can recompile, through a dry run on a rolled-back
-//! transaction before anything is applied). `tagService` has no UPDATE path at
-//! all.
+//! every profile bind (`PUT /engines/{id}`, external-engine registration, the
+//! two `POST /engines` binds and the late-bind in an apply; snapshot before the
+//! `authz_service_id` write, check after the recompile, one transaction) and an
+//! engine <-> catalog attachment (an external engine's declared attachment the
+//! same way; a provisioned engine's, which applies to the cluster before it can
+//! recompile, through a dry run on a rolled-back transaction before anything is
+//! applied AND the same comparison against the pre-apply snapshot after the
+//! real recompile). `tagService` has no UPDATE path at all.
 //!
 //! **Cost:** with N profiles sharing one tag service, a tag-rule write
 //! recompiles all N and each compile loads all N units — about N² unit loads.

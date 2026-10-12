@@ -2264,16 +2264,14 @@ pub async fn confine_rule_selector(
     }
 }
 
-/// `egret_perm::EngineType` → the evaluator's own. Two enums for one fact
-/// because `egret-ranger-eval` is a pure crate that depends on neither
-/// `egret-perm` nor `egret-policy`; this is the single crossing.
 /// **The one place an engine's Ranger plugin version is derived** (SP4d-4
 /// Task 7). A provisioned engine maps its type to the version egret's own
 /// image ships (`EngineType::plugin_version`). An external engine maps the
 /// version its operator DECLARED, if `egret-ranger-eval` has been read against
-/// it (`egret_perm::MODELLED_RANGER_PLUGIN_VERSIONS`), else returns a sentence:
-/// the evaluator cannot express any other version, and a guess would be an
-/// evaluation at a version nobody measured.
+/// it for ITS TYPE (`egret_perm::ranger_plugin_is_modelled`: Trino@2.5.0 and
+/// StarRocks@2.8.0 only), else returns a sentence: the evaluator was not read
+/// against any other (type, version) pair, and a guess would be an evaluation
+/// nobody measured.
 pub(crate) fn engine_plugin_version(
     name: &str,
     origin: &str,
@@ -2292,12 +2290,16 @@ pub(crate) fn engine_plugin_version(
         };
     }
     match declared {
-        Some("2.5.0") => Ok(PluginVersion::Ranger2_5_0),
-        Some("2.8.0") => Ok(PluginVersion::Ranger2_8_0),
+        Some(v) if egret_perm::ranger_plugin_is_modelled(r#type, v) => Ok(match v {
+            "2.5.0" => PluginVersion::Ranger2_5_0,
+            _ => PluginVersion::Ranger2_8_0,
+        }),
         Some(v) => Err(format!(
-            "engine \"{name}\" declares Ranger plugin {v}, which egret's evaluator has not been \
-             verified against (it models {}), so a decision cannot be proved on it",
-            egret_perm::MODELLED_RANGER_PLUGIN_VERSIONS.join(" and ")
+            "engine \"{name}\" is a {} declaring Ranger plugin {v}, a (type, version) pair \
+             egret's evaluator has not been verified against (it models {}), so a decision \
+             cannot be proved on it",
+            r#type,
+            egret_perm::modelled_ranger_plugins_sentence()
         )),
         None => Err(format!(
             "engine \"{name}\" is external but declares no Ranger plugin version"
@@ -2352,8 +2354,9 @@ async fn profile_plugin_version(
     for e in bound_engines(conn, service_id).await? {
         let v = e.plugin_version().map_err(|sentence| {
             PermHttpError::Conflict(format!(
-                "cannot explain profile #{service_id}: {sentence}. Declare a version egret models, \
-                 or bind an engine it does."
+                "cannot explain profile #{service_id}: {sentence}. Only an engine of a modelled \
+                 (type, version) pair can be explained: {}.",
+                egret_perm::modelled_ranger_plugins_sentence()
             ))
         })?;
         if !versions.contains(&v) {
@@ -2370,6 +2373,9 @@ async fn profile_plugin_version(
     }
 }
 
+/// `egret_perm::EngineType` → the evaluator's own. Two enums for one fact
+/// because `egret-ranger-eval` is a pure crate that depends on neither
+/// `egret-perm` nor `egret-policy`; this is the single crossing.
 pub(crate) fn ranger_engine(engine: EngineType) -> egret_ranger_eval::eval::EngineType {
     match engine {
         EngineType::Trino => egret_ranger_eval::eval::EngineType::Trino,
@@ -4460,10 +4466,10 @@ mod engine_plugin_version_tests {
 
     #[test]
     fn every_version_the_operator_may_call_modelled_maps_to_a_variant() {
-        for v in egret_perm::MODELLED_RANGER_PLUGIN_VERSIONS {
+        for (t, v) in egret_perm::MODELLED_RANGER_PLUGINS {
             assert!(
-                engine_plugin_version("e", "external", "trino", Some(v)).is_ok(),
-                "{v} is listed as modelled but the evaluator has no variant for it"
+                engine_plugin_version("e", "external", t, Some(v)).is_ok(),
+                "{t}@{v} is listed as modelled but the evaluator has no variant for it"
             );
         }
     }
@@ -4479,14 +4485,31 @@ mod engine_plugin_version_tests {
             Ok(PluginVersion::Ranger2_8_0)
         );
         assert_eq!(
-            engine_plugin_version("e", "external", "trino", Some("2.8.0")),
-            Ok(PluginVersion::Ranger2_8_0),
-            "the declared version decides, not the type"
-        );
-        assert_eq!(
-            engine_plugin_version("e", "external", "starrocks", Some("2.5.0")),
+            engine_plugin_version("e", "external", "trino", Some("2.5.0")),
             Ok(PluginVersion::Ranger2_5_0)
         );
+        assert_eq!(
+            engine_plugin_version("e", "external", "starrocks", Some("2.8.0")),
+            Ok(PluginVersion::Ranger2_8_0)
+        );
+    }
+
+    /// The four (type, version) pairings: only the diagonal is modelled.
+    #[test]
+    fn only_trino_2_5_0_and_starrocks_2_8_0_are_modelled() {
+        for (t, v, modelled) in [
+            ("trino", "2.5.0", true),
+            ("trino", "2.8.0", false),
+            ("starrocks", "2.5.0", false),
+            ("starrocks", "2.8.0", true),
+        ] {
+            assert_eq!(
+                engine_plugin_version("e", "external", t, Some(v)).is_ok(),
+                modelled,
+                "{t}@{v}"
+            );
+            assert_eq!(egret_perm::ranger_plugin_is_modelled(t, v), modelled, "{t}@{v}");
+        }
     }
 
     #[test]

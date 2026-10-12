@@ -316,8 +316,9 @@ pub(crate) struct EngineDto {
     /// External only: the Ranger plugin version the operator declared installed.
     #[serde(skip_serializing_if = "Option::is_none")]
     ranger_plugin_version: Option<String>,
-    /// External only: whether egret's Ranger evaluator has been read against the
-    /// declared version. When `false`, a migration to the profile bound to this
+    /// External only: whether egret's Ranger evaluator has been read against this
+    /// engine's (type, declared version) PAIR: only Trino@2.5.0 and
+    /// StarRocks@2.8.0 are. When `false`, a migration to the profile bound to this
     /// engine is refused (never evaluated at a guessed version) and `explain`
     /// answers that it cannot.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -330,7 +331,7 @@ impl From<Engine> for EngineDto {
         let modelled = e
             .ranger_plugin_version
             .as_deref()
-            .map(crate::external::plugin_version_is_modelled);
+            .map(|v| crate::external::plugin_version_is_modelled(&e.r#type, v));
         EngineDto {
             id: e.id,
             name: e.name,
@@ -605,6 +606,16 @@ pub(crate) async fn build_provision_req_with(
                         )
                         .await;
                     }
+                    // A bind that would create an order-ambiguous pair is
+                    // SKIPPED, never made (C1): the guarded bind rolled back, so
+                    // the engine stays unbound and the warning names the pair.
+                    Err(CpError::RuleOverlap(body)) => tracing::warn!(
+                        engine = %engine.name,
+                        overlap = %body,
+                        "late Ranger bind skipped: binding this engine's catalogs into the \
+                         profile would create an order-ambiguous mask or row-filter pair; \
+                         engine stays unbound"
+                    ),
                     Err(e) => tracing::warn!(engine = %engine.name, error = %e,
                         "late Ranger bind failed; engine stays unbound"),
                 }
@@ -2655,10 +2666,9 @@ async fn bind_trino_profile(
             svc.id
         }
     };
-    st.engine_mgmt
-        .set_engine_authz_service(engine_id, Some(profile_id))
-        .await?;
-    Ok(())
+    // A pair this bind creates is refused (SP4d-4 Task 7 fix round 1, C1): the
+    // caller undoes the create, or skips the late-bind.
+    crate::profile_compiler::bind_profile_guarded(st, engine_id, name, profile_id).await
 }
 
 /// Resolve the warehouse the engine leads with, from whichever shape the
@@ -4100,12 +4110,18 @@ async fn create_starrocks_engine(
     if let Some(sid) = b.authz_service_id {
         match st.authz.list_services().await {
             Ok(svcs) if svcs.iter().any(|s| s.id == sid) => {
-                if let Err(e) = st
-                    .engine_mgmt
-                    .set_engine_authz_service(engine.id, Some(sid))
+                match crate::profile_compiler::bind_profile_guarded(&st, engine.id, &b.name, sid)
                     .await
                 {
-                    tracing::warn!(error = %e, "set_engine_authz_service failed for starrocks create");
+                    Ok(()) => {}
+                    // A pair this bind creates refuses the create (C1).
+                    Err(e @ CpError::RuleOverlap(_)) => {
+                        compensate_failed_create(&st, undo).await;
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "binding the profile failed for starrocks create");
+                    }
                 }
             }
             Ok(_) => {

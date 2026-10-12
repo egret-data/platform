@@ -10964,6 +10964,30 @@ async fn registration_validates_its_input_and_states_an_unmodelled_version() {
     assert_eq!(j["rangerPluginVersion"], "2.6.0");
     assert_eq!(j["rangerPluginVersionModelled"], false, "{j}");
 
+    // "Modelled" is a (type, version) PAIR (user ruling 2026-10-12): 2.8.0 is
+    // modelled for StarRocks and 2.5.0 for Trino, and neither the other way.
+    for (kind, version, modelled) in [
+        ("trino", "2.5.0", true),
+        ("trino", "2.8.0", false),
+        ("starrocks", "2.5.0", false),
+        ("starrocks", "2.8.0", true),
+    ] {
+        let n = external_name("ext-pair");
+        let (status, j) = call(
+            &f,
+            "POST",
+            "/engines/external",
+            &token,
+            Some(register_body(&n, kind, version, None, &[])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{kind}@{version}: {j}");
+        assert_eq!(
+            j["rangerPluginVersionModelled"], modelled,
+            "{kind}@{version}: {j}"
+        );
+    }
+
     // A taken name is a 409.
     let (status, j) = call(
         &f,
@@ -11032,6 +11056,8 @@ async fn the_whole_table_agrees_declared_means_external() {
 // unit resolves no assignment and the pair does not exist.
 
 struct OverlapUnit {
+    /// The tag `both_tags = false` leaves unassigned.
+    second_tag: Uuid,
     profile: i64,
     warehouse_id: Uuid,
     catalog_id: Uuid,
@@ -11068,8 +11094,20 @@ async fn assign_tag(f: &Fixture, tag: Uuid, warehouse_id: Uuid) {
 /// catalog). `both_tags` false assigns only the first tag, so no pair exists
 /// whatever binds the profile.
 async fn overlap_unit(f: &Fixture, warehouse: Option<Uuid>, both_tags: bool) -> OverlapUnit {
+    overlap_unit_named(f, warehouse, both_tags, &external_name("ovl")).await
+}
+
+/// [`overlap_unit`] with the profile's name chosen (a late-bind adopts a profile
+/// named after the engine). A `warehouse` with no registry catalog yet gets one,
+/// the row an engine create would ensure for it.
+async fn overlap_unit_named(
+    f: &Fixture,
+    warehouse: Option<Uuid>,
+    both_tags: bool,
+    profile_name: &str,
+) -> OverlapUnit {
     let pool = &f.db.pool;
-    let profile_name = external_name("ovl");
+    let profile_name = profile_name.to_string();
     let profile = seed_ranger_profile(f, &profile_name, &[]).await;
     let tag_service = format!("{profile_name}_tag");
     let tag_service_id: i64 =
@@ -11101,12 +11139,26 @@ async fn overlap_unit(f: &Fixture, warehouse: Option<Uuid>, both_tags: bool) -> 
     }
     let (warehouse_id, catalog_id) = match warehouse {
         Some(wh) => {
-            let catalog: Uuid =
+            let existing: Option<Uuid> =
                 sqlx::query_scalar("SELECT id FROM registry.catalogs WHERE warehouse_id = $1")
                     .bind(wh)
-                    .fetch_one(pool)
+                    .fetch_optional(pool)
                     .await
                     .expect("the warehouse's registry catalog");
+            let catalog = match existing {
+                Some(c) => c,
+                None => sqlx::query_scalar(
+                    "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+                     VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                             jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+                     RETURNING id",
+                )
+                .bind(unique_catalog_name("ovlcat"))
+                .bind(wh)
+                .fetch_one(pool)
+                .await
+                .expect("registry catalog"),
+            };
             (wh, catalog)
         }
         None => {
@@ -11130,6 +11182,7 @@ async fn overlap_unit(f: &Fixture, warehouse: Option<Uuid>, both_tags: bool) -> 
         assign_tag(f, tag_b, warehouse_id).await;
     }
     OverlapUnit {
+        second_tag: tag_b,
         profile,
         warehouse_id,
         catalog_id,
@@ -11378,4 +11431,372 @@ async fn attaching_to_a_provisioned_engine_a_catalog_that_creates_an_overlap_is_
         "nothing applied to the cluster"
     );
     let _ = unit.warehouse_id;
+}
+
+// -- fix round 1 (C1, I2): the create binds, the late-bind and the attach's
+// post-apply comparison --------------------------------------------------------
+
+fn real_compiler(f: &Fixture) -> Arc<dyn egret_engine_mgmt::ProfileCompilerPort> {
+    Arc::new(RealProfileCompiler {
+        perm: egret_perm::PermStore::new(f.db.pool.clone()),
+        policy: egret_policy::PolicyStore::new(f.db.clone()),
+    })
+}
+
+fn trino_create_body(name: &str, wh: Uuid, profile: i64) -> serde_json::Value {
+    serde_json::json!({
+        "name": name, "warehouseId": wh, "authzServiceId": profile,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+    })
+}
+
+fn starrocks_create_body(name: &str, wh: Uuid, profile: i64) -> serde_json::Value {
+    serde_json::json!({
+        "name": name, "warehouseId": wh, "kind": "starrocks", "authzServiceId": profile,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+    })
+}
+
+/// C1, Trino: `POST /engines` adopting an existing profile binds the new
+/// engine's primary catalog into the profile's unit. The pair that completes is
+/// refused, the create is undone (no row, nothing provisioned), and the same
+/// create over a unit with one tag succeeds.
+#[tokio::test]
+async fn a_trino_create_adopting_a_profile_that_creates_an_overlap_is_409_and_creates_nothing() {
+    let Some((f, port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "create_trino_ovl_admin", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let unit = overlap_unit(&f, Some(wh), true).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(trino_create_body(&name, wh, unit.profile)),
+    )
+    .await;
+    assert_rule_overlap(status, &body);
+    assert_eq!(engine_rows_named(&f, &name).await, 0, "the create is undone");
+    assert!(port.provisioned.lock().unwrap().is_empty(), "nothing provisioned");
+
+    // Accept cell.
+    let wh2 = seed_provisioned_warehouse(&f).await;
+    let ok = overlap_unit(&f, Some(wh2), false).await;
+    let ok_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(trino_create_body(&ok_name, wh2, ok.profile)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(authz_service_of(&f, &ok_name).await, Some(ok.profile));
+}
+
+/// C1, StarRocks: `POST /engines` with `authzServiceId`.
+#[tokio::test]
+async fn a_starrocks_create_with_authz_service_id_that_creates_an_overlap_is_409_and_creates_nothing()
+{
+    let Some((f, port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "create_sr_ovl_admin", true).await;
+    let wh = seed_provisioned_warehouse_with_secret(&f).await;
+    let unit = overlap_unit(&f, Some(wh), true).await;
+    let name = format!("sr-{}", Uuid::new_v4().simple());
+
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(starrocks_create_body(&name, wh, unit.profile)),
+    )
+    .await;
+    assert_rule_overlap(status, &body);
+    assert_eq!(engine_rows_named(&f, &name).await, 0, "the create is undone");
+    assert!(port.provisioned.lock().unwrap().is_empty(), "nothing provisioned");
+
+    // Accept cell.
+    let wh2 = seed_provisioned_warehouse_with_secret(&f).await;
+    let ok = overlap_unit(&f, Some(wh2), false).await;
+    let ok_name = format!("sr-{}", Uuid::new_v4().simple());
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(starrocks_create_body(&ok_name, wh2, ok.profile)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(authz_service_of(&f, &ok_name).await, Some(ok.profile));
+}
+
+/// C1, the late-bind inside an apply: Ranger turned on after an unbound create
+/// adopts the profile named after the engine. A bind that would create a pair is
+/// SKIPPED (the apply still succeeds, the engine stays unbound); one that does
+/// not is made.
+#[tokio::test]
+async fn a_late_bind_that_would_create_an_overlap_is_skipped_and_one_that_would_not_is_made() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        false,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    f.perm_compiler = Some(real_compiler(&f));
+    let rebuild = |f: &Fixture, ranger: bool| {
+        build_app(
+            &f.db,
+            &f.sessions,
+            f.engine_provisioner.clone(),
+            f.kube.clone(),
+            std::sync::Arc::new(AllowAllPdp),
+            ranger,
+            f.starrocks_ddl.clone(),
+            f.perm_compiler.clone(),
+        )
+    };
+    f.app = rebuild(&f, false);
+    let token = session_for(&f, "late_bind_ovl_admin", true).await;
+
+    let mut ids = Vec::new();
+    for both_tags in [true, false] {
+        let wh = seed_provisioned_warehouse(&f).await;
+        let name = format!("trino-{}", Uuid::new_v4().simple());
+        let (status, j) =
+            create_engine_via_api(&f, &token, &name, wh, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+        assert_eq!(authz_service_of(&f, &name).await, None);
+        // The orphan profile the late-bind will adopt, named after the engine.
+        let unit = overlap_unit_named(&f, Some(wh), both_tags, &name).await;
+        ids.push((j["id"].as_str().unwrap().to_string(), name, unit.profile));
+    }
+
+    f.app = rebuild(&f, true);
+    f.ranger_enabled = true;
+    for (id, ..) in &ids {
+        let resp = f
+            .app
+            .clone()
+            .oneshot(req("POST", &format!("/engines/{id}/rotate-secrets"), &token, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT, "the apply itself succeeds");
+    }
+    let (_, ovl_name, _) = &ids[0];
+    assert_eq!(
+        authz_service_of(&f, ovl_name).await,
+        None,
+        "a bind that creates a pair is skipped"
+    );
+    let (_, ok_name, ok_profile) = &ids[1];
+    assert_eq!(
+        authz_service_of(&f, ok_name).await,
+        Some(*ok_profile),
+        "a bind that creates none is made"
+    );
+}
+
+/// A test double over the real compiler that commits a conflicting write at the
+/// moment the real recompile of an attach runs, i.e. AFTER the dry run and
+/// BEFORE the post-apply comparison. `conflict` is run once, on the first
+/// `recompile_profile` (the fire-and-forget one `attach_to_engine` makes).
+struct ConflictAfterDryRun {
+    /// Fail every `overlap_snapshot_in_tx` (a dry run that cannot complete).
+    fail_snapshot: bool,
+    inner: RealProfileCompiler,
+    conflict: tokio::sync::Mutex<Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>>,
+}
+
+#[async_trait::async_trait]
+impl egret_engine_mgmt::ProfileCompilerPort for ConflictAfterDryRun {
+    async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        if let Some(fut) = self.conflict.lock().await.take() {
+            fut.await;
+        }
+        self.inner.recompile_profile(service_id).await
+    }
+    async fn recompile_catalog_assignment_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        catalog_id: Uuid,
+    ) -> Result<(), egret_perm::CompileError> {
+        self.inner.recompile_catalog_assignment_in_tx(tx, catalog_id).await
+    }
+    async fn recompile_profile_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_id: i64,
+    ) -> Result<(), egret_perm::CompileError> {
+        self.inner.recompile_profile_in_tx(tx, service_id).await
+    }
+    async fn overlap_snapshot_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<egret_engine_mgmt::OverlapSnapshot, egret_perm::CompileError> {
+        if self.fail_snapshot {
+            return Err(egret_perm::CompileError::Db("snapshot unavailable".into()));
+        }
+        self.inner.overlap_snapshot_in_tx(tx, service_ids).await
+    }
+    async fn refuse_created_overlaps_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        snapshot: &egret_engine_mgmt::OverlapSnapshot,
+    ) -> Result<(), egret_perm::CompileError> {
+        self.inner.refuse_created_overlaps_in_tx(tx, snapshot).await
+    }
+}
+
+/// I2: a pair created by a write that commits between the attach's dry run and
+/// its real recompile is caught by the comparison against the PRE-APPLY
+/// snapshot, and the attachment is undone. The dry run alone passes here (the
+/// second tag is not assigned yet when it runs).
+#[tokio::test]
+async fn a_pair_committed_between_the_dry_run_and_the_real_recompile_refuses_the_attach() {
+    let Some((mut f, _port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "attach_race_admin", true).await;
+    // One tag assigned: the dry run sees no pair. The race assigns the second.
+    let unit = overlap_unit(&f, None, false).await;
+    let second_tag = unit.second_tag;
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1, 'trino', 'egret', '{}'::jsonb, $2) RETURNING id",
+    )
+    .bind(external_name("prov-race"))
+    .bind(unit.profile)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("provisioned engine bound to the profile");
+
+    let (pool, wh) = (f.db.pool.clone(), unit.warehouse_id);
+    let race = Box::pin(async move {
+        sqlx::query(
+            "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, \
+                                                  table_name, column_name) \
+             VALUES ($1, $2, 'sales', 'orders', $3)",
+        )
+        .bind(second_tag)
+        .bind(wh)
+        .bind(OVERLAP_COLUMN)
+        .execute(&pool)
+        .await
+        .expect("the conflicting write");
+    });
+    f.perm_compiler = Some(Arc::new(ConflictAfterDryRun {
+        fail_snapshot: false,
+        inner: RealProfileCompiler {
+            perm: egret_perm::PermStore::new(f.db.pool.clone()),
+            policy: egret_policy::PolicyStore::new(f.db.clone()),
+        },
+        conflict: tokio::sync::Mutex::new(Some(race)),
+    }));
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+    );
+
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{}", unit.catalog_id),
+        &token,
+        None,
+    )
+    .await;
+    assert_rule_overlap(status, &body);
+    let attached: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM registry.engine_catalog_attachments WHERE engine_id = $1",
+    )
+    .bind(engine_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(attached, 0, "the refused attachment is undone");
+}
+
+/// I2: a dry run that cannot complete for a reason that is NOT an overlap used
+/// to be logged and the attach went ahead unchecked (fail-open). It refuses.
+#[tokio::test]
+async fn a_dry_run_that_cannot_complete_refuses_the_attach_instead_of_attaching_unchecked() {
+    let Some((mut f, port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "attach_failopen_admin", true).await;
+    let unit = overlap_unit(&f, None, false).await;
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1, 'trino', 'egret', '{}'::jsonb, $2) RETURNING id",
+    )
+    .bind(external_name("prov-failopen"))
+    .bind(unit.profile)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("provisioned engine bound to the profile");
+    f.perm_compiler = Some(Arc::new(ConflictAfterDryRun {
+        fail_snapshot: true,
+        inner: RealProfileCompiler {
+            perm: egret_perm::PermStore::new(f.db.pool.clone()),
+            policy: egret_policy::PolicyStore::new(f.db.clone()),
+        },
+        conflict: tokio::sync::Mutex::new(None),
+    }));
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+    );
+
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{}", unit.catalog_id),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    let attached: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM registry.engine_catalog_attachments WHERE engine_id = $1",
+    )
+    .bind(engine_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(attached, 0, "nothing attached unchecked");
+    assert!(port.updated.lock().unwrap().is_empty(), "nothing applied");
 }
