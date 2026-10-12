@@ -69,9 +69,16 @@
 //! `recompile_service_in_tx` directly) reads the model and the assignments in
 //! `compile_desired` BEFORE `apply_diff_in_tx` takes T's lock, so its overlap
 //! check runs on a snapshot another transaction may change before it commits.
-//! And the policy editor takes no service row lock at all, so an editor write
-//! and a concurrent recompile are not serialised against each other. Neither
-//! is changed in this task.
+//! That limit stands.
+//!
+//! **The policy editor is serialised with them (fix round 1, review I1).** Its
+//! write (`egret_policy::admin`'s `write_policy_checked`) takes `FOR UPDATE` on
+//! every service row of every unit it lands in, ascending, through the same
+//! `egret_policy::lock_service_rows_via` this crate's `lock_services_in_tx`
+//! calls, then checks and writes on that transaction. An editor write and a
+//! tag assignment, a recompile or a second editor write on one unit now queue;
+//! `two_concurrent_editor_writes_forming_a_pair_store_exactly_one`
+//! (`egret-policy/tests/admin_routes.rs`) pins it.
 
 use std::collections::{BTreeSet, HashMap};
 

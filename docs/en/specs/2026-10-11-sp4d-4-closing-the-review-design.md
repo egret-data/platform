@@ -240,9 +240,24 @@ data either way". It is **not** sound against:
   `ambiguous_arbitration.rs:185-188` already records;
 - `PUT /policies/{id}/enabled`, which is deliberately unguarded so a pair can be broken
   (`ambiguous_arbitration.rs:175-184`) — a pair completed by re-enabling is refused by the next
-  compile and shown by the report below;
-- concurrent writes on two profiles that share a tag service — plan Task 3 verifies that
-  `lock_services_in_tx` (`trigger.rs:1539`) serialises them and, if it does not, says so.
+  compile when one member is compiled, and is shown by the report below either way;
+- a pair of two HAND-WRITTEN policies that is already stored (completed by a re-enable or a write
+  outside the routes): the editor and the tag assignment refuse only pairs their write creates,
+  and the compiler refuses only pairs with a compiled member, so such a pair is reported, not
+  refused, and wedges nothing;
+- a recompile whose caller does not take the profile locks before compiling reads the model and
+  the tag assignments before `apply_diff_in_tx` locks the rows, so its check runs on a snapshot a
+  concurrent transaction may still change (the rule and grant routes, the migration and the tag
+  assignment pre-lock; the other recompiling callers were not audited for this).
+
+*(Amended in Task 3 fix round 1.)* What this list used to name and is now closed: recompiles of two
+profiles sharing a tag service serialise (`lock_services_in_tx` locks the expanded, sorted set, and
+`apply_diff_in_tx` re-takes it); the compiler reads the enabled hand-written masks and row filters of
+the profile and its tag service and refuses every pair with a compiled member, so a rule write, a
+migration (whose originals are switched off before its rule writes) or a membership-driven recompile
+cannot complete a compiled × hand-written pair (review C1); and the policy editor checks and writes
+in one transaction under the same row locks, through the same lock helper, so it serialises with
+tag assignments, recompiles and other editor writes on the unit (review I1).
 
 ### Which write catches what
 
@@ -257,7 +272,7 @@ code path (`ambiguous_arbitration.rs:152-174`, re-verified in plan Task 3 with
 | SP4d-3 `POST …/migrate` (rules inserted, then `recompile_services_in_tx`) | the same, for migrated rules |
 | tag assign / unassign (`crates/egret-bi/src/catalog_tags.rs:138`, `:176`, recompile in the same tx) | a tag pair or a tag/path pair the moment an assignment makes it real |
 | tag rename, classification, grant, role/workspace membership, catalog attach, profile bind | whatever the recompile they already run would emit |
-| the policy editor (`admin/mod.rs:1171-1237`) | hand-written pairs on manual profiles (widened by the same function) |
+| the policy editor (`admin/mod.rs:1171-1237`) | hand-written pairs on manual profiles (widened by the same function), and a hand-written policy that would pair with a stored compiled one |
 
 **Caught only at compile time, by design:** a pair of tag rules whose tags share no column yet is
 **not** refused when the second rule is written. It becomes a refusal on the tag assignment that

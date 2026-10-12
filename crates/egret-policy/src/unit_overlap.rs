@@ -145,15 +145,24 @@ pub struct UnitOverlap {
     pub second: String,
     pub first_items: Value,
     pub second_items: Value,
-    /// Where both decide: a coordinate (`catalog.schema.table[.column]`) for a
+    /// Where both decide, as the sentence names it: the FIRST coordinate met
+    /// (`catalog.schema.table[.column]`, assignments in sorted order) for a
     /// cross pair, the resource-map hint for a same-download pair.
     pub coordinate: String,
+    /// EVERY coordinate where a cross pair meets (for a same-download pair,
+    /// just its hint). The identity carries this set, not `coordinate`, so
+    /// whether a write extends a stored pair does not depend on how column
+    /// names sort (fix round 1, review I2).
+    pub coordinates: BTreeSet<String>,
     pub shape: OverlapShape,
 }
 
 /// What makes two reports the SAME pair: both names, what each decides, and
-/// where. An edit that keeps a partner but changes either side's decisive
-/// items, or where they meet, is a different pair (SP4d-4 Task 3).
+/// where — the whole SET of coordinates where they meet. An edit that keeps a
+/// partner but changes either side's decisive items, or where they meet, is a
+/// different pair (SP4d-4 Task 3); so is an assignment that extends a stored
+/// pair to one more column, whichever way that column's name sorts (fix round
+/// 1, review I2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverlapIdentity {
     kind: i64,
@@ -161,7 +170,7 @@ pub struct OverlapIdentity {
     first_items: Value,
     second: String,
     second_items: Value,
-    coordinate: String,
+    coordinates: BTreeSet<String>,
 }
 
 impl UnitOverlap {
@@ -172,7 +181,7 @@ impl UnitOverlap {
             first_items: self.first_items.clone(),
             second: self.second.clone(),
             second_items: self.second_items.clone(),
-            coordinate: self.coordinate.clone(),
+            coordinates: self.coordinates.clone(),
         }
     }
 
@@ -374,6 +383,7 @@ pub fn unit_overlaps(policies: &[UnitPolicy<'_>], assignments: &[AssignedTag]) -
             first_items: pair.first_items.clone(),
             second_items: pair.second_items.clone(),
             coordinate: pair.coordinate_hint.clone(),
+            coordinates: BTreeSet::from([pair.coordinate_hint.clone()]),
             shape: OverlapShape::SameDownload(pair),
         });
     }
@@ -446,7 +456,8 @@ pub fn unit_overlaps(policies: &[UnitPolicy<'_>], assignments: &[AssignedTag]) -
                 }
                 other => other,
             };
-            out.entry((kind.policy_type(), f.name.to_string(), s.name.to_string()))
+            let report = out
+                .entry((kind.policy_type(), f.name.to_string(), s.name.to_string()))
                 .or_insert_with(|| UnitOverlap {
                     arbitrated: kind,
                     first: f.name.to_string(),
@@ -454,8 +465,15 @@ pub fn unit_overlaps(policies: &[UnitPolicy<'_>], assignments: &[AssignedTag]) -
                     first_items: f.items.clone(),
                     second_items: s.items.clone(),
                     coordinate: coord.to_string(),
+                    coordinates: BTreeSet::new(),
                     shape,
                 });
+            // Every coordinate a cross pair meets on, not only the first
+            // (review I2). A same-download pair already decides its whole
+            // intersection whatever is assigned, so its set stays its hint.
+            if !matches!(report.shape, OverlapShape::SameDownload(_)) {
+                report.coordinates.insert(coord.to_string());
+            }
         };
 
         // Tag ↔ path, at any priority.
@@ -863,6 +881,35 @@ mod tests {
         let got = run(&tags, &[(n, b)], &[assigned("orders", "email", "pii")]);
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[0].coordinate, "wh.sales.orders");
+    }
+
+    #[test]
+    fn extending_a_stored_pair_to_another_column_is_created_whichever_way_it_sorts() {
+        // A stored tag ↔ path pair on `phone` (the path mask covers every
+        // column of `orders`); an assignment extends it to `email`, which sorts
+        // BEFORE `phone`, or to `zip`, which sorts AFTER it. Both extend the
+        // pair, so both are "created" — the answer must not depend on the
+        // order (review I2: with the first coordinate as identity, `email` was
+        // refused and `zip` admitted).
+        let tags = [tag_mask("t-pii", "pii", "MASK", 0)];
+        let paths = [path_mask("p-orders", "orders", "*", "MASK_NULL")];
+        let stored = [assigned("orders", "phone", "pii")];
+        let before = run(&tags, &paths, &stored);
+        assert_eq!(before.len(), 1, "{before:?}");
+        for column in ["email", "zip"] {
+            let extended = [
+                assigned("orders", "phone", "pii"),
+                assigned("orders", column, "pii"),
+            ];
+            let after = run(&tags, &paths, &extended);
+            assert_eq!(
+                created_overlaps(&before, after).len(),
+                1,
+                "extending the pair to {column} is a new pair"
+            );
+        }
+        // And the same assignments again create nothing.
+        assert!(created_overlaps(&before, run(&tags, &paths, &stored)).is_empty());
     }
 
     #[test]
