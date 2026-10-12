@@ -12399,3 +12399,231 @@ async fn reapplying_a_catalog_converges_the_provisioned_engine_and_skips_the_ext
         "the external engine was never applied"
     );
 }
+
+// ---------------------------------------------------------------------------
+// PATCH /engines/{id}/external (Task 8 fix round 1)
+// ---------------------------------------------------------------------------
+
+async fn external_row(
+    f: &Fixture,
+    id: Uuid,
+) -> (Option<String>, Option<i32>, Option<String>, Option<i64>) {
+    sqlx::query_as(
+        "SELECT external_host, external_port, ranger_plugin_version, authz_service_id \
+           FROM engine_mgmt.engines WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn patching_an_external_engine_persists_address_and_version_and_touches_no_cluster() {
+    let port = FakeEnginePort::default();
+    let kube = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = external_fixture(Some(port.clone()), Some(kube.clone())).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_patch_admin", true).await;
+    let (id, _name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+
+    let (status, j) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{id}/external"),
+        &token,
+        Some(serde_json::json!({
+            "host": "new-trino.example.com", "port": 8443, "rangerPluginVersion": "2.6.0"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["host"], "new-trino.example.com", "{j}");
+    assert_eq!(j["port"], 8443, "{j}");
+    assert_eq!(j["rangerPluginVersion"], "2.6.0", "{j}");
+    assert_eq!(
+        j["rangerPluginVersionModelled"], false,
+        "Trino@2.6.0 is not modelled: {j}"
+    );
+    // The row the migration gate and explain read their declared version from.
+    let version: String = sqlx::query_scalar(
+        "SELECT ranger_plugin_version FROM engine_mgmt.engines WHERE id = $1 AND origin = 'external'",
+    )
+    .bind(id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(version, "2.6.0");
+
+    // Invalid values are 400s that write nothing.
+    for body in [
+        serde_json::json!({ "host": "http://x" }),
+        serde_json::json!({ "port": 0 }),
+        serde_json::json!({ "rangerPluginVersion": "2.55.0" }),
+        serde_json::json!({}),
+    ] {
+        let (status, j) = call(
+            &f,
+            "PATCH",
+            &format!("/engines/{id}/external"),
+            &token,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {j}");
+    }
+    assert_eq!(
+        external_row(&f, id).await,
+        (
+            Some("new-trino.example.com".into()),
+            Some(8443),
+            Some("2.6.0".into()),
+            None
+        )
+    );
+    assert_cluster_untouched(&port, &kube);
+}
+
+#[tokio::test]
+async fn patching_a_rebind_that_creates_an_overlap_is_409_and_writes_nothing() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_patch_ovl_admin", true).await;
+    let unit = overlap_unit(&f, None, true).await;
+    // Unbound, so declaring the catalog creates no pair yet.
+    let (id, _name) =
+        register_external(&f, &token, "trino", "2.5.0", None, &[unit.catalog_id]).await;
+    let before = external_row(&f, id).await;
+
+    let (status, body) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{id}/external"),
+        &token,
+        Some(serde_json::json!({ "authzServiceId": unit.profile, "host": "other.example.com" })),
+    )
+    .await;
+    assert_rule_overlap(status, &body);
+    assert_eq!(external_row(&f, id).await, before, "the row is unchanged");
+}
+
+#[tokio::test]
+async fn patching_a_rebind_without_an_overlap_binds_and_unbinding_recompiles_the_old_profile() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_patch_unbind_admin", true).await;
+    let profile = starrocks_profile(&f).await;
+    let catalog = jdbc_catalog(&f, &token).await;
+    let grant = allow_read_grant(&f, catalog).await;
+    let (id, _name) =
+        register_external(&f, &token, "starrocks", "2.8.0", Some(profile), &[catalog]).await;
+    let compiled = |sid: i64| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+            )
+            .bind(sid)
+            .bind(format!("{}{}", egret_policy::COMPILER_GRANT_PREFIX, grant))
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(compiled(profile).await, 1, "compiled while bound");
+
+    // Rebind to a second profile: it gains the grant at once, the first loses it.
+    let other = starrocks_profile(&f).await;
+    let (status, j) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{id}/external"),
+        &token,
+        Some(serde_json::json!({ "authzServiceId": other })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(external_row(&f, id).await.3, Some(other));
+    assert_eq!(compiled(other).await, 1, "the new profile was recompiled");
+    assert_eq!(
+        compiled(profile).await,
+        0,
+        "the old profile was recompiled without it"
+    );
+
+    // Unbind: the profile it leaves is recompiled too.
+    let (status, j) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{id}/external"),
+        &token,
+        Some(serde_json::json!({ "authzServiceId": null })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(external_row(&f, id).await.3, None);
+    assert_eq!(
+        compiled(other).await,
+        0,
+        "the unbound profile was recompiled without it"
+    );
+}
+
+#[tokio::test]
+async fn patching_a_provisioned_engine_is_400_and_needs_engine_update() {
+    let Some(mut f) = external_fixture(
+        Some(FakeEnginePort::default()),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "ext_patch_perm_admin", true).await;
+    let reader = session_for_with_permission(&f, "ext_patch_reader", "engine:read").await;
+    let updater = session_for_with_permission(&f, "ext_patch_updater", "engine:update").await;
+    attach_real_pdp(&mut f).await;
+    let _wh = seed_provisioned_warehouse(&f).await;
+    let provisioned = seed_jwt_engine(&f).await;
+    let (external, _name) = register_external(&f, &admin, "trino", "2.5.0", None, &[]).await;
+    let body = serde_json::json!({ "host": "h.example.com" });
+
+    let (status, j) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{provisioned}/external"),
+        &admin,
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    let (status, j) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{external}/external"),
+        &reader,
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{j}");
+    assert_eq!(
+        external_row(&f, external).await.0.as_deref(),
+        Some("sr.example.com")
+    );
+    let (status, j) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{external}/external"),
+        &updater,
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+}

@@ -175,6 +175,22 @@ pub(crate) async fn recompile_bound_profile(
 
 /// The overlap snapshot of the profile `service_id`, or `None` when no compiler
 /// is wired or the engine binds nothing.
+pub(crate) async fn snapshot_overlaps_of(
+    st: &crate::EngineMgmtState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    service_ids: &[i64],
+) -> Result<Option<OverlapSnapshot>, egret_perm::CompileError> {
+    let Some(compiler) = st.perm_compiler.clone() else {
+        return Ok(None);
+    };
+    if service_ids.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        compiler.overlap_snapshot_in_tx(tx, service_ids).await?,
+    ))
+}
+
 pub(crate) async fn snapshot_overlaps(
     st: &crate::EngineMgmtState,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,

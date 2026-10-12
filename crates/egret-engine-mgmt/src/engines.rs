@@ -5272,8 +5272,13 @@ async fn update_engine(
         .ok_or(CpError::NotFound)?;
     // An external engine has no spec of egret's to update, and `prov.update`
     // would apply one to a cluster egret does not own. Its address and plugin
-    // version are changed by registering it again.
-    crate::external::refuse_if_external(&engine, "apply a provisioning spec to it")?;
+    // version are changed through the dedicated PATCH route.
+    crate::external::refuse_if_external(
+        &engine,
+        "apply a provisioning spec to it; change its address, declared plugin version or \
+         policy profile with PATCH /api/control-plane/engines/{id}/external (or delete it first \
+         to register it again)",
+    )?;
     // I4: EVERY cheap refusal runs BEFORE the profile binding is committed.
     // The bind is a real write (and compiles policy), so a PUT that ends in a
     // 400 or a 409 must not have performed it. These three guards used to sit
@@ -5657,12 +5662,12 @@ pub(crate) fn sr_delegation_block(spec: &serde_json::Value) -> serde_json::Value
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id")),
     responses(
-        (status = 204, description = "Cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger profile is unbound, not deleted"),
+        (status = 204, description = "For an external engine: egret's rows only (the engine, its declared attachments and its profile binding) are removed and nothing is sent to any cluster or provisioner, and Kubernetes need not be configured. For a provisioned engine: cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger profile is unbound, not deleted"),
         (status = 400, description = "Kubernetes not configured", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:delete permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "Nothing deleted: Data API endpoints (including trashed), schedules or datasets still use the engine's workspace connections (`code` = `engine_has_dependents`, with `dependents`), or a database constraint refused the delete (`code` = `constraint_violation`, with `constraint`); The engine is external (`code` = `engine_is_external`): egret does not provision or delete the cluster of; instead the external engine's rows are removed and nothing is sent to a cluster. The cluster delete and Kubernetes requirement below apply to provisioned engines only it", body = EngineConflictBody),
+        (status = 409, description = "Nothing deleted: Data API endpoints (including trashed), schedules or datasets still use the engine's workspace connections (`code` = `engine_has_dependents`, with `dependents`), or a database constraint refused the delete (`code` = `constraint_violation`, with `constraint`)", body = EngineConflictBody),
         (status = 500, description = "Internal error", body = ErrorBody),
         (status = 502, description = "The Kubernetes delete failed (`code` = `engine_cluster_delete_failed`); the engine stays `deleting` and the request can be retried", body = EngineConflictBody),
     ),

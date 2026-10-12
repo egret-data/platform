@@ -30,9 +30,10 @@
 //! migration gate refuse on that profile, naming the version. It is never
 //! evaluated at a guessed one.
 
+use axum::extract::Path;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::{patch, post};
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
 use egret_core::http::ErrorBody;
@@ -107,17 +108,49 @@ pub struct RegisterExternalEngine {
     pub catalogs: Vec<Uuid>,
 }
 
+/// `PATCH /api/control-plane/engines/{id}/external`: every field optional;
+/// an absent field is left as it is.
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateExternalEngine {
+    /// The policy profile to bind: absent leaves the binding, `null` unbinds,
+    /// a number binds (same rules as at registration).
+    #[serde(default, deserialize_with = "present_or_null")]
+    #[schema(value_type = Option<i64>, nullable)]
+    pub authz_service_id: Option<Option<i64>>,
+    /// New host (bare host: no scheme, port or path).
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// The Ranger plugin version installed on the engine, as at registration.
+    /// The response says whether egret's evaluator models the (type, version)
+    /// pair.
+    #[serde(default)]
+    pub ranger_plugin_version: Option<String>,
+}
+
+/// `Some(None)` for an explicit `null`, `Some(Some(v))` for a value; with
+/// `#[serde(default)]` an absent key stays `None`.
+fn present_or_null<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<i64>>, D::Error> {
+    Option::<i64>::deserialize(d).map(Some)
+}
+
 /// The OpenAPI fragment of the external-engine routes, merged by
 /// [`crate::openapi`].
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(register_external_engine),
-    components(schemas(RegisterExternalEngine))
+    paths(register_external_engine, update_external_engine),
+    components(schemas(RegisterExternalEngine, UpdateExternalEngine))
 )]
 pub struct ExternalEngineApi;
 
 pub fn routes() -> Router<CpState> {
-    Router::new().route("/engines/external", post(register_external_engine))
+    Router::new()
+        .route("/engines/external", post(register_external_engine))
+        .route("/engines/{id}/external", patch(update_external_engine))
 }
 
 fn validate_name(name: &str) -> Result<(), CpError> {
@@ -283,6 +316,120 @@ pub(crate) async fn detach_declared_and_recompile(
     }
     tx.commit().await.map_err(crate::http_error::db_error)?;
     Ok(())
+}
+
+/// `PATCH /api/control-plane/engines/{id}/external`.
+#[utoipa::path(
+    patch,
+    path = "/api/control-plane/engines/{id}/external",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    request_body = UpdateExternalEngine,
+    responses(
+        (status = 200, description = "Updated. Egret's row only: nothing is sent to the engine, a provisioner or Kubernetes. The policy profile it was or is bound to were recompiled in the same transaction. `rangerPluginVersionModelled` is as at registration", body = EngineDto),
+        (status = 400, description = "The engine is not external; nothing to update; invalid host, port or plugin version; or `authzServiceId` naming no profile, one of the wrong type, or a Trino profile with no usable tag service", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:update permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete); the profile is bound to another engine; or the change would create an order-ambiguous mask or row-filter pair (`code: rule_overlap`). Nothing was written", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn update_external_engine(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(b): Json<UpdateExternalEngine>,
+) -> Result<Json<EngineDto>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    if !is_external(&engine) {
+        return Err(CpError::BadRequest(format!(
+            "engine {} is provisioned: update it with PUT /api/control-plane/engines/{{id}}",
+            engine.name
+        )));
+    }
+    if b.authz_service_id.is_none()
+        && b.host.is_none()
+        && b.port.is_none()
+        && b.ranger_plugin_version.is_none()
+    {
+        return Err(CpError::BadRequest(
+            "nothing to update: send authzServiceId, host, port or rangerPluginVersion".into(),
+        ));
+    }
+    if let Some(host) = &b.host {
+        validate_host(host)?;
+    }
+    if b.port == Some(0) {
+        return Err(CpError::BadRequest("port must be 1 to 65535".into()));
+    }
+    if let Some(v) = &b.ranger_plugin_version {
+        validate_plugin_version(v)?;
+    }
+    let old_profile = engine.authz_service_id;
+    let new_profile = b.authz_service_id.unwrap_or(old_profile);
+    if let Some(sid) = new_profile {
+        if Some(sid) != old_profile {
+            crate::engines::check_profile_bindable(&st, sid, &engine.r#type, &engine.name).await?;
+        }
+    }
+    let host = b.host.clone().or(engine.external_host.clone());
+    let port = b.port.map(i32::from).or(engine.external_port);
+    let version = b
+        .ranger_plugin_version
+        .clone()
+        .or(engine.ranger_plugin_version.clone());
+
+    let mut tx = st
+        .engine_mgmt
+        .pool()
+        .begin()
+        .await
+        .map_err(crate::http_error::db_error)?;
+    // Taken BEFORE the write: a rebind changes which catalogs, hence which tag
+    // assignments, the new profile's unit resolves.
+    let touched: Vec<i64> = new_profile.into_iter().chain(old_profile).collect();
+    let before = crate::profile_compiler::snapshot_overlaps_of(&st, &mut tx, &touched).await?;
+    let updated = sqlx::query_as::<_, Engine>(
+        "UPDATE engine_mgmt.engines \
+            SET external_host = $2, external_port = $3, ranger_plugin_version = $4, \
+                authz_service_id = $5 \
+          WHERE id = $1 AND origin = 'external' AND status = $6 \
+            AND authz_service_id IS NOT DISTINCT FROM $7 \
+        RETURNING id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version",
+    )
+    .bind(engine.id)
+    .bind(&host)
+    .bind(port)
+    .bind(&version)
+    .bind(new_profile)
+    .bind(&engine.status)
+    .bind(old_profile)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(crate::http_error::db_error)?
+    .ok_or_else(|| {
+        CpError::Conflict("engine changed while it was being updated; retry".into())
+    })?;
+    // The new profile first, then the one it replaced (it lost this engine's
+    // catalogs). Each refuses a pair the change created.
+    for sid in touched.iter().copied() {
+        crate::profile_compiler::recompile_refusing_created_overlaps(
+            &st,
+            &mut tx,
+            sid,
+            before.as_ref(),
+        )
+        .await?;
+    }
+    tx.commit().await.map_err(crate::http_error::db_error)?;
+    tracing::info!(engine = %updated.name, "external engine updated; nothing was sent to the cluster");
+    Ok(Json(updated.into()))
 }
 
 #[utoipa::path(
