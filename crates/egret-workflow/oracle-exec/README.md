@@ -2210,6 +2210,14 @@ accepted. M8's danger was a rule that refused for a reason unrelated to the
 flow; this one refuses exactly what Kestra's own validator refuses, and the
 ratchet's regression arm is what says so.
 
+*(Annotation, 2026-10-12, no-silent-stall Task 1: true when written, and no
+longer. Since the ruling of 2026-10-11 and Task 1, `validate` reports errors on
+52 of the 266 `runs` entries — gapped `Pause`s, `AllowFailure`,
+`WorkingDirectory` and unregistered types, each a task egret could not run and
+whose execution stalled. All are deliberate and named in
+`executor::PUBLISHED_BUT_REFUSED`; see the section "no-silent-stall Task 1" at
+the end of this file.)*
+
 ## What Task 5 had to change, and what it banked
 
 Task 5 implements `if` and `switch`. It banks **8** of the 189 entries Task 4
@@ -3467,6 +3475,14 @@ Running `validate` there costs nothing on the accepting side, measured rather
 than argued: over the golden's **266 `runs` entries** — every flow this pinned
 Kestra published *and ran* — `validate` reports **zero** errors.
 
+*(Annotation, 2026-10-12, no-silent-stall Task 1: true when written, and no
+longer. Since the ruling of 2026-10-11 and Task 1, `validate` reports errors on
+52 of the 266 `runs` entries — gapped `Pause`s, `AllowFailure`,
+`WorkingDirectory` and unregistered types, each a task egret could not run and
+whose execution stalled. All are deliberate and named in
+`executor::PUBLISHED_BUT_REFUSED`; see the section "no-silent-stall Task 1" at
+the end of this file.)*
+
 ### The gate order is measured, and the message assertion is what measured it
 
 The first version ran `validate` **before** the builder's own structural checks.
@@ -3523,9 +3539,14 @@ direction.
 **Three of them are one cause: egret has no plugin schema.**
 
 - `invalids/invalid-task` — `Invalid type: io.kestra.plugin.core.debug.MissingTwo`.
-  egret's `spec::registry` is not Kestra's classpath. `unknown_task_type` is a
+  egret's `spec::registry` is not Kestra's classpath. `unknown_task_type` was a
   **warning**, and promoting it to an error would refuse every plugin egret has
-  not registered. That is a product decision, not a Task 8 rule.
+  not registered. That is a product decision, not a Task 8 rule. **It was
+  taken at no-silent-stall Task 1 (2026-10-12)**: an unregistered type stalled
+  every run that reached it (`NoHandler`), so `unknown_task_type` is an error,
+  this entry is refused for Kestra's own reason and banked, and it moved from
+  `STILL_OVER_ACCEPTED` to a refusal group. The 44 Kestra-published flows the
+  same error refuses are named in `executor::PUBLISHED_BUT_REFUSED`.
 - `invalids/invalid-property` — `Unrecognized field "invalid"`. W1 models a
   task's plugin properties as an opaque `Leaf { spec }` on purpose.
 - `invalids/dag-invalid-subtask` — `tasks[task1].tasks[task1].task.message: must
@@ -3713,7 +3734,11 @@ is the arm `invalids/workingdirectory-invalid` needs — its offending child is 
 `KESTRA_FLOW_CONTROL`'s **other** use is fail-CLOSED: the `not_yet_enforced`
 warning fires for anything spelled like `io.kestra.plugin.core.flow.*`. This one
 is not, and the asymmetry is the point. A spurious warning costs a reader one
-line; a spurious **refusal** rejects a flow. The same spelling test would refuse
+line; a spurious **refusal** rejects a flow. *(Since no-silent-stall Task 1
+that other finding is the error `unsupported_flow_task`, not a warning: an
+unregistered type spelled like control flow is one no handler runs, so a run
+reaching it stalled. It is fail-closed still, and it judges a different
+question — whether egret can run the task at all — from this one.)* The same spelling test would refuse
 `io.kestra.plugin.core.flow.Sleep` and `…PurgeFlows` — measured at the checkout,
 the only two classes in that package that implement `RunnableTask`
 — and both are legitimate children of a `WorkingDirectory`. The residual is
@@ -9673,7 +9698,10 @@ or fails, never passes; all were run during the package with the gates set):
 4. **No store or database outage was induced live**; the infrastructure-error
    split rests on `nsfiles_render_outage` and the MemStore tests.
 5. **`WorkingDirectory`** does not run on egret, so its `namespaceFiles` was
-   only published, never staged.
+   only published, never staged. *(Since no-silent-stall Task 1 a
+   `WorkingDirectory` does not publish either: it is refused as
+   `unsupported_working_directory`, and its `namespaceFiles` is still
+   validated, so a draft shows both findings.)*
 6. **The ratchet cannot judge any of this**, for the reason above.
 
 #### The release note
@@ -10922,6 +10950,25 @@ item necessary rather than what makes it unnecessary.** Four things a green
   `core.http`, `core.slack`. The four script rows are served when a runner is
   configured and refused at publish when it is not; a draft run of one under
   `none` still reaches this loop. See the W5a section.)*
+  *(No-silent-stall, 2026-10-12: **(a) is closed.** Tasks 2–3 refuse a type
+  this deployment does not serve at validate, publish and every start
+  (`task_type_not_served`), so no new execution of one is created; Task 4
+  makes the worker FAIL a run that reaches it anyway -- an execution started
+  on an older binary, or under a configuration that served the type -- with
+  the run-log line "egret cannot run task type `X` on this deployment: no
+  handler is registered for it. This is not an error in the flow.", through
+  the normal commit, so `retry:` and `errors:` apply and the execution
+  settles. `WorkerError::NotALeaf` fails the same way. The "somewhere to
+  record *tried, no handler*" below turned out to be the attempt itself: a
+  `FAILED` attempt is the record. An old execution whose stored source
+  validation now refuses (an unregistered type, an `AllowFailure`, a
+  `WorkingDirectory`) is covered too since Task 4 fix round 1: the worker
+  plans a stored execution with `executor::plan_stored`, without validation
+  (user ruling: validation gates starts only), so its run reaches one of
+  those two arms and fails. Before that round it stopped at
+  `WorkerError::Unplannable` in `claim::load` and cycled through the reaper
+  exactly as (a) did. `Unplannable` is again only a source that does not
+  parse or flatten.)*
 
   **(b) A handler that OUTRUNS `working_timeout`** — and this is a *slow*
   handler, not a *missing* one. `DEFAULT_WORKING_TIMEOUT` is 3600 s;
@@ -10955,6 +11002,13 @@ item necessary rather than what makes it unnecessary.** Four things a green
   driver error. With `BATCH == 1` the refusal concerns only the run it names,
   the driver carries on, and the trace still compares. **The ratchet cannot
   score either cause in either direction.**
+  *(No-silent-stall Task 4, 2026-10-12: a `NoHandler` or `NotALeaf` run no
+  longer stalls the driver -- it is FAILED like any failed task and the trace
+  carries that `FAILED`. A worker error the driver still carries on past is
+  now an abort that is not one of those two, e.g. `Unplannable`. Measured:
+  **no `baseline.txt` line moved.** Task 1 had already brought
+  `ENTRIES_LEFT_UNFINISHED` to 0 and Task 3 refuses an unserved type at
+  start, so no corpus entry reaches either arm in the driver.)*
 - **Kill has no mechanism, and the endpoint is absent for that reason.**
   `RunState::Killed` has **zero** producing sites — no
   `Command::SetRunState { state: RunState::Killed }`, no `SetExecutionState`
@@ -13092,3 +13146,57 @@ The gate after part 2: **259 result lines / 3513 passed / 0 failed / 5
 ignored**, exit 0, against `35d20de6`'s 259 / 3507 / 0 / 5, reconciled by a
 test-NAME-SET diff of **6 added and 0 removed** over the whole task.
 `sql_starrocks_live` reports **8 passed in 0.77 s**.
+
+## no-silent-stall Task 1 — static refusals, and the stalled population is now empty
+
+*(2026-10-12; spec `docs/en/specs/2026-10-12-workflow-no-silent-stall-design.md`
+§3.)* Every task `build_plan` plans as an opaque runnable that no handler can
+run is a validation **error** now: `unsupported_allow_failure`,
+`unsupported_working_directory`, `unsupported_loop_until_property`,
+`unsupported_flow_task` (a type spelled like Kestra control flow that egret
+does not implement, which was a task-level `not_yet_enforced` warning), and
+`unknown_task_type` (a warning until now). `validate_for_run` is
+`build_plan`'s third gate, so publish and every start path refuse them. The
+flow-level `not_yet_enforced` warnings are unchanged.
+
+**The ratchet: 108 → 107, by one bank and nothing else.**
+`invalids/invalid-task` is refused now for Kestra's own reason (an unknown
+type) and left `baseline.txt`; no line moved from match to mismatch. The 49
+golden `runs` entries Task 1 refuses at start were all baselined already, so
+each stays a mismatch for a new reason: refused where Kestra ran it.
+`tests/executor.rs`'s `RUNS_REFUSED` names them; `executor`'s
+`PUBLISHED_BUT_REFUSED` names all 52 Kestra-published flows with a cause each
+(three have no golden entry).
+
+**`ENTRIES_LEFT_UNFINISHED`: 42 → 0.** Every execution the driver used to
+leave mid-flight stalled on a task no handler serves — an `OutputValues`,
+`Labels`, `SetVariables`, `UnsetVariables`, `Exit`, `Assert` or `PurgeLogs`
+leaf, or an opaque `AllowFailure`/`WorkingDirectory` — and each of those is a
+static refusal now. On this corpus no execution stalls any more; it is
+refused before it starts.
+
+The census of `workflow.flows` moved too: `LIVE` 245 → 237 (the eight
+`AllowFailure`/`WorkingDirectory` flows), `VALIDATE_REFUSED` 25 → 33.
+`UNKNOWN_TYPE_REFUSED` stays 65, because `driver::publish_class` files the
+validator's `unknown_task_type`/`unsupported_flow_task` message under the same
+class as the reference resolution's `unknown type '…'`.
+
+The other derived figures that moved, each because a refused entry no longer
+produces a trace: the field split (`MISMATCH_ON_EXECUTION` 68 → 26, `_RUNS`
+90 → 41, `_ORDER` 53 → 19, `_SPAWNED` 13 → 11; the total of 103 is
+unchanged), the spawned-key comparison (41 → 38 entries), the ordered pairs
+(836 → 829 before the restriction), the `Loop` populations, and
+`handler-surface.txt` (matching 186 → 187, blocked 81 → 80).
+`planning_the_loop_removed_forty_spurious_submitted_emissions` reconstructs
+an earlier builder, so it reads the 49 from `executor::plan_stored` (named `plan_unvalidated`, test-only, until no-silent-stall Task 4 fix round 1) (the
+flattening without the gate, `test-util` only) and its figures do not move.
+
+**The guard that keeps it this way** is
+`executor::tests::every_task_planned_opaque_is_refused_at_its_path`: over the
+whole corpus, every task the flattening plans as a `Runnable` while its model
+kind is not a `Leaf` has a `validate_for_run` error at its path or below. It
+judges 6 `AllowFailure`, 13 `WorkingDirectory` and 3 gapped `Pause` tasks,
+plus synthetic gapped `LoopUntil`/`WaitFor` under a flowable's `errors:`.
+Deleting the `unsupported_working_directory` push fails it naming
+`valids/task-runif-workingdirectory`, `-working-directory-invalid-runif`,
+`-working-directory-taskrun` and `-taskrun-nested`.

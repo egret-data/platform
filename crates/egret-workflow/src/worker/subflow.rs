@@ -430,6 +430,20 @@ pub(super) async fn spawn_one(
             ));
         }
     };
+    // No-silent-stall §4.3 point 5: a child this deployment cannot run would
+    // stall, and the parent with it. The child is inserted below, not through
+    // `start_execution_in_on`, so its start check does not reach here.
+    let unserved = crate::spec::unrunnable(&child, crate::runtime::served());
+    if !unserved.is_empty() {
+        return Ok(fail_run(
+            ctx,
+            r.run,
+            &format!(
+                "cannot execute an invalid flow '{namespace}'.'{flow_id}': {}",
+                crate::spec::describe(&unserved)
+            ),
+        ));
+    }
 
     // **The child's `metadata.executionDepth`, and the artifact's refusal on
     // it** (W13a final review I1). `ExecutableUtils.subflowExecution` on the

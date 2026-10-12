@@ -15,10 +15,54 @@ use uuid::Uuid;
 /// (that crate's contract), so this suite cannot silently report `ok` having
 /// asserted nothing.
 pub async fn db() -> Option<Db> {
+    install_served_default();
     let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     Some(db)
+}
+
+/// Install, for this test binary, the task types a deployment WITH a
+/// container runner serves (`runtime::served_for` with `docker`): every type
+/// egret has a handler for in some configuration, and still none of the
+/// unwired ones (`egret.sql`, `core.http`, ...). Idempotent; panics if this
+/// binary already installed a different set (`install_served_for_tests`).
+///
+/// No-silent-stall spec §4.1: `runtime::served()` panics in a process that
+/// installed nothing. The helpers below install this set by default
+/// ([`install_served_default`]); a binary calls this, or
+/// [`install_served_none`], itself to pin the set it relies on.
+pub fn install_served_runner() -> &'static egret_workflow::runtime::Served {
+    let mut cfg = egret_config::Config::default().workflow;
+    cfg.container_runner = egret_config::ContainerRunner::Docker;
+    egret_workflow::runtime::install_served_for_tests(egret_workflow::runtime::served_for(&cfg))
+}
+
+/// The set a test binary serves when it installed none itself: the runner
+/// set of [`install_served_runner`], so a script or plugin flow starts as it
+/// did before the start gate. A no-op when this binary already installed a
+/// set -- whichever it is -- so a binary that needs another one (the `none`
+/// set of `tests/not_served.rs`, or a set with a fake handler's type) installs
+/// it before its first call to any helper here, and keeps it.
+///
+/// Called from every helper a DB test passes through first ([`db`],
+/// [`seed_workspace`], the app builders), because since no-silent-stall
+/// Task 3 every start, every validation report and the flow schema read
+/// `runtime::served()`, which panics in a process that installed nothing.
+pub fn install_served_default() {
+    let mut cfg = egret_config::Config::default().workflow;
+    cfg.container_runner = egret_config::ContainerRunner::Docker;
+    // `Err` is "this binary already installed a set": keep it.
+    let _ = egret_workflow::runtime::install_served(egret_workflow::runtime::served_for(&cfg));
+}
+
+/// As [`install_served_runner`], for a deployment with
+/// `container_runner = none` (the shipping default). A binary uses one or
+/// the other, never both.
+pub fn install_served_none() -> &'static egret_workflow::runtime::Served {
+    egret_workflow::runtime::install_served_for_tests(egret_workflow::runtime::served_for(
+        &egret_config::Config::default().workflow,
+    ))
 }
 
 /// Seed a fresh user + workspace, returning `(workspace_id, user_id)` --
@@ -38,6 +82,7 @@ pub async fn db() -> Option<Db> {
 /// widen this helper's return type for the two existing DB-only callers that
 /// never look at a slug.
 pub async fn seed_workspace(db: &Db) -> (Uuid, UserId) {
+    install_served_default();
     let uid: Uuid = sqlx::query_scalar(
         "INSERT INTO users (email, name, provider, status, password_hash) \
          VALUES ($1, 't', 'local', 'active', 'x') RETURNING id",
@@ -341,6 +386,7 @@ fn app_with_dbs_and_pdp(
     export_total_timeout: std::time::Duration,
     pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
 ) -> App {
+    install_served_default();
     let sessions = egret_auth::session::SessionService::new(
         db.clone(),
         chrono::Duration::hours(24),
@@ -713,6 +759,7 @@ pub async fn webhook_app_with_guard(
     db: &Db,
     guard: std::sync::Arc<egret_workflow::WebhookGuard>,
 ) -> WebhookApp {
+    install_served_default();
     let sessions = egret_auth::session::SessionService::new(
         db.clone(),
         chrono::Duration::hours(24),

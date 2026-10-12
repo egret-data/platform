@@ -5,7 +5,9 @@
 //! flowable.** They are different constructs with the same word in them:
 //! `io.kestra.plugin.core.flow.AllowFailure` is a class that `extends
 //! Sequential` and is still planned opaque here
-//! ([`plan::TaskKind::Runnable`](super::plan::TaskKind)), while
+//! ([`plan::TaskKind::Runnable`](super::plan::TaskKind)) -- and refused at
+//! validate as `unsupported_allow_failure` since no-silent-stall Task 1 --
+//! while
 //! `allowFailure:` is a `Task.java` property every task in the language may
 //! write. Four of `oracle-exec/baseline.txt`'s twelve entries for this row hold
 //! the class and are out of this module's reach; the other eight hold the flag.

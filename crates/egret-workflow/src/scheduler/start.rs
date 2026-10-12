@@ -79,8 +79,10 @@ pub(crate) const ONE_PER_FLOW_TRIGGER_EVENT: &str =
 /// What starting a trigger's execution came to.
 pub(crate) enum Started {
     Yes,
-    /// `Error::InvalidInput`: the source does not parse or plan, or an input
-    /// is refused. Fixed only by a save, so retrying cannot help.
+    /// `Error::InvalidInput`: the source does not parse or plan, uses a task
+    /// type this deployment does not serve (no-silent-stall §4.3), or an
+    /// input is refused. Fixed only by a save (or, for a type not served, a
+    /// deployment that serves it), so retrying cannot help.
     Refused(String),
     /// A unique violation on [`ONE_PER_TICK`] or
     /// [`ONE_PER_FLOW_TRIGGER_EVENT`]: this fire already has its execution.

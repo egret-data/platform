@@ -54,17 +54,25 @@ pub struct TaskTypeSpec {
 /// not run: `core.http`, `core.slack`, and every `egret.*` task a given
 /// deployment does not wire in.
 ///
-/// It would be easy to read that as "the same defect facing the other way", and
-/// it is worse than that. The missing-row case was a **400 at publish** — loud,
-/// immediate, and about a flow nobody had started. This case is a **hang**:
-/// `claim` takes the run and writes its lease, `Registry::run` returns
-/// `WorkerError::NoHandler`, and that error propagates out of `run_one` and
-/// `tick` — where `runtime::spawn` logs a `warn` and ticks again — so **the run
-/// keeps the lease it was given**. `working_timeout` later, the reaper clears
-/// it (`worker::reap`), the next tick claims the run again, and it fails again,
-/// for ever. The execution never terminates and nothing in it ever moves.
+/// It would be easy to read that as "the same defect facing the other way".
+/// The missing-row case was a **400 at publish** — loud, immediate, and about a
+/// flow nobody had started. **This case was a hang until the no-silent-stall
+/// package**: `claim` took the run and wrote its lease, `Registry::run`
+/// returned `WorkerError::NoHandler`, the error propagated out of `run_one`
+/// and `tick`, the run kept its lease, the reaper cleared it
+/// `working_timeout` later, and the next tick refused it again, for ever.
 ///
-/// **Not guarding it is still the right call**, and the reason is the panic in
+/// **It is now refused before it starts and failed if it slips through.**
+/// The set of types this deployment serves is installed at start-up
+/// (`runtime::served_for`, from the same configuration that builds the
+/// handlers); `spec::unrunnable` names each task outside it
+/// (`task_type_not_served`), and publish and every start refuse it
+/// (no-silent-stall Tasks 2–3). An execution that reaches the worker anyway
+/// -- started on an older binary, or under a configuration that served the
+/// type -- has its run FAILED by `worker::run_one` with a line saying the
+/// deployment, not the flow, is at fault (Task 4, spec §5), and settles.
+///
+/// **Not guarding it HERE is still the right call**, and the reason is the panic in
 /// [`add_publishable`](crate::worker::Handlers::add_publishable): the same
 /// mechanism facing this way would refuse to start any deployment that declines
 /// to wire `egret.sql`, `core.http` or the container tasks — which is every
@@ -75,7 +83,8 @@ pub struct TaskTypeSpec {
 /// storage tasks, two of them in `with_core_tasks`, and Task 12 the five
 /// whole-file ones, all in it). The
 /// asymmetry is deliberate, `main.rs` documents the shipping set, and what a
-/// flow using an unwired type gets is the loop above rather than a refusal.
+/// flow using an unwired type gets is the per-deployment refusal above, not a
+/// startup panic.
 pub const TASK_TYPES: &[TaskTypeSpec] = &[
     TaskTypeSpec {
         r#type: "egret.sql",

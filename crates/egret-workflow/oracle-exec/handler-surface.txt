@@ -315,27 +315,27 @@ Two rules, and they are deliberately different:
   file, with the entry named and the reason given; a ceiling that is too
   high costs nothing at all, which is why it would not be a ceiling.
 
-    186  reproduced today, and by nothing the driver removes
+    187  reproduced today, and by nothing the driver removes
       0  reproduced today ONLY because the feed supplies a terminal
          for a task type W3b has no handler for
      27  not reproduced today, and nothing found here blocks it
-     81  not reproduced today, and blocked -- by cause below
+     80  not reproduced today, and blocked -- by cause below
   -----
     294  TOTAL, the comparable entries
 
-  CEILING, feed removed  = 186 + 27 = **213**
-  CEILING, feed retained = 186 + 0 + 27 = 213
+  CEILING, feed removed  = 187 + 27 = **214**
+  CEILING, feed retained = 187 + 0 + 27 = 214
 
-  Today the ratchet matches 186. The two ceilings are the same
+  Today the ratchet matches 187. The two ceilings are the same
   quantity under the two answers Task 5 may give to `does the driver
   still feed a terminal for a task type it has no handler for?`. They are
   NOT the same set with a different name, and the composition is printed
   above so a reader cannot take one for the other.
 
-  **213 is the bound this package should be held to**, because removing
+  **214 is the bound this package should be held to**, because removing
   the feed is the stated intent of Task 5 step 4. If Task 5 keeps the
   feed for unhandled types it must say so, and then the bound is
-  213 -- reported as a decision, not as progress.
+  214 -- reported as a decision, not as progress.
 
   The 0 at risk, with the type whose terminal is fed:
 
@@ -378,10 +378,10 @@ Two rules, and they are deliberately different:
         7  construct  io.kestra.plugin.core.execution.Labels
         5  construct  io.kestra.plugin.core.execution.SetVariables
         5  handler    io.kestra.plugin.core.log.PurgeLogs
-        5  refusal    egret over-accepts it -- W1's validation, not a handler
         4  construct  io.kestra.plugin.core.execution.Exit
         4  construct  io.kestra.plugin.core.flow.AllowFailure
         4  construct  io.kestra.plugin.core.flow.WorkingDirectory
+        4  refusal    egret over-accepts it -- W1's validation, not a handler
         3  construct  flow concurrency:
         3  construct  flow sla:
         2  clock      checkFrequency.maxDuration; the golden's iteration count carries the artifact's delay-poller latency
@@ -395,14 +395,14 @@ Two rules, and they are deliberately different:
         1  handler    io.kestra.plugin.core.kv.Set
         1  render     a relational operator against a quoted operand; Pebble throws and minijinja answers
     -----
-       81  DISTINCT entries blocked (the rows above overlap)
+       80  DISTINCT entries blocked (the rows above overlap)
 
   The four causes the plan names, and where each landed:
 
        30  a missing handler
        59  a construct no W3b task owns
         0  a state RunState cannot hold
-        5  an over-acceptance -- W1's validation
+        4  an over-acceptance -- W1's validation
 
   `an unreachable ordered pair` and `an output the handler cannot
   produce` are the two causes the plan names that this derivation CANNOT
@@ -427,7 +427,7 @@ Two rules, and they are deliberately different:
         here: blocked: refusal/egret over-accepts it -- W1's validation, not a handler
     invalids/invalid-task
         W3a : over-accepted: a type not on Kestra's classpath
-        here: blocked: refusal/egret over-accepts it -- W1's validation, not a handler
+        here: reproduced today
     valids/dag
         W3a : one `order` pair a clockless machine cannot reach
         here: BANKABLE
@@ -464,7 +464,7 @@ Two rules, and they are deliberately different:
     valids/retry-failed-flow-duration        maxDuration with no elapsed time
     valids/retry-success                     WARNING, which RunState cannot hold
 
-    working expectation = 213 - 6 = 207
+    working expectation = 214 - 6 = 208
 
   Two of them deserve a sentence each:
 

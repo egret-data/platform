@@ -457,9 +457,10 @@ fn type_refusal(type_id: &str) -> PluginRefusal {
 
 /// Every leaf task in `flow`, with its validation path, in all four root
 /// lists and at every depth -- through [`Task::children`] **and**
-/// [`Task::error_children`], as `scripts::script_tasks` walks.
-/// `spec::validate`'s own walk visits `children()` only.
-fn leaves(flow: &Flow) -> Vec<(String, &Task, &Value)> {
+/// [`Task::error_children`], as `scripts::script_tasks` walks (and
+/// `spec::validate`'s own walk, since no-silent-stall Task 1).
+/// `spec::unrunnable` walks this too, so its paths are these.
+pub(crate) fn leaves(flow: &Flow) -> Vec<(String, &Task, &Value)> {
     fn walk<'a>(task: &'a Task, path: String, out: &mut Vec<(String, &'a Task, &'a Value)>) {
         if let TaskKind::Leaf { spec } = &task.kind {
             out.push((path.clone(), task, spec));

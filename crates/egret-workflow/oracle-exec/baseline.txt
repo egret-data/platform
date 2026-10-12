@@ -532,11 +532,19 @@
 # `valids/sla-max-duration-ok` (PT10S over `PT0.5S`) is the control and it is
 # NOT in this file: it matches, and it would match under a correct MAX_DURATION
 # implementation and under none at all, so it discriminates nothing.
+#
+# **no-silent-stall Task 1 (2026-10-12) banks one: `invalids/invalid-task`.**
+# Kestra refuses it (`Invalid type: io.kestra.plugin.core.debug.MissingTwo`),
+# and egret now does too, because `unknown_task_type` is an error (spec §3):
+# a type no handler serves stalled every run that reached it. No other line
+# moves. The 52 Kestra-published flows Task 1 refuses (`executor`'s
+# `PUBLISHED_BUT_REFUSED`) were all baselined `runs` entries already, or have
+# no golden entry, so each stays a mismatch for a new reason: refused where
+# Kestra ran it.
 invalids/dag-invalid-subtask
 invalids/inputs-bad-validator-syntax
 invalids/inputs-with-multiple-constraint-violations
 invalids/invalid-property
-invalids/invalid-task
 invalids/loop-switch-failed
 valids/after-execution
 valids/after-execution-error
