@@ -98,6 +98,12 @@ export interface LogViewProps {
   onClearFilters?: () => void;
   /** The scroller's height classes. */
   heightClass?: string;
+  /**
+   * Fill the parent's height (a flex column) instead of a fixed height: the
+   * scroller takes what the filters and toolbar leave, so the page around it
+   * never scrolls too. With `heightClass` as its minimum.
+   */
+  fill?: boolean;
   /** The list's accessible name. */
   label?: string;
   /** Lines per read and the window, for tests. */
@@ -119,6 +125,7 @@ export function LogView({
   filtersActive = false,
   onClearFilters,
   heightClass = "h-[28rem]",
+  fill = false,
   label = "Log lines",
   pageSize,
   windowLines,
@@ -251,6 +258,7 @@ export function LogView({
           rows={rows}
           offsets={offsets}
           heightClass={heightClass}
+          fill={fill}
           label={label}
           onToggle={toggle}
           onBackAtBottom={follow.followLatest}
@@ -260,7 +268,7 @@ export function LogView({
   }
 
   return (
-    <div data-testid="log-view" className="flex min-w-0 flex-col">
+    <div data-testid="log-view" className={cn("flex min-w-0 flex-col", fill && "min-h-0 flex-1")}>
       <div className="mb-2 flex flex-wrap items-center justify-end gap-2">
         {grouped && groupKeys.length > 0 ? (
           <Button
@@ -309,6 +317,7 @@ function WindowedLines({
   rows,
   offsets,
   heightClass,
+  fill,
   label,
   onToggle,
   onBackAtBottom,
@@ -316,6 +325,7 @@ function WindowedLines({
   rows: LogRow[];
   offsets: number[];
   heightClass: string;
+  fill: boolean;
   label: string;
   onToggle: (key: string) => void;
   /** The user came back to the newest lines (scrolled there, or Jump to latest). */
@@ -420,7 +430,7 @@ function WindowedLines({
   if (total > y) parts.push(<div key="gap-end" style={{ height: total - y }} aria-hidden />);
 
   return (
-    <div className="relative">
+    <div className={cn("relative", fill && "flex min-h-0 flex-1 flex-col")}>
       {/* A tab stop, so the keyboard can scroll it (FE-A11Y-3: a scrollable
           `role="log"` takes `tabIndex={0}`, as axe's scrollable-region-focusable
           expects). `aria-live` off: a live region would read every polled page
@@ -440,6 +450,7 @@ function WindowedLines({
         className={cn(
           "overflow-auto rounded-md border bg-card font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           heightClass,
+          fill && "flex-1",
         )}
       >
         {parts}

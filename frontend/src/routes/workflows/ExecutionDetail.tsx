@@ -174,7 +174,7 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
         <TabsContent value="gantt" className="min-h-0 flex-1 overflow-auto p-4">
           <ExecutionGanttTab execution={execution} slots={ganttSlots} />
         </TabsContent>
-        <TabsContent value="logs" className="min-h-0 flex-1 overflow-auto p-4">
+        <TabsContent value="logs" className="flex min-h-0 flex-1 flex-col overflow-auto p-4">
           <ExecutionLogsTab ws={ws} execution={execution} />
         </TabsContent>
         <TabsContent value="outputs" className="min-h-0 flex-1 overflow-auto p-4">

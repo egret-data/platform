@@ -131,7 +131,10 @@ describe("ExecutionGanttTab: rows", () => {
     expect(within(rowFor(2)).getByText("Success")).toBeInTheDocument();
     // A loop's child is labelled with its value.
     expect(within(rowFor(3)).getByText("eu-west")).toBeInTheDocument();
-    expect(within(rowFor(0)).getByText("2 attempts")).toBeInTheDocument();
+    // The count, with the word for a screen reader and on hover: "2 attempts" in full truncated a short task id at 900 px.
+    const retried = within(rowFor(0)).getByTitle("Retried: 2 attempts");
+    expect(retried).toHaveTextContent(/^2 attempts$/);
+    expect(within(retried).getByText("attempts", { exact: false })).toHaveClass("sr-only");
   });
 
   it("places bars on the axis from started_at and ended_at", () => {

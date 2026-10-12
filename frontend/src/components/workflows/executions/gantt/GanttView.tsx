@@ -59,6 +59,15 @@ const hatch = (tone: StateTone): CSSProperties => ({
   borderColor: TONE_VAR[tone],
 });
 
+/**
+ * The timeline's inset on both sides, in the header and in every row: a bar
+ * at the axis end keeps its 2 px minimum and a never-started marker (a 10 px
+ * square turned 45°, centred on its time) its half inside the cell.
+ * Measured at 900 px before the inset: the last run's 2 px bar ended 2 px
+ * past the cell and gave the chart a horizontal scroll.
+ */
+const AXIS_INSET = "left-2 right-2";
+
 /** Task, state, duration, timeline. The task column gives way first; the timeline keeps its room. */
 const COLUMNS = "grid grid-cols-[minmax(9rem,16rem)_7.5rem_6.5rem_minmax(14rem,1fr)] items-center";
 
@@ -101,42 +110,45 @@ function TimelineCell({ row, axis, ticks }: { row: GanttRow; axis: GanttModel["a
   return (
     <div role="gridcell" className="relative h-full">
       <span className="sr-only">{describeTimeline(row, axis.start)}</span>
-      {ticks.map((t) => (
-        <span key={t.at} aria-hidden className="absolute inset-y-0 w-px bg-border" style={{ left: `${pct(t.at)}%` }} />
-      ))}
-      {bar ? (
-        <span
-          aria-hidden
-          data-testid={`gantt-bar-${row.runIx}`}
-          data-estimated={row.estimated || undefined}
-          data-open={bar.open || undefined}
-          title={row.estimated ? ESTIMATED_RUN_TITLE : undefined}
-          className={cn(
-            "absolute top-1/2 h-3 min-w-0.5 -translate-y-1/2 rounded-sm",
-            row.estimated ? "border border-dashed" : row.attempts.length > 0 ? `${TONE_FILL[tone]} opacity-35` : TONE_FILL[tone],
-            bar.open && "rounded-r-none",
-          )}
-          style={{
-            left: `${pct(bar.start)}%`,
-            width: `${pct(bar.end) - pct(bar.start)}%`,
-            ...(row.estimated ? hatch(tone) : {}),
-          }}
-        />
-      ) : null}
-      {bar
-        ? row.attempts.map((a, i) => (
-            <AttemptSegment key={i} attempt={a} index={i} runIx={row.runIx} estimated={row.estimated} barEnd={bar.end} pct={pct} />
-          ))
-        : null}
-      {row.marker && row.markerAt !== undefined ? (
-        <span
-          aria-hidden
-          data-testid={`gantt-marker-${row.runIx}`}
-          title={markerReason(row.state)}
-          className="absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rotate-45 border-2 border-muted-foreground bg-background"
-          style={{ left: `${pct(row.markerAt)}%` }}
-        />
-      ) : null}
+      {/* The axis is inset (`AXIS_INSET`), so a bar's minimum width or a marker's half at either end stays in the cell. */}
+      <div aria-hidden className={cn("absolute inset-y-0", AXIS_INSET)}>
+        {ticks.map((t) => (
+          <span key={t.at} aria-hidden className="absolute inset-y-0 w-px bg-border" style={{ left: `${pct(t.at)}%` }} />
+        ))}
+        {bar ? (
+          <span
+            aria-hidden
+            data-testid={`gantt-bar-${row.runIx}`}
+            data-estimated={row.estimated || undefined}
+            data-open={bar.open || undefined}
+            title={row.estimated ? ESTIMATED_RUN_TITLE : undefined}
+            className={cn(
+              "absolute top-1/2 h-3 min-w-0.5 -translate-y-1/2 rounded-sm",
+              row.estimated ? "border border-dashed" : row.attempts.length > 0 ? `${TONE_FILL[tone]} opacity-35` : TONE_FILL[tone],
+              bar.open && "rounded-r-none",
+            )}
+            style={{
+              left: `${pct(bar.start)}%`,
+              width: `${pct(bar.end) - pct(bar.start)}%`,
+              ...(row.estimated ? hatch(tone) : {}),
+            }}
+          />
+        ) : null}
+        {bar
+          ? row.attempts.map((a, i) => (
+              <AttemptSegment key={i} attempt={a} index={i} runIx={row.runIx} estimated={row.estimated} barEnd={bar.end} pct={pct} />
+            ))
+          : null}
+        {row.marker && row.markerAt !== undefined ? (
+          <span
+            aria-hidden
+            data-testid={`gantt-marker-${row.runIx}`}
+            title={markerReason(row.state)}
+            className="absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rotate-45 border-2 border-muted-foreground bg-background"
+            style={{ left: `${pct(row.markerAt)}%` }}
+          />
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -280,23 +292,25 @@ export function GanttView({ ref, model, selectedRunIx, onSelect }: GanttViewProp
           </div>
           <div role="columnheader" ref={timelineHead} className="relative h-full overflow-hidden">
             <span className="sr-only">Timeline</span>
-            {ticks.map((t, i) => {
-              const at = pct(t.at);
-              return (
-                <span
-                  key={t.at}
-                  aria-hidden
-                  data-testid="gantt-tick"
-                  className={cn(
-                    "absolute top-1/2 -translate-y-1/2 whitespace-nowrap tabular-nums",
-                    i === 0 ? "pl-1" : at > 92 ? "-translate-x-full pr-1" : "-translate-x-1/2",
-                  )}
-                  style={{ left: `${at}%` }}
-                >
-                  {t.label}
-                </span>
-              );
-            })}
+            <div aria-hidden className={cn("absolute inset-y-0", AXIS_INSET)}>
+              {ticks.map((t, i) => {
+                const at = pct(t.at);
+                return (
+                  <span
+                    key={t.at}
+                    aria-hidden
+                    data-testid="gantt-tick"
+                    className={cn(
+                      "absolute top-1/2 -translate-y-1/2 whitespace-nowrap tabular-nums",
+                      i === 0 ? "pl-1" : at > 92 ? "-translate-x-full pr-1" : "-translate-x-1/2",
+                    )}
+                    style={{ left: `${at}%` }}
+                  >
+                    {t.label}
+                  </span>
+                );
+              })}
+            </div>
           </div>
         </div>
         {rows.map((row, i) => {
@@ -354,9 +368,14 @@ export function GanttView({ ref, model, selectedRunIx, onSelect }: GanttViewProp
                   ) : null}
                 </span>
                 {row.attempts.length > 1 ? (
-                  <span className="ml-auto flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground tabular-nums" title="Retried">
+                  // The count alone, the word for a screen reader: at 900 px "2 attempts" truncated a five-letter task id.
+                  <span
+                    className="ml-auto flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground tabular-nums"
+                    title={`Retried: ${row.attempts.length} attempts`}
+                  >
                     <RotateCcw aria-hidden className="size-3" />
-                    {row.attempts.length} attempts
+                    {row.attempts.length}
+                    <span className="sr-only"> attempts</span>
                   </span>
                 ) : null}
               </div>

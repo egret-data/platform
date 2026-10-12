@@ -71,7 +71,7 @@ export default function ExecutionLogsTab({ ws, execution }: { ws: string; execut
     .map((r) => ({ value: String(r.run_ix), label: `${r.task_id} #${r.run_ix}${r.value ? ` (${r.value})` : ""}` }));
 
   return (
-    <div className="flex min-h-0 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <FacetSelect
           label="Level"
@@ -109,7 +109,10 @@ export default function ExecutionLogsTab({ ws, execution }: { ws: string; execut
         runs={execution.runs}
         filtersActive={active}
         onClearFilters={clear}
-        heightClass="h-[calc(100vh-22rem)] min-h-80"
+        // The tab's height, whatever the header above it wraps to: a fixed `100vh - 22rem`
+        // overran the panel (by 132 px at 1280×720) and scrolled the tab around the log.
+        fill
+        heightClass="min-h-60"
         label="Execution logs"
       />
     </div>
