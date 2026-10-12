@@ -37,7 +37,7 @@ const GENERATED_NOTICE =
 const UNDO_NOTICE =
   "Every profile this migration recompiled stays compiled by egret's permission model after the undo: its hand-written policies can be edited and deleted, but a NEW hand-written policy still cannot be created in it.";
 const BUDGET_REFUSAL =
-  "proving this migration needs 412000 probe evaluations across 2 profile(s), over the limit of 200000. The count grows with the size of each affected profile's download (the largest serves 340 policies), roughly with its square, not with how many policies this request migrates. The probe set is never cut short — a partial proof would be reported as a whole one — so this migration cannot be proved until those profiles are smaller.";
+  "proving this migration needs 15000 probe evaluations across 2 profile(s), 3100000 units of work (probe evaluations x the policies each visits), over the limit of 1300000. The work grows with the size of each affected profile's download (the largest serves 340 policies), roughly with its square, not with how many policies this request migrates. The probe set is never cut short — a partial proof would be reported as a whole one — so this migration cannot be proved until those profiles are smaller.";
 
 const ROWS: ClassifiedPolicy[] = [
   {
@@ -46,6 +46,7 @@ const ROWS: ClassifiedPolicy[] = [
     managed_by: "compiler",
     enabled: true,
     migratable: false,
+    warnings: [],
     blockers: [COMPILER_REASON],
   },
   {
@@ -54,6 +55,7 @@ const ROWS: ClassifiedPolicy[] = [
     managed_by: "operator",
     enabled: true,
     migratable: true,
+    warnings: [],
     blockers: [],
     proposed: { grants: 1, rules: 0 },
   },
@@ -63,6 +65,7 @@ const ROWS: ClassifiedPolicy[] = [
     managed_by: "infra",
     enabled: true,
     migratable: false,
+    warnings: [],
     blockers: [INFRA_REASON],
   },
   {
@@ -71,6 +74,7 @@ const ROWS: ClassifiedPolicy[] = [
     managed_by: "operator",
     enabled: true,
     migratable: false,
+    warnings: [],
     blockers: [CATALOG_BLOCKER],
   },
   {
@@ -79,6 +83,7 @@ const ROWS: ClassifiedPolicy[] = [
     managed_by: "operator",
     enabled: true,
     migratable: true,
+    warnings: [],
     blockers: [],
     proposed: { grants: 2, rules: 1 },
   },
@@ -88,6 +93,7 @@ const ROWS: ClassifiedPolicy[] = [
     managed_by: "operator",
     enabled: false,
     migratable: false,
+    warnings: [],
     blockers: [MIGRATED_SENTENCE],
     migrated: {
       policy_name: "old-sales",
@@ -115,6 +121,7 @@ function proved(overrides: Partial<MigrateResponse> = {}): MigrateResponse {
         service_name: "trino-prod",
         plugin_versions: ["ranger_2_5_0"],
         probes: 96,
+        probes_full: 96,
         disagreements: 0,
         removed_policies: ["allow-analysts"],
         added_policies: ["perm-grant-9a"],
@@ -124,6 +131,7 @@ function proved(overrides: Partial<MigrateResponse> = {}): MigrateResponse {
         service_name: "trino-analytics",
         plugin_versions: ["ranger_2_8_0"],
         probes: 40,
+        probes_full: 40,
         disagreements: 0,
         removed_policies: [],
         added_policies: ["perm-grant-9a"],
@@ -312,6 +320,44 @@ describe("PolicyMigrationPage — preview before migrate", () => {
     expect(within(self).queryByText("Also changed")).toBeNull();
 
     expect(screen.getByText(GENERATED_NOTICE)).toBeInTheDocument();
+  });
+
+  /** SP4d-4 live D-3: the preview says how much pruning saved, and why it
+   *  kept every probe when it did. */
+  it("shows the pruned probe count beside the full one, and the reason when pruning fell back", async () => {
+    const user = userEvent.setup();
+    const base = proved();
+    vi.mocked(migrateServicePolicies).mockResolvedValueOnce(
+      proved({
+        profiles: [
+          { ...base.profiles[0], probes: 6210, probes_full: 273240 },
+          {
+            ...base.profiles[1],
+            probes: 40,
+            probes_full: 40,
+            pruning_fallback: "ContentFreeConstruct",
+          },
+        ],
+      }),
+    );
+    renderPage();
+    await rowOf("allow-analysts");
+    await user.click(screen.getByRole("checkbox", { name: "Select allow-analysts" }));
+    await user.click(screen.getByRole("button", { name: "Preview migration" }));
+
+    const panel = await screen.findByRole("region", { name: "Affected profiles" });
+    const pruned = within(panel).getByText("trino-prod").closest("tr") as HTMLElement;
+    expect(within(pruned).getByText("6210")).toBeInTheDocument();
+    expect(within(pruned).getByText("of 273240 without pruning")).toBeInTheDocument();
+    expect(within(pruned).queryByText(/Not pruned/)).toBeNull();
+
+    const full = within(panel).getByText("trino-analytics").closest("tr") as HTMLElement;
+    expect(within(full).getByText("of 40 without pruning")).toBeInTheDocument();
+    expect(
+      within(full).getByText(
+        "Not pruned: a policy uses conditions, schedules or delegation the checker cannot decide around",
+      ),
+    ).toBeInTheDocument();
   });
 
   /** Final review (Task 10 Minor 1): a preview is rolled back, so the compiled

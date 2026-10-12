@@ -484,3 +484,225 @@ describe("PolicyEditorPage — a reader can read it but not save it (review I-1)
     );
   });
 });
+
+describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
+  const SELECT_ITEM = { users: ["bob"], accesses: [{ type: "select" }] };
+  const INSERT_ITEM = { users: ["bob"], accesses: [{ type: "insert" }] };
+  const stored = (resources: Record<string, unknown>, item = SELECT_ITEM) => ({
+    name: "stored-row",
+    isEnabled: true,
+    resources,
+    policyItems: [item],
+    denyPolicyItems: [],
+  });
+  const STOPS = /Stops above column: grants no column reads/;
+
+  beforeEach(() => {
+    navigate.mockClear();
+    createPolicy.mockClear();
+    updatePolicy.mockClear();
+    getPolicy.mockClear();
+    routeParams = { service: "trino", kind: "access", id: "42" };
+  });
+
+  /** An unrelated edit: rename the policy. */
+  async function renameAndSave() {
+    const name = await screen.findByLabelText("Policy name");
+    fireEvent.change(name, { target: { value: "stored-row renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+  }
+
+  it("asks before an unrelated save widens a stored row, naming the level and what changes", async () => {
+    getPolicy.mockResolvedValueOnce(
+      stored({
+        catalog: { values: ["iceberg"] },
+        schema: { values: ["*"] },
+        table: { values: ["*"] },
+        column: { values: [] },
+      }),
+    );
+    wrap(<PolicyEditorPage />);
+    await renameAndSave();
+
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("Saving will widen this stored policy");
+    expect(dialog).toHaveTextContent("column");
+    expect(dialog).toHaveTextContent("stores that level as *");
+    expect(dialog).toHaveTextContent("Column SELECT becomes granted");
+    expect(dialog).toHaveTextContent("may also be evaluated earlier");
+    expect(updatePolicy).not.toHaveBeenCalled();
+  });
+
+  it("treats a stored blank value as empty: the widening prompt appears for values [\"\"]", async () => {
+    getPolicy.mockResolvedValueOnce(
+      stored({ catalog: { values: ["iceberg"] }, schema: { values: ["*"] }, table: { values: ["*"] }, column: { values: [" "] } }),
+    );
+    wrap(<PolicyEditorPage />);
+    await renameAndSave();
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Saving will widen this stored policy");
+    expect(updatePolicy).not.toHaveBeenCalled();
+  });
+
+  it("a blank root blocks Save with the reason, like an empty one", async () => {
+    getPolicy.mockResolvedValueOnce(stored({ catalog: { values: [""] }, schema: { values: ["*"] } }));
+    wrap(<PolicyEditorPage />);
+    await screen.findByDisplayValue("stored-row");
+    const save = screen.getByRole("button", { name: /^save$/i });
+    expect(save).toBeDisabled();
+    expect(save).toHaveAttribute("title", expect.stringContaining("Name the required resource level"));
+  });
+
+  it("sends nothing when the operator keeps the policy as stored", async () => {
+    getPolicy.mockResolvedValueOnce(
+      stored({ catalog: { values: ["iceberg"] }, schema: { values: ["*"] }, table: { values: ["*"] }, column: { values: [] } }),
+    );
+    wrap(<PolicyEditorPage />);
+    await renameAndSave();
+    fireEvent.click(await screen.findByRole("button", { name: "Keep the policy as stored" }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(updatePolicy).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("saves after the operator confirms the widening", async () => {
+    getPolicy.mockResolvedValueOnce(
+      stored({ catalog: { values: ["iceberg"] }, schema: { values: ["*"] }, table: { values: ["*"] }, column: { values: [] } }),
+    );
+    wrap(<PolicyEditorPage />);
+    await renameAndSave();
+    fireEvent.click(await screen.findByRole("button", { name: "Widen and save" }));
+    await waitFor(() => expect(updatePolicy).toHaveBeenCalledWith(42, expect.any(Object)));
+  });
+
+  it("does not ask when the save widens nothing (a full chain)", async () => {
+    getPolicy.mockResolvedValueOnce(
+      stored({ catalog: { values: ["iceberg"] }, schema: { values: ["*"] }, table: { values: ["*"] }, column: { values: ["*"] } }),
+    );
+    wrap(<PolicyEditorPage />);
+    await renameAndSave();
+    await waitFor(() => expect(updatePolicy).toHaveBeenCalled());
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("does not ask for a NEW policy, which has no stored grant to widen", async () => {
+    routeParams = { service: "trino", kind: "access" };
+    wrap(<PolicyEditorPage />);
+    fireEvent.change(await screen.findByLabelText("Policy name"), { target: { value: "p1" } });
+    const catalog = screen.getAllByPlaceholderText("value or * (Enter to add)")[0];
+    fireEvent.change(catalog, { target: { value: "iceberg" } });
+    fireEvent.keyDown(catalog, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(createPolicy).toHaveBeenCalled());
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("warns, beside the chain, when a select policy stops above column — and not for insert", async () => {
+    const chain = { catalog: { values: ["iceberg"] }, schema: { values: ["*"] }, table: { values: ["*"] } };
+    getPolicy.mockResolvedValueOnce(stored(chain, SELECT_ITEM));
+    const { unmount } = wrap(<PolicyEditorPage />);
+    await screen.findByDisplayValue("stored-row");
+    expect(screen.getByText(STOPS)).toBeInTheDocument();
+    unmount();
+
+    getPolicy.mockResolvedValueOnce(stored(chain, INSERT_ITEM));
+    wrap(<PolicyEditorPage />);
+    await screen.findByDisplayValue("stored-row");
+    expect(screen.queryByText(STOPS)).not.toBeInTheDocument();
+  });
+
+  it("a stored row that stops above column saves as it is, with no widening prompt", async () => {
+    getPolicy.mockResolvedValueOnce(
+      stored({ catalog: { values: ["iceberg"] }, schema: { values: ["*"] }, table: { values: ["*"] } }),
+    );
+    wrap(<PolicyEditorPage />);
+    await renameAndSave();
+    await waitFor(() => expect(updatePolicy).toHaveBeenCalled());
+    const body = updatePolicy.mock.calls[0][1] as { resources: Record<string, unknown> };
+    expect(Object.keys(body.resources)).toEqual(["catalog", "schema", "table"]);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("disables Save for an empty catalog, with the reason on the button and beside the field", async () => {
+    routeParams = { service: "trino", kind: "access" };
+    wrap(<PolicyEditorPage />);
+    fireEvent.change(await screen.findByLabelText("Policy name"), { target: { value: "p1" } });
+    const save = screen.getByRole("button", { name: /^save$/i });
+    expect(save).toBeDisabled();
+    expect(save).toHaveAttribute("title", expect.stringContaining("Name the required resource level"));
+    expect(screen.getByText(/Name a catalog\. It is required/)).toBeInTheDocument();
+  });
+
+  it("disables Save for a gap, saying which level is missing", async () => {
+    getPolicy.mockResolvedValueOnce(
+      stored({ catalog: { values: ["iceberg"] }, table: { values: ["orders"] } }),
+    );
+    wrap(<PolicyEditorPage />);
+    await screen.findByDisplayValue("stored-row");
+    const save = screen.getByRole("button", { name: /^save$/i });
+    expect(save).toBeDisabled();
+    expect(save).toHaveAttribute("title", "table is set but schema is not: set schema or clear table");
+    expect(screen.getByRole("alert")).toHaveTextContent("Table is set but schema is not");
+  });
+
+  it("names the Enabled switch that the overlap report points to", async () => {
+    getPolicy.mockResolvedValueOnce(stored({ catalog: { values: ["iceberg"] } }));
+    wrap(<PolicyEditorPage />);
+    await screen.findByDisplayValue("stored-row");
+    expect(screen.getByRole("switch", { name: "Enabled" })).toBeInTheDocument();
+  });
+
+  describe("after a save that filled a level", () => {
+    const RESPONSE = {
+      id: 7,
+      filledLevels: ["column"],
+      note: "The policy now covers every column of the table and is evaluated earlier in its band.",
+      warnings: [
+        {
+          kind: "evaluation_order_changed",
+          policy: "deny-pii",
+          policyId: 9,
+          policyKind: "access",
+          sentence: "Ranger now evaluates this broader policy before deny-pii.",
+        },
+      ],
+    };
+
+    async function createWithEmptyColumn() {
+      routeParams = { service: "trino", kind: "access" };
+      wrap(<PolicyEditorPage />);
+      fireEvent.change(await screen.findByLabelText("Policy name"), { target: { value: "p1" } });
+      const catalog = screen.getAllByPlaceholderText("value or * (Enter to add)")[0];
+      fireEvent.change(catalog, { target: { value: "iceberg" } });
+      fireEvent.keyDown(catalog, { key: "Enter" });
+      fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    }
+
+    it("shows filledLevels, the note and each overtaken policy, linked, instead of navigating away", async () => {
+      createPolicy.mockResolvedValueOnce(RESPONSE);
+      await createWithEmptyColumn();
+
+      expect(await screen.findByText(/Policy created with a level stored as/)).toBeInTheDocument();
+      expect(screen.getByText(/Saved as/)).toHaveTextContent("column");
+      expect(screen.getByText(RESPONSE.note)).toBeInTheDocument();
+      expect(screen.getByText("This save changed the order of 1 other policy")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "deny-pii" })).toHaveAttribute(
+        "href",
+        "/governance/policies/trino/access/9",
+      );
+      expect(screen.getByText(/evaluates this broader policy before deny-pii/)).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Back to trino" })).toHaveAttribute(
+        "href",
+        "/governance/policies/trino",
+      );
+      expect(navigate).not.toHaveBeenCalled();
+    });
+
+    it("a plain { id } response navigates away as before", async () => {
+      createPolicy.mockResolvedValueOnce({ id: 8 });
+      await createWithEmptyColumn();
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith("/governance/policies/trino"));
+      expect(screen.queryByText(/Policy created/)).not.toBeInTheDocument();
+    });
+  });
+});

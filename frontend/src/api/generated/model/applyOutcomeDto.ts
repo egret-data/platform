@@ -12,7 +12,11 @@
 export interface ApplyOutcomeDto {
   engineId: string;
   engineName: string;
-  /** `applied` | `failed`. */
+  /**
+     * `applied` | `failed` | `skipped`. `skipped`: the engine is external, so
+     * egret did not touch it (the attachment is only declared); `error` then
+     * says so.
+     */
   status: string;
   /** @nullable */
   error?: string | null;

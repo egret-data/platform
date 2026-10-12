@@ -317,6 +317,24 @@ describe("RuleDialog — full-body PATCH and verbatim refusals", () => {
       ),
     ).toBeInTheDocument();
   });
+
+  const SENTENCE =
+    'two mask policies would be served at policyPriority 0 that may both decide one request: rule "mask-ssn" and rule "null ssn".';
+
+  test("the 409 sentence shows beside the form and nothing the user entered is cleared", async () => {
+    const user = userEvent.setup();
+    patchMutateAsync.mockRejectedValueOnce(new ApiError(409, SENTENCE));
+    renderDialog({ existing: EXISTING });
+
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const saveBtn = await screen.findByRole("button", { name: "Save changes" });
+    await waitFor(() => expect(saveBtn).toBeEnabled());
+    await user.click(saveBtn);
+
+    expect(await screen.findByText(SENTENCE)).toBeInTheDocument();
+    expect(screen.getByDisplayValue("mask-ssn")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
+  });
 });
 
 describe("RuleDialog — the fan-out's skip list (SP4b-2 finding 4)", () => {

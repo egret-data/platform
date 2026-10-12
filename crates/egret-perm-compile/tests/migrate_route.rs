@@ -841,6 +841,10 @@ async fn a_migrated_policy_is_classified_as_migrated_not_as_switched_off() {
 #[tokio::test]
 async fn a_profile_too_large_to_prove_is_refused_by_count_with_nothing_written() {
     let Some(f) = setup().await else { return };
+    // Changed by pruning (SP4d-4 Task 6): one migrated policy among 40 siblings
+    // now prunes to a few thousand probes and fits the cap, so the fixture has
+    // to exceed the cap UNDER pruning: 20 migrated policies (each one's grant
+    // is a changed policy whose coordinates stay) among 60 in the profile.
     for i in 0..40 {
         insert(
             &f,
@@ -851,25 +855,34 @@ async fn a_profile_too_large_to_prove_is_refused_by_count_with_nothing_written()
         )
         .await;
     }
-    let name = unique("alice reads orders");
-    let id = insert(
-        &f,
-        f.p,
-        &name,
-        "operator",
-        access_policy(&f.catalog, "sales", "alice"),
-    )
-    .await;
+    let mut names = Vec::new();
+    let mut first = 0;
+    for i in 0..20 {
+        let name = unique(&format!("migrated {i}"));
+        let id = insert(
+            &f,
+            f.p,
+            &name,
+            "operator",
+            access_policy(&f.catalog, &format!("m{i}"), &format!("migrant{i}")),
+        )
+        .await;
+        if i == 0 {
+            first = id;
+        }
+        names.push(name);
+    }
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
 
     let started = std::time::Instant::now();
-    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    let (status, body) = migrate(&f, f.p, &refs, false).await;
     let elapsed = started.elapsed();
     eprintln!("MEASURE cap refusal elapsed={elapsed:?}");
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     let refusal = body["refusal"].as_str().expect("refusal");
     assert!(refusal.contains("probe evaluations"), "{refusal}");
     assert!(
-        refusal.contains("the largest serves 41 policies"),
+        refusal.contains("the largest serves 60 policies"),
         "{refusal}"
     );
     assert!(refusal.contains("never cut short"), "{refusal}");
@@ -879,7 +892,131 @@ async fn a_profile_too_large_to_prove_is_refused_by_count_with_nothing_written()
     );
     assert_eq!(grants_on_catalog(&f).await, 0);
     assert!(provenance(&f, f.p).await.is_empty());
-    assert!(enabled(&f, id).await);
+    assert!(enabled(&f, first).await);
+}
+
+/// SP4d-4 Task 6: the dry run and the real migration prove on the PRUNED set,
+/// and say how much smaller it is than the full one.
+#[tokio::test]
+async fn the_dry_run_and_the_real_migration_prove_on_the_same_pruned_set() {
+    let Some(f) = setup().await else { return };
+    for i in 0..10 {
+        insert(
+            &f,
+            f.p,
+            &unique(&format!("sibling {i}")),
+            "operator",
+            access_policy(&f.catalog, &format!("s{i}"), &format!("user{i}")),
+        )
+        .await;
+    }
+    let name = unique("alice reads orders");
+    insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let (status, dry) = migrate(&f, f.p, &[&name], true).await;
+    assert_eq!(status, StatusCode::OK, "{dry}");
+    let profile = &dry["profiles"][0];
+    let (pruned, full) = (
+        profile["probes"].as_u64().unwrap(),
+        profile["probes_full"].as_u64().unwrap(),
+    );
+    assert!(
+        pruned > 0 && pruned < full,
+        "pruning removed probes: {pruned} of {full}"
+    );
+    assert!(
+        profile.get("pruning_fallback").is_none(),
+        "no fallback was needed: {profile}"
+    );
+
+    let (status, real) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::OK, "{real}");
+    assert_eq!(real["profiles"][0]["probes"], dry["profiles"][0]["probes"]);
+    assert_eq!(
+        real["profiles"][0]["probes_full"],
+        dry["profiles"][0]["probes_full"]
+    );
+    assert_eq!(real["probe_evaluations"], dry["probe_evaluations"]);
+}
+
+/// SP4d-4 final review I-1: the route-level counterpart of `gate_timing.rs`.
+/// The migration holds the profile lock across the recompile, the two
+/// `artifact_via` reads, the cap count, the case build and `compare`; this
+/// times a whole dry run of the request (which does all of it and rolls back)
+/// on one profile of N single-user policies, growing N until the cap refuses.
+/// Release only; the largest admitted request must stay within the 2.5 s the
+/// cap's doc promises.
+///
+/// ```bash
+/// DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test \
+///   cargo test -p egret-perm-compile --release --test migrate_route \
+///   a_dry_run_at_the_cap_holds_the_lock_no_longer_than_promised -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "timing harness; run with --release -- --ignored --nocapture"]
+async fn a_dry_run_at_the_cap_holds_the_lock_no_longer_than_promised() {
+    let Some(f) = setup().await else { return };
+    let mut inserted = 0usize;
+    let mut slowest_admitted = 0.0f64;
+    for target in (60..=140).step_by(10) {
+        while inserted < target {
+            insert(
+                &f,
+                f.p,
+                &unique(&format!("sibling {inserted}")),
+                "operator",
+                access_policy(
+                    &f.catalog,
+                    &format!("s{inserted}"),
+                    &format!("user{inserted}"),
+                ),
+            )
+            .await;
+            inserted += 1;
+        }
+        let name = unique("migrated");
+        insert(
+            &f,
+            f.p,
+            &name,
+            "operator",
+            access_policy(&f.catalog, "sales", "alice"),
+        )
+        .await;
+        let started = std::time::Instant::now();
+        let (status, body) = migrate(&f, f.p, &[&name], true).await;
+        let secs = started.elapsed().as_secs_f64();
+        eprintln!(
+            "MEASURE route dry run policies={} status={status} probes={} full={} elapsed={secs:.2}s",
+            inserted + 1,
+            body["profiles"][0]["probes"],
+            body["profiles"][0]["probes_full"],
+        );
+        if status == StatusCode::OK {
+            slowest_admitted = slowest_admitted.max(secs);
+        } else {
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            break;
+        }
+        sqlx::query("DELETE FROM policy.authz_policies WHERE service_id = $1 AND name = $2")
+            .bind(f.p)
+            .bind(&name)
+            .execute(&f.db.pool)
+            .await
+            .expect("remove the migrated candidate");
+    }
+    eprintln!("MEASURE route slowest admitted dry run = {slowest_admitted:.2}s");
+    assert!(
+        slowest_admitted <= 2.5,
+        "the largest admitted request held the lock for {slowest_admitted:.2}s"
+    );
 }
 
 async fn edit_original(f: &Fixture, id: i64, name: &str, body: Value) {
@@ -1300,5 +1437,101 @@ async fn a_profile_recompiled_outside_the_gated_set_is_refused_and_nothing_is_wr
     assert_eq!(
         attached, 0,
         "the trigger's attachment rolled back with the migration"
+    );
+}
+
+// ── an external engine declares the plugin version it runs ───────────────
+
+/// Turn the engine bound to `f.p` into an external one declaring `version` —
+/// the shape migration 0184's `engines_external_shape` allows.
+async fn make_bound_engine_external(f: &Fixture, version: &str) {
+    let res = sqlx::query(
+        "UPDATE engine_mgmt.engines \
+            SET origin = 'external', external_host = 'trino.example.com', external_port = 8080, \
+                ranger_plugin_version = $2, namespace = '', spec = '{}'::jsonb \
+          WHERE authz_service_id = $1",
+    )
+    .bind(f.p)
+    .bind(version)
+    .execute(&f.db.pool)
+    .await
+    .expect("make the bound engine external");
+    assert_eq!(res.rows_affected(), 1);
+}
+
+#[tokio::test]
+async fn an_external_engine_declaring_an_unmeasured_plugin_version_refuses_the_migration() {
+    let Some(f) = setup().await else { return };
+    make_bound_engine_external(&f, "2.6.0").await;
+    let name = unique("alice reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let refusal = body["refusal"].as_str().expect("refusal");
+    assert!(
+        refusal.contains("2.6.0") && refusal.contains("not been verified"),
+        "the sentence must name the declared version: {refusal}"
+    );
+    assert_eq!(grants_on_catalog(&f).await, 0, "nothing is written");
+    assert!(enabled(&f, id).await, "the original stays on");
+}
+
+/// User ruling 2026-10-12: "modelled" is a (type, version) PAIR. A Trino engine
+/// declaring 2.8.0 is a real Ranger release but not one the evaluator was read
+/// against for Trino, so the gate refuses rather than evaluating it with the
+/// wrong semantics. (The StarRocks half is in `tests/routes.rs`' explain test.)
+#[tokio::test]
+async fn an_external_trino_declaring_2_8_0_refuses_the_migration_naming_the_pair() {
+    let Some(f) = setup().await else { return };
+    make_bound_engine_external(&f, "2.8.0").await;
+    let name = unique("alice reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], true).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let refusal = body["refusal"].as_str().expect("refusal");
+    assert!(
+        refusal.contains("2.8.0") && refusal.contains("trino") && refusal.contains("Trino@2.5.0"),
+        "the sentence must name the pair and what is modelled: {refusal}"
+    );
+    assert_eq!(grants_on_catalog(&f).await, 0, "nothing is written");
+    assert!(enabled(&f, id).await, "the original stays on");
+}
+
+/// The accept cell of the pair: Trino declaring 2.5.0 is proved on 2.5.0.
+#[tokio::test]
+async fn an_external_trino_declaring_2_5_0_is_proved_on_2_5_0() {
+    let Some(f) = setup().await else { return };
+    make_bound_engine_external(&f, "2.5.0").await;
+    let name = unique("alice reads orders");
+    insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["profiles"][0]["plugin_versions"],
+        json!(["ranger_2_5_0"])
     );
 }

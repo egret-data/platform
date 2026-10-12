@@ -295,6 +295,24 @@ pub struct RangerPolicy {
     pub service: String,
     pub is_enabled: bool,
     pub body: Value,
+    /// Set only by [`editor_to_ranger_json`], and only when the save filled an
+    /// emptied level with `*` (SP4d-4 Task 11, B1). `None` everywhere else.
+    pub filled: Option<FilledLevels>,
+}
+
+/// What an editor save changed about the form's resource levels (SP4d-4
+/// Task 11, B1): which emptied levels it stored as `*`, and the body the same
+/// form would have rendered WITHOUT that fill. The second is what lets the
+/// handler tell whether the fill moved this policy ahead of another one in
+/// Ranger's evaluation order — see
+/// [`crate::ambiguous_arbitration::eval_order_shifts`].
+#[derive(Debug, Clone)]
+pub struct FilledLevels {
+    /// Level names, in hierarchy order, deduplicated across the primary
+    /// resource map and every `additional` one.
+    pub names: Vec<String>,
+    /// The Ranger body the unmodified form renders to.
+    pub unfilled_body: Value,
 }
 
 /// Dispatch an editor form (`{kind, ...}`) to the right serializer and stamp the
@@ -303,6 +321,19 @@ pub struct RangerPolicy {
 /// service type (`"trino"` | `"starrocks"`) — the builders default to `"trino"`,
 /// this overrides it for the actual target service.
 pub fn editor_to_ranger_json(v: &Value, service_type: &str) -> Result<RangerPolicy, String> {
+    let kind = v.get("kind").and_then(Value::as_str).unwrap_or("access");
+    let (form, filled) = normalize_editor_levels(v, service_type, kind)?;
+    let mut pol = render_editor_form(&form, service_type)?;
+    if !filled.is_empty() {
+        pol.filled = Some(FilledLevels {
+            names: filled,
+            unfilled_body: render_editor_form(v, service_type)?.body,
+        });
+    }
+    Ok(pol)
+}
+
+fn render_editor_form(v: &Value, service_type: &str) -> Result<RangerPolicy, String> {
     let kind = v.get("kind").and_then(Value::as_str).unwrap_or("access");
     let mut pol: RangerPolicy = match kind {
         "access" => {
@@ -313,6 +344,7 @@ pub fn editor_to_ranger_json(v: &Value, service_type: &str) -> Result<RangerPoli
                 service: inp.service.clone(),
                 is_enabled: inp.is_enabled,
                 body: access_to_ranger_json(&inp),
+                filled: None,
             }
         }
         "masking" => {
@@ -323,6 +355,7 @@ pub fn editor_to_ranger_json(v: &Value, service_type: &str) -> Result<RangerPoli
                 service: inp.service.clone(),
                 is_enabled: inp.is_enabled,
                 body: masking_to_ranger_json(&inp),
+                filled: None,
             }
         }
         "rowfilter" => {
@@ -333,6 +366,7 @@ pub fn editor_to_ranger_json(v: &Value, service_type: &str) -> Result<RangerPoli
                 service: inp.service.clone(),
                 is_enabled: inp.is_enabled,
                 body: rowfilter_to_ranger_json(&inp),
+                filled: None,
             }
         }
         other => return Err(format!("unknown policy kind: {other}")),
@@ -341,6 +375,148 @@ pub fn editor_to_ranger_json(v: &Value, service_type: &str) -> Result<RangerPoli
         m.insert("serviceType".into(), Value::from(service_type));
     }
     Ok(pol)
+}
+
+/// The resource levels an editor form of `kind` addresses on a `service_type`
+/// profile, root first, or `None` for a service type or kind the editor does
+/// not normalise (a tag service, an unknown kind). A row filter stops at
+/// `table` (`rowFilterDef`); access and mask forms run to `column`.
+///
+/// The names are the service defs' (`trino`: catalog, schema, table, column;
+/// `starrocks`: catalog, database, table, column) — the same four
+/// `egret_perm_compile::grants::resource_level_names` spells, which this crate
+/// cannot call (it depends on this one).
+fn editor_level_chain(service_type: &str, kind: &str) -> Option<&'static [&'static str]> {
+    let all: &'static [&'static str] = match service_type {
+        "trino" => &["catalog", "schema", "table", "column"],
+        "starrocks" => &["catalog", "database", "table", "column"],
+        _ => return None,
+    };
+    match kind {
+        "access" | "masking" => Some(all),
+        "rowfilter" => Some(&all[..3]),
+        _ => None,
+    }
+}
+
+/// A level the form carries but names nothing at: no value, or only blank ones.
+fn level_is_empty(level: &Value) -> bool {
+    level
+        .get("values")
+        .and_then(Value::as_array)
+        .is_none_or(|vs| {
+            vs.iter()
+                .all(|v| v.as_str().is_none_or(|s| s.trim().is_empty()))
+        })
+}
+
+/// **SP4d-4 Task 11, branch B1 — what an editor save does with an empty level.**
+///
+/// Measured on the real Ranger jars (`docs/en/plans/2026-10-11-sp4d-4-task1-
+/// levels-result.md`): a policy that stops at catalog / schema / table is
+/// denied `select` at column depth on Trino 470 and StarRocks 4.1.4 at both
+/// Ranger versions, because both plugins check `SELECT col` per column. The
+/// editor used to drop an emptied level on save, so "table `orders`, all
+/// columns" was stored as a policy that lets nobody read a column. Per level,
+/// along `chain` (root first), for each resource map of the form:
+///
+/// | the form's level | saved as |
+/// |---|---|
+/// | named | as written |
+/// | **key absent** ("— none —") | stays absent |
+/// | **key present, empty, root (catalog)** | **refused** — `*` would cover every catalog this profile serves |
+/// | **key present, empty, non-root, every level above present** | `{"values":["*"],"isExcludes":false,"isRecursive":false}` |
+/// | key present, empty, below an absent level | dropped (it is part of the truncated tail) |
+/// | named, below an absent level | **refused** — a gap: Ranger decides nothing for it |
+///
+/// A map with every level absent or empty is left as the form had it (it
+/// renders no resources, exactly as before). Levels outside `chain` (a tag, an
+/// unknown name) are not touched.
+///
+/// **Editor path only.** [`resources_object`] is shared with the compiler's
+/// serializers and still drops an empty level; a compiled body is unchanged
+/// (`a_compiled_body_is_unchanged`). Stored rows are never rewritten.
+fn normalize_editor_levels(
+    v: &Value,
+    service_type: &str,
+    kind: &str,
+) -> Result<(Value, Vec<String>), String> {
+    let Some(chain) = editor_level_chain(service_type, kind) else {
+        return Ok((v.clone(), Vec::new()));
+    };
+    let mut form = v.clone();
+    let mut filled: Vec<&str> = Vec::new();
+
+    let mut normalize_map = |map: &mut Value, is_primary: bool| -> Result<(), String> {
+        let Some(obj) = map.as_object_mut() else {
+            return Ok(());
+        };
+        let state = |obj: &Map<String, Value>, name: &str| match obj.get(name) {
+            None => Presence::Absent,
+            Some(l) if level_is_empty(l) => Presence::Empty,
+            Some(_) => Presence::Named,
+        };
+        let none_named = chain
+            .iter()
+            .all(|n| !matches!(state(obj, n), Presence::Named));
+        // A map that names nothing is the pre-B1 shape of an untouched form —
+        // left as it was — unless it is the primary map with an emptied
+        // catalog, which is refused below.
+        if none_named && (!is_primary || matches!(state(obj, chain[0]), Presence::Absent)) {
+            return Ok(());
+        }
+        if matches!(state(obj, chain[0]), Presence::Empty) {
+            return Err(format!(
+                "name a {root} — `*` here would cover every {root} this profile serves",
+                root = chain[0]
+            ));
+        }
+        let mut first_absent: Option<&str> = None;
+        for name in chain {
+            match (state(obj, name), first_absent) {
+                (Presence::Absent, None) => first_absent = Some(name),
+                (Presence::Absent, Some(_)) => {}
+                (Presence::Empty, None) => {
+                    obj.insert(
+                        (*name).to_string(),
+                        json!({ "values": ["*"], "isExcludes": false, "isRecursive": false }),
+                    );
+                    if !filled.contains(name) {
+                        filled.push(name);
+                    }
+                }
+                (Presence::Empty, Some(_)) => {
+                    obj.remove(*name);
+                }
+                (Presence::Named, Some(missing)) => {
+                    return Err(format!(
+                        "the policy names `{name}` but not `{missing}`, the level above it — \
+                         Ranger decides nothing for a policy with a gap in its resource levels. \
+                         Name `{missing}` (use `*` for every {missing}), or remove `{name}`"
+                    ));
+                }
+                (Presence::Named, None) => {}
+            }
+        }
+        Ok(())
+    };
+
+    if let Some(r) = form.get_mut("resources") {
+        normalize_map(r, true)?;
+    }
+    if let Some(Value::Array(extra)) = form.get_mut("additional") {
+        for m in extra {
+            normalize_map(m, false)?;
+        }
+    }
+    Ok((form, filled.into_iter().map(str::to_string).collect()))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Presence {
+    Absent,
+    Empty,
+    Named,
 }
 
 // ── Tag-based policies (Access P3.2) ────────────────────────────────────────
@@ -407,6 +583,42 @@ pub fn is_tag_kind(v: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// The Ranger policy-body keys that carry a policy's items. The editor form
+/// names them `items` (each with an `effect`), so a body that sends these is a
+/// Ranger body posted to the wrong endpoint, and without this refusal its
+/// items were dropped silently and a policy that grants nothing was stored.
+const RANGER_ITEM_KEYS: [&str; 4] = [
+    "policyItems",
+    "denyPolicyItems",
+    "dataMaskPolicyItems",
+    "rowFilterPolicyItems",
+];
+
+/// Refuse a Ranger-shaped body on the editor-form endpoint, naming the keys.
+///
+/// An explicit list, not `deny_unknown_fields`: the editor form carries other
+/// keys the server ignores on purpose (`kind`, `tag`, `additional`…), and the
+/// rest of the form is validated by its own serde types.
+pub fn refuse_ranger_shaped_body(v: &Value) -> Result<(), String> {
+    let found: Vec<&str> = RANGER_ITEM_KEYS
+        .into_iter()
+        .filter(|k| v.get(*k).is_some())
+        .collect();
+    if found.is_empty() {
+        return Ok(());
+    }
+    let names = found
+        .iter()
+        .map(|k| format!("`{k}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "unexpected key(s) {names}: this endpoint takes the editor form, not a Ranger policy \
+         body, and would have stored the policy with no items. Send the grants as `items` \
+         (each with `users`, `groups`, `roles`, `accesses` and an `effect`)."
+    ))
+}
+
 /// Dispatch a tag-policy editor form (`{kind:"tag-*", tag, ...}`) to the right
 /// serializer. `tag_service` is the resolved `<profile>_tag` service name the
 /// handler looked up; the body's `service` binds to it. The trino profile the
@@ -433,6 +645,7 @@ pub fn tag_editor_to_ranger_json(v: &Value, tag_service: &str) -> Result<RangerP
                 service: tag_service.to_string(),
                 is_enabled: inp.is_enabled,
                 body: tag_access_to_ranger_json(&inp, &tag, tag_service),
+                filled: None,
             })
         }
         "tag-masking" => {
@@ -443,6 +656,7 @@ pub fn tag_editor_to_ranger_json(v: &Value, tag_service: &str) -> Result<RangerP
                 service: tag_service.to_string(),
                 is_enabled: inp.is_enabled,
                 body: tag_masking_to_ranger_json(&inp, &tag, tag_service),
+                filled: None,
             })
         }
         "tag-rowfilter" => {
@@ -453,6 +667,7 @@ pub fn tag_editor_to_ranger_json(v: &Value, tag_service: &str) -> Result<RangerP
                 service: tag_service.to_string(),
                 is_enabled: inp.is_enabled,
                 body: tag_rowfilter_to_ranger_json(&inp, &tag, tag_service),
+                filled: None,
             })
         }
         other => Err(format!("unknown tag policy kind: {other}")),
@@ -838,5 +1053,100 @@ mod tests {
         assert_eq!(s.policy_type, "masking");
         assert_eq!(s.resource_path, "tag: pii");
         assert!(s.principals.contains(&"pii".to_string()));
+    }
+
+    // ── SP4d-4 Task 11 (B1) ────────────────────────────────────────────────
+
+    fn lvl(values: &[&str]) -> Value {
+        json!({ "values": values, "isExcludes": false, "isRecursive": false })
+    }
+
+    fn form(resources: Value) -> Value {
+        json!({ "name": "p", "service": "s", "resources": resources,
+                "items": [{"users": ["alice"], "accesses": ["select"]}] })
+    }
+
+    /// The compiler's serializers share `resources_object`, which still DROPS
+    /// an empty level: the fill belongs to the editor path only, so a compiled
+    /// body is byte-for-byte what it was.
+    #[test]
+    fn the_shared_serializer_still_drops_an_empty_level() {
+        let inp: AccessPolicyInput = serde_json::from_value(form(json!({
+            "catalog": lvl(&["c"]), "schema": lvl(&["s"]),
+            "table": lvl(&["t"]), "column": lvl(&[])
+        })))
+        .unwrap();
+        let direct = access_to_ranger_json(&inp);
+        assert!(
+            direct["resources"].get("column").is_none(),
+            "the serializer is unchanged: {direct}"
+        );
+        let editor = editor_to_ranger_json(
+            &form(json!({
+                "catalog": lvl(&["c"]), "schema": lvl(&["s"]),
+                "table": lvl(&["t"]), "column": lvl(&[])
+            })),
+            "trino",
+        )
+        .unwrap();
+        assert_eq!(editor.body["resources"]["column"], lvl(&["*"]));
+        assert_eq!(editor.filled.as_ref().unwrap().names, ["column"]);
+        assert_eq!(
+            editor.filled.as_ref().unwrap().unfilled_body["resources"],
+            direct["resources"],
+            "the recorded unfilled body is what the serializer renders"
+        );
+    }
+
+    #[test]
+    fn starrocks_names_its_second_level_database() {
+        let pol = editor_to_ranger_json(
+            &form(json!({"catalog": lvl(&["c"]), "database": lvl(&[])})),
+            "starrocks",
+        )
+        .unwrap();
+        assert_eq!(pol.body["resources"]["database"], lvl(&["*"]));
+        assert_eq!(pol.filled.unwrap().names, ["database"]);
+    }
+
+    #[test]
+    fn a_row_filter_form_is_filled_only_down_to_table() {
+        let rf = json!({
+            "kind": "rowfilter", "name": "r", "service": "s",
+            "resources": {"catalog": lvl(&["c"]), "schema": lvl(&[]), "table": lvl(&["t"]),
+                          "column": lvl(&[])},
+            "items": [{"groups": ["public"], "filterExpr": "true"}]
+        });
+        let pol = editor_to_ranger_json(&rf, "trino").unwrap();
+        assert_eq!(pol.body["resources"]["schema"], lvl(&["*"]));
+        assert!(
+            pol.body["resources"].get("column").is_none(),
+            "a row filter has no column level: {}",
+            pol.body
+        );
+    }
+
+    #[test]
+    fn an_empty_level_under_an_absent_one_is_dropped_not_filled() {
+        // `table` removed ("— none —") with a stale empty `column` key below it.
+        let pol = editor_to_ranger_json(
+            &form(json!({"catalog": lvl(&["c"]), "schema": lvl(&["s"]), "column": lvl(&[])})),
+            "trino",
+        )
+        .unwrap();
+        assert!(
+            pol.body["resources"].get("column").is_none(),
+            "{}",
+            pol.body
+        );
+        assert!(pol.filled.is_none());
+    }
+
+    #[test]
+    fn additional_resources_are_normalised_too() {
+        let mut f = form(json!({"catalog": lvl(&["c"]), "schema": lvl(&["s"])}));
+        f["additional"] = json!([{"catalog": lvl(&["d"]), "schema": lvl(&[])}]);
+        let pol = editor_to_ranger_json(&f, "trino").unwrap();
+        assert_eq!(pol.body["additionalResources"][0]["schema"], lvl(&["*"]));
     }
 }

@@ -1952,6 +1952,151 @@ pub async fn get_service_def_via(
     .ok_or_else(|| PolicyStoreError::NotFound(format!("service-def {name}")))
 }
 
+/// Connection-generic core of [`PolicyStore::create_policy`] (and its infra
+/// twin): the same owner/name guards, the same refusal order, the INSERT and
+/// the `policy_version` bump, on the CALLER's transaction. Does not begin or
+/// commit (SP4d-4 Task 3 fix round 1, review I1).
+pub async fn insert_policy_owned_by_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    name: &str,
+    policy: &Value,
+    managed_by: &str,
+) -> Result<i64, PolicyStoreError> {
+    // Fix round 3's reserved-namespace check and Task 8's origin check, in
+    // the one order they are allowed to fire in — spelled once, in
+    // `refuse_before_policy_insert`, and shared with
+    // `preflight_policy_insert`. The reserved-name reason wins; see that
+    // function's doc comment for the ruling and for the test that pins it.
+    //
+    // First, the SP4d-3 owner/name agreement, which needs the profile's
+    // type: a human writer may not take an infrastructure name, and the
+    // infra writer may take nothing else. A refusal leaves the caller's transaction to roll back.
+    let service_type = service_type_of(&mut *conn, service_id).await?;
+    if managed_by == "infra" {
+        refuse_non_infrastructure_name(&service_type, name)?;
+    } else {
+        refuse_infrastructure_name(&service_type, name)?;
+    }
+    refuse_before_policy_insert(&mut *conn, service_id, name).await?;
+    let id: i64 = sqlx::query_scalar::<_, i64>(
+        r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by)
+               VALUES ($1,$2,$3,$4) RETURNING id"#,
+    )
+    .bind(service_id)
+    .bind(name)
+    .bind(policy)
+    .bind(managed_by)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(|e| match &e {
+        sqlx::Error::Database(d) if d.is_unique_violation() => {
+            PolicyStoreError::AlreadyExists(name.into())
+        }
+        _ => PolicyStoreError::Db(e),
+    })?;
+    sqlx::query(
+            r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
+        )
+        .bind(service_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(id)
+}
+
+/// Connection-generic core of [`PolicyStore::update_policy`]: the same guards
+/// in the same order, the UPDATE and the `policy_version` bump, on the CALLER's
+/// transaction. Does not begin or commit (SP4d-4 Task 3 fix round 1, I1).
+pub async fn update_policy_via(
+    conn: &mut sqlx::PgConnection,
+    id: i64,
+    name: &str,
+    policy: &Value,
+    enabled: bool,
+) -> Result<(), PolicyStoreError> {
+    // Fetch the policy's CURRENT name — ownership (Task 8 fix round 2,
+    // I-1) is decided by what this policy IS today, not by the new name
+    // the caller is trying to write.
+    let row: Option<(i64, String, String)> = sqlx::query_as::<_, (i64, String, String)>(
+        r#"SELECT p.service_id, p.name, s.type FROM policy.authz_policies p
+               JOIN policy.authz_services s ON s.id = p.service_id WHERE p.id = $1"#,
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((service_id, current_name, service_type)) = row else {
+        return Err(PolicyStoreError::NotFound(format!("policy {id}")));
+    };
+    refuse_if_compiler_owned(&mut *conn, service_id, &current_name).await?;
+    refuse_if_infrastructure_owned(&mut *conn, id).await?;
+    // Fix round 3: reserved-namespace check on the NEW/target name, AFTER
+    // the ownership check above — an already-owned policy (caught above,
+    // whatever `name` the caller resent) gets the ownership-specific
+    // message ("this is compiler-owned, edit the grant/rule"), which is
+    // both more accurate and less confusing than "rename this" for a
+    // name the compiler itself is the one using legitimately. This check
+    // is what catches the round-2 finding's OTHER vector instead: a
+    // human renaming an ordinary (not-yet-owned) policy INTO the
+    // compiler's namespace, in ANY profile including `manual` — where
+    // the ownership check above does not fire at all (it requires
+    // `origin = 'generated'`, and the whole point of the round-2 finding
+    // was that a `manual` profile is not yet flagged as anything).
+    refuse_reserved_name(name)?;
+    // SP4d-3 Task 2: and a rename INTO an infrastructure name. Only a
+    // CHANGE of name: the editor resends the current name on every save,
+    // and a row that already carries one (it is `'operator'` here, since an
+    // `'infra'` row was refused above) must stay editable.
+    if name != current_name {
+        refuse_infrastructure_name(&service_type, name)?;
+    }
+    sqlx::query(
+            r#"UPDATE policy.authz_policies SET name=$2, policy_jsonb=$3, enabled=$4, version=version+1, updated_at=now() WHERE id=$1"#,
+        )
+        .bind(id)
+        .bind(name)
+        .bind(policy)
+        .bind(enabled)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query(
+            r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
+        )
+        .bind(service_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// **The one spelling of "lock these profiles' rows"**: `SELECT … FOR UPDATE`
+/// on each `policy.authz_services` row in `service_ids`, one statement per id,
+/// in the ascending order given. Every writer that serialises on a profile
+/// takes its rows through here — the compiler's
+/// `egret_perm_compile::trigger::lock_services_in_tx` (after expanding the set
+/// with [`services_and_tag_services_via`]) and the policy editor's overlap check
+/// (SP4d-4 Task 3 fix round 1, review I1) — so every path acquires the same
+/// universe of rows in the same order and two of them queue rather than
+/// deadlock.
+///
+/// One statement per id rather than `WHERE id = ANY(...) ORDER BY id FOR
+/// UPDATE`: Postgres does not promise that a sort is applied before row locks
+/// are taken, and the ORDER is the entire point here.
+pub async fn lock_service_rows_via(
+    conn: &mut sqlx::PgConnection,
+    service_ids: &[i64],
+) -> Result<(), PolicyStoreError> {
+    debug_assert!(
+        service_ids.is_sorted(),
+        "lock_service_rows_via requires ascending service ids, got {service_ids:?}"
+    );
+    for &service_id in service_ids {
+        sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
+            .bind(service_id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
 /// Connection-generic core of [`PolicyStore::enabled_policies_for_service`] —
 /// the ONE assembler of the policies a download serves, so the migration gate
 /// (SP4d-3 Task 7) and the download route read the same rows the same way.
@@ -2086,50 +2231,20 @@ impl PolicyStore {
         policy: &Value,
         managed_by: &str,
     ) -> Result<i64, PolicyStoreError> {
-        // Fix round 3's reserved-namespace check and Task 8's origin check, in
-        // the one order they are allowed to fire in — spelled once, in
-        // `refuse_before_policy_insert`, and shared with
-        // `preflight_policy_insert`. The reserved-name reason wins; see that
-        // function's doc comment for the ruling and for the test that pins it.
-        //
-        // First, the SP4d-3 owner/name agreement, which needs the profile's
-        // type: a human writer may not take an infrastructure name, and the
-        // infra writer may take nothing else. A refusal drops `tx` (rollback).
+        // A refusal drops `tx` (rollback).
         let mut tx = self.db.pool.begin().await?;
-        let service_type = service_type_of(&mut tx, service_id).await?;
-        if managed_by == "infra" {
-            refuse_non_infrastructure_name(&service_type, name)?;
-        } else {
-            refuse_infrastructure_name(&service_type, name)?;
-        }
-        if let Err(e) = refuse_before_policy_insert(&mut tx, service_id, name).await {
-            tx.rollback().await?;
-            return Err(e);
-        }
-        let id: i64 = sqlx::query_scalar::<_, i64>(
-            r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by)
-               VALUES ($1,$2,$3,$4) RETURNING id"#,
-        )
-        .bind(service_id)
-        .bind(name)
-        .bind(policy)
-        .bind(managed_by)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| match &e {
-            sqlx::Error::Database(d) if d.is_unique_violation() => {
-                PolicyStoreError::AlreadyExists(name.into())
-            }
-            _ => PolicyStoreError::Db(e),
-        })?;
-        sqlx::query(
-            r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
-        )
-        .bind(service_id)
-        .execute(&mut *tx)
-        .await?;
+        let id = insert_policy_owned_by_via(&mut tx, service_id, name, policy, managed_by).await?;
         tx.commit().await?;
         Ok(id)
+    }
+
+    /// Begin a transaction on the store's pool — for a caller that has to run
+    /// a check and a `*_via` write under one set of row locks (SP4d-4 Task 3
+    /// fix round 1, review I1: the policy editor's overlap check).
+    pub async fn begin(
+        &self,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, PolicyStoreError> {
+        Ok(self.db.pool.begin().await?)
     }
 
     /// [`upsert_policy`](Self::upsert_policy) for egret's OWN infrastructure
@@ -2230,70 +2345,9 @@ impl PolicyStore {
         policy: &Value,
         enabled: bool,
     ) -> Result<(), PolicyStoreError> {
+        // A refusal drops `tx` (rollback).
         let mut tx = self.db.pool.begin().await?;
-        // Fetch the policy's CURRENT name — ownership (Task 8 fix round 2,
-        // I-1) is decided by what this policy IS today, not by the new name
-        // the caller is trying to write.
-        let row: Option<(i64, String, String)> = sqlx::query_as::<_, (i64, String, String)>(
-            r#"SELECT p.service_id, p.name, s.type FROM policy.authz_policies p
-               JOIN policy.authz_services s ON s.id = p.service_id WHERE p.id = $1"#,
-        )
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some((service_id, current_name, service_type)) = row else {
-            tx.rollback().await?;
-            return Err(PolicyStoreError::NotFound(format!("policy {id}")));
-        };
-        if let Err(e) = refuse_if_compiler_owned(&mut tx, service_id, &current_name).await {
-            tx.rollback().await?;
-            return Err(e);
-        }
-        if let Err(e) = refuse_if_infrastructure_owned(&mut tx, id).await {
-            tx.rollback().await?;
-            return Err(e);
-        }
-        // Fix round 3: reserved-namespace check on the NEW/target name, AFTER
-        // the ownership check above — an already-owned policy (caught above,
-        // whatever `name` the caller resent) gets the ownership-specific
-        // message ("this is compiler-owned, edit the grant/rule"), which is
-        // both more accurate and less confusing than "rename this" for a
-        // name the compiler itself is the one using legitimately. This check
-        // is what catches the round-2 finding's OTHER vector instead: a
-        // human renaming an ordinary (not-yet-owned) policy INTO the
-        // compiler's namespace, in ANY profile including `manual` — where
-        // the ownership check above does not fire at all (it requires
-        // `origin = 'generated'`, and the whole point of the round-2 finding
-        // was that a `manual` profile is not yet flagged as anything).
-        if let Err(e) = refuse_reserved_name(name) {
-            tx.rollback().await?;
-            return Err(e);
-        }
-        // SP4d-3 Task 2: and a rename INTO an infrastructure name. Only a
-        // CHANGE of name: the editor resends the current name on every save,
-        // and a row that already carries one (it is `'operator'` here, since an
-        // `'infra'` row was refused above) must stay editable.
-        if name != current_name {
-            if let Err(e) = refuse_infrastructure_name(&service_type, name) {
-                tx.rollback().await?;
-                return Err(e);
-            }
-        }
-        sqlx::query(
-            r#"UPDATE policy.authz_policies SET name=$2, policy_jsonb=$3, enabled=$4, version=version+1, updated_at=now() WHERE id=$1"#,
-        )
-        .bind(id)
-        .bind(name)
-        .bind(policy)
-        .bind(enabled)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
-        )
-        .bind(service_id)
-        .execute(&mut *tx)
-        .await?;
+        update_policy_via(&mut tx, id, name, policy, enabled).await?;
         tx.commit().await?;
         Ok(())
     }

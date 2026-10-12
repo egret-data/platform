@@ -44,6 +44,7 @@ import {
 } from "./generated/perm/perm";
 import type {
   ClassifiedPolicy,
+  CreatedPolicyId,
   CreatedProfile,
   MigrateResponse,
   UndoResponse,
@@ -74,7 +75,7 @@ export interface PolicySummary {
 }
 
 // Re-export generated DTOs under the app's existing names.
-export type { CreatedProfile, ProfileEngine };
+export type { CreatedPolicyId, CreatedProfile, ProfileEngine };
 // The backend also returns `tag_service` (the profile's `<name>_tag` policy
 // service, when it exists); the field ships in the JSON but the generated
 // ProfileDto doesn't declare it yet, so widen it here.
@@ -216,13 +217,13 @@ export const MASK_TYPES = [
   { name: "CUSTOM", label: "Custom expression" },
 ] as const;
 
-export async function createPolicy(input: PolicyInput): Promise<{ id: number }> {
+export async function createPolicy(input: PolicyInput): Promise<CreatedPolicyId> {
   // The spec types the body as a loose `Object`; cast the strict FE union.
-  return (await policyAdminCreatePolicy(input as unknown as PolicyAdminCreatePolicyBody)).data as { id: number };
+  return (await policyAdminCreatePolicy(input as unknown as PolicyAdminCreatePolicyBody)).data as CreatedPolicyId;
 }
 
-export async function updatePolicy(id: number, input: PolicyInput): Promise<{ id: number }> {
-  return (await policyAdminUpdatePolicy(id, input as unknown as PolicyAdminUpdatePolicyBody)).data as { id: number };
+export async function updatePolicy(id: number, input: PolicyInput): Promise<CreatedPolicyId> {
+  return (await policyAdminUpdatePolicy(id, input as unknown as PolicyAdminUpdatePolicyBody)).data as CreatedPolicyId;
 }
 
 export async function deletePolicy(id: number): Promise<void> {

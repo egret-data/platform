@@ -44,6 +44,17 @@ pub struct Engine {
     /// `None`: the pods still carry the legacy id-derived value.
     pub monitor_secret_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
+    /// `provisioned` (egret runs the cluster) or `external` (egret holds a row
+    /// for a cluster it never touches). See [`crate::external`]; migration
+    /// 0184's `engines_external_shape` makes the other columns below agree.
+    pub origin: String,
+    /// External only: the address a client dials. `None` for a provisioned row.
+    pub external_host: Option<String>,
+    pub external_port: Option<i32>,
+    /// External only: the Ranger plugin version the operator declared
+    /// installed. The one source of an external engine's plugin version for the
+    /// equivalence gate and explain (`egret_perm_compile::engine_plugin_version`).
+    pub ranger_plugin_version: Option<String>,
 }
 
 impl Engine {
@@ -56,12 +67,33 @@ impl Engine {
         self.r#type == "starrocks"
     }
 
-    /// In-cluster DNS name of this engine's coordinator/FE service. For Trino,
+    /// The declared host of an external engine, `None` for a provisioned one.
+    fn external_address_host(&self) -> Option<&str> {
+        if self.origin == crate::external::ORIGIN_EXTERNAL {
+            self.external_host.as_deref()
+        } else {
+            None
+        }
+    }
+
+    fn external_address_port(&self) -> Option<i32> {
+        if self.origin == crate::external::ORIGIN_EXTERNAL {
+            self.external_port
+        } else {
+            None
+        }
+    }
+
+    /// In-cluster DNS name of this engine's coordinator/FE service. For an
+    /// external engine, the host its operator declared instead. For Trino,
     /// egret provisions plain Deployments plus a single Service named
     /// `{name}-trino.{namespace}.svc` (the coordinator selector) — so that is
     /// the host we dial. StarRocks' kube-starrocks operator instead exposes the
     /// FE (the MySQL-protocol query endpoint) as `{name}-fe-service.{namespace}.svc`.
     pub fn coordinator_host(&self) -> String {
+        if let Some(host) = self.external_address_host() {
+            return host.to_string();
+        }
         if self.is_starrocks() {
             format!("{}-fe-service.{}.svc", self.name, self.namespace)
         } else {
@@ -73,6 +105,9 @@ impl Engine {
     /// Trino's HTTP listener is `8080`; StarRocks' FE MySQL-protocol
     /// (`query_port`) listener is `9030`.
     pub fn coordinator_port(&self) -> i32 {
+        if let Some(port) = self.external_address_port() {
+            return port;
+        }
         if self.is_starrocks() {
             9030
         } else {
@@ -192,7 +227,7 @@ impl EngineMgmtStore {
     ) -> Result<Engine, EngineMgmtError> {
         sqlx::query_as::<_, Engine>(
             "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, tls_cert_secret_ref) VALUES ($1,$2,$3,$4,$5) \
-             RETURNING id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at",
+             RETURNING id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version",
         )
         .bind(name)
         .bind(r#type)
@@ -211,7 +246,7 @@ impl EngineMgmtStore {
 
     pub async fn list_engines(&self) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at \
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version \
              FROM engine_mgmt.engines ORDER BY created_at",
         )
         .fetch_all(self.pool())
@@ -220,7 +255,7 @@ impl EngineMgmtStore {
 
     pub async fn get_engine(&self, id: Uuid) -> Result<Option<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at \
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version \
              FROM engine_mgmt.engines WHERE id = $1",
         )
         .bind(id)
@@ -526,7 +561,7 @@ impl EngineMgmtStore {
         workspace_id: Uuid,
     ) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT e.id, e.name, e.type, e.namespace, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at \
+            "SELECT e.id, e.name, e.type, e.namespace, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at, e.origin, e.external_host, e.external_port, e.ranger_plugin_version \
              FROM engine_mgmt.engines e JOIN engine_mgmt.engine_workspaces ew ON ew.engine_id = e.id \
              WHERE ew.workspace_id = $1 ORDER BY e.name",
         )
@@ -558,6 +593,10 @@ mod tests {
             internal_secret_id: None,
             monitor_secret_id: None,
             created_at: chrono::Utc::now(),
+            origin: "provisioned".into(),
+            external_host: None,
+            external_port: None,
+            ranger_plugin_version: None,
         };
         assert_eq!(e.delegation_mode(), "impersonate");
         assert!(e.is_impersonate_delegation());
@@ -582,6 +621,10 @@ mod tests {
             internal_secret_id: None,
             monitor_secret_id: None,
             created_at: chrono::Utc::now(),
+            origin: "provisioned".into(),
+            external_host: None,
+            external_port: None,
+            ranger_plugin_version: None,
         };
         assert_eq!(e.delegation_mode(), "jwt");
         assert!(!e.is_impersonate_delegation());
@@ -606,6 +649,10 @@ mod tests {
             internal_secret_id: None,
             monitor_secret_id: None,
             created_at: chrono::Utc::now(),
+            origin: "provisioned".into(),
+            external_host: None,
+            external_port: None,
+            ranger_plugin_version: None,
         };
         assert!(e.is_jwt_delegation());
         assert!(!e.is_impersonate_delegation());
@@ -632,6 +679,10 @@ mod tests {
             internal_secret_id: None,
             monitor_secret_id: None,
             created_at: chrono::Utc::now(),
+            origin: "provisioned".into(),
+            external_host: None,
+            external_port: None,
+            ranger_plugin_version: None,
         }
     }
 
@@ -667,6 +718,10 @@ mod tests {
             internal_secret_id: None,
             monitor_secret_id: None,
             created_at: chrono::Utc::now(),
+            origin: "provisioned".into(),
+            external_host: None,
+            external_port: None,
+            ranger_plugin_version: None,
         };
         assert_eq!(e.coordinator_host(), "trino1-trino.engines.svc");
         assert_eq!(e.coordinator_port(), 8080);

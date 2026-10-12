@@ -84,6 +84,46 @@ pub trait ProfileCompilerPort: Send + Sync {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         service_id: i64,
     ) -> Result<(), egret_perm::CompileError>;
+
+    /// The mask and row-filter pairs stored in every unit the profiles in
+    /// `service_ids` belong to, read on the caller's transaction **before** a
+    /// write that changes which catalogs — and so which tag assignments — a
+    /// profile's unit resolves (a profile bind, an engine ↔ catalog
+    /// attachment). Pair it with
+    /// [`refuse_created_overlaps_in_tx`](Self::refuse_created_overlaps_in_tx)
+    /// after the recompile (SP4d-4 Task 3 re-review M-2; the tag assignment and
+    /// tag rename in `egret-bi` do the same through
+    /// `egret_perm_compile::overlap`).
+    async fn overlap_snapshot_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<OverlapSnapshot, egret_perm::CompileError>;
+
+    /// Refuse, with `CompileError::AmbiguousMaskOrFilterArbitration`, any pair
+    /// the units hold now that `snapshot` did not — only the pairs the write
+    /// CREATED; a pair already stored is reported elsewhere and blocks nothing.
+    async fn refuse_created_overlaps_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        snapshot: &OverlapSnapshot,
+    ) -> Result<(), egret_perm::CompileError>;
+}
+
+/// What [`ProfileCompilerPort::overlap_snapshot_in_tx`] hands back. Opaque to
+/// this crate: the pairs are `egret-policy` types, which this crate keeps out of
+/// its production graph (see the module doc), so the composition root puts its
+/// own snapshot type in and takes it out again.
+pub struct OverlapSnapshot(Box<dyn std::any::Any + Send + Sync>);
+
+impl OverlapSnapshot {
+    pub fn new<T: std::any::Any + Send + Sync>(snapshot: T) -> Self {
+        Self(Box::new(snapshot))
+    }
+
+    pub fn get<T: std::any::Any>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
 }
 
 /// Recompile whatever profile `engine_id` is currently bound to, if any and if
@@ -131,4 +171,125 @@ pub(crate) async fn recompile_bound_profile(
              /api/control-plane/perm/compile/{service_id} succeeds"
         ),
     }
+}
+
+/// The overlap snapshot of the profile `service_id`, or `None` when no compiler
+/// is wired or the engine binds nothing.
+pub(crate) async fn snapshot_overlaps_of(
+    st: &crate::EngineMgmtState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    service_ids: &[i64],
+) -> Result<Option<OverlapSnapshot>, egret_perm::CompileError> {
+    let Some(compiler) = st.perm_compiler.clone() else {
+        return Ok(None);
+    };
+    if service_ids.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        compiler.overlap_snapshot_in_tx(tx, service_ids).await?,
+    ))
+}
+
+pub(crate) async fn snapshot_overlaps(
+    st: &crate::EngineMgmtState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    service_id: Option<i64>,
+) -> Result<Option<OverlapSnapshot>, egret_perm::CompileError> {
+    let (Some(compiler), Some(service_id)) = (st.perm_compiler.clone(), service_id) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        compiler.overlap_snapshot_in_tx(tx, &[service_id]).await?,
+    ))
+}
+
+/// Recompile `service_id` on the caller's transaction and refuse the pairs the
+/// write made since `before`. A no-op when no compiler is wired.
+pub(crate) async fn recompile_refusing_created_overlaps(
+    st: &crate::EngineMgmtState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    service_id: i64,
+    before: Option<&OverlapSnapshot>,
+) -> Result<(), egret_perm::CompileError> {
+    let Some(compiler) = st.perm_compiler.clone() else {
+        return Ok(());
+    };
+    compiler.recompile_profile_in_tx(tx, service_id).await?;
+    if let Some(before) = before {
+        compiler.refuse_created_overlaps_in_tx(tx, before).await?;
+    }
+    Ok(())
+}
+
+/// **Bind `engine_id` to the profile `profile_id`, refusing a pair the bind
+/// creates** (SP4d-4 Task 7 fix round 1, C1). Used by the two engine-create
+/// binds (`POST /engines` for Trino, adopting or creating a profile, and for
+/// StarRocks with `authzServiceId`) and by the late-bind inside an apply.
+///
+/// One transaction: snapshot the profile's unit, write the binding, recompile,
+/// compare. An overlap the bind creates is `Err(RuleOverlap)` and NOTHING is
+/// bound (the transaction is dropped); the create path undoes the rest with
+/// `compensate_failed_create`, and the late-bind skips the bind and logs.
+///
+/// Any OTHER failure of the guarded path (no compiler, a compile error) keeps
+/// the behaviour these binds always had: the binding is written plainly and the
+/// profile is repaired by the fire-and-forget recompile that follows. Only an
+/// overlap refuses.
+pub(crate) async fn bind_profile_guarded(
+    st: &crate::EngineMgmtState,
+    engine_id: Uuid,
+    engine_name: &str,
+    profile_id: i64,
+) -> Result<(), crate::EngineHttpError> {
+    if st.perm_compiler.is_some() {
+        let status = match st.engine_mgmt.get_engine(engine_id).await? {
+            Some(e) => e.status,
+            None => return Err(crate::EngineHttpError::NotFound),
+        };
+        let mut tx = st
+            .engine_mgmt
+            .pool()
+            .begin()
+            .await
+            .map_err(crate::http_error::db_error)?;
+        let outcome: Result<bool, egret_perm::CompileError> = async {
+            let before = snapshot_overlaps(st, &mut tx, Some(profile_id)).await?;
+            let bound = st
+                .engine_mgmt
+                .set_engine_authz_service_in_tx(&mut tx, engine_id, Some(profile_id), &status)
+                .await
+                .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
+            if !bound {
+                return Ok(false);
+            }
+            recompile_refusing_created_overlaps(st, &mut tx, profile_id, before.as_ref()).await?;
+            Ok(true)
+        }
+        .await;
+        match outcome {
+            Ok(true) => {
+                tx.commit().await.map_err(crate::http_error::db_error)?;
+                return Ok(());
+            }
+            Ok(false) => {
+                return Err(crate::EngineHttpError::Conflict(
+                    "engine changed while the policy-profile binding was being applied; retry"
+                        .into(),
+                ))
+            }
+            Err(e) => {
+                drop(tx);
+                if let Some(body) = e.rule_overlap_body() {
+                    return Err(crate::EngineHttpError::RuleOverlap(body));
+                }
+                tracing::error!(engine = %engine_name, service_id = profile_id, error = %e,
+                    "the guarded bind could not complete; binding without the overlap check");
+            }
+        }
+    }
+    st.engine_mgmt
+        .set_engine_authz_service(engine_id, Some(profile_id))
+        .await?;
+    Ok(())
 }

@@ -559,17 +559,20 @@ async fn compile_desired(
         );
     }
 
-    // **SP4d debt Task 6, item 1: the write side of `EvalOrderAmbiguous`.**
+    // **SP4d debt Task 6, item 1: the write side of `EvalOrderAmbiguous`** —
+    // widened by SP4d-4 Task 3 to the profile's whole evaluation unit.
     // Checked HERE, on the complete desired set, because no single
     // `compile_rule`/`compile_clearance` call can see another rule's output —
     // the pair SP4d-1's F2 measured came from two different `perm.rules` rows
     // compiled independently, and the ambiguity exists only in their union.
     //
-    // The rule is `egret_policy::ambiguous_arbitration_in`, spelled once and
-    // shared with the policy editor's own create/update guard; read that
-    // module for the measurement, for why an AGREEING tie is admitted, and for
-    // the band key's one-for-one correspondence with
-    // `egret_ranger_eval::eval::PolicyView`.
+    // The rule is `egret_policy::unit_overlaps`, spelled once and shared with
+    // the policy editor; it takes every within-download pair from
+    // `ambiguous_arbitrations_in` (read `egret_policy::ambiguous_arbitration`
+    // for the measurement and for why an AGREEING tie is admitted) and adds
+    // the pairs only the tag assignments reveal — a tag rule and a path rule on
+    // one tagged column, two tag rules whose tags share a column. See
+    // `crate::overlap` for the write paths this covers.
     //
     // ⚠ It runs BEFORE `apply_diff_in_tx`, so a refusal writes nothing at all
     // — the caller's transaction is intact and its route returns the refusal
@@ -577,25 +580,43 @@ async fn compile_desired(
     // `POST /perm/preview` report it before the steward presses Save, since
     // preview runs the real `write_rule` in a rolled-back transaction.
     //
-    // ⚠ It sees the COMPILER's set only. A hand-authored mask on the same
-    // profile is not in `desired` and so cannot be paired here — that is the
-    // editor's own call site's job, and on a `generated` profile
-    // `refuse_if_generated` means there are none. The seeded `egret-admin`
-    // policies are `policyType 0` and are not in this class.
-    if let Some(pair) =
-        egret_policy::ambiguous_arbitration_in(desired.iter().map(|((service, name), dp)| {
-            egret_policy::PolicyUnderWrite {
-                service: *service,
-                name,
-                body: &dp.body,
-            }
-        }))
-    {
-        return Err(CompileError::AmbiguousMaskOrFilterArbitration {
-            profile: svc.name,
-            refusal: pair.refusal(),
-        });
-    }
+    // **Only pairs THIS compile creates are refused** (user ruling
+    // 2026-10-12, SP4d-4 Task 3 fix round 2 — superseding the wedge round 1
+    // widened). The stored unit (compiled and hand-written, as served now) is
+    // the BEFORE; the unit with this profile's compiler-owned policies
+    // replaced by `desired` is the AFTER; a pair whose identity (names, both
+    // item arrays, the set of coordinates) is new is refused. A stored pair is
+    // reported, not refused, so it no longer blocks unrelated writes — which
+    // for a tag-rule write or a tag rename meant every engine-bound profile in
+    // the installation. A migration's originals are switched off before its
+    // rule writes (`migrate.rs`, step 1), so they are in neither set. See
+    // `crate::overlap::refuse_created_by_compile_via`.
+    let tag_service_id = sweep.iter().copied().find(|&id| id != service_id);
+    let rule_names: HashMap<Uuid, &str> =
+        all_rules.iter().map(|r| (r.id, r.name.as_str())).collect();
+    let for_overlap: Vec<crate::overlap::CompiledForOverlap<'_>> = desired
+        .iter()
+        .map(|((sid, name), dp)| crate::overlap::CompiledForOverlap {
+            service: *sid,
+            is_tag_service: Some(*sid) == tag_service_id,
+            policy_name: name,
+            body: &dp.body,
+            rule: dp.rule_id.map(|id| egret_perm::OverlapRule {
+                id: Some(id),
+                name: rule_names
+                    .get(&id)
+                    .map_or_else(|| name.clone(), |n| (*n).to_string()),
+            }),
+        })
+        .collect();
+    crate::overlap::refuse_created_by_compile_via(
+        conn,
+        &svc.name,
+        service_id,
+        tag_service_id,
+        &for_overlap,
+    )
+    .await?;
 
     Ok(Some(Compiled {
         desired,
@@ -1563,17 +1584,12 @@ pub async fn lock_services_in_tx(
     let expanded = services_and_tag_services_via(tx, service_ids)
         .await
         .map_err(db_err)?;
-    // One statement per id rather than `WHERE id = ANY(...) ORDER BY id FOR
-    // UPDATE`: Postgres does not promise that a sort is applied before row
-    // locks are taken, and the ORDER is the entire point here.
-    for &service_id in &expanded {
-        sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
-            .bind(service_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(db_err)?;
-    }
-    Ok(())
+    // The one spelling of the row lock, shared with the policy editor's
+    // overlap check (SP4d-4 Task 3 fix round 1, review I1): one statement per
+    // id, ascending — see `egret_policy::lock_service_rows_via`.
+    egret_policy::lock_service_rows_via(tx, &expanded)
+        .await
+        .map_err(db_err)
 }
 
 /// Recompile every service in `service_ids` on the CALLER's open transaction.

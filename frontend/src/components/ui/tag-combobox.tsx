@@ -21,6 +21,8 @@ export interface TagComboboxProps {
   creatable?: boolean;
   /** aria-label on the input. */
   ariaLabel?: string;
+  /** id(s) of the element(s) that describe the input (a hint, an error). */
+  ariaDescribedBy?: string;
   /**
    * How to render a chip when the VALUE is not what a person should read —
    * an owner is stored by user id, and a row of UUIDs is not a list of people.
@@ -37,6 +39,7 @@ export function TagCombobox({
   placeholder,
   creatable = true,
   ariaLabel,
+  ariaDescribedBy,
   labelFor,
 }: TagComboboxProps) {
   const [q, setQ] = useState("");
@@ -102,6 +105,7 @@ export function TagCombobox({
             // move the trigger prop-merge target back onto the input.
             type="text"
             aria-label={ariaLabel}
+            aria-describedby={ariaDescribedBy}
             className="min-w-[80px] flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
             placeholder={placeholder}
             value={q}

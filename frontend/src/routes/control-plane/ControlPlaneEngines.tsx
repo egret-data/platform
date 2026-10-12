@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ExternalLink, Plus, Server } from "lucide-react";
+import { ExternalLink, Plug, Plus, Server } from "lucide-react";
 
 import { type Engine, getEngine, listEngines } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
@@ -15,6 +15,7 @@ import {
   type Column,
 } from "@/components/explore/FilterableTable";
 import { EmptyState } from "@/components/explore/EmptyState";
+import { ExternalChip, isExternal, useCan } from "./externalEngine";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 
 /**
@@ -64,6 +65,7 @@ export const TRINO_FIELD_DEFAULTS = {
 
 /** DNS name of the engine's coordinator/FE service, as shown in the Endpoint column. */
 function engineEndpoint(engine: Engine): string {
+  if (isExternal(engine)) return `${engine.host}:${engine.port}`;
   const suffix = engine.type === "starrocks" ? "-fe-service" : "-coordinator";
   return `${engine.name}${suffix}.${engine.namespace}`;
 }
@@ -101,9 +103,15 @@ export default function ControlPlaneEngines() {
   const goCreate = (type: string) =>
     navigate(`/control-plane/engines/new?type=${type}`);
 
+  const canRegister = useCan("engine:create");
+
   const all = engines.data ?? [];
   const total = all.length;
-  const running = all.filter((e) => (e.status ?? "").toLowerCase() === "running").length;
+  // An external engine's stored status is a placeholder egret never reads, so it
+  // counts as neither running nor not running; it has its own figure.
+  const external = all.filter(isExternal).length;
+  const managed = all.filter((e) => !isExternal(e));
+  const running = managed.filter((e) => (e.status ?? "").toLowerCase() === "running").length;
 
   return (
     <div className="space-y-4" data-testid="engines-frame">
@@ -115,22 +123,32 @@ export default function ControlPlaneEngines() {
             warehouse and monitor its health. RisingWave arrives in a later phase.
           </p>
         </div>
-        <Button
-          className="shrink-0"
-          onClick={() => goCreate(activeType)}
-          disabled={!canProvision}
-          title={canProvision ? undefined : "Coming soon"}
-        >
-          <Plus className="h-4 w-4" />
-          Add engine
-        </Button>
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {canRegister && (
+            <Button variant="outline" asChild>
+              <Link to="/control-plane/engines/register">
+                <Plug className="h-4 w-4" />
+                Register external engine
+              </Link>
+            </Button>
+          )}
+          <Button
+            onClick={() => goCreate(activeType)}
+            disabled={!canProvision}
+            title={canProvision ? undefined : "Coming soon"}
+          >
+            <Plus className="h-4 w-4" />
+            Add engine
+          </Button>
+        </div>
       </div>
 
       <SummaryStrip
         items={[
           { label: "engines", value: total },
           { label: "running", value: running },
-          { label: "not running", value: total - running },
+          { label: "not running", value: managed.length - running },
+          ...(external > 0 ? [{ label: "external", value: external }] : []),
         ]}
       />
 
@@ -223,7 +241,8 @@ function EngineTable({
     {
       key: "status",
       label: "Status",
-      cell: (e) => <EngineStatusBadge id={e.id} fallback={e.status} />,
+      // An external engine is not monitored: a chip stands where the status would be.
+      cell: (e) => (isExternal(e) ? <ExternalChip /> : <EngineStatusBadge id={e.id} fallback={e.status} />),
     },
     {
       key: "actions",

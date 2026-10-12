@@ -160,7 +160,9 @@ pub fn summarize_policy(
 ) -> PolicySummary {
     let policy_type = body.get("policyType").and_then(Value::as_i64).unwrap_or(0);
 
-    // resource_path = catalog.schema.table.column, joining the first value of each level present.
+    // resource_path = catalog.schema.table.column, joining the first value of each level
+    // present. A service names its second level `schema` (Trino) or `database` (StarRocks),
+    // never both, so listing both keeps either in position.
     let res = body.get("resources").and_then(Value::as_object);
     let level = |k: &str| -> Option<String> {
         res.and_then(|r| r.get(k))
@@ -170,7 +172,7 @@ pub fn summarize_policy(
             .and_then(Value::as_str)
             .map(str::to_string)
     };
-    let mut resource_path = ["catalog", "schema", "table", "column"]
+    let mut resource_path = ["catalog", "schema", "database", "table", "column"]
         .iter()
         .filter_map(|k| level(k))
         .collect::<Vec<_>>()
@@ -816,13 +818,16 @@ pub struct ConfigFile {
 
 /// GET /policies/services/{service}/trino-config — the two files a Trino
 /// coordinator needs to enforce this profile via the native ranger plugin.
+///
+/// Rendered by `egret_engine_mgmt_api::ranger_config::ranger_plugin_files`, the
+/// same code that writes the files egret mounts into its own engines.
 #[utoipa::path(
     get,
     path = "/api/control-plane/policies/services/{service}/trino-config",
     tag = "policy-admin",
     params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
     responses(
-        (status = 200, description = "The Trino coordinator config files for this profile's native ranger plugin", body = Vec<ConfigFile>),
+        (status = 200, description = "The Trino coordinator config files for this profile's native ranger plugin, from the same renderer that writes the files egret mounts into its own engines (`access-control.properties` and `ranger-trino-security.xml`). Since SP4d-4 the security file also carries the policy source, cache directory and client timeouts, the properties file points at `/etc/trino/ranger-trino-security.xml`, and the poll interval is 30000 ms; earlier responses omitted those keys and used a relative resource path", body = Vec<ConfigFile>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
@@ -836,41 +841,22 @@ async fn trino_config(
 ) -> Result<Json<Vec<ConfigFile>>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let _ = st.store.get_service(&service).await?; // 404 if the profile doesn't exist
-    let base = st.engine_egret_url.trim_end_matches('/');
 
-    let props = format!(
-        "access-control.name=ranger\n\
-         ranger.service.name={service}\n\
-         ranger.plugin.config.resource=ranger-trino-security.xml\n"
+    // ONE renderer: the same code that writes the files egret mounts into its own
+    // engines (SP4d-4 Task 9). The poll interval is the provisioner's default.
+    let rendered = egret_engine_mgmt_api::ranger_config::ranger_plugin_files(
+        egret_engine_mgmt_api::EngineKind::Trino,
+        &service,
+        &st.engine_egret_url,
+        30_000,
     );
-    let xml = format!(
-        "<?xml version=\"1.0\"?>\n\
-         <?xml-stylesheet type=\"text/xsl\" href=\"configuration.xsl\"?>\n\
-         <configuration>\n\
-         \x20 <property>\n\
-         \x20   <name>ranger.plugin.trino.policy.rest.url</name>\n\
-         \x20   <value>{base}</value>\n\
-         \x20 </property>\n\
-         \x20 <property>\n\
-         \x20   <name>ranger.plugin.trino.service.name</name>\n\
-         \x20   <value>{service}</value>\n\
-         \x20 </property>\n\
-         \x20 <property>\n\
-         \x20   <name>ranger.plugin.trino.policy.pollIntervalMs</name>\n\
-         \x20   <value>30000</value>\n\
-         \x20 </property>\n\
-         </configuration>\n"
-    );
-    Ok(Json(vec![
-        ConfigFile {
-            name: "access-control.properties".into(),
-            content: props,
-        },
-        ConfigFile {
-            name: "ranger-trino-security.xml".into(),
-            content: xml,
-        },
-    ]))
+    Ok(Json(
+        rendered
+            .files
+            .into_iter()
+            .map(|(name, content)| ConfigFile { name, content })
+            .collect(),
+    ))
 }
 
 /// POST /policies/services/{service}/seed-defaults — seed default "admin has
@@ -1057,6 +1043,75 @@ async fn list_principals(
 pub struct CreatedPolicyId {
     /// The created/updated policy's id.
     pub id: i64,
+    /// Present only when this save stored an emptied resource level as `*`
+    /// (SP4d-4 Task 11): the level names, root first.
+    #[serde(rename = "filledLevels", skip_serializing_if = "Option::is_none")]
+    pub filled_levels: Option<Vec<String>>,
+    /// Present with `filledLevels`: what the fill means in Ranger — the policy
+    /// now covers every child of those levels, and it moved earlier in the
+    /// evaluation order of its priority band.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Present only when the fill moved the saved policy ahead of another
+    /// same-band policy that may decide the same request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<PolicyWriteWarning>>,
+}
+
+/// One warning on a policy write's response (`kind: "evaluation_order_changed"`).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PolicyWriteWarning {
+    pub kind: String,
+    /// The other policy's name.
+    pub policy: String,
+    /// The other policy's id, when known.
+    #[serde(rename = "policyId")]
+    pub policy_id: Option<i64>,
+    /// `access` | `mask` | `row_filter`.
+    #[serde(rename = "policyKind")]
+    pub policy_kind: String,
+    /// Operator-readable explanation.
+    pub sentence: String,
+}
+
+/// What a save that filled emptied levels says to the operator. It never says
+/// the more specific policy wins: Ranger evaluates the BROADER one first.
+const FILLED_LEVELS_NOTE: &str = "Levels left empty in the form were saved as `*` (every child \
+    of the level above). Ranger does not apply a policy that stops above the column to column \
+    requests, so an empty level would have granted no column read. A `*` level also moves \
+    this policy EARLIER in Ranger's evaluation order within its priority band: Ranger \
+    evaluates the broader policy (more `*` levels, other things equal) first, not the more \
+    specific one. Where it may now be consulted before another policy that can decide the \
+    same request, `warnings` names that policy.";
+
+/// The 200 body of a create/update: `{id}` alone for an ordinary save, plus
+/// `filledLevels`, `note` and any `warnings` when the save filled levels.
+fn write_response(
+    id: i64,
+    pol: &RangerPolicy,
+    shifts: &[crate::ambiguous_arbitration::EvalOrderShift],
+) -> Value {
+    let mut out = json!({ "id": id });
+    let Some(filled) = &pol.filled else {
+        return out;
+    };
+    out["filledLevels"] = json!(filled.names);
+    out["note"] = json!(FILLED_LEVELS_NOTE);
+    if !shifts.is_empty() {
+        out["warnings"] = shifts
+            .iter()
+            .map(|s| {
+                json!({
+                    "kind": "evaluation_order_changed",
+                    "policy": s.other,
+                    "policyId": s.other_id,
+                    "policyKind": match s.policy_type { 1 => "mask", 2 => "row_filter", _ => "access" },
+                    "sentence": s.sentence(&pol.name),
+                })
+            })
+            .collect();
+    }
+    out
 }
 
 /// Doc-only mirror of the `{ "created": <n> }` body `seed_defaults` returns.
@@ -1168,17 +1223,123 @@ fn tag_mask_addresses(body: &Value) -> Vec<&str> {
         .unwrap_or_default()
 }
 
-/// **The editor's half of SP4d debt Task 6's one rule.** Would storing `pol`
-/// under `service_id` leave that profile serving two mask (or two row-filter)
-/// policies that arbitrate one request differently? The rule itself is
-/// [`crate::ambiguous_arbitration::ambiguous_arbitration_in`], spelled once and
-/// shared with `egret_perm_compile::trigger::compile_desired`; the refusal is
-/// the same sentence from both.
+/// Whether a Ranger body is a mask (1) or a row filter (2) — the class the
+/// overlap rule is about.
+fn is_mask_or_filter(body: &Value) -> bool {
+    matches!(
+        body.get("policyType").and_then(Value::as_i64),
+        Some(1) | Some(2)
+    )
+}
+
+/// What [`write_policy_checked`] writes.
+#[derive(Debug, Clone, Copy)]
+enum PolicyWrite {
+    Create,
+    Replace(i64),
+}
+
+/// **The editor's write, with its overlap check made atomic** (SP4d-4 Task 3
+/// fix round 1, review I1). One transaction:
 ///
-/// `replacing` is the policy id a `PUT` is about to overwrite, excluded from the
-/// comparison set — **without it a `PUT` would pair the new body against the OLD
+/// 1. for a mask or row filter, `FOR UPDATE` on every `policy.authz_services`
+///    row of every evaluation unit the write lands in, ascending, through
+///    [`crate::lock_service_rows_via`] — the same rows, the same order and the
+///    same helper the rule compiler's `lock_services_in_tx` takes for a
+///    recompile of that unit (a profile and its tag service; or a tag service
+///    and every profile naming it). A tag assignment recompiles under those
+///    locks too, so an editor write and a concurrent assignment, recompile or
+///    second editor write on one unit now queue;
+/// 2. [`refuse_ambiguous_arbitration`] on that transaction, so it reads the
+///    unit as the last committed writer left it;
+/// 3. the store's own guarded INSERT/UPDATE, on the same transaction;
+/// 4. commit.
+///
+/// Before this, the check read on a pooled connection with no lock, and an
+/// editor write racing a tag assignment could see neither the other's row and
+/// commit a pair both checks had passed.
+async fn write_policy_checked(
+    st: &PolicyAdminState,
+    service_id: i64,
+    write: PolicyWrite,
+    pol: &RangerPolicy,
+) -> Result<(i64, Vec<crate::ambiguous_arbitration::EvalOrderShift>), PolicyHttpError> {
+    let mut tx = st.store.begin().await?;
+    if is_mask_or_filter(&pol.body) {
+        let mut rows: Vec<i64> = crate::unit_overlap::units_for_service_via(&mut tx, service_id)
+            .await?
+            .into_iter()
+            .flat_map(|u| [u.resource, u.tag_service])
+            .flatten()
+            .chain([service_id])
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        crate::lock_service_rows_via(&mut tx, &rows).await?;
+    }
+    let replacing = match write {
+        PolicyWrite::Create => None,
+        PolicyWrite::Replace(id) => Some(id),
+    };
+    refuse_ambiguous_arbitration(&mut tx, service_id, replacing, pol).await?;
+    // SP4d-4 Task 11: a save that filled emptied levels with `*` lowers the
+    // policy's evalOrder; report whom it now precedes. Runs after the
+    // refusal, so a pair that guard refuses is refused, not merely warned.
+    let shifts = match &pol.filled {
+        None => Vec::new(),
+        Some(f) => {
+            let stored =
+                crate::store::enabled_policies_for_service_via(&mut tx, service_id).await?;
+            let is_replaced = |p: &Value| {
+                replacing.is_some_and(|id| p.get("id").and_then(Value::as_i64) == Some(id))
+            };
+            crate::ambiguous_arbitration::eval_order_shifts(
+                &f.unfilled_body,
+                &pol.body,
+                stored
+                    .iter()
+                    .filter(|p| !is_replaced(p))
+                    .map(|p| (p.get("name").and_then(Value::as_str).unwrap_or_default(), p)),
+            )
+        }
+    };
+    let id = match write {
+        PolicyWrite::Create => {
+            let id = crate::insert_policy_owned_by_via(
+                &mut tx, service_id, &pol.name, &pol.body, "operator",
+            )
+            .await?;
+            if !pol.is_enabled {
+                // The INSERT takes the DB default (enabled); reflect the form's toggle.
+                crate::update_policy_via(&mut tx, id, &pol.name, &pol.body, false).await?;
+            }
+            id
+        }
+        PolicyWrite::Replace(id) => {
+            crate::update_policy_via(&mut tx, id, &pol.name, &pol.body, pol.is_enabled).await?;
+            id
+        }
+    };
+    tx.commit().await.map_err(crate::PolicyStoreError::from)?;
+    Ok((id, shifts))
+}
+
+/// **The editor's half of SP4d debt Task 6's one rule.** Would storing `pol`
+/// under `service_id` leave an evaluation unit it lands in — the profile and
+/// its tag service, with the tag assignments that place tag policies (SP4d-4
+/// Task 3) — serving two mask (or two row-filter) policies that may decide one
+/// request and would decide it differently? The rule itself is
+/// [`crate::unit_overlap::unit_overlaps`] (which takes every within-download
+/// pair from [`crate::ambiguous_arbitration::ambiguous_arbitrations_in`]),
+/// spelled once and shared with `egret_perm_compile::trigger::compile_desired`.
+///
+/// `replacing` is the policy id a `PUT` is about to overwrite, swapped out of
+/// the AFTER set — **without it a `PUT` would pair the new body against the OLD
 /// version of itself**, which is a refusal that cannot be escaped (every retry
 /// hits the same stored row) and the first thing a reviewer should check here.
+///
+/// Only pairs the write CREATES are refused (the AFTER set's pairs minus the
+/// stored set's); see the body for why.
 ///
 /// Reads nothing when the body is not a mask or a row filter, which is the
 /// common case: an access policy is not in this class at all (its arbitration
@@ -1186,51 +1347,135 @@ fn tag_mask_addresses(body: &Value) -> Vec<&str> {
 /// The read it does do is `enabled_policies_for_service`, the SAME assembler the
 /// download route and `explain` use, so the set compared is the set served.
 ///
-/// Runs BEFORE the insert/update, so a refusal has written nothing and the route
-/// returns a plain 400 rather than rolling anything back — the same shape
-/// `unreadable_table_mask_for`'s callers have.
+/// Runs inside the write's own transaction, after [`write_policy_checked`] has
+/// locked every service row of every unit the write lands in and before the
+/// INSERT/UPDATE (SP4d-4 Task 3 fix round 1, review I1), so the set it reads
+/// cannot change under it and a refusal rolls back a transaction that has
+/// written nothing.
 async fn refuse_ambiguous_arbitration(
-    st: &PolicyAdminState,
+    conn: &mut sqlx::PgConnection,
     service_id: i64,
     replacing: Option<i64>,
     pol: &RangerPolicy,
 ) -> Result<(), PolicyHttpError> {
-    if !matches!(
-        pol.body.get("policyType").and_then(Value::as_i64),
-        Some(1) | Some(2)
-    ) {
+    if !is_mask_or_filter(&pol.body) {
         return Ok(());
     }
-    let existing: Vec<Value> = st
-        .store
-        .enabled_policies_for_service(service_id)
-        .await?
-        .into_iter()
-        .filter(|p| replacing.is_none_or(|id| p.get("id").and_then(Value::as_i64) != Some(id)))
-        .collect();
-    let candidates: Vec<(String, &Value)> = existing
-        .iter()
-        .map(|p| {
-            (
-                p.get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                p,
+    // **Every unit this write lands in** (SP4d-4 Task 3, user ruling): the
+    // profile plus its tag service, or — for a tag service — each Trino
+    // profile that names it, with the tag assignments that decide where a tag
+    // policy applies. `crate::unit_overlap::unit_overlaps` is the ONE rule the
+    // compiler calls too; here it is handed the stored set and the body.
+    let mut units = Vec::new();
+    for ids in crate::unit_overlap::units_for_service_via(conn, service_id).await? {
+        units.push(crate::unit_overlap::load_unit_via(conn, ids).await?);
+    }
+    for unit in units {
+        let is_replaced = |sid: i64, p: &Value| {
+            sid == service_id
+                && replacing.is_some_and(|id| p.get("id").and_then(Value::as_i64) == Some(id))
+        };
+        let is_tag_written = unit.ids.and_then(|u| u.tag_service) == Some(service_id);
+        // BEFORE: the unit as stored. The row a PUT replaces is in it, under
+        // the name it will carry AFTER the write, so a rename alone does not
+        // make a stored pair look new.
+        let before_names: Vec<String> = unit
+            .policies
+            .iter()
+            .map(|(sid, _, p)| {
+                if is_replaced(*sid, p) {
+                    pol.name.clone()
+                } else {
+                    p.get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                }
+            })
+            .collect();
+        let before: Vec<crate::unit_overlap::UnitPolicy<'_>> = unit
+            .policies
+            .iter()
+            .zip(&before_names)
+            .map(
+                |((sid, is_tag, body), name)| crate::unit_overlap::UnitPolicy {
+                    service: *sid,
+                    is_tag_service: *is_tag,
+                    name,
+                    body,
+                },
             )
-        })
-        .chain(std::iter::once((pol.name.clone(), &pol.body)))
-        .collect();
-    if let Some(pair) =
-        crate::ambiguous_arbitration::ambiguous_arbitration_in(candidates.iter().map(
-            |(name, body)| crate::ambiguous_arbitration::PolicyUnderWrite {
+            .collect();
+        // AFTER: the stored unit with the replaced row swapped for the body.
+        let after: Vec<crate::unit_overlap::UnitPolicy<'_>> = unit
+            .unit_policies()
+            .into_iter()
+            .filter(|p| !is_replaced(p.service, p.body))
+            .chain(std::iter::once(crate::unit_overlap::UnitPolicy {
                 service: service_id,
-                name,
-                body,
-            },
-        ))
-    {
-        return Err(PolicyHttpError::BadRequest(pair.refusal()));
+                is_tag_service: is_tag_written,
+                name: &pol.name,
+                body: &pol.body,
+            }))
+            .collect();
+        // **Refuse only a pair this write CREATES** (SP4d-4 Task 2 review I2).
+        // Refusing any pair in the unit broke Part A's promise that a write
+        // REMOVING a pair succeeds: with stored pairs (A,B) and (C,D), narrowing
+        // A was refused on (C,D) and narrowing C on (A,B), so the editor could
+        // never fix either. A pair of hand-written policies that is already
+        // stored is therefore left alone by this guard; the rule compiler
+        // refuses only pairs with a COMPILED member (SP4d-4 Task 3 fix round
+        // 1), so it is reported, not refused — by `explain`
+        // (`EvalOrderAmbiguous`) and by the read-only overlap report SP4d-4
+        // Task 4 adds (`GET /perm/overlaps`). A pair the write creates or
+        // completes — a new overlapping policy, an edit that widens into
+        // another policy, a re-enable through this route — is not in BEFORE
+        // and is refused.
+        //
+        // Identity is `(kind, first, first's items, second, second's items,
+        // coordinate)` (SP4d-4 Task 3): an edit that keeps a stored partner but
+        // changes what either side decides, or where they meet, makes a
+        // DIFFERENT pair and is refused; an edit that touches neither (a
+        // rename, a description) keeps the identity and passes.
+        let created = crate::unit_overlap::created_overlaps(
+            &crate::unit_overlap::unit_overlaps(&before, &unit.assignments),
+            crate::unit_overlap::unit_overlaps(&after, &unit.assignments),
+        );
+        if let Some(pair) = created.into_iter().next() {
+            // 409, not 400: the body is well-formed; it conflicts with a policy
+            // already stored (SP4d-4 Part A, "The refusal"). The editor's
+            // sentence adds the one remedy only a hand-written policy has,
+            // Override, wherever an authored priority can fix the pair.
+            //
+            // The body is the one every overlap surface answers (fix round 1,
+            // M1): a compiled member is named by its RULE (id and name), a
+            // hand-written one by its policy name with `id: null`.
+            let rules = crate::unit_overlap::compiled_rule_names_via(
+                conn,
+                &[pair.first.as_str(), pair.second.as_str()],
+            )
+            .await?;
+            let label = |n: &str| match rules.get(n) {
+                Some((_, rule)) => format!("rule {rule:?}"),
+                // One label for a hand-written member on every surface (fix
+                // round 2, N3): the compiler and the tag assignment write
+                // `policy "H"` too.
+                None => format!("policy {}", crate::ambiguous_arbitration::quoted(n)),
+            };
+            let member = |n: &str| match rules.get(n) {
+                Some((id, rule)) => json!({ "id": id, "name": rule }),
+                None => json!({ "id": null, "name": n }),
+            };
+            return Err(PolicyHttpError::Overlap {
+                body: json!({
+                    "error": pair.sentence(&label, true),
+                    "code": "rule_overlap",
+                    "rules": [member(&pair.first), member(&pair.second)],
+                    "coordinate": pair.coordinate,
+                    "kind": pair.kind_wire_name(),
+                }),
+            });
+        }
     }
     Ok(())
 }
@@ -1243,13 +1488,15 @@ async fn refuse_ambiguous_arbitration(
 /// edited (`editor_to_ranger_json` answered `"unknown policy kind:
 /// tag-masking"`). Adding the branch means a second authoring surface for the
 /// same shapes, and the thing most likely to go wrong is that the two surfaces
-/// end up running different guards. So they run this, and the only argument that
-/// differs between them is `replacing`.
-///
-/// `replacing` is `None` for a create and `Some(id)` for an edit; it reaches
-/// [`refuse_ambiguous_arbitration`], which excludes that row from the comparison
-/// set — without it a `PUT` pairs the new body against the OLD version of
-/// itself and produces a refusal no retry can escape.
+/// end up running different guards. So they run this, and then both write
+/// through [`write_policy_checked`], whose `PolicyWrite` is the only thing that
+/// differs between them: `Create`, or `Replace(id)`, which reaches
+/// [`refuse_ambiguous_arbitration`] as `replacing` and excludes that row from
+/// the comparison set — without it a `PUT` pairs the new body against the OLD
+/// version of itself and produces a refusal no retry can escape. (The
+/// arbitration check moved out of this function in SP4d-4 Task 3 fix round 1,
+/// review I1, so it runs inside the write's transaction under the unit's row
+/// locks.)
 ///
 /// **Task 2's `tagService`-on-non-Trino refusal is reached by construction, not
 /// by a call from here.** That guard lives on the profile write
@@ -1261,8 +1508,6 @@ async fn refuse_ambiguous_arbitration(
 /// filed under a StarRocks profile's stranded tag service.
 async fn guard_tag_policy_authoring(
     st: &PolicyAdminState,
-    tag_service_id: i64,
-    replacing: Option<i64>,
     pol: &RangerPolicy,
 ) -> Result<(), PolicyHttpError> {
     if pol.name.trim().is_empty() {
@@ -1294,9 +1539,11 @@ async fn guard_tag_policy_authoring(
     // a path-addressed one — `tag_masking_to_ranger_json` and
     // `tag_rowfilter_to_ranger_json` delegate to the very builders the resource
     // path uses and only retarget the selector, so the pair is reachable here
-    // too. Checked against the TAG service's own set, which is the download the
-    // tag plugin polls.
-    refuse_ambiguous_arbitration(st, tag_service_id, replacing, pol).await
+    // too. Checked against every unit the TAG service is in — by
+    // `write_policy_checked`, which both tag surfaces write through, inside the
+    // write's transaction and under the unit's row locks (SP4d-4 Task 3 fix
+    // round 1, review I1).
+    Ok(())
 }
 
 /// **A guard pointed at the wrong policy set is not running** — so a `PUT` must
@@ -1368,12 +1615,12 @@ fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
     tag = "policy-admin",
     request_body = Object,
     responses(
-        (status = 200, description = "Policy created", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input, missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter policy that would be served alongside another one selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)", body = ErrorBody),
+        (status = 200, description = "Policy created. When the save stored an emptied resource level as `*`, the body adds `filledLevels`, a `note` (the broader policy is evaluated first within a priority band) and, where the fill moved this policy ahead of another same-band policy that may decide the same request, `warnings`", body = CreatedPolicyId),
+        (status = 400, description = "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:create permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
-        (status = 409, description = "A policy with this name already exists, or the target profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
+        (status = 409, description = "A policy with this name already exists, the target profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or a mask/row-filter policy would form a rule overlap with another policy or compiled rule that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the sentence names both and suggests Override where a priority can fix it). An overlap body adds `code: \"rule_overlap\"`, `rules` (both members: a compiled rule's `id` and name, `id` null for a hand-written policy), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1383,6 +1630,7 @@ async fn create_policy(
     Json(v): Json<Value>,
 ) -> Result<Json<Value>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:create").await?;
+    ranger_json::refuse_ranger_shaped_body(&v).map_err(PolicyHttpError::BadRequest)?;
 
     // Tag policies (Access P3.2) are authored against a trino profile but stored
     // under that profile's tag service. Resolve the tag service, build the
@@ -1402,13 +1650,8 @@ async fn create_policy(
         // a reserved NAME wins over a compiled PROFILE, and
         // `generated_profile_guard` caught it.
         st.store.preflight_policy_insert(svc.id, &pol.name).await?;
-        guard_tag_policy_authoring(&st, svc.id, None, &pol).await?;
-        let id = st.store.create_policy(svc.id, &pol.name, &pol.body).await?;
-        if !pol.is_enabled {
-            st.store
-                .update_policy(id, &pol.name, &pol.body, false)
-                .await?;
-        }
+        guard_tag_policy_authoring(&st, &pol).await?;
+        let (id, _) = write_policy_checked(&st, svc.id, PolicyWrite::Create, &pol).await?;
         return Ok(Json(json!({ "id": id })));
     }
 
@@ -1423,17 +1666,10 @@ async fn create_policy(
     // Task 6's concern 5 again, on the resource-addressed half — see the tag
     // branch above for why the shared pre-flight and not a second `origin` read.
     st.store.preflight_policy_insert(svc.id, &pol.name).await?;
-    // SP4d debt Task 6, item 1 — the editor's half. See
-    // `refuse_ambiguous_arbitration`.
-    refuse_ambiguous_arbitration(&st, svc.id, None, &pol).await?;
-    let id = st.store.create_policy(svc.id, &pol.name, &pol.body).await?;
-    if !pol.is_enabled {
-        // create_policy inserts with enabled=true (DB default); reflect the form's toggle.
-        st.store
-            .update_policy(id, &pol.name, &pol.body, false)
-            .await?;
-    }
-    Ok(Json(json!({ "id": id })))
+    // SP4d debt Task 6, item 1 — the editor's half, checked and written under
+    // the unit's row locks. See `write_policy_checked`.
+    let (id, shifts) = write_policy_checked(&st, svc.id, PolicyWrite::Create, &pol).await?;
+    Ok(Json(write_response(id, &pol, &shifts)))
 }
 
 /// PUT /policies/{id} — replace a policy's body (any kind).
@@ -1465,12 +1701,12 @@ async fn create_policy(
     params(("id" = i64, Path, description = "Policy id")),
     request_body = Object,
     responses(
-        (status = 200, description = "Policy replaced", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input, missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter body that would be served alongside another policy selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)", body = ErrorBody),
+        (status = 200, description = "Policy replaced. Same optional `filledLevels` / `note` / `warnings` as create", body = CreatedPolicyId),
+        (status = 400, description = "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
-        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
+        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the mask/row-filter body would form a rule overlap with another policy or compiled rule that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the sentence names both and suggests Override where a priority can fix it). An overlap body adds `code: \"rule_overlap\"`, `rules` (both members: a compiled rule's `id` and name, `id` null for a hand-written policy), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1481,6 +1717,7 @@ async fn update_policy(
     Json(v): Json<Value>,
 ) -> Result<Json<Value>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    ranger_json::refuse_ranger_shaped_body(&v).map_err(PolicyHttpError::BadRequest)?;
     // The row this `PUT` replaces, read before anything else, so both branches
     // can check the body's `service` against the profile the policy actually
     // lives under — see `refuse_service_mismatch`. 404s here for an unknown id,
@@ -1504,10 +1741,8 @@ async fn update_policy(
         // SP4d-3 Task 2: the infrastructure refusals win over the authoring
         // guards, as `preflight_policy_insert` does on the create path.
         st.store.preflight_policy_update(id, &pol.name).await?;
-        guard_tag_policy_authoring(&st, svc.id, Some(id), &pol).await?;
-        st.store
-            .update_policy(id, &pol.name, &pol.body, pol.is_enabled)
-            .await?;
+        guard_tag_policy_authoring(&st, &pol).await?;
+        write_policy_checked(&st, svc.id, PolicyWrite::Replace(id), &pol).await?;
         return Ok(Json(json!({ "id": id })));
     }
 
@@ -1525,11 +1760,8 @@ async fn update_policy(
     st.store.preflight_policy_update(id, &pol.name).await?;
     // SP4d debt Task 6, item 1 — the editor's half, with `replacing: Some(id)`
     // so the new body is not compared against the row it is replacing.
-    refuse_ambiguous_arbitration(&st, svc.id, Some(id), &pol).await?;
-    st.store
-        .update_policy(id, &pol.name, &pol.body, pol.is_enabled)
-        .await?;
-    Ok(Json(json!({ "id": id })))
+    let (_, shifts) = write_policy_checked(&st, svc.id, PolicyWrite::Replace(id), &pol).await?;
+    Ok(Json(write_response(id, &pol, &shifts)))
 }
 
 /// DELETE /policies/{id}
@@ -1623,6 +1855,7 @@ async fn set_policy_enabled(
         Principal,
         EnabledBody,
         CreatedPolicyId,
+        PolicyWriteWarning,
         SeedResult,
         ranger_json::AccessPolicyInput,
         ranger_json::AccessItemInput,
@@ -1667,6 +1900,27 @@ mod tests {
         assert!(s.principals.contains(&"analysts".to_string()));
         assert_eq!(s.permissions, vec!["select".to_string()]);
         assert!(s.is_enabled);
+    }
+
+    #[test]
+    fn summarize_starrocks_policy_keeps_the_database_level() {
+        // StarRocks names its second level `database`, not `schema`.
+        let body = json!({
+            "name": "sr-read",
+            "policyType": 0,
+            "isEnabled": true,
+            "resources": {
+                "catalog":  {"values": ["lake"]},
+                "database": {"values": ["sales"]},
+                "table":    {"values": ["items"]},
+                "column":   {"values": ["*"]}
+            },
+            "policyItems": [
+                {"users": ["dave"], "accesses": [{"type": "select"}]}
+            ]
+        });
+        let s = summarize_policy(7, "sr4live", true, "operator", &body);
+        assert_eq!(s.resource_path, "lake.sales.items.*");
     }
 
     #[test]

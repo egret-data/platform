@@ -1,18 +1,33 @@
 import { useEffect, useMemo } from "react";
+import { TriangleAlert } from "lucide-react";
 import { type ResourceLevel, type ServiceDefResource } from "@/api/policies";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ResourceLevelEditor } from "@/components/policy/ResourceLevelEditor";
+import { grantsSelect, levelGaps, levelHasValue, stopsAboveColumn } from "@/components/policy/resourceLevels";
 
 export interface ResourceSelectorProps {
   /** The applicable resources from the service-def: `def.resources`, `def.dataMaskDef.resources`, or `def.rowFilterDef.resources`. */
   resourceDefs: ServiceDefResource[];
   /** Service name, forwarded to `resourceLookup` for value autocomplete. */
   service: string;
+  /**
+   * The engine the profile serves (`trino` or `starrocks`, the service-def's
+   * name). It only words the "stops above column" note: Trino still allows
+   * table-level checks such as `count(*)`, StarRocks denies even those.
+   */
+  engine?: string;
   /** The generic resources map, e.g. `{ catalog: {...}, schema: {...} }` or `{ role: {...} }`. */
   value: Record<string, ResourceLevel>;
   onChange: (value: Record<string, ResourceLevel>) => void;
   /** Reports the current chain's leaf resource type name (or null if empty), so the editor can restrict access-types. */
   onLeafChange?: (leafResourceName: string | null) => void;
+  /**
+   * The access types the policy grants (an access policy only). When they
+   * include `select` (or `all`) and the chain stops above `column`, the
+   * selector warns that no column read is granted. Omit for masking and
+   * row-filter policies, which grant no access types.
+   */
+  grantedAccessTypes?: string[];
 }
 
 const NONE = "__none__";
@@ -51,7 +66,15 @@ function labelFor(name: string): string {
  * select — Ranger allows a policy to stop at that parent, so picking
  * "— none —" truncates the chain there and every level below it.
  */
-export function ResourceSelector({ resourceDefs, service, value, onChange, onLeafChange }: ResourceSelectorProps) {
+export function ResourceSelector({
+  resourceDefs,
+  service,
+  engine,
+  value,
+  onChange,
+  onLeafChange,
+  grantedAccessTypes,
+}: ResourceSelectorProps) {
   const byName = useMemo(() => {
     const m = new Map<string, ServiceDefResource>();
     for (const r of resourceDefs) m.set(r.name, r);
@@ -142,6 +165,9 @@ export function ResourceSelector({ resourceDefs, service, value, onChange, onLea
   const leafChildren = leaf ? childrenOfName(leaf) : [];
   const canExtend = leafChildren.length > 0 && (leafDef?.isValidLeaf ?? true);
 
+  const gaps = levelGaps(resourceDefs, value);
+  const stoppedAt = grantsSelect(grantedAccessTypes) ? stopsAboveColumn(resourceDefs, value) : null;
+
   return (
     <div className="space-y-2">
       {chain.map((name, index) => {
@@ -153,6 +179,19 @@ export function ResourceSelector({ resourceDefs, service, value, onChange, onLea
         // Never offered at the root — a policy needs at least one resource.
         const showNone = index > 0 && parentDef?.isValidLeaf === true;
         const def = byName.get(name) ?? { name };
+        const empty = !levelHasValue(value[name]);
+        const levelName = labelFor(name).toLowerCase();
+        // The root cannot be left empty (`*` would cover every one this
+        // profile serves); any deeper level can, and is saved as `*`.
+        const rootMessage = `Name a ${levelName}. It is required: * here would cover every ${levelName} this profile serves.`;
+        const emptyHint =
+          index > 0 && empty
+            ? `Empty means every ${levelName} — saved as *.${
+                name === "column" && grantsSelect(grantedAccessTypes)
+                  ? " Column SELECT is then granted on every column."
+                  : ` The policy then covers every ${levelName} under the levels above.`
+              }`
+            : undefined;
         // One compact row per level: the Type (a select when the level admits
         // more than one type, else a static label) + the value control inline,
         // so a full catalog→schema→table→column chain (and any additional
@@ -193,11 +232,47 @@ export function ResourceSelector({ resourceDefs, service, value, onChange, onLea
               excludesSupported={def.excludesSupported}
               recursiveSupported={def.recursiveSupported}
               mandatory={def.mandatory}
-              invalid={!!def.mandatory && (value[name]?.values.length ?? 0) === 0}
+              invalid={index === 0 && !!def.mandatory && empty}
+              invalidMessage={rootMessage}
+              hint={emptyHint}
             />
           </div>
         );
       })}
+
+      {gaps.map((g) => (
+        <p key={g.level} role="alert" className="text-xs text-destructive">
+          {labelFor(g.level)} is set but {labelFor(g.missing).toLowerCase()} is not, so Ranger cannot
+          match this policy. Set {labelFor(g.missing).toLowerCase()} (use * for every value), or clear{" "}
+          {labelFor(g.level).toLowerCase()}.
+        </p>
+      ))}
+
+      {stoppedAt && (
+        <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+          <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span>
+            Stops above column: grants no column reads.{" "}
+            {engine === "trino" && (
+              <>
+                Trino still allows table-level checks such as <code>count(*)</code>.
+              </>
+            )}
+            {engine === "starrocks" && (
+              <>
+                StarRocks denies even <code>count(*)</code>.
+              </>
+            )}
+            {engine !== "trino" && engine !== "starrocks" && (
+              <>
+                Trino still allows table-level checks such as <code>count(*)</code>; StarRocks denies
+                even those.
+              </>
+            )}{" "}
+            Add the column level (use * for every column) to grant SELECT.
+          </span>
+        </p>
+      )}
 
       {canExtend && (
         <Select value={NONE} onValueChange={(v) => v !== NONE && extendChain(v)}>

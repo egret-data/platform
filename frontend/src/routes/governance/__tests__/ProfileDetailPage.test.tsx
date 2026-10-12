@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -8,6 +8,7 @@ import { AuthContext } from "@/auth/useAuth";
 import type { Me } from "@/api/hooks";
 import { setPolicyEnabled, seedDefaultPolicies } from "@/api/policies";
 import { ApiError } from "@/api/client";
+import type { ProfileWarnings, StoredOverlap } from "@/api/generated/model";
 import ProfileDetailPage from "../ProfileDetailPage";
 
 const navigate = vi.fn();
@@ -33,6 +34,26 @@ let tagServiceOrigin: string = "manual";
 /** The main profile's type (default "trino"). Seed and the Trino config are
  *  offered only on a Trino profile (SP4d-3 final review I-1). */
 let profileType: string = "trino";
+/** What `GET /perm/overlaps` answers (every profile's pairs). */
+let overlapRows: StoredOverlap[] = [];
+/** Make the policy list fail, so a warning cannot learn its policy's kind. */
+let listPoliciesFails = false;
+/** What `GET /perm/policies/services/{id}/warnings` answers. */
+let warnings: ProfileWarnings = { warningCount: 0, policies: [] };
+/** The ids the warnings hook was asked about. */
+const warningsAskedFor: number[] = [];
+
+vi.mock("@/api/generated/perm/perm", () => ({
+  usePermListOverlaps: () => ({
+    data: { status: 200, data: overlapRows },
+    isLoading: false,
+    isError: false,
+  }),
+  usePermServicePolicyWarnings: (serviceId: number) => {
+    warningsAskedFor.push(serviceId);
+    return { data: { status: 200, data: warnings }, isLoading: false, isError: false };
+  },
+}));
 
 vi.mock("@/api/policies", async (orig) => ({
   ...(await orig<typeof import("@/api/policies")>()),
@@ -58,7 +79,7 @@ vi.mock("@/api/policies", async (orig) => ({
       origin: tagServiceOrigin,
     },
   ]),
-  listPolicies: () => Promise.resolve([
+  listPolicies: () => listPoliciesFails ? Promise.reject(new Error("boom")) : Promise.resolve([
     {
       id: 42,
       name: "allow-analysts",
@@ -141,6 +162,8 @@ describe("ProfileDetailPage", () => {
     profileOrigin = "manual";
     tagServiceOrigin = "manual";
     profileType = "trino";
+    overlapRows = [];
+    warnings = { warningCount: 0, policies: [] };
   });
 
   it("renders the profile name and a policy row", async () => {
@@ -436,5 +459,158 @@ describe("ProfileDetailPage — SP4d-3 final review I-1", () => {
     expect(screen.getByRole("link", { name: "allow-analysts" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: /toggle allow-analysts/i })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Delete allow-analysts" })).not.toBeDisabled();
+  });
+});
+
+describe("ProfileDetailPage — the overlap report for this profile", () => {
+  beforeEach(() => {
+    profileOrigin = "manual";
+    tagServiceOrigin = "manual";
+    profileType = "trino";
+    overlapRows = [];
+  });
+
+  const pair = (serviceName: string, hand: string, rule: string): StoredOverlap => ({
+    serviceId: 1,
+    serviceName,
+    kind: "mask",
+    coordinate: "catalog=[wh] column=[email] schema=[sales] table=[orders]",
+    rules: [
+      { id: null, policyId: 51, name: hand },
+      { id: "r-9", policyId: 52, name: rule },
+    ],
+    servedToday: null,
+    sentence: "two mask policies ...",
+    howToFix: "Delete one of the two, or narrow one so they no longer select a common resource.",
+  });
+
+  it("shows this profile's pair, with the hand-written member linking to its editor", async () => {
+    overlapRows = [pair("trino-prod", "hand email", "mask emails")];
+    wrap(<ProfileDetailPage />);
+    await screen.findByText("allow-analysts");
+    expect(screen.getByRole("alert")).toHaveTextContent("1 pair of rules overlaps");
+    expect(screen.getByRole("link", { name: "policy hand email" })).toHaveAttribute(
+      "href",
+      "/governance/policies/trino-prod/masking/51",
+    );
+    expect(screen.getByRole("link", { name: "rule mask emails" })).toHaveAttribute(
+      "href",
+      "/governance/mask-filter-rules?rule=r-9",
+    );
+  });
+
+  it("does not show another profile's pair", async () => {
+    overlapRows = [pair("trino-other", "hand email", "mask emails")];
+    wrap(<ProfileDetailPage />);
+    await screen.findByText("allow-analysts");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+describe("ProfileDetailPage — stored policies Ranger reads differently (SP4d-4 B1)", () => {
+  beforeEach(() => {
+    profileOrigin = "manual";
+    tagServiceOrigin = "manual";
+    profileType = "trino";
+    overlapRows = [];
+    warnings = { warningCount: 0, policies: [] };
+    warningsAskedFor.length = 0;
+    listPoliciesFails = false;
+  });
+
+  const SELECT_SENTENCE =
+    "Stops at table but allows select: it grants no column read, only table-level checks.";
+
+  it("shows no callout for a profile with warningCount 0", async () => {
+    wrap(<ProfileDetailPage />);
+    await screen.findByText("allow-analysts");
+    expect(screen.queryByText(/stored polic(y|ies)$/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("asks for the warnings of THIS profile's id", async () => {
+    wrap(<ProfileDetailPage />);
+    await screen.findByText("allow-analysts");
+    expect(warningsAskedFor).toContain(1);
+  });
+
+  it("shows one callout with the count, each policy's sentence, a link to its editor, the measured reason and the remedy", async () => {
+    warnings = {
+      warningCount: 2,
+      policies: [
+        {
+          id: 42,
+          name: "allow-analysts",
+          warnings: [{ kind: "select_stops_above_column", level: "table", sentence: SELECT_SENTENCE }],
+        },
+        {
+          id: 43,
+          name: "gap-policy",
+          warnings: [{ kind: "level_gap", missing: "schema", sentence: "Names table under an absent schema." }],
+        },
+      ],
+    };
+    wrap(<ProfileDetailPage />);
+    const callout = (await screen.findByText("2 warnings on 2 stored policies")).closest('[role="alert"]') as HTMLElement;
+    expect(callout).not.toBeNull();
+    expect(within(callout).getByText(SELECT_SENTENCE)).toBeInTheDocument();
+    expect(within(callout).getByText("Names table under an absent schema.")).toBeInTheDocument();
+    // The link carries the policy's own type (found from the list), not a guess.
+    expect(within(callout).getByRole("link", { name: "allow-analysts" })).toHaveAttribute(
+      "href",
+      "/governance/policies/trino-prod/access/42",
+    );
+    // The measured fact and what to do about it.
+    expect(callout).toHaveTextContent("does not grant column SELECT on Trino 470 or StarRocks 4.1.4");
+    expect(callout).toHaveTextContent("set the column level");
+    expect(callout).toHaveTextContent("Nothing was changed");
+  });
+
+  it.each([
+    ["trino", "Trino still allows table-level checks such as count(*)", /StarRocks denies/],
+    ["starrocks", "StarRocks denies even count(*)", /Trino still allows/],
+  ])("words the count(*) consequence for a %s profile", async (type, said, unsaid) => {
+    profileType = type;
+    warnings = {
+      warningCount: 1,
+      policies: [
+        {
+          id: 42,
+          name: "allow-analysts",
+          warnings: [{ kind: "select_stops_above_column", level: "table", sentence: SELECT_SENTENCE }],
+        },
+      ],
+    };
+    wrap(<ProfileDetailPage />);
+    const callout = (await screen.findByText("1 warning on 1 stored policy")).closest('[role="alert"]') as HTMLElement;
+    expect(callout).toHaveTextContent(said);
+    expect(callout).not.toHaveTextContent(unsaid);
+  });
+
+  it("explains only the kinds that are present", async () => {
+    warnings = {
+      warningCount: 1,
+      policies: [
+        { id: 43, name: "gap-policy", warnings: [{ kind: "level_gap", missing: "schema", sentence: "gap." }] },
+      ],
+    };
+    wrap(<ProfileDetailPage />);
+    const callout = (await screen.findByText("1 warning on 1 stored policy")).closest('[role="alert"]') as HTMLElement;
+    expect(callout).toHaveTextContent("A level is named below one that is not set");
+    expect(callout).not.toHaveTextContent("column SELECT");
+  });
+
+  it("shows a policy's name as plain text, not a guessed link, while its kind is unknown", async () => {
+    listPoliciesFails = true;
+    warnings = {
+      warningCount: 1,
+      policies: [
+        { id: 42, name: "allow-analysts", warnings: [{ kind: "level_gap", missing: "schema", sentence: "gap." }] },
+      ],
+    };
+    wrap(<ProfileDetailPage />);
+    const callout = (await screen.findByText("1 warning on 1 stored policy")).closest('[role="alert"]') as HTMLElement;
+    expect(within(callout).getByText("allow-analysts")).toBeInTheDocument();
+    expect(within(callout).queryByRole("link", { name: "allow-analysts" })).toBeNull();
   });
 });

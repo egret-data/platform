@@ -207,6 +207,37 @@ impl TagRepo {
                 return Err(BiError::BadRequest(pair.refusal()));
             }
         }
+        // **SP4d-4 Task 3 fix round 3 (re-review M-2): the rename's own
+        // overlap snapshot.** A tag policy matches a tag by NAME, so renaming a
+        // tag into a name a hand-written tag mask (or row filter) names can
+        // complete a pair with whatever already decides that column. The
+        // recompile below cannot see it — it reads the assignments under the
+        // new name on both of its sides — so, exactly as
+        // `CatalogTagRepo::assign_catalog` does, the units of every profile
+        // bound to a warehouse carrying this tag are read BEFORE the `UPDATE`,
+        // and the pairs the rename creates are refused after the recompile.
+        let overlaps_before = match renamed_to {
+            Some(_) => {
+                let warehouses: Vec<Uuid> = sqlx::query_scalar(
+                    "SELECT DISTINCT warehouse_id FROM catalog_tag_assignments WHERE tag_id = $1 \
+                     ORDER BY warehouse_id",
+                )
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await?;
+                let mut bound: Vec<i64> = Vec::new();
+                for warehouse_id in warehouses {
+                    bound.extend(
+                        egret_catalog_registry::services_bound_to_warehouse(&mut *tx, warehouse_id)
+                            .await?,
+                    );
+                }
+                bound.sort_unstable();
+                bound.dedup();
+                Some(egret_perm_compile::overlap::unit_snapshot_via(&mut tx, &bound).await?)
+            }
+            None => None,
+        };
         let affected = sqlx::query(
             "UPDATE tags SET \
                 name = COALESCE($2, name), \
@@ -226,6 +257,9 @@ impl TagRepo {
         }
         if renamed_to.is_some() {
             Self::recompile_for_rename_in_tx(&mut tx, id, &key).await?;
+        }
+        if let Some(before) = &overlaps_before {
+            egret_perm_compile::overlap::refuse_created_overlaps_via(&mut tx, before).await?;
         }
         tx.commit().await?;
         self.get(id).await

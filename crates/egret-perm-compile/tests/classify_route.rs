@@ -623,3 +623,216 @@ async fn a_migrated_original_is_reported_as_migrated_not_as_switched_off() {
     assert_eq!(h["migrated"], Value::Null, "{h}");
     assert_refused_with(h, &["switched off", "Switch it on first"]);
 }
+
+// ── SP4d-4 Task 11 (B1): stored rows that stop above the leaf are FLAGGED ───
+
+/// An access policy for `accesses` that stops at `table` (no `column` key).
+fn table_stopping_policy(catalog: &str, accesses: &[&str]) -> Value {
+    let mut p = access_policy(catalog, accesses);
+    p["resources"].as_object_mut().unwrap().remove("column");
+    p
+}
+
+fn warnings_of(p: &Value) -> Vec<Value> {
+    p["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings array in {p}"))
+        .clone()
+}
+
+async fn profile_warnings(f: &Fixture, service_id: i64) -> (StatusCode, Value) {
+    let request = HttpRequest::builder()
+        .method("GET")
+        .uri(format!("/perm/policies/services/{service_id}/warnings"))
+        .header("Cookie", format!("egret_session={}", f.token))
+        .body(Body::empty())
+        .unwrap();
+    let resp = f.app.clone().oneshot(request).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn select_above_column_is_warned_and_insert_above_column_is_not() {
+    let Some(f) = setup().await else { return };
+    let cat = f.served_catalog.clone();
+    let reads = insert(
+        &f,
+        f.trino_id,
+        "t11-select",
+        "operator",
+        true,
+        table_stopping_policy(&cat, &["select"]),
+    )
+    .await;
+    // `all` implies `select` on Trino (read from the service-def).
+    let all = insert(
+        &f,
+        f.trino_id,
+        "t11-all",
+        "operator",
+        true,
+        table_stopping_policy(&cat, &["all"]),
+    )
+    .await;
+    // The control: the same shape granting only `insert` reads no column anyway.
+    let writes = insert(
+        &f,
+        f.trino_id,
+        "t11-insert",
+        "operator",
+        true,
+        table_stopping_policy(&cat, &["insert"]),
+    )
+    .await;
+    // The control: the full chain is not above the column.
+    let full = insert(
+        &f,
+        f.trino_id,
+        "t11-full",
+        "operator",
+        true,
+        access_policy(&cat, &["select"]),
+    )
+    .await;
+    // A compiler-owned row is not examined.
+    let compiled = insert(
+        &f,
+        f.trino_id,
+        "t11-compiled",
+        "compiler",
+        true,
+        table_stopping_policy(&cat, &["select"]),
+    )
+    .await;
+
+    let (status, body) = classify(&f, f.trino_id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for id in [reads, all] {
+        let w = warnings_of(by_id(&body, id));
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w[0]["kind"], "select_stops_above_column");
+        assert_eq!(w[0]["level"], "table");
+        let sentence = w[0]["sentence"].as_str().unwrap();
+        assert!(
+            sentence.contains("lets nobody read a column")
+                && sentence.contains("EARLIER")
+                && sentence.contains("not the more specific one")
+                && sentence.contains("2026-10-11-sp4d-4-task1-levels-result.md"),
+            "{sentence}"
+        );
+    }
+    for id in [writes, full, compiled] {
+        assert!(warnings_of(by_id(&body, id)).is_empty(), "id {id}: {body}");
+    }
+
+    // The profile-level list counts exactly the two warned policies.
+    let (status, w) = profile_warnings(&f, f.trino_id).await;
+    assert_eq!(status, StatusCode::OK, "{w}");
+    let warned: Vec<i64> = w["policies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| [reads, all].contains(&p["id"].as_i64().unwrap()))
+        .map(|p| p["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(warned, vec![reads, all], "{w}");
+    assert!(w["warningCount"].as_u64().unwrap() >= 2, "{w}");
+}
+
+#[tokio::test]
+async fn a_stored_gap_row_is_warned() {
+    let Some(f) = setup().await else { return };
+    let cat = f.served_catalog.clone();
+    let mut gap = access_policy(&cat, &["select"]);
+    gap["resources"].as_object_mut().unwrap().remove("schema");
+    let id = insert(&f, f.trino_id, "t11-gap", "operator", true, gap).await;
+
+    let (status, body) = classify(&f, f.trino_id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let w = warnings_of(by_id(&body, id));
+    assert_eq!(
+        w.len(),
+        1,
+        "one gap, one warning (not also a stop-above warning): {w:?}"
+    );
+    assert_eq!(w[0]["kind"], "level_gap");
+    assert_eq!(w[0]["missing"], "schema");
+    assert!(w[0]["sentence"]
+        .as_str()
+        .unwrap()
+        .contains("decides nothing"));
+}
+
+#[tokio::test]
+async fn an_existing_row_is_never_rewritten() {
+    let Some(f) = setup().await else { return };
+    let cat = f.served_catalog.clone();
+    let id = insert(
+        &f,
+        f.trino_id,
+        "t11-readonly",
+        "operator",
+        true,
+        table_stopping_policy(&cat, &["select"]),
+    )
+    .await;
+    let read = |f: &Fixture| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_as::<_, (Value, i64)>(
+                "SELECT policy_jsonb, version FROM policy.authz_policies WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read row")
+        }
+    };
+    let before = read(&f).await;
+    let (status, body) = classify(&f, f.trino_id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(warnings_of(by_id(&body, id)).len(), 1);
+    let (status, _) = profile_warnings(&f, f.trino_id).await;
+    assert_eq!(status, StatusCode::OK);
+    let after = read(&f).await;
+    // `Value ==` is order-independent; never compare through `to_string()`.
+    assert_eq!(before, after, "classifying must not write the row");
+    assert!(after.0["resources"].get("column").is_none());
+}
+
+#[tokio::test]
+async fn the_missing_level_blocker_states_the_measured_fact() {
+    let Some(f) = setup().await else { return };
+    let cat = f.served_catalog.clone();
+    let id = insert(
+        &f,
+        f.trino_id,
+        "t11-sentence",
+        "operator",
+        true,
+        table_stopping_policy(&cat, &["select"]),
+    )
+    .await;
+    let (_, body) = classify(&f, f.trino_id).await;
+    let p = by_id(&body, id);
+    assert_refused_with(
+        p,
+        &[
+            "stops above `column`",
+            "does not apply it to `column`-level requests",
+            "policy's warnings",
+            "EARLIER",
+        ],
+    );
+    assert!(
+        blockers(p)
+            .iter()
+            .all(|b| !b.contains("how most editor-saved policies look")),
+        "the old claim is gone: {p}"
+    );
+}

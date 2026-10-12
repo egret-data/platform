@@ -595,6 +595,39 @@ async fn admin_gets_trino_config_for_profile() {
                 .as_str()
                 .unwrap()
                 .contains("ranger.plugin.trino.policy.rest.url")));
+    // The whole response, byte for byte (profile name normalised to `SVC`).
+    let content = |name: &str| {
+        files
+            .iter()
+            .find(|file| file["name"] == name)
+            .and_then(|file| file["content"].as_str())
+            .unwrap_or_default()
+            .replace(&svc_name, "SVC")
+    };
+    let (props, xml) = (
+        content("access-control.properties"),
+        content("ranger-trino-security.xml"),
+    );
+    assert_eq!(
+        props,
+        include_str!("golden/trino-config.access-control.properties")
+    );
+    assert_eq!(
+        xml,
+        include_str!("golden/trino-config.ranger-trino-security.xml")
+    );
+    // What changed against the response captured BEFORE the route moved onto the
+    // shared renderer (`golden/pre-sp4d4-*`): every property the old file set is
+    // still set, and the old file's keys are a subset of the new one's.
+    let old_xml = include_str!("golden/pre-sp4d4-trino-config.ranger-trino-security.xml");
+    for name in old_xml.split("<name>").skip(1) {
+        let key = name.split("</name>").next().unwrap();
+        assert!(xml.contains(&format!("<name>{key}</name>")), "lost {key}");
+    }
+    assert_ne!(
+        props,
+        include_str!("golden/pre-sp4d4-trino-config.access-control.properties")
+    );
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 
@@ -1575,8 +1608,9 @@ async fn a_second_row_filter_on_one_table_is_refused_only_when_it_disagrees() {
     let (status, body) = post(filter("rf-id", "orders", "id > 2")).await;
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
-        "a disagreeing second filter on one table must be refused; body={body}"
+        StatusCode::CONFLICT,
+        "a disagreeing second filter on one table must be refused with 409 (SP4d-4 \
+         Part A: the body is well-formed, it conflicts with a stored policy); body={body}"
     );
     let msg = body["error"]
         .as_str()
@@ -1591,13 +1625,18 @@ async fn a_second_row_filter_on_one_table_is_refused_only_when_it_disagrees() {
         msg.contains("\"rf-id\""),
         "the refusal must name the policy being written: {body}"
     );
+    assert!(
+        msg.contains("or set Override on the one that should win"),
+        "the editor's refusal must offer Override, the remedy only a hand-written \
+         policy has: {body}"
+    );
 
     // ⚠ **A PUT must not pair the new body against the row it REPLACES.**
     // `rf-other` is the ONLY filter on `invoices`, so changing its expression
     // is one policy changing and nothing else is in its band — the only thing
     // that can tie with it is its own stored version. Without
-    // `refuse_ambiguous_arbitration`'s `replacing` argument this 400s, and
-    // every retry 400s the same way, so the steward can never edit a row
+    // `refuse_ambiguous_arbitration`'s `replacing` argument this 409s, and
+    // every retry 409s the same way, so the steward can never edit a row
     // filter's expression again. Deliberately done on `invoices` and not on
     // `orders`: editing `rf-us` while `rf-us-again` still carries the old
     // expression really WOULD create a new disagreeing pair, so that version
@@ -1630,6 +1669,124 @@ async fn a_second_row_filter_on_one_table_is_refused_only_when_it_disagrees() {
     assert!(
         stored.to_string().contains("id > 7"),
         "the PUT must have replaced the expression; body={stored}"
+    );
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// **SP4d-4 Task 2 review I2: the editor refuses only a pair the write
+/// CREATES.** Part A promises that "the writes that remove the pair still
+/// succeed — deleting or narrowing one rule". With the editor refusing ANY pair
+/// in the profile, two stored pairs deadlocked it: narrowing a member of one
+/// was refused on the other.
+///
+/// The two stored pairs are built the one way a route can still build them —
+/// create the second half DISABLED (a disabled policy is in no band), then
+/// re-enable it through the deliberately unguarded `PUT …/enabled`.
+///
+/// ⚠ Refusal controls in the same test: a NEW policy overlapping a stored pair
+/// is still refused, and so is moving the narrowed policy back onto its old
+/// partner (the pair is new again, because it no longer exists in BEFORE).
+#[tokio::test]
+async fn narrowing_one_stored_pair_succeeds_while_another_pair_is_stored() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ambigpairs", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let filter = |name: &str, table: &str, expr: &str, enabled: bool| {
+        serde_json::json!({
+            "kind": "rowfilter", "name": name, "service": svc_name, "isEnabled": enabled,
+            "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                          "table": {"values": [table]}},
+            "items": [{"groups": ["public"], "filterExpr": expr}]
+        })
+    };
+    let send = |method: &'static str, uri: String, body: serde_json::Value| {
+        let app = f.app_empty();
+        let token = token.clone();
+        async move {
+            into_json(
+                app.oneshot(req(method, &uri, &token, Some(body)))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        }
+    };
+
+    // Two stored differing pairs: (pa, pb) on t1 and (pc, pd) on t2.
+    let mut ids = std::collections::BTreeMap::new();
+    for (name, table, expr) in [
+        ("pa", "t1", "x = 1"),
+        ("pb", "t1", "x = 2"),
+        ("pc", "t2", "y = 1"),
+        ("pd", "t2", "y = 2"),
+    ] {
+        let (status, body) =
+            send("POST", "/policies".into(), filter(name, table, expr, false)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "create {name} disabled; body={body}"
+        );
+        ids.insert(name, body["id"].as_i64().expect("id"));
+    }
+    for name in ["pa", "pb", "pc", "pd"] {
+        let (status, body) = send(
+            "PUT",
+            format!("/policies/{}/enabled", ids[name]),
+            serde_json::json!({"enabled": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "enable {name}; body={body}");
+    }
+
+    // The write that REMOVES (pa, pb): narrow pa onto t3. Before the fix this
+    // was refused on the unrelated (pc, pd).
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{}", ids["pa"]),
+        filter("pa", "t3", "x = 1", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "narrowing one member of a stored pair must succeed while another stored pair \
+         exists; body={body}"
+    );
+
+    // Refusal control 1: a NEW policy overlapping the stored (pc, pd).
+    let (status, body) = send(
+        "POST",
+        "/policies".into(),
+        filter("pe", "t2", "y = 9", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a new overlapping policy must still be refused; body={body}"
+    );
+    let msg = body.to_string();
+    assert!(
+        msg.contains("\\\"pe\\\"") && msg.contains("or set Override on the one that should win"),
+        "the refusal must name the policy being written and offer Override: {body}"
+    );
+
+    // Refusal control 2: moving pa back onto t1 re-creates (pa, pb).
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{}", ids["pa"]),
+        filter("pa", "t1", "x = 1", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "re-creating a removed pair must be refused; body={body}"
     );
 
     f.store.delete_service(svc_id).await.expect("cleanup");
@@ -2334,9 +2491,15 @@ async fn editing_a_tag_policy_runs_the_same_refusals_as_creating_one() {
     .await;
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
+        StatusCode::CONFLICT,
         "an EDIT onto a tag another mask already selects, with different items, must be \
-         refused; body={body}"
+         refused with 409 (SP4d-4 Part A); body={body}"
+    );
+    assert!(
+        body.to_string()
+            .contains("or set Override on the one that should win"),
+        "the refusal must be the arbitration guard's, carrying the editor's Override \
+         remedy; body={body}"
     );
 
     // ── ACCEPT control, and the one that proves `replacing: Some(id)` is
@@ -2522,12 +2685,14 @@ async fn put_policies_refuses_a_service_that_is_not_the_policys_own() {
 
 /// A human `POST`/`PUT` of an infrastructure name whose body ALSO trips the
 /// ambiguous-arbitration guard must answer 409 `InfrastructureOwned`, not the
-/// guard's 400: the store's own refusal sits inside `create_policy`/
+/// guard's refusal: the store's own refusal sits inside `create_policy`/
 /// `update_policy`, after the guards, so the route needs the pre-flights.
-/// Controls: the same disagreeing body under an ordinary name IS the 400 (so
-/// the guard is genuinely armed and the 409 is not a vacuous pass).
+/// Controls: the same disagreeing body under an ordinary name IS the guard's
+/// refusal (so the guard is genuinely armed and the infra 409 is not a
+/// vacuous pass). Since SP4d-4 the guard answers 409 too, so the two are told
+/// apart by their messages, which both arms assert.
 #[tokio::test]
-async fn an_infra_name_is_refused_with_409_before_the_authoring_guards_can_say_400() {
+async fn an_infra_name_is_refused_with_409_before_the_arbitration_guard() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
@@ -2581,9 +2746,16 @@ async fn an_infra_name_is_refused_with_409_before_the_authoring_guards_can_say_4
     let b_id = body["id"].as_i64().expect("id");
     let rows = count().await;
 
-    // Control: an ordinary name with the disagreeing body is the guard's 400.
+    // Control: an ordinary name with the disagreeing body is the guard's 409.
+    // Since SP4d-4 both refusals are 409, so the status alone no longer tells
+    // them apart — the guard's own remedy does.
     let (status, body) = send("POST", "/policies".into(), filter("rf-id", "id > 2")).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "armed guard; body={body}");
+    assert_eq!(status, StatusCode::CONFLICT, "armed guard; body={body}");
+    assert!(
+        body.to_string()
+            .contains("or set Override on the one that should win"),
+        "the control must be the arbitration guard's refusal: {body}"
+    );
 
     // POST: infra names + a guard-tripping body -> 409, nothing created.
     for name in ["egret-query-timeout", "all - catalog, schema, table"] {
@@ -2593,6 +2765,10 @@ async fn an_infra_name_is_refused_with_409_before_the_authoring_guards_can_say_4
             body.to_string()
                 .contains("reserved for egret's own plumbing"),
             "{name}: must carry the InfrastructureOwned message: {body}"
+        );
+        assert!(
+            !body.to_string().contains("set Override"),
+            "{name}: must be the infra refusal, not the arbitration guard's: {body}"
         );
     }
     assert_eq!(count().await, rows, "no row created");
@@ -2740,5 +2916,1008 @@ async fn the_policy_list_carries_each_rows_owner() {
             ("sales can read".to_string(), "operator".to_string()),
         ]
     );
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+// ---------------------------------------------------------------------------
+// SP4d-4 Task 3 — the editor's half, widened to the evaluation unit.
+// ---------------------------------------------------------------------------
+
+/// N3: `PUT /policies/{id}` with `isEnabled: true` is a guarded write, unlike
+/// `PUT …/enabled` — a re-enable through it that completes a differing pair is
+/// refused, and one that completes an AGREEING tie is not.
+#[tokio::test]
+async fn re_enabling_through_put_policies_that_completes_a_pair_is_409() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t3reenable", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let filter = |name: &str, expr: &str, enabled: bool| {
+        serde_json::json!({
+            "kind": "rowfilter", "name": name, "service": svc_name, "isEnabled": enabled,
+            "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                          "table": {"values": ["t1"]}},
+            "items": [{"groups": ["public"], "filterExpr": expr}]
+        })
+    };
+    let send = |method: &'static str, uri: String, body: serde_json::Value| {
+        let app = f.app_empty();
+        let token = token.clone();
+        async move {
+            into_json(
+                app.oneshot(req(method, &uri, &token, Some(body)))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        }
+    };
+    let (status, body) = send("POST", "/policies".into(), filter("ra", "x = 1", false)).await;
+    assert_eq!(status, StatusCode::OK, "ra disabled; body={body}");
+    let ra = body["id"].as_i64().expect("id");
+    let (status, body) = send("POST", "/policies".into(), filter("rb", "x = 2", true)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "rb, nothing enabled to pair with; body={body}"
+    );
+
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{ra}"),
+        filter("ra", "x = 1", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "re-enabling ra through PUT /policies/{{id}} completes (ra, rb); body={body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(msg.contains("\"ra\"") && msg.contains("\"rb\""), "{msg}");
+    // Accept-control: the same re-enable with an AGREEING expression.
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{ra}"),
+        filter("ra", "x = 2", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an agreeing tie is admitted; body={body}"
+    );
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// The pair identity carries both decisive arrays and the coordinate: an edit
+/// that keeps its stored partner but changes WHAT it decides, or WHERE the two
+/// meet, is a different pair and is refused; an edit that touches neither, or
+/// that removes the pair, passes.
+#[tokio::test]
+async fn an_edit_that_keeps_its_partner_but_changes_the_pair_is_409() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t3partner", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let filter = |name: &str, table: &str, expr: &str, enabled: bool| {
+        serde_json::json!({
+            "kind": "rowfilter", "name": name, "service": svc_name, "isEnabled": enabled,
+            "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                          "table": {"values": [table]}},
+            "items": [{"groups": ["public"], "filterExpr": expr}]
+        })
+    };
+    let send = |method: &'static str, uri: String, body: serde_json::Value| {
+        let app = f.app_empty();
+        let token = token.clone();
+        async move {
+            into_json(
+                app.oneshot(req(method, &uri, &token, Some(body)))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        }
+    };
+    // A stored differing pair (pa, pb) on t1, built through the unguarded
+    // `PUT …/enabled`.
+    let mut ids = std::collections::BTreeMap::new();
+    for (name, expr) in [("pa", "x = 1"), ("pb", "x = 2")] {
+        let (status, body) =
+            send("POST", "/policies".into(), filter(name, "t1", expr, false)).await;
+        assert_eq!(status, StatusCode::OK, "create {name}; body={body}");
+        ids.insert(name, body["id"].as_i64().expect("id"));
+    }
+    for name in ["pa", "pb"] {
+        let (status, body) = send(
+            "PUT",
+            format!("/policies/{}/enabled", ids[name]),
+            serde_json::json!({"enabled": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "enable {name}; body={body}");
+    }
+
+    // Control: an edit that changes neither side's decision nor the coordinate.
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{}", ids["pa"]),
+        filter("pa", "t1", "x = 1", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unchanged pair is not new; body={body}"
+    );
+
+    // Cell 1: same partner, different decisive items.
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{}", ids["pa"]),
+        filter("pa", "t1", "x = 3", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "changing what pa decides while it still meets pb is a new pair; body={body}"
+    );
+
+    // Cell 2: same partner, different coordinate.
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{}", ids["pa"]),
+        filter("pa", "t*", "x = 1", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "moving where pa meets pb is a new pair; body={body}"
+    );
+
+    // The write that REMOVES the pair still passes.
+    let (status, body) = send(
+        "PUT",
+        format!("/policies/{}", ids["pa"]),
+        filter("pa", "t3", "x = 3", true),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "removing the pair passes; body={body}"
+    );
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// A Trino profile with a tag service, one engine bound to it, and one registry
+/// catalog (named `catalog`) attached — the shape `catalogs_for_service_via`
+/// resolves tag assignments through. Returns `(profile name, profile id, tag
+/// service id, warehouse id, catalog name)`.
+async fn trino_unit(f: &Fixture, label: &str) -> (String, i64, i64, Uuid, String) {
+    egret_policy::seed_trino(&f.store)
+        .await
+        .expect("seed trino");
+    egret_policy::seed_tag(&f.store).await.expect("seed tag");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tag_svc_name = format!("{label}tag-{suffix}");
+    let tag_svc = f
+        .store
+        .create_service(&tag_svc_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("tag service");
+    let trino_name = format!("{label}trino-{suffix}");
+    let trino = f
+        .store
+        .create_service(
+            &trino_name,
+            "trino",
+            &serde_json::json!({ "tagService": tag_svc_name }),
+        )
+        .await
+        .expect("trino profile");
+    let pool = &f.db.pool;
+    let ws: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,'T3 WS') RETURNING id")
+            .bind(format!("{label}-ws-{suffix}"))
+            .fetch_one(pool)
+            .await
+            .expect("workspace");
+    let sc: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','egret-t3','AKIATEST') RETURNING id",
+    )
+    .bind(format!("{label}-sc-{suffix}"))
+    .fetch_one(pool)
+    .await
+    .expect("storage connection");
+    let wh: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(format!("{label}_wh_{suffix}"))
+    .bind(ws)
+    .bind(sc)
+    .fetch_one(pool)
+    .await
+    .expect("warehouse");
+    let engine: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
+    )
+    .bind(format!("{label}-eng-{suffix}"))
+    .bind(trino.id)
+    .fetch_one(pool)
+    .await
+    .expect("engine");
+    let catalog = format!("{label}_cat_{}", &suffix[..12]);
+    let catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+         RETURNING id",
+    )
+    .bind(&catalog)
+    .bind(wh)
+    .fetch_one(pool)
+    .await
+    .expect("catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine)
+    .bind(catalog_id)
+    .execute(pool)
+    .await
+    .expect("attach");
+    (trino_name, trino.id, tag_svc.id, wh, catalog)
+}
+
+async fn new_tag_on(f: &Fixture, wh: Uuid, label: &str, columns: &[&str]) -> String {
+    let name = format!("{label}-{}", Uuid::new_v4().simple());
+    let id: Uuid = sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+        .bind(name.to_lowercase())
+        .bind(&name)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("tag");
+    for column in columns {
+        sqlx::query(
+            "INSERT INTO catalog_tag_assignments \
+                 (tag_id, warehouse_id, schema_name, table_name, column_name) \
+             VALUES ($1, $2, 'sales', 'orders', $3)",
+        )
+        .bind(id)
+        .bind(wh)
+        .bind(column)
+        .execute(&f.db.pool)
+        .await
+        .expect("assignment");
+    }
+    name
+}
+
+/// User ruling (SP4d-4 Task 3): hand-written TAG policies on a manual profile
+/// were treated as never overlapping, but a column carrying both tags is
+/// decided by both. The editor now refuses the write that forms such a pair
+/// given the current assignments — tag ↔ tag and tag ↔ path — and admits a tag
+/// policy whose tag shares no column with the other.
+#[tokio::test]
+async fn hand_written_tag_masks_meeting_on_a_tagged_column_are_409() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t3tags", true).await;
+    let (trino, trino_id, tag_svc, wh, catalog) = trino_unit(&f, "t3h").await;
+    let pii = new_tag_on(&f, wh, "PII", &["email"]).await;
+    let gdpr = new_tag_on(&f, wh, "GDPR", &["email"]).await;
+    let phone = new_tag_on(&f, wh, "PHONE", &["phone"]).await;
+    let send = |body: serde_json::Value| {
+        let app = f.app_empty();
+        let token = token.clone();
+        async move {
+            into_json(
+                app.oneshot(req("POST", "/policies", &token, Some(body)))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        }
+    };
+    let tag_mask = |name: &str, tag: &str, mask: &str| {
+        serde_json::json!({
+            "kind": "tag-masking", "name": name, "service": trino, "tag": tag,
+            "isEnabled": true, "items": [{"groups": ["public"], "maskType": mask}]
+        })
+    };
+
+    let (status, body) = send(tag_mask("tm-pii", &pii, "MASK")).await;
+    assert_eq!(status, StatusCode::OK, "the first tag mask; body={body}");
+    // Accept-control: a tag on another column only.
+    let (status, body) = send(tag_mask("tm-phone", &phone, "MASK_HASH")).await;
+    assert_eq!(status, StatusCode::OK, "no shared column; body={body}");
+
+    // Tag ↔ tag: `email` carries both PII and GDPR.
+    let (status, body) = send(tag_mask("tm-gdpr", &gdpr, "MASK_NULL")).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "tag ↔ tag on email; body={body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("\"tm-gdpr\"")
+            && msg.contains("\"tm-pii\"")
+            && msg.contains(&format!("{catalog}.sales.orders.email")),
+        "names both policies and the column: {msg}"
+    );
+    assert_eq!(
+        f.store
+            .enabled_policies_for_service(tag_svc)
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "the refused tag mask was not stored"
+    );
+
+    // Tag ↔ path: a hand-written resource mask on the tagged column.
+    let path = serde_json::json!({
+        "kind": "masking", "name": "pm-email", "service": trino, "isEnabled": true,
+        "resources": {"catalog": {"values": [catalog]}, "schema": {"values": ["sales"]},
+                      "table": {"values": ["orders"]}, "column": {"values": ["email"]}},
+        "items": [{"groups": ["public"], "maskType": "MASK_NULL"}]
+    });
+    let (status, body) = send(path).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "tag ↔ path on email; body={body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("\"tm-pii\"") && msg.contains("\"pm-email\"") && msg.contains("tag phase"),
+        "{msg}"
+    );
+    // Accept-control: the same resource mask on an untagged column.
+    let untagged = serde_json::json!({
+        "kind": "masking", "name": "pm-sku", "service": trino, "isEnabled": true,
+        "resources": {"catalog": {"values": [catalog]}, "schema": {"values": ["sales"]},
+                      "table": {"values": ["orders"]}, "column": {"values": ["sku"]}},
+        "items": [{"groups": ["public"], "maskType": "MASK_NULL"}]
+    });
+    let (status, body) = send(untagged).await;
+    assert_eq!(status, StatusCode::OK, "an untagged column; body={body}");
+
+    f.store.delete_service(trino_id).await.expect("cleanup");
+    f.store.delete_service(tag_svc).await.expect("cleanup");
+}
+
+/// SP4d-4 Task 3 fix round 1, review I1: the editor's overlap check and its
+/// write are ONE transaction under the unit's service row locks. Two editor
+/// writes that would form a differing pair on one column, both started while a
+/// second connection holds the unit's rows (a profile and its tag service —
+/// what a recompile or a tag assignment holds), must not both commit: once the
+/// holder lets go, exactly one is stored and the other answers 409.
+///
+/// Before the fix each request checked on a pooled connection with no lock,
+/// then parked on the row at its INSERT, so both checks passed and both
+/// committed. Driven without a sleep for synchronisation: the holder's pid is
+/// polled in `pg_blocking_pids` until BOTH requests are parked behind it
+/// (directly or behind the other).
+#[tokio::test]
+async fn two_concurrent_editor_writes_forming_a_pair_store_exactly_one() {
+    use sqlx::Connection as _;
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let dsn = egret_test_db::url().await.expect("dsn");
+    let token = session_for(&f, "t3race", true).await;
+    egret_policy::seed_trino(&f.store)
+        .await
+        .expect("seed trino");
+    egret_policy::seed_tag(&f.store).await.expect("seed tag");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tag_name = format!("t3race-tag-{suffix}");
+    let tag_svc = f
+        .store
+        .create_service(&tag_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("tag service");
+    let trino_name = format!("t3race-trino-{suffix}");
+    let trino = f
+        .store
+        .create_service(
+            &trino_name,
+            "trino",
+            &serde_json::json!({ "tagService": tag_name }),
+        )
+        .await
+        .expect("trino profile");
+
+    let mut holder = sqlx::PgConnection::connect(&dsn).await.expect("holder");
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut holder)
+        .await
+        .expect("holder pid");
+    sqlx::query("BEGIN").execute(&mut holder).await.unwrap();
+    let mut held = [tag_svc.id, trino.id];
+    held.sort_unstable();
+    for id in held {
+        sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .execute(&mut holder)
+            .await
+            .expect("hold the unit's rows");
+    }
+
+    let write = |name: &str, mask: &str| {
+        let app = f.app_empty();
+        let token = token.clone();
+        let body = serde_json::json!({
+            "kind": "masking", "name": name, "service": trino_name, "isEnabled": true,
+            "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                          "table": {"values": ["t"]}, "column": {"values": ["email"]}},
+            "items": [{"groups": ["public"], "maskType": mask}]
+        });
+        tokio::spawn(async move {
+            into_json(
+                app.oneshot(req("POST", "/policies", &token, Some(body)))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        })
+    };
+    let a = write("race-a", "MASK");
+    let b = write("race-b", "MASK_NULL");
+
+    let mut parked = 0_i64;
+    for _ in 0..400 {
+        // Transitively: the second waiter on a row queues behind the FIRST
+        // waiter's tuple lock, so `pg_blocking_pids` names that waiter, not
+        // the holder.
+        parked = sqlx::query_scalar(
+            "WITH RECURSIVE w(pid) AS ( \
+                 SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) \
+                 UNION \
+                 SELECT a.pid FROM pg_stat_activity a JOIN w ON w.pid = ANY(pg_blocking_pids(a.pid)) \
+             ) SELECT count(*) FROM w",
+        )
+        .bind(holder_pid)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("read pg_blocking_pids");
+        if parked >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        parked >= 2,
+        "both writes must park on the held rows: {parked}"
+    );
+    sqlx::query("COMMIT").execute(&mut holder).await.unwrap();
+
+    let (sa, ba) = a.await.expect("a");
+    let (sb, bb) = b.await.expect("b");
+    let mut statuses = [sa, sb];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::CONFLICT],
+        "exactly one stored: a={sa} {ba}; b={sb} {bb}"
+    );
+    let stored: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM policy.authz_policies WHERE service_id = $1")
+            .bind(trino.id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("count");
+    assert_eq!(stored, 1, "one policy in the profile");
+    let refused = if sa == StatusCode::CONFLICT { &ba } else { &bb };
+    // M1: the editor's 409 carries the same structured fields as the perm
+    // routes; both members are hand-written, so neither has a rule id.
+    assert_eq!(refused["code"], "rule_overlap", "{refused}");
+    assert_eq!(refused["kind"], "mask", "{refused}");
+    assert!(refused["coordinate"].is_string(), "{refused}");
+    let members = refused["rules"].as_array().expect("rules");
+    let mut names: Vec<&str> = members.iter().filter_map(|m| m["name"].as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["race-a", "race-b"], "{refused}");
+    assert!(members.iter().all(|m| m["id"].is_null()), "{refused}");
+
+    f.store.delete_service(trino.id).await.expect("cleanup");
+    f.store.delete_service(tag_svc.id).await.expect("cleanup");
+}
+
+// ── SP4d-4 Task 11 (B1): the editor's absent levels ──────────────────────────
+//
+// Measured on the real Ranger jars (docs/en/plans/2026-10-11-sp4d-4-task1-
+// levels-result.md): a policy that stops above `column` is denied `select` at
+// column depth on both engines. An emptied level is therefore saved as `*`;
+// an emptied CATALOG is refused; a level the form removed ("— none —") stays
+// absent; a gap is refused. Every test below runs against the per-process
+// test database and deletes its own service.
+
+fn level(values: &[&str]) -> serde_json::Value {
+    serde_json::json!({ "values": values, "isExcludes": false, "isRecursive": false })
+}
+
+async fn post_policy(
+    f: &Fixture,
+    token: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    into_json(
+        f.app_empty()
+            .oneshot(req("POST", "/policies", token, Some(body)))
+            .await
+            .unwrap(),
+    )
+    .await
+}
+
+async fn stored_policy_count(f: &Fixture, service_id: i64) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM policy.authz_policies WHERE service_id = $1")
+        .bind(service_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count")
+}
+
+#[tokio::test]
+async fn an_editor_body_with_a_level_gap_is_refused() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11gap", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    // `column` is named but `schema` and `table` are absent: Ranger decides
+    // nothing for it (Task 1, `gap`).
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "gap", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"]), "column": level(&["email"])},
+            "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let msg = body["error"]
+        .as_str()
+        .or(body["message"].as_str())
+        .unwrap_or_default();
+    assert!(
+        msg.contains("`column`") && msg.contains("`schema`"),
+        "the refusal must name the named level and the missing one: {body}"
+    );
+    assert_eq!(stored_policy_count(&f, svc_id).await, 0, "nothing stored");
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// A Ranger-shaped body (`policyItems`, `dataMaskPolicyItems`,
+/// `rowFilterPolicyItems`) on the editor-form endpoint used to answer 200 and
+/// store a policy with EMPTY items. It is now a 400 that names the keys.
+#[tokio::test]
+async fn a_ranger_shaped_body_is_refused_naming_the_keys_and_stores_nothing() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11ranger", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "ranger-shaped", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"])},
+            "policyItems": [{"users": ["alice"], "accesses": [{"type": "select", "isAllowed": true}]}],
+            "dataMaskPolicyItems": [], "rowFilterPolicyItems": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let msg = body["error"]
+        .as_str()
+        .or(body["message"].as_str())
+        .unwrap_or_default();
+    for key in ["policyItems", "dataMaskPolicyItems", "rowFilterPolicyItems"] {
+        assert!(msg.contains(key), "the refusal names `{key}`: {body}");
+    }
+    assert!(
+        msg.contains("items"),
+        "and points at the form's `items`: {body}"
+    );
+    assert_eq!(stored_policy_count(&f, svc_id).await, 0, "nothing stored");
+
+    // The editor form itself is untouched.
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "form-shaped", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"])},
+            "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(stored_policy_count(&f, svc_id).await, 1);
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// The PUT half: a Ranger-shaped body used to replace the stored policy with
+/// one that has no items. It is a 400 naming the key, and the row is unchanged.
+#[tokio::test]
+async fn a_ranger_shaped_put_is_refused_and_the_stored_items_survive() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11rangerput", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let form = serde_json::json!({
+        "name": "put-target", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": level(&["c"])},
+        "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+    });
+    let (status, body) = post_policy(&f, &token, form.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = body["id"].as_i64().expect("id");
+    let stored = |f: &Fixture| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT policy_jsonb FROM policy.authz_policies WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the stored body")
+        }
+    };
+    let before = stored(&f).await;
+    assert!(
+        !before["policyItems"].as_array().expect("items").is_empty(),
+        "the created policy grants something: {before}"
+    );
+
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "PUT",
+                &format!("/policies/{id}"),
+                &token,
+                Some(serde_json::json!({
+                    "name": "put-target", "service": svc_name, "isEnabled": true,
+                    "resources": {"catalog": level(&["c"])},
+                    "policyItems": [{"users": ["bob"], "accesses": [{"type": "select", "isAllowed": true}]}]
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let msg = body["error"]
+        .as_str()
+        .or(body["message"].as_str())
+        .unwrap_or_default();
+    assert!(msg.contains("policyItems"), "names the key: {body}");
+    assert_eq!(stored(&f).await, before, "the stored policy is unchanged");
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn an_empty_catalog_is_refused() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11cat", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "no-catalog", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&[]), "schema": level(&["s"])},
+            "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let msg = body["error"]
+        .as_str()
+        .or(body["message"].as_str())
+        .unwrap_or_default();
+    assert!(
+        msg.contains("name a catalog") && msg.contains("every catalog"),
+        "the refusal must say why `*` is not offered here: {body}"
+    );
+    assert_eq!(stored_policy_count(&f, svc_id).await, 0, "nothing stored");
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn an_empty_non_root_level_is_stored_as_star() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11fill", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "table-all-columns", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"]), "schema": level(&["s"]),
+                          "table": level(&["orders"]), "column": level(&[])},
+            "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["filledLevels"],
+        serde_json::json!(["column"]),
+        "{body}"
+    );
+    let note = body["note"].as_str().unwrap_or_default();
+    assert!(
+        note.contains("broader policy") && !note.contains("more specific one wins"),
+        "the note must say the BROADER policy is evaluated first, never that the specific one wins: {body}"
+    );
+    let stored = f
+        .store
+        .get_policy(body["id"].as_i64().unwrap())
+        .await
+        .expect("get");
+    assert_eq!(
+        stored.policy_jsonb["resources"]["column"],
+        serde_json::json!({"values": ["*"], "isExcludes": false, "isRecursive": false}),
+        "the emptied level is stored as `*`: {}",
+        stored.policy_jsonb
+    );
+    // The named levels are untouched.
+    assert_eq!(
+        stored.policy_jsonb["resources"]["table"],
+        level(&["orders"])
+    );
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn a_truncated_chain_stays_truncated() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11trunc", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    // The form removed `column` ("— none —"): the KEY is absent, which is not
+    // the same as an emptied level.
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "stops-at-table", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"]), "schema": level(&["s"]),
+                          "table": level(&["orders"])},
+            "items": [{"users": ["alice"], "accesses": ["insert"], "effect": "allow"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.get("filledLevels").is_none() && body.get("note").is_none(),
+        "{body}"
+    );
+    let stored = f
+        .store
+        .get_policy(body["id"].as_i64().unwrap())
+        .await
+        .expect("get");
+    assert!(
+        stored.policy_jsonb["resources"].get("column").is_none(),
+        "an absent level stays absent: {}",
+        stored.policy_jsonb
+    );
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// The ordering ruling (user, 2026-10-12). `deny-secret` and the new policy are
+/// both access policies with a deny item (so they share a `hasDeny` band) and
+/// the new one's emptied `column` becomes `*`: its evalOrder drops by 25 and it
+/// is now consulted BEFORE `deny-secret`, which names the column literally.
+#[tokio::test]
+async fn a_fill_that_moves_ahead_of_a_deny_policy_warns_naming_it() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11ord", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    let (status, other) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "deny-secret", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"]), "schema": level(&["s"]),
+                          "table": level(&["orders"]), "column": level(&["secret"])},
+            "items": [{"users": ["bob"], "accesses": ["select"], "effect": "deny"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    assert!(
+        other.get("warnings").is_none(),
+        "no fill, no warning: {other}"
+    );
+
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "orders-all-columns", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"]), "schema": level(&["s"]),
+                          "table": level(&["orders"]), "column": level(&[])},
+            "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"},
+                      {"users": ["carol"], "accesses": ["delete"], "effect": "deny"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let warnings = body["warnings"].as_array().expect("warnings");
+    assert_eq!(warnings.len(), 1, "{body}");
+    let w = &warnings[0];
+    assert_eq!(w["kind"], "evaluation_order_changed", "{body}");
+    assert_eq!(w["policy"], "deny-secret", "{body}");
+    assert_eq!(w["policyId"], other["id"], "{body}");
+    assert_eq!(w["policyKind"], "access", "{body}");
+    let sentence = w["sentence"].as_str().unwrap_or_default();
+    assert!(
+        sentence.contains("\"orders-all-columns\"")
+            && sentence.contains("\"deny-secret\"")
+            && sentence.contains("broader policy")
+            && sentence.contains("not the more specific one"),
+        "the sentence names both policies and states the real direction: {body}"
+    );
+    assert!(
+        body["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("EARLIER"),
+        "the note explains the reorder: {body}"
+    );
+
+    // An UPDATE of the same policy reports the same pair (and does not pair
+    // the new body against the row it replaces).
+    let new_id = body["id"].as_i64().unwrap();
+    let resp = f
+        .app_empty()
+        .oneshot(req(
+            "PUT",
+            &format!("/policies/{new_id}"),
+            &token,
+            Some(serde_json::json!({
+                "name": "orders-all-columns", "service": svc_name, "isEnabled": true,
+                "resources": {"catalog": level(&["c"]), "schema": level(&["s"]),
+                              "table": level(&["orders"]), "column": level(&[])},
+                "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"},
+                          {"users": ["carol"], "accesses": ["delete"], "effect": "deny"}]
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, put) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{put}");
+    assert_eq!(put["warnings"].as_array().map(Vec::len), Some(1), "{put}");
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// The controls for the test above: each is a fill (or not) that moves the
+/// policy ahead of nobody that matters, so no warning is carried.
+#[tokio::test]
+async fn a_fill_that_does_not_reorder_warns_nobody() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11ordctl", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    let body_for = |name: &str, table: &str, column: &[&str], effect: &str, priority: bool| {
+        serde_json::json!({
+            "name": name, "service": svc_name, "isEnabled": true, "isOverride": priority,
+            "resources": {"catalog": level(&["c"]), "schema": level(&["s"]),
+                          "table": level(&[table]), "column": level(column)},
+            "items": [{"users": ["bob"], "accesses": ["select"], "effect": effect},
+                      {"users": ["carol"], "accesses": ["delete"], "effect": "deny"}]
+        })
+    };
+    // Four stored neighbours, each one a reason NOT to warn about the fill below.
+    for (name, table, column, effect, override_band) in [
+        // a different table: the two cannot decide the same request
+        ("other-table", "invoices", vec!["secret"], "allow", false),
+        // a different priority band (Override): Ranger orders bands first
+        ("override-band", "orders", vec!["secret"], "allow", true),
+        // already BROADER than the filled policy (table `*` and column `*`):
+        // it stays ahead of it, so the fill reorders nothing against it
+        ("broader", "*", vec!["*"], "allow", false),
+    ] {
+        let (status, b) = post_policy(
+            &f,
+            &token,
+            body_for(name, table, &column, effect, override_band),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{name}: {b}");
+    }
+    // Allow items only on both sides (no deny, no exception): any order reaches
+    // the same union, so there is nothing to warn about. Needs its own band
+    // (hasDeny false), hence its own policy pair.
+    let allow_only = |name: &str, column: &[&str]| {
+        serde_json::json!({
+            "name": name, "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"]), "schema": level(&["s"]),
+                          "table": level(&["lines"]), "column": level(column)},
+            "items": [{"users": ["bob"], "accesses": ["select"], "effect": "allow"}]
+        })
+    };
+    let (status, b) = post_policy(&f, &token, allow_only("lines-secret", &["secret"])).await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+
+    let (status, b) =
+        post_policy(&f, &token, body_for("filled", "orders", &[], "deny", false)).await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+    assert_eq!(
+        b["filledLevels"],
+        serde_json::json!(["column"]),
+        "the fill happened: {b}"
+    );
+    assert!(
+        b.get("warnings").is_none(),
+        "no stored same-band policy is overtaken by this fill: {b}"
+    );
+
+    let (status, b) = post_policy(&f, &token, allow_only("lines-all", &[])).await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+    assert_eq!(b["filledLevels"], serde_json::json!(["column"]), "{b}");
+    assert!(
+        b.get("warnings").is_none(),
+        "allow-only pairs are order-free: {b}"
+    );
+
     f.store.delete_service(svc_id).await.expect("cleanup");
 }

@@ -40,7 +40,10 @@ import type {
   PodLogsDto,
   QueryDetailDto,
   QueryDto,
+  RangerPluginConfigDto,
+  RegisterExternalEngine,
   SetWorkspacesBody,
+  UpdateExternalEngine,
   WorkspaceEngineDto
 } from '../model';
 
@@ -214,6 +217,11 @@ export type controlPlaneEnginesAssignWorkspaceEngineResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesAssignWorkspaceEngineResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesAssignWorkspaceEngineResponse500 = {
   data: ErrorBody
   status: 500
@@ -222,7 +230,7 @@ export type controlPlaneEnginesAssignWorkspaceEngineResponse500 = {
 export type controlPlaneEnginesAssignWorkspaceEngineResponseSuccess = (controlPlaneEnginesAssignWorkspaceEngineResponse204) & {
   headers: Headers;
 };
-export type controlPlaneEnginesAssignWorkspaceEngineResponseError = (controlPlaneEnginesAssignWorkspaceEngineResponse400 | controlPlaneEnginesAssignWorkspaceEngineResponse401 | controlPlaneEnginesAssignWorkspaceEngineResponse403 | controlPlaneEnginesAssignWorkspaceEngineResponse404 | controlPlaneEnginesAssignWorkspaceEngineResponse500) & {
+export type controlPlaneEnginesAssignWorkspaceEngineResponseError = (controlPlaneEnginesAssignWorkspaceEngineResponse400 | controlPlaneEnginesAssignWorkspaceEngineResponse401 | controlPlaneEnginesAssignWorkspaceEngineResponse403 | controlPlaneEnginesAssignWorkspaceEngineResponse404 | controlPlaneEnginesAssignWorkspaceEngineResponse409 | controlPlaneEnginesAssignWorkspaceEngineResponse500) & {
   headers: Headers;
 };
 
@@ -624,6 +632,114 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getControlPlaneEnginesCreateEngineMutationOptions(options), queryClient);
     }
+    export type controlPlaneEnginesRegisterExternalEngineResponse201 = {
+  data: EngineDto
+  status: 201
+}
+
+export type controlPlaneEnginesRegisterExternalEngineResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneEnginesRegisterExternalEngineResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesRegisterExternalEngineResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesRegisterExternalEngineResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesRegisterExternalEngineResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesRegisterExternalEngineResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesRegisterExternalEngineResponseSuccess = (controlPlaneEnginesRegisterExternalEngineResponse201) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesRegisterExternalEngineResponseError = (controlPlaneEnginesRegisterExternalEngineResponse400 | controlPlaneEnginesRegisterExternalEngineResponse401 | controlPlaneEnginesRegisterExternalEngineResponse403 | controlPlaneEnginesRegisterExternalEngineResponse404 | controlPlaneEnginesRegisterExternalEngineResponse409 | controlPlaneEnginesRegisterExternalEngineResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesRegisterExternalEngineResponse = (controlPlaneEnginesRegisterExternalEngineResponseSuccess | controlPlaneEnginesRegisterExternalEngineResponseError)
+
+export const getControlPlaneEnginesRegisterExternalEngineUrl = () => {
+
+
+
+
+  return `/api/control-plane/engines/external`
+}
+
+export const controlPlaneEnginesRegisterExternalEngine = async (registerExternalEngine: RegisterExternalEngine, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesRegisterExternalEngineResponse> => {
+
+  return customInstance<controlPlaneEnginesRegisterExternalEngineResponse>(getControlPlaneEnginesRegisterExternalEngineUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(registerExternalEngine)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesRegisterExternalEngineMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRegisterExternalEngine>>, TError,{data: RegisterExternalEngine}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRegisterExternalEngine>>, TError,{data: RegisterExternalEngine}, TContext> => {
+
+const mutationKey = ['controlPlaneEnginesRegisterExternalEngine'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesRegisterExternalEngine>>, {data: RegisterExternalEngine}> = (props) => {
+          const {data} = props ?? {};
+
+          return  controlPlaneEnginesRegisterExternalEngine(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneEnginesRegisterExternalEngineMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesRegisterExternalEngine>>>
+    export type ControlPlaneEnginesRegisterExternalEngineMutationBody = RegisterExternalEngine
+    export type ControlPlaneEnginesRegisterExternalEngineMutationError = ErrorBody
+
+    export const useControlPlaneEnginesRegisterExternalEngine = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRegisterExternalEngine>>, TError,{data: RegisterExternalEngine}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneEnginesRegisterExternalEngine>>,
+        TError,
+        {data: RegisterExternalEngine},
+        TContext
+      > => {
+      return useMutation(getControlPlaneEnginesRegisterExternalEngineMutationOptions(options), queryClient);
+    }
     export type controlPlaneEnginesGetEngineResponse200 = {
   data: EngineDetailDto
   status: 200
@@ -999,6 +1115,11 @@ export type controlPlaneEnginesTestCatalogResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesTestCatalogResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesTestCatalogResponse500 = {
   data: ErrorBody
   status: 500
@@ -1012,7 +1133,7 @@ export type controlPlaneEnginesTestCatalogResponse502 = {
 export type controlPlaneEnginesTestCatalogResponseSuccess = (controlPlaneEnginesTestCatalogResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesTestCatalogResponseError = (controlPlaneEnginesTestCatalogResponse401 | controlPlaneEnginesTestCatalogResponse403 | controlPlaneEnginesTestCatalogResponse404 | controlPlaneEnginesTestCatalogResponse500 | controlPlaneEnginesTestCatalogResponse502) & {
+export type controlPlaneEnginesTestCatalogResponseError = (controlPlaneEnginesTestCatalogResponse401 | controlPlaneEnginesTestCatalogResponse403 | controlPlaneEnginesTestCatalogResponse404 | controlPlaneEnginesTestCatalogResponse409 | controlPlaneEnginesTestCatalogResponse500 | controlPlaneEnginesTestCatalogResponse502) & {
   headers: Headers;
 };
 
@@ -1148,6 +1269,11 @@ export type controlPlaneEnginesGetClusterResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesGetClusterResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesGetClusterResponse500 = {
   data: ErrorBody
   status: 500
@@ -1161,7 +1287,7 @@ export type controlPlaneEnginesGetClusterResponse502 = {
 export type controlPlaneEnginesGetClusterResponseSuccess = (controlPlaneEnginesGetClusterResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesGetClusterResponseError = (controlPlaneEnginesGetClusterResponse401 | controlPlaneEnginesGetClusterResponse403 | controlPlaneEnginesGetClusterResponse404 | controlPlaneEnginesGetClusterResponse500 | controlPlaneEnginesGetClusterResponse502) & {
+export type controlPlaneEnginesGetClusterResponseError = (controlPlaneEnginesGetClusterResponse401 | controlPlaneEnginesGetClusterResponse403 | controlPlaneEnginesGetClusterResponse404 | controlPlaneEnginesGetClusterResponse409 | controlPlaneEnginesGetClusterResponse500 | controlPlaneEnginesGetClusterResponse502) & {
   headers: Headers;
 };
 
@@ -1261,7 +1387,122 @@ export function useControlPlaneEnginesGetCluster<TData = Awaited<ReturnType<type
 
 
 
-export type controlPlaneEnginesPodExecResponse101 = {
+export type controlPlaneEnginesUpdateExternalEngineResponse200 = {
+  data: EngineDto
+  status: 200
+}
+
+export type controlPlaneEnginesUpdateExternalEngineResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneEnginesUpdateExternalEngineResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesUpdateExternalEngineResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesUpdateExternalEngineResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesUpdateExternalEngineResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesUpdateExternalEngineResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesUpdateExternalEngineResponseSuccess = (controlPlaneEnginesUpdateExternalEngineResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesUpdateExternalEngineResponseError = (controlPlaneEnginesUpdateExternalEngineResponse400 | controlPlaneEnginesUpdateExternalEngineResponse401 | controlPlaneEnginesUpdateExternalEngineResponse403 | controlPlaneEnginesUpdateExternalEngineResponse404 | controlPlaneEnginesUpdateExternalEngineResponse409 | controlPlaneEnginesUpdateExternalEngineResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesUpdateExternalEngineResponse = (controlPlaneEnginesUpdateExternalEngineResponseSuccess | controlPlaneEnginesUpdateExternalEngineResponseError)
+
+export const getControlPlaneEnginesUpdateExternalEngineUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/external`
+}
+
+/**
+ * @summary `PATCH /api/control-plane/engines/{id}/external`.
+ */
+export const controlPlaneEnginesUpdateExternalEngine = async (id: string,
+    updateExternalEngine: UpdateExternalEngine, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesUpdateExternalEngineResponse> => {
+
+  return customInstance<controlPlaneEnginesUpdateExternalEngineResponse>(getControlPlaneEnginesUpdateExternalEngineUrl(id),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(updateExternalEngine)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesUpdateExternalEngineMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesUpdateExternalEngine>>, TError,{id: string;data: UpdateExternalEngine}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesUpdateExternalEngine>>, TError,{id: string;data: UpdateExternalEngine}, TContext> => {
+
+const mutationKey = ['controlPlaneEnginesUpdateExternalEngine'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesUpdateExternalEngine>>, {id: string;data: UpdateExternalEngine}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  controlPlaneEnginesUpdateExternalEngine(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneEnginesUpdateExternalEngineMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesUpdateExternalEngine>>>
+    export type ControlPlaneEnginesUpdateExternalEngineMutationBody = UpdateExternalEngine
+    export type ControlPlaneEnginesUpdateExternalEngineMutationError = ErrorBody
+
+    /**
+ * @summary `PATCH /api/control-plane/engines/{id}/external`.
+ */
+export const useControlPlaneEnginesUpdateExternalEngine = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesUpdateExternalEngine>>, TError,{id: string;data: UpdateExternalEngine}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneEnginesUpdateExternalEngine>>,
+        TError,
+        {id: string;data: UpdateExternalEngine},
+        TContext
+      > => {
+      return useMutation(getControlPlaneEnginesUpdateExternalEngineMutationOptions(options), queryClient);
+    }
+    export type controlPlaneEnginesPodExecResponse101 = {
   data: void
   status: 101
 }
@@ -1286,13 +1527,18 @@ export type controlPlaneEnginesPodExecResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesPodExecResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesPodExecResponse500 = {
   data: ErrorBody
   status: 500
 }
 
 ;
-export type controlPlaneEnginesPodExecResponseError = (controlPlaneEnginesPodExecResponse101 | controlPlaneEnginesPodExecResponse400 | controlPlaneEnginesPodExecResponse401 | controlPlaneEnginesPodExecResponse403 | controlPlaneEnginesPodExecResponse404 | controlPlaneEnginesPodExecResponse500) & {
+export type controlPlaneEnginesPodExecResponseError = (controlPlaneEnginesPodExecResponse101 | controlPlaneEnginesPodExecResponse400 | controlPlaneEnginesPodExecResponse401 | controlPlaneEnginesPodExecResponse403 | controlPlaneEnginesPodExecResponse404 | controlPlaneEnginesPodExecResponse409 | controlPlaneEnginesPodExecResponse500) & {
   headers: Headers;
 };
 
@@ -1439,6 +1685,11 @@ export type controlPlaneEnginesPodLogsResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesPodLogsResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesPodLogsResponse500 = {
   data: ErrorBody
   status: 500
@@ -1447,7 +1698,7 @@ export type controlPlaneEnginesPodLogsResponse500 = {
 export type controlPlaneEnginesPodLogsResponseSuccess = (controlPlaneEnginesPodLogsResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesPodLogsResponseError = (controlPlaneEnginesPodLogsResponse400 | controlPlaneEnginesPodLogsResponse401 | controlPlaneEnginesPodLogsResponse403 | controlPlaneEnginesPodLogsResponse404 | controlPlaneEnginesPodLogsResponse500) & {
+export type controlPlaneEnginesPodLogsResponseError = (controlPlaneEnginesPodLogsResponse400 | controlPlaneEnginesPodLogsResponse401 | controlPlaneEnginesPodLogsResponse403 | controlPlaneEnginesPodLogsResponse404 | controlPlaneEnginesPodLogsResponse409 | controlPlaneEnginesPodLogsResponse500) & {
   headers: Headers;
 };
 
@@ -1607,13 +1858,18 @@ export type controlPlaneEnginesPodLogsFollowResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesPodLogsFollowResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesPodLogsFollowResponse500 = {
   data: ErrorBody
   status: 500
 }
 
 ;
-export type controlPlaneEnginesPodLogsFollowResponseError = (controlPlaneEnginesPodLogsFollowResponse101 | controlPlaneEnginesPodLogsFollowResponse400 | controlPlaneEnginesPodLogsFollowResponse401 | controlPlaneEnginesPodLogsFollowResponse403 | controlPlaneEnginesPodLogsFollowResponse404 | controlPlaneEnginesPodLogsFollowResponse500) & {
+export type controlPlaneEnginesPodLogsFollowResponseError = (controlPlaneEnginesPodLogsFollowResponse101 | controlPlaneEnginesPodLogsFollowResponse400 | controlPlaneEnginesPodLogsFollowResponse401 | controlPlaneEnginesPodLogsFollowResponse403 | controlPlaneEnginesPodLogsFollowResponse404 | controlPlaneEnginesPodLogsFollowResponse409 | controlPlaneEnginesPodLogsFollowResponse500) & {
   headers: Headers;
 };
 
@@ -1774,6 +2030,11 @@ export type controlPlaneEnginesListQueriesResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesListQueriesResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesListQueriesResponse500 = {
   data: ErrorBody
   status: 500
@@ -1787,7 +2048,7 @@ export type controlPlaneEnginesListQueriesResponse502 = {
 export type controlPlaneEnginesListQueriesResponseSuccess = (controlPlaneEnginesListQueriesResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesListQueriesResponseError = (controlPlaneEnginesListQueriesResponse401 | controlPlaneEnginesListQueriesResponse403 | controlPlaneEnginesListQueriesResponse404 | controlPlaneEnginesListQueriesResponse500 | controlPlaneEnginesListQueriesResponse502) & {
+export type controlPlaneEnginesListQueriesResponseError = (controlPlaneEnginesListQueriesResponse401 | controlPlaneEnginesListQueriesResponse403 | controlPlaneEnginesListQueriesResponse404 | controlPlaneEnginesListQueriesResponse409 | controlPlaneEnginesListQueriesResponse500 | controlPlaneEnginesListQueriesResponse502) & {
   headers: Headers;
 };
 
@@ -1907,6 +2168,11 @@ export type controlPlaneEnginesGetQueryResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesGetQueryResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesGetQueryResponse500 = {
   data: ErrorBody
   status: 500
@@ -1920,7 +2186,7 @@ export type controlPlaneEnginesGetQueryResponse502 = {
 export type controlPlaneEnginesGetQueryResponseSuccess = (controlPlaneEnginesGetQueryResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesGetQueryResponseError = (controlPlaneEnginesGetQueryResponse401 | controlPlaneEnginesGetQueryResponse403 | controlPlaneEnginesGetQueryResponse404 | controlPlaneEnginesGetQueryResponse500 | controlPlaneEnginesGetQueryResponse502) & {
+export type controlPlaneEnginesGetQueryResponseError = (controlPlaneEnginesGetQueryResponse401 | controlPlaneEnginesGetQueryResponse403 | controlPlaneEnginesGetQueryResponse404 | controlPlaneEnginesGetQueryResponse409 | controlPlaneEnginesGetQueryResponse500 | controlPlaneEnginesGetQueryResponse502) & {
   headers: Headers;
 };
 
@@ -2048,6 +2314,11 @@ export type controlPlaneEnginesKillQueryResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesKillQueryResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesKillQueryResponse500 = {
   data: ErrorBody
   status: 500
@@ -2061,7 +2332,7 @@ export type controlPlaneEnginesKillQueryResponse502 = {
 export type controlPlaneEnginesKillQueryResponseSuccess = (controlPlaneEnginesKillQueryResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesKillQueryResponseError = (controlPlaneEnginesKillQueryResponse401 | controlPlaneEnginesKillQueryResponse403 | controlPlaneEnginesKillQueryResponse404 | controlPlaneEnginesKillQueryResponse500 | controlPlaneEnginesKillQueryResponse502) & {
+export type controlPlaneEnginesKillQueryResponseError = (controlPlaneEnginesKillQueryResponse401 | controlPlaneEnginesKillQueryResponse403 | controlPlaneEnginesKillQueryResponse404 | controlPlaneEnginesKillQueryResponse409 | controlPlaneEnginesKillQueryResponse500 | controlPlaneEnginesKillQueryResponse502) & {
   headers: Headers;
 };
 
@@ -2133,7 +2404,146 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getControlPlaneEnginesKillQueryMutationOptions(options), queryClient);
     }
-    export type controlPlaneEnginesRestartEngineResponse200 = {
+    export type controlPlaneEnginesRangerPluginConfigResponse200 = {
+  data: RangerPluginConfigDto
+  status: 200
+}
+
+export type controlPlaneEnginesRangerPluginConfigResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesRangerPluginConfigResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesRangerPluginConfigResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesRangerPluginConfigResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesRangerPluginConfigResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesRangerPluginConfigResponseSuccess = (controlPlaneEnginesRangerPluginConfigResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesRangerPluginConfigResponseError = (controlPlaneEnginesRangerPluginConfigResponse401 | controlPlaneEnginesRangerPluginConfigResponse403 | controlPlaneEnginesRangerPluginConfigResponse404 | controlPlaneEnginesRangerPluginConfigResponse409 | controlPlaneEnginesRangerPluginConfigResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesRangerPluginConfigResponse = (controlPlaneEnginesRangerPluginConfigResponseSuccess | controlPlaneEnginesRangerPluginConfigResponseError)
+
+export const getControlPlaneEnginesRangerPluginConfigUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/ranger-plugin-config`
+}
+
+/**
+ * @summary `GET /api/control-plane/engines/{id}/ranger-plugin-config`.
+ */
+export const controlPlaneEnginesRangerPluginConfig = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesRangerPluginConfigResponse> => {
+
+  return customInstance<controlPlaneEnginesRangerPluginConfigResponse>(getControlPlaneEnginesRangerPluginConfigUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesRangerPluginConfigQueryKey = (id: string,) => {
+    return [
+    `/api/control-plane/engines/${encodeURIComponent(id)}/ranger-plugin-config`
+    ] as const;
+    }
+
+
+export const getControlPlaneEnginesRangerPluginConfigQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneEnginesRangerPluginConfigQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>> = ({ signal }) => controlPlaneEnginesRangerPluginConfig(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneEnginesRangerPluginConfigQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>>
+export type ControlPlaneEnginesRangerPluginConfigQueryError = ErrorBody
+
+
+export function useControlPlaneEnginesRangerPluginConfig<TData = Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesRangerPluginConfig<TData = Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesRangerPluginConfig<TData = Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary `GET /api/control-plane/engines/{id}/ranger-plugin-config`.
+ */
+
+export function useControlPlaneEnginesRangerPluginConfig<TData = Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesRangerPluginConfig>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneEnginesRangerPluginConfigQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneEnginesRestartEngineResponse200 = {
   data: void
   status: 200
 }
@@ -2158,6 +2568,11 @@ export type controlPlaneEnginesRestartEngineResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesRestartEngineResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesRestartEngineResponse500 = {
   data: ErrorBody
   status: 500
@@ -2166,7 +2581,7 @@ export type controlPlaneEnginesRestartEngineResponse500 = {
 export type controlPlaneEnginesRestartEngineResponseSuccess = (controlPlaneEnginesRestartEngineResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesRestartEngineResponseError = (controlPlaneEnginesRestartEngineResponse400 | controlPlaneEnginesRestartEngineResponse401 | controlPlaneEnginesRestartEngineResponse403 | controlPlaneEnginesRestartEngineResponse404 | controlPlaneEnginesRestartEngineResponse500) & {
+export type controlPlaneEnginesRestartEngineResponseError = (controlPlaneEnginesRestartEngineResponse400 | controlPlaneEnginesRestartEngineResponse401 | controlPlaneEnginesRestartEngineResponse403 | controlPlaneEnginesRestartEngineResponse404 | controlPlaneEnginesRestartEngineResponse409 | controlPlaneEnginesRestartEngineResponse500) & {
   headers: Headers;
 };
 

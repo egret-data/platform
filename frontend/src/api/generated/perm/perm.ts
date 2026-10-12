@@ -37,7 +37,9 @@ import type {
   NewRule,
   PreviewRequest,
   PreviewResponse,
+  ProfileWarnings,
   RuleView,
+  StoredOverlap,
   UndoRequest,
   UndoResponse
 } from '../model';
@@ -89,6 +91,11 @@ export type permCompileResponse404 = {
   status: 404
 }
 
+export type permCompileResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type permCompileResponse500 = {
   data: ErrorBody
   status: 500
@@ -97,7 +104,7 @@ export type permCompileResponse500 = {
 export type permCompileResponseSuccess = (permCompileResponse200) & {
   headers: Headers;
 };
-export type permCompileResponseError = (permCompileResponse400 | permCompileResponse401 | permCompileResponse403 | permCompileResponse404 | permCompileResponse500) & {
+export type permCompileResponseError = (permCompileResponse400 | permCompileResponse401 | permCompileResponse403 | permCompileResponse404 | permCompileResponse409 | permCompileResponse500) & {
   headers: Headers;
 };
 
@@ -469,6 +476,11 @@ export type permCreateGrantResponse403 = {
   status: 403
 }
 
+export type permCreateGrantResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type permCreateGrantResponse500 = {
   data: ErrorBody
   status: 500
@@ -477,7 +489,7 @@ export type permCreateGrantResponse500 = {
 export type permCreateGrantResponseSuccess = (permCreateGrantResponse201) & {
   headers: Headers;
 };
-export type permCreateGrantResponseError = (permCreateGrantResponse400 | permCreateGrantResponse401 | permCreateGrantResponse403 | permCreateGrantResponse500) & {
+export type permCreateGrantResponseError = (permCreateGrantResponse400 | permCreateGrantResponse401 | permCreateGrantResponse403 | permCreateGrantResponse409 | permCreateGrantResponse500) & {
   headers: Headers;
 };
 
@@ -567,6 +579,11 @@ export type permDeleteGrantResponse404 = {
   status: 404
 }
 
+export type permDeleteGrantResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type permDeleteGrantResponse500 = {
   data: ErrorBody
   status: 500
@@ -575,7 +592,7 @@ export type permDeleteGrantResponse500 = {
 export type permDeleteGrantResponseSuccess = (permDeleteGrantResponse200) & {
   headers: Headers;
 };
-export type permDeleteGrantResponseError = (permDeleteGrantResponse401 | permDeleteGrantResponse403 | permDeleteGrantResponse404 | permDeleteGrantResponse500) & {
+export type permDeleteGrantResponseError = (permDeleteGrantResponse401 | permDeleteGrantResponse403 | permDeleteGrantResponse404 | permDeleteGrantResponse409 | permDeleteGrantResponse500) & {
   headers: Headers;
 };
 
@@ -773,7 +790,138 @@ export const usePermPatchGrant = <TError = ErrorBody,
       > => {
       return useMutation(getPermPatchGrantMutationOptions(options), queryClient);
     }
-    export type permClassifyServicePoliciesResponse200 = {
+    export type permListOverlapsResponse200 = {
+  data: StoredOverlap[]
+  status: 200
+}
+
+export type permListOverlapsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permListOverlapsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permListOverlapsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permListOverlapsResponseSuccess = (permListOverlapsResponse200) & {
+  headers: Headers;
+};
+export type permListOverlapsResponseError = (permListOverlapsResponse401 | permListOverlapsResponse403 | permListOverlapsResponse500) & {
+  headers: Headers;
+};
+
+export type permListOverlapsResponse = (permListOverlapsResponseSuccess | permListOverlapsResponseError)
+
+export const getPermListOverlapsUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/overlaps`
+}
+
+/**
+ * @summary Every mask / row-filter pair already stored in a profile's download. Writes
+refuse only the pairs they create; this is where an operator sees the rest.
+ */
+export const permListOverlaps = async ( options?: Parameters<typeof customInstance>[1]): Promise<permListOverlapsResponse> => {
+
+  return customInstance<permListOverlapsResponse>(getPermListOverlapsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermListOverlapsQueryKey = () => {
+    return [
+    `/api/control-plane/perm/overlaps`
+    ] as const;
+    }
+
+
+export const getPermListOverlapsQueryOptions = <TData = Awaited<ReturnType<typeof permListOverlaps>>, TError = ErrorBody>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListOverlaps>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermListOverlapsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permListOverlaps>>> = ({ signal }) => permListOverlaps({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permListOverlaps>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermListOverlapsQueryResult = NonNullable<Awaited<ReturnType<typeof permListOverlaps>>>
+export type PermListOverlapsQueryError = ErrorBody
+
+
+export function usePermListOverlaps<TData = Awaited<ReturnType<typeof permListOverlaps>>, TError = ErrorBody>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListOverlaps>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permListOverlaps>>,
+          TError,
+          Awaited<ReturnType<typeof permListOverlaps>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermListOverlaps<TData = Awaited<ReturnType<typeof permListOverlaps>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListOverlaps>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permListOverlaps>>,
+          TError,
+          Awaited<ReturnType<typeof permListOverlaps>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermListOverlaps<TData = Awaited<ReturnType<typeof permListOverlaps>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListOverlaps>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Every mask / row-filter pair already stored in a profile's download. Writes
+refuse only the pairs they create; this is where an operator sees the rest.
+ */
+
+export function usePermListOverlaps<TData = Awaited<ReturnType<typeof permListOverlaps>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListOverlaps>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermListOverlapsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permClassifyServicePoliciesResponse200 = {
   data: ClassifiedPolicy[]
   status: 200
 }
@@ -1168,7 +1316,151 @@ export const usePermUndoServicePolicyMigration = <TError = ErrorBody,
       > => {
       return useMutation(getPermUndoServicePolicyMigrationMutationOptions(options), queryClient);
     }
-    export type permPreviewResponse200 = {
+    export type permServicePolicyWarningsResponse200 = {
+  data: ProfileWarnings
+  status: 200
+}
+
+export type permServicePolicyWarningsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permServicePolicyWarningsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permServicePolicyWarningsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permServicePolicyWarningsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permServicePolicyWarningsResponseSuccess = (permServicePolicyWarningsResponse200) & {
+  headers: Headers;
+};
+export type permServicePolicyWarningsResponseError = (permServicePolicyWarningsResponse401 | permServicePolicyWarningsResponse403 | permServicePolicyWarningsResponse404 | permServicePolicyWarningsResponse500) & {
+  headers: Headers;
+};
+
+export type permServicePolicyWarningsResponse = (permServicePolicyWarningsResponseSuccess | permServicePolicyWarningsResponseError)
+
+export const getPermServicePolicyWarningsUrl = (serviceId: number,) => {
+
+
+
+
+  return `/api/control-plane/perm/policies/services/${encodeURIComponent(serviceId)}/warnings`
+}
+
+/**
+ * @summary SP4d-4 Task 11: the policies of one profile whose stored resource levels
+Ranger reads differently from how the editor shows them — a policy that
+stops above `column` and allows `select` (it grants no column read), or one
+with a gap (it decides nothing) — with `warningCount` for the profile.
+Read-only: a stored row is flagged here, never rewritten. The same
+`warnings` ride on each policy of `GET .../classify`.
+ */
+export const permServicePolicyWarnings = async (serviceId: number, options?: Parameters<typeof customInstance>[1]): Promise<permServicePolicyWarningsResponse> => {
+
+  return customInstance<permServicePolicyWarningsResponse>(getPermServicePolicyWarningsUrl(serviceId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermServicePolicyWarningsQueryKey = (serviceId: number,) => {
+    return [
+    `/api/control-plane/perm/policies/services/${encodeURIComponent(serviceId)}/warnings`
+    ] as const;
+    }
+
+
+export const getPermServicePolicyWarningsQueryOptions = <TData = Awaited<ReturnType<typeof permServicePolicyWarnings>>, TError = ErrorBody>(serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permServicePolicyWarnings>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermServicePolicyWarningsQueryKey(serviceId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permServicePolicyWarnings>>> = ({ signal }) => permServicePolicyWarnings(serviceId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: serviceId !== null && serviceId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permServicePolicyWarnings>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermServicePolicyWarningsQueryResult = NonNullable<Awaited<ReturnType<typeof permServicePolicyWarnings>>>
+export type PermServicePolicyWarningsQueryError = ErrorBody
+
+
+export function usePermServicePolicyWarnings<TData = Awaited<ReturnType<typeof permServicePolicyWarnings>>, TError = ErrorBody>(
+ serviceId: number, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permServicePolicyWarnings>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permServicePolicyWarnings>>,
+          TError,
+          Awaited<ReturnType<typeof permServicePolicyWarnings>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermServicePolicyWarnings<TData = Awaited<ReturnType<typeof permServicePolicyWarnings>>, TError = ErrorBody>(
+ serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permServicePolicyWarnings>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permServicePolicyWarnings>>,
+          TError,
+          Awaited<ReturnType<typeof permServicePolicyWarnings>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermServicePolicyWarnings<TData = Awaited<ReturnType<typeof permServicePolicyWarnings>>, TError = ErrorBody>(
+ serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permServicePolicyWarnings>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary SP4d-4 Task 11: the policies of one profile whose stored resource levels
+Ranger reads differently from how the editor shows them — a policy that
+stops above `column` and allows `select` (it grants no column read), or one
+with a gap (it decides nothing) — with `warningCount` for the profile.
+Read-only: a stored row is flagged here, never rewritten. The same
+`warnings` ride on each policy of `GET .../classify`.
+ */
+
+export function usePermServicePolicyWarnings<TData = Awaited<ReturnType<typeof permServicePolicyWarnings>>, TError = ErrorBody>(
+ serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permServicePolicyWarnings>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermServicePolicyWarningsQueryOptions(serviceId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permPreviewResponse200 = {
   data: PreviewResponse
   status: 200
 }
@@ -1426,6 +1718,11 @@ export type permCreateRuleResponse403 = {
   status: 403
 }
 
+export type permCreateRuleResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type permCreateRuleResponse500 = {
   data: ErrorBody
   status: 500
@@ -1434,7 +1731,7 @@ export type permCreateRuleResponse500 = {
 export type permCreateRuleResponseSuccess = (permCreateRuleResponse201) & {
   headers: Headers;
 };
-export type permCreateRuleResponseError = (permCreateRuleResponse400 | permCreateRuleResponse401 | permCreateRuleResponse403 | permCreateRuleResponse500) & {
+export type permCreateRuleResponseError = (permCreateRuleResponse400 | permCreateRuleResponse401 | permCreateRuleResponse403 | permCreateRuleResponse409 | permCreateRuleResponse500) & {
   headers: Headers;
 };
 
@@ -1527,6 +1824,11 @@ export type permDeleteRuleResponse404 = {
   status: 404
 }
 
+export type permDeleteRuleResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type permDeleteRuleResponse500 = {
   data: ErrorBody
   status: 500
@@ -1535,7 +1837,7 @@ export type permDeleteRuleResponse500 = {
 export type permDeleteRuleResponseSuccess = (permDeleteRuleResponse200) & {
   headers: Headers;
 };
-export type permDeleteRuleResponseError = (permDeleteRuleResponse401 | permDeleteRuleResponse403 | permDeleteRuleResponse404 | permDeleteRuleResponse500) & {
+export type permDeleteRuleResponseError = (permDeleteRuleResponse401 | permDeleteRuleResponse403 | permDeleteRuleResponse404 | permDeleteRuleResponse409 | permDeleteRuleResponse500) & {
   headers: Headers;
 };
 

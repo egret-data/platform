@@ -1044,6 +1044,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not assign to a workspace it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -3304,7 +3314,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The unchanged configuration re-applied to every attached engine (e.g. after rotating a secret)",
+            "description": "The unchanged configuration re-applied to every attached engine (e.g. after rotating a secret). An external engine is listed with status `skipped`: egret does not apply catalogs to it",
             "content": {
               "application/json": {
                 "schema": {
@@ -3795,6 +3805,96 @@
         }
       }
     },
+    "/api/control-plane/engines/external": {
+      "post": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "operationId": "register_external_engine",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterExternalEngine"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to a policy profile, with the given catalogs declared attached (`applyStatus: declared`). The bound profile was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the (type, declared version) pair (only Trino@2.5.0 and StarRocks@2.8.0 are): a migration to that profile is then refused, never evaluated at a guessed version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid name, type, host, port or plugin version; a catalog the engine cannot read; `authzServiceId` naming no policy profile or a Trino profile with no usable tag service; or Kubernetes-free registration was malformed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:create permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "A catalog id in `catalogs` names no registry catalog (the message names it); nothing was written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The name is taken, the profile has another type or is bound to another engine, or binding it would create an order-ambiguous mask or row-filter pair (`code: rule_overlap`); nothing was written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/engines/{id}": {
       "get": {
         "tags": [
@@ -3945,7 +4045,7 @@
             }
           },
           "409": {
-            "description": "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names a profile of the wrong type or one another engine already binds; retry",
+            "description": "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names a profile of the wrong type or one another engine already binds; retry; The engine is external (`code` = `engine_is_external`): egret does not update, restart, scale or delete the cluster of it",
             "content": {
               "application/json": {
                 "schema": {
@@ -3995,7 +4095,7 @@
         ],
         "responses": {
           "204": {
-            "description": "Cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger profile is unbound, not deleted"
+            "description": "For an external engine: egret's rows only (the engine, its declared attachments and its profile binding) are removed and nothing is sent to any cluster or provisioner, and Kubernetes need not be configured. For a provisioned engine: cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger profile is unbound, not deleted"
           },
           "400": {
             "description": "Kubernetes not configured",
@@ -4262,7 +4362,7 @@
             }
           },
           "409": {
-            "description": "The engine is being deleted",
+            "description": "The engine is being deleted; The engine is external (`code` = `engine_is_external`): egret does not apply a catalog to it",
             "content": {
               "application/json": {
                 "schema": {
@@ -4365,6 +4465,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not test a catalog on it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -4447,6 +4557,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not monitor it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -4459,6 +4579,109 @@
           },
           "502": {
             "description": "Trino coordinator unreachable or returned a non-JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/engines/{id}/external": {
+      "patch": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "summary": "`PATCH /api/control-plane/engines/{id}/external`.",
+        "operationId": "update_external_engine",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateExternalEngine"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated. Egret's row only: nothing is sent to the engine, a provisioner or Kubernetes. The policy profile it was or is bound to were recompiled in the same transaction. `rangerPluginVersionModelled` is as at registration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The engine is not external; nothing to update; invalid host, port or plugin version; or `authzServiceId` naming no profile, one of the wrong type, or a Trino profile with no usable tag service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine changed concurrently (e.g. a delete); the profile is bound to another engine; or the change would create an order-ambiguous mask or row-filter pair (`code: rule_overlap`). Nothing was written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
             "content": {
               "application/json": {
                 "schema": {
@@ -4534,6 +4757,16 @@
           },
           "404": {
             "description": "No such engine, or pod does not belong to the engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not exec into the pods of it",
             "content": {
               "application/json": {
                 "schema": {
@@ -4662,6 +4895,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not read the pods of it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -4757,6 +5000,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not read the pods of it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -4824,6 +5077,16 @@
           },
           "404": {
             "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not monitor it",
             "content": {
               "application/json": {
                 "schema": {
@@ -4923,6 +5186,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not monitor it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -5005,6 +5278,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not cancel queries on it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -5017,6 +5300,89 @@
           },
           "502": {
             "description": "Trino coordinator unreachable or rejected the cancel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/engines/{id}/ranger-plugin-config": {
+      "get": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "summary": "`GET /api/control-plane/engines/{id}/ranger-plugin-config`.",
+        "operationId": "ranger_plugin_config",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The Ranger plugin files to install on this external engine, rendered by the same code that renders the files egret mounts into its own engines. No credential is included or minted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerPluginConfigDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is provisioned (egret mounts these files itself), or it is bound to no policy profile (bind one first)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
             "content": {
               "application/json": {
                 "schema": {
@@ -5083,6 +5449,16 @@
           },
           "404": {
             "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not restart it",
             "content": {
               "application/json": {
                 "schema": {
@@ -5168,7 +5544,7 @@
             }
           },
           "409": {
-            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
+            "description": "The engine changed concurrently (e.g. a delete in progress); retry; The engine is external (`code` = `engine_is_external`): egret does not rotate the secrets of it",
             "content": {
               "application/json": {
                 "schema": {
@@ -5356,7 +5732,7 @@
             }
           },
           "409": {
-            "description": "A removed workspace still has Data API endpoints, schedules or datasets on the engine's connection; nothing applied",
+            "description": "A removed workspace still has Data API endpoints, schedules or datasets on the engine's connection; nothing applied; The engine is external (`code` = `engine_is_external`): egret does not assign workspaces to it",
             "content": {
               "application/json": {
                 "schema": {
@@ -6137,6 +6513,16 @@
               }
             }
           },
+          "409": {
+            "description": "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -6323,6 +6709,16 @@
               }
             }
           },
+          "409": {
+            "description": "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -6380,6 +6776,16 @@
           },
           "404": {
             "description": "No such grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6481,7 +6887,61 @@
             }
           },
           "409": {
-            "description": "The grant changed concurrently and now affects a profile this request did not lock; retry",
+            "description": "The grant changed concurrently and now affects a profile this request did not lock; retry; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/overlaps": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "Every mask / row-filter pair already stored in a profile's download. Writes\nrefuse only the pairs they create; this is where an operator sees the rest.",
+        "operationId": "list_overlaps",
+        "responses": {
+          "200": {
+            "description": "Every overlapping mask or row-filter pair stored in a profile's download, compiled or hand-written, with the profile that serves it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StoredOverlap"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -6661,7 +7121,7 @@
             }
           },
           "409": {
-            "description": "Already migrated, not hand-written (compiler or infra owned), or a rule name it would create is taken",
+            "description": "Already migrated, not hand-written (compiler or infra owned), or a rule name it would create is taken; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6774,7 +7234,80 @@
             }
           },
           "409": {
-            "description": "Nothing was changed: an object the migration created was edited or deleted since, or the original was edited or switched on (each change is named); or a profile became reachable from the migrated objects while undo waited for its locks (retry)",
+            "description": "Nothing was changed: an object the migration created was edited or deleted since, or the original was edited or switched on (each change is named); or a profile became reachable from the migrated objects while undo waited for its locks (retry); or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/policies/services/{service_id}/warnings": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP4d-4 Task 11: the policies of one profile whose stored resource levels\nRanger reads differently from how the editor shows them — a policy that\nstops above `column` and allows `select` (it grants no column read), or one\nwith a gap (it decides nothing) — with `warningCount` for the profile.\nRead-only: a stored row is flagged here, never rewritten. The same\n`warnings` ride on each policy of `GET .../classify`.",
+        "operationId": "service_policy_warnings",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "description": "policy.authz_services id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`warningCount` and, ordered by id, the policies of the profile that carry a warning",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileWarnings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy profile",
             "content": {
               "application/json": {
                 "schema": {
@@ -6866,7 +7399,7 @@
             }
           },
           "409": {
-            "description": "The previewed row changed concurrently — the same refusal the write would have given",
+            "description": "The previewed row changed concurrently — the same refusal the write would have given; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6990,6 +7523,16 @@
               }
             }
           },
+          "409": {
+            "description": "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -7047,6 +7590,16 @@
           },
           "404": {
             "description": "No such rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7148,7 +7701,7 @@
             }
           },
           "409": {
-            "description": "The rule changed concurrently and now affects a profile this request did not lock; retry",
+            "description": "The rule changed concurrently and now affects a profile this request did not lock; retry; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7335,7 +7888,7 @@
         },
         "responses": {
           "200": {
-            "description": "Policy created",
+            "description": "Policy created. When the save stored an emptied resource level as `*`, the body adds `filledLevels`, a `note` (the broader policy is evaluated first within a priority band) and, where the fill moved this policy ahead of another same-band policy that may decide the same request, `warnings`",
             "content": {
               "application/json": {
                 "schema": {
@@ -7345,7 +7898,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input, missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter policy that would be served alongside another one selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)",
+            "description": "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7385,7 +7938,7 @@
             }
           },
           "409": {
-            "description": "A policy with this name already exists, or the target profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
+            "description": "A policy with this name already exists, the target profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or a mask/row-filter policy would form a rule overlap with another policy or compiled rule that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the sentence names both and suggests Override where a priority can fix it). An overlap body adds `code: \"rule_overlap\"`, `rules` (both members: a compiled rule's `id` and name, `id` null for a hand-written policy), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7907,6 +8460,7 @@
           "policy-admin"
         ],
         "summary": "GET /policies/services/{service}/trino-config — the two files a Trino\ncoordinator needs to enforce this profile via the native ranger plugin.",
+        "description": "Rendered by `egret_engine_mgmt_api::ranger_config::ranger_plugin_files`, the\nsame code that writes the files egret mounts into its own engines.",
         "operationId": "trino_config",
         "parameters": [
           {
@@ -7921,7 +8475,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The Trino coordinator config files for this profile's native ranger plugin",
+            "description": "The Trino coordinator config files for this profile's native ranger plugin, from the same renderer that writes the files egret mounts into its own engines (`access-control.properties` and `ranger-trino-security.xml`). Since SP4d-4 the security file also carries the policy source, cache directory and client timeouts, the properties file points at `/etc/trino/ranger-trino-security.xml`, and the poll interval is 30000 ms; earlier responses omitted those keys and used a relative resource path",
             "content": {
               "application/json": {
                 "schema": {
@@ -8079,7 +8633,7 @@
         },
         "responses": {
           "200": {
-            "description": "Policy replaced",
+            "description": "Policy replaced. Same optional `filledLevels` / `note` / `warnings` as create",
             "content": {
               "application/json": {
                 "schema": {
@@ -8089,7 +8643,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input, missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or a mask/row-filter body that would be served alongside another policy selecting the same resource at the same priority with different items (which of the two the engine applies is not expressed by the artifact)",
+            "description": "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)",
             "content": {
               "application/json": {
                 "schema": {
@@ -8129,7 +8683,7 @@
             }
           },
           "409": {
-            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
+            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the mask/row-filter body would form a rule overlap with another policy or compiled rule that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the sentence names both and suggests Override where a priority can fix it). An overlap body adds `code: \"rule_overlap\"`, `rules` (both members: a compiled rule's `id` and name, `id` null for a hand-written policy), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -12347,6 +12901,16 @@
               }
             }
           },
+          "409": {
+            "description": "A rule overlap: the assignment would make two mask (or two row-filter) policies decide one column differently (compiled rules, hand-written tag policies, or one of each), or a profile it recompiles already holds such a pair. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -12409,6 +12973,16 @@
           },
           "403": {
             "description": "Missing catalog_registry:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A rule overlap that the unassignment does not remove: a profile it recompiles already holds two mask (or two row-filter) rules that decide one request differently. Same body as the assignment's 409",
             "content": {
               "application/json": {
                 "schema": {
@@ -33222,7 +33796,7 @@
           },
           "status": {
             "type": "string",
-            "description": "`applied` | `failed`."
+            "description": "`applied` | `failed` | `skipped`. `skipped`: the engine is external, so\negret did not touch it (the attachment is only declared); `error` then\nsays so."
           },
           "error": {
             "type": [
@@ -34048,7 +34622,8 @@
           "managed_by",
           "enabled",
           "migratable",
-          "blockers"
+          "blockers",
+          "warnings"
         ],
         "properties": {
           "id": {
@@ -34097,6 +34672,13 @@
                 "description": "Present iff `perm.migrated_from` records this policy as migrated —\nwhich is what tells a migrated original apart from one switched off by\nhand (both have `enabled = false`). A migrated policy is never\n`migratable`, and its one blocker sentence says how to undo it."
               }
             ]
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PolicyWarning"
+            },
+            "description": "SP4d-4 Task 11: what this policy's resource levels mean to Ranger,\nindependent of migration — a policy that stops above `column` and\nallows `select` grants no column read, and one with a gap decides\nnothing. Empty for every row that is neither a hand-written\n(`operator`) policy of a resource profile nor affected. **Flagged,\nnever rewritten**: nothing here edits a stored row."
           }
         }
       },
@@ -35293,6 +35875,33 @@
             "type": "integer",
             "format": "int64",
             "description": "The created/updated policy's id."
+          },
+          "filledLevels": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Present only when this save stored an emptied resource level as `*`\n(SP4d-4 Task 11): the level names, root first."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present with `filledLevels`: what the fill means in Ranger — the policy\nnow covers every child of those levels, and it moved earlier in the\nevaluation order of its priority band."
+          },
+          "warnings": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/PolicyWriteWarning"
+            },
+            "description": "Present only when the fill moved the saved policy ahead of another\nsame-band policy that may decide the same request."
           }
         }
       },
@@ -36946,7 +37555,8 @@
           "type",
           "namespace",
           "status",
-          "spec"
+          "spec",
+          "origin"
         ],
         "properties": {
           "id": {
@@ -36963,10 +37573,44 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "For an external engine this is the row's placeholder `running`, which\nmeans nothing: read `origin` instead (egret does not monitor it)."
           },
           "spec": {
             "$ref": "#/components/schemas/EngineSpecDto"
+          },
+          "origin": {
+            "type": "string",
+            "description": "`provisioned` (egret runs the cluster) or `external` (egret holds a row\nfor a cluster it never provisions, updates, restarts, scales or deletes)."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "External only: the host the engine answers on."
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "External only: the port the engine answers on."
+          },
+          "rangerPluginVersion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "External only: the Ranger plugin version the operator declared installed."
+          },
+          "rangerPluginVersionModelled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "External only: whether egret's Ranger evaluator has been read against this\nengine's (type, declared version) PAIR: only Trino@2.5.0 and\nStarRocks@2.8.0 are. When `false`, a migration to the profile bound to this\nengine is refused (never evaluated at a guessed version) and `explain`\nanswers that it cannot."
           }
         }
       },
@@ -37996,6 +38640,7 @@
           "service_name",
           "plugin_versions",
           "probes",
+          "probes_full",
           "disagreements",
           "removed_policies",
           "added_policies"
@@ -38016,7 +38661,20 @@
           },
           "probes": {
             "type": "integer",
+            "description": "Probes evaluated (after pruning).",
             "minimum": 0
+          },
+          "probes_full": {
+            "type": "integer",
+            "description": "Probes the unpruned gate would have evaluated.",
+            "minimum": 0
+          },
+          "pruning_fallback": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why pruning gave the full set, when it did."
           },
           "disagreements": {
             "type": "integer",
@@ -39895,6 +40553,69 @@
           }
         }
       },
+      "PolicyWarning": {
+        "type": "object",
+        "description": "One finding about a stored policy's resource levels (SP4d-4 Task 11).\n`kind` is `select_stops_above_column` (with `level`: the deepest level the\npolicy names) or `level_gap` (with `missing`: the absent level that has a\nnamed level beneath it); each carries the `sentence` an operator reads.",
+        "required": [
+          "kind",
+          "sentence"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "level": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "missing": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sentence": {
+            "type": "string"
+          }
+        }
+      },
+      "PolicyWriteWarning": {
+        "type": "object",
+        "description": "One warning on a policy write's response (`kind: \"evaluation_order_changed\"`).",
+        "required": [
+          "kind",
+          "policy",
+          "policyKind",
+          "sentence"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "policy": {
+            "type": "string",
+            "description": "The other policy's name."
+          },
+          "policyId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The other policy's id, when known."
+          },
+          "policyKind": {
+            "type": "string",
+            "description": "`access` | `mask` | `row_filter`."
+          },
+          "sentence": {
+            "type": "string",
+            "description": "Operator-readable explanation."
+          }
+        }
+      },
       "PreviewEndpointInput": {
         "allOf": [
           {
@@ -40155,6 +40876,26 @@
           },
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "ProfileWarnings": {
+        "type": "object",
+        "description": "The `policyId`-keyed answer of `GET .../warnings`: how many warnings the\nprofile carries in all and which policies carry them.",
+        "required": [
+          "warningCount",
+          "policies"
+        ],
+        "properties": {
+          "warningCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "policies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WarnedPolicy"
+            }
           }
         }
       },
@@ -40502,6 +41243,89 @@
           }
         }
       },
+      "RangerPluginConfigDto": {
+        "type": "object",
+        "description": "The Ranger plugin configuration an external engine's admin installs.",
+        "required": [
+          "serviceName",
+          "downloadUrl",
+          "authMode",
+          "rangerPluginVersionModelled",
+          "warnings",
+          "assumptions",
+          "adminMustSupply",
+          "files"
+        ],
+        "properties": {
+          "serviceName": {
+            "type": "string",
+            "description": "The bound policy profile: the Ranger service name the plugin asks for."
+          },
+          "downloadUrl": {
+            "type": "string",
+            "description": "`{public_url}/service/plugins/policies/download/{serviceName}`: where the\nplugin's download lands. The files below carry `public_url` itself (the\nplugin appends the path)."
+          },
+          "authMode": {
+            "type": "string",
+            "description": "`anonymous`, or `bearer-configured` (egret requires a bearer token on\n`/service`; the token is never shown here)."
+          },
+          "rangerPluginVersion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The plugin version the engine was DECLARED to run."
+          },
+          "rangerPluginVersionModelled": {
+            "type": "boolean",
+            "description": "Whether egret's evaluator models the (type, version) pair. When `false`,\nmigrations into this profile are refused."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Things that make the install not work, or not safe, as configured."
+          },
+          "assumptions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What egret's `explain` and migration gate assume about the plugin and\ncannot check on an external engine."
+          },
+          "adminMustSupply": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the admin must supply themselves. egret renders no credential and\ninvents none."
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RangerPluginFileDto"
+            }
+          }
+        }
+      },
+      "RangerPluginFileDto": {
+        "type": "object",
+        "description": "One file the admin of an external engine installs.",
+        "required": [
+          "name",
+          "content"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "File name; for StarRocks `fe.conf (add this line)` is a line to add to\nthe FE's existing `fe.conf`, not a file to replace it with."
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      },
       "RangerServiceDefs": {
         "type": "object",
         "description": "Doc-only mirror of the `{ \"serviceDefs\": [...] }` envelope `list_defs` returns.",
@@ -40699,6 +41523,57 @@
           "webhook",
           "slack"
         ]
+      },
+      "RegisterExternalEngine": {
+        "type": "object",
+        "description": "`POST /api/control-plane/engines/external`.",
+        "required": [
+          "name",
+          "type",
+          "host",
+          "port",
+          "rangerPluginVersion"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Unique across engines. Lower-case letters, digits and `-`, 1 to 63\ncharacters, starting and ending alphanumeric."
+          },
+          "type": {
+            "type": "string",
+            "description": "`trino` or `starrocks`."
+          },
+          "host": {
+            "type": "string",
+            "description": "Host or IP the engine answers on: no scheme, no port, no path."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Trino's HTTP port or StarRocks' FE query port.",
+            "minimum": 0
+          },
+          "rangerPluginVersion": {
+            "type": "string",
+            "description": "The Ranger plugin version installed on the engine, `x.y.z`, one of the\nRanger 2.x releases. **Only Trino@2.5.0 and StarRocks@2.8.0 are\nmodelled by egret's evaluator** (a type and version PAIR): any other is\nstored as declared, and a migration to a profile bound to this engine is\nthen refused rather than evaluated with the wrong semantics."
+          },
+          "authzServiceId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "A policy profile to bind. Its type must equal `type`, no other engine may\nbind it, and a Trino profile needs a usable `tagService`."
+          },
+          "catalogs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Registry catalogs to declare attached. Nothing is applied to the engine."
+          }
+        }
       },
       "RegistryCatalogDto": {
         "type": "object",
@@ -43052,6 +43927,89 @@
           }
         }
       },
+      "StoredMember": {
+        "type": "object",
+        "description": "One member of a stored pair, as a steward finds it.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The rule's id; `null` for a hand-written policy."
+          },
+          "policyId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The `policy.authz_policies` id of the stored policy (the one\n`PUT /policies/{id}/enabled` takes), for compiled and hand-written alike."
+          },
+          "name": {
+            "type": "string",
+            "description": "The rule's name, or the hand-written policy's name."
+          }
+        }
+      },
+      "StoredOverlap": {
+        "type": "object",
+        "description": "One pair already stored in a profile's download.",
+        "required": [
+          "serviceId",
+          "serviceName",
+          "kind",
+          "coordinate",
+          "rules",
+          "sentence",
+          "howToFix"
+        ],
+        "properties": {
+          "serviceId": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The profile whose download serves the pair (a tag service on its own\nwhen no profile names it)."
+          },
+          "serviceName": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`\"mask\"` or `\"row_filter\"`."
+          },
+          "coordinate": {
+            "type": "string"
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StoredMember"
+            },
+            "description": "In the pair's order (policy names ascending)."
+          },
+          "servedToday": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StoredMember",
+                "description": "Which member Ranger serves today where both match, when that can be\ncomputed; `null` when the order falls to something this report does\nnot compute (or to the policy name)."
+              }
+            ]
+          },
+          "sentence": {
+            "type": "string"
+          },
+          "howToFix": {
+            "type": "string"
+          }
+        }
+      },
       "SubmitAck": {
         "type": "object",
         "required": [
@@ -43963,6 +44921,42 @@
         },
         "additionalProperties": false
       },
+      "UpdateExternalEngine": {
+        "type": "object",
+        "description": "`PATCH /api/control-plane/engines/{id}/external`: every field optional;\nan absent field is left as it is.",
+        "properties": {
+          "authzServiceId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The policy profile to bind: absent leaves the binding, `null` unbinds,\na number binds (same rules as at registration)."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New host (bare host: no scheme, port or path)."
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "rangerPluginVersion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Ranger plugin version installed on the engine, as at registration.\nThe response says whether egret's evaluator models the (type, version)\npair."
+          }
+        }
+      },
       "UpdateFlowRequest": {
         "type": "object",
         "description": "`PUT /flows/{id}` body — a full replace, following the route's verb: the\nwhole draft (source, and therefore its derived namespace/flow_id/plan) is\nreplaced by what is sent, and `folder_id` is set to exactly what is sent\n(including `None`, which clears it).",
@@ -44454,6 +45448,30 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "WarnedPolicy": {
+        "type": "object",
+        "description": "One policy that carries at least one [`PolicyWarning`].",
+        "required": [
+          "id",
+          "name",
+          "warnings"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PolicyWarning"
+            }
           }
         }
       },

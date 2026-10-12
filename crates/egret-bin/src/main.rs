@@ -295,6 +295,31 @@ impl egret_engine_mgmt::ProfileCompilerPort for ProfileCompilerImpl {
     ) -> Result<(), egret_perm::CompileError> {
         recompile_one_profile(tx, service_id).await
     }
+
+    async fn overlap_snapshot_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<egret_engine_mgmt::OverlapSnapshot, egret_perm::CompileError> {
+        Ok(egret_engine_mgmt::OverlapSnapshot::new(
+            egret_perm_compile::overlap::unit_snapshot_via(tx, service_ids).await?,
+        ))
+    }
+
+    async fn refuse_created_overlaps_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        snapshot: &egret_engine_mgmt::OverlapSnapshot,
+    ) -> Result<(), egret_perm::CompileError> {
+        let snapshot = snapshot
+            .get::<egret_perm_compile::overlap::UnitSnapshot>()
+            .ok_or_else(|| {
+                egret_perm::CompileError::Db(
+                    "an overlap snapshot of a type this compiler did not produce".into(),
+                )
+            })?;
+        egret_perm_compile::overlap::refuse_created_overlaps_via(tx, snapshot).await
+    }
 }
 
 /// `egret-catalog-registry`'s narrower port (SP4a Task 16, D3 defects 2 and
@@ -2147,6 +2172,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // queries work; an admin who explicitly picks an `authz_service_id` still
         // binds regardless.
         ranger_enabled: config.ranger.enabled,
+        // The FACT only: the page for an external engine states the auth mode and
+        // must have no path to the token.
+        ranger_bearer_configured: !config.ranger.auth_token.is_empty(),
         // The compiled-in pinned JDBC driver table with this deployment's
         // `[starrocks.jdbc_drivers]` overrides applied (design D5).
         sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default()

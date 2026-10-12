@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { EyeOff, Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
@@ -21,6 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { formatPrincipals, formatRuleKind, formatSelector } from "./permFormat";
+import { OverlapReport } from "./OverlapReport";
 import { RuleDialog } from "./RuleDialog";
 
 /**
@@ -47,6 +49,24 @@ export default function MaskFilterRules() {
   const [editing, setEditing] = useState<RuleView | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<RuleView | null>(null);
 
+  // `?rule=<id>` (a link from the overlap report) opens that rule for editing.
+  // The URL is the source of that state, so there is nothing to sync: any
+  // other way of opening or closing the dialog drops the parameter.
+  const [sp, setSp] = useSearchParams();
+  const wanted = sp.get("rule");
+  const linked = canWrite && wanted ? (rows.find((r) => r.id === wanted) ?? null) : null;
+  function dropLink() {
+    if (!wanted) return;
+    setSp(
+      (prev) => {
+        const n = new URLSearchParams(prev);
+        n.delete("rule");
+        return n;
+      },
+      { replace: true },
+    );
+  }
+
   const queryClient = useQueryClient();
   const deleteRule = usePermDeleteRule<ApiError>({
     mutation: {
@@ -56,10 +76,12 @@ export default function MaskFilterRules() {
   });
 
   function openCreate() {
+    dropLink();
     setEditing(null);
     setDialogOpen(true);
   }
   function openEdit(r: RuleView) {
+    dropLink();
     setEditing(r);
     setDialogOpen(true);
   }
@@ -156,6 +178,17 @@ export default function MaskFilterRules() {
         {newRuleButton}
       </div>
 
+      <OverlapReport />
+
+      {wanted && !canWrite && (
+        <Alert>
+          <AlertDescription>
+            You followed a link to edit a rule, but editing needs the <code>policy:update</code>{" "}
+            permission, which this account does not have. The list is shown instead.
+          </AlertDescription>
+        </Alert>
+      )}
+
       <div className="space-y-4">
         {rulesQ.isLoading ? (
           <ListSkeleton rows={6} cols={4} />
@@ -217,9 +250,15 @@ export default function MaskFilterRules() {
       </div>
 
       <RuleDialog
-        open={dialogOpen}
-        onOpenChange={setDialogOpen}
-        existing={editing}
+        open={dialogOpen || linked !== null}
+        onOpenChange={(o) => {
+          setDialogOpen(o);
+          if (!o) {
+            setEditing(null);
+            dropLink();
+          }
+        }}
+        existing={editing ?? linked}
       />
 
       <ConfirmDeleteDialog

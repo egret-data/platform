@@ -11,8 +11,9 @@ use std::collections::BTreeSet;
 
 use egret_perm::{EngineType, Grant, PrincipalKind};
 use egret_perm_compile::equivalence::{
-    compare, compare_profiles, derive_probes, probe_count, Check, Disagreement, GateRefusal, Probe,
-    ProfileCase, TagAssignment, Tagging, PROBE_SIBLING_PREFIX, PROBE_UNNAMED_USER,
+    changed_policies, compare, compare_profiles, derive_probes, plan_probes, planned_probe_count,
+    probe_count, Check, Disagreement, FallbackReason, GateRefusal, Probe, ProfileCase, PruneMode,
+    TagAssignment, Tagging, PROBE_SIBLING_PREFIX, PROBE_UNNAMED_USER,
 };
 use egret_perm_compile::grammar::{
     grants_from_access_policy, rules_from_mask_or_filter_policy, ServiceKind,
@@ -26,20 +27,18 @@ use egret_ranger_eval::servicedef::ServiceDef;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+#[path = "common/corpus.rs"]
+mod corpus;
+use corpus::{
+    assign, corpus_json, def_json, envelope_json, item, level, mask_item, tag_deny_pii, tag_mask,
+    CORPUS_PAIRS, CORPUS_SEED, LARGE_CORPUS_PAIRS,
+};
+
 const CAT: Uuid = Uuid::from_u128(0x1111_1111_1111_1111_1111_1111_1111_1111);
 const CAT2: Uuid = Uuid::from_u128(0x2222_2222_2222_2222_2222_2222_2222_2222);
 const BOTH: [PluginVersion; 2] = [PluginVersion::Ranger2_5_0, PluginVersion::Ranger2_8_0];
 
 // ── fixtures ─────────────────────────────────────────────────────────────
-
-fn def_json(file: &str) -> Value {
-    let path = format!(
-        "{}/../egret-policy/src/service-defs/{file}",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    serde_json::from_str(&std::fs::read_to_string(path).expect("read service-def"))
-        .expect("parse service-def")
-}
 
 fn trino_def() -> ServiceDef {
     ServiceDef::parse(&def_json("trino.json"))
@@ -64,17 +63,6 @@ fn catalog_name(id: Uuid) -> &'static str {
 /// key == name, the one migratable tag shape.
 fn tags(key: &str) -> Option<String> {
     (key == "phi").then(|| "phi".to_string())
-}
-
-fn level(values: &[&str]) -> Value {
-    json!({"values": values, "isExcludes": false, "isRecursive": false})
-}
-
-fn item(users: &[&str], groups: &[&str], accesses: &[&str]) -> Value {
-    json!({
-        "users": users, "groups": groups, "roles": [],
-        "accesses": accesses.iter().map(|a| json!({"type": a, "isAllowed": true})).collect::<Vec<_>>()
-    })
 }
 
 /// A hand-written access policy on `<catalogs>.sales.orders.*`.
@@ -126,19 +114,7 @@ fn compiled(grants: &[Grant]) -> Vec<Value> {
 /// A download envelope carrying `policies` and, when non-empty, a
 /// `tagPolicies` block with the embedded tag service-def.
 fn envelope(policies: Vec<Value>, tag_policies: Vec<Value>) -> ServicePolicySet {
-    let mut env = json!({
-        "serviceName": "trino-p", "serviceId": 1, "policyVersion": 1,
-        "policies": policies,
-        "serviceDef": def_json("trino.json"),
-    });
-    if !tag_policies.is_empty() {
-        env["tagPolicies"] = json!({
-            "serviceName": "trino-tags", "serviceId": 99, "policyVersion": 1,
-            "policies": tag_policies,
-            "serviceDef": def_json("tag.json"),
-        });
-    }
-    serde_json::from_value(env).expect("parse envelope")
+    serde_json::from_value(envelope_json(policies, tag_policies)).expect("parse envelope")
 }
 
 fn case<'a>(
@@ -161,8 +137,137 @@ fn case<'a>(
     }
 }
 
+/// A disagreement that is no CHANGE: both sides are `Undecidable` for the same
+/// reason (`compare` counts any `Undecidable` as a disagreement, so a pair of
+/// UNCHANGED policies the evaluator cannot arbitrate shows up once per probe).
+/// Pruning drops such a probe wherever no changed policy may be a candidate —
+/// the theorem's "decides identically" — and `pruned_agrees` accounts for that
+/// class explicitly instead of hiding it in a looser comparison.
+fn unchanged_undecidable(d: &Disagreement) -> bool {
+    d.before == d.after && d.before.starts_with("cannot be decided")
+}
+
+/// SP4d-4 Task 5. The gate on `before -> after` with the FULL probe set and
+/// with the PRUNED one: asserts the pruned probes are a subset of the full
+/// ones and that the two find exactly the same disagreements (as multisets),
+/// up to [`unchanged_undecidable`] ones that pruning is allowed to drop and
+/// never to invent. Returns the pruned plan, the full set's other
+/// disagreements, and how many unchanged-undecidable ones pruning dropped.
+/// Every case in this file is run through it, so a pruning that drops a probe
+/// which disagrees fails the case that owns it.
+fn pruned_agrees(
+    before: &ServicePolicySet,
+    after: &ServicePolicySet,
+    assignments: &[TagAssignment],
+    versions: &[PluginVersion],
+) -> (
+    egret_perm_compile::equivalence::ProbePlan,
+    Vec<Disagreement>,
+    usize,
+) {
+    let def = trino_def();
+    let full = plan_probes(before, after, &def, assignments, PruneMode::Full);
+    let pruned = plan_probes(before, after, &def, assignments, PruneMode::Pruned);
+    assert_eq!(full.fallback, None);
+    assert_eq!(full.probes, derive_probes(before, after, &def, assignments));
+    assert_eq!(pruned.full_count, full.probes.len());
+    // Pruning keeps `derive_probes`' order, so "subset" is "subsequence".
+    let mut rest = full.probes.iter();
+    assert!(
+        pruned.probes.iter().all(|p| rest.any(|f| f == p)),
+        "pruned must be a subsequence of full"
+    );
+    assert_eq!(
+        planned_probe_count(before, after, &def, assignments, PruneMode::Pruned),
+        pruned.probes.len()
+    );
+    // The argument as a check: no probe that pruning DROPPED has a changed
+    // policy that may be a candidate for it.
+    {
+        let tag_def = ServiceDef::parse(&before.tag_service_def);
+        let (resource_delta, tag_delta): (Vec<_>, Vec<_>) =
+            changed_policies(before, after).into_iter().partition(|p| {
+                before
+                    .policies
+                    .iter()
+                    .chain(&after.policies)
+                    .any(|q| std::ptr::eq(q, *p))
+            });
+        let mut kept = pruned.probes.iter().peekable();
+        for probe in &full.probes {
+            if kept.peek().is_some_and(|k| *k == probe) {
+                kept.next();
+                continue;
+            }
+            for p in &resource_delta {
+                for pt in [
+                    egret_ranger_eval::servicedef::PolicyType::Access,
+                    egret_ranger_eval::servicedef::PolicyType::DataMask,
+                    egret_ranger_eval::servicedef::PolicyType::RowFilter,
+                ] {
+                    assert!(
+                        !egret_ranger_eval::eval::may_be_candidate(
+                            p,
+                            &probe.request.resource,
+                            &def,
+                            pt
+                        ),
+                        "dropped probe at {:?} has changed policy {:?} as a candidate",
+                        probe.request.resource,
+                        p.name
+                    );
+                }
+            }
+            for p in &tag_delta {
+                for t in probe
+                    .request
+                    .resolved_tags
+                    .iter()
+                    .flat_map(|t| t.as_slice())
+                {
+                    assert!(
+                        !egret_ranger_eval::eval::may_be_tag_candidate(p, &t.name, &tag_def),
+                        "dropped probe carries tag {} that changed tag policy {:?} covers",
+                        t.name,
+                        p.name
+                    );
+                }
+            }
+        }
+    }
+    let key = |d: &Disagreement| format!("{d:?}");
+    let run = |probes: Vec<Probe>| {
+        let mut ds = match compare(&case(1, before, after, &def, versions, probes)) {
+            Ok(ds) => ds,
+            Err(GateRefusal::NoProbes { .. }) => vec![],
+            Err(e) => panic!("{e:?}"),
+        };
+        ds.sort_by_key(key);
+        ds
+    };
+    let (full_ds, pruned_ds) = (run(full.probes), run(pruned.probes.clone()));
+    let (full_inert, full_ds): (Vec<_>, Vec<_>) =
+        full_ds.into_iter().partition(unchanged_undecidable);
+    let (pruned_inert, pruned_ds): (Vec<_>, Vec<_>) =
+        pruned_ds.into_iter().partition(unchanged_undecidable);
+    assert_eq!(
+        pruned_ds,
+        full_ds,
+        "pruning changed the disagreements:\n full:{}\n pruned:{}",
+        summary(&full_ds),
+        summary(&pruned_ds)
+    );
+    assert!(
+        pruned_inert.iter().all(|d| full_inert.contains(d)),
+        "pruning invented a disagreement"
+    );
+    let dropped = full_inert.len() - pruned_inert.len();
+    (pruned, full_ds, dropped)
+}
+
 /// The gate on one profile, probes derived from the two sets, no tags.
 fn gate(before: &ServicePolicySet, after: &ServicePolicySet) -> Vec<Disagreement> {
+    pruned_agrees(before, after, &[], &BOTH);
     let def = trino_def();
     let probes = derive_probes(before, after, &def, &[]);
     compare(&case(1, before, after, &def, &BOTH, probes)).expect("the gate answers")
@@ -174,17 +279,6 @@ fn column(catalog: &str, schema: &str, table: &str, column: &str) -> RequestReso
         .with("schema", schema)
         .with("table", table)
         .with("column", column)
-}
-
-/// One `catalog_tag_assignments` row on a column.
-fn assign(catalog: &str, schema: &str, table: &str, column: &str, tag: &str) -> TagAssignment {
-    TagAssignment {
-        catalog: catalog.into(),
-        schema: schema.into(),
-        table: table.into(),
-        column: column.into(),
-        tag: tag.into(),
-    }
 }
 
 fn summary(ds: &[Disagreement]) -> String {
@@ -391,16 +485,6 @@ fn a_grant_that_omits_a_user_is_named_by_user_access_type_and_resource() {
 
 // ── 3. the version split ─────────────────────────────────────────────────
 
-/// A tag ACCESS policy denying alice `select` on the tag `pii`.
-fn tag_deny_pii() -> Value {
-    json!({
-        "id": 900, "name": "pii clearance", "service": "trino-tags", "policyType": 0,
-        "isEnabled": true, "policyPriority": 0,
-        "resources": {"tag": level(&["pii"])},
-        "denyPolicyItems": [item(&["alice"], &[], &["select"])]
-    })
-}
-
 /// A resource ALLOW for alice on `wh.sales.orders.*`, at `priority`, with no
 /// deny items.
 fn allow_alice_at(priority: i32) -> Value {
@@ -440,6 +524,7 @@ fn a_tag_deny_reopened_on_2_8_0_is_a_decided_flip_on_2_8_0_and_a_refusal_on_2_5_
     let assignments = [assign("wh", "sales", "orders", "email", "pii")];
     let probes = derive_probes(&before, &after, &def, &assignments);
 
+    pruned_agrees(&before, &after, &assignments, &BOTH);
     let ds = compare(&case(1, &before, &after, &def, &BOTH, probes)).expect("answers");
 
     // Only alice, only where `pii` is (actually or hypothetically) carried.
@@ -500,6 +585,7 @@ fn removing_a_tag_deny_that_only_2_8_0_already_reopens_is_caught_on_2_5_0_alone(
     let assignments = [assign("wh", "sales", "orders", "email", "pii")];
     let probes = derive_probes(&before, &after, &def, &assignments);
 
+    pruned_agrees(&before, &after, &assignments, &BOTH);
     let ds = compare(&case(1, &before, &after, &def, &BOTH, probes.clone())).expect("answers");
     assert!(
         ds.iter()
@@ -518,6 +604,7 @@ fn removing_a_tag_deny_that_only_2_8_0_already_reopens_is_caught_on_2_5_0_alone(
     );
 
     // What a 2.8.0-only gate would have said.
+    pruned_agrees(&before, &after, &assignments, &BOTH);
     let only_2_8 = compare(&case(
         1,
         &before,
@@ -589,27 +676,6 @@ fn the_probe_set_reaches_past_both_policies_vocabulary() {
 }
 
 // ── masks and row filters: the whole result, not "masked or not" ─────────
-
-fn mask_item(users: &[&str], groups: &[&str], mask_type: &str) -> Value {
-    json!({
-        "users": users, "groups": groups, "roles": [],
-        "accesses": [{"type": "select", "isAllowed": true}],
-        "dataMaskInfo": {"dataMaskType": mask_type}
-    })
-}
-
-fn tag_mask(mask_type: &str) -> Value {
-    json!({
-        "id": 700, "name": "mask phi", "service": "trino-tags", "serviceType": "tag",
-        "policyType": 1, "isEnabled": true,
-        "resources": {"tag": level(&["phi"])},
-        "dataMaskPolicyItems": [
-            mask_item(&["alice"], &[], "MASK_NONE"),
-            mask_item(&[], &["public"], mask_type)
-        ],
-        "policyItems": [], "denyPolicyItems": []
-    })
-}
 
 /// What the compiler emits for a mask / filter body.
 fn compiled_rules(body: &Value, service: ServiceKind) -> Vec<Value> {
@@ -693,6 +759,7 @@ fn a_tag_mask_change_is_caught_on_the_actually_tagged_column_from_the_assignment
         && p.request.resource.get("column").is_some_and(|c| c != "ssn")
         && actual_tags_on(p) == Some(vec![])));
 
+    pruned_agrees(&before, &after, &assignments, &BOTH);
     let ds = compare(&case(1, &before, &after, &def, &BOTH, probes())).expect("answers");
     assert!(ds.is_empty(), "expected equivalent:{}", summary(&ds));
 
@@ -707,6 +774,7 @@ fn a_tag_mask_change_is_caught_on_the_actually_tagged_column_from_the_assignment
         vec![reader.clone()],
         compiled_rules(&tag_mask("MASK_HASH"), ServiceKind::Tag),
     );
+    pruned_agrees(&before, &hashed, &assignments, &BOTH);
     let ds = actual(compare(&case(1, &before, &hashed, &def, &BOTH, probes())).expect("answers"));
     assert!(
         !ds.is_empty(),
@@ -731,6 +799,7 @@ fn a_tag_mask_change_is_caught_on_the_actually_tagged_column_from_the_assignment
         vec![reader.clone()],
         compiled_rules(&no_exempt, ServiceKind::Tag),
     );
+    pruned_agrees(&before, &unexempt, &assignments, &BOTH);
     let ds = actual(compare(&case(1, &before, &unexempt, &def, &BOTH, probes())).expect("answers"));
     assert!(
         !ds.is_empty()
@@ -764,6 +833,7 @@ fn a_tag_rule_change_is_caught_even_when_no_column_carries_the_tag() {
     );
     let def = trino_def();
 
+    pruned_agrees(&before, &same, &[], &BOTH);
     let ds = compare(&case(
         1,
         &before,
@@ -775,6 +845,7 @@ fn a_tag_rule_change_is_caught_even_when_no_column_carries_the_tag() {
     .expect("answers");
     assert!(ds.is_empty(), "expected equivalent:{}", summary(&ds));
 
+    pruned_agrees(&before, &hashed, &[], &BOTH);
     let ds = compare(&case(
         1,
         &before,
@@ -905,6 +976,9 @@ fn a_migration_equivalent_on_its_own_profile_but_widening_another_is_caught_on_t
     let q_alone = compare(&cases[1]).expect("answers");
     assert!(!q_alone.is_empty(), "Q changes");
 
+    for c in &cases {
+        pruned_agrees(c.before, c.after, &[], &[PluginVersion::Ranger2_5_0]);
+    }
     let ds = compare_profiles(&cases).expect("answers");
     assert_eq!(ds, q_alone, "exactly Q's disagreements, nothing from P");
     assert!(ds
@@ -1011,5 +1085,719 @@ fn the_probe_count_is_exactly_the_number_of_probes_derived() {
             derive_probes(b, a, &def, assignments).len(),
             "case {i}"
         );
+    }
+}
+
+// ── SP4d-4 Task 5: pruning the probes to where a changed policy may matter ──
+
+/// A resource policy on `wh.<schema>.<table>.*` for `users` (allow) with
+/// `deny_users` as deny items.
+fn orders_like(
+    name: &str,
+    schema: &str,
+    table: &str,
+    users: &[&str],
+    deny_users: &[&str],
+    priority: i32,
+) -> Value {
+    let mut p = json!({
+        "id": 500, "name": name, "service": "trino-p", "policyType": 0, "isEnabled": true,
+        "policyPriority": priority,
+        "resources": {
+            "catalog": level(&["wh"]), "schema": level(&[schema]),
+            "table": level(&[table]), "column": level(&["*"])
+        },
+        "policyItems": if users.is_empty() { vec![] } else { vec![item(users, &[], &["select"])] },
+        "denyPolicyItems":
+            if deny_users.is_empty() { vec![] } else { vec![item(deny_users, &[], &["select"])] },
+        "allowExceptions": [], "denyExceptions": []
+    });
+    p["id"] = json!(500);
+    p
+}
+
+/// `wh.sales.*.*` — the spec's `H`.
+fn sales_wide(name: &str, users: &[&str], priority: i32) -> Value {
+    let mut p = orders_like(name, "sales", "*", users, &[], priority);
+    p["resources"]["table"] = level(&["*"]);
+    p
+}
+
+fn disagreements_at<'a>(
+    ds: &'a [Disagreement],
+    user: &'a str,
+    prefix: &'a str,
+) -> impl Iterator<Item = &'a Disagreement> {
+    ds.iter()
+        .filter(move |d| d.user == user && d.resource.starts_with(prefix))
+}
+
+/// The spec's example: an UNCHANGED deny on `wh.sales.orders` for alice, an
+/// allow `H` on `wh.sales.*`, and `H` replaced by `G` that differs only by a
+/// strictly higher priority. The disagreement sits at `wh.sales.orders.*`,
+/// which `G` may match — so it is kept — and it is reported.
+#[test]
+fn an_unchanged_interacting_deny_is_still_caught() {
+    let deny = orders_like("deny alice orders", "sales", "orders", &[], &["alice"], 0);
+    let h = sales_wide("alice reads sales", &["alice"], 0);
+    let g = sales_wide("alice reads sales", &["alice"], 1);
+    let before = envelope(vec![deny.clone(), h], vec![]);
+    let after = envelope(vec![deny.clone(), g], vec![]);
+
+    let (plan, ds, _) = pruned_agrees(&before, &after, &[], &BOTH);
+    // A non-zero priority in Δ is a fallback condition: the full set.
+    assert_eq!(plan.fallback, Some(FallbackReason::NonZeroPriorityInDelta));
+    assert_eq!(plan.probes.len(), plan.full_count);
+    assert!(
+        disagreements_at(&ds, "alice", "wh.sales.orders").any(|d| d.access_type == "select"
+            && d.before.starts_with("denied")
+            && d.after.starts_with("allowed")),
+        "the higher-priority allow reopens the unchanged deny:{}",
+        summary(&ds)
+    );
+
+    // The same shape with `G` differing from `H` by an added user instead:
+    // pruning is ON, and the deny that still holds at `orders` (same priority,
+    // deny wins) yields no disagreement there, while the new user's access to
+    // the rest of `sales` is reported.
+    let deny_both = orders_like(
+        "deny alice orders",
+        "sales",
+        "orders",
+        &[],
+        &["alice", "bob"],
+        0,
+    );
+    let h = sales_wide("alice reads sales", &["alice"], 0);
+    let g = sales_wide("alice reads sales", &["alice", "bob"], 0);
+    let before = envelope(vec![deny_both.clone(), h], vec![]);
+    let after = envelope(vec![deny_both, g], vec![]);
+    let (plan, ds, _) = pruned_agrees(&before, &after, &[], &BOTH);
+    assert_eq!(plan.fallback, None);
+    assert!(
+        plan.probes.len() < plan.full_count,
+        "pruning must be active here"
+    );
+    assert!(
+        disagreements_at(&ds, "bob", "wh.sales.egret-probe")
+            .any(|d| d.after.starts_with("allowed")),
+        "bob gains the rest of sales:{}",
+        summary(&ds)
+    );
+    assert_eq!(
+        disagreements_at(&ds, "bob", "wh.sales.orders").count(),
+        0,
+        "the unchanged deny still holds at orders:{}",
+        summary(&ds)
+    );
+    // ...and the orders coordinate was KEPT (G may match it), not dropped.
+    assert!(
+        plan.probes.iter().any(|p| p.request.user == "bob"
+            && p.request.resource.get("table") == Some("orders")
+            && p.request.access_type == "select"),
+        "orders is a coordinate G may match"
+    );
+}
+
+/// SP4d-3's version-split shape: a tag DENY plus a strictly higher-priority
+/// no-deny resource ALLOW. Δ is the resource ALLOW; the interacting tag DENY is
+/// unchanged. The decided flip is reported on 2.8.0 and the refusal on 2.5.0,
+/// exactly as under the full set (`pruned_agrees` pins the equality).
+#[test]
+fn a_tag_interaction_is_still_caught_under_pruning() {
+    let before = envelope(vec![allow_alice_at(0)], vec![tag_deny_pii()]);
+    let after = envelope(vec![allow_alice_at(1)], vec![tag_deny_pii()]);
+    let assignments = [assign("wh", "sales", "orders", "email", "pii")];
+    let (plan, ds, _) = pruned_agrees(&before, &after, &assignments, &BOTH);
+    assert_eq!(plan.fallback, Some(FallbackReason::NonZeroPriorityInDelta));
+    assert!(
+        ds.iter()
+            .any(|d| d.plugin_version == PluginVersion::Ranger2_8_0
+                && d.tags == ["pii"]
+                && d.before.starts_with("denied by a deny item")
+                && d.after.starts_with("allowed")),
+        "{}",
+        summary(&ds)
+    );
+
+    // Pruning ON: the same tag DENY, unchanged, and a Δ at priority 0 that
+    // covers the tagged coordinate (a user is added to the allow). The tag
+    // deny still wins there; the column elsewhere in the table changes.
+    let tagged_before = orders_like("orders reader", "sales", "orders", &["alice"], &[], 0);
+    let tagged_after = orders_like(
+        "orders reader",
+        "sales",
+        "orders",
+        &["alice", "bob"],
+        &[],
+        0,
+    );
+    let before = envelope(vec![tagged_before], vec![tag_deny_pii()]);
+    let after = envelope(vec![tagged_after], vec![tag_deny_pii()]);
+    let (plan, ds, _) = pruned_agrees(&before, &after, &assignments, &BOTH);
+    assert_eq!(plan.fallback, None);
+    assert!(
+        disagreements_at(&ds, "bob", "wh.sales.orders").any(|d| d.tagging == Tagging::Actual
+            && d.tags.is_empty()
+            && d.after.starts_with("allowed")),
+        "bob gains the untagged columns:{}",
+        summary(&ds)
+    );
+}
+
+/// A tag policy in Δ keeps the probes whose tags it covers, actual or
+/// hypothetical, and the answer is the full set's.
+#[test]
+fn a_changed_tag_policy_keeps_the_probes_that_carry_its_tag() {
+    let reader = hand_policy(
+        "everyone reads orders",
+        &["wh"],
+        vec![item(&[], &["public"], &["select"])],
+    );
+    let before = envelope(vec![reader.clone()], vec![tag_mask("MASK_NULL")]);
+    let after = envelope(
+        vec![reader],
+        compiled_rules(&tag_mask("MASK_HASH"), ServiceKind::Tag),
+    );
+    let assignments = [assign("wh", "sales", "orders", "ssn", "phi")];
+    let (plan, ds, _) = pruned_agrees(&before, &after, &assignments, &BOTH);
+    assert_eq!(plan.fallback, None);
+    assert!(!ds.is_empty());
+    // Every probe is at a tagging that carries `phi`.
+    let carrying = |p: &Probe| {
+        p.request
+            .resolved_tags
+            .as_ref()
+            .is_some_and(|t| t.as_slice().iter().any(|t| t.name == "phi"))
+    };
+    assert!(plan.probes.iter().all(carrying), "only phi-carrying probes");
+    assert!(plan.probes.len() < plan.full_count);
+}
+
+/// 20 policies on 20 tables, one of which changes: pruning must remove most
+/// probes (otherwise "pruned == full" above is satisfied by keeping all).
+#[test]
+fn pruning_removes_probes() {
+    let table = |i: usize, users: &[&str]| {
+        orders_like(
+            &format!("p{i}"),
+            &format!("s{i}"),
+            &format!("t{i}"),
+            users,
+            &[],
+            0,
+        )
+    };
+    let before: Vec<Value> = (0..20).map(|i| table(i, &["alice"])).collect();
+    let mut after = before.clone();
+    after[7] = table(7, &["alice", "bob"]);
+    let (before, after) = (envelope(before, vec![]), envelope(after, vec![]));
+    let def = trino_def();
+
+    let (plan, ds, _) = pruned_agrees(&before, &after, &[], &[PluginVersion::Ranger2_5_0]);
+    assert_eq!(plan.fallback, None);
+    assert_eq!(plan.full_count, probe_count(&before, &after, &def, &[]));
+    assert!(
+        plan.probes.len() < plan.full_count / 4,
+        "pruned {} of {}",
+        plan.probes.len(),
+        plan.full_count
+    );
+    assert!(disagreements_at(&ds, "bob", "wh.s7.t7").count() > 0);
+    assert!(ds
+        .iter()
+        .all(|d| d.resource.starts_with("wh") && d.user == "bob"));
+}
+
+#[test]
+fn every_fallback_condition_gives_the_full_set() {
+    let def = trino_def();
+    let base = orders_like("p", "sales", "orders", &["alice"], &[], 0);
+    let widened = orders_like("p", "sales", "orders", &["alice", "bob"], &[], 0);
+    let other = orders_like("q", "hr", "people", &["carol"], &[], 0);
+    let before = envelope(vec![base.clone(), other.clone()], vec![]);
+    let after = envelope(vec![widened.clone(), other.clone()], vec![]);
+    let plan_of = |b: &ServicePolicySet, a: &ServicePolicySet| {
+        plan_probes(b, a, &def, &[], PruneMode::Pruned)
+    };
+    let expect_full = |b: &ServicePolicySet, a: &ServicePolicySet, why: FallbackReason| {
+        let plan = plan_of(b, a);
+        assert_eq!(plan.fallback, Some(why));
+        assert_eq!(plan.probes.len(), plan.full_count, "{why:?}");
+        assert_eq!(plan.probes, derive_probes(b, a, &def, &[]), "{why:?}");
+        assert_eq!(
+            planned_probe_count(b, a, &def, &[], PruneMode::Pruned),
+            plan.full_count
+        );
+    };
+
+    // Control: no fallback, and pruning is active.
+    let control = plan_of(&before, &after);
+    assert_eq!(control.fallback, None);
+    assert!(control.probes.len() < control.full_count);
+
+    // 1. E(B) != E(A): the service-def, the tag service-def, the service id,
+    //    and an envelope construct on one side.
+    let mut a = after.clone();
+    a.service_def = json!({"name": "somebody else's def"});
+    expect_full(&before, &a, FallbackReason::EnvelopeDiffers);
+    let mut a = after.clone();
+    a.tag_service_def = json!({"name": "tag"});
+    expect_full(&before, &a, FallbackReason::EnvelopeDiffers);
+    let mut a = after.clone();
+    a.service_id = Some(2);
+    expect_full(&before, &a, FallbackReason::EnvelopeDiffers);
+    let mut a = after.clone();
+    a.unmodelled
+        .push(egret_ranger_eval::model::Unmodelled::SecurityZones);
+    expect_full(&before, &a, FallbackReason::EnvelopeDiffers);
+    //    ...but a bumped `policyVersion` is not an envelope difference.
+    let mut a = after.clone();
+    a.policy_version = Some(99);
+    assert_eq!(plan_of(&before, &a).fallback, None);
+
+    // 1b. The same unmodelled construct on both sides.
+    let (mut b, mut a) = (before.clone(), after.clone());
+    for s in [&mut b, &mut a] {
+        s.unmodelled
+            .push(egret_ranger_eval::model::Unmodelled::SecurityZones);
+    }
+    expect_full(&b, &a, FallbackReason::EnvelopeUnmodelled);
+
+    // 2. A Δ policy with isDenyAllElse, or a non-zero priority.
+    let mut deny_all = widened.clone();
+    deny_all["isDenyAllElse"] = json!(true);
+    expect_full(
+        &before,
+        &envelope(vec![deny_all, other.clone()], vec![]),
+        FallbackReason::DenyAllElseInDelta,
+    );
+    expect_full(
+        &before,
+        &envelope(
+            vec![
+                orders_like("p", "sales", "orders", &["alice"], &[], 3),
+                other.clone(),
+            ],
+            vec![],
+        ),
+        FallbackReason::NonZeroPriorityInDelta,
+    );
+    //    ...the priority of the BEFORE side counts too (both versions are in Δ).
+    expect_full(
+        &envelope(
+            vec![
+                orders_like("p", "sales", "orders", &["alice"], &[], 3),
+                other.clone(),
+            ],
+            vec![],
+        ),
+        &after,
+        FallbackReason::NonZeroPriorityInDelta,
+    );
+
+    // 3. Nothing changed: every question is still asked.
+    expect_full(&before, &before.clone(), FallbackReason::EmptyDelta);
+}
+
+/// Δ is `(name, body without id)`, compared as values.
+#[test]
+fn an_id_only_change_is_not_in_delta() {
+    let p = orders_like("p", "sales", "orders", &["alice"], &[], 0);
+    let mut reid = p.clone();
+    reid["id"] = json!(9001);
+    // `jsonb` hands the keys back in another order.
+    let reordered: Value = serde_json::from_str(
+        &serde_json::to_string(&reid)
+            .map(|s| {
+                let v: serde_json::Map<String, Value> = serde_json::from_str(&s).unwrap();
+                let mut keys: Vec<_> = v.into_iter().collect();
+                keys.reverse();
+                format!(
+                    "{{{}}}",
+                    keys.iter()
+                        .map(|(k, v)| format!("\"{k}\":{v}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    let before = envelope(vec![p.clone()], vec![]);
+    let after = envelope(vec![reordered], vec![]);
+    assert!(changed_policies(&before, &after).is_empty());
+
+    // A changed body is in Δ on BOTH sides; a renamed policy too.
+    let widened = envelope(
+        vec![orders_like(
+            "p",
+            "sales",
+            "orders",
+            &["alice", "bob"],
+            &[],
+            0,
+        )],
+        vec![],
+    );
+    assert_eq!(changed_policies(&before, &widened).len(), 2);
+    let renamed = envelope(
+        vec![orders_like("p2", "sales", "orders", &["alice"], &[], 0)],
+        vec![],
+    );
+    assert_eq!(changed_policies(&before, &renamed).len(), 2);
+    // Two same-named policies, one changed: multiset difference.
+    let twin = envelope(vec![p.clone(), p.clone()], vec![]);
+    let twin_changed = envelope(
+        vec![
+            p.clone(),
+            orders_like("p", "sales", "orders", &["alice", "bob"], &[], 0),
+        ],
+        vec![],
+    );
+    assert_eq!(changed_policies(&twin, &twin_changed).len(), 2);
+}
+
+/// A grant to the `public` group is felt by principals no changed policy
+/// names — alice (named by an unchanged policy) and the unnamed user. Pruning
+/// the principals to those Δ names would lose them.
+#[test]
+fn a_public_group_grant_is_felt_by_principals_the_changed_policy_does_not_name() {
+    let alice = orders_like("alice reads hr", "hr", "people", &["alice"], &[], 0);
+    let before = envelope(vec![alice.clone()], vec![]);
+    let mut public = orders_like("everyone reads orders", "sales", "orders", &[], &[], 0);
+    public["policyItems"] = json!([item(&[], &["public"], &["select"])]);
+    let after = envelope(vec![alice, public], vec![]);
+    let (plan, ds, _) = pruned_agrees(&before, &after, &[], &BOTH);
+    assert_eq!(plan.fallback, None);
+    assert!(
+        disagreements_at(&ds, PROBE_UNNAMED_USER, "wh.sales.orders").count() > 0,
+        "{}",
+        summary(&ds)
+    );
+    assert!(
+        disagreements_at(&ds, "alice", "wh.sales.orders").count() > 0,
+        "{}",
+        summary(&ds)
+    );
+}
+
+#[test]
+fn an_empty_pruned_set_is_a_refusal_not_an_answer() {
+    // No coordinate at all (a policy with no resource levels, on one side):
+    // the plan is empty and `compare` refuses, never "equivalent".
+    let def = trino_def();
+    let before = envelope(vec![], vec![]);
+    let mut empty_res = orders_like("p", "sales", "orders", &["alice"], &[], 0);
+    empty_res["resources"] = json!({});
+    let after = envelope(vec![empty_res], vec![]);
+    let plan = plan_probes(&before, &after, &def, &[], PruneMode::Pruned);
+    assert!(plan.probes.is_empty());
+    assert_eq!(plan.fallback, None);
+    assert_eq!(
+        compare(&case(3, &before, &after, &def, &BOTH, plan.probes)),
+        Err(GateRefusal::NoProbes { service_id: 3 })
+    );
+}
+
+#[test]
+fn planned_probe_count_matches_the_build() {
+    let def = trino_def();
+    let assignments = [assign("wh", "sales", "orders", "email", "pii")];
+    let table = |i: usize, users: &[&str]| {
+        orders_like(
+            &format!("p{i}"),
+            &format!("s{i}"),
+            &format!("t{i}"),
+            users,
+            &[],
+            0,
+        )
+    };
+    let twenty: Vec<Value> = (0..20).map(|i| table(i, &["alice"])).collect();
+    let mut twenty_after = twenty.clone();
+    twenty_after[7] = table(7, &["alice", "bob"]);
+    let mut changed_def = envelope(twenty.clone(), vec![]);
+    changed_def.service_def = json!({"x": 1});
+    let cases: Vec<(ServicePolicySet, ServicePolicySet, &[TagAssignment])> = vec![
+        (
+            envelope(
+                vec![
+                    orders_like("d", "sales", "orders", &[], &["alice"], 0),
+                    sales_wide("h", &["alice"], 0),
+                ],
+                vec![],
+            ),
+            envelope(
+                vec![
+                    orders_like("d", "sales", "orders", &[], &["alice"], 0),
+                    sales_wide("h", &["alice"], 1),
+                ],
+                vec![],
+            ),
+            &[],
+        ),
+        (
+            envelope(vec![allow_alice_at(0)], vec![tag_deny_pii()]),
+            envelope(vec![allow_alice_at(0)], vec![]),
+            &assignments,
+        ),
+        (
+            envelope(twenty, vec![]),
+            envelope(twenty_after, vec![]),
+            &[],
+        ),
+        (envelope(vec![allow_alice_at(0)], vec![]), changed_def, &[]),
+    ];
+    for (i, (b, a, asg)) in cases.iter().enumerate() {
+        for mode in [PruneMode::Full, PruneMode::Pruned] {
+            assert_eq!(
+                planned_probe_count(b, a, &def, asg, mode),
+                plan_probes(b, a, &def, asg, mode).probes.len(),
+                "case {i} {mode:?}"
+            );
+        }
+    }
+}
+
+// ── the seeded corpus ────────────────────────────────────────────────────
+
+/// `corpus::corpus_json`, parsed.
+fn corpus(pairs: usize) -> Vec<(ServicePolicySet, ServicePolicySet, Vec<TagAssignment>)> {
+    corpus_json(pairs)
+        .into_iter()
+        .map(|(b, a, asg)| {
+            (
+                serde_json::from_value(b).expect("parse envelope"),
+                serde_json::from_value(a).expect("parse envelope"),
+                asg,
+            )
+        })
+        .collect()
+}
+
+/// `compare` over the pruned probes returns EXACTLY the disagreements it
+/// returns over the full set, on a fixed-seed corpus; and the corpus really
+/// exercises pruning (most pairs prune, some fall back, some disagree).
+fn run_corpus(pairs: usize) {
+    let mut pruned_pairs = 0;
+    let mut fell_back = 0;
+    let mut with_disagreements = 0;
+    let (mut full_total, mut pruned_total, mut dropped_inert) = (0usize, 0usize, 0usize);
+    for (i, (before, after, assignments)) in corpus(pairs).iter().enumerate() {
+        // Same answer as the full set, version by version.
+        // The two versions answer differently only where a tag policy is in
+        // play, so only those pairs pay for both.
+        let versions: &[PluginVersion] =
+            if before.tag_policies.is_empty() && after.tag_policies.is_empty() {
+                &[PluginVersion::Ranger2_8_0]
+            } else {
+                &BOTH
+            };
+        let (plan, ds, dropped) = pruned_agrees(before, after, assignments, versions);
+        dropped_inert += dropped;
+        full_total += plan.full_count;
+        pruned_total += plan.probes.len();
+        match plan.fallback {
+            Some(_) => fell_back += 1,
+            None if plan.probes.len() < plan.full_count => pruned_pairs += 1,
+            None => {}
+        }
+        if !ds.is_empty() {
+            with_disagreements += 1;
+        }
+        let _ = i;
+    }
+    eprintln!(
+        "corpus: seed={CORPUS_SEED:#x} pairs={pairs} pruned={pruned_pairs} \
+         fell_back={fell_back} with_disagreements={with_disagreements} \
+         probes full={full_total} pruned={pruned_total} \
+         dropped_unchanged_undecidable={dropped_inert}"
+    );
+    assert!(pruned_pairs >= pairs / 4, "pruned only {pruned_pairs}");
+    assert!(fell_back > 0, "no fallback exercised");
+    assert!(
+        with_disagreements >= pairs / 4,
+        "only {with_disagreements} pairs disagree"
+    );
+    assert!(pruned_total < full_total);
+}
+
+#[test]
+fn pruned_and_full_find_the_same_disagreements_on_a_seeded_corpus() {
+    run_corpus(CORPUS_PAIRS);
+}
+
+/// The same stream, longer: `cargo test -p egret-perm-compile --test
+/// equivalence -- --ignored`.
+#[test]
+#[ignore = "minutes in debug; the default corpus is its prefix"]
+fn pruned_and_full_find_the_same_disagreements_on_the_large_corpus() {
+    run_corpus(LARGE_CORPUS_PAIRS);
+}
+
+/// The trie half of candidacy at the gate: a changed policy that EXCLUDES
+/// `sales` is rejected by the matcher at `wh.sales.*` (match type `NONE`), but
+/// Ranger's trie cannot be shown to omit it (an `isExcludes` level is an
+/// inherited evaluator), and at offset 553 an evaluator that matched nothing
+/// still counts. So those coordinates must be KEPT.
+#[test]
+fn a_changed_excludes_policy_keeps_the_coordinates_the_matcher_rejects() {
+    let mut excluding = orders_like("not sales", "sales", "orders", &["alice"], &[], 0);
+    excluding["resources"]["schema"]["isExcludes"] = json!(true);
+    let other = orders_like("hr", "hr", "people", &["carol"], &[], 0);
+    let before = envelope(vec![other.clone()], vec![]);
+    let after = envelope(vec![other, excluding], vec![]);
+    let (plan, _, _) = pruned_agrees(&before, &after, &[], &BOTH);
+    assert_eq!(plan.fallback, None);
+    assert!(
+        plan.probes
+            .iter()
+            .any(|p| p.request.resource.get("schema") == Some("sales")),
+        "a coordinate the matcher rejects but the trie cannot exclude was dropped"
+    );
+}
+
+// ── fix round 1: Δ sees the CONTENT of what the reader keeps only as a marker ──
+
+fn conditioned(ip: &str) -> Value {
+    let mut p = orders_like("conditioned", "sales", "orders", &["alice"], &[], 0);
+    p["conditions"] = json!([{"type": "ip-range", "values": [ip]}]);
+    p
+}
+
+/// The gate's raw answer (no inert/undecidable filtering) under `mode`.
+fn raw_gate(
+    before: &ServicePolicySet,
+    after: &ServicePolicySet,
+    mode: PruneMode,
+) -> Vec<Disagreement> {
+    let def = trino_def();
+    let probes = plan_probes(before, after, &def, &[], mode).probes;
+    match compare(&case(1, before, after, &def, &BOTH, probes)) {
+        Ok(ds) => ds,
+        Err(GateRefusal::NoProbes { .. }) => vec![],
+        Err(e) => panic!("{e:?}"),
+    }
+}
+
+/// Two bodies that differ ONLY in a condition's content parse to equal typed
+/// fields (the reader keeps `PolicyConditions` as a bare marker); both
+/// versions must still be in Δ. The same for a schedule, an item condition,
+/// `delegateAdmin` and a mask `conditionExpr`.
+#[test]
+fn bodies_differing_only_in_marker_content_are_in_delta() {
+    let pair = |a: Value, b: Value| {
+        changed_policies(&envelope(vec![a], vec![]), &envelope(vec![b], vec![])).len()
+    };
+    assert_eq!(pair(conditioned("10.0.0.1"), conditioned("10.0.0.2")), 2);
+    assert_eq!(pair(conditioned("10.0.0.1"), conditioned("10.0.0.1")), 0);
+
+    let base = orders_like("p", "sales", "orders", &["alice"], &[], 0);
+    let with = |key: &str, v: Value| {
+        let mut p = base.clone();
+        p[key] = v;
+        p
+    };
+    assert_eq!(
+        pair(
+            with(
+                "validitySchedules",
+                json!([{"startTime": "2026/01/01 00:00:00"}])
+            ),
+            with(
+                "validitySchedules",
+                json!([{"startTime": "2026/02/01 00:00:00"}])
+            )
+        ),
+        2
+    );
+    let item_cond = |v: &str| {
+        let mut p = base.clone();
+        p["policyItems"][0]["conditions"] = json!([{"type": "ip-range", "values": [v]}]);
+        p
+    };
+    assert_eq!(pair(item_cond("1.1.1.1"), item_cond("2.2.2.2")), 2);
+    let delegate = |d: bool| {
+        let mut p = base.clone();
+        p["policyItems"][0]["delegateAdmin"] = json!(d);
+        p
+    };
+    assert_eq!(pair(delegate(true), delegate(false)), 2);
+    // ...but a reordering of keys, and the store's bookkeeping, are not changes.
+    let mut stamped = base.clone();
+    stamped["guid"] = json!("g-1");
+    stamped["version"] = json!(7);
+    stamped["updateTime"] = json!(123);
+    assert_eq!(pair(base.clone(), stamped), 0);
+}
+
+/// A profile carrying a conditioned policy whose condition content changes
+/// (plus an unrelated benign change elsewhere, so a pruned plan would exist):
+/// the full gate refuses it (the conditioned policy is Undecidable), and the
+/// pruned gate must report exactly the same — via the fallback.
+#[test]
+fn a_changed_condition_cannot_pass_the_pruned_gate() {
+    let other = orders_like("hr", "hr", "people", &["carol"], &[], 0);
+    let other_wider = orders_like("hr", "hr", "people", &["carol", "dave"], &[], 0);
+    let before = envelope(vec![conditioned("10.0.0.1"), other], vec![]);
+    let after = envelope(vec![conditioned("10.0.0.2"), other_wider], vec![]);
+    let def = trino_def();
+
+    let plan = plan_probes(&before, &after, &def, &[], PruneMode::Pruned);
+    assert_eq!(plan.fallback, Some(FallbackReason::ContentFreeConstruct));
+    assert_eq!(plan.probes.len(), plan.full_count);
+
+    let full = raw_gate(&before, &after, PruneMode::Full);
+    let pruned = raw_gate(&before, &after, PruneMode::Pruned);
+    assert!(
+        full.iter()
+            .any(|d| d.resource.starts_with("wh.sales.orders") && d.user == "alice"),
+        "the full gate refuses the conditioned policy:{}",
+        summary(&full)
+    );
+    assert_eq!(pruned, full, "the pruned gate must refuse it too");
+}
+
+/// The fallback alone (Δ already sees the change): an UNCHANGED conditioned
+/// policy on either side still forces the full set.
+#[test]
+fn any_content_free_construct_forces_the_full_set() {
+    let def = trino_def();
+    let plain = orders_like("p", "hr", "people", &["carol"], &[], 0);
+    let wider = orders_like("p", "hr", "people", &["carol", "dave"], &[], 0);
+    let mut with_marker = vec![];
+    let base = orders_like("m", "sales", "orders", &["alice"], &[], 0);
+    let mut cond = base.clone();
+    cond["conditions"] = json!([{"type": "ip-range", "values": ["1.1.1.1"]}]);
+    with_marker.push(cond);
+    let mut sched = base.clone();
+    sched["validitySchedules"] = json!([{"startTime": "2026/01/01 00:00:00"}]);
+    with_marker.push(sched);
+    let mut item_cond = base.clone();
+    item_cond["policyItems"][0]["conditions"] = json!([{"type": "x", "values": ["y"]}]);
+    with_marker.push(item_cond);
+    let mut delegate = base.clone();
+    delegate["policyItems"][0]["delegateAdmin"] = json!(true);
+    with_marker.push(delegate);
+    let mut mask = json!({
+        "id": 5, "name": "mc", "service": "trino-p", "policyType": 1, "isEnabled": true,
+        "resources": {"catalog": level(&["wh"]), "schema": level(&["sales"]),
+                      "table": level(&["orders"]), "column": level(&["ssn"])},
+        "dataMaskPolicyItems": [mask_item(&["alice"], &[], "MASK_NULL")]
+    });
+    mask["dataMaskPolicyItems"][0]["dataMaskInfo"]["conditionExpr"] = json!("x > 1");
+    with_marker.push(mask);
+
+    for marked in with_marker {
+        let before = envelope(vec![marked.clone(), plain.clone()], vec![]);
+        let after = envelope(vec![marked.clone(), wider.clone()], vec![]);
+        let plan = plan_probes(&before, &after, &def, &[], PruneMode::Pruned);
+        assert_eq!(
+            plan.fallback,
+            Some(FallbackReason::ContentFreeConstruct),
+            "{marked}"
+        );
+        assert_eq!(plan.probes.len(), plan.full_count);
     }
 }

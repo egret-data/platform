@@ -106,6 +106,7 @@ function engine(over: Partial<EngineDto> = {}): EngineDto {
     type: "trino",
     namespace: "egret",
     status: "ready",
+    origin: "provisioned",
     spec: {},
     ...over,
   };

@@ -119,7 +119,7 @@ pub fn starrocks_fe_configmap(spec: &EngineSpec) -> Value {
     conf.push_str("aws_s3_enable_path_style_access = true\n");
     conf.push_str("enable_load_volume_from_conf = true\n");
     if spec.ranger.is_some() {
-        conf.push_str("access_control = ranger\n");
+        conf.push_str(crate::ranger_config::STARROCKS_ACCESS_CONTROL_LINE);
     }
     // FE TLS on :9030 (Access delegation parity, slice 3): the exact `ssl_*`
     // keys are LIVE-ONLY (the T4 smoke tunes them against the `fe-ubuntu`
@@ -178,9 +178,9 @@ pub fn starrocks_cn_configmap(spec: &EngineSpec) -> Option<Value> {
 /// shadow `fe.conf` and stop the FE booting.
 const FE_CONF_DIR: &str = "/opt/starrocks/fe/conf";
 /// Key (and file name) of the Ranger plugin security config in `{name}-ranger-cm`.
-const RANGER_SECURITY_XML_KEY: &str = "ranger-starrocks-security.xml";
+const RANGER_SECURITY_XML_KEY: &str = crate::ranger_config::STARROCKS_SECURITY_XML;
 /// Key (and file name) of the Ranger plugin audit config in `{name}-ranger-cm`.
-const RANGER_AUDIT_XML_KEY: &str = "ranger-starrocks-audit.xml";
+const RANGER_AUDIT_XML_KEY: &str = crate::ranger_config::STARROCKS_AUDIT_XML;
 
 /// The Ranger plugin's `ranger-starrocks-security.xml` + audit ConfigMap
 /// (`{name}-ranger-cm`). `None` unless `spec.ranger` is bound.
@@ -190,22 +190,20 @@ const RANGER_AUDIT_XML_KEY: &str = "ranger-starrocks-audit.xml";
 /// This renderer emits no comments at all to stay safe by construction.
 pub fn starrocks_ranger_configmap(spec: &EngineSpec) -> Option<Value> {
     let r = spec.ranger.as_ref()?;
-    let security_xml = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration>\n\
-  <property><name>ranger.plugin.starrocks.service.name</name><value>{svc}</value></property>\n\
-  <property><name>ranger.plugin.starrocks.policy.rest.url</name><value>{url}</value></property>\n\
-  <property><name>ranger.plugin.starrocks.policy.source.impl</name><value>org.apache.ranger.admin.client.RangerAdminRESTClient</value></property>\n\
-  <property><name>ranger.plugin.starrocks.policy.cache.dir</name><value>/tmp/ranger/{svc}/policycache</value></property>\n\
-  <property><name>ranger.plugin.starrocks.policy.pollIntervalMs</name><value>{poll}</value></property>\n\
-  <property><name>ranger.plugin.starrocks.policy.rest.client.connection.timeoutMs</name><value>120000</value></property>\n\
-  <property><name>ranger.plugin.starrocks.policy.rest.client.read.timeoutMs</name><value>30000</value></property>\n\
-</configuration>\n",
-        svc = r.service_name, url = r.egret_url, poll = r.poll_interval_ms
+    let rendered = crate::ranger_config::ranger_plugin_files(
+        egret_engine_mgmt_api::EngineKind::StarRocks,
+        &r.service_name,
+        &r.egret_url,
+        r.poll_interval_ms.into(),
     );
-    let audit_xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration>\n\
-  <property><name>xasecure.audit.is.enabled</name><value>false</value></property>\n\
-</configuration>\n"
-        .to_string();
+    let file = |name: &str| {
+        rendered
+            .get(name)
+            .expect("the renderer emits it")
+            .to_string()
+    };
+    let security_xml = file(RANGER_SECURITY_XML_KEY);
+    let audit_xml = file(RANGER_AUDIT_XML_KEY);
     Some(json!({
         "apiVersion": "v1", "kind": "ConfigMap",
         "metadata": { "name": format!("{}-ranger-cm", spec.name), "namespace": spec.namespace,
@@ -1354,6 +1352,53 @@ mod tests {
         assert!(conf.contains("enable_load_volume_from_conf = true"));
         assert!(!conf.contains("access_control = ranger")); // not unless bound
         assert!(!conf.contains("ssl_")); // not unless delegation.tls_enabled
+    }
+
+    #[test]
+    fn the_provisioned_ranger_files_equal_the_renderer_and_the_pre_refactor_golden() {
+        use crate::ranger_config::{ranger_plugin_files, STARROCKS_FE_CONF_LINE};
+        let mut spec = sample_sr_spec();
+        spec.ranger = Some(RangerBinding {
+            service_name: "sr1".into(),
+            egret_url: "http://host.docker.internal:8080".into(),
+            poll_interval_ms: 30_000,
+        });
+        let rendered = ranger_plugin_files(
+            egret_engine_mgmt_api::EngineKind::StarRocks,
+            "sr1",
+            "http://host.docker.internal:8080",
+            30_000,
+        );
+        let cm = starrocks_ranger_configmap(&spec).unwrap();
+        for k in [RANGER_SECURITY_XML_KEY, RANGER_AUDIT_XML_KEY] {
+            assert_eq!(
+                cm["data"][k].as_str().unwrap(),
+                rendered.get(k).unwrap(),
+                "{k}"
+            );
+        }
+        assert_eq!(
+            cm["data"][RANGER_SECURITY_XML_KEY].as_str().unwrap(),
+            include_str!(
+                "../../egret-engine-mgmt-api/tests/golden/starrocks.ranger-starrocks-security.xml"
+            )
+        );
+        assert_eq!(
+            cm["data"][RANGER_AUDIT_XML_KEY].as_str().unwrap(),
+            include_str!(
+                "../../egret-engine-mgmt-api/tests/golden/starrocks.ranger-starrocks-audit.xml"
+            )
+        );
+        // The whole fe.conf, byte for byte, and the admin-facing line inside it.
+        let conf = starrocks_fe_configmap(&spec)["data"]["fe.conf"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            conf,
+            include_str!("../../egret-engine-mgmt-api/tests/golden/starrocks.fe.conf")
+        );
+        assert!(conf.contains(rendered.get(STARROCKS_FE_CONF_LINE).unwrap()));
     }
 
     #[test]

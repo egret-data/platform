@@ -15,7 +15,7 @@ const NOT_PROVED: MigrateResponse = {
   dry_run: true,
   committed: false,
   equivalent: false,
-  refusal: "proving this migration needs 412000 probe evaluations …",
+  refusal: "proving this migration needs 15000 probe evaluations across 2 profile(s), 3100000 units of work (probe evaluations x the policies each visits), over the limit of 1300000. …",
   policies: [],
   profiles: [],
   probe_evaluations: 0,

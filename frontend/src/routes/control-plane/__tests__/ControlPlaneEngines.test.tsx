@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import ControlPlaneEngines from "@/routes/control-plane/ControlPlaneEngines";
 import * as api from "@/api/controlPlane";
+import { AuthContext } from "@/auth/useAuth";
 
 /** Stub for the create route: echoes the `?type=` so navigation can be asserted. */
 function CreateStub() {
@@ -118,5 +119,69 @@ describe("ControlPlaneEngines", () => {
     await user.click(screen.getByRole("tab", { name: "StarRocks" }));
     await user.click(screen.getByRole("button", { name: /Add engine/i }));
     expect(await screen.findByText("CREATE:starrocks")).toBeInTheDocument();
+  });
+
+  describe("external engines", () => {
+    const EXTERNAL: api.Engine = {
+      ...ENGINE,
+      id: "x1",
+      name: "legacy-trino",
+      namespace: "",
+      origin: "external",
+      host: "trino.corp.example",
+      port: 8080,
+      rangerPluginVersion: "2.5.0",
+      rangerPluginVersionModelled: true,
+    };
+
+    function renderAs(perms: string[]) {
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      return render(
+        <AuthContext.Provider
+          value={{ me: { user_id: "u", email: "u@x", platform_roles: [], permissions: perms }, isLoading: false }}
+        >
+          <QueryClientProvider client={qc}>
+            <MemoryRouter>
+              <ControlPlaneEngines />
+            </MemoryRouter>
+          </QueryClientProvider>
+        </AuthContext.Provider>,
+      );
+    }
+
+    test("an external engine shows the External chip and its address, and is not polled", async () => {
+      vi.mocked(api.listEngines).mockResolvedValue([ENGINE, EXTERNAL]);
+      renderAs(["engine:read"]);
+      const row = (await screen.findByText("legacy-trino")).closest("tr")!;
+      expect(within(row).getByText("External")).toBeInTheDocument();
+      expect(within(row).getByText("trino.corp.example:8080")).toBeInTheDocument();
+      expect(within(row).queryByText("running")).not.toBeInTheDocument();
+      expect(vi.mocked(api.getEngine)).not.toHaveBeenCalledWith("x1");
+    });
+
+    test("the summary does not count an external engine as running", async () => {
+      vi.mocked(api.listEngines).mockResolvedValue([ENGINE, EXTERNAL]);
+      renderAs(["engine:read"]);
+      await screen.findByText("legacy-trino");
+      // Both rows store status "running"; only the provisioned one means it.
+      const figure = (text: string) =>
+        screen.getByText((_, el) => el?.tagName === "SPAN" && el.className.includes("inline-flex") && el.textContent?.replace("·", "") === text);
+      expect(figure("1running")).toBeInTheDocument();
+      expect(figure("0not running")).toBeInTheDocument();
+      expect(figure("1external")).toBeInTheDocument();
+    });
+
+    test("Register external engine links to the register page only for engine:create", async () => {
+      renderAs(["engine:read", "engine:create"]);
+      await screen.findByText("analytics-trino");
+      expect(screen.getByRole("link", { name: "Register external engine" })).toHaveAttribute(
+        "href",
+        "/control-plane/engines/register",
+      );
+      cleanup();
+      renderAs(["engine:read"]);
+      await screen.findByText("analytics-trino");
+      expect(screen.queryByRole("link", { name: "Register external engine" })).not.toBeInTheDocument();
+    });
   });
 });

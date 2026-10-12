@@ -110,6 +110,8 @@ import { RotateSecretsSection } from "./RotateSecretsSection";
 import EngineMonitor from "./EngineMonitor";
 import PodLogsDialog from "./PodLogsDialog";
 import PodTerminalDialog from "./PodTerminalDialog";
+import ExternalEngineDetail from "./ExternalEngineDetail";
+import { isExternal } from "./externalEngine";
 
 type EngineWithStatus = Omit<Engine, "status"> & { status: EngineStatus };
 
@@ -404,11 +406,13 @@ export default function EngineDetail() {
   const engine = useQuery<EngineWithStatus, ApiError>({
     queryKey: ["cp", "engine", id],
     queryFn: () => getEngine(id),
-    refetchInterval: 5000,
+    // An external engine has no cluster to poll (egret does not monitor it).
+    refetchInterval: (q) => (isExternal(q.state.data) ? false : 5000),
     retry: false,
   });
 
   const data = engine.data;
+  if (data && isExternal(data)) return <ExternalEngineDetail engine={data} />;
 
   return (
     <div className="space-y-5">

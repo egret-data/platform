@@ -346,28 +346,15 @@ pub fn trino_config_map(spec: &EngineSpec) -> Value {
     }
 
     if let Some(r) = &spec.ranger {
-        data.insert(
-            "access-control.properties".into(),
-            json!(format!(
-                "access-control.name=ranger\nranger.service.name={}\nranger.plugin.config.resource=/etc/trino/ranger-trino-security.xml\n",
-                r.service_name
-            )),
+        let rendered = crate::ranger_config::ranger_plugin_files(
+            egret_engine_mgmt_api::EngineKind::Trino,
+            &r.service_name,
+            &r.egret_url,
+            r.poll_interval_ms.into(),
         );
-        data.insert(
-            "ranger-trino-security.xml".into(),
-            json!(format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration>\n\
-  <property><name>ranger.plugin.trino.service.name</name><value>{svc}</value></property>\n\
-  <property><name>ranger.plugin.trino.policy.rest.url</name><value>{url}</value></property>\n\
-  <property><name>ranger.plugin.trino.policy.source.impl</name><value>org.apache.ranger.admin.client.RangerAdminRESTClient</value></property>\n\
-  <property><name>ranger.plugin.trino.policy.cache.dir</name><value>/tmp/ranger/{svc}/policycache</value></property>\n\
-  <property><name>ranger.plugin.trino.policy.pollIntervalMs</name><value>{poll}</value></property>\n\
-  <property><name>ranger.plugin.trino.policy.rest.client.connection.timeoutMs</name><value>120000</value></property>\n\
-  <property><name>ranger.plugin.trino.policy.rest.client.read.timeoutMs</name><value>30000</value></property>\n\
-</configuration>\n",
-                svc = r.service_name, url = r.egret_url, poll = r.poll_interval_ms
-            )),
-        );
+        for (name, content) in rendered.files {
+            data.insert(name, json!(content));
+        }
     } else {
         // No Ranger binding (Ranger disabled): pin Trino's built-in ALLOW-ALL
         // access control EXPLICITLY. Omitting access-control.properties falls back
@@ -1358,6 +1345,42 @@ mod tests {
             kind: EngineKind::Trino,
             starrocks: None,
         }
+    }
+
+    #[test]
+    fn the_provisioned_ranger_files_equal_the_renderer_and_the_pre_refactor_golden() {
+        let mut spec = sample_spec();
+        spec.ranger = Some(RangerBinding {
+            service_name: "demo2".into(),
+            egret_url: "http://host.docker.internal:8080".into(),
+            poll_interval_ms: 30_000,
+        });
+        let rendered = crate::ranger_config::ranger_plugin_files(
+            egret_engine_mgmt_api::EngineKind::Trino,
+            "demo2",
+            "http://host.docker.internal:8080",
+            30_000,
+        );
+        let cm = trino_config_map(&spec);
+        for (name, content) in &rendered.files {
+            assert_eq!(
+                cm["data"][name.as_str()].as_str().unwrap(),
+                content,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            cm["data"]["access-control.properties"].as_str().unwrap(),
+            include_str!(
+                "../../egret-engine-mgmt-api/tests/golden/trino.access-control.properties"
+            )
+        );
+        assert_eq!(
+            cm["data"]["ranger-trino-security.xml"].as_str().unwrap(),
+            include_str!(
+                "../../egret-engine-mgmt-api/tests/golden/trino.ranger-trino-security.xml"
+            )
+        );
     }
 
     #[test]

@@ -144,6 +144,9 @@ pub(crate) struct ApplyOutcome {
     pub(crate) engine_id: Uuid,
     pub(crate) engine_name: String,
     pub(crate) applied: bool,
+    /// The engine was deliberately not touched (it is external); `error`
+    /// carries the reason. Neither applied nor failed.
+    pub(crate) skipped: bool,
     pub(crate) error: Option<String>,
 }
 
@@ -153,6 +156,12 @@ pub(crate) async fn apply_catalog_change(
     engine: &Engine,
     change: CatalogChange,
 ) -> Result<(), ApplyError> {
+    // The chokepoint under attach, detach, retry and propagate: whichever route
+    // got here, an external engine's cluster is never rendered or applied to.
+    // `Build` is not flagged on the attachment row, which is right: nothing was
+    // said to the engine.
+    crate::external::refuse_if_external(engine, "apply a catalog to it")
+        .map_err(ApplyError::Build)?;
     match EngineType::parse(&engine.r#type) {
         Some(EngineType::Trino) => apply_trino(st, engine, change).await,
         Some(EngineType::StarRocks) => apply_starrocks(st, engine, change).await,
@@ -317,6 +326,11 @@ pub(crate) async fn converge_starrocks_catalogs(
     fe: &FeTarget,
     consecutive_read_errors: &mut u32,
 ) {
+    // Never converge an external engine's FE: its attachments are declared, and
+    // egret does not run DDL on a cluster it did not provision.
+    if crate::external::is_external(engine) {
+        return;
+    }
     let registry = st.engine_mgmt.registry();
     let mut attachments = match registry.list_engine_attachments(engine.id).await {
         Ok(a) => a,
@@ -861,14 +875,24 @@ pub(crate) fn check_engine_supports(
     catalog_name: &str,
     def: &CatalogDef,
 ) -> Result<(), CatalogOpError> {
-    let engine_type = EngineType::parse(&engine.r#type)
-        .ok_or_else(|| CpError::BadRequest(format!("unknown engine type {}", engine.r#type)))?;
+    check_engine_supports_type(&engine.r#type, catalog_name, def).map_err(CatalogOpError::Http)
+}
+
+/// [`check_engine_supports`] for an engine that does not exist yet (a
+/// registration validates its catalogs before it writes the row).
+pub(crate) fn check_engine_supports_type(
+    engine_type: &str,
+    catalog_name: &str,
+    def: &CatalogDef,
+) -> Result<(), CpError> {
+    let engine_type = EngineType::parse(engine_type)
+        .ok_or_else(|| CpError::BadRequest(format!("unknown engine type {engine_type}")))?;
     if !def.can_read(engine_type) {
-        return Err(CatalogOpError::Http(CpError::BadRequest(format!(
+        return Err(CpError::BadRequest(format!(
             "a {} engine cannot read catalog {}",
             engine_type.as_str(),
             catalog_name
-        ))));
+        )));
     }
     // The FE would reject these itself, but only after egret had minted a
     // Catalog Client for the attachment and written a row for it — and the
@@ -879,9 +903,9 @@ pub(crate) fn check_engine_supports(
     if engine_type == EngineType::StarRocks
         && egret_catalog_registry::is_reserved_starrocks_name(catalog_name)
     {
-        return Err(CatalogOpError::Http(CpError::BadRequest(format!(
+        return Err(CpError::BadRequest(format!(
             "StarRocks reserves the catalog name {catalog_name}"
-        ))));
+        )));
     }
     Ok(())
 }
@@ -898,6 +922,19 @@ pub(crate) async fn attach_to_engine(
     catalog: &CatalogRow,
     role_from_client: Option<Uuid>,
 ) -> Result<(), CatalogOpError> {
+    // **An external engine is declared, not applied** (SP4d-4 Part C): there is
+    // no cluster egret runs, so no DDL, no render and no minted client. The
+    // row, the recompile of the profile it binds and the refusal of any pair
+    // the attachment creates share one transaction.
+    if crate::external::is_external(engine) {
+        if engine.status == crate::engine_status::DELETING {
+            return Err(CatalogOpError::Http(apply_conflict()));
+        }
+        return crate::external::declare_attached_and_recompile(st, engine, catalog)
+            .await
+            .map_err(CatalogOpError::Http);
+    }
+    let pre_apply = refuse_attach_that_creates_overlap(st, engine, catalog).await?;
     let out = attach_to_engine_inner(st, engine, catalog, role_from_client).await;
     if out.is_ok() {
         // **An attachment change is a recompile trigger** (whole-branch
@@ -914,8 +951,155 @@ pub(crate) async fn attach_to_engine(
         // on the three routes that reach it, so a fourth caller cannot miss
         // it, and it never fails its caller — the attach has happened.
         crate::profile_compiler::recompile_bound_profile(st, engine.id, &engine.name).await;
+        // **The same comparison again, against the PRE-APPLY snapshot** (fix
+        // round 1, I2). The dry run above looks ahead of the write; whatever was
+        // committed between it and the real recompile (the apply takes seconds
+        // to minutes) is only visible here. A pair created since the snapshot is
+        // refused and the attachment undone.
+        if let Some(snapshot) = pre_apply.as_ref() {
+            if let Err(e) = recheck_attach_against_snapshot(st, snapshot).await {
+                undo_refused_attach(st, engine, catalog).await;
+                return Err(CatalogOpError::Http(e));
+            }
+        }
     }
     out
+}
+
+/// Compare the unit as it is now with the pre-apply `snapshot`. Fail-closed: a
+/// read that cannot complete refuses like an overlap does.
+async fn recheck_attach_against_snapshot(
+    st: &CpState,
+    snapshot: &crate::profile_compiler::OverlapSnapshot,
+) -> Result<(), CpError> {
+    let Some(compiler) = st.perm_compiler.clone() else {
+        return Ok(());
+    };
+    let mut tx = st
+        .engine_mgmt
+        .pool()
+        .begin()
+        .await
+        .map_err(crate::http_error::db_error)?;
+    let out = compiler
+        .refuse_created_overlaps_in_tx(&mut tx, snapshot)
+        .await;
+    drop(tx);
+    out.map_err(CpError::from)
+}
+
+/// Reverse an attach the post-apply comparison refused: the full detach, so the
+/// cluster, the row, the minted credential and the compiled profile all go back.
+/// If even that fails the attachment stays, and the error names the repair.
+async fn undo_refused_attach(st: &CpState, engine: &Engine, catalog: &CatalogRow) {
+    if let Err(e) = detach_from_engine(st, engine, catalog).await {
+        let reason = match e {
+            CatalogOpError::Http(e) => e.to_string(),
+            CatalogOpError::Apply(e) => format!("{e:?}"),
+        };
+        tracing::error!(engine = %engine.name, catalog = %catalog.name, error = %reason,
+            "an attach created an order-ambiguous pair and was refused, but undoing it failed; \
+             the attachment (and the catalog on the cluster) remain: detach it by hand");
+    }
+}
+
+/// **A dry run of the attachment's recompile, refusing the pairs it would
+/// create** (SP4d-4 Task 3 re-review M-2, closed in Task 7).
+///
+/// An attachment changes which catalogs — so which tag assignments — the bound
+/// profile's unit resolves, and every overlap check reads those as stored: a
+/// pair the attachment completes would read as already there. The real attach
+/// cannot sit in one transaction with its recompile (a Trino attach applies to
+/// the cluster FIRST, a StarRocks attach converges after it), so the pair is
+/// looked for before anything is applied: on a transaction that is rolled back,
+/// take the before-snapshot, write a stand-in attachment row, recompile the
+/// profile, and refuse what the recompile creates. Nothing it writes survives.
+///
+/// **Its limit is the usual one for a check made ahead of a write:** another
+/// transaction may change the unit between this and the real recompile, so it
+/// hands back the PRE-APPLY snapshot and `attach_to_engine` compares against it
+/// again after the real recompile. A dry run that fails for any reason refuses.
+async fn refuse_attach_that_creates_overlap(
+    st: &CpState,
+    engine: &Engine,
+    catalog: &CatalogRow,
+) -> Result<Option<crate::profile_compiler::OverlapSnapshot>, CatalogOpError> {
+    let (Some(sid), Some(_)) = (engine.authz_service_id, st.perm_compiler.as_ref()) else {
+        return Ok(None);
+    };
+    let mut tx = st
+        .engine_mgmt
+        .pool()
+        .begin()
+        .await
+        .map_err(crate::http_error::db_error)?;
+    let before = match crate::profile_compiler::snapshot_overlaps(st, &mut tx, Some(sid)).await {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(CatalogOpError::Http(refusal_for_dry_run(
+                engine, catalog, e,
+            )))
+        }
+    };
+    let outcome: Result<(), egret_perm::CompileError> = async {
+        if let Err(e) = st
+            .engine_mgmt
+            .registry()
+            .insert_attachment_in_tx(
+                &mut tx,
+                &NewAttachment {
+                    engine_id: engine.id,
+                    catalog_id: catalog.id,
+                    catalog_client_id: None,
+                    credential_secret_id: None,
+                    minted_client: false,
+                    applied_now: false,
+                    is_primary: false,
+                    created_at: None,
+                    apply_status: egret_catalog_registry::store::apply_status::PENDING,
+                },
+            )
+            .await
+        {
+            // Already attached (the real attach answers that 409) or a row the
+            // stand-in cannot be: nothing to look for here.
+            tracing::debug!(engine = %engine.name, error = %e,
+                "overlap dry run for an attachment skipped: stand-in row not written");
+            return Ok(());
+        }
+        crate::profile_compiler::recompile_refusing_created_overlaps(
+            st,
+            &mut tx,
+            sid,
+            before.as_ref(),
+        )
+        .await
+    }
+    .await;
+    // Dropped, never committed: the stand-in row and the recompile go with it.
+    drop(tx);
+    match outcome {
+        Ok(()) => Ok(before),
+        Err(e) => Err(CatalogOpError::Http(refusal_for_dry_run(
+            engine, catalog, e,
+        ))),
+    }
+}
+
+/// A dry run that cannot complete REFUSES (it used to log and attach anyway):
+/// an overlap is the caller's 409, anything else a 500 naming nothing the
+/// caller can act on, with the cause logged.
+fn refusal_for_dry_run(
+    engine: &Engine,
+    catalog: &CatalogRow,
+    e: egret_perm::CompileError,
+) -> CpError {
+    if e.rule_overlap_body().is_none() {
+        tracing::error!(engine = %engine.name, catalog = %catalog.name, error = %e,
+            "overlap dry run for an attachment could not complete; the attach is refused \
+             rather than made unchecked");
+    }
+    e.into()
 }
 
 async fn attach_to_engine_inner(
@@ -1155,6 +1339,13 @@ pub(crate) async fn detach_from_engine(
     engine: &Engine,
     catalog: &CatalogRow,
 ) -> Result<(), CatalogOpError> {
+    // An external engine's attachment is a declared row: remove it and recompile,
+    // with no render, no DDL and no credential to retire.
+    if crate::external::is_external(engine) {
+        return crate::external::detach_declared_and_recompile(st, engine, catalog)
+            .await
+            .map_err(CatalogOpError::Http);
+    }
     let registry = st.engine_mgmt.registry();
     let attachment = registry
         .get_attachment(engine.id, catalog.id)
@@ -1200,6 +1391,8 @@ pub(crate) async fn retry_apply(
     engine: &Engine,
     catalog_id: Uuid,
 ) -> Result<(), CatalogOpError> {
+    crate::external::refuse_if_external(engine, "apply a catalog to it")
+        .map_err(CatalogOpError::Http)?;
     if engine.status == crate::engine_status::DELETING {
         return Err(CatalogOpError::Apply(ApplyError::Conflict));
     }
@@ -1261,17 +1454,35 @@ pub(crate) async fn propagate(
         let Some(engine) = st.engine_mgmt.get_engine(row.engine_id).await? else {
             continue;
         };
+        // A declared attachment is not applied by egret: say so in the list
+        // rather than dropping the engine from it or calling it a failure.
+        if crate::external::is_external(&engine) {
+            out.push(ApplyOutcome {
+                engine_id: engine.id,
+                engine_name: engine.name.clone(),
+                applied: false,
+                skipped: true,
+                error: Some(
+                    "external engine: egret does not apply catalogs to it; the attachment is \
+                     declared only"
+                        .into(),
+                ),
+            });
+            continue;
+        }
         let outcome = match retry_apply(st, &engine, catalog.id).await {
             Ok(()) => ApplyOutcome {
                 engine_id: engine.id,
                 engine_name: engine.name.clone(),
                 applied: true,
+                skipped: false,
                 error: None,
             },
             Err(CatalogOpError::Apply(e)) => ApplyOutcome {
                 engine_id: engine.id,
                 engine_name: engine.name.clone(),
                 applied: false,
+                skipped: false,
                 error: Some(e.message()),
             },
             Err(CatalogOpError::Http(e)) => return Err(e),

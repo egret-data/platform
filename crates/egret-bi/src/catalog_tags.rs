@@ -134,6 +134,23 @@ impl CatalogTagRepo {
         {
             return Err(crate::error::BiError::BadRequest(pair.refusal()).into());
         }
+        // **SP4d-4 Task 3 (user ruling): an assignment that makes two mask (or
+        // row-filter) policies decide one column differently is refused** —
+        // between hand-written tag policies, compiled rules, or one of each.
+        // The recompile below cannot refuse the pair an assignment completes:
+        // it compares stored and compiled bodies under the SAME (already
+        // changed) assignments on both of its sides (SP4d-4 Task 3 fix round
+        // 2). The snapshot taken HERE, before the row exists, is what lets the
+        // check after the recompile refuse exactly the pairs this write creates
+        // across the whole stored unit (a profile and its tag service) —
+        // compiled, hand-written, or one of each — without refusing a pair
+        // that was already stored. One rule, `egret_policy::unit_overlaps`.
+        let bound = egret_catalog_registry::services_bound_to_warehouse(&mut *tx, warehouse_id)
+            .await
+            .map_err(crate::error::BiError::from)?;
+        let overlaps_before = egret_perm_compile::overlap::unit_snapshot_via(&mut tx, &bound)
+            .await
+            .map_err(crate::error::BiError::from)?;
         sqlx::query(
             "INSERT INTO catalog_tag_assignments \
                  (tag_id, warehouse_id, schema_name, table_name, column_name, assigned_by) \
@@ -151,11 +168,20 @@ impl CatalogTagRepo {
         .map_err(crate::error::BiError::from)?;
         Self::bump_bound_tag_versions(&mut tx, warehouse_id).await?;
         Self::recompile_bound_services_in_tx(&mut tx, warehouse_id).await?;
+        egret_perm_compile::overlap::refuse_created_overlaps_via(&mut tx, &overlaps_before)
+            .await
+            .map_err(crate::error::BiError::from)?;
         tx.commit().await.map_err(crate::error::BiError::from)?;
         Ok(())
     }
 
     /// Detach `tag_id` from a catalog resource (idempotent — deletes 0 or 1 row).
+    ///
+    /// Runs no overlap check of its own (SP4d-4 Task 3): removing a tag from a
+    /// coordinate can only shrink where a tag policy applies, so it can remove
+    /// a pair but never create one. Its recompile refuses only a pair the
+    /// compile itself creates; a pair that remains stored is reported, not
+    /// refused (user ruling 2026-10-12).
     /// Bumps the bound services' `tag_version` and recompiles them in the same
     /// transaction (see [`Self::assign_catalog`]).
     pub async fn unassign_catalog(
@@ -514,6 +540,7 @@ async fn list_resource_tags(
         (status = 400, description = "The coordinate cannot be stored (an empty schema or table, or `*`/`?` in any level — see migration 0177), or the tag is being attached to a whole TABLE while a tag-addressed mask names it, which would make that table unreadable rather than masked", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
+        (status = 409, description = "A rule overlap: the assignment would make two mask (or two row-filter) policies decide one column differently (compiled rules, hand-written tag policies, or one of each), or a profile it recompiles already holds such a pair. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -559,6 +586,7 @@ async fn assign_resource_tag(
         (status = 200, description = "Tag removed from the catalog resource (idempotent)", body = egret_core::Ack),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
+        (status = 409, description = "A rule overlap that the unassignment does not remove: a profile it recompiles already holds two mask (or two row-filter) rules that decide one request differently. Same body as the assignment's 409", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]

@@ -123,12 +123,17 @@ pub fn perm_router() -> Router<PermState> {
             "/perm/rules/{id}",
             axum::routing::patch(patch_rule).delete(delete_rule),
         )
+        .route("/perm/overlaps", get(list_overlaps))
         .route("/perm/preview", post(preview))
         .route("/perm/explain", post(explain))
         .route("/perm/compile/{service_id}", post(compile))
         .route(
             "/perm/policies/services/{service_id}/classify",
             get(classify_service_policies),
+        )
+        .route(
+            "/perm/policies/services/{service_id}/warnings",
+            get(service_policy_warnings),
         )
         .route(
             "/perm/policies/services/{service_id}/migrate",
@@ -159,14 +164,18 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         create_rule,
         patch_rule,
         delete_rule,
+        list_overlaps,
         preview,
         explain,
         compile,
         classify_service_policies,
+        service_policy_warnings,
         migrate_service_policies,
         undo_service_policy_migration
     ),
     components(schemas(
+        crate::overlap::StoredOverlap,
+        crate::overlap::StoredMember,
         NewGrant,
         NewRule,
         PreviewRequest,
@@ -209,6 +218,9 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::explain_wire::WirePluginVersion,
         CompileResponse,
         crate::classify::ClassifiedPolicy,
+        crate::classify::PolicyWarning,
+        crate::classify::ProfileWarnings,
+        crate::classify::WarnedPolicy,
         crate::classify::ProposedObjects,
         crate::classify::MigrationRecord,
         crate::migrate::MigrateRequest,
@@ -1254,6 +1266,7 @@ async fn list_grants(
     responses(
         (status = 201, description = "Grant created AND the profiles it affects recompiled, in one transaction"),
         (status = 400, description = "The grant names a scope level as \"\" (Ranger's \"every value at that level\", not a resource name — it would be enforced across the whole catalog), names a level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), or cannot be compiled for a profile it affects", body = ErrorBody),
+        (status = 409, description = "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1307,7 +1320,7 @@ async fn create_grant(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such grant", body = ErrorBody),
-        (status = 409, description = "The grant changed concurrently and now affects a profile this request did not lock; retry", body = ErrorBody),
+        (status = 409, description = "The grant changed concurrently and now affects a profile this request did not lock; retry; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1333,6 +1346,7 @@ async fn patch_grant(
     params(("id" = Uuid, Path, description = "Grant id")),
     responses(
         (status = 200, description = "Grant deleted AND its compiled policies reaped, in one transaction"),
+        (status = 409, description = "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such grant", body = ErrorBody),
@@ -1369,6 +1383,35 @@ async fn delete_grant(
 // ---------------------------------------------------------------------------
 // rules
 // ---------------------------------------------------------------------------
+
+/// Every mask / row-filter pair already stored in a profile's download. Writes
+/// refuse only the pairs they create; this is where an operator sees the rest.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/overlaps",
+    tag = "perm",
+    responses(
+        (status = 200, description = "Every overlapping mask or row-filter pair stored in a profile's download, compiled or hand-written, with the profile that serves it", body = Vec<crate::overlap::StoredOverlap>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_overlaps(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+) -> Result<Json<Vec<crate::overlap::StoredOverlap>>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    // One read-only snapshot: the report cannot write, and sees one state.
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(PermHttpError::db)?;
+    let report = crate::overlap::stored_overlaps_via(&mut tx).await?;
+    tx.rollback().await.map_err(PermHttpError::db)?;
+    Ok(Json(report))
+}
 
 #[utoipa::path(
     get,
@@ -1437,6 +1480,7 @@ async fn list_rules(
     responses(
         (status = 201, description = "Rule created AND the profiles it affects recompiled, in one transaction"),
         (status = 400, description = "The rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or cannot be compiled for a profile it affects", body = ErrorBody),
+        (status = 409, description = "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1483,7 +1527,7 @@ async fn create_rule(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such rule", body = ErrorBody),
-        (status = 409, description = "The rule changed concurrently and now affects a profile this request did not lock; retry", body = ErrorBody),
+        (status = 409, description = "The rule changed concurrently and now affects a profile this request did not lock; retry; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1509,6 +1553,7 @@ async fn patch_rule(
     params(("id" = Uuid, Path, description = "Rule id")),
     responses(
         (status = 200, description = "Rule deleted AND its compiled policies reaped, in one transaction"),
+        (status = 409, description = "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such rule", body = ErrorBody),
@@ -1599,7 +1644,7 @@ async fn name_profiles(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "Previewing a patch of an id that does not exist", body = ErrorBody),
-        (status = 409, description = "The previewed row changed concurrently — the same refusal the write would have given", body = ErrorBody),
+        (status = 409, description = "The previewed row changed concurrently — the same refusal the write would have given; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1767,6 +1812,12 @@ async fn explain(
         let Some(engine) = engine_type_for(&svc.r#type) else {
             continue;
         };
+        // The version this profile's plugin runs at: the bound engine's when
+        // exactly one is bound (an external engine declares its own), the type's
+        // measured one when none is. Several bound engines of one profile are
+        // refused to disagree — a profile is evaluated at ONE version here, and
+        // a guess between two would be an evaluation nobody measured.
+        let plugin_version = profile_plugin_version(&mut conn, service_id, engine).await?;
         // The compiler's own reachability test: a catalog absent from this map
         // is out of scope for this profile, and a request naming it would be
         // built from a catalog name this profile's policies never mention.
@@ -1831,7 +1882,7 @@ async fn explain(
         // setting it.
         let config = EngineConfig {
             engine: Some(ranger_engine(engine)),
-            plugin_version: Some(ranger_engine(engine).plugin_version()),
+            plugin_version: Some(plugin_version),
             ..EngineConfig::without_super_users()
         };
 
@@ -2218,6 +2269,115 @@ pub async fn confine_rule_selector(
             Err(PermHttpError::Forbidden)
         }
         Selector::Tag { .. } => Ok(()),
+    }
+}
+
+/// **The one place an engine's Ranger plugin version is derived** (SP4d-4
+/// Task 7). A provisioned engine maps its type to the version egret's own
+/// image ships (`EngineType::plugin_version`). An external engine maps the
+/// version its operator DECLARED, if `egret-ranger-eval` has been read against
+/// it for ITS TYPE (`egret_perm::ranger_plugin_is_modelled`: Trino@2.5.0 and
+/// StarRocks@2.8.0 only), else returns a sentence: the evaluator was not read
+/// against any other (type, version) pair, and a guess would be an evaluation
+/// nobody measured.
+pub(crate) fn engine_plugin_version(
+    name: &str,
+    origin: &str,
+    r#type: &str,
+    declared: Option<&str>,
+) -> Result<egret_ranger_eval::eval::PluginVersion, String> {
+    use egret_ranger_eval::eval::PluginVersion;
+    if origin != "external" {
+        return match engine_type_for(r#type) {
+            Some(t) => Ok(ranger_engine(t).plugin_version()),
+            None => Err(format!(
+                "engine \"{name}\" is of type `{}`, for which egret has no measured Ranger \
+                 plugin version",
+                r#type
+            )),
+        };
+    }
+    match declared {
+        Some(v) if egret_perm::ranger_plugin_is_modelled(r#type, v) => Ok(match v {
+            "2.5.0" => PluginVersion::Ranger2_5_0,
+            _ => PluginVersion::Ranger2_8_0,
+        }),
+        Some(v) => Err(format!(
+            "engine \"{name}\" is a {} declaring Ranger plugin {v}, a (type, version) pair \
+             egret's evaluator has not been verified against (it models {}), so a decision \
+             cannot be proved on it",
+            r#type,
+            egret_perm::modelled_ranger_plugins_sentence()
+        )),
+        None => Err(format!(
+            "engine \"{name}\" is external but declares no Ranger plugin version"
+        )),
+    }
+}
+
+/// The engines bound to `service_id` as far as their plugin version goes.
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct BoundEngine {
+    pub(crate) name: String,
+    pub(crate) origin: String,
+    pub(crate) r#type: String,
+    pub(crate) ranger_plugin_version: Option<String>,
+}
+
+impl BoundEngine {
+    pub(crate) fn plugin_version(&self) -> Result<egret_ranger_eval::eval::PluginVersion, String> {
+        engine_plugin_version(
+            &self.name,
+            &self.origin,
+            &self.r#type,
+            self.ranger_plugin_version.as_deref(),
+        )
+    }
+}
+
+pub(crate) async fn bound_engines(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Vec<BoundEngine>, PermHttpError> {
+    sqlx::query_as::<_, BoundEngine>(
+        "SELECT name, origin, type, ranger_plugin_version FROM engine_mgmt.engines \
+          WHERE authz_service_id = $1 ORDER BY name",
+    )
+    .bind(service_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(PermHttpError::db)
+}
+
+/// The Ranger plugin version `explain` evaluates profile `service_id` at: its
+/// bound engines' (all must agree), or the type's measured one when none is
+/// bound. A version the evaluator has not been read against is a refusal that
+/// names it, never an evaluation at a guessed version.
+async fn profile_plugin_version(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    profile_engine: EngineType,
+) -> Result<egret_ranger_eval::eval::PluginVersion, PermHttpError> {
+    let mut versions = Vec::new();
+    for e in bound_engines(conn, service_id).await? {
+        let v = e.plugin_version().map_err(|sentence| {
+            PermHttpError::Conflict(format!(
+                "cannot explain profile #{service_id}: {sentence}. Only an engine of a modelled \
+                 (type, version) pair can be explained: {}.",
+                egret_perm::modelled_ranger_plugins_sentence()
+            ))
+        })?;
+        if !versions.contains(&v) {
+            versions.push(v);
+        }
+    }
+    match versions.as_slice() {
+        [] => Ok(ranger_engine(profile_engine).plugin_version()),
+        [v] => Ok(*v),
+        _ => Err(PermHttpError::Conflict(format!(
+            "cannot explain profile #{service_id}: its bound engines run different Ranger plugin \
+             versions, and a verdict is for one"
+        ))),
     }
 }
 
@@ -3070,6 +3230,7 @@ fn clearing_roles(tag: Option<&str>, gates: &[(String, Vec<String>)]) -> Option<
     responses(
         (status = 200, description = "What the recompile wrote", body = CompileResponse),
         (status = 400, description = "The model cannot be compiled for this profile", body = ErrorBody),
+        (status = 409, description = "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
@@ -3125,6 +3286,37 @@ async fn classify_service_policies(
     ))
 }
 
+/// SP4d-4 Task 11: the policies of one profile whose stored resource levels
+/// Ranger reads differently from how the editor shows them — a policy that
+/// stops above `column` and allows `select` (it grants no column read), or one
+/// with a gap (it decides nothing) — with `warningCount` for the profile.
+/// Read-only: a stored row is flagged here, never rewritten. The same
+/// `warnings` ride on each policy of `GET .../classify`.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/policies/services/{service_id}/warnings",
+    tag = "perm",
+    params(("service_id" = i64, Path, description = "policy.authz_services id")),
+    responses(
+        (status = 200, description = "`warningCount` and, ordered by id, the policies of the profile that carry a warning", body = crate::classify::ProfileWarnings),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn service_policy_warnings(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(service_id): Path<i64>,
+) -> Result<Json<crate::classify::ProfileWarnings>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
+    Ok(Json(
+        crate::classify::profile_warnings(&mut conn, service_id).await?,
+    ))
+}
+
 /// SP4d-3 Task 7: migrate hand-written policies of one profile into the
 /// permission model, PROVABLY — see `crate::migrate` for the transaction, its
 /// order, and the refusal order. The equivalence gate runs inside the
@@ -3147,7 +3339,7 @@ async fn classify_service_policies(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such profile, or no policy of that name in it", body = ErrorBody),
-        (status = 409, description = "Already migrated, not hand-written (compiler or infra owned), or a rule name it would create is taken", body = ErrorBody),
+        (status = 409, description = "Already migrated, not hand-written (compiler or infra owned), or a rule name it would create is taken; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 422, description = "Not proved: the disagreements on any affected profile, or why the gate could not answer. Nothing was written", body = crate::migrate::MigrateResponse),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -3198,7 +3390,7 @@ async fn migrate_service_policies(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such profile, or no migration on record for a named policy", body = ErrorBody),
-        (status = 409, description = "Nothing was changed: an object the migration created was edited or deleted since, or the original was edited or switched on (each change is named); or a profile became reachable from the migrated objects while undo waited for its locks (retry)", body = ErrorBody),
+        (status = 409, description = "Nothing was changed: an object the migration created was edited or deleted since, or the original was edited or switched on (each change is named); or a profile became reachable from the migrated objects while undo waited for its locks (retry); or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -4303,5 +4495,71 @@ mod tag_resolution_tests {
                  arm is unreachable from `resolved_tags_for_resource_via`: {mt:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod engine_plugin_version_tests {
+    use super::engine_plugin_version;
+    use egret_ranger_eval::eval::PluginVersion;
+
+    #[test]
+    fn every_version_the_operator_may_call_modelled_maps_to_a_variant() {
+        for (t, v) in egret_perm::MODELLED_RANGER_PLUGINS {
+            assert!(
+                engine_plugin_version("e", "external", t, Some(v)).is_ok(),
+                "{t}@{v} is listed as modelled but the evaluator has no variant for it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_provisioned_engine_maps_its_type_and_an_external_one_its_declared_version() {
+        assert_eq!(
+            engine_plugin_version("e", "provisioned", "trino", None),
+            Ok(PluginVersion::Ranger2_5_0)
+        );
+        assert_eq!(
+            engine_plugin_version("e", "provisioned", "starrocks", None),
+            Ok(PluginVersion::Ranger2_8_0)
+        );
+        assert_eq!(
+            engine_plugin_version("e", "external", "trino", Some("2.5.0")),
+            Ok(PluginVersion::Ranger2_5_0)
+        );
+        assert_eq!(
+            engine_plugin_version("e", "external", "starrocks", Some("2.8.0")),
+            Ok(PluginVersion::Ranger2_8_0)
+        );
+    }
+
+    /// The four (type, version) pairings: only the diagonal is modelled.
+    #[test]
+    fn only_trino_2_5_0_and_starrocks_2_8_0_are_modelled() {
+        for (t, v, modelled) in [
+            ("trino", "2.5.0", true),
+            ("trino", "2.8.0", false),
+            ("starrocks", "2.5.0", false),
+            ("starrocks", "2.8.0", true),
+        ] {
+            assert_eq!(
+                engine_plugin_version("e", "external", t, Some(v)).is_ok(),
+                modelled,
+                "{t}@{v}"
+            );
+            assert_eq!(
+                egret_perm::ranger_plugin_is_modelled(t, v),
+                modelled,
+                "{t}@{v}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unmeasured_or_missing_version_is_a_sentence_naming_it() {
+        let err = engine_plugin_version("edge", "external", "trino", Some("2.6.0")).unwrap_err();
+        assert!(err.contains("edge") && err.contains("2.6.0"), "{err}");
+        assert!(engine_plugin_version("edge", "external", "trino", None).is_err());
+        assert!(engine_plugin_version("edge", "provisioned", "risingwave", None).is_err());
     }
 }

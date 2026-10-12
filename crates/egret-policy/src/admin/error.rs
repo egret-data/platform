@@ -21,6 +21,11 @@ pub enum PolicyHttpError {
     BadRequest(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    /// A mask/row-filter overlap (SP4d-4 Task 3 fix round 1, M1): 409 with the
+    /// structured body every surface answers it with — `{error, code:
+    /// "rule_overlap", rules, coordinate, kind}` — served as is.
+    #[error("rule overlap")]
+    Overlap { body: serde_json::Value },
     #[error("internal error")]
     Internal,
 }
@@ -75,6 +80,9 @@ impl IntoResponse for PolicyHttpError {
             PolicyHttpError::AlreadyExists(_) => (StatusCode::CONFLICT, self.to_string()),
             PolicyHttpError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             PolicyHttpError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
+            PolicyHttpError::Overlap { body } => {
+                return (StatusCode::CONFLICT, Json(body.clone())).into_response()
+            }
             PolicyHttpError::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal error".to_string(),

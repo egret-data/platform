@@ -289,7 +289,7 @@ one place: it always rolls back.
    download carried the original; one case per member, the count asserted; a member with no
    bound engine is refused, not skipped. Before the gate runs, its preconditions are enforced:
    no fold-divergent tag-assignment coordinate or policy resource value, a probe-evaluation
-   count under `migrate::MAX_PROBE_EVALUATIONS` (refused, never truncated), and a non-vacuous
+   count under `migrate::MAX_PROBE_EVALUATIONS` (refused, never truncated; *2026-10-13 note: SP4d-4 replaced this probe-count cap with `migrate::MAX_PROBE_WORK`, a cap on probes x versions x policies, 1 300 000, measured end to end*), and a non-vacuous
    comparison (each before/after is two reads, and the original is in every carrier's before
    and in no carrier's after). Every profile the writes recompiled must be in the gated set.
    `write_grant` / `write_rule` recompute their own set, so a catalog attached while the

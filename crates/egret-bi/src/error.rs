@@ -18,6 +18,14 @@ pub enum BiError {
     Conflict(String),
     #[error("engine: {0}")]
     Engine(String),
+    /// Two mask (or row-filter) policies would decide one request differently
+    /// — a tag write's recompile refused, or the write created such a pair
+    /// among the stored policies (SP4d-4 Task 3). 409 with
+    /// `egret_perm_compile::overlap::refusal_body`, served as is, so the tag
+    /// UI gets the same `{error, code: "rule_overlap", rules, coordinate,
+    /// kind}` the rule routes answer.
+    #[error("rule overlap: {body}")]
+    Overlap { body: serde_json::Value },
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -47,25 +55,29 @@ impl From<egret_query::EngineError> for BiError {
 /// failed" and renders the message, not just a generic label.
 impl From<egret_perm::CompileError> for BiError {
     fn from(e: egret_perm::CompileError) -> Self {
-        BiError::Engine(format!("permission recompile failed: {e}"))
+        match egret_perm_compile::overlap::refusal_body(&e) {
+            Some(body) => BiError::Overlap { body },
+            None => BiError::Engine(format!("permission recompile failed: {e}")),
+        }
     }
 }
 
 /// Domain arm only — the shared `Auth` arm is in `egret_core::ApiError`.
 impl IntoResponse for BiError {
     fn into_response(self) -> Response {
-        let (status, msg) = match &self {
-            BiError::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
-            BiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
-            BiError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            BiError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
-            BiError::Engine(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            BiError::Db(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal error".to_string(),
-            ),
+        let msg = self.to_string();
+        let error = |m: &str| serde_json::json!({ "error": m });
+        let (status, body) = match self {
+            BiError::NotFound(_) => (StatusCode::NOT_FOUND, error(&msg)),
+            BiError::Forbidden => (StatusCode::FORBIDDEN, error("forbidden")),
+            BiError::BadRequest(_) => (StatusCode::BAD_REQUEST, error(&msg)),
+            BiError::Conflict(_) => (StatusCode::CONFLICT, error(&msg)),
+            BiError::Engine(_) => (StatusCode::BAD_GATEWAY, error(&msg)),
+            // The structured body, served as is: its `error` is the sentence.
+            BiError::Overlap { body } => (StatusCode::CONFLICT, body),
+            BiError::Db(_) => (StatusCode::INTERNAL_SERVER_ERROR, error("internal error")),
         };
-        (status, Json(serde_json::json!({ "error": msg }))).into_response()
+        (status, Json(body)).into_response()
     }
 }
 

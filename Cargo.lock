@@ -3503,6 +3503,7 @@ dependencies = [
  "egret-metastore",
  "egret-test-db",
  "serde",
+ "serde_json",
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
@@ -3514,6 +3515,7 @@ dependencies = [
 name = "egret-perm-compile"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "chrono",
  "egret-auth",
@@ -3550,6 +3552,7 @@ dependencies = [
  "chrono",
  "egret-auth",
  "egret-core",
+ "egret-engine-mgmt-api",
  "egret-events",
  "egret-metastore",
  "egret-policy-api",

@@ -1152,6 +1152,8 @@ export const getPolicyAdminTrinoConfigUrl = (service: string,) => {
 }
 
 /**
+ * Rendered by `egret_engine_mgmt_api::ranger_config::ranger_plugin_files`, the
+ * same code that writes the files egret mounts into its own engines.
  * @summary GET /policies/services/{service}/trino-config — the two files a Trino
 coordinator needs to enforce this profile via the native ranger plugin.
  */

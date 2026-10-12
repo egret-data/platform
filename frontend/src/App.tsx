@@ -96,6 +96,7 @@ import WorkspaceDetail from "@/routes/control-plane/WorkspaceDetail";
 import ControlPlaneEngines from "@/routes/control-plane/ControlPlaneEngines";
 import EngineDetail from "@/routes/control-plane/EngineDetail";
 import EngineCreate from "@/routes/control-plane/EngineCreate";
+import EngineRegister from "@/routes/control-plane/EngineRegister";
 import ControlPlaneStorage from "@/routes/control-plane/ControlPlaneStorage";
 import StorageDetail from "@/routes/control-plane/StorageDetail";
 import StorageBrowser from "@/routes/control-plane/StorageBrowser";
@@ -436,6 +437,7 @@ function ControlPlaneRoutes() {
           <Route path="workspaces/:id" element={<RequireGlobalAdmin><WorkspaceDetail /></RequireGlobalAdmin>} />
           <Route path="engines" element={<RequirePermission perm="engine:read"><ControlPlaneEngines /></RequirePermission>} />
           <Route path="engines/new" element={<RequirePermission perm="engine:create"><EngineCreate /></RequirePermission>} />
+          <Route path="engines/register" element={<RequirePermission perm="engine:create"><EngineRegister /></RequirePermission>} />
           <Route path="engines/:id" element={<RequirePermission perm="engine:read"><EngineDetail /></RequirePermission>} />
           <Route path="catalogs" element={<RequirePermission perm="catalog_registry:read"><Catalogs /></RequirePermission>} />
           <Route path="catalogs/new" element={<RequirePermission perm="catalog_registry:create"><CatalogCreate /></RequirePermission>} />

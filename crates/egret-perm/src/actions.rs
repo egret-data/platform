@@ -39,6 +39,73 @@ pub enum EngineType {
     StarRocks,
 }
 
+/// Which decision an overlapping pair arbitrates — the `kind` of a
+/// `rule_overlap` refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlapKind {
+    Mask,
+    RowFilter,
+}
+
+impl OverlapKind {
+    /// The wire spelling: `"mask"` / `"row_filter"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OverlapKind::Mask => "mask",
+            OverlapKind::RowFilter => "row_filter",
+        }
+    }
+}
+
+/// One member of an overlapping pair, as a steward finds it: a compiled
+/// policy names its `perm.rules` row (`id` and the rule's own name); a
+/// hand-written policy has no rule (`id: None`) and is named by its policy
+/// name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlapRule {
+    pub id: Option<uuid::Uuid>,
+    pub name: String,
+}
+
+/// The (engine type, Ranger plugin version) pairs `egret-ranger-eval` has been
+/// read against: Trino at 2.5.0 and StarRocks at 2.8.0, and nothing else (user
+/// ruling 2026-10-12). "Modelled" is a PAIR, never a version alone: the
+/// evaluator's `PluginVersion` and `EngineType` are measured together, so a
+/// Trino engine declaring 2.8.0 is not covered by the StarRocks measurement.
+///
+/// Spelled here, in the crate both `egret-engine-mgmt` (registering an external
+/// engine) and `egret-perm-compile` (`engine_plugin_version`) already depend
+/// on, so the answer the API reports (`rangerPluginVersionModelled`), the one
+/// the migration gate proves on and the one `explain` evaluates at are ONE
+/// predicate, [`ranger_plugin_is_modelled`].
+pub const MODELLED_RANGER_PLUGINS: [(&str, &str); 2] = [("trino", "2.5.0"), ("starrocks", "2.8.0")];
+
+/// Whether `engine_type` (`trino` / `starrocks`) at Ranger plugin `version` is a
+/// modelled pair.
+pub fn ranger_plugin_is_modelled(engine_type: &str, version: &str) -> bool {
+    MODELLED_RANGER_PLUGINS.contains(&(engine_type, version))
+}
+
+/// What egret's `explain` and the SP4d-3 migration gate assume about an
+/// engine's Ranger plugin. egret guarantees them for the engines it provisions
+/// (its renderer sets them); for an external engine the admin's own plugin
+/// configuration decides, and egret cannot check it. The plugin-config page and
+/// `explain` quote these same sentences.
+pub const EXTERNAL_PLUGIN_ASSUMPTIONS: [&str; 3] = [
+    "The plugin has no super-users configured (no ranger.plugin.*.super.users), so every request is evaluated against the downloaded policies.",
+    "The plugin has no group provider and no usersync, so a user belongs to no group beyond the one egret's policies name.",
+    "Plugin audit is off, so egret's policy evaluation is the only decision record.",
+];
+
+/// `Trino@2.5.0 and StarRocks@2.8.0`, for sentences.
+pub fn modelled_ranger_plugins_sentence() -> String {
+    MODELLED_RANGER_PLUGINS
+        .iter()
+        .map(|(t, v)| format!("{}@{v}", if *t == "trino" { "Trino" } else { "StarRocks" }))
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
 /// A grant the compiler cannot express against the target engine, or cannot
 /// express *correctly* — every variant here exists because a silent
 /// alternative would compile a policy that grants something other than what
@@ -115,14 +182,25 @@ pub enum CompileError {
     /// well: the trigger may be a workspace-membership write on a page that
     /// mentions neither rule.
     ///
-    /// `refusal` is `egret_policy::AmbiguousArbitration::refusal()` — the SAME
-    /// sentence the policy editor's 400 carries, so the two surfaces cannot
-    /// describe one state differently. The rule itself is
-    /// `egret_policy::ambiguous_arbitration_in`, spelled once; read that
-    /// module for why an AGREEING tie is admitted, and for why the guard is
-    /// deliberately narrower than the evaluator's own refusal.
+    /// `refusal` is `egret_policy::UnitOverlap::sentence` with each compiled
+    /// policy labelled by its RULE's name (SP4d-4 Task 3) — the same sentence
+    /// the editor's 409 carries for the same shape, with the editor's own
+    /// labels. The rule itself is `egret_policy::unit_overlaps` (which takes
+    /// every within-download pair from `ambiguous_arbitrations_in`), spelled
+    /// once; read `egret_policy::ambiguous_arbitration` for why an AGREEING
+    /// tie is admitted.
+    ///
+    /// `kind`, `coordinate` and `rules` (exactly two; a hand-written policy has
+    /// `id: None`) are what a route renders as the structured 409 body
+    /// (`code: "rule_overlap"`); the Display stays one sentence.
     #[error("recompiling profile {profile:?} would emit an order-ambiguous pair: {refusal}")]
-    AmbiguousMaskOrFilterArbitration { profile: String, refusal: String },
+    AmbiguousMaskOrFilterArbitration {
+        profile: String,
+        refusal: String,
+        kind: OverlapKind,
+        coordinate: String,
+        rules: Vec<OverlapRule>,
+    },
     /// A `User` principal's `r#ref` is not the bare username the store is
     /// supposed to hold (`model::Principal`'s doc comment: "a username,
     /// never an email … written through unchanged"). The compiler does no
@@ -368,6 +446,35 @@ pub enum CompileError {
     /// the parse error itself.
     #[error("database error: {0}")]
     Db(String),
+}
+
+impl CompileError {
+    /// The structured 409 body of an order-ambiguous pair —
+    /// `{error, code: "rule_overlap", rules, coordinate, kind}` — or `None` for
+    /// any other error. Spelled HERE, once, so the perm routes
+    /// (`egret_perm_compile::overlap::refusal_body`) and the engine bind and
+    /// attach routes (`egret-engine-mgmt`) answer one body.
+    pub fn rule_overlap_body(&self) -> Option<serde_json::Value> {
+        let CompileError::AmbiguousMaskOrFilterArbitration {
+            kind,
+            coordinate,
+            rules,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some(serde_json::json!({
+            "error": self.to_string(),
+            "code": "rule_overlap",
+            "rules": rules
+                .iter()
+                .map(|r| serde_json::json!({ "id": r.id, "name": r.name }))
+                .collect::<Vec<_>>(),
+            "coordinate": coordinate,
+            "kind": kind.as_str(),
+        }))
+    }
 }
 
 /// The Ranger access types `a` compiles to on `e`. Every engine declares

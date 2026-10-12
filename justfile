@@ -159,13 +159,28 @@ check:
 # not seconds) is its own visible step. A name filter that matches nothing makes cargo print
 # `0 passed` and exit 0, so the line before it LISTS the test by that exact name and fails the
 # recipe when the listing is empty — a rename breaks the gate loudly instead of skipping it.
+#
+# SP4d-4 Task 6: the first line after the recipe header is the listing guard for the pruning
+# oracle, and it comes BEFORE the general line because that line `--skip`s the name: a rename
+# would otherwise make the skip match nothing and the oracle run nowhere. The last line asks
+# the real engines about the probes the gate's pruning DROPS (Part D's theorem), before and
+# after, and requires every one to decide identically.
+#
+# SP4d-4 Task 1: the THIRD and FOURTH lines are the editor-shaped levels matrix — what a policy
+# that stops above the leaf (or names a level below an absent one) grants on the real 2.5.0 and
+# 2.8.0 jars under both service-defs, plus the two evalOrder pins Part A rests on. Same binary,
+# so the second line `--skip`s it too, and it carries the same listing guard.
 test-ranger-gates:
     @echo "── Ranger gates (real jars, 2.5.0 + 2.8.0). Needs a JVM and Maven; a failure"
     @echo "   here means the differential did NOT run, which is the thing to know."
     {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-policy --test ranger_engine_gate --no-fail-fast
-    {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture --skip a_migration_the_grammar_accepts_decides_identically_on_the_real_engine
+    {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential -- --list --exact probes_the_gate_prunes_decide_identically_on_the_real_engine | grep -qx 'probes_the_gate_prunes_decide_identically_on_the_real_engine: test'
+    {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture --skip a_migration_the_grammar_accepts_decides_identically_on_the_real_engine --skip probes_the_gate_prunes_decide_identically_on_the_real_engine --skip editor_shaped_levels_on_the_real_ranger_jars
+    {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential -- --list --exact editor_shaped_levels_on_the_real_ranger_jars | grep -qx 'editor_shaped_levels_on_the_real_ranger_jars: test'
+    {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture --exact editor_shaped_levels_on_the_real_ranger_jars
     {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential -- --list --exact a_migration_the_grammar_accepts_decides_identically_on_the_real_engine | grep -qx 'a_migration_the_grammar_accepts_decides_identically_on_the_real_engine: test'
     {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture --exact a_migration_the_grammar_accepts_decides_identically_on_the_real_engine
+    {{ no_db_skip }} EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture --exact probes_the_gate_prunes_decide_identically_on_the_real_engine
 
 # The Kestra plugin host's Java tests (`plugin-host/`, W5b), including the pins of its refusal
 # messages (`EgretPluginHostTest`: `namespaceKv()`'s since W9c Task 7).

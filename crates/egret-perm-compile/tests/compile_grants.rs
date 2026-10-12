@@ -915,3 +915,50 @@ fn a_compiled_grant_always_emits_policy_priority_zero() {
         }
     }
 }
+
+/// SP4d-4 Task 11 (B1) — the editor's level fill must not reach the compiler.
+/// `resources_object` is shared by the compiler's serializers and the editor;
+/// the fill lives in the editor path only, so a compiled body still carries
+/// every level the compiler names, as `*` where the scope leaves one unnamed,
+/// and is exactly what it was before B1.
+#[test]
+fn a_compiled_body_is_unchanged() {
+    let table_scope = Scope {
+        catalog_id: Uuid::nil(),
+        schema: Some("sales".into()),
+        table: Some("orders".into()),
+        column: None,
+    };
+    let input = compile_grant(
+        &grant_allow_read_on(table_scope),
+        "wh",
+        "svc",
+        EngineType::Trino,
+    )
+    .expect("compile");
+    let body = egret_policy::admin::access_to_ranger_json(&input);
+    let star =
+        |v: &str| serde_json::json!({"values": [v], "isExcludes": false, "isRecursive": false});
+    assert_eq!(
+        body["resources"],
+        serde_json::json!({
+            "catalog": star("wh"), "schema": star("sales"),
+            "table": star("orders"), "column": star("*"),
+        }),
+        "the compiler names all four levels itself: {body}"
+    );
+    // And the serializer still drops an EMPTY level — the behaviour the editor
+    // path now overrides before calling it.
+    let empty: AccessPolicyInputProbe = serde_json::from_value(serde_json::json!({
+        "name": "p", "service": "s",
+        "resources": {"catalog": star("wh"), "column": {"values": []}}
+    }))
+    .unwrap();
+    assert!(
+        egret_policy::admin::access_to_ranger_json(&empty)["resources"]
+            .get("column")
+            .is_none()
+    );
+}
+
+type AccessPolicyInputProbe = egret_policy::admin::AccessPolicyInput;

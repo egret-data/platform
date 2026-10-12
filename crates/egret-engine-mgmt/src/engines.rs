@@ -94,6 +94,8 @@ pub use egret_engine_mgmt_api::{
 pub fn router() -> Router<CpState> {
     Router::new()
         .route("/engines", get(list_engines).post(create_engine))
+        // Register an engine egret did not provision (SP4d-4 Part C).
+        .merge(crate::external::routes())
         .route(
             "/engines/{id}",
             get(get_engine).put(update_engine).delete(delete_engine),
@@ -292,19 +294,44 @@ struct EngineSpecDto {
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct EngineDto {
+pub(crate) struct EngineDto {
     id: Uuid,
     name: String,
     #[serde(rename = "type")]
     r#type: String,
     namespace: String,
+    /// For an external engine this is the row's placeholder `running`, which
+    /// means nothing: read `origin` instead (egret does not monitor it).
     status: String,
     spec: EngineSpecDto,
+    /// `provisioned` (egret runs the cluster) or `external` (egret holds a row
+    /// for a cluster it never provisions, updates, restarts, scales or deletes).
+    origin: String,
+    /// External only: the host the engine answers on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
+    /// External only: the port the engine answers on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port: Option<i32>,
+    /// External only: the Ranger plugin version the operator declared installed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ranger_plugin_version: Option<String>,
+    /// External only: whether egret's Ranger evaluator has been read against this
+    /// engine's (type, declared version) PAIR: only Trino@2.5.0 and
+    /// StarRocks@2.8.0 are. When `false`, a migration to the profile bound to this
+    /// engine is refused (never evaluated at a guessed version) and `explain`
+    /// answers that it cannot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ranger_plugin_version_modelled: Option<bool>,
 }
 
 impl From<Engine> for EngineDto {
     fn from(e: Engine) -> Self {
         let spec = serde_json::from_value(e.spec).unwrap_or_default();
+        let modelled = e
+            .ranger_plugin_version
+            .as_deref()
+            .map(|v| crate::external::plugin_version_is_modelled(&e.r#type, v));
         EngineDto {
             id: e.id,
             name: e.name,
@@ -312,6 +339,11 @@ impl From<Engine> for EngineDto {
             namespace: e.namespace,
             status: e.status,
             spec,
+            origin: e.origin,
+            host: e.external_host,
+            port: e.external_port,
+            ranger_plugin_version: e.ranger_plugin_version,
+            ranger_plugin_version_modelled: modelled,
         }
     }
 }
@@ -574,6 +606,16 @@ pub(crate) async fn build_provision_req_with(
                         )
                         .await;
                     }
+                    // A bind that would create an order-ambiguous pair is
+                    // SKIPPED, never made (C1): the guarded bind rolled back, so
+                    // the engine stays unbound and the warning names the pair.
+                    Err(CpError::RuleOverlap(body)) => tracing::warn!(
+                        engine = %engine.name,
+                        overlap = %body,
+                        "late Ranger bind skipped: binding this engine's catalogs into the \
+                         profile would create an order-ambiguous mask or row-filter pair; \
+                         engine stays unbound"
+                    ),
                     Err(e) => tracing::warn!(engine = %engine.name, error = %e,
                         "late Ranger bind failed; engine stays unbound"),
                 }
@@ -648,7 +690,7 @@ pub(crate) async fn build_provision_req_with(
             .map(|service_name| egret_engine_mgmt_api::RangerBinding {
                 service_name,
                 egret_url: st.engine_egret_url.clone(),
-                poll_interval_ms: 30_000,
+                poll_interval_ms: RANGER_POLL_INTERVAL_MS,
             });
     Ok(BuiltReq {
         req: EngineProvisionReq {
@@ -2248,7 +2290,14 @@ async fn list_engines(
             engine.namespace.clone(),
             engine.name.clone(),
         );
+        // An external engine has no cluster egret can ask: its row's `running`
+        // is a placeholder and `origin` is what a reader shows.
+        let external = crate::external::is_external(&engine);
         let mut dto: EngineDto = engine.into();
+        if external {
+            out.push(dto);
+            continue;
+        }
         if let Some(prov) = prov {
             if let Ok(s) = prov.status(&kind, &ns, &name).await {
                 dto.status = s.phase;
@@ -2454,6 +2503,10 @@ async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
     }
 }
 
+/// How often an engine's Ranger plugin polls egret for policy: one value for the
+/// engines egret provisions and the files an external engine's admin installs.
+pub(crate) const RANGER_POLL_INTERVAL_MS: u32 = 30_000;
+
 /// Resolve the Ranger service NAME an engine's `authz_service_id` actually
 /// names, by reading the bound profile row (`policy.authz_services`) — never
 /// by assuming it is spelled like the engine (SP4a Task 3b).
@@ -2472,7 +2525,7 @@ async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
 /// profile rows are never deleted by bind/unbind (standing constraint), so
 /// this should only ever fire on genuine data corruption; when it does, the
 /// caller must see it rather than quietly enforce the wrong (or no) policy.
-async fn resolve_ranger_service_name(
+pub(crate) async fn resolve_ranger_service_name(
     st: &CpState,
     authz_service_id: Option<i64>,
 ) -> Result<Option<String>, CpError> {
@@ -2617,10 +2670,9 @@ async fn bind_trino_profile(
             svc.id
         }
     };
-    st.engine_mgmt
-        .set_engine_authz_service(engine_id, Some(profile_id))
-        .await?;
-    Ok(())
+    // A pair this bind creates is refused (SP4d-4 Task 7 fix round 1, C1): the
+    // caller undoes the create, or skips the late-bind.
+    crate::profile_compiler::bind_profile_guarded(st, engine_id, name, profile_id).await
 }
 
 /// Resolve the warehouse the engine leads with, from whichever shape the
@@ -3238,7 +3290,7 @@ async fn build_starrocks_provision_req(
             .map(|service_name| egret_engine_mgmt_api::RangerBinding {
                 service_name,
                 egret_url: st.engine_egret_url.clone(),
-                poll_interval_ms: 30_000,
+                poll_interval_ms: RANGER_POLL_INTERVAL_MS,
             });
 
     // Delegation wiring: provision (idempotently reuse) the TLS cert + delegator
@@ -4062,12 +4114,18 @@ async fn create_starrocks_engine(
     if let Some(sid) = b.authz_service_id {
         match st.authz.list_services().await {
             Ok(svcs) if svcs.iter().any(|s| s.id == sid) => {
-                if let Err(e) = st
-                    .engine_mgmt
-                    .set_engine_authz_service(engine.id, Some(sid))
+                match crate::profile_compiler::bind_profile_guarded(&st, engine.id, &b.name, sid)
                     .await
                 {
-                    tracing::warn!(error = %e, "set_engine_authz_service failed for starrocks create");
+                    Ok(()) => {}
+                    // A pair this bind creates refuses the create (C1).
+                    Err(e @ CpError::RuleOverlap(_)) => {
+                        compensate_failed_create(&st, undo).await;
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "binding the profile failed for starrocks create");
+                    }
                 }
             }
             Ok(_) => {
@@ -4765,7 +4823,15 @@ async fn get_engine(
         .ok_or(CpError::NotFound)?;
     // A `deleting` row is the retry state of an unfinished delete; the live
     // status of a half-deleted cluster would hide it, so it wins.
-    let status = if engine.status == crate::engine_status::DELETING {
+    let status = if crate::external::is_external(&engine) {
+        // Never ask the provisioner: there is no cluster of ours to ask about,
+        // and a `not found` from it would read as an outage.
+        EngineStatusDto {
+            phase: crate::external::ORIGIN_EXTERNAL.into(),
+            message: Some("External: egret does not provision or monitor this engine".into()),
+            pods: vec![],
+        }
+    } else if engine.status == crate::engine_status::DELETING {
         EngineStatusDto {
             phase: engine.status.clone(),
             message: Some("a previous delete did not finish; retry the delete".into()),
@@ -4953,51 +5019,19 @@ async fn restore_engine_authz_service(st: &CpState, engine_id: Uuid, previous: O
     }
 }
 
-/// Apply an update body's `authz_service_id` to `engine`, binding it to that
-/// policy profile and compiling the profile in the SAME transaction.
-///
-/// **Why honoured and not refused.** `CreateEngineBody` is shared with create,
-/// and `update_engine` refuses its `catalogs` field outright because accepting
-/// and dropping it would tell the caller their catalogs were attached when
-/// they were not — and because `POST /engines/{id}/catalogs/{cid}` is a real
-/// route to send them to instead. `authz_service_id` had the same silence with
-/// no such route behind it: the field was declared, accepted and dropped, so
-/// the only way to bind an engine to an existing profile after create was a
-/// direct SQL `UPDATE`. This is that route.
-///
-/// **`None` means "unchanged", never "unbind".** The wire shape cannot tell an
-/// absent field from an explicit `null` (`#[serde(default)]` on an
-/// `Option<i64>`), and the update wizard sends the whole body — so treating
-/// `None` as a detach would silently unbind every engine on every unrelated
-/// spec edit. That is a worse silence than the one being fixed. Changing the
-/// binding from profile A to profile B is a plain re-point: A's row is
-/// untouched, because unbinding must never delete a profile.
-///
-/// **An unknown id is a 400 naming it.** Not a warning-and-carry-on the way
-/// create's `plan_trino_profile` treats a bad id (there, a fresh profile is
-/// created instead, so the engine still ends up governed). Here there is no
-/// fallback, and a silent no-op is precisely the defect.
-///
-/// **Bind and compile commit together.** A profile an engine newly binds is
-/// stale: the compiler's affected-service sets are all derived from the
-/// MUTATED model row, and a binding mutates no grant and no rule. SP4a fixed
-/// this at engine create (`680adea9`); this is the same fix on update, through
-/// the same seam — `ProfileCompilerPort::recompile_profile_in_tx`, which locks
-/// through `lock_services_in_tx` (expanded with each profile's tag service,
-/// ascending). Unlike create — where a cluster is already provisioned by the
-/// time the recompile runs, so a failure only logs — nothing has been applied
-/// here yet, so a compile failure rolls the binding back and refuses.
-async fn apply_authz_service_update(
+/// Every refusal a profile bind makes BEFORE it writes anything, shared by
+/// `PUT /engines/{id}` ([`apply_authz_service_update`]) and external-engine
+/// registration so the two cannot drift: the profile must exist (400), its
+/// type must equal the engine's (409), no other engine may bind it (409), and
+/// a Trino profile needs a usable `tagService` (400). `engine_type` and
+/// `engine_name` describe the engine the profile is for, which for a
+/// registration does not exist yet.
+pub(crate) async fn check_profile_bindable(
     st: &CpState,
-    engine: &mut Engine,
-    requested: Option<i64>,
+    sid: i64,
+    engine_type: &str,
+    engine_name: &str,
 ) -> Result<(), CpError> {
-    let Some(sid) = requested else {
-        return Ok(());
-    };
-    if engine.authz_service_id == Some(sid) {
-        return Ok(()); // already bound there; no write, nothing to recompile
-    }
     let services = st
         .authz
         .list_services()
@@ -5016,11 +5050,11 @@ async fn apply_authz_service_update(
     // `trino` profile evaluates trino-shaped policy definitions against
     // starrocks-shaped compiled policies — and resource names that no longer
     // match are not denials, they are absent rules, which is an unmasked read.
-    if svc.r#type != engine.r#type {
+    if svc.r#type != engine_type {
         return Err(CpError::Conflict(format!(
             "policy profile {sid} ({}) has type {}, but engine {} is a {} engine; \
              bind a profile of the same type",
-            svc.name, svc.r#type, engine.name, engine.r#type
+            svc.name, svc.r#type, engine_name, engine_type
         )));
     }
     // I2: refuse a profile another engine already binds — again mirroring
@@ -5088,6 +5122,55 @@ async fn apply_authz_service_update(
             svc.name
         )));
     }
+    Ok(())
+}
+
+/// Apply an update body's `authz_service_id` to `engine`, binding it to that
+/// policy profile and compiling the profile in the SAME transaction.
+///
+/// **Why honoured and not refused.** `CreateEngineBody` is shared with create,
+/// and `update_engine` refuses its `catalogs` field outright because accepting
+/// and dropping it would tell the caller their catalogs were attached when
+/// they were not — and because `POST /engines/{id}/catalogs/{cid}` is a real
+/// route to send them to instead. `authz_service_id` had the same silence with
+/// no such route behind it: the field was declared, accepted and dropped, so
+/// the only way to bind an engine to an existing profile after create was a
+/// direct SQL `UPDATE`. This is that route.
+///
+/// **`None` means "unchanged", never "unbind".** The wire shape cannot tell an
+/// absent field from an explicit `null` (`#[serde(default)]` on an
+/// `Option<i64>`), and the update wizard sends the whole body — so treating
+/// `None` as a detach would silently unbind every engine on every unrelated
+/// spec edit. That is a worse silence than the one being fixed. Changing the
+/// binding from profile A to profile B is a plain re-point: A's row is
+/// untouched, because unbinding must never delete a profile.
+///
+/// **An unknown id is a 400 naming it.** Not a warning-and-carry-on the way
+/// create's `plan_trino_profile` treats a bad id (there, a fresh profile is
+/// created instead, so the engine still ends up governed). Here there is no
+/// fallback, and a silent no-op is precisely the defect.
+///
+/// **Bind and compile commit together.** A profile an engine newly binds is
+/// stale: the compiler's affected-service sets are all derived from the
+/// MUTATED model row, and a binding mutates no grant and no rule. SP4a fixed
+/// this at engine create (`680adea9`); this is the same fix on update, through
+/// the same seam — `ProfileCompilerPort::recompile_profile_in_tx`, which locks
+/// through `lock_services_in_tx` (expanded with each profile's tag service,
+/// ascending). Unlike create — where a cluster is already provisioned by the
+/// time the recompile runs, so a failure only logs — nothing has been applied
+/// here yet, so a compile failure rolls the binding back and refuses.
+async fn apply_authz_service_update(
+    st: &CpState,
+    engine: &mut Engine,
+    requested: Option<i64>,
+) -> Result<(), CpError> {
+    let Some(sid) = requested else {
+        return Ok(());
+    };
+    if engine.authz_service_id == Some(sid) {
+        return Ok(()); // already bound there; no write, nothing to recompile
+    }
+    check_profile_bindable(st, sid, &engine.r#type, &engine.name).await?;
     // The binding write and the compile of the profile it names share ONE
     // transaction, the same shape `catalogs::set_catalog_workspaces` keeps —
     // and, like it, `sqlx::Error` from `.begin()`/`.commit()` is mapped
@@ -5099,6 +5182,13 @@ async fn apply_authz_service_update(
         .begin()
         .await
         .map_err(crate::http_error::db_error)?;
+    // **The pairs this bind creates are refused** (SP4d-4 Task 3 re-review M-2).
+    // Binding changes which catalogs — and so which tag assignments — the
+    // profile's unit resolves, and every overlap check reads those as stored, so
+    // the snapshot of the unit's pairs is taken BEFORE the bind and compared
+    // after the recompile. A pair already stored is reported, not refused.
+    let overlaps_before =
+        crate::profile_compiler::snapshot_overlaps(st, &mut tx, Some(sid)).await?;
     if !st
         .engine_mgmt
         .set_engine_authz_service_in_tx(&mut tx, engine.id, Some(sid), &engine.status)
@@ -5112,17 +5202,26 @@ async fn apply_authz_service_update(
             "engine changed while the policy-profile binding was being applied; retry".into(),
         ));
     }
-    if let Some(compiler) = st.perm_compiler.clone() {
-        if let Err(e) = compiler.recompile_profile_in_tx(&mut tx, sid).await {
-            tracing::error!(
-                engine = %engine.name,
-                service_id = sid,
-                error = %e,
-                "compiling the policy profile this engine was being bound to failed; \
-                 the binding was rolled back rather than committed uncompiled"
-            );
-            return Err(CpError::Internal);
-        }
+    if let Err(e) = crate::profile_compiler::recompile_refusing_created_overlaps(
+        st,
+        &mut tx,
+        sid,
+        overlaps_before.as_ref(),
+    )
+    .await
+    {
+        tracing::error!(
+            engine = %engine.name,
+            service_id = sid,
+            error = %e,
+            "compiling the policy profile this engine was being bound to failed; \
+             the binding was rolled back rather than committed uncompiled"
+        );
+        // An overlap this bind created is the caller's 409; anything else is ours.
+        return Err(match e.rule_overlap_body() {
+            Some(body) => CpError::RuleOverlap(body),
+            None => CpError::Internal,
+        });
     }
     tx.commit().await.map_err(crate::http_error::db_error)?;
     tracing::info!(
@@ -5147,7 +5246,7 @@ async fn apply_authz_service_update(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names a profile of the wrong type or one another engine already binds; retry", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names a profile of the wrong type or one another engine already binds; retry; The engine is external (`code` = `engine_is_external`): egret does not update, restart, scale or delete the cluster of it", body = ErrorBody),
         (status = 502, description = "Kubernetes rejected the update; the previous spec was restored", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -5175,6 +5274,15 @@ async fn update_engine(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    // An external engine has no spec of egret's to update, and `prov.update`
+    // would apply one to a cluster egret does not own. Its address and plugin
+    // version are changed through the dedicated PATCH route.
+    crate::external::refuse_if_external(
+        &engine,
+        "apply a provisioning spec to it; change its address, declared plugin version or \
+         policy profile with PATCH /api/control-plane/engines/{id}/external (or delete it first \
+         to register it again)",
+    )?;
     // I4: EVERY cheap refusal runs BEFORE the profile binding is committed.
     // The bind is a real write (and compiles policy), so a PUT that ends in a
     // 400 or a 409 must not have performed it. These three guards used to sit
@@ -5558,7 +5666,7 @@ pub(crate) fn sr_delegation_block(spec: &serde_json::Value) -> serde_json::Value
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id")),
     responses(
-        (status = 204, description = "Cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger profile is unbound, not deleted"),
+        (status = 204, description = "For an external engine: egret's rows only (the engine, its declared attachments and its profile binding) are removed and nothing is sent to any cluster or provisioner, and Kubernetes need not be configured. For a provisioned engine: cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger profile is unbound, not deleted"),
         (status = 400, description = "Kubernetes not configured", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:delete permission", body = ErrorBody),
@@ -5586,6 +5694,14 @@ async fn delete_engine(
     let dependents = st.engine_mgmt.engine_dependents(id, None).await?;
     if !dependents.is_empty() {
         return Err(CpError::HasDependents(dependents));
+    }
+
+    // An external engine is egret's rows and nothing else: no cluster to
+    // delete, so no Kubernetes requirement, no provisioner call and no
+    // `deleting` state to retry. The same preflight above has already refused
+    // while a dependent exists.
+    if crate::external::is_external(&engine) {
+        return delete_external_engine(&st, &engine).await;
     }
 
     // 2. Same rule as create: without Kubernetes the cluster cannot be removed,
@@ -5631,6 +5747,52 @@ async fn delete_engine(
 
     // 6. Cross-seam cleanup after commit: logged, never returned.
     cleanup_deleted_engine(&st, &engine, &attachments).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Delete the rows egret holds for an external engine: the engine, its
+/// declared attachments and its profile binding (the profile itself stays, as
+/// for a provisioned engine). **Never calls the provisioner.**
+///
+/// An external engine owns no secret (`engines_external_shape` keeps every
+/// secret column NULL) and a declared attachment minted no client
+/// (`attachments_declared_holds_nothing`), so there is nothing for
+/// [`cleanup_deleted_engine`] to remove, and a secret the cluster might still
+/// hold must never be deleted. That is asserted here rather than assumed: a row
+/// that somehow carries one is refused untouched.
+async fn delete_external_engine(st: &CpState, engine: &Engine) -> Result<StatusCode, CpError> {
+    let attachments = st
+        .engine_mgmt
+        .registry()
+        .list_engine_attachments(engine.id)
+        .await?;
+    let holds_a_credential = attachments.iter().any(|a| {
+        a.attachment.minted_client
+            || a.attachment.catalog_client_id.is_some()
+            || a.attachment.credential_secret_id.is_some()
+    });
+    if !engine_owned_secret_ids(engine).is_empty()
+        || engine.tls_cert_secret_ref.is_some()
+        || holds_a_credential
+    {
+        tracing::error!(engine = %engine.name,
+            "an external engine row carries a secret or a minted client; refusing to delete it \
+             rather than leave or remove a credential the cluster may hold");
+        return Err(CpError::Internal);
+    }
+    match st
+        .engine_mgmt
+        .delete_engine_unless_blocked(engine.id)
+        .await?
+    {
+        DeleteEngineOutcome::Deleted | DeleteEngineOutcome::NotFound => {}
+        DeleteEngineOutcome::Blocked(dependents) => return Err(CpError::HasDependents(dependents)),
+    }
+    // The profile this engine was bound to loses its engine with the row; the
+    // grants it compiled stay as the profile's own (as for a provisioned
+    // engine, whose delete does not recompile either).
+    tracing::info!(engine = %engine.name,
+        "external engine deleted; egret's rows only, nothing was sent to the cluster");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -5712,6 +5874,7 @@ async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, attachments: &[At
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:provision permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not restart it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -5726,6 +5889,7 @@ async fn restart_engine(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    crate::external::refuse_if_external(&engine, "restart it")?;
     // FAIL-FAST on unsupported kinds. Trino rolls its Deployments directly;
     // StarRocks rolls the operator-owned FE/CN pods via a CR annotation merge
     // patch (see `StarRocksProvisioner::restart`). Any other kind has no restart
@@ -5767,7 +5931,7 @@ async fn restart_engine(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry; The engine is external (`code` = `engine_is_external`): egret does not rotate the secrets of it", body = ErrorBody),
         (status = 502, description = "Kubernetes rejected the apply; the engine row now names the new secret pair (the cluster may already hold it), and the previous pair is kept — not deleted — until a later successful apply supersedes it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -5783,6 +5947,7 @@ async fn rotate_engine_secrets(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    crate::external::refuse_if_external(&engine, "rotate its secrets")?;
     // A concurrent DELETE already marked the row and may have torn the cluster
     // down; 409 the common case here, before doing any work, rather than only
     // catching it in `apply_built`'s re-read right before the provisioner call.
@@ -5915,7 +6080,7 @@ async fn list_engine_workspaces(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine, or an added workspace does not exist; nothing applied", body = ErrorBody),
-        (status = 409, description = "A removed workspace still has Data API endpoints, schedules or datasets on the engine's connection; nothing applied", body = EngineConflictBody),
+        (status = 409, description = "A removed workspace still has Data API endpoints, schedules or datasets on the engine's connection; nothing applied; The engine is external (`code` = `engine_is_external`): egret does not assign workspaces to it", body = EngineConflictBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -5931,6 +6096,10 @@ async fn set_engine_workspaces(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    crate::external::refuse_if_external(
+        &engine,
+        "assign it to a workspace (egret holds no credentials for it)",
+    )?;
 
     // Diff the requested set against the current set and apply per-delta. The
     // assignment service keeps the query-seam materialized connection in sync.
@@ -6017,6 +6186,7 @@ async fn list_workspace_engines(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine or workspace", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not assign to a workspace it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -6035,6 +6205,15 @@ async fn assign_workspace_engine(
     {
         return Err(CpError::NotFound);
     }
+    let engine = st
+        .engine_mgmt
+        .get_engine(b.engine_id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    crate::external::refuse_if_external(
+        &engine,
+        "assign it to a workspace (egret holds no credentials for it)",
+    )?;
     st.assignment.assign(b.engine_id, id, p.user_id.0).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -6126,6 +6305,9 @@ pub(crate) async fn show_schemas_verdict(
     engine: &Engine,
     catalog_name: &str,
 ) -> Result<(bool, String), CpError> {
+    // The chokepoint under both test routes: egret never queries the
+    // coordinator of an engine it does not run.
+    crate::external::refuse_if_external(engine, "run a catalog test against it")?;
     let sql = format!("SHOW SCHEMAS FROM {}", quote_ident(catalog_name));
     let (code, body) = crate::monitor::coordinator_call(
         st,
@@ -6252,6 +6434,7 @@ struct CatalogTestDto {
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
         (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
         (status = 502, description = "Trino coordinator unreachable", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not test a catalog on it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -6266,6 +6449,7 @@ async fn test_catalog(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    crate::external::refuse_if_external(&engine, "run a catalog test against it")?;
     let cat = find_attached(&st, &engine, cid).await?.catalog;
     let (ok, message) = show_schemas_verdict(&st, &engine, &cat.name).await?;
     Ok(Json(CatalogTestDto { ok, message }))
@@ -6308,6 +6492,7 @@ struct PodLogsDto {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
         (status = 404, description = "No such engine, or pod does not belong to the engine", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not read the pods of it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -6323,6 +6508,7 @@ async fn pod_logs(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    crate::external::refuse_if_external(&engine, "read its pod logs")?;
     let Some(prov) = st.engine_provisioner.as_ref() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
@@ -6385,6 +6571,7 @@ struct PodLogsFollowQuery {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
         (status = 404, description = "No such engine, or pod does not belong to the engine", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not read the pods of it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -6393,7 +6580,7 @@ async fn pod_logs_follow(
     Auth(p): Auth,
     Path((id, pod)): Path<(Uuid, String)>,
     axum::extract::Query(q): axum::extract::Query<PodLogsFollowQuery>,
-    ws: WebSocketUpgrade,
+    ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Result<Response, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     let engine = st
@@ -6401,6 +6588,13 @@ async fn pod_logs_follow(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    // Decided before the upgrade is looked at, so the refusal is an ordinary
+    // 409 a client can read rather than a failed handshake.
+    crate::external::refuse_if_external(&engine, "stream its pod logs")?;
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(rejection) => return Ok(axum::response::IntoResponse::into_response(rejection)),
+    };
     let Some(prov) = st.engine_provisioner.clone() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
@@ -6517,6 +6711,7 @@ struct ExecResize {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:provision permission", body = ErrorBody),
         (status = 404, description = "No such engine, or pod does not belong to the engine", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not exec into the pods of it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -6524,7 +6719,7 @@ async fn pod_exec(
     State(st): State<CpState>,
     Auth(p): Auth,
     Path((id, pod)): Path<(Uuid, String)>,
-    ws: WebSocketUpgrade,
+    ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Result<Response, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:provision").await?;
     let engine = st
@@ -6532,6 +6727,11 @@ async fn pod_exec(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    crate::external::refuse_if_external(&engine, "open a shell in its pods")?;
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(rejection) => return Ok(axum::response::IntoResponse::into_response(rejection)),
+    };
     let Some(prov) = st.engine_provisioner.clone() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
@@ -7438,6 +7638,10 @@ mod tests {
             internal_secret_id: None,
             monitor_secret_id: None,
             created_at: chrono::Utc::now(),
+            origin: "provisioned".into(),
+            external_host: None,
+            external_port: None,
+            ranger_plugin_version: None,
         }
     }
 
@@ -7482,6 +7686,7 @@ mod tests {
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
             ranger_enabled: false,
+            ranger_bearer_configured: false,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(crate::starrocks_ddl::FakeStarRocksDdl::default()),
             perm_compiler: None,

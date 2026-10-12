@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { PolicyWriteWarning } from './policyWriteWarning';
 
 /**
  * Doc-only mirror of the `{ "id": <n> }` body the create/update handlers return.
@@ -12,4 +13,23 @@
 export interface CreatedPolicyId {
   /** The created/updated policy's id. */
   id: number;
+  /**
+     * Present only when this save stored an emptied resource level as `*`
+     * (SP4d-4 Task 11): the level names, root first.
+     * @nullable
+     */
+  filledLevels?: string[] | null;
+  /**
+     * Present with `filledLevels`: what the fill means in Ranger — the policy
+     * now covers every child of those levels, and it moved earlier in the
+     * evaluation order of its priority band.
+     * @nullable
+     */
+  note?: string | null;
+  /**
+     * Present only when the fill moved the saved policy ahead of another
+     * same-band policy that may decide the same request.
+     * @nullable
+     */
+  warnings?: PolicyWriteWarning[] | null;
 }

@@ -158,7 +158,9 @@ pub(crate) struct UpdateRegistryCatalogBody {
 pub(crate) struct ApplyOutcomeDto {
     engine_id: Uuid,
     engine_name: String,
-    /// `applied` | `failed`.
+    /// `applied` | `failed` | `skipped`. `skipped`: the engine is external, so
+    /// egret did not touch it (the attachment is only declared); `error` then
+    /// says so.
     status: String,
     error: Option<String>,
 }
@@ -168,7 +170,14 @@ impl From<ApplyOutcome> for ApplyOutcomeDto {
         ApplyOutcomeDto {
             engine_id: o.engine_id,
             engine_name: o.engine_name,
-            status: if o.applied { "applied" } else { "failed" }.into(),
+            status: if o.skipped {
+                "skipped"
+            } else if o.applied {
+                "applied"
+            } else {
+                "failed"
+            }
+            .into(),
             error: o.error,
         }
     }
@@ -518,7 +527,7 @@ async fn catalog_impact(
     tag = "control-plane-catalog-registry",
     params(("id" = Uuid, Path, description = "Registry catalog id")),
     responses(
-        (status = 200, description = "The unchanged configuration re-applied to every attached engine (e.g. after rotating a secret)", body = Vec<ApplyOutcomeDto>),
+        (status = 200, description = "The unchanged configuration re-applied to every attached engine (e.g. after rotating a secret). An external engine is listed with status `skipped`: egret does not apply catalogs to it", body = Vec<ApplyOutcomeDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
         (status = 404, description = "No such catalog", body = ErrorBody),
@@ -645,7 +654,10 @@ async fn test_registry_catalog(
         .list_catalog_attachments(id)
         .await?
         .into_iter()
-        .filter(|a| a.engine_type == "trino")
+        .filter(|a| {
+            a.engine_type == "trino"
+                && a.apply_status != egret_catalog_registry::store::apply_status::DECLARED
+        })
         .collect();
     // An APPLIED attachment, not merely the alphabetically first one
     // (`list_catalog_attachments` is `ORDER BY e.name`). Querying an engine the
@@ -888,7 +900,7 @@ async fn detach_catalog(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
         (status = 404, description = "No such engine, or the catalog is not attached to it", body = ErrorBody),
-        (status = 409, description = "The engine is being deleted", body = ErrorBody),
+        (status = 409, description = "The engine is being deleted; The engine is external (`code` = `engine_is_external`): egret does not apply a catalog to it", body = ErrorBody),
         (status = 502, description = "The engine rejected the apply — Kubernetes for Trino, the FE for StarRocks (including a catalog of this name the FE already holds with different properties); the attachment stays `failed` with the new error", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),

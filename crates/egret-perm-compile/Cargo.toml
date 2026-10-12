@@ -66,6 +66,7 @@ tokio.workspace = true
 # `tests/routes.rs` drives the composed router with `oneshot` and a real
 # session cookie, and builds a real `CedarPdp` for the 403 assertions.
 tower.workspace = true
+async-trait.workspace = true
 http-body-util = "0.1"
 egret-events.workspace = true
 egret-secrets.workspace = true

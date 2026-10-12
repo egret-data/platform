@@ -74,6 +74,11 @@ pub struct EngineMgmtState {
     /// makes per-user delegated impersonation queries work. An admin explicitly
     /// passing `authz_service_id` still binds regardless of this flag.
     pub ranger_enabled: bool,
+    /// Whether egret's Ranger `/service` surface requires a bearer token
+    /// (`config.ranger.auth_token` is non-empty). Only the FACT is carried, never
+    /// the token: the external plugin-config page states the auth mode and must
+    /// not be able to leak the secret.
+    pub ranger_bearer_configured: bool,
     /// The JDBC drivers a StarRocks `jdbc` catalog makes the FE download
     /// (design D5): the compiled-in pinned table with this deployment's
     /// `[starrocks.jdbc_drivers]` overrides applied. Populated from config in

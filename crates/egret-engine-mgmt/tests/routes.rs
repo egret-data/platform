@@ -83,6 +83,22 @@ impl egret_engine_mgmt::ProfileCompilerPort for RecordingProfileCompiler {
         self.in_tx_calls.lock().unwrap().push(service_id);
         Ok(())
     }
+
+    async fn overlap_snapshot_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _service_ids: &[i64],
+    ) -> Result<egret_engine_mgmt::OverlapSnapshot, egret_perm::CompileError> {
+        Ok(egret_engine_mgmt::OverlapSnapshot::new(()))
+    }
+
+    async fn refuse_created_overlaps_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _snapshot: &egret_engine_mgmt::OverlapSnapshot,
+    ) -> Result<(), egret_perm::CompileError> {
+        Ok(())
+    }
 }
 
 /// A `ProfileCompilerPort` that really recompiles, against the fixture's own
@@ -133,6 +149,27 @@ impl egret_engine_mgmt::ProfileCompilerPort for RealProfileCompiler {
         egret_perm_compile::recompile_service_in_tx(tx, service_id).await?;
         Ok(())
     }
+
+    async fn overlap_snapshot_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<egret_engine_mgmt::OverlapSnapshot, egret_perm::CompileError> {
+        Ok(egret_engine_mgmt::OverlapSnapshot::new(
+            egret_perm_compile::overlap::unit_snapshot_via(tx, service_ids).await?,
+        ))
+    }
+
+    async fn refuse_created_overlaps_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        snapshot: &egret_engine_mgmt::OverlapSnapshot,
+    ) -> Result<(), egret_perm::CompileError> {
+        let snapshot = snapshot
+            .get::<egret_perm_compile::overlap::UnitSnapshot>()
+            .expect("a snapshot this compiler produced");
+        egret_perm_compile::overlap::refuse_created_overlaps_via(tx, snapshot).await
+    }
 }
 
 /// Incidental PDP for `EngineMgmtState`: every existing route test authenticates
@@ -176,6 +213,32 @@ fn build_app(
     starrocks_ddl: FakeStarRocksDdl,
     perm_compiler: Option<Arc<dyn egret_engine_mgmt::ProfileCompilerPort>>,
 ) -> axum::Router {
+    build_app_with_bearer(
+        db,
+        sessions,
+        engine_provisioner,
+        kube,
+        pdp,
+        ranger_enabled,
+        starrocks_ddl,
+        perm_compiler,
+        false,
+    )
+}
+
+/// `build_app`, with whether egret's Ranger `/service` requires a bearer token.
+#[allow(clippy::too_many_arguments)]
+fn build_app_with_bearer(
+    db: &Db,
+    sessions: &SessionService,
+    engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
+    kube: Option<Arc<dyn KubeClient>>,
+    pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+    ranger_enabled: bool,
+    starrocks_ddl: FakeStarRocksDdl,
+    perm_compiler: Option<Arc<dyn egret_engine_mgmt::ProfileCompilerPort>>,
+    ranger_bearer_configured: bool,
+) -> axum::Router {
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
     let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
@@ -204,6 +267,7 @@ fn build_app(
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
             ranger_enabled,
+            ranger_bearer_configured,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(starrocks_ddl),
             perm_compiler,
@@ -621,6 +685,9 @@ struct FakeEnginePort {
     /// all-pods-ready `running` default — so a test can drive a not-ready /
     /// crash-looping cluster through `GET /engines/{id}` (I1).
     status_response: Arc<std::sync::Mutex<Option<egret_engine_mgmt_api::EngineStatus>>>,
+    /// How many times `status` was asked, for any engine. An external engine has
+    /// no cluster of egret's to ask about, so a read of one must leave this at 0.
+    status_calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl FakeEnginePort {
@@ -679,6 +746,8 @@ impl EngineProvisioningPort for FakeEnginePort {
         _ns: &str,
         _name: &str,
     ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+        self.status_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some(s) = self.status_response.lock().unwrap().clone() {
             return Ok(s);
         }
@@ -10509,4 +10578,2259 @@ async fn a_late_refusal_restores_the_previous_binding() {
     // Both profile rows survive — a restore unbinds, never deletes.
     assert!(service_exists(&f, &start_name).await);
     assert!(service_exists(&f, &target_name).await);
+}
+
+// ---------------------------------------------------------------------------
+// External engines (SP4d-4 Part C, Task 7)
+// ---------------------------------------------------------------------------
+//
+// An external engine is a row egret holds for a cluster it never provisions.
+// Every test here wires the REAL profile compiler, because what is being
+// proved is the compiled effect (`policy.authz_policies`, which is what the
+// plugin's download serves) and the refusal of a created overlap, neither of
+// which a recording fake can show.
+
+/// A fixture whose engine seam compiles for real, and the fake provisioner it
+/// was built with (so a test can assert nothing was provisioned).
+async fn setup_external() -> Option<(Fixture, FakeEnginePort)> {
+    let port = FakeEnginePort::default();
+    let mut f = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await?;
+    f.perm_compiler = Some(Arc::new(RealProfileCompiler {
+        perm: egret_perm::PermStore::new(f.db.pool.clone()),
+        policy: egret_policy::PolicyStore::new(f.db.clone()),
+    }));
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+    );
+    Some((f, port))
+}
+
+async fn starrocks_profile(f: &Fixture) -> i64 {
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    egret_policy::seed_starrocks(&policy)
+        .await
+        .expect("seed starrocks service-def");
+    egret_policy_api::PolicyPort::create_service(
+        &policy,
+        &format!("extsr_{}", Uuid::new_v4().simple()),
+        "starrocks",
+        &serde_json::json!({}),
+    )
+    .await
+    .expect("starrocks profile")
+    .id
+}
+
+/// A registry catalog both engine types can read.
+async fn jdbc_catalog(f: &Fixture, token: &str) -> Uuid {
+    let pw = seed_secret(f, "hunter2").await;
+    let (status, j) = call(
+        f,
+        "POST",
+        "/catalogs",
+        token,
+        Some(jdbc_body(&unique_catalog_name("extpg"), pw)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    Uuid::parse_str(j["id"].as_str().unwrap()).unwrap()
+}
+
+async fn allow_read_grant(f: &Fixture, catalog_id: Uuid) -> Uuid {
+    use egret_perm::{
+        Action, Effect, Grant, GrantOrigin, Principal, PrincipalKind, PrincipalSet, Scope,
+    };
+    egret_perm::PermStore::new(f.db.pool.clone())
+        .create_grant(&Grant {
+            id: Uuid::nil(),
+            effect: Effect::Allow,
+            actions: vec![Action::Read],
+            scope: Scope {
+                catalog_id,
+                schema: None,
+                table: None,
+                column: None,
+            },
+            principals: PrincipalSet {
+                include: vec![Principal {
+                    kind: PrincipalKind::User,
+                    r#ref: "analyst".into(),
+                }],
+                exclude: vec![],
+            },
+            origin: GrantOrigin::Explicit,
+        })
+        .await
+        .expect("grant")
+}
+
+fn register_body(
+    name: &str,
+    kind: &str,
+    version: &str,
+    authz: Option<i64>,
+    catalogs: &[Uuid],
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": name, "type": kind, "host": "sr.example.com",
+        "port": if kind == "trino" { 8080 } else { 9030 },
+        "rangerPluginVersion": version, "authzServiceId": authz, "catalogs": catalogs,
+    })
+}
+
+fn external_name(prefix: &str) -> String {
+    format!("{prefix}-{}", &Uuid::new_v4().simple().to_string()[..10])
+}
+
+fn assert_nothing_provisioned(port: &FakeEnginePort) {
+    assert!(port.provisioned.lock().unwrap().is_empty(), "provisioned");
+    assert!(port.updated.lock().unwrap().is_empty(), "updated");
+    assert!(port.deleted.lock().unwrap().is_empty(), "deleted");
+    assert!(port.restarted.lock().unwrap().is_empty(), "restarted");
+}
+
+#[tokio::test]
+async fn registering_an_external_starrocks_binds_it_and_declares_its_catalogs() {
+    let Some((f, port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_register_admin", true).await;
+    let profile = starrocks_profile(&f).await;
+    let catalog = jdbc_catalog(&f, &token).await;
+    let grant = allow_read_grant(&f, catalog).await;
+    let name = external_name("ext-sr");
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(
+            &name,
+            "starrocks",
+            "2.8.0",
+            Some(profile),
+            &[catalog],
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert_eq!(j["origin"], "external", "{j}");
+    assert_eq!(j["host"], "sr.example.com");
+    assert_eq!(j["port"], 9030);
+    assert_eq!(j["rangerPluginVersion"], "2.8.0");
+    assert_eq!(j["rangerPluginVersionModelled"], true);
+
+    let (origin, bound, namespace): (String, Option<i64>, String) = sqlx::query_as(
+        "SELECT origin, authz_service_id, namespace FROM engine_mgmt.engines WHERE name = $1",
+    )
+    .bind(&name)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (origin.as_str(), bound, namespace.as_str()),
+        ("external", Some(profile), "")
+    );
+
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let attachment: (String, bool, bool, Option<Uuid>) = sqlx::query_as(
+        "SELECT apply_status, minted_client, is_primary, catalog_client_id \
+           FROM registry.engine_catalog_attachments WHERE engine_id = $1 AND catalog_id = $2",
+    )
+    .bind(engine_id)
+    .bind(catalog)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(attachment, ("declared".to_string(), false, false, None));
+
+    // The compiled effect, which is what the plugin's download serves: the
+    // bound profile carries a policy for the grant on the declared catalog.
+    let compiled: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(profile)
+    .bind(format!("{}{}", egret_policy::COMPILER_GRANT_PREFIX, grant))
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        compiled, 1,
+        "the declared catalog's grant must be compiled at once"
+    );
+
+    assert_nothing_provisioned(&port);
+}
+
+#[tokio::test]
+async fn registering_against_a_profile_of_the_other_type_is_409() {
+    let Some((f, port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_type_admin", true).await;
+    let trino_profile = seed_ranger_profile(&f, &external_name("exttr"), &[]).await;
+    let name = external_name("ext-sr");
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(
+            &name,
+            "starrocks",
+            "2.8.0",
+            Some(trino_profile),
+            &[],
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_eq!(engine_rows_named(&f, &name).await, 0, "nothing is written");
+    assert_nothing_provisioned(&port);
+}
+
+#[tokio::test]
+async fn registering_against_a_profile_another_engine_binds_is_409() {
+    let Some((f, _port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_bound_admin", true).await;
+    let profile = starrocks_profile(&f).await;
+    let first = external_name("ext-sr");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(
+            &first,
+            "starrocks",
+            "2.8.0",
+            Some(profile),
+            &[],
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+
+    let second = external_name("ext-sr");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(
+            &second,
+            "starrocks",
+            "2.8.0",
+            Some(profile),
+            &[],
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_eq!(
+        engine_rows_named(&f, &second).await,
+        0,
+        "nothing is written"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_catalog_is_404_naming_it_and_writes_nothing() {
+    let Some((f, _port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_404_admin", true).await;
+    let profile = starrocks_profile(&f).await;
+    let missing = Uuid::new_v4();
+    let name = external_name("ext-sr");
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(
+            &name,
+            "starrocks",
+            "2.8.0",
+            Some(profile),
+            &[missing],
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{j}");
+    assert!(
+        j["error"].as_str().unwrap().contains(&missing.to_string()),
+        "the 404 must name the catalog id: {j}"
+    );
+    assert_eq!(engine_rows_named(&f, &name).await, 0, "nothing is written");
+    let bound: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM engine_mgmt.engines WHERE authz_service_id = $1")
+            .bind(profile)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(bound, 0, "the profile stays unbound");
+}
+
+#[tokio::test]
+async fn get_engine_never_asks_the_provisioner_for_an_external_engine() {
+    let Some((f, port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_get_admin", true).await;
+    let name = external_name("ext-tr");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(&name, "trino", "2.5.0", None, &[])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let id = j["id"].as_str().unwrap().to_string();
+
+    let (status, got) = call(&f, "GET", &format!("/engines/{id}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!(got["origin"], "external", "{got}");
+    assert_eq!(
+        port.status_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "an external engine has no cluster of egret's to ask"
+    );
+
+    // The list asks the provisioner about every PROVISIONED engine in the
+    // database (other tests' included), so a call count says nothing there; what
+    // matters is that the external row is listed as itself.
+    let (status, list) = call(&f, "GET", "/engines", &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == id.as_str())
+        .expect("listed");
+    assert_eq!(row["origin"], "external");
+    assert_eq!(row["rangerPluginVersion"], "2.5.0");
+}
+
+#[tokio::test]
+async fn registration_validates_its_input_and_states_an_unmodelled_version() {
+    let Some((f, _port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_validate_admin", true).await;
+    let ok = |name: &str| register_body(name, "trino", "2.5.0", None, &[]);
+    let mut cases: Vec<(&str, serde_json::Value)> = Vec::new();
+    let mut with = |why, field: &str, v: serde_json::Value| {
+        let mut b = ok(&external_name("ext-bad"));
+        b[field] = v;
+        cases.push((why, b));
+    };
+    with("risingwave type", "type", "risingwave".into());
+    with("scheme in host", "host", "http://trino.example.com".into());
+    with("path in host", "host", "trino.example.com/x".into());
+    with("port zero", "port", 0.into());
+    with(
+        "unknown plugin version",
+        "rangerPluginVersion",
+        "2.55.0".into(),
+    );
+    with(
+        "malformed plugin version",
+        "rangerPluginVersion",
+        "2.5".into(),
+    );
+    with("upper-case name", "name", "Bad_Name".into());
+    for (why, body) in cases {
+        let name = body["name"].as_str().unwrap().to_string();
+        let (status, j) = call(&f, "POST", "/engines/external", &token, Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {j}");
+        assert_eq!(
+            engine_rows_named(&f, &name).await,
+            0,
+            "{why}: nothing is written"
+        );
+    }
+
+    // A real Ranger release the evaluator does not model is accepted as
+    // declared, and the response says it is not modelled.
+    let name = external_name("ext-260");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(&name, "trino", "2.6.0", None, &[])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert_eq!(j["rangerPluginVersion"], "2.6.0");
+    assert_eq!(j["rangerPluginVersionModelled"], false, "{j}");
+
+    // "Modelled" is a (type, version) PAIR (user ruling 2026-10-12): 2.8.0 is
+    // modelled for StarRocks and 2.5.0 for Trino, and neither the other way.
+    for (kind, version, modelled) in [
+        ("trino", "2.5.0", true),
+        ("trino", "2.8.0", false),
+        ("starrocks", "2.5.0", false),
+        ("starrocks", "2.8.0", true),
+    ] {
+        let n = external_name("ext-pair");
+        let (status, j) = call(
+            &f,
+            "POST",
+            "/engines/external",
+            &token,
+            Some(register_body(&n, kind, version, None, &[])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{kind}@{version}: {j}");
+        assert_eq!(
+            j["rangerPluginVersionModelled"], modelled,
+            "{kind}@{version}: {j}"
+        );
+    }
+
+    // A taken name is a 409.
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(&name, "trino", "2.5.0", None, &[])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+}
+
+/// Last of the external tests by name only; reports the unscoped count and
+/// asserts the scoped one. The database is shared, so the unscoped count is
+/// printed, not asserted.
+#[tokio::test]
+async fn the_whole_table_agrees_declared_means_external() {
+    let Some((f, _port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_agree_admin", true).await;
+    let catalog = jdbc_catalog(&f, &token).await;
+    let name = external_name("ext-agree");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(&name, "trino", "2.5.0", None, &[catalog])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let scoped: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM registry.engine_catalog_attachments a \
+           JOIN engine_mgmt.engines e ON e.id = a.engine_id \
+          WHERE (a.apply_status = 'declared') <> (e.origin = 'external') AND e.id = $1",
+    )
+    .bind(engine_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(scoped, 0, "this test's engine: declared <=> external");
+    let unscoped: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM registry.engine_catalog_attachments a \
+           JOIN engine_mgmt.engines e ON e.id = a.engine_id \
+          WHERE (a.apply_status = 'declared') <> (e.origin = 'external')",
+    )
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    eprintln!("declared<=>external disagreements across the whole table: {unscoped}");
+}
+
+// -- a bind and an attachment refuse the mask / row-filter pairs they create --
+//
+// SP4d-4 Task 3 re-review M-2, closed here. A profile bind and an engine <->
+// catalog attachment change which catalogs, hence which tag assignments, a
+// profile's unit resolves, and every overlap check reads those as stored. The
+// fixture is the one `egret-bi`'s `catalog_tag_overlap` uses: two HAND-WRITTEN
+// tag masks (so no compile claims or rewrites them) under the profile's tag
+// service, and two tags assigned to one column of a warehouse. Until an engine
+// that attaches the warehouse's catalog is bound to the profile, the profile's
+// unit resolves no assignment and the pair does not exist.
+
+struct OverlapUnit {
+    /// The tag `both_tags = false` leaves unassigned.
+    second_tag: Uuid,
+    profile: i64,
+    warehouse_id: Uuid,
+    catalog_id: Uuid,
+}
+
+const OVERLAP_COLUMN: &str = "email";
+
+async fn insert_tag(f: &Fixture, label: &str) -> (Uuid, String) {
+    let key = format!("{label}-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let id: Uuid = sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $1) RETURNING id")
+        .bind(&key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("tag");
+    (id, key)
+}
+
+async fn assign_tag(f: &Fixture, tag: Uuid, warehouse_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+                                              column_name) \
+         VALUES ($1, $2, 'sales', 'orders', $3)",
+    )
+    .bind(tag)
+    .bind(warehouse_id)
+    .bind(OVERLAP_COLUMN)
+    .execute(&f.db.pool)
+    .await
+    .expect("assign tag");
+}
+
+/// A Trino profile whose tag service holds two hand-written tag masks, tagged
+/// onto one column of `warehouse_id` (or of a fresh warehouse with its registry
+/// catalog). `both_tags` false assigns only the first tag, so no pair exists
+/// whatever binds the profile.
+async fn overlap_unit(f: &Fixture, warehouse: Option<Uuid>, both_tags: bool) -> OverlapUnit {
+    overlap_unit_named(f, warehouse, both_tags, &external_name("ovl")).await
+}
+
+/// [`overlap_unit`] with the profile's name chosen (a late-bind adopts a profile
+/// named after the engine). A `warehouse` with no registry catalog yet gets one,
+/// the row an engine create would ensure for it.
+async fn overlap_unit_named(
+    f: &Fixture,
+    warehouse: Option<Uuid>,
+    both_tags: bool,
+    profile_name: &str,
+) -> OverlapUnit {
+    let pool = &f.db.pool;
+    let profile_name = profile_name.to_string();
+    let profile = seed_ranger_profile(f, &profile_name, &[]).await;
+    let tag_service = format!("{profile_name}_tag");
+    let tag_service_id: i64 =
+        sqlx::query_scalar("SELECT id FROM policy.authz_services WHERE name = $1")
+            .bind(&tag_service)
+            .fetch_one(pool)
+            .await
+            .expect("tag service");
+    let (tag_a, key_a) = insert_tag(f, "ovla").await;
+    let (tag_b, key_b) = insert_tag(f, "ovlb").await;
+    let store = egret_policy::PolicyStore::new(f.db.clone());
+    for (label, key, mask) in [("a", &key_a, "MASK"), ("b", &key_b, "MASK_NULL")] {
+        let name = format!("hand {label} {}", Uuid::new_v4().simple());
+        let body = serde_json::json!({
+            "name": name, "service": tag_service, "serviceType": "tag",
+            "policyType": 1, "isEnabled": true, "policyPriority": 0,
+            "resources": {"tag": {"values": [key], "isExcludes": false, "isRecursive": false}},
+            "dataMaskPolicyItems": [{
+                "users": [], "groups": ["public"], "roles": [],
+                "accesses": [{"type": "select", "isAllowed": true}],
+                "dataMaskInfo": {"dataMaskType": mask}
+            }],
+            "policyItems": [], "denyPolicyItems": []
+        });
+        store
+            .create_policy(tag_service_id, &name, &body)
+            .await
+            .expect("hand-written tag mask");
+    }
+    let (warehouse_id, catalog_id) = match warehouse {
+        Some(wh) => {
+            let existing: Option<Uuid> =
+                sqlx::query_scalar("SELECT id FROM registry.catalogs WHERE warehouse_id = $1")
+                    .bind(wh)
+                    .fetch_optional(pool)
+                    .await
+                    .expect("the warehouse's registry catalog");
+            let catalog = match existing {
+                Some(c) => c,
+                None => sqlx::query_scalar(
+                    "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+                     VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                             jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+                     RETURNING id",
+                )
+                .bind(unique_catalog_name("ovlcat"))
+                .bind(wh)
+                .fetch_one(pool)
+                .await
+                .expect("registry catalog"),
+            };
+            (wh, catalog)
+        }
+        None => {
+            let wh = seed_provisioned_warehouse(f).await;
+            let catalog: Uuid = sqlx::query_scalar(
+                "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+                 VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                         jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+                 RETURNING id",
+            )
+            .bind(unique_catalog_name("ovlcat"))
+            .bind(wh)
+            .fetch_one(pool)
+            .await
+            .expect("registry catalog");
+            (wh, catalog)
+        }
+    };
+    assign_tag(f, tag_a, warehouse_id).await;
+    if both_tags {
+        assign_tag(f, tag_b, warehouse_id).await;
+    }
+    OverlapUnit {
+        second_tag: tag_b,
+        profile,
+        warehouse_id,
+        catalog_id,
+    }
+}
+
+fn assert_rule_overlap(status: StatusCode, body: &serde_json::Value) {
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "rule_overlap", "{body}");
+    assert_eq!(body["kind"], "mask", "{body}");
+    assert!(
+        body["coordinate"]
+            .as_str()
+            .unwrap()
+            .ends_with(".sales.orders.email"),
+        "{body}"
+    );
+}
+
+/// The bind: a `PUT` that re-points an engine at the profile completes the pair
+/// (the engine attaches the warehouse whose column carries both tags).
+#[tokio::test]
+async fn a_put_bind_that_creates_an_overlap_is_409_and_binds_nothing() {
+    let Some((f, _port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_bind_ovl_admin", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let before = authz_service_of(&f, &name).await;
+    let unit = overlap_unit(&f, Some(wh), true).await;
+
+    let (status, body) = call(
+        &f,
+        "PUT",
+        &format!("/engines/{engine_id}"),
+        &token,
+        Some(rebind_body(&name, wh, serde_json::json!(unit.profile))),
+    )
+    .await;
+    assert_rule_overlap(status, &body);
+    assert_eq!(authz_service_of(&f, &name).await, before, "nothing bound");
+}
+
+/// Accept cell of the same bind: one tag on the column, no pair, the bind lands.
+#[tokio::test]
+async fn a_put_bind_that_creates_no_overlap_still_binds() {
+    let Some((f, _port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_bind_ok_admin", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let unit = overlap_unit(&f, Some(wh), false).await;
+
+    let (status, body) = call(
+        &f,
+        "PUT",
+        &format!("/engines/{engine_id}"),
+        &token,
+        Some(rebind_body(&name, wh, serde_json::json!(unit.profile))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(authz_service_of(&f, &name).await, Some(unit.profile));
+}
+
+/// Registration binds AND declares in one transaction: the same pair is refused
+/// and the row is not left behind.
+#[tokio::test]
+async fn registering_an_external_engine_that_creates_an_overlap_is_409_and_writes_nothing() {
+    let Some((f, port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_reg_ovl_admin", true).await;
+    let unit = overlap_unit(&f, None, true).await;
+    let name = external_name("ext-ovl");
+
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(
+            &name,
+            "trino",
+            "2.5.0",
+            Some(unit.profile),
+            &[unit.catalog_id],
+        )),
+    )
+    .await;
+    assert_rule_overlap(status, &body);
+    assert_eq!(
+        engine_rows_named(&f, &name).await,
+        0,
+        "the row is rolled back"
+    );
+    assert_nothing_provisioned(&port);
+
+    // Accept cell: the same registration over a unit with one tag succeeds.
+    let ok_unit = overlap_unit(&f, None, false).await;
+    let ok_name = external_name("ext-ovl-ok");
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(
+            &ok_name,
+            "trino",
+            "2.5.0",
+            Some(ok_unit.profile),
+            &[ok_unit.catalog_id],
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+/// Declaring a catalog on an external engine that already binds the profile.
+#[tokio::test]
+async fn declaring_a_catalog_that_creates_an_overlap_is_409_and_attaches_nothing() {
+    let Some((f, _port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_decl_ovl_admin", true).await;
+    let unit = overlap_unit(&f, None, true).await;
+    let name = external_name("ext-ovl");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(
+            &name,
+            "trino",
+            "2.5.0",
+            Some(unit.profile),
+            &[],
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "no catalog, no pair: {j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{}", unit.catalog_id),
+        &token,
+        None,
+    )
+    .await;
+    assert_rule_overlap(status, &body);
+    let attached: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM registry.engine_catalog_attachments WHERE catalog_id = $1",
+    )
+    .bind(unit.catalog_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(attached, 0, "the attachment is rolled back");
+
+    // Accept cell.
+    let ok_unit = overlap_unit(&f, None, false).await;
+    let ok_name = external_name("ext-ovl-ok");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(
+            &ok_name,
+            "trino",
+            "2.5.0",
+            Some(ok_unit.profile),
+            &[],
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let ok_id = j["id"].as_str().unwrap().to_string();
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{ok_id}/catalogs/{}", ok_unit.catalog_id),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["applyStatus"], "declared", "{body}");
+}
+
+/// A PROVISIONED engine's attach cannot share a transaction with its recompile
+/// (the cluster is applied first), so the pair is looked for on a dry run
+/// before anything is applied.
+#[tokio::test]
+async fn attaching_to_a_provisioned_engine_a_catalog_that_creates_an_overlap_is_409() {
+    let Some((f, port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_attach_ovl_admin", true).await;
+    let unit = overlap_unit(&f, None, true).await;
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1, 'trino', 'egret', '{}'::jsonb, $2) RETURNING id",
+    )
+    .bind(external_name("prov-ovl"))
+    .bind(unit.profile)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("provisioned engine bound to the profile");
+
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{}", unit.catalog_id),
+        &token,
+        None,
+    )
+    .await;
+    assert_rule_overlap(status, &body);
+    let attached: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM registry.engine_catalog_attachments WHERE engine_id = $1",
+    )
+    .bind(engine_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(attached, 0, "nothing attached");
+    assert!(
+        port.updated.lock().unwrap().is_empty(),
+        "nothing applied to the cluster"
+    );
+    let _ = unit.warehouse_id;
+}
+
+// -- fix round 1 (C1, I2): the create binds, the late-bind and the attach's
+// post-apply comparison --------------------------------------------------------
+
+fn real_compiler(f: &Fixture) -> Arc<dyn egret_engine_mgmt::ProfileCompilerPort> {
+    Arc::new(RealProfileCompiler {
+        perm: egret_perm::PermStore::new(f.db.pool.clone()),
+        policy: egret_policy::PolicyStore::new(f.db.clone()),
+    })
+}
+
+fn trino_create_body(name: &str, wh: Uuid, profile: i64) -> serde_json::Value {
+    serde_json::json!({
+        "name": name, "warehouseId": wh, "authzServiceId": profile,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+    })
+}
+
+fn starrocks_create_body(name: &str, wh: Uuid, profile: i64) -> serde_json::Value {
+    serde_json::json!({
+        "name": name, "warehouseId": wh, "kind": "starrocks", "authzServiceId": profile,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+    })
+}
+
+/// C1, Trino: `POST /engines` adopting an existing profile binds the new
+/// engine's primary catalog into the profile's unit. The pair that completes is
+/// refused, the create is undone (no row, nothing provisioned), and the same
+/// create over a unit with one tag succeeds.
+#[tokio::test]
+async fn a_trino_create_adopting_a_profile_that_creates_an_overlap_is_409_and_creates_nothing() {
+    let Some((f, port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "create_trino_ovl_admin", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let unit = overlap_unit(&f, Some(wh), true).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(trino_create_body(&name, wh, unit.profile)),
+    )
+    .await;
+    assert_rule_overlap(status, &body);
+    assert_eq!(
+        engine_rows_named(&f, &name).await,
+        0,
+        "the create is undone"
+    );
+    assert!(
+        port.provisioned.lock().unwrap().is_empty(),
+        "nothing provisioned"
+    );
+
+    // Accept cell.
+    let wh2 = seed_provisioned_warehouse(&f).await;
+    let ok = overlap_unit(&f, Some(wh2), false).await;
+    let ok_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(trino_create_body(&ok_name, wh2, ok.profile)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(authz_service_of(&f, &ok_name).await, Some(ok.profile));
+}
+
+/// C1, StarRocks: `POST /engines` with `authzServiceId`.
+#[tokio::test]
+async fn a_starrocks_create_with_authz_service_id_that_creates_an_overlap_is_409_and_creates_nothing(
+) {
+    let Some((f, port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "create_sr_ovl_admin", true).await;
+    let wh = seed_provisioned_warehouse_with_secret(&f).await;
+    let unit = overlap_unit(&f, Some(wh), true).await;
+    let name = format!("sr-{}", Uuid::new_v4().simple());
+
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(starrocks_create_body(&name, wh, unit.profile)),
+    )
+    .await;
+    assert_rule_overlap(status, &body);
+    assert_eq!(
+        engine_rows_named(&f, &name).await,
+        0,
+        "the create is undone"
+    );
+    assert!(
+        port.provisioned.lock().unwrap().is_empty(),
+        "nothing provisioned"
+    );
+
+    // Accept cell.
+    let wh2 = seed_provisioned_warehouse_with_secret(&f).await;
+    let ok = overlap_unit(&f, Some(wh2), false).await;
+    let ok_name = format!("sr-{}", Uuid::new_v4().simple());
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(starrocks_create_body(&ok_name, wh2, ok.profile)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(authz_service_of(&f, &ok_name).await, Some(ok.profile));
+}
+
+/// C1, the late-bind inside an apply: Ranger turned on after an unbound create
+/// adopts the profile named after the engine. A bind that would create a pair is
+/// SKIPPED (the apply still succeeds, the engine stays unbound); one that does
+/// not is made.
+#[tokio::test]
+async fn a_late_bind_that_would_create_an_overlap_is_skipped_and_one_that_would_not_is_made() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        false,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    f.perm_compiler = Some(real_compiler(&f));
+    let rebuild = |f: &Fixture, ranger: bool| {
+        build_app(
+            &f.db,
+            &f.sessions,
+            f.engine_provisioner.clone(),
+            f.kube.clone(),
+            std::sync::Arc::new(AllowAllPdp),
+            ranger,
+            f.starrocks_ddl.clone(),
+            f.perm_compiler.clone(),
+        )
+    };
+    f.app = rebuild(&f, false);
+    let token = session_for(&f, "late_bind_ovl_admin", true).await;
+
+    let mut ids = Vec::new();
+    for both_tags in [true, false] {
+        let wh = seed_provisioned_warehouse(&f).await;
+        let name = format!("trino-{}", Uuid::new_v4().simple());
+        let (status, j) = create_engine_via_api(&f, &token, &name, wh, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+        assert_eq!(authz_service_of(&f, &name).await, None);
+        // The orphan profile the late-bind will adopt, named after the engine.
+        let unit = overlap_unit_named(&f, Some(wh), both_tags, &name).await;
+        ids.push((j["id"].as_str().unwrap().to_string(), name, unit.profile));
+    }
+
+    f.app = rebuild(&f, true);
+    f.ranger_enabled = true;
+    for (id, ..) in &ids {
+        let resp = f
+            .app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/engines/{id}/rotate-secrets"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "the apply itself succeeds"
+        );
+    }
+    let (_, ovl_name, _) = &ids[0];
+    assert_eq!(
+        authz_service_of(&f, ovl_name).await,
+        None,
+        "a bind that creates a pair is skipped"
+    );
+    let (_, ok_name, ok_profile) = &ids[1];
+    assert_eq!(
+        authz_service_of(&f, ok_name).await,
+        Some(*ok_profile),
+        "a bind that creates none is made"
+    );
+}
+
+/// A test double over the real compiler that commits a conflicting write at the
+/// moment the real recompile of an attach runs, i.e. AFTER the dry run and
+/// BEFORE the post-apply comparison. `conflict` is run once, on the first
+/// `recompile_profile` (the fire-and-forget one `attach_to_engine` makes).
+struct ConflictAfterDryRun {
+    /// Fail every `overlap_snapshot_in_tx` (a dry run that cannot complete).
+    fail_snapshot: bool,
+    inner: RealProfileCompiler,
+    conflict:
+        tokio::sync::Mutex<Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>>,
+}
+
+#[async_trait::async_trait]
+impl egret_engine_mgmt::ProfileCompilerPort for ConflictAfterDryRun {
+    async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        if let Some(fut) = self.conflict.lock().await.take() {
+            fut.await;
+        }
+        self.inner.recompile_profile(service_id).await
+    }
+    async fn recompile_catalog_assignment_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        catalog_id: Uuid,
+    ) -> Result<(), egret_perm::CompileError> {
+        self.inner
+            .recompile_catalog_assignment_in_tx(tx, catalog_id)
+            .await
+    }
+    async fn recompile_profile_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_id: i64,
+    ) -> Result<(), egret_perm::CompileError> {
+        self.inner.recompile_profile_in_tx(tx, service_id).await
+    }
+    async fn overlap_snapshot_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<egret_engine_mgmt::OverlapSnapshot, egret_perm::CompileError> {
+        if self.fail_snapshot {
+            return Err(egret_perm::CompileError::Db("snapshot unavailable".into()));
+        }
+        self.inner.overlap_snapshot_in_tx(tx, service_ids).await
+    }
+    async fn refuse_created_overlaps_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        snapshot: &egret_engine_mgmt::OverlapSnapshot,
+    ) -> Result<(), egret_perm::CompileError> {
+        self.inner.refuse_created_overlaps_in_tx(tx, snapshot).await
+    }
+}
+
+/// I2: a pair created by a write that commits between the attach's dry run and
+/// its real recompile is caught by the comparison against the PRE-APPLY
+/// snapshot, and the attachment is undone. The dry run alone passes here (the
+/// second tag is not assigned yet when it runs).
+#[tokio::test]
+async fn a_pair_committed_between_the_dry_run_and_the_real_recompile_refuses_the_attach() {
+    let Some((mut f, _port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "attach_race_admin", true).await;
+    // One tag assigned: the dry run sees no pair. The race assigns the second.
+    let unit = overlap_unit(&f, None, false).await;
+    let second_tag = unit.second_tag;
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1, 'trino', 'egret', '{}'::jsonb, $2) RETURNING id",
+    )
+    .bind(external_name("prov-race"))
+    .bind(unit.profile)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("provisioned engine bound to the profile");
+
+    let (pool, wh) = (f.db.pool.clone(), unit.warehouse_id);
+    let race = Box::pin(async move {
+        sqlx::query(
+            "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, \
+                                                  table_name, column_name) \
+             VALUES ($1, $2, 'sales', 'orders', $3)",
+        )
+        .bind(second_tag)
+        .bind(wh)
+        .bind(OVERLAP_COLUMN)
+        .execute(&pool)
+        .await
+        .expect("the conflicting write");
+    });
+    f.perm_compiler = Some(Arc::new(ConflictAfterDryRun {
+        fail_snapshot: false,
+        inner: RealProfileCompiler {
+            perm: egret_perm::PermStore::new(f.db.pool.clone()),
+            policy: egret_policy::PolicyStore::new(f.db.clone()),
+        },
+        conflict: tokio::sync::Mutex::new(Some(race)),
+    }));
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+    );
+
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{}", unit.catalog_id),
+        &token,
+        None,
+    )
+    .await;
+    assert_rule_overlap(status, &body);
+    let attached: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM registry.engine_catalog_attachments WHERE engine_id = $1",
+    )
+    .bind(engine_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(attached, 0, "the refused attachment is undone");
+}
+
+/// I2: a dry run that cannot complete for a reason that is NOT an overlap used
+/// to be logged and the attach went ahead unchecked (fail-open). It refuses.
+#[tokio::test]
+async fn a_dry_run_that_cannot_complete_refuses_the_attach_instead_of_attaching_unchecked() {
+    let Some((mut f, port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "attach_failopen_admin", true).await;
+    let unit = overlap_unit(&f, None, false).await;
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1, 'trino', 'egret', '{}'::jsonb, $2) RETURNING id",
+    )
+    .bind(external_name("prov-failopen"))
+    .bind(unit.profile)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("provisioned engine bound to the profile");
+    f.perm_compiler = Some(Arc::new(ConflictAfterDryRun {
+        fail_snapshot: true,
+        inner: RealProfileCompiler {
+            perm: egret_perm::PermStore::new(f.db.pool.clone()),
+            policy: egret_policy::PolicyStore::new(f.db.clone()),
+        },
+        conflict: tokio::sync::Mutex::new(None),
+    }));
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+    );
+
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{}", unit.catalog_id),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    let attached: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM registry.engine_catalog_attachments WHERE engine_id = $1",
+    )
+    .bind(engine_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(attached, 0, "nothing attached unchecked");
+    assert!(port.updated.lock().unwrap().is_empty(), "nothing applied");
+}
+
+// ---------------------------------------------------------------------------
+// External engines: every lifecycle operation refuses or no-ops (Task 8)
+// ---------------------------------------------------------------------------
+//
+// egret must never provision, scale, restart, rotate secrets on, exec into,
+// query or delete the cluster of an external engine. Each test here registers a
+// real external row and then asserts, besides the answer, that the fake
+// provisioner and the fake Kubernetes client recorded NOTHING.
+
+/// `setup_external`, with the provisioner and the Kubernetes client under the
+/// test's control (`None` for either leaves it unconfigured).
+async fn external_fixture(
+    port: Option<FakeEnginePort>,
+    kube: Option<Arc<egret_provisioner::kube_client::FakeKube>>,
+) -> Option<Fixture> {
+    let mut f = setup_with_ranger(
+        port.map(|p| Arc::new(p) as Arc<dyn EngineProvisioningPort>),
+        kube.map(|k| k as Arc<dyn KubeClient>),
+        true,
+    )
+    .await?;
+    f.perm_compiler = Some(Arc::new(RealProfileCompiler {
+        perm: egret_perm::PermStore::new(f.db.pool.clone()),
+        policy: egret_policy::PolicyStore::new(f.db.clone()),
+    }));
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+    );
+    Some(f)
+}
+
+async fn register_external(
+    f: &Fixture,
+    token: &str,
+    kind: &str,
+    version: &str,
+    authz: Option<i64>,
+    catalogs: &[Uuid],
+) -> (Uuid, String) {
+    let name = external_name("ext-life");
+    let (status, j) = call(
+        f,
+        "POST",
+        "/engines/external",
+        token,
+        Some(register_body(&name, kind, version, authz, catalogs)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    (Uuid::parse_str(j["id"].as_str().unwrap()).unwrap(), name)
+}
+
+/// Neither the provisioner nor Kubernetes was touched, in any way.
+fn assert_cluster_untouched(
+    port: &FakeEnginePort,
+    kube: &egret_provisioner::kube_client::FakeKube,
+) {
+    assert_nothing_provisioned(port);
+    assert_eq!(
+        port.status_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "status was asked"
+    );
+    assert!(kube.applied.lock().unwrap().is_empty(), "kube applied");
+    assert!(kube.deleted.lock().unwrap().is_empty(), "kube deleted");
+    assert!(kube.restarted.lock().unwrap().is_empty(), "kube restarted");
+    assert!(kube.patched.lock().unwrap().is_empty(), "kube patched");
+    assert!(
+        kube.coordinator_calls.lock().unwrap().is_empty(),
+        "the coordinator was called"
+    );
+}
+
+/// The route answers 409 `engine_is_external`, naming the engine.
+async fn assert_refused_as_external(
+    f: &Fixture,
+    token: &str,
+    engine_name: &str,
+    method: &str,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) {
+    let (status, j) = call(f, method, uri, token, body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{method} {uri}: {j}");
+    assert_eq!(j["code"], "engine_is_external", "{method} {uri}: {j}");
+    assert!(
+        j["error"].as_str().unwrap_or("").contains(engine_name),
+        "{method} {uri}: the sentence names the engine: {j}"
+    );
+}
+
+#[tokio::test]
+async fn put_on_an_external_engine_is_409_and_never_updates_the_cluster() {
+    let port = FakeEnginePort::default();
+    let kube = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = external_fixture(Some(port.clone()), Some(kube.clone())).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_put_admin", true).await;
+    let (id, name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+    let body = serde_json::json!({
+        "name": name, "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+    });
+    assert_refused_as_external(
+        &f,
+        &token,
+        &name,
+        "PUT",
+        &format!("/engines/{id}"),
+        Some(body),
+    )
+    .await;
+    assert_cluster_untouched(&port, &kube);
+}
+
+#[tokio::test]
+async fn restart_and_rotate_on_an_external_engine_are_409() {
+    let port = FakeEnginePort::default();
+    let kube = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = external_fixture(Some(port.clone()), Some(kube.clone())).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_restart_admin", true).await;
+    let (id, name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+    for path in ["restart", "rotate-secrets"] {
+        assert_refused_as_external(
+            &f,
+            &token,
+            &name,
+            "POST",
+            &format!("/engines/{id}/{path}"),
+            None,
+        )
+        .await;
+    }
+    assert_cluster_untouched(&port, &kube);
+}
+
+#[tokio::test]
+async fn pod_logs_follow_and_exec_on_an_external_engine_are_409() {
+    let port = FakeEnginePort::default();
+    let kube = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = external_fixture(Some(port.clone()), Some(kube.clone())).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_logs_admin", true).await;
+    let (id, name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+    // The websocket routes answer before the upgrade is even looked at: a plain
+    // GET is enough to reach the refusal.
+    for path in ["logs", "logs/follow", "exec"] {
+        assert_refused_as_external(
+            &f,
+            &token,
+            &name,
+            "GET",
+            &format!("/engines/{id}/pods/coordinator-0/{path}"),
+            None,
+        )
+        .await;
+    }
+    assert_cluster_untouched(&port, &kube);
+}
+
+#[tokio::test]
+async fn monitor_routes_on_an_external_engine_are_409() {
+    let port = FakeEnginePort::default();
+    let kube = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = external_fixture(Some(port.clone()), Some(kube.clone())).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_monitor_admin", true).await;
+    let (id, name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+    for (method, path) in [
+        ("GET", "queries"),
+        ("GET", "queries/q1"),
+        ("DELETE", "queries/q1"),
+        ("GET", "cluster"),
+    ] {
+        assert_refused_as_external(
+            &f,
+            &token,
+            &name,
+            method,
+            &format!("/engines/{id}/{path}"),
+            None,
+        )
+        .await;
+    }
+    assert_cluster_untouched(&port, &kube);
+}
+
+#[tokio::test]
+async fn catalog_test_and_apply_on_an_external_engine_are_409_and_the_registry_test_skips_it() {
+    let port = FakeEnginePort::default();
+    let kube = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = external_fixture(Some(port.clone()), Some(kube.clone())).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cattest_admin", true).await;
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": unique_catalog_name("extbench"), "kind": "tpch", "config": {}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let catalog = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let (id, name) = register_external(&f, &token, "trino", "2.5.0", None, &[catalog]).await;
+
+    assert_refused_as_external(
+        &f,
+        &token,
+        &name,
+        "POST",
+        &format!("/engines/{id}/catalogs/{catalog}/test"),
+        None,
+    )
+    .await;
+    assert_refused_as_external(
+        &f,
+        &token,
+        &name,
+        "POST",
+        &format!("/engines/{id}/catalogs/{catalog}/apply"),
+        None,
+    )
+    .await;
+
+    // The registry's own test prefers an applied Trino attachment; a declared
+    // one is not that, so no query runs and the coordinator is never asked.
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/catalogs/{catalog}/test"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_ne!(j["check"], "query", "{j}");
+    assert!(
+        !j["message"].as_str().unwrap_or("").contains(&name),
+        "a declared attachment is not offered as the engine that failed: {j}"
+    );
+    assert_cluster_untouched(&port, &kube);
+}
+
+#[tokio::test]
+async fn workspace_assignment_of_an_external_engine_is_409() {
+    let port = FakeEnginePort::default();
+    let kube = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = external_fixture(Some(port.clone()), Some(kube.clone())).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_assign_admin", true).await;
+    let (id, name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+    let ws = seed_workspace(&f).await;
+    assert_refused_as_external(
+        &f,
+        &token,
+        &name,
+        "PUT",
+        &format!("/engines/{id}/workspaces"),
+        Some(serde_json::json!({ "workspaceIds": [ws] })),
+    )
+    .await;
+    assert_refused_as_external(
+        &f,
+        &token,
+        &name,
+        "POST",
+        &format!("/workspaces/{ws}/engines"),
+        Some(serde_json::json!({ "engineId": id })),
+    )
+    .await;
+    assert_eq!(
+        materialized_count(&f, ws, id).await,
+        0,
+        "no connection was materialized"
+    );
+    // Reading what is assigned stays fine: it is egret's own rows, and empty.
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/workspaces"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert!(j.as_array().unwrap().is_empty(), "{j}");
+    assert_cluster_untouched(&port, &kube);
+}
+
+#[tokio::test]
+async fn deleting_an_external_engine_removes_egrets_rows_only() {
+    let port = FakeEnginePort::default();
+    let kube = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = external_fixture(Some(port.clone()), Some(kube.clone())).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_delete_admin", true).await;
+    let profile = starrocks_profile(&f).await;
+    let catalog = jdbc_catalog(&f, &token).await;
+    let (id, _name) =
+        register_external(&f, &token, "starrocks", "2.8.0", Some(profile), &[catalog]).await;
+
+    let (status, j) = call(&f, "DELETE", &format!("/engines/{id}"), &token, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{j}");
+
+    let engines: i64 = sqlx::query_scalar("SELECT count(*) FROM engine_mgmt.engines WHERE id = $1")
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(engines, 0, "the engine row is gone");
+    let attachments: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM registry.engine_catalog_attachments WHERE engine_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(attachments, 0, "its declared attachments are gone");
+    let catalogs: i64 = sqlx::query_scalar("SELECT count(*) FROM registry.catalogs WHERE id = $1")
+        .bind(catalog)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        catalogs, 1,
+        "the registry catalog is not egret's to drop here"
+    );
+    let profiles: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM policy.authz_services WHERE id = $1")
+            .bind(profile)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(profiles, 1, "the profile is unbound, not deleted");
+    assert_cluster_untouched(&port, &kube);
+}
+
+/// A delete needs no Kubernetes for an external engine (there is no cluster), but
+/// still needs it for a provisioned one: deleting only that row would orphan it.
+#[tokio::test]
+async fn deleting_an_external_engine_needs_no_kubernetes_and_a_provisioned_one_still_does() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_delete_nokube_admin", true).await;
+    let _wh = seed_provisioned_warehouse(&f).await;
+    let provisioned = seed_jwt_engine(&f).await;
+    let (external, _name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+
+    let (status, j) = call(&f, "DELETE", &format!("/engines/{external}"), &token, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{j}");
+    assert_eq!(engine_status(&f, external).await, None, "the row is gone");
+
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/engines/{provisioned}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("kubernetes not configured"),
+        "{j}"
+    );
+    assert!(engine_status(&f, provisioned).await.is_some(), "kept");
+}
+
+#[tokio::test]
+async fn deleting_an_external_engine_with_dependents_is_409_and_keeps_it() {
+    let port = FakeEnginePort::default();
+    let kube = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = external_fixture(Some(port.clone()), Some(kube.clone())).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_delete_dep_admin", true).await;
+    let (id, _name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+    // An external engine cannot be assigned through the API, so a connection
+    // that names it is put there by hand: the preflight reads the table.
+    let ws = seed_workspace(&f).await;
+    let db: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases \
+           (name, engine, host, port, options, workspace_id, delegated, engine_id) \
+         VALUES ($1, 'trino', 'trino.example.com', 8080, '{}'::jsonb, $2, true, $3) RETURNING id",
+    )
+    .bind(external_name("ext-conn"))
+    .bind(ws)
+    .bind(id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    seed_dependent(&f, ws, db, "dataset", "orders-by-day").await;
+
+    let (status, j) = call(&f, "DELETE", &format!("/engines/{id}"), &token, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_eq!(j["code"], "engine_has_dependents", "{j}");
+    assert!(engine_status(&f, id).await.is_some(), "the row survives");
+    assert_cluster_untouched(&port, &kube);
+}
+
+#[tokio::test]
+async fn detaching_a_declared_catalog_removes_the_row_recompiles_and_touches_no_cluster() {
+    let port = FakeEnginePort::default();
+    let kube = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = external_fixture(Some(port.clone()), Some(kube.clone())).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_detach_admin", true).await;
+    let profile = starrocks_profile(&f).await;
+    let catalog = jdbc_catalog(&f, &token).await;
+    let grant = allow_read_grant(&f, catalog).await;
+    let (id, _name) =
+        register_external(&f, &token, "starrocks", "2.8.0", Some(profile), &[catalog]).await;
+    let compiled = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+        )
+        .bind(profile)
+        .bind(format!("{}{}", egret_policy::COMPILER_GRANT_PREFIX, grant))
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(compiled().await, 1, "compiled while declared");
+
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/catalogs/{catalog}/engines/{id}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{j}");
+    let left: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM registry.engine_catalog_attachments WHERE engine_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 0, "the declared row is gone");
+    assert_eq!(compiled().await, 0, "the profile was recompiled without it");
+    assert_cluster_untouched(&port, &kube);
+
+    // Detaching again: the catalog is no longer attached.
+    let (status, _) = call(
+        &f,
+        "DELETE",
+        &format!("/catalogs/{catalog}/engines/{id}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// `POST /catalogs/{id}/reapply` converges the provisioned engine and SKIPS the
+/// external one, and says so — a test that skipped everything would fail the
+/// first half.
+#[tokio::test]
+async fn reapplying_a_catalog_converges_the_provisioned_engine_and_skips_the_external_one() {
+    let port = FakeEnginePort::default();
+    let kube = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = external_fixture(Some(port.clone()), Some(kube.clone())).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_reapply_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let provisioned_name = format!("trino-re-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &provisioned_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let provisioned = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": unique_catalog_name("rebench"), "kind": "tpch", "config": {}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let catalog = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    registry(&f)
+        .insert_attachment(&egret_catalog_registry::NewAttachment {
+            engine_id: provisioned,
+            catalog_id: catalog,
+            catalog_client_id: None,
+            credential_secret_id: None,
+            minted_client: false,
+            applied_now: true,
+            is_primary: false,
+            created_at: None,
+            apply_status: egret_catalog_registry::store::apply_status::APPLIED,
+        })
+        .await
+        .unwrap();
+    let (_external, external_name_) =
+        register_external(&f, &token, "trino", "2.5.0", None, &[catalog]).await;
+    let updates_before = port.updated.lock().unwrap().len();
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/catalogs/{catalog}/reapply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    let outcome = |n: &str| {
+        j.as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["engineName"] == n)
+            .cloned()
+            .unwrap_or_else(|| panic!("{n} is listed: {j}"))
+    };
+    assert_eq!(outcome(&provisioned_name)["status"], "applied", "{j}");
+    let skipped = outcome(&external_name_);
+    assert_eq!(skipped["status"], "skipped", "{j}");
+    assert!(
+        skipped["error"].as_str().unwrap_or("").contains("external"),
+        "the list says why: {j}"
+    );
+    let updated = port.updated.lock().unwrap().clone();
+    assert_eq!(
+        updated.len(),
+        updates_before + 1,
+        "exactly the provisioned engine was applied"
+    );
+    assert_eq!(updated.last().unwrap().name, provisioned_name);
+    assert!(
+        updated.iter().all(|u| u.name != external_name_),
+        "the external engine was never applied"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /engines/{id}/external (Task 8 fix round 1)
+// ---------------------------------------------------------------------------
+
+async fn external_row(
+    f: &Fixture,
+    id: Uuid,
+) -> (Option<String>, Option<i32>, Option<String>, Option<i64>) {
+    sqlx::query_as(
+        "SELECT external_host, external_port, ranger_plugin_version, authz_service_id \
+           FROM engine_mgmt.engines WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn patching_an_external_engine_persists_address_and_version_and_touches_no_cluster() {
+    let port = FakeEnginePort::default();
+    let kube = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = external_fixture(Some(port.clone()), Some(kube.clone())).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_patch_admin", true).await;
+    let (id, _name) = register_external(&f, &token, "trino", "2.5.0", None, &[]).await;
+
+    let (status, j) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{id}/external"),
+        &token,
+        Some(serde_json::json!({
+            "host": "new-trino.example.com", "port": 8443, "rangerPluginVersion": "2.6.0"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["host"], "new-trino.example.com", "{j}");
+    assert_eq!(j["port"], 8443, "{j}");
+    assert_eq!(j["rangerPluginVersion"], "2.6.0", "{j}");
+    assert_eq!(
+        j["rangerPluginVersionModelled"], false,
+        "Trino@2.6.0 is not modelled: {j}"
+    );
+    // The row the migration gate and explain read their declared version from.
+    let version: String = sqlx::query_scalar(
+        "SELECT ranger_plugin_version FROM engine_mgmt.engines WHERE id = $1 AND origin = 'external'",
+    )
+    .bind(id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(version, "2.6.0");
+
+    // Invalid values are 400s that write nothing.
+    for body in [
+        serde_json::json!({ "host": "http://x" }),
+        serde_json::json!({ "port": 0 }),
+        serde_json::json!({ "rangerPluginVersion": "2.55.0" }),
+        serde_json::json!({}),
+    ] {
+        let (status, j) = call(
+            &f,
+            "PATCH",
+            &format!("/engines/{id}/external"),
+            &token,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {j}");
+    }
+    assert_eq!(
+        external_row(&f, id).await,
+        (
+            Some("new-trino.example.com".into()),
+            Some(8443),
+            Some("2.6.0".into()),
+            None
+        )
+    );
+    assert_cluster_untouched(&port, &kube);
+}
+
+#[tokio::test]
+async fn patching_a_rebind_that_creates_an_overlap_is_409_and_writes_nothing() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_patch_ovl_admin", true).await;
+    let unit = overlap_unit(&f, None, true).await;
+    // Unbound, so declaring the catalog creates no pair yet.
+    let (id, _name) =
+        register_external(&f, &token, "trino", "2.5.0", None, &[unit.catalog_id]).await;
+    let before = external_row(&f, id).await;
+
+    let (status, body) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{id}/external"),
+        &token,
+        Some(serde_json::json!({ "authzServiceId": unit.profile, "host": "other.example.com" })),
+    )
+    .await;
+    assert_rule_overlap(status, &body);
+    assert_eq!(external_row(&f, id).await, before, "the row is unchanged");
+}
+
+#[tokio::test]
+async fn patching_a_rebind_without_an_overlap_binds_and_unbinding_recompiles_the_old_profile() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_patch_unbind_admin", true).await;
+    let profile = starrocks_profile(&f).await;
+    let catalog = jdbc_catalog(&f, &token).await;
+    let grant = allow_read_grant(&f, catalog).await;
+    let (id, _name) =
+        register_external(&f, &token, "starrocks", "2.8.0", Some(profile), &[catalog]).await;
+    let compiled = |sid: i64| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+            )
+            .bind(sid)
+            .bind(format!("{}{}", egret_policy::COMPILER_GRANT_PREFIX, grant))
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(compiled(profile).await, 1, "compiled while bound");
+
+    // Rebind to a second profile: it gains the grant at once, the first loses it.
+    let other = starrocks_profile(&f).await;
+    let (status, j) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{id}/external"),
+        &token,
+        Some(serde_json::json!({ "authzServiceId": other })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(external_row(&f, id).await.3, Some(other));
+    assert_eq!(compiled(other).await, 1, "the new profile was recompiled");
+    assert_eq!(
+        compiled(profile).await,
+        0,
+        "the old profile was recompiled without it"
+    );
+
+    // Unbind: the profile it leaves is recompiled too.
+    let (status, j) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{id}/external"),
+        &token,
+        Some(serde_json::json!({ "authzServiceId": null })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(external_row(&f, id).await.3, None);
+    assert_eq!(
+        compiled(other).await,
+        0,
+        "the unbound profile was recompiled without it"
+    );
+}
+
+#[tokio::test]
+async fn patching_a_provisioned_engine_is_400_and_needs_engine_update() {
+    let Some(mut f) = external_fixture(
+        Some(FakeEnginePort::default()),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "ext_patch_perm_admin", true).await;
+    let reader = session_for_with_permission(&f, "ext_patch_reader", "engine:read").await;
+    let updater = session_for_with_permission(&f, "ext_patch_updater", "engine:update").await;
+    attach_real_pdp(&mut f).await;
+    let _wh = seed_provisioned_warehouse(&f).await;
+    let provisioned = seed_jwt_engine(&f).await;
+    let (external, _name) = register_external(&f, &admin, "trino", "2.5.0", None, &[]).await;
+    let body = serde_json::json!({ "host": "h.example.com" });
+
+    let (status, j) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{provisioned}/external"),
+        &admin,
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    let (status, j) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{external}/external"),
+        &reader,
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{j}");
+    assert_eq!(
+        external_row(&f, external).await.0.as_deref(),
+        Some("sr.example.com")
+    );
+    let (status, j) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{external}/external"),
+        &updater,
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+}
+
+// ---------------------------------------------------------------------------
+// External engines: the Ranger plugin configuration the admin installs (Task 9)
+// ---------------------------------------------------------------------------
+
+async fn profile_name(f: &Fixture, id: i64) -> String {
+    egret_policy_api::PolicyPort::list_services(&egret_policy::PolicyStore::new(f.db.clone()))
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == id)
+        .expect("profile row")
+        .name
+}
+
+#[tokio::test]
+async fn an_external_starrocks_engine_gets_the_three_files_and_the_default_url_warning() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cfg_admin", true).await;
+    let profile = starrocks_profile(&f).await;
+    let service = profile_name(&f, profile).await;
+    let (id, _name) = register_external(&f, &token, "starrocks", "2.8.0", Some(profile), &[]).await;
+
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/ranger-plugin-config"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["serviceName"], service);
+    assert!(
+        j["downloadUrl"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("/service/plugins/policies/download/{service}")),
+        "{j}"
+    );
+    assert_eq!(j["authMode"], "anonymous");
+    assert_eq!(j["rangerPluginVersion"], "2.8.0");
+    assert_eq!(j["rangerPluginVersionModelled"], true);
+    let warnings = j["warnings"].to_string();
+    assert!(warnings.contains("public_url"), "default-URL warning: {j}");
+    assert!(warnings.contains("every profile's policies"), "{j}");
+    assert_eq!(j["assumptions"].as_array().unwrap().len(), 3);
+    let names: Vec<&str> = j["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "fe.conf (add this line)",
+            "ranger-starrocks-security.xml",
+            "ranger-starrocks-audit.xml"
+        ]
+    );
+    // The security file is the renderer's, for this profile and this egret URL.
+    let want = egret_provisioner::ranger_plugin_files(
+        egret_engine_mgmt_api::EngineKind::StarRocks,
+        &service,
+        "http://egret:8080",
+        30_000,
+    );
+    assert_eq!(
+        j["files"][1]["content"].as_str().unwrap(),
+        want.get("ranger-starrocks-security.xml").unwrap()
+    );
+    // No credential anywhere in the answer.
+    assert!(!j.to_string().to_lowercase().contains("secret"), "{j}");
+}
+
+#[tokio::test]
+async fn an_unmodelled_declared_version_is_stated_on_the_plugin_config() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cfg_unmodelled_admin", true).await;
+    let profile = starrocks_profile(&f).await;
+    let (id, _name) = register_external(&f, &token, "starrocks", "2.4.0", Some(profile), &[]).await;
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/ranger-plugin-config"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["rangerPluginVersion"], "2.4.0");
+    assert_eq!(j["rangerPluginVersionModelled"], false);
+    assert!(j["warnings"].to_string().contains("refused"), "{j}");
+}
+
+#[tokio::test]
+async fn the_plugin_config_of_a_provisioned_or_unbound_engine_is_409_and_needs_engine_read() {
+    let Some(mut f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "ext_cfg_perm_admin", true).await;
+    let reader = session_for_with_permission(&f, "ext_cfg_reader", "engine:read").await;
+    let nobody = session_for_with_permission(&f, "ext_cfg_nobody", "workspace:read").await;
+    attach_real_pdp(&mut f).await;
+    let _wh = seed_provisioned_warehouse(&f).await;
+    let provisioned = seed_jwt_engine(&f).await;
+    let (unbound, _n) = register_external(&f, &admin, "starrocks", "2.8.0", None, &[]).await;
+    let profile = starrocks_profile(&f).await;
+    let (bound, _n) = register_external(&f, &admin, "starrocks", "2.8.0", Some(profile), &[]).await;
+
+    let path = |id: Uuid| format!("/engines/{id}/ranger-plugin-config");
+    let (status, j) = call(&f, "GET", &path(provisioned), &admin, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    let (status, j) = call(&f, "GET", &path(unbound), &admin, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap()
+            .contains("bind a profile first"),
+        "{j}"
+    );
+    let (status, j) = call(&f, "GET", &path(bound), &nobody, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{j}");
+    let (status, j) = call(&f, "GET", &path(bound), &reader, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    let (status, j) = call(&f, "GET", &path(Uuid::new_v4()), &admin, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{j}");
+}
+
+#[tokio::test]
+async fn a_configured_bearer_token_is_reported_as_the_auth_mode_and_the_token_is_not() {
+    let Some(mut f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cfg_bearer_admin", true).await;
+    let profile = starrocks_profile(&f).await;
+    let (id, _name) = register_external(&f, &token, "starrocks", "2.8.0", Some(profile), &[]).await;
+    f.app = build_app_with_bearer(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+        true,
+    );
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/ranger-plugin-config"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["authMode"], "bearer-configured", "{j}");
+    assert!(j["warnings"].to_string().contains("cannot send"), "{j}");
+    assert!(
+        j["adminMustSupply"].to_string().contains("bearer token"),
+        "{j}"
+    );
+    assert!(!j["warnings"].to_string().contains("anonymous"), "{j}");
+    // The plugin files carry no credential in either mode.
+    assert!(
+        !j["files"].to_string().to_lowercase().contains("bearer"),
+        "{j}"
+    );
 }

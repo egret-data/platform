@@ -14,8 +14,21 @@ export interface GatedProfile {
   service_id: number;
   service_name: string;
   plugin_versions: WirePluginVersion[];
-  /** @minimum 0 */
+  /**
+     * Probes evaluated (after pruning).
+     * @minimum 0
+     */
   probes: number;
+  /**
+     * Probes the unpruned gate would have evaluated.
+     * @minimum 0
+     */
+  probes_full: number;
+  /**
+     * Why pruning gave the full set, when it did.
+     * @nullable
+     */
+  pruning_fallback?: string | null;
   /** @minimum 0 */
   disagreements: number;
   /** Policy names (resource and tag) the download no longer serves. */

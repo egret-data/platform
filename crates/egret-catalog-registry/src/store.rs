@@ -31,6 +31,11 @@ pub mod apply_status {
     /// StarRocks attachment is ever written this way: a Trino apply happens
     /// before the row exists at all.
     pub const PENDING: &str = "pending";
+    /// An attachment egret records and never applies: the engine is external
+    /// (`engines.origin = 'external'`), so there is no cluster to converge. It
+    /// carries no client and no credential (`attachments_declared_holds_nothing`,
+    /// migration 0184). `egret_engine_mgmt::external` is its one writer.
+    pub const DECLARED: &str = "declared";
 }
 
 #[derive(Clone, Debug, sqlx::FromRow)]
@@ -159,7 +164,7 @@ pub struct NewAttachment {
     /// Keep a legacy row's creation time, so attachment order — and with it the
     /// rendered env-var names — is unchanged after the migration.
     pub created_at: Option<DateTime<Utc>>,
-    /// One of `apply_status::{APPLIED, FAILED, PENDING}`. Every existing call
+    /// One of `apply_status::{APPLIED, FAILED, PENDING, DECLARED}`. Every existing call
     /// site passes `APPLIED` (SP3b Task 3 keeps this step behaviour-neutral);
     /// Task 5 is the one that starts writing `PENDING` for a StarRocks attach.
     pub apply_status: &'static str,
@@ -654,6 +659,27 @@ impl RegistryStore {
 
     // attachments --------------------------------------------------------------
 
+    /// [`insert_attachment`](Self::insert_attachment) on the CALLER's open
+    /// transaction, so an attachment and the recompile it makes necessary commit
+    /// (or roll back) together. Same conflict mapping.
+    pub async fn insert_attachment_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        a: &NewAttachment,
+    ) -> Result<AttachmentRow, RegistryError> {
+        insert_attachment_row(tx, a)
+            .await
+            .map_err(|e| match unique_constraint(&e).as_deref() {
+                Some("engine_catalog_attachments_pkey") => RegistryError::AlreadyExists(
+                    "the catalog is already attached to this engine".into(),
+                ),
+                Some("engine_catalog_attachments_primary_key") => {
+                    RegistryError::AlreadyExists("this engine already has a primary catalog".into())
+                }
+                _ => RegistryError::Db(e),
+            })
+    }
+
     pub async fn insert_attachment(
         &self,
         a: &NewAttachment,
@@ -699,6 +725,22 @@ impl RegistryStore {
         .bind(catalog_id)
         .fetch_optional(self.pool())
         .await?)
+    }
+
+    /// [`Self::delete_attachment`] inside the caller's transaction, for a
+    /// delete that must commit with a recompile.
+    pub async fn delete_attachment_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        engine_id: Uuid,
+        catalog_id: Uuid,
+    ) -> Result<bool, RegistryError> {
+        let r = sqlx::query("DELETE FROM registry.engine_catalog_attachments WHERE engine_id = $1 AND catalog_id = $2")
+            .bind(engine_id)
+            .bind(catalog_id)
+            .execute(&mut **tx)
+            .await?;
+        Ok(r.rows_affected() == 1)
     }
 
     pub async fn delete_attachment(

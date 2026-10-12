@@ -25,6 +25,14 @@ pub enum PermHttpError {
     /// against the state that won.
     #[error("conflict: {0}")]
     Conflict(String),
+    /// **Two mask (or row-filter) rules would decide one request differently**
+    /// — `CompileError::AmbiguousMaskOrFilterArbitration` (SP4d-4 Task 3). A
+    /// 409, not a 400: the write is well-formed and conflicts with a rule (or
+    /// policy, or tag assignment) already stored. `body` is
+    /// `crate::overlap::refusal_body` — `{error, code: "rule_overlap", rules,
+    /// coordinate, kind}` — served as is.
+    #[error("rule overlap: {body}")]
+    Overlap { body: serde_json::Value },
     #[error("internal error")]
     Internal,
 }
@@ -73,6 +81,10 @@ impl From<PolicyStoreError> for PermHttpError {
 ///   refusal, because the author can fix it — and because a 500 would read as
 ///   "egret is broken" for an input egret correctly refused.
 /// - `Db` is the genuine internal failure: 500, message withheld.
+/// - `AmbiguousMaskOrFilterArbitration` is a 409 with a structured body
+///   (SP4d-4 Task 3): the write conflicts with a rule, policy or tag
+///   assignment already stored, and the body names both rules and the
+///   coordinate so a client can link to them.
 ///
 /// `UnexpandedPrincipalKind` never reaches here from the recompile driver — it
 /// is recorded as a skip and surfaced in the response's `skipped` list instead
@@ -82,6 +94,12 @@ impl From<CompileError> for PermHttpError {
     fn from(e: CompileError) -> Self {
         match e {
             CompileError::Db(detail) => PermHttpError::db(detail),
+            ref overlap @ CompileError::AmbiguousMaskOrFilterArbitration { .. } => {
+                PermHttpError::Overlap {
+                    body: crate::overlap::refusal_body(overlap)
+                        .expect("refusal_body answers every AmbiguousMaskOrFilterArbitration"),
+                }
+            }
             CompileError::ServiceDefUnreadable { .. } => {
                 tracing::error!(error = %e, "embedded service-def failed to parse");
                 PermHttpError::Internal
@@ -111,18 +129,25 @@ impl From<egret_core::Error> for PermHttpError {
     }
 }
 
+fn error_body(msg: &str) -> serde_json::Value {
+    serde_json::json!({ "error": msg })
+}
+
 impl IntoResponse for PermHttpError {
     fn into_response(self) -> Response {
-        let (status, msg) = match &self {
-            PermHttpError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
-            PermHttpError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
-            PermHttpError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            PermHttpError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
+        let msg = self.to_string();
+        let (status, body) = match self {
+            PermHttpError::Forbidden => (StatusCode::FORBIDDEN, error_body("forbidden")),
+            PermHttpError::NotFound => (StatusCode::NOT_FOUND, error_body("not found")),
+            PermHttpError::BadRequest(_) => (StatusCode::BAD_REQUEST, error_body(&msg)),
+            PermHttpError::Conflict(_) => (StatusCode::CONFLICT, error_body(&msg)),
+            // The structured body, served as is: its `error` is the sentence.
+            PermHttpError::Overlap { body } => (StatusCode::CONFLICT, body),
             PermHttpError::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "internal error".to_string(),
+                error_body("internal error"),
             ),
         };
-        (status, Json(serde_json::json!({ "error": msg }))).into_response()
+        (status, Json(body)).into_response()
     }
 }
