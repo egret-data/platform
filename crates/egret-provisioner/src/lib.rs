@@ -6,12 +6,14 @@
 pub mod ingress;
 pub mod kube_client;
 pub mod provisioner;
+pub mod ranger_config;
 pub mod spec;
 pub mod starrocks;
 pub mod trino;
 
 pub use kube_client::{KubeClient, LiveKube};
 pub use provisioner::EngineProvisioner;
+pub use ranger_config::{ranger_plugin_files, RangerPluginFiles};
 pub use spec::{
     Affinity, Auth, Autoscaling, CatalogSpec, ContainerPort, CronTrigger, DeploymentStrategy,
     EngineSpec, EngineStatus, EnvFromSource, FaultTolerant, GracefulShutdown, HeapConfig,
