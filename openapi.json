@@ -8387,6 +8387,7 @@
           "policy-admin"
         ],
         "summary": "GET /policies/services/{service}/trino-config — the two files a Trino\ncoordinator needs to enforce this profile via the native ranger plugin.",
+        "description": "Rendered by `egret_engine_mgmt_api::ranger_config::ranger_plugin_files`, the\nsame code that writes the files egret mounts into its own engines.",
         "operationId": "trino_config",
         "parameters": [
           {
@@ -8401,7 +8402,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The Trino coordinator config files for this profile's native ranger plugin",
+            "description": "The Trino coordinator config files for this profile's native ranger plugin, from the same renderer that writes the files egret mounts into its own engines (`access-control.properties` and `ranger-trino-security.xml`). Since SP4d-4 the security file also carries the policy source, cache directory and client timeouts, the properties file points at `/etc/trino/ranger-trino-security.xml`, and the poll interval is 30000 ms; earlier responses omitted those keys and used a relative resource path",
             "content": {
               "application/json": {
                 "schema": {
