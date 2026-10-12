@@ -311,12 +311,15 @@ pub(super) async fn spawn_due(
         workspace_id: ctx.workspace_id,
         flow_id: row.get("flow_id"),
         source: ctx.source.clone(),
-        // `build_plan` is deterministic over the source and the source is the
-        // same string, so this is the parent's plan by construction. It is
+        // `plan_stored`, as the parent's own context was planned (`claim::load`):
+        // the retry runs the source the original started under, by the rules
+        // it started under (user ruling 2026-10-12). Deterministic over the
+        // source, and the source is the same string, so this is the parent's
+        // plan by construction. It is
         // rebuilt rather than cloned because `Plan` is not `Clone` and a plan
         // that could be moved between two contexts is a plan two executions
         // could disagree about.
-        plan: crate::executor::build_plan(&ctx.source)
+        plan: crate::executor::plan_stored(&ctx.source)
             .map_err(|e| worker_err(WorkerError::Unplannable(child, e.to_string())))?,
         // Its own logical clock, for `spawn::spawn_one`'s reason: the
         // happens-before relation is compared PER EXECUTION.

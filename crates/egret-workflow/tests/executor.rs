@@ -5143,7 +5143,7 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
         // **no-silent-stall Task 1's refusals are reconstructed away**, unlike
         // W7b's `Pause` one above: the 49 entries they refuse at start were
         // planned by every builder this test reconstructs, so they are read
-        // from the flattening alone (`plan_unvalidated`) and every figure below
+        // from the flattening alone (`plan_stored`) and every figure below
         // stays the one its package committed.
         let planned = match build_plan(&corpus_source(&entry.id)) {
             Err(e)
@@ -5155,7 +5155,7 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
                 .iter()
                 .any(|c| e.message.starts_with(c)) =>
             {
-                egret_workflow::executor::plan_unvalidated(&corpus_source(&entry.id))
+                egret_workflow::executor::plan_stored(&corpus_source(&entry.id))
             }
             other => other,
         };

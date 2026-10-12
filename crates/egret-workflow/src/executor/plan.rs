@@ -1023,14 +1023,7 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
 /// `spec::validate` tests and not the ratchet: deleting the `"waitfor"` row
 /// today leaves the ratchet green at 118.
 pub fn build_plan(source: &str) -> Result<Plan, PlanError> {
-    let flow = crate::spec::parse(source).map_err(|e| PlanError {
-        message: match (e.line, e.column) {
-            (Some(l), Some(c)) => {
-                format!("cannot parse flow at line {l} column {c}: {}", e.message)
-            }
-            _ => format!("cannot parse flow: {}", e.message),
-        },
-    })?;
+    let flow = parse_for_plan(source)?;
 
     let plan = flatten_flow(&flow)?;
 
@@ -1060,10 +1053,49 @@ pub fn build_plan(source: &str) -> Result<Plan, PlanError> {
     Ok(plan)
 }
 
+/// The plan of a STORED execution's source: [`build_plan`]'s parse and
+/// flattening, and **not** its third gate (`validate_for_run`).
+///
+/// **The rule (user ruling, 2026-10-12, no-silent-stall Task 4 review): an
+/// execution that started runs by the rules it started under; validation
+/// gates starts only.** Every new start -- `worker::start_execution_in_on`,
+/// and a `Subflow` planning its target's CURRENT source -- goes through
+/// [`build_plan`]. Every re-plan of an execution that already exists (the
+/// worker's `claim::load_with`, a `Loop` iteration's sub-source in
+/// `spawn::insert_iteration`, a `CREATE_NEW_EXECUTION` retry's copy of the
+/// source in `replay`) comes here.
+///
+/// Why: validation tightens over time (no-silent-stall Task 1 made
+/// `AllowFailure`, `WorkingDirectory`, an expression-bounded `LoopUntil` and
+/// an unregistered type errors). Re-validating a stored source at every
+/// claim turned each such tightening into `WorkerError::Unplannable` for the
+/// executions already running -- an aborted tick and a reaper cycle, for
+/// ever. Planned here, those runs reach the worker and fail with a line
+/// (`WorkerError::NotALeaf`, `WorkerError::NoHandler`; spec §5), and the
+/// execution settles. `Unplannable` is left meaning what its name says: the
+/// stored source does not parse, or does not flatten.
+///
+/// The parse error keeps its line and column, as [`build_plan`]'s does.
+pub fn plan_stored(source: &str) -> Result<Plan, PlanError> {
+    flatten_flow(&parse_for_plan(source)?)
+}
+
+/// [`build_plan`]'s and [`plan_stored`]'s first gate, with the same message.
+fn parse_for_plan(source: &str) -> Result<crate::models::Flow, PlanError> {
+    crate::spec::parse(source).map_err(|e| PlanError {
+        message: match (e.line, e.column) {
+            (Some(l), Some(c)) => {
+                format!("cannot parse flow at line {l} column {c}: {}", e.message)
+            }
+            _ => format!("cannot parse flow: {}", e.message),
+        },
+    })
+}
+
 /// [`build_plan`]'s first two gates without its third: the flattening alone,
 /// over an already-parsed flow, with no `validate_for_run`.
 ///
-/// `pub(crate)` for one reader beside [`build_plan`]: the corpus guard
+/// `pub(crate)` for [`build_plan`], [`plan_stored`] and one reader beside them: the corpus guard
 /// `executor::tests::every_task_planned_opaque_is_refused_at_its_path`, which
 /// has to see what this builder WOULD plan opaque for a flow that the third
 /// gate now refuses (no-silent-stall Task 1). Asking `build_plan` instead

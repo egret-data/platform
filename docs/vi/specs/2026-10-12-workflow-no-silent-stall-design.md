@@ -17,6 +17,9 @@
 - **Worker cho thất bại thứ lọt qua.** Một run được claim mà không có handler (`NoHandler`) hoặc không có leaf (`NotALeaf`) kết thúc `FAILED`, kèm một dòng log hệ thống nói egret không chạy được nó. Nó không còn giữ lease và lặp mãi. Retry và `errors:` áp dụng như với mọi `FAILED` khác (§5). Điều này đảo ngược lựa chọn thiết kế trước đó, ghi ở `WorkerError::NoHandler`, rằng một thất bại "trông như flow của tác giả sai". Chính dòng log là thứ nói rằng không phải vậy.
 - **Tập được phục vụ được cài một lần lúc khởi động** (`Served`, như `storage::current()`), và một hàm thuần đánh giá flow dựa trên nó. `build_plan` và `validate_for_run` vẫn thuần và không phụ thuộc deployment (§4.2).
 
+**Đã quyết với người dùng, 2026-10-12 (review Task 4):**
+- **Execution đã lưu được lập kế hoạch không qua validation; validation chỉ chặn ở start.** Một execution đã start chạy theo luật lúc nó start. Mọi lần lập kế hoạch lại một execution đã có (`claim::load_with`, sub-source của một vòng lặp `Loop` trong `spawn::insert_iteration`, một retry `CREATE_NEW_EXECUTION` trong `replay`) dùng `executor::plan_stored`: parse và flatten, không `validate_for_run`. Start mới (`start_execution_in_on`, source hiện tại của đích `Subflow`) vẫn dùng `build_plan`. Nếu không, mọi cấu trúc §3 từ chối biến các execution đang chạy thành abort `Unplannable` vòng qua reaper mãi mãi (§5).
+
 ## 1. Vì sao
 
 Một execution có thể kẹt ở `RUNNING` mãi mãi, không có gì trong log. Cơ chế giống nhau cho mọi trường hợp:
@@ -110,7 +113,7 @@ Mọi nơi dựng một báo cáo validation, cộng hai nơi start công việc
 4. `worker::claim::start_execution_in_on`, điểm nghẽn duy nhất cho start qua API, webhook, một lần fire của schedule, một Flow trigger và replay, trả `Error::InvalidInput("the flow cannot run on this deployment: …")`. Fire của schedule và Flow trigger giữ cách xử lý hiện có khi một start thất bại; kế hoạch ghi lại mỗi cái làm gì và không thêm gì mới;
 5. đích của `worker::subflow`, nơi run thất bại với thông báo hiện có "cannot execute an invalid flow '{ns}'.'{id}': …", như khi đích không lập kế hoạch được.
 
-Các vòng lặp lập kế hoạch lại source của chính parent. Source đó đã qua điểm 4 khi execution start, nên chúng không cần kiểm tra riêng.
+Các vòng lặp lập kế hoạch lại source đã lưu của chính parent, bằng `executor::plan_stored` (không validation; quyết định ở review Task 4). Source đó đã qua điểm 4 khi execution start, nên chúng không cần kiểm tra riêng; một execution start trước các lệnh từ chối của gói này không bị chúng xét lại, và run của nó thất bại trong worker thay vào đó (§5).
 
 ### 4.4 Schema của flow
 
@@ -129,7 +132,7 @@ Các vòng lặp lập kế hoạch lại source của chính parent. Source đ�
 **Các execution đang kẹt hiện có tự kết thúc.** Khi reaper lần tới nhả lease, lần claim kế tiếp cho run thất bại và execution ổn định. Không cần migration và không cần script dọn dẹp.
 
 **Không đổi:**
-- `Unplannable` (source đã lưu không parse được) và `Corrupt` vẫn là abort, vì đó là dữ liệu hỏng, không phải thiếu handler.
+- `Unplannable` và `Corrupt` vẫn là abort, vì đó là dữ liệu hỏng, không phải thiếu handler. `Unplannable` chỉ có nghĩa là source đã lưu không parse hoặc không flatten được: một execution đã lưu được lập kế hoạch bằng `executor::plan_stored`, không bao giờ validate lại (quyết định ở review Task 4), nên một source mà validation từ chối kể từ §3 đi tới `NoHandler` hoặc `NotALeaf` và thất bại như mọi run khác.
 - `Registry::cancel` và `Registry::release` vẫn từ chối khi trượt.
 
 **Tài liệu phải đổi trong cùng commit với hành vi:**

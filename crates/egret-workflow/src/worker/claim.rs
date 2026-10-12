@@ -77,8 +77,8 @@ use super::timeout::{self, Budget};
 use super::txn::{transaction, Ended, Fetched, Finish, Gate, InTxn, Isolation, Txn};
 use super::{from_wire, Outcome, Registry, TaskInput, WorkerError, MAX_ROUNDS};
 use crate::executor::{
-    advance, apply, build_plan, Attempt, Command, ExecutionMeta, ExecutionState, Plan, Resume,
-    RunIx, RunState, TaskKind, TaskRun, Tick,
+    advance, apply, build_plan, plan_stored, Attempt, Command, ExecutionMeta, ExecutionState, Plan,
+    Resume, RunIx, RunState, TaskKind, TaskRun, Tick,
 };
 #[cfg(any(test, feature = "test-util"))]
 use crate::storage::prefetch::Prefetch;
@@ -366,9 +366,10 @@ struct Leaf<'a> {
 /// [`WorkerError::NotALeaf`], which since no-silent-stall Task 4 FAILS the run
 /// with a system line, exactly as a type with no handler does (it aborted the
 /// tick until then), and [`WorkerError::Corrupt`] is left meaning what its own
-/// doc says. Since no-silent-stall Task 1 the three constructs above reach
-/// [`WorkerError::Unplannable`] in `load` first, before this function runs;
-/// see `NotALeaf`'s doc.
+/// doc says. The three constructs above are validation errors since
+/// no-silent-stall Task 1, so only an execution started before that reaches
+/// this arm; `load` plans its stored source without validation
+/// (`executor::plan_stored`), so it does reach it. See `NotALeaf`'s doc.
 fn leaf<'a>(flow: &'a crate::models::Flow, task_id: &str) -> Option<Leaf<'a>> {
     fn walk<'a>(task: &'a crate::models::Task, want: &str) -> Option<Leaf<'a>> {
         if task.id == want {
@@ -3130,7 +3131,9 @@ pub(super) async fn load_with(
     let source: String = row.get("source");
     let history: serde_json::Value = row.get("history");
     let now_ms: i64 = row.get("now_ms");
-    let plan = build_plan(&source)
+    // A STORED execution: planned by the rules it started under, never
+    // re-validated (`executor::plan_stored`; user ruling 2026-10-12).
+    let plan = plan_stored(&source)
         .map_err(|e| worker_err(WorkerError::Unplannable(execution_id, e.to_string())))?;
     let ctx = ExecutionCtx {
         id: execution_id,

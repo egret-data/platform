@@ -1412,52 +1412,205 @@ async fn a_run_stalled_on_no_handler_before_the_upgrade_is_failed_after_the_reap
     );
 }
 
-/// **`NotALeaf` fails the run, with the line naming the task and its type.**
-///
-/// **How the row is made, and why not as spec §5 / the brief imagined.** The
-/// populations that reached `NotALeaf` -- an `AllowFailure`, a
-/// `WorkingDirectory`, an expression-bounded `LoopUntil` -- no longer reach it
-/// from a tick: `claim::load` rebuilds the plan with `build_plan`, whose third
-/// gate (`validate_for_run`) refuses each of them since no-silent-stall Task
-/// 1, so such an execution stops one gate earlier, at
-/// [`WorkerError::Unplannable`](egret_workflow::worker::WorkerError::Unplannable).
-/// What still reaches `NotALeaf` is a claimable run whose task the stored
-/// source holds as a flowable, in a source that plans: so the row is
-/// constructed as `claim` would see it -- a `core.log` run at task index 0,
-/// whose stored source now holds a `Sequential` at that index, with the
-/// `Sequential`'s type as the run's `type_id`.
-#[sqlx::test(migrations = "../../migrations")]
-async fn a_run_whose_task_is_not_a_leaf_fails_with_a_system_line(pool: sqlx::PgPool) {
-    egret_test_db::assert_database_url_is_exported();
-    let (_db, ws) = seed(&pool).await;
-    let sequential = "io.kestra.plugin.core.flow.Sequential";
-    let stored = format!(
-        "id: not-a-leaf\nnamespace: t\ntasks:\n  - id: w\n    type: {sequential}\n    tasks:\n\
-         \x20     - id: x\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n"
-    );
-    let served = "id: not-a-leaf\nnamespace: t\ntasks:\n  - id: w\n    \
-                  type: io.kestra.plugin.core.log.Log\n    message: hi\n";
-    let ex = started_before_the_gate(&pool, ws, served, &stored, "w", sequential).await;
+/// One opaque flowable `w` of `type_id` holding a `core.log` child, and the
+/// one-`core.log` shape it is started as (the plan of both is one task: the
+/// flattening plans the flowable opaque, taking its subtree with it).
+fn one_opaque_flowable(id: &str, type_id: &str) -> (String, String) {
+    (
+        format!(
+            "id: {id}\nnamespace: t\ntasks:\n  - id: w\n    type: {type_id}\n    tasks:\n\
+             \x20     - id: x\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n"
+        ),
+        format!(
+            "id: {id}\nnamespace: t\ntasks:\n  - id: w\n    \
+             type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+        ),
+    )
+}
+
+/// Tick once with the core handlers and assert `task` FAILED with exactly
+/// `line` at ERROR, and the execution settled FAILED with every end stamped.
+async fn fails_with_line(pool: &sqlx::PgPool, ex: Uuid, task: &str, line: String) {
     let lines = std::sync::Arc::new(Lines::default());
-
-    egret_workflow::worker::tick(&pool, 8, &core_handlers_logging_to(&lines))
+    egret_workflow::worker::tick(pool, 8, &core_handlers_logging_to(&lines))
         .await
-        .expect("a task that is not a leaf no longer aborts the tick");
-
-    assert_eq!(run_state(&pool, ex, "w").await.as_deref(), Some("FAILED"));
+        .expect("a stored execution validation now refuses still plans, and its run is failed");
+    assert_eq!(run_state(pool, ex, task).await.as_deref(), Some("FAILED"));
     assert_eq!(
         lines.of(ex),
-        vec![(LogLevel::Error, not_a_leaf_line("w", sequential))],
+        vec![(LogLevel::Error, line)],
         "the run's log holds exactly the system line, at ERROR"
     );
     assert_eq!(
-        execution_history(&pool, ex).await,
+        execution_history(pool, ex).await,
         serde_json::json!(["CREATED", "RUNNING", "FAILED"])
     );
-    let (run_end, attempt_ends, execution_end) = ends_of(&pool, ex, "w").await;
+    let (run_end, attempt_ends, execution_end) = ends_of(pool, ex, task).await;
     assert!(run_end.is_some());
     assert!(attempt_ends.iter().all(Option::is_some));
     assert!(execution_end.is_some());
+}
+
+/// **A stored execution of a `WorkingDirectory` reaches `NotALeaf` and FAILS
+/// with the line naming the task and its type** (spec §5).
+///
+/// The execution is the one an older binary left: started before
+/// no-silent-stall Task 1 made `WorkingDirectory` a validation error, so its
+/// stored source holds one and its run carries the type the old plan wrote.
+/// Until Task 4 fix round 1 the worker re-validated that source on every
+/// claim (`claim::load` called `build_plan`) and stopped one gate earlier, at
+/// `Unplannable` -- an aborted tick and a reaper cycle for ever. Since the
+/// user's ruling (2026-10-12) a stored execution is planned without validation
+/// (`executor::plan_stored`), so the run reaches `NotALeaf`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_stored_working_directory_run_fails_with_the_not_a_leaf_line(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let wd = "io.kestra.plugin.core.flow.WorkingDirectory";
+    let (stored, served) = one_opaque_flowable("stored-wd", wd);
+    let ex = started_before_the_gate(&pool, ws, &served, &stored, "w", wd).await;
+    fails_with_line(&pool, ex, "w", not_a_leaf_line("w", wd)).await;
+}
+
+/// The same for a stored `AllowFailure`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_stored_allow_failure_run_fails_with_the_not_a_leaf_line(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let af = "io.kestra.plugin.core.flow.AllowFailure";
+    let (stored, served) = one_opaque_flowable("stored-af", af);
+    let ex = started_before_the_gate(&pool, ws, &served, &stored, "w", af).await;
+    fails_with_line(&pool, ex, "w", not_a_leaf_line("w", af)).await;
+}
+
+const OUTPUT_VALUES: &str = "io.kestra.plugin.core.output.OutputValues";
+
+/// **A stored execution of a type with no `TASK_TYPES` row reaches
+/// `NoHandler` and FAILS with its line.** `OutputValues` is
+/// `unknown_task_type` since no-silent-stall Task 1, so re-validating the
+/// stored source stopped it at `Unplannable`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_stored_unregistered_type_run_fails_with_the_no_handler_line(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let stored = format!(
+        "id: stored-ov\nnamespace: t\ntasks:\n  - id: o\n    type: {OUTPUT_VALUES}\n    \
+         values:\n      k: v\n"
+    );
+    let served = "id: stored-ov\nnamespace: t\ntasks:\n  - id: o\n    \
+                  type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+    let ex = started_before_the_gate(&pool, ws, served, &stored, "o", OUTPUT_VALUES).await;
+    fails_with_line(&pool, ex, "o", no_handler_line(OUTPUT_VALUES)).await;
+}
+
+/// `a` then a `Loop` over one value whose body is `body`.
+fn log_then_loop(id: &str, body: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    \
+         message: hi\n  - id: loop\n    type: io.kestra.plugin.core.flow.Loop\n    \
+         values: '[\"x\"]'\n    tasks:\n{body}"
+    )
+}
+
+/// **A stored `Loop` whose body holds a construct validation now refuses
+/// still creates its iteration, and the iteration's run fails** rather than
+/// `spawn::insert_iteration` aborting the commit that reached the loop.
+///
+/// The iteration is a sub-execution planned from the PARENT's stored source,
+/// cut down to the loop's body -- a re-plan of stored state, so
+/// `executor::plan_stored` (user ruling 2026-10-12). The loop sits behind `a`
+/// so that the spawn happens on the first tick after the source is the stored
+/// one: with `build_plan` there, finishing `a` returned `Unplannable` and
+/// rolled back.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_stored_loop_whose_body_is_refused_spawns_and_its_run_fails(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let stored = log_then_loop(
+        "stored-loop",
+        &format!("      - id: o\n        type: {OUTPUT_VALUES}\n        values:\n          k: v\n"),
+    );
+    let served = log_then_loop("stored-loop", LOG_BODY);
+    let ex = start_execution(&pool, ws, None, &served, serde_json::json!({}))
+        .await
+        .expect("start the served shape");
+    sqlx::query("UPDATE workflow.executions SET source = $2 WHERE id = $1")
+        .bind(ex)
+        .bind(&stored)
+        .execute(&pool)
+        .await
+        .expect("the source an execution started before the start gate holds");
+    let lines = std::sync::Arc::new(Lines::default());
+    let reg = core_handlers_logging_to(&lines);
+
+    egret_workflow::worker::tick(&pool, 8, &reg)
+        .await
+        .expect("finishing `a` reaches the loop and spawns its iteration");
+    let loop_run: i32 = sqlx::query_scalar(
+        "SELECT run_ix FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'loop'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("the loop's run exists");
+    let children = sub_executions(&pool, ex, loop_run).await;
+    assert_eq!(children.len(), 1, "the iteration was created: {children:?}");
+    let child: Uuid =
+        sqlx::query_scalar("SELECT id FROM workflow.executions WHERE parent_execution_id = $1")
+            .bind(ex)
+            .fetch_one(&pool)
+            .await
+            .expect("the iteration's id");
+
+    drain(&pool, &reg).await;
+    assert_eq!(
+        run_state(&pool, child, "o").await.as_deref(),
+        Some("FAILED")
+    );
+    assert_eq!(
+        lines.of(child),
+        vec![(LogLevel::Error, no_handler_line(OUTPUT_VALUES))]
+    );
+    let last = execution_history(&pool, ex).await;
+    assert_eq!(
+        last.as_array().and_then(|h| h.last()),
+        Some(&serde_json::json!("FAILED")),
+        "the parent settles: {last}"
+    );
+}
+
+/// **A NEW start of each of those flows is still refused**: validation gates
+/// starts (no-silent-stall Tasks 1 and 3); only stored executions skip it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_new_start_of_each_refused_flow_is_still_refused(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let flows = [
+        one_opaque_flowable("new-wd", "io.kestra.plugin.core.flow.WorkingDirectory").0,
+        one_opaque_flowable("new-af", "io.kestra.plugin.core.flow.AllowFailure").0,
+        format!(
+            "id: new-ov\nnamespace: t\ntasks:\n  - id: o\n    type: {OUTPUT_VALUES}\n    \
+             values:\n      k: v\n"
+        ),
+        log_then_loop(
+            "new-loop",
+            &format!(
+                "      - id: o\n        type: {OUTPUT_VALUES}\n        values:\n          k: v\n"
+            ),
+        ),
+    ];
+    for source in &flows {
+        let refused = start_execution(&pool, ws, None, source, serde_json::json!({})).await;
+        assert!(
+            refused.is_err(),
+            "a new start must still be refused: {source}"
+        );
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "and no execution was written");
 }
 
 /// **Unchanged: a stored source that does not parse still aborts the tick and
@@ -1486,6 +1639,10 @@ async fn an_unplannable_source_still_aborts_the_tick_and_records_nothing(pool: s
         "the refusal is Unplannable: {err}"
     );
     assert_eq!(run_state(&pool, ex, "a").await.as_deref(), Some("RUNNING"));
+    assert!(
+        lease_of(&pool, ex, "a").await.is_some(),
+        "the lease is still held: the abort records nothing, and the reaper releases it"
+    );
     assert_eq!(attempt_terminals(&pool, ex, "a").await, vec!["RUNNING"]);
     assert!(lines.of(ex).is_empty(), "no line: {:?}", lines.of(ex));
     assert_eq!(

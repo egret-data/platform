@@ -615,7 +615,19 @@ pub enum WorkerError {
     )]
     PrefetchMiss,
 
-    /// The stored `source` no longer builds a plan.
+    /// The stored `source` does not parse, or does not flatten into a plan
+    /// (a structural error the flattening in `executor::plan_stored`
+    /// reports). Damaged data, not a
+    /// missing handler, so it still aborts the tick and records nothing
+    /// (no-silent-stall spec §5).
+    ///
+    /// **Never a validation refusal.** A stored execution is planned without
+    /// `validate_for_run` (user ruling 2026-10-12: an execution that started
+    /// runs by the rules it started under; validation gates starts only). From
+    /// no-silent-stall Task 1 until Task 4 fix round 1 the worker re-planned
+    /// stored sources with `build_plan`, so every construct Task 1 made an
+    /// error landed here for the executions already running, and cycled
+    /// through the reaper for ever.
     #[error("execution {0} holds a source that no longer plans: {1}")]
     Unplannable(uuid::Uuid, String),
 
@@ -713,15 +725,15 @@ pub enum WorkerError {
     /// 4 the tick aborted for that run, the execution stalled, and the
     /// differential oracle's driver carried on past it.
     ///
-    /// **What still reaches it is narrower than the three constructs above.**
-    /// `claim::load` rebuilds the plan with `build_plan`, whose third gate
+    /// **What reaches it now is old executions only.** No-silent-stall Task 1
     /// refuses `AllowFailure`, `WorkingDirectory` and an expression-bounded
-    /// `LoopUntil` since no-silent-stall Task 1, so an execution of one of
-    /// them stops one gate EARLIER, at [`WorkerError::Unplannable`], which
-    /// still aborts the tick. This arm is reached by a claimable run whose
-    /// task the stored source holds as a flowable in a source that plans --
-    /// `tests/worker.rs::a_run_whose_task_is_not_a_leaf_fails_with_a_system_line`
-    /// constructs one.
+    /// `LoopUntil` at validation, so no new start creates such a run. An
+    /// execution started before that still holds one, and `claim::load` plans
+    /// it with `executor::plan_stored` -- parse and flatten, no validation --
+    /// so its run arrives here and fails rather than stopping at
+    /// [`WorkerError::Unplannable`]. `tests/worker.rs`'s
+    /// `a_stored_working_directory_run_fails_with_the_not_a_leaf_line` and
+    /// `a_stored_allow_failure_run_fails_with_the_not_a_leaf_line` drive it.
     ///
     /// **A `Pause` declaring `behavior:`, `onPause:`, `tasks:` or
     /// `errors:` reached this arm until 2026-10-11** -- `plan::pause_gap`

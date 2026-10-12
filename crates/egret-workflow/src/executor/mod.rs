@@ -50,30 +50,12 @@ mod state;
 
 pub use command::Command;
 pub use plan::{
-    build_plan, loop_until_gap, pause_gap, DagNode, Plan, PlanError, PlanTask, RetryBehavior,
-    RetryDelay, RetryPolicy, TaskIx, TaskKind,
+    build_plan, loop_until_gap, pause_gap, plan_stored, DagNode, Plan, PlanError, PlanTask,
+    RetryBehavior, RetryDelay, RetryPolicy, TaskIx, TaskKind,
 };
 pub use state::{
     apply, Attempt, ExecutionMeta, ExecutionState, Resume, RunIx, RunState, TaskRun, Tick,
 };
-
-/// Test-only (`test-util`): [`build_plan`] WITHOUT its third gate -- the parse
-/// and the flattening, and no `validate_for_run`.
-///
-/// For the oracle's historical reconstructions in `tests/executor.rs`, which
-/// rebuild what an earlier builder planned for a flow. Since no-silent-stall
-/// Task 1 the third gate refuses flows the flattening still plans (an
-/// `AllowFailure`, a `WorkingDirectory`, a type egret does not register), and a
-/// reconstruction of an earlier package's figures must not lose them for a
-/// reason that package did not have. Never a start path: every one of those
-/// goes through [`build_plan`].
-#[cfg(any(test, feature = "test-util"))]
-pub fn plan_unvalidated(source: &str) -> Result<Plan, PlanError> {
-    let flow = crate::spec::parse(source).map_err(|e| PlanError {
-        message: format!("cannot parse flow: {}", e.message),
-    })?;
-    plan::flatten_flow(&flow)
-}
 
 /// Kestra's `FlowableUtils.resolveValues`, over a rendered `Loop.values`.
 ///

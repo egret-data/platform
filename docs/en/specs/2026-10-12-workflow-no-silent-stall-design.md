@@ -15,6 +15,9 @@
 - **The worker fails what slips through.** A claimed run with no handler (`NoHandler`) or with no leaf (`NotALeaf`) ends `FAILED`, with a system log line saying egret cannot run it. It no longer keeps its lease and loops for ever. Retry and `errors:` apply as for any `FAILED` (§5). This reverses the earlier design choice, recorded on `WorkerError::NoHandler`, that a failure "would look like the author's flow was wrong". The log line is what says it is not.
 - **The served set is installed once at start-up** (`Served`, like `storage::current()`), and a pure function judges a flow against it. `build_plan` and `validate_for_run` stay pure and deployment-free (§4.2).
 
+**Decided with the user, 2026-10-12 (Task 4 review):**
+- **Stored executions are planned without validation; validation gates starts only.** An execution that started runs by the rules it started under. Every re-plan of an existing execution (`claim::load_with`, a `Loop` iteration's sub-source in `spawn::insert_iteration`, a `CREATE_NEW_EXECUTION` retry in `replay`) uses `executor::plan_stored`: parse and flatten, no `validate_for_run`. New starts (`start_execution_in_on`, a `Subflow` target's current source) keep `build_plan`. Without this, every construct §3 refuses turned the executions already running into `Unplannable` aborts that cycled through the reaper for ever (§5).
+
 ## 1. Why
 
 An execution can stall in `RUNNING` for ever, with nothing in its logs. The mechanism is the same for every case:
@@ -108,7 +111,7 @@ Every place that builds a validation report, plus the two places that start work
 4. `worker::claim::start_execution_in_on`, the one chokepoint for the API start, the webhook, a schedule fire, a Flow trigger and replay, which answers `Error::InvalidInput("the flow cannot run on this deployment: …")`. Schedule and Flow-trigger fires keep their existing handling of a start that fails; the plan records what each does and adds nothing new;
 5. `worker::subflow`'s target, where the run fails with the existing message "cannot execute an invalid flow '{ns}'.'{id}': …", as when the target does not plan.
 
-Loop iterations re-plan the parent's own source. That source passed point 4 when the execution started, so they need no check of their own.
+Loop iterations re-plan the parent's own stored source, with `executor::plan_stored` (no validation; Task 4 review ruling). That source passed point 4 when the execution started, so they need no check of their own; an execution started before this package's refusals is not re-judged by them, and its run fails in the worker instead (§5).
 
 ### 4.4 The flow schema
 
@@ -127,7 +130,7 @@ Loop iterations re-plan the parent's own source. That source passed point 4 when
 **Existing stalled executions end on their own.** When the reaper next releases the lease, the next claim fails the run and the execution settles. No migration and no clean-up script are needed.
 
 **Unchanged:**
-- `Unplannable` (the stored source does not parse) and `Corrupt` stay aborts, because those are damaged data, not a missing handler.
+- `Unplannable` and `Corrupt` stay aborts, because those are damaged data, not a missing handler. `Unplannable` means only that the stored source does not parse or flatten: a stored execution is planned with `executor::plan_stored`, never re-validated (Task 4 review ruling), so a source that validation refuses since §3 reaches `NoHandler` or `NotALeaf` and fails like any other.
 - `Registry::cancel` and `Registry::release` keep refusing on a miss.
 
 **Docs that must change in the same commit as the behaviour:**

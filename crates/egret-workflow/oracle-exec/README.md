@@ -10960,11 +10960,15 @@ item necessary rather than what makes it unnecessary.** Four things a green
   the normal commit, so `retry:` and `errors:` apply and the execution
   settles. `WorkerError::NotALeaf` fails the same way. The "somewhere to
   record *tried, no handler*" below turned out to be the attempt itself: a
-  `FAILED` attempt is the record. What is NOT closed: an old execution whose
-  stored source `build_plan` now refuses (an unregistered type, an
-  `AllowFailure`, a `WorkingDirectory`) stops at `WorkerError::Unplannable`
-  in `claim::load` before any handler is looked up, and that still aborts the
-  tick, keeps the lease and cycles through the reaper exactly as (a) did.)*
+  `FAILED` attempt is the record. An old execution whose stored source
+  validation now refuses (an unregistered type, an `AllowFailure`, a
+  `WorkingDirectory`) is covered too since Task 4 fix round 1: the worker
+  plans a stored execution with `executor::plan_stored`, without validation
+  (user ruling: validation gates starts only), so its run reaches one of
+  those two arms and fails. Before that round it stopped at
+  `WorkerError::Unplannable` in `claim::load` and cycled through the reaper
+  exactly as (a) did. `Unplannable` is again only a source that does not
+  parse or flatten.)*
 
   **(b) A handler that OUTRUNS `working_timeout`** — and this is a *slow*
   handler, not a *missing* one. `DEFAULT_WORKING_TIMEOUT` is 3600 s;
@@ -13184,7 +13188,7 @@ unchanged), the spawned-key comparison (41 → 38 entries), the ordered pairs
 (836 → 829 before the restriction), the `Loop` populations, and
 `handler-surface.txt` (matching 186 → 187, blocked 81 → 80).
 `planning_the_loop_removed_forty_spurious_submitted_emissions` reconstructs
-an earlier builder, so it reads the 49 from `executor::plan_unvalidated` (the
+an earlier builder, so it reads the 49 from `executor::plan_stored` (named `plan_unvalidated`, test-only, until no-silent-stall Task 4 fix round 1) (the
 flattening without the gate, `test-util` only) and its figures do not move.
 
 **The guard that keeps it this way** is

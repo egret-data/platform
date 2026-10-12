@@ -1825,11 +1825,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // error propagated out of `run_one`, the run kept its lease, `reap`
     // cleared only `claimed_at` a `working_timeout` later, `claim` re-selected
     // it, and the cycle repeated for ever; `oracle-exec/README.md` item 19
-    // records that history. **Not covered:** an old execution whose stored
-    // source `build_plan` now refuses (a type with no `TASK_TYPES` row, an
-    // `AllowFailure`, a `WorkingDirectory`, ...) stops at
-    // `WorkerError::Unplannable` before any handler is looked up, and that
-    // still aborts the tick and keeps the lease, as spec §5 leaves it.
+    // records that history. An old execution whose stored source validation
+    // now refuses (a type with no `TASK_TYPES` row, an `AllowFailure`, a
+    // `WorkingDirectory`, ...) is covered too: the worker plans a stored
+    // execution without validation (`executor::plan_stored`; validation gates
+    // starts only), so its run reaches `NoHandler` or `NotALeaf` and fails.
     // **Six of twenty-three
     // registered types have no handler, whatever the runner**, and since
     // Task 3 none of them publishes or starts (`egret.sql`,
