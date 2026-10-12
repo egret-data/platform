@@ -293,3 +293,36 @@ cd frontend && npx vite --config tests/e2e/vite.e2e.config.mts   # in one shell
 cd frontend && EGRET_E2E_WORKFLOWS=1 EGRET_E2E_BASE_URL=http://localhost:5197 \
   npx playwright test workflows-flows
 ```
+
+## Workflow executions (`workflows-executions.spec.ts`)
+
+Opt-in (`EGRET_E2E_WORKFLOWS=1`). W7b's money path in the browser. The spec creates and starts one flow through the
+API: a task that fails once and succeeds on retry, a `Write` of a small CSV, 400 log lines, a `Loop` over three values
+and a five-minute `Pause`. It then asserts:
+
+- the list shows the root and the "Show child executions" switch adds the three iterations;
+- the gantt draws two attempt segments on the retried run, measured in the DOM, also at 900 px;
+- a selected run's panel shows only its own log lines;
+- the Logs tab fits its panel;
+- the file preview shows its rows;
+- the logs follow live until the execution is complete, then stop reading;
+- Resume releases the pause long before its deadline;
+- Replay opens a new execution that says "Replayed from".
+
+The stack is private, as for `workflows-flows.spec.ts`:
+
+- a database of its own on the branch's Postgres (`egret_w7b_e2e` on `egret-w7b-postgres`, :5442);
+- a private RustFS with one bucket (the `Write` task stores its file there);
+- `serve` on :8197 with the worker on;
+- Vite on :5207 through the committed `tests/e2e/vite.e2e.config.mts`.
+
+`egret init` generates a random admin password unless `EGRET_ADMIN_PASSWORD` is set, so set it to the password the spec
+signs in with (`Admin12345!`, or override `EGRET_E2E_PASSWORD`). Every command, setup and teardown, is in the spec
+file's header. A run takes about a minute, and its replay is left paused in the throwaway database, which teardown drops.
+
+```bash
+cd frontend && EGRET_E2E_VITE_PORT=5207 EGRET_E2E_API=http://localhost:8197 \
+  npx vite --config tests/e2e/vite.e2e.config.mts                       # in one shell
+cd frontend && EGRET_E2E_WORKFLOWS=1 EGRET_E2E_BASE_URL=http://localhost:5207 \
+  npx playwright test workflows-executions
+```

@@ -1,6 +1,6 @@
 # W7b — Workflows UI, part 2: the executions list, the execution detail (overview, gantt, logs, outputs), resume and replay
 
-**Status:** design, 2026-10-11; not yet implemented.
+**Status:** implemented, 2026-10-12 (Tasks 1–7; the end to end and the Kestra comparison are §11 and §12).
 
 **Depends on:**
 - W7a (#659): the Workflows area, `StateChip`, `executionState.ts`, the minimal execution page, and `nextPollMs`;
@@ -54,7 +54,19 @@ The gantt needs real start and end times, and the engine does not record them. T
 | CSV export of the list | Not in W7b | Not asked for |
 | The log level filter defaults to INFO (a stored per-user display preference) | No level filter by default: every level is shown, and `?level=` is absent | FE-STATE-3: "empty" means the unfiltered log, so a log of DEBUG lines must not read "No logs"; FE-PAGE-2: no `?level=` means no filter. Kestra's quieter default would be a preference, with the empty state saying a level filter hides lines. Decided 2026-10-11 (Task 5 review) |
 
-Differences found while comparing against a running Kestra (§11) are added here, each with its reason.
+**Found against a running Kestra, 2026-10-12 (Task 7, §11).** The local `kestra/kestra` image (2.0 nightly) ran the same flow as the end to end: a retried `Fail`, a `Write`, a `Sequential` with two children, 400 log lines, a three-value `Loop`, a WARN line and a `Pause`. These differences are deliberate:
+
+| Kestra | egret | Why |
+|---|---|---|
+| List columns: Id, State, Start date, End date, Duration, Namespace, Flow, Labels, Triggers; a column chooser and an executions chart above the table | ID, Flow, Namespace, State, Start, Duration, Trigger; a `SummaryStrip` of counts by state, each a quick filter | No labels on the backend (§10). The end date is the start plus the duration, both shown. A chart was not asked for, and the strip answers "what state are these in" |
+| List filters: free-text search, State, Started (default **Last 24 hours**), Namespace, Flow, Kind, Scope, Hierarchy, Labels, advanced filters, saved filters | State, Namespace (with child namespaces), Flow, Time (no default), and the child switch | `GET …/executions` has no text search, kind, scope or labels. Without a default window the list's empty state means "nothing ran" (FE-STATE-3), and a link with no `?time=` shows everything (FE-PAGE-2). Hierarchy is the child switch, root-only by default (the user's ruling) |
+| Gantt: one bar per task run; a retried run has a warning icon, and its attempts are a picker in the row's details | Each attempt is its own segment of the run's bar, coloured by the attempt's end state, and the row carries a "↻ 2" count | Retries visible on the timeline itself (§6.2) |
+| Gantt: selecting a row expands its details under the row, with an attempt picker and that attempt's logs, filtered by a log level that defaults to INFO | One panel under the chart with the run's times, attempts, message, logs (every level, every attempt, each line labelled) and outputs; `?run=` in the URL | The bars keep their places while a run is read (§6.4) |
+| Logs: a card per run with an attempt picker that shows one attempt's lines; level counters that jump to the next line of a level; log search; a "Temporal view" that lists every line by time; repeated similar lines folded ("×400 similar lines"); Copy all | Groups per run with every attempt's lines (an "Attempt N" label when a run has more than one); filters by level, task and run; virtualised, so 10 000 lines stay unfolded and smooth; Download | The logs route reads by level, task and run only (W11), so there is no search. A flat view, level counters and folding were not asked for in W7b; §15 lists them |
+| Outputs ("Input/Output" in this build): three panes, the task outputs with a key or value search, the value, and the expression debugger. A file output is previewed in place, a CSV as a table with columns, with Row count, Encoding and an editor view | Outputs: the runs with outputs, then the run's tree; a `kestra:///` value is a file row whose Preview opens a drawer on the right, text line by line, with the row cap and Download | No expression endpoint (§10); the route reads text as UTF-8 only, so there is no encoding to choose; a line is the file's own text, which a guessed CSV dialect could misread. §15 lists the table view |
+| Resume: a confirmation that asks "Are you sure you want to resume execution …?" | A confirmation that says what happens: every paused task ends now as a success, and the execution continues | FE-ACTION-1 asks the dialog to name the consequence. Both release a pause before its deadline: Kestra ended a 10-minute pause at once with `SUCCESS`, as egret's end to end does with a 5-minute one |
+| Replay: in the execution's actions menu, with Original, Latest or a specific flow revision | A Replay button beside Resume, from the frozen source and inputs | The first row of this table: the engine replays only the frozen source |
+| A three-value `Loop` listed one execution and showed "Iterations 3 Success" inside it | The `Loop` spawns three child executions, listed under "Show child executions" and in Overview's Child executions | The engine's loop (§6.1, W3b), not the UI's; recorded here for the engine |
 
 ## 3. Backend: real timestamps
 
@@ -350,6 +362,8 @@ A temporary Kestra from the local `kestra/kestra` image runs on a free port duri
 
 Differences go into §2.
 
+**Done, 2026-10-12 (Task 7).** The comparison ran against the local image `28f59bf175e1` (Kestra 2.0 nightly) in a temporary container `w7b-kestra-t7`, removed afterwards, with the end to end's flow (§12). Every difference found is in §2's second table; the ones not built are in §15. Resume matched: Kestra's Resume ended a 10-minute pause at once with `SUCCESS`, and egret's end to end does the same with a 5-minute one.
+
 ## 12. Testing
 
 **Rust**
@@ -400,6 +414,18 @@ Differences go into §2.
 
 DOM measurements cover light and dark mode, plus the gantt at narrow widths.
 
+**Done, 2026-10-12 (Task 7).** `frontend/tests/e2e/workflows-executions.spec.ts`, on a stack of its own (the recipe is in its header and in `frontend/tests/e2e/README.md`). The flow: `flaky` (a `Fail` whose condition holds on the first attempt only, `retry` constant, `maxAttempts: 3`), `write` (a `Write` of three CSV lines), `chatty` (400 lines), `each` (a `Loop` over three values), `wait` (a `Pause` of `PT5M`) and `after`. The spec asserts:
+- the list shows the root alone, the switch adds the three iterations, and the flow's Executions tab shows the root;
+- the gantt shows two attempt segments on `flaky`, `FAILED` then `SUCCESS`, measured inside the timeline cell and in order; at 900 px every mark stays in its cell, the chart does not scroll sideways, and the task id is not truncated;
+- selecting `flaky` opens its panel, whose logs are its own lines, labelled by attempt; Escape closes it and the arrows move between rows; `?run=2` on the Logs tab shows only that run's lines;
+- the Logs tab fits its panel, which does not scroll around the log;
+- the file preview shows the three rows, and Escape returns focus to Preview;
+- the log follows live: lines written after Resume arrive in the open view, and once the log is complete no read is sent for 6 s;
+- Resume releases the pause long before its deadline, and the gantt then shows it `SUCCESS` and closed;
+- Replay opens a new execution whose header says "Replayed from" the first.
+
+It was run red against three mutations (`root_only` never sent, log polling never stopping, only the last attempt segment drawn) and against the code before §15's two layout fixes, each failing at its own assertion, and green after.
+
 **Gate:**
 - frontend: FE-TEST-4 (lint, tsc, test, build, every `test:bundle*`);
 - backend: `cargo test -p egret-workflow`, `egret-server`, fmt, and clippy `-D warnings`.
@@ -432,3 +458,8 @@ All of `docs/en/frontend-rules.md`. The rules most at stake:
 - Executions recorded before migration 0180 have estimated times (§6.3).
 - A retry of a loop iteration or of a subflow child appears in the default list as a root. Its `CREATE_NEW_EXECUTION` replacement carries `parent_execution_id` (the child) with no `loop_index` and no `trigger_execution_id`, which is exactly the shape of a retry of a root, so `root_only` keeps it (§3.3). *(Found in the Task 2 review.)*
 - A `Pause` with `behavior`, `onPause`, `tasks` or `errors` is refused, not run (Kestra runs all four). An execution already stalled on one before 2026-10-11 stays stalled; replaying it is refused because its frozen source no longer plans. *(Ruled 2026-10-11, Task 4b.)*
+- **Found in Task 7, 2026-10-12**, by measuring in the browser:
+  - Two layout defects were fixed. The Logs tab's log had a fixed height, `100vh − 22rem`, which overran its panel (by 132 px at the end to end's 1280×720, and at 1440×900 too), so the panel scrolled around the log and hid its last lines; the log now fills the tab, with a 15 rem minimum. At 900 px a 2 px bar at the axis end stood 2 px outside its cell and gave the chart a sideways scroll, and "2 attempts" truncated the five-letter task id `flaky`; the timeline is now inset by 0.5 rem on both sides, and the count reads "↻ 2", with "attempts" for a screen reader and on hover.
+  - Safari's default Tab order skips buttons, so a log group's toggle is reached with Option+Tab there; the log itself is a tab stop in Chromium and WebKit alike, measured.
+  - Below a viewport about 640 px tall, the Logs tab's log keeps its 15 rem minimum and the tab's panel scrolls.
+  - From the Kestra comparison (§2), not built: a flat, time-ordered log view, level counters that jump between lines, folding of repeated lines, log search (the route has no text filter), a CSV preview as a table, and an End date column.

@@ -2,7 +2,7 @@
 
 > Bản tham khảo tiếng Việt. Bản chính là `docs/en/specs/2026-10-11-workflow-w7b-executions-design.md`; khi hai bản khác nhau, bản tiếng Anh thắng.
 
-**Trạng thái:** thiết kế, 2026-10-11; chưa cài.
+**Trạng thái:** đã cài, 2026-10-12 (Task 1–7; end to end và đối chiếu Kestra ở §11 và §12).
 
 **Phụ thuộc:**
 - W7a (#659): khu vực Workflows, `StateChip`, `executionState.ts`, trang execution tối thiểu, `nextPollMs`.
@@ -61,7 +61,19 @@ Gantt cần thời điểm bắt đầu và kết thúc thật, nhưng engine ch
 | Xuất CSV danh sách | Không có trong W7b | Không được yêu cầu |
 | Bộ lọc mức log mặc định là INFO (một tuỳ chọn hiển thị lưu theo người dùng) | Mặc định không lọc mức: hiện mọi mức, URL không có `?level=` | FE-STATE-3: "trống" nghĩa là log khi chưa lọc, nên một log toàn dòng DEBUG không được hiện "No logs"; FE-PAGE-2: không có `?level=` nghĩa là không lọc. Mặc định gọn hơn của Kestra nếu muốn sẽ là một tuỳ chọn, và trạng thái trống phải nói rằng bộ lọc mức đang ẩn dòng. Quyết định ngày 2026-10-11 (review Task 5) |
 
-Khác biệt nào tìm thấy khi đối chiếu với một Kestra đang chạy (§11) sẽ được thêm vào đây, kèm lý do.
+**Tìm thấy khi đối chiếu với một Kestra đang chạy, 2026-10-12 (Task 7, §11).** Image `kestra/kestra` có sẵn trên máy (bản 2.0 nightly) chạy cùng flow với end to end: một `Fail` bị retry, một `Write`, một `Sequential` có hai task con, 400 dòng log, một `Loop` ba giá trị, một dòng WARN và một `Pause`. Các khác biệt sau là có chủ ý:
+
+| Kestra | egret | Vì sao |
+|---|---|---|
+| Cột của danh sách: Id, State, Start date, End date, Duration, Namespace, Flow, Labels, Triggers; có bộ chọn cột và một biểu đồ execution phía trên bảng | ID, Flow, Namespace, State, Start, Duration, Trigger; một `SummaryStrip` đếm theo trạng thái, mỗi số là một bộ lọc nhanh | Backend không có label (§10). End date là start cộng duration, cả hai đã hiện. Không ai yêu cầu biểu đồ, và dải đếm trả lời câu "các execution này đang ở trạng thái nào" |
+| Bộ lọc danh sách: tìm theo chữ, State, Started (mặc định **Last 24 hours**), Namespace, Flow, Kind, Scope, Hierarchy, Labels, bộ lọc nâng cao, bộ lọc đã lưu | State, Namespace (kèm namespace con), Flow, Time (không có mặc định), và công tắc execution con | `GET …/executions` không có tìm theo chữ, kind, scope hay label. Không có cửa sổ thời gian mặc định thì trạng thái trống của danh sách nghĩa là "chưa có gì chạy" (FE-STATE-3), và một link không có `?time=` hiện tất cả (FE-PAGE-2). Hierarchy chính là công tắc execution con, mặc định chỉ execution gốc (phán quyết của người dùng) |
+| Gantt: mỗi task run một thanh; run bị retry có biểu tượng cảnh báo, và các attempt là một bộ chọn trong phần chi tiết của dòng | Mỗi attempt là một đoạn riêng trong thanh của run, tô theo trạng thái kết thúc của attempt đó, và dòng có số đếm "↻ 2" | Thấy retry ngay trên trục thời gian (§6.2) |
+| Gantt: chọn một dòng thì phần chi tiết mở ngay dưới dòng, có bộ chọn attempt và log của attempt đó, lọc theo mức log mặc định INFO | Một panel dưới biểu đồ với thời gian, các attempt, message, log (mọi mức, mọi attempt, mỗi dòng có nhãn) và output của run; `?run=` nằm trong URL | Các thanh giữ nguyên chỗ trong lúc đọc một run (§6.4) |
+| Log: mỗi run một thẻ, có bộ chọn attempt chỉ hiện dòng của một attempt; bộ đếm theo mức, bấm để nhảy tới dòng kế tiếp của mức đó; tìm trong log; "Temporal view" liệt kê mọi dòng theo thời gian; các dòng giống nhau lặp lại được gộp ("×400 similar lines"); Copy all | Nhóm theo run, gồm dòng của mọi attempt (có nhãn "Attempt N" khi run có hơn một attempt); lọc theo mức, task và run; ảo hoá, nên 10 000 dòng vẫn mượt mà không phải gộp; Download | Route log chỉ đọc theo mức, task và run (W11), nên không có tìm kiếm. Kiểu xem phẳng, bộ đếm theo mức và gộp dòng không được yêu cầu trong W7b; §15 liệt kê chúng |
+| Output ("Input/Output" trong bản này): ba ô, danh sách output của task có ô tìm theo key hoặc value, giá trị, và expression debugger. Output là file thì preview ngay tại chỗ, CSV thành bảng có cột, kèm Row count, Encoding và chế độ xem bằng editor | Outputs: các run có output, rồi cây output của run; giá trị `kestra:///` là một dòng file, nút Preview mở drawer bên phải, text từng dòng, kèm giới hạn số dòng và Download | Không có endpoint đánh giá biểu thức (§10); route chỉ đọc text dạng UTF-8 nên không có encoding để chọn; mỗi dòng là chính text của file, còn đoán phương ngữ CSV có thể đọc sai. §15 liệt kê kiểu xem bảng |
+| Resume: một hộp xác nhận hỏi "Are you sure you want to resume execution …?" | Một hộp xác nhận nói điều sẽ xảy ra: mọi task đang pause kết thúc ngay với trạng thái thành công, và execution chạy tiếp | FE-ACTION-1 yêu cầu dialog nêu hệ quả. Cả hai đều giải phóng pause trước hạn: Kestra kết thúc ngay một pause 10 phút với `SUCCESS`, đúng như end to end của egret làm với một pause 5 phút |
+| Replay: nằm trong menu hành động của execution, chọn được revision Original, Latest hoặc một revision cụ thể | Nút Replay cạnh Resume, dùng source và inputs đã đóng băng | Dòng đầu của bảng này: engine chỉ replay source đã đóng băng |
+| Một `Loop` ba giá trị chỉ có một execution trong danh sách, và hiện "Iterations 3 Success" bên trong execution đó | `Loop` sinh ba execution con, hiện khi bật "Show child executions" và trong mục Child executions của Overview | Đây là loop của engine (§6.1, W3b), không phải của UI; ghi lại đây cho phía engine |
 
 ## 3. Backend: mốc thời gian thật
 
@@ -358,6 +370,8 @@ Trong Task 7, một Kestra tạm từ image `kestra/kestra` có sẵn trên máy
 
 Khác biệt được đưa vào §2.
 
+**Đã làm, 2026-10-12 (Task 7).** Đối chiếu chạy trên image có sẵn `28f59bf175e1` (Kestra 2.0 nightly) trong một container tạm `w7b-kestra-t7`, đã xoá sau đó, với chính flow của end to end (§12). Mọi khác biệt tìm thấy nằm trong bảng thứ hai của §2; những gì chưa dựng nằm ở §15. Resume khớp nhau: Resume của Kestra kết thúc ngay một pause 10 phút với `SUCCESS`, và end to end của egret làm điều tương tự với một pause 5 phút.
+
 ## 12. Kiểm thử
 
 **Rust:**
@@ -402,6 +416,18 @@ Khác biệt được đưa vào §2.
 
 Đo trên DOM ở cả chế độ sáng lẫn tối, và đo gantt ở bề rộng hẹp.
 
+**Đã làm, 2026-10-12 (Task 7).** `frontend/tests/e2e/workflows-executions.spec.ts`, trên một stack riêng (công thức nằm ở đầu file và trong `frontend/tests/e2e/README.md`). Flow gồm: `flaky` (một `Fail` có điều kiện chỉ đúng ở attempt đầu, `retry` constant, `maxAttempts: 3`), `write` (một `Write` ba dòng CSV), `chatty` (400 dòng), `each` (một `Loop` ba giá trị), `wait` (một `Pause` `PT5M`) và `after`. Spec kiểm:
+- danh sách chỉ hiện execution gốc, công tắc thêm ba iteration, và tab Executions của flow hiện execution gốc;
+- gantt có hai đoạn attempt trên `flaky`, `FAILED` rồi `SUCCESS`, đo thấy nằm trong ô timeline và đúng thứ tự; ở 900 px mọi vạch nằm trong ô của nó, biểu đồ không cuộn ngang, và task id không bị cắt;
+- chọn `flaky` mở panel của nó, log trong đó chỉ là dòng của run này, có nhãn attempt; Escape đóng panel và phím mũi tên đi giữa các dòng; `?run=2` ở tab Logs chỉ hiện dòng của run đó;
+- tab Logs vừa khít panel, panel không cuộn quanh log;
+- preview file hiện ba dòng, và Escape trả focus về nút Preview;
+- log theo dõi trực tiếp: dòng ghi sau Resume hiện trong view đang mở, và khi log đã complete thì 6 giây sau không có lần đọc nào nữa;
+- Resume giải phóng pause rất lâu trước hạn, sau đó gantt hiện nó `SUCCESS` và đã đóng;
+- Replay mở một execution mới, header ghi "Replayed from" execution đầu.
+
+Spec được chạy đỏ với ba mutation (`root_only` không bao giờ được gửi, polling log không bao giờ dừng, chỉ vẽ đoạn attempt cuối) và với code trước hai bản sửa layout ở mục 2026-10-12 của §15, mỗi lần đỏ đúng ở assertion của nó, rồi chạy xanh.
+
 **Cổng kiểm:**
 - Frontend theo FE-TEST-4: lint, tsc, test, build, mọi `test:bundle*`.
 - Backend: `cargo test -p egret-workflow`, `egret-server`, fmt, và clippy với `-D warnings`.
@@ -434,3 +460,8 @@ Toàn bộ `docs/en/frontend-rules.md`. Những rule quan trọng nhất ở đ�
 - Execution ghi trước migration 0180 có thời gian ước tính (§6.3).
 - Một lần retry của một vòng lặp con hoặc của một execution con do subflow tạo ra hiện trong danh sách mặc định như một execution gốc. Execution thay thế do `CREATE_NEW_EXECUTION` tạo ra mang `parent_execution_id` (là execution con) nhưng không có `loop_index` và không có `trigger_execution_id`, đúng hình dạng của một lần retry của execution gốc, nên `root_only` giữ nó lại (§3.3). *(Phát hiện trong review Task 2.)*
 - Một `Pause` có `behavior`, `onPause`, `tasks` hoặc `errors` bị từ chối chứ không chạy (Kestra chạy cả bốn). Execution đã kẹt vì một `Pause` như vậy trước ngày 2026-10-11 vẫn kẹt; replay nó bị từ chối vì source đã đóng băng của nó không lập kế hoạch được nữa. *(Quyết định 2026-10-11, Task 4b.)*
+- **Tìm thấy trong Task 7, 2026-10-12**, bằng cách đo trên trình duyệt:
+  - Đã sửa hai lỗi layout. Log ở tab Logs có chiều cao cố định `100vh − 22rem`, tràn khỏi panel (132 px ở 1280×720 của end to end, và cả ở 1440×900), nên panel cuộn quanh log và che mất các dòng cuối; nay log lấp đầy tab, tối thiểu 15 rem. Ở 900 px, một thanh 2 px ở cuối trục lòi ra ngoài ô 2 px và làm biểu đồ cuộn ngang, còn chữ "2 attempts" cắt mất task id năm chữ cái `flaky`; nay trục thời gian thụt vào 0.5 rem ở hai bên, và số đếm hiện "↻ 2", chữ "attempts" dành cho screen reader và khi rê chuột.
+  - Thứ tự Tab mặc định của Safari bỏ qua button, nên ở đó nút đóng/mở một nhóm log phải dùng Option+Tab; bản thân log là một tab stop trên cả Chromium lẫn WebKit, đã đo.
+  - Khi viewport thấp hơn khoảng 640 px, log ở tab Logs giữ mức tối thiểu 15 rem và panel của tab cuộn.
+  - Từ đối chiếu với Kestra (§2), chưa dựng: kiểu xem log phẳng theo thời gian, bộ đếm theo mức để nhảy giữa các dòng, gộp dòng lặp, tìm trong log (route không có bộ lọc chữ), preview CSV dạng bảng, và cột End date.
