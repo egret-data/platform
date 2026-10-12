@@ -240,6 +240,51 @@ pub(crate) async fn declare_attached_and_recompile(
     Ok(())
 }
 
+/// Remove the declared attachment of `catalog` from the external `engine` and
+/// recompile the profile it binds, in ONE transaction: egret's rows only, no
+/// DDL, no render, no credential to retire (a declared attachment holds none).
+/// Takes the same before-snapshot as the declare path so the two cannot drift;
+/// a detach can only remove pairs, so the refusal never fires on it today.
+pub(crate) async fn detach_declared_and_recompile(
+    st: &CpState,
+    engine: &Engine,
+    catalog: &egret_catalog_registry::store::CatalogRow,
+) -> Result<(), CpError> {
+    if !is_external(engine) {
+        return Err(CpError::Internal);
+    }
+    let registry = st.engine_mgmt.registry();
+    registry
+        .get_attachment(engine.id, catalog.id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    let mut tx = st
+        .engine_mgmt
+        .pool()
+        .begin()
+        .await
+        .map_err(crate::http_error::db_error)?;
+    let before =
+        crate::profile_compiler::snapshot_overlaps(st, &mut tx, engine.authz_service_id).await?;
+    if !registry
+        .delete_attachment_in_tx(&mut tx, engine.id, catalog.id)
+        .await?
+    {
+        return Err(CpError::NotFound);
+    }
+    if let Some(sid) = engine.authz_service_id {
+        crate::profile_compiler::recompile_refusing_created_overlaps(
+            st,
+            &mut tx,
+            sid,
+            before.as_ref(),
+        )
+        .await?;
+    }
+    tx.commit().await.map_err(crate::http_error::db_error)?;
+    Ok(())
+}
+
 #[utoipa::path(
     post,
     path = "/api/control-plane/engines/external",

@@ -215,6 +215,11 @@ export type controlPlaneEnginesAssignWorkspaceEngineResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesAssignWorkspaceEngineResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesAssignWorkspaceEngineResponse500 = {
   data: ErrorBody
   status: 500
@@ -223,7 +228,7 @@ export type controlPlaneEnginesAssignWorkspaceEngineResponse500 = {
 export type controlPlaneEnginesAssignWorkspaceEngineResponseSuccess = (controlPlaneEnginesAssignWorkspaceEngineResponse204) & {
   headers: Headers;
 };
-export type controlPlaneEnginesAssignWorkspaceEngineResponseError = (controlPlaneEnginesAssignWorkspaceEngineResponse400 | controlPlaneEnginesAssignWorkspaceEngineResponse401 | controlPlaneEnginesAssignWorkspaceEngineResponse403 | controlPlaneEnginesAssignWorkspaceEngineResponse404 | controlPlaneEnginesAssignWorkspaceEngineResponse500) & {
+export type controlPlaneEnginesAssignWorkspaceEngineResponseError = (controlPlaneEnginesAssignWorkspaceEngineResponse400 | controlPlaneEnginesAssignWorkspaceEngineResponse401 | controlPlaneEnginesAssignWorkspaceEngineResponse403 | controlPlaneEnginesAssignWorkspaceEngineResponse404 | controlPlaneEnginesAssignWorkspaceEngineResponse409 | controlPlaneEnginesAssignWorkspaceEngineResponse500) & {
   headers: Headers;
 };
 
@@ -1108,6 +1113,11 @@ export type controlPlaneEnginesTestCatalogResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesTestCatalogResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesTestCatalogResponse500 = {
   data: ErrorBody
   status: 500
@@ -1121,7 +1131,7 @@ export type controlPlaneEnginesTestCatalogResponse502 = {
 export type controlPlaneEnginesTestCatalogResponseSuccess = (controlPlaneEnginesTestCatalogResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesTestCatalogResponseError = (controlPlaneEnginesTestCatalogResponse401 | controlPlaneEnginesTestCatalogResponse403 | controlPlaneEnginesTestCatalogResponse404 | controlPlaneEnginesTestCatalogResponse500 | controlPlaneEnginesTestCatalogResponse502) & {
+export type controlPlaneEnginesTestCatalogResponseError = (controlPlaneEnginesTestCatalogResponse401 | controlPlaneEnginesTestCatalogResponse403 | controlPlaneEnginesTestCatalogResponse404 | controlPlaneEnginesTestCatalogResponse409 | controlPlaneEnginesTestCatalogResponse500 | controlPlaneEnginesTestCatalogResponse502) & {
   headers: Headers;
 };
 
@@ -1257,6 +1267,11 @@ export type controlPlaneEnginesGetClusterResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesGetClusterResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesGetClusterResponse500 = {
   data: ErrorBody
   status: 500
@@ -1270,7 +1285,7 @@ export type controlPlaneEnginesGetClusterResponse502 = {
 export type controlPlaneEnginesGetClusterResponseSuccess = (controlPlaneEnginesGetClusterResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesGetClusterResponseError = (controlPlaneEnginesGetClusterResponse401 | controlPlaneEnginesGetClusterResponse403 | controlPlaneEnginesGetClusterResponse404 | controlPlaneEnginesGetClusterResponse500 | controlPlaneEnginesGetClusterResponse502) & {
+export type controlPlaneEnginesGetClusterResponseError = (controlPlaneEnginesGetClusterResponse401 | controlPlaneEnginesGetClusterResponse403 | controlPlaneEnginesGetClusterResponse404 | controlPlaneEnginesGetClusterResponse409 | controlPlaneEnginesGetClusterResponse500 | controlPlaneEnginesGetClusterResponse502) & {
   headers: Headers;
 };
 
@@ -1395,13 +1410,18 @@ export type controlPlaneEnginesPodExecResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesPodExecResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesPodExecResponse500 = {
   data: ErrorBody
   status: 500
 }
 
 ;
-export type controlPlaneEnginesPodExecResponseError = (controlPlaneEnginesPodExecResponse101 | controlPlaneEnginesPodExecResponse400 | controlPlaneEnginesPodExecResponse401 | controlPlaneEnginesPodExecResponse403 | controlPlaneEnginesPodExecResponse404 | controlPlaneEnginesPodExecResponse500) & {
+export type controlPlaneEnginesPodExecResponseError = (controlPlaneEnginesPodExecResponse101 | controlPlaneEnginesPodExecResponse400 | controlPlaneEnginesPodExecResponse401 | controlPlaneEnginesPodExecResponse403 | controlPlaneEnginesPodExecResponse404 | controlPlaneEnginesPodExecResponse409 | controlPlaneEnginesPodExecResponse500) & {
   headers: Headers;
 };
 
@@ -1548,6 +1568,11 @@ export type controlPlaneEnginesPodLogsResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesPodLogsResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesPodLogsResponse500 = {
   data: ErrorBody
   status: 500
@@ -1556,7 +1581,7 @@ export type controlPlaneEnginesPodLogsResponse500 = {
 export type controlPlaneEnginesPodLogsResponseSuccess = (controlPlaneEnginesPodLogsResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesPodLogsResponseError = (controlPlaneEnginesPodLogsResponse400 | controlPlaneEnginesPodLogsResponse401 | controlPlaneEnginesPodLogsResponse403 | controlPlaneEnginesPodLogsResponse404 | controlPlaneEnginesPodLogsResponse500) & {
+export type controlPlaneEnginesPodLogsResponseError = (controlPlaneEnginesPodLogsResponse400 | controlPlaneEnginesPodLogsResponse401 | controlPlaneEnginesPodLogsResponse403 | controlPlaneEnginesPodLogsResponse404 | controlPlaneEnginesPodLogsResponse409 | controlPlaneEnginesPodLogsResponse500) & {
   headers: Headers;
 };
 
@@ -1716,13 +1741,18 @@ export type controlPlaneEnginesPodLogsFollowResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesPodLogsFollowResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesPodLogsFollowResponse500 = {
   data: ErrorBody
   status: 500
 }
 
 ;
-export type controlPlaneEnginesPodLogsFollowResponseError = (controlPlaneEnginesPodLogsFollowResponse101 | controlPlaneEnginesPodLogsFollowResponse400 | controlPlaneEnginesPodLogsFollowResponse401 | controlPlaneEnginesPodLogsFollowResponse403 | controlPlaneEnginesPodLogsFollowResponse404 | controlPlaneEnginesPodLogsFollowResponse500) & {
+export type controlPlaneEnginesPodLogsFollowResponseError = (controlPlaneEnginesPodLogsFollowResponse101 | controlPlaneEnginesPodLogsFollowResponse400 | controlPlaneEnginesPodLogsFollowResponse401 | controlPlaneEnginesPodLogsFollowResponse403 | controlPlaneEnginesPodLogsFollowResponse404 | controlPlaneEnginesPodLogsFollowResponse409 | controlPlaneEnginesPodLogsFollowResponse500) & {
   headers: Headers;
 };
 
@@ -1883,6 +1913,11 @@ export type controlPlaneEnginesListQueriesResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesListQueriesResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesListQueriesResponse500 = {
   data: ErrorBody
   status: 500
@@ -1896,7 +1931,7 @@ export type controlPlaneEnginesListQueriesResponse502 = {
 export type controlPlaneEnginesListQueriesResponseSuccess = (controlPlaneEnginesListQueriesResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesListQueriesResponseError = (controlPlaneEnginesListQueriesResponse401 | controlPlaneEnginesListQueriesResponse403 | controlPlaneEnginesListQueriesResponse404 | controlPlaneEnginesListQueriesResponse500 | controlPlaneEnginesListQueriesResponse502) & {
+export type controlPlaneEnginesListQueriesResponseError = (controlPlaneEnginesListQueriesResponse401 | controlPlaneEnginesListQueriesResponse403 | controlPlaneEnginesListQueriesResponse404 | controlPlaneEnginesListQueriesResponse409 | controlPlaneEnginesListQueriesResponse500 | controlPlaneEnginesListQueriesResponse502) & {
   headers: Headers;
 };
 
@@ -2016,6 +2051,11 @@ export type controlPlaneEnginesGetQueryResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesGetQueryResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesGetQueryResponse500 = {
   data: ErrorBody
   status: 500
@@ -2029,7 +2069,7 @@ export type controlPlaneEnginesGetQueryResponse502 = {
 export type controlPlaneEnginesGetQueryResponseSuccess = (controlPlaneEnginesGetQueryResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesGetQueryResponseError = (controlPlaneEnginesGetQueryResponse401 | controlPlaneEnginesGetQueryResponse403 | controlPlaneEnginesGetQueryResponse404 | controlPlaneEnginesGetQueryResponse500 | controlPlaneEnginesGetQueryResponse502) & {
+export type controlPlaneEnginesGetQueryResponseError = (controlPlaneEnginesGetQueryResponse401 | controlPlaneEnginesGetQueryResponse403 | controlPlaneEnginesGetQueryResponse404 | controlPlaneEnginesGetQueryResponse409 | controlPlaneEnginesGetQueryResponse500 | controlPlaneEnginesGetQueryResponse502) & {
   headers: Headers;
 };
 
@@ -2157,6 +2197,11 @@ export type controlPlaneEnginesKillQueryResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesKillQueryResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesKillQueryResponse500 = {
   data: ErrorBody
   status: 500
@@ -2170,7 +2215,7 @@ export type controlPlaneEnginesKillQueryResponse502 = {
 export type controlPlaneEnginesKillQueryResponseSuccess = (controlPlaneEnginesKillQueryResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesKillQueryResponseError = (controlPlaneEnginesKillQueryResponse401 | controlPlaneEnginesKillQueryResponse403 | controlPlaneEnginesKillQueryResponse404 | controlPlaneEnginesKillQueryResponse500 | controlPlaneEnginesKillQueryResponse502) & {
+export type controlPlaneEnginesKillQueryResponseError = (controlPlaneEnginesKillQueryResponse401 | controlPlaneEnginesKillQueryResponse403 | controlPlaneEnginesKillQueryResponse404 | controlPlaneEnginesKillQueryResponse409 | controlPlaneEnginesKillQueryResponse500 | controlPlaneEnginesKillQueryResponse502) & {
   headers: Headers;
 };
 
@@ -2267,6 +2312,11 @@ export type controlPlaneEnginesRestartEngineResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesRestartEngineResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesRestartEngineResponse500 = {
   data: ErrorBody
   status: 500
@@ -2275,7 +2325,7 @@ export type controlPlaneEnginesRestartEngineResponse500 = {
 export type controlPlaneEnginesRestartEngineResponseSuccess = (controlPlaneEnginesRestartEngineResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesRestartEngineResponseError = (controlPlaneEnginesRestartEngineResponse400 | controlPlaneEnginesRestartEngineResponse401 | controlPlaneEnginesRestartEngineResponse403 | controlPlaneEnginesRestartEngineResponse404 | controlPlaneEnginesRestartEngineResponse500) & {
+export type controlPlaneEnginesRestartEngineResponseError = (controlPlaneEnginesRestartEngineResponse400 | controlPlaneEnginesRestartEngineResponse401 | controlPlaneEnginesRestartEngineResponse403 | controlPlaneEnginesRestartEngineResponse404 | controlPlaneEnginesRestartEngineResponse409 | controlPlaneEnginesRestartEngineResponse500) & {
   headers: Headers;
 };
 

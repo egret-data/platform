@@ -727,6 +727,22 @@ impl RegistryStore {
         .await?)
     }
 
+    /// [`Self::delete_attachment`] inside the caller's transaction, for a
+    /// delete that must commit with a recompile.
+    pub async fn delete_attachment_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        engine_id: Uuid,
+        catalog_id: Uuid,
+    ) -> Result<bool, RegistryError> {
+        let r = sqlx::query("DELETE FROM registry.engine_catalog_attachments WHERE engine_id = $1 AND catalog_id = $2")
+            .bind(engine_id)
+            .bind(catalog_id)
+            .execute(&mut **tx)
+            .await?;
+        Ok(r.rows_affected() == 1)
+    }
+
     pub async fn delete_attachment(
         &self,
         engine_id: Uuid,

@@ -160,10 +160,15 @@ async fn monitor_headers(st: &CpState, engine: &Engine) -> Result<Vec<(String, S
 }
 
 async fn load_engine(st: &CpState, id: Uuid) -> Result<Engine, CpError> {
-    st.engine_mgmt
+    let engine = st
+        .engine_mgmt
         .get_engine(id)
         .await?
-        .ok_or(CpError::NotFound)
+        .ok_or(CpError::NotFound)?;
+    // Every monitor route loads its engine here, so this is the one place an
+    // external engine is turned away: egret never calls its coordinator.
+    crate::external::refuse_if_external(&engine, "monitor it or cancel its queries")?;
+    Ok(engine)
 }
 
 /// The engine's public Ingress base URL (`https://{host}`) when
@@ -231,6 +236,9 @@ pub(crate) async fn coordinator_call(
     path: &str,
     body: Option<Vec<u8>>,
 ) -> Result<(u16, Vec<u8>), CpError> {
+    // The chokepoint under every coordinator request, including the catalog
+    // tests, whatever route reached it.
+    crate::external::refuse_if_external(engine, "send requests to its coordinator")?;
     let headers = monitor_headers(st, engine).await?;
     if let Some(resp) = try_ingress(engine, method, path, &headers, body.clone()).await {
         return Ok(resp);
@@ -271,6 +279,7 @@ async fn coordinator_json(
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
         (status = 502, description = "Trino coordinator unreachable or returned a non-JSON error", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not monitor it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -303,6 +312,7 @@ async fn list_queries(
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
         (status = 502, description = "Trino coordinator unreachable or returned a non-JSON error", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not monitor it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -331,6 +341,7 @@ async fn get_query(
         (status = 403, description = "Missing engine:kill permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
         (status = 502, description = "Trino coordinator unreachable or rejected the cancel", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not cancel queries on it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -360,6 +371,7 @@ async fn kill_query(
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
         (status = 502, description = "Trino coordinator unreachable or returned a non-JSON error", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not monitor it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

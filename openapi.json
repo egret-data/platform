@@ -1044,6 +1044,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not assign to a workspace it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -3304,7 +3314,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The unchanged configuration re-applied to every attached engine (e.g. after rotating a secret)",
+            "description": "The unchanged configuration re-applied to every attached engine (e.g. after rotating a secret). An external engine is listed with status `skipped`: egret does not apply catalogs to it",
             "content": {
               "application/json": {
                 "schema": {
@@ -4035,7 +4045,7 @@
             }
           },
           "409": {
-            "description": "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names a profile of the wrong type or one another engine already binds; retry",
+            "description": "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names a profile of the wrong type or one another engine already binds; retry; The engine is external (`code` = `engine_is_external`): egret does not update, restart, scale or delete the cluster of it",
             "content": {
               "application/json": {
                 "schema": {
@@ -4128,7 +4138,7 @@
             }
           },
           "409": {
-            "description": "Nothing deleted: Data API endpoints (including trashed), schedules or datasets still use the engine's workspace connections (`code` = `engine_has_dependents`, with `dependents`), or a database constraint refused the delete (`code` = `constraint_violation`, with `constraint`)",
+            "description": "Nothing deleted: Data API endpoints (including trashed), schedules or datasets still use the engine's workspace connections (`code` = `engine_has_dependents`, with `dependents`), or a database constraint refused the delete (`code` = `constraint_violation`, with `constraint`); The engine is external (`code` = `engine_is_external`): egret does not provision or delete the cluster of; instead the external engine's rows are removed and nothing is sent to a cluster. The cluster delete and Kubernetes requirement below apply to provisioned engines only it",
             "content": {
               "application/json": {
                 "schema": {
@@ -4352,7 +4362,7 @@
             }
           },
           "409": {
-            "description": "The engine is being deleted",
+            "description": "The engine is being deleted; The engine is external (`code` = `engine_is_external`): egret does not apply a catalog to it",
             "content": {
               "application/json": {
                 "schema": {
@@ -4455,6 +4465,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not test a catalog on it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -4529,6 +4549,16 @@
           },
           "404": {
             "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not monitor it",
             "content": {
               "application/json": {
                 "schema": {
@@ -4624,6 +4654,16 @@
           },
           "404": {
             "description": "No such engine, or pod does not belong to the engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not exec into the pods of it",
             "content": {
               "application/json": {
                 "schema": {
@@ -4752,6 +4792,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not read the pods of it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -4847,6 +4897,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not read the pods of it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -4914,6 +4974,16 @@
           },
           "404": {
             "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not monitor it",
             "content": {
               "application/json": {
                 "schema": {
@@ -5013,6 +5083,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not monitor it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -5087,6 +5167,16 @@
           },
           "404": {
             "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not cancel queries on it",
             "content": {
               "application/json": {
                 "schema": {
@@ -5181,6 +5271,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`): egret does not restart it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -5258,7 +5358,7 @@
             }
           },
           "409": {
-            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
+            "description": "The engine changed concurrently (e.g. a delete in progress); retry; The engine is external (`code` = `engine_is_external`): egret does not rotate the secrets of it",
             "content": {
               "application/json": {
                 "schema": {
@@ -5446,7 +5546,7 @@
             }
           },
           "409": {
-            "description": "A removed workspace still has Data API endpoints, schedules or datasets on the engine's connection; nothing applied",
+            "description": "A removed workspace still has Data API endpoints, schedules or datasets on the engine's connection; nothing applied; The engine is external (`code` = `engine_is_external`): egret does not assign workspaces to it",
             "content": {
               "application/json": {
                 "schema": {
@@ -33398,7 +33498,7 @@
           },
           "status": {
             "type": "string",
-            "description": "`applied` | `failed`."
+            "description": "`applied` | `failed` | `skipped`. `skipped`: the engine is external, so\negret did not touch it (the attachment is only declared); `error` then\nsays so."
           },
           "error": {
             "type": [

@@ -5242,7 +5242,7 @@ async fn apply_authz_service_update(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names a profile of the wrong type or one another engine already binds; retry", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names a profile of the wrong type or one another engine already binds; retry; The engine is external (`code` = `engine_is_external`): egret does not update, restart, scale or delete the cluster of it", body = ErrorBody),
         (status = 502, description = "Kubernetes rejected the update; the previous spec was restored", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -5270,6 +5270,10 @@ async fn update_engine(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    // An external engine has no spec of egret's to update, and `prov.update`
+    // would apply one to a cluster egret does not own. Its address and plugin
+    // version are changed by registering it again.
+    crate::external::refuse_if_external(&engine, "apply a provisioning spec to it")?;
     // I4: EVERY cheap refusal runs BEFORE the profile binding is committed.
     // The bind is a real write (and compiles policy), so a PUT that ends in a
     // 400 or a 409 must not have performed it. These three guards used to sit
@@ -5658,7 +5662,7 @@ pub(crate) fn sr_delegation_block(spec: &serde_json::Value) -> serde_json::Value
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:delete permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "Nothing deleted: Data API endpoints (including trashed), schedules or datasets still use the engine's workspace connections (`code` = `engine_has_dependents`, with `dependents`), or a database constraint refused the delete (`code` = `constraint_violation`, with `constraint`)", body = EngineConflictBody),
+        (status = 409, description = "Nothing deleted: Data API endpoints (including trashed), schedules or datasets still use the engine's workspace connections (`code` = `engine_has_dependents`, with `dependents`), or a database constraint refused the delete (`code` = `constraint_violation`, with `constraint`); The engine is external (`code` = `engine_is_external`): egret does not provision or delete the cluster of; instead the external engine's rows are removed and nothing is sent to a cluster. The cluster delete and Kubernetes requirement below apply to provisioned engines only it", body = EngineConflictBody),
         (status = 500, description = "Internal error", body = ErrorBody),
         (status = 502, description = "The Kubernetes delete failed (`code` = `engine_cluster_delete_failed`); the engine stays `deleting` and the request can be retried", body = EngineConflictBody),
     ),
@@ -5681,6 +5685,14 @@ async fn delete_engine(
     let dependents = st.engine_mgmt.engine_dependents(id, None).await?;
     if !dependents.is_empty() {
         return Err(CpError::HasDependents(dependents));
+    }
+
+    // An external engine is egret's rows and nothing else: no cluster to
+    // delete, so no Kubernetes requirement, no provisioner call and no
+    // `deleting` state to retry. The same preflight above has already refused
+    // while a dependent exists.
+    if crate::external::is_external(&engine) {
+        return delete_external_engine(&st, &engine).await;
     }
 
     // 2. Same rule as create: without Kubernetes the cluster cannot be removed,
@@ -5726,6 +5738,52 @@ async fn delete_engine(
 
     // 6. Cross-seam cleanup after commit: logged, never returned.
     cleanup_deleted_engine(&st, &engine, &attachments).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Delete the rows egret holds for an external engine: the engine, its
+/// declared attachments and its profile binding (the profile itself stays, as
+/// for a provisioned engine). **Never calls the provisioner.**
+///
+/// An external engine owns no secret (`engines_external_shape` keeps every
+/// secret column NULL) and a declared attachment minted no client
+/// (`attachments_declared_holds_nothing`), so there is nothing for
+/// [`cleanup_deleted_engine`] to remove, and a secret the cluster might still
+/// hold must never be deleted. That is asserted here rather than assumed: a row
+/// that somehow carries one is refused untouched.
+async fn delete_external_engine(st: &CpState, engine: &Engine) -> Result<StatusCode, CpError> {
+    let attachments = st
+        .engine_mgmt
+        .registry()
+        .list_engine_attachments(engine.id)
+        .await?;
+    let holds_a_credential = attachments.iter().any(|a| {
+        a.attachment.minted_client
+            || a.attachment.catalog_client_id.is_some()
+            || a.attachment.credential_secret_id.is_some()
+    });
+    if !engine_owned_secret_ids(engine).is_empty()
+        || engine.tls_cert_secret_ref.is_some()
+        || holds_a_credential
+    {
+        tracing::error!(engine = %engine.name,
+            "an external engine row carries a secret or a minted client; refusing to delete it \
+             rather than leave or remove a credential the cluster may hold");
+        return Err(CpError::Internal);
+    }
+    match st
+        .engine_mgmt
+        .delete_engine_unless_blocked(engine.id)
+        .await?
+    {
+        DeleteEngineOutcome::Deleted | DeleteEngineOutcome::NotFound => {}
+        DeleteEngineOutcome::Blocked(dependents) => return Err(CpError::HasDependents(dependents)),
+    }
+    // The profile this engine was bound to loses its engine with the row; the
+    // grants it compiled stay as the profile's own (as for a provisioned
+    // engine, whose delete does not recompile either).
+    tracing::info!(engine = %engine.name,
+        "external engine deleted; egret's rows only, nothing was sent to the cluster");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -5807,6 +5865,7 @@ async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, attachments: &[At
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:provision permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not restart it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -5821,6 +5880,7 @@ async fn restart_engine(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    crate::external::refuse_if_external(&engine, "restart it")?;
     // FAIL-FAST on unsupported kinds. Trino rolls its Deployments directly;
     // StarRocks rolls the operator-owned FE/CN pods via a CR annotation merge
     // patch (see `StarRocksProvisioner::restart`). Any other kind has no restart
@@ -5862,7 +5922,7 @@ async fn restart_engine(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry; The engine is external (`code` = `engine_is_external`): egret does not rotate the secrets of it", body = ErrorBody),
         (status = 502, description = "Kubernetes rejected the apply; the engine row now names the new secret pair (the cluster may already hold it), and the previous pair is kept — not deleted — until a later successful apply supersedes it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -5878,6 +5938,7 @@ async fn rotate_engine_secrets(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    crate::external::refuse_if_external(&engine, "rotate its secrets")?;
     // A concurrent DELETE already marked the row and may have torn the cluster
     // down; 409 the common case here, before doing any work, rather than only
     // catching it in `apply_built`'s re-read right before the provisioner call.
@@ -6010,7 +6071,7 @@ async fn list_engine_workspaces(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine, or an added workspace does not exist; nothing applied", body = ErrorBody),
-        (status = 409, description = "A removed workspace still has Data API endpoints, schedules or datasets on the engine's connection; nothing applied", body = EngineConflictBody),
+        (status = 409, description = "A removed workspace still has Data API endpoints, schedules or datasets on the engine's connection; nothing applied; The engine is external (`code` = `engine_is_external`): egret does not assign workspaces to it", body = EngineConflictBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -6026,6 +6087,10 @@ async fn set_engine_workspaces(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    crate::external::refuse_if_external(
+        &engine,
+        "assign it to a workspace (egret holds no credentials for it)",
+    )?;
 
     // Diff the requested set against the current set and apply per-delta. The
     // assignment service keeps the query-seam materialized connection in sync.
@@ -6112,6 +6177,7 @@ async fn list_workspace_engines(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine or workspace", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not assign to a workspace it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -6130,6 +6196,15 @@ async fn assign_workspace_engine(
     {
         return Err(CpError::NotFound);
     }
+    let engine = st
+        .engine_mgmt
+        .get_engine(b.engine_id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    crate::external::refuse_if_external(
+        &engine,
+        "assign it to a workspace (egret holds no credentials for it)",
+    )?;
     st.assignment.assign(b.engine_id, id, p.user_id.0).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -6221,6 +6296,9 @@ pub(crate) async fn show_schemas_verdict(
     engine: &Engine,
     catalog_name: &str,
 ) -> Result<(bool, String), CpError> {
+    // The chokepoint under both test routes: egret never queries the
+    // coordinator of an engine it does not run.
+    crate::external::refuse_if_external(engine, "run a catalog test against it")?;
     let sql = format!("SHOW SCHEMAS FROM {}", quote_ident(catalog_name));
     let (code, body) = crate::monitor::coordinator_call(
         st,
@@ -6347,6 +6425,7 @@ struct CatalogTestDto {
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
         (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
         (status = 502, description = "Trino coordinator unreachable", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not test a catalog on it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -6361,6 +6440,7 @@ async fn test_catalog(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    crate::external::refuse_if_external(&engine, "run a catalog test against it")?;
     let cat = find_attached(&st, &engine, cid).await?.catalog;
     let (ok, message) = show_schemas_verdict(&st, &engine, &cat.name).await?;
     Ok(Json(CatalogTestDto { ok, message }))
@@ -6403,6 +6483,7 @@ struct PodLogsDto {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
         (status = 404, description = "No such engine, or pod does not belong to the engine", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not read the pods of it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -6418,6 +6499,7 @@ async fn pod_logs(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    crate::external::refuse_if_external(&engine, "read its pod logs")?;
     let Some(prov) = st.engine_provisioner.as_ref() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
@@ -6480,6 +6562,7 @@ struct PodLogsFollowQuery {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
         (status = 404, description = "No such engine, or pod does not belong to the engine", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not read the pods of it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -6488,7 +6571,7 @@ async fn pod_logs_follow(
     Auth(p): Auth,
     Path((id, pod)): Path<(Uuid, String)>,
     axum::extract::Query(q): axum::extract::Query<PodLogsFollowQuery>,
-    ws: WebSocketUpgrade,
+    ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Result<Response, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     let engine = st
@@ -6496,6 +6579,13 @@ async fn pod_logs_follow(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    // Decided before the upgrade is looked at, so the refusal is an ordinary
+    // 409 a client can read rather than a failed handshake.
+    crate::external::refuse_if_external(&engine, "stream its pod logs")?;
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(rejection) => return Ok(axum::response::IntoResponse::into_response(rejection)),
+    };
     let Some(prov) = st.engine_provisioner.clone() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
@@ -6612,6 +6702,7 @@ struct ExecResize {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:provision permission", body = ErrorBody),
         (status = 404, description = "No such engine, or pod does not belong to the engine", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`): egret does not exec into the pods of it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -6619,7 +6710,7 @@ async fn pod_exec(
     State(st): State<CpState>,
     Auth(p): Auth,
     Path((id, pod)): Path<(Uuid, String)>,
-    ws: WebSocketUpgrade,
+    ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Result<Response, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:provision").await?;
     let engine = st
@@ -6627,6 +6718,11 @@ async fn pod_exec(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    crate::external::refuse_if_external(&engine, "open a shell in its pods")?;
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(rejection) => return Ok(axum::response::IntoResponse::into_response(rejection)),
+    };
     let Some(prov) = st.engine_provisioner.clone() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };

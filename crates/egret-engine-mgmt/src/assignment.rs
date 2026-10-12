@@ -54,6 +54,15 @@ impl EngineAssignmentService {
             .get_engine(engine_id)
             .await?
             .ok_or_else(|| EngineMgmtError::NotFound(engine_id.to_string()))?;
+        // The routes refuse an external engine with a 409 before they get here;
+        // this is the floor under them for any other caller.
+        if engine.origin == crate::external::ORIGIN_EXTERNAL {
+            return Err(EngineMgmtError::NotAssignable(format!(
+                "engine {} is external: egret holds no credentials for it, so it cannot be \
+                 assigned to a workspace",
+                engine.name
+            )));
+        }
         if !engine.supports_delegation() {
             return Err(EngineMgmtError::NotAssignable(
                 NOT_DELEGATION_CAPABLE_MSG.into(),
