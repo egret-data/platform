@@ -36,6 +36,9 @@ Bộ rule frontend `docs/en/frontend-rules.md` ràng buộc mọi dòng code fro
 **Đã quyết với người dùng, 2026-10-11 (Task 4b, một lỗi có từ trước W7b):**
 - **Một `Pause` mà egret không chạy được bị từ chối ngay ở bước validate.** `Pause` khai báo `behavior`, `onPause`, `tasks` hoặc `errors` là một lỗi validate, `unsupported_pause_property`, nêu tên thuộc tính và bảo người viết bỏ nó đi hoặc dùng một `Pause` thường. Trước quyết định này nó chỉ là cảnh báo `not_yet_enforced`: flow vẫn publish và chạy được, task bị lập kế hoạch thành một runnable mờ (opaque), worker báo `NotALeaf` trước khi ghi kết quả, và reaper nhả claim mãi mãi, nên execution kẹt ở `RUNNING` mà không có thông báo nào. Giờ editor hiện lỗi, publish từ chối, và không đường khởi chạy nào chạy được nó: API start, webhook, schedule, Flow trigger và lời gọi `Subflow` đều lập kế hoạch qua `build_plan`, mà cổng `validate_for_run` của nó vốn đã từ chối một bản nháp đã lưu có lỗi. `executor::pause_gap` vẫn là danh sách duy nhất của bốn thuộc tính, và flow schema xếp `behavior`, `onPause`, `errors` vào `refused`, nên editor không gợi ý chúng nữa.
 
+**Đã quyết với người dùng, 2026-10-12 (review Task 7, một lỗi có từ trước W7b):**
+- **`ForEach` bị từ chối khi validate.** Một task kiểu `io.kestra.plugin.core.flow.ForEach` là một lỗi validation; thông báo của nó chỉ sang `io.kestra.plugin.core.flow.Loop`, loop của egret, và flow schema không còn gợi ý `ForEach`. Trước phán quyết này nó chỉ là một cảnh báo `not_yet_enforced` và chạy như một no-op trơ: flow vẫn publish và start được, thân vòng lặp không bao giờ chạy, và execution có thể kết thúc `SUCCESS`. Đó là một thành công giả mà không màn hình nào của W7b để lộ. Lỗi này cùng loại với `Pause` của Task 4b. Kestra 2.0, image ở §11, cũng từ chối `ForEach`: tạo flow dùng nó nhận 422 "Invalid type: io.kestra.plugin.core.flow.ForEach", còn cùng flow đó dùng `Loop` thì được tạo (đo ngày 2026-10-12). Task 7b cài phần từ chối này.
+
 ## 1. Vì sao
 
 Từ W7a người dùng chạy được flow trên trình duyệt, nhưng chỉ theo dõi được qua một trang tối thiểu liệt kê state của các task run. W7b mang tới đúng những gì người dùng Kestra quen dùng cho một lần chạy:
@@ -73,7 +76,12 @@ Gantt cần thời điểm bắt đầu và kết thúc thật, nhưng engine ch
 | Output ("Input/Output" trong bản này): ba ô, danh sách output của task có ô tìm theo key hoặc value, giá trị, và expression debugger. Output là file thì preview ngay tại chỗ, CSV thành bảng có cột, kèm Row count, Encoding và chế độ xem bằng editor | Outputs: các run có output, rồi cây output của run; giá trị `kestra:///` là một dòng file, nút Preview mở drawer bên phải, text từng dòng, kèm giới hạn số dòng và Download | Không có endpoint đánh giá biểu thức (§10); route chỉ đọc text dạng UTF-8 nên không có encoding để chọn; mỗi dòng là chính text của file, còn đoán phương ngữ CSV có thể đọc sai. §15 liệt kê kiểu xem bảng |
 | Resume: một hộp xác nhận hỏi "Are you sure you want to resume execution …?" | Một hộp xác nhận nói điều sẽ xảy ra: mọi task đang pause kết thúc ngay với trạng thái thành công, và execution chạy tiếp | FE-ACTION-1 yêu cầu dialog nêu hệ quả. Cả hai đều giải phóng pause trước hạn: Kestra kết thúc ngay một pause 10 phút với `SUCCESS`, đúng như end to end của egret làm với một pause 5 phút |
 | Replay: nằm trong menu hành động của execution, chọn được revision Original, Latest hoặc một revision cụ thể | Nút Replay cạnh Resume, dùng source và inputs đã đóng băng | Dòng đầu của bảng này: engine chỉ replay source đã đóng băng |
-| Một `Loop` ba giá trị chỉ có một execution trong danh sách, và hiện "Iterations 3 Success" bên trong execution đó | `Loop` sinh ba execution con, hiện khi bật "Show child executions" và trong mục Child executions của Overview | Đây là loop của engine (§6.1, W3b), không phải của UI; ghi lại đây cho phía engine |
+
+**Một khác biệt của engine, tìm thấy trong cùng lần chạy.** Đây không phải khác biệt của UI và không có chủ ý; nó được ghi lại đây cho phía engine:
+
+| Kestra | egret | Ghi chú |
+|---|---|---|
+| Một `Loop` ba giá trị chỉ có một execution trong danh sách, và hiện "Iterations 3 Success" bên trong execution đó | `Loop` sinh ba execution con, hiện khi bật "Show child executions" và trong mục Child executions của Overview | Loop của engine (§6.1, W3b), đã đo với golden corpus của Kestra khi dựng. Bản Kestra 2.0 này cư xử khác; việc dung hoà hai bên là việc của engine, nằm ngoài W7b |
 
 ## 3. Backend: mốc thời gian thật
 
@@ -237,7 +245,7 @@ Mọi hành động bị vô hiệu hoá đều hiện lý do thành chữ (FE-A
 
 - Mỗi task run là một dòng, theo thứ tự `run_ix`.
 - Dòng lồng dưới dòng cha theo `parent_ix`, và thu gọn được.
-- Một `Loop` (`ForEach` của Kestra) không có dòng con. Các vòng lặp của nó là execution con, liệt kê ở mục "Child executions" của Overview (§5.3), vì `executor/flowable/loop_.rs` không tạo run nào trong execution cha cho thân vòng lặp. Loop là một dòng flowable. Hiện không `CreateRun` nào đặt `value`, nên value chỉ hiện cạnh task id khi có. *(Sửa 2026-10-11, Task 4.)*
+- Một `Loop` (`io.kestra.plugin.core.flow.Loop`, Kestra 2.0 cũng gọi đúng tên này; `ForEach` bị từ chối, xem phần đầu) không có dòng con. Các vòng lặp của nó là execution con, liệt kê ở mục "Child executions" của Overview (§5.3), vì `executor/flowable/loop_.rs` không tạo run nào trong execution cha cho thân vòng lặp. Loop là một dòng flowable. Hiện không `CreateRun` nào đặt `value`, nên value chỉ hiện cạnh task id khi có. *(Sửa 2026-10-11, Task 4.)*
 - Mỗi dòng hiện task id, value (nếu có), chip state và thời lượng.
 - Các dòng là một `treegrid`: mỗi dòng có `aria-level`, `aria-posinset`/`aria-setsize`, và `aria-expanded` nếu có con. *(Thêm 2026-10-11, review Task 4.)*
 
@@ -370,7 +378,7 @@ Trong Task 7, một Kestra tạm từ image `kestra/kestra` có sẵn trên máy
 
 Khác biệt được đưa vào §2.
 
-**Đã làm, 2026-10-12 (Task 7).** Đối chiếu chạy trên image có sẵn `28f59bf175e1` (Kestra 2.0 nightly) trong một container tạm `w7b-kestra-t7`, đã xoá sau đó, với chính flow của end to end (§12). Mọi khác biệt tìm thấy nằm trong bảng thứ hai của §2; những gì chưa dựng nằm ở §15. Resume khớp nhau: Resume của Kestra kết thúc ngay một pause 10 phút với `SUCCESS`, và end to end của egret làm điều tương tự với một pause 5 phút.
+**Đã làm, 2026-10-12 (Task 7).** Đối chiếu chạy trên image có sẵn `28f59bf175e1` (Kestra 2.0 nightly) trong một container tạm `w7b-kestra-t7`, đã xoá sau đó, với chính flow của end to end (§12). Mọi khác biệt tìm thấy nằm trong §2: khác biệt có chủ ý ở bảng thứ hai, khác biệt `Loop` của engine ở bảng thứ ba; những gì chưa dựng nằm ở §15. Resume khớp nhau: Resume của Kestra kết thúc ngay một pause 10 phút với `SUCCESS`, và end to end của egret làm điều tương tự với một pause 5 phút.
 
 ## 12. Kiểm thử
 
@@ -426,7 +434,7 @@ Khác biệt được đưa vào §2.
 - Resume giải phóng pause rất lâu trước hạn, sau đó gantt hiện nó `SUCCESS` và đã đóng;
 - Replay mở một execution mới, header ghi "Replayed from" execution đầu.
 
-Spec được chạy đỏ với ba mutation (`root_only` không bao giờ được gửi, polling log không bao giờ dừng, chỉ vẽ đoạn attempt cuối) và với code trước hai bản sửa layout ở mục 2026-10-12 của §15, mỗi lần đỏ đúng ở assertion của nó, rồi chạy xanh.
+Spec được chạy đỏ với ba mutation (`root_only` không bao giờ được gửi, polling log không bao giờ dừng, chỉ vẽ đoạn attempt cuối), với code trước bản sửa tab Logs (panel tràn 132 px), và với code trước bản sửa số đếm retry (task id `flaky` bị cắt ở 900 px). Mỗi lần đỏ đúng ở assertion của nó, rồi chạy xanh. **Bản sửa thụt trục (axis inset) không có lần chạy đỏ nào** (fix round 1). Chỉ hoàn nguyên phần thụt thì end to end vẫn xanh, vì run cuối của nó, `after`, kéo dài khoảng 1 s trên trục 30 s, tức 8 px, rộng hơn mức tối thiểu 2 px của một thanh. Phép kiểm 900 px chạy lại khi execution đã xong, nhưng chỉ canh được phần thụt khi run cuối ngắn đến thế. Lỗi mà phần thụt sửa được đo trên trình duyệt thay vào đó (§15).
 
 **Cổng kiểm:**
 - Frontend theo FE-TEST-4: lint, tsc, test, build, mọi `test:bundle*`.
@@ -461,7 +469,8 @@ Toàn bộ `docs/en/frontend-rules.md`. Những rule quan trọng nhất ở đ�
 - Một lần retry của một vòng lặp con hoặc của một execution con do subflow tạo ra hiện trong danh sách mặc định như một execution gốc. Execution thay thế do `CREATE_NEW_EXECUTION` tạo ra mang `parent_execution_id` (là execution con) nhưng không có `loop_index` và không có `trigger_execution_id`, đúng hình dạng của một lần retry của execution gốc, nên `root_only` giữ nó lại (§3.3). *(Phát hiện trong review Task 2.)*
 - Một `Pause` có `behavior`, `onPause`, `tasks` hoặc `errors` bị từ chối chứ không chạy (Kestra chạy cả bốn). Execution đã kẹt vì một `Pause` như vậy trước ngày 2026-10-11 vẫn kẹt; replay nó bị từ chối vì source đã đóng băng của nó không lập kế hoạch được nữa. *(Quyết định 2026-10-11, Task 4b.)*
 - **Tìm thấy trong Task 7, 2026-10-12**, bằng cách đo trên trình duyệt:
-  - Đã sửa hai lỗi layout. Log ở tab Logs có chiều cao cố định `100vh − 22rem`, tràn khỏi panel (132 px ở 1280×720 của end to end, và cả ở 1440×900), nên panel cuộn quanh log và che mất các dòng cuối; nay log lấp đầy tab, tối thiểu 15 rem. Ở 900 px, một thanh 2 px ở cuối trục lòi ra ngoài ô 2 px và làm biểu đồ cuộn ngang, còn chữ "2 attempts" cắt mất task id năm chữ cái `flaky`; nay trục thời gian thụt vào 0.5 rem ở hai bên, và số đếm hiện "↻ 2", chữ "attempts" dành cho screen reader và khi rê chuột.
+  - Đã sửa hai lỗi layout. Log ở tab Logs có chiều cao cố định `100vh − 22rem`, tràn khỏi panel (132 px ở 1280×720 của end to end, và cả ở 1440×900), nên panel cuộn quanh log và che mất các dòng cuối; nay log lấp đầy tab, tối thiểu 15 rem. Ở 900 px, chữ "2 attempts" cắt mất task id năm chữ cái `flaky`; nay số đếm hiện "↻ 2", chữ "attempts" dành cho screen reader và khi rê chuột. Cũng ở 900 px, một run ngắn hơn bề rộng tối thiểu 2 px của thanh và kết thúc ở cuối trục có thanh nằm lòi ra ngoài ô timeline. Đó là run `after`, 0.07 s trong một execution 17 s. Khi hoàn nguyên phần thụt, thanh của nó kết thúc lố mép phải của ô 1.1 px và làm biểu đồ cuộn ngang 1 px (595 so với 594). Với trục thụt 0.5 rem ở hai bên, cả hai đều hết. Cả hai trạng thái đã được đo trên trình duyệt trong fix round 1. End to end không chạm tới trường hợp này một cách ổn định (§12).
   - Thứ tự Tab mặc định của Safari bỏ qua button, nên ở đó nút đóng/mở một nhóm log phải dùng Option+Tab; bản thân log là một tab stop trên cả Chromium lẫn WebKit, đã đo.
   - Khi viewport thấp hơn khoảng 640 px, log ở tab Logs giữ mức tối thiểu 15 rem và panel của tab cuộn.
   - Từ đối chiếu với Kestra (§2), chưa dựng: kiểu xem log phẳng theo thời gian, bộ đếm theo mức để nhảy giữa các dòng, gộp dòng lặp, tìm trong log (route không có bộ lọc chữ), preview CSV dạng bảng, và cột End date.
+- Một phiên bản flow publish trước phán quyết ngày 2026-10-12 mà dùng `ForEach` sẽ bị từ chối ở mọi lần start, như các phiên bản có `Pause` bị từ chối (Task 4b). *(Quyết định 2026-10-12, review Task 7.)*

@@ -29,6 +29,9 @@ The frontend rulebook `docs/en/frontend-rules.md` binds every frontend line.
 **Decided with the user, 2026-10-11 (Task 4b, a defect that predates W7b):**
 - **A `Pause` egret cannot run is refused at validation.** A `Pause` that declares `behavior`, `onPause`, `tasks` or `errors` is a validation error, `unsupported_pause_property`, naming the property and saying to remove it or use a plain `Pause`. Until this ruling it was a `not_yet_enforced` warning: the flow published and started, the task was planned an opaque runnable, the worker failed it with `NotALeaf` before recording an outcome, and the reaper released the claim for ever, so the execution stalled in `RUNNING` with no message. The editor now shows the error, publish refuses it, and no start path can run it: the API start, the webhook, a schedule fire, a Flow trigger and a `Subflow` call all plan through `build_plan`, whose `validate_for_run` gate already refuses a saved draft with errors. `executor::pause_gap` remains the single list of the four properties, and the flow schema classifies `behavior`, `onPause` and `errors` as `refused`, so the editor no longer offers them.
 
+**Decided with the user, 2026-10-12 (Task 7 review, a defect that predates W7b):**
+- **`ForEach` is refused at validation.** A task of type `io.kestra.plugin.core.flow.ForEach` is a validation error whose message points to `io.kestra.plugin.core.flow.Loop`, egret's loop, and the flow schema stops offering `ForEach`. Until this ruling it was a `not_yet_enforced` warning and ran as an inert no-op: the flow published and started, the body never ran, and the execution could end `SUCCESS`. That is a false success, and no W7b screen would reveal it. It is the same class of defect as Task 4b's `Pause`. Kestra 2.0, the image of §11, also refuses `ForEach`: creating a flow with it answers 422 "Invalid type: io.kestra.plugin.core.flow.ForEach", and the same flow with `Loop` is created (measured 2026-10-12). Task 7b implements the refusal.
+
 ## 1. Why
 
 Since W7a, a user can run a flow from the browser, but can follow it only on a minimal page that lists task-run states. W7b gives runs the surface Kestra users expect:
@@ -66,7 +69,12 @@ The gantt needs real start and end times, and the engine does not record them. T
 | Outputs ("Input/Output" in this build): three panes, the task outputs with a key or value search, the value, and the expression debugger. A file output is previewed in place, a CSV as a table with columns, with Row count, Encoding and an editor view | Outputs: the runs with outputs, then the run's tree; a `kestra:///` value is a file row whose Preview opens a drawer on the right, text line by line, with the row cap and Download | No expression endpoint (§10); the route reads text as UTF-8 only, so there is no encoding to choose; a line is the file's own text, which a guessed CSV dialect could misread. §15 lists the table view |
 | Resume: a confirmation that asks "Are you sure you want to resume execution …?" | A confirmation that says what happens: every paused task ends now as a success, and the execution continues | FE-ACTION-1 asks the dialog to name the consequence. Both release a pause before its deadline: Kestra ended a 10-minute pause at once with `SUCCESS`, as egret's end to end does with a 5-minute one |
 | Replay: in the execution's actions menu, with Original, Latest or a specific flow revision | A Replay button beside Resume, from the frozen source and inputs | The first row of this table: the engine replays only the frozen source |
-| A three-value `Loop` listed one execution and showed "Iterations 3 Success" inside it | The `Loop` spawns three child executions, listed under "Show child executions" and in Overview's Child executions | The engine's loop (§6.1, W3b), not the UI's; recorded here for the engine |
+
+**An engine divergence, found in the same run.** It is not a UI difference and is not deliberate; it is recorded here for the engine:
+
+| Kestra | egret | Note |
+|---|---|---|
+| A three-value `Loop` listed one execution and showed "Iterations 3 Success" inside it | The `Loop` spawns three child executions, listed under "Show child executions" and in Overview's Child executions | The engine's loop (§6.1, W3b), measured against Kestra's golden corpus when it was built. This Kestra 2.0 build behaved differently; reconciling the two is engine work, outside W7b |
 
 ## 3. Backend: real timestamps
 
@@ -227,7 +235,7 @@ Every disabled action shows its reason as visible text (FE-ACTION-4), using W7a'
 
 - There is one row per task run, in `run_ix` order.
 - Rows nest under their `parent_ix` parent and collapse.
-- A `Loop` (Kestra's `ForEach`) has no child rows. Its iterations are child executions, listed in Overview's "Child executions" (§5.3), because `executor/flowable/loop_.rs` creates no run in the parent for a loop body. The loop is one flowable row. No `CreateRun` sets `value` today, so the value is shown beside the task id only when present. *(Corrected 2026-10-11, Task 4.)*
+- A `Loop` (`io.kestra.plugin.core.flow.Loop`, also Kestra 2.0's name; `ForEach` is refused, see the header) has no child rows. Its iterations are child executions, listed in Overview's "Child executions" (§5.3), because `executor/flowable/loop_.rs` creates no run in the parent for a loop body. The loop is one flowable row. No `CreateRun` sets `value` today, so the value is shown beside the task id only when present. *(Corrected 2026-10-11, Task 4.)*
 - Each row shows the task id, the value if there is one, the state chip and the duration.
 - The rows are a `treegrid`: each row carries `aria-level`, `aria-posinset`/`aria-setsize` and, with children, `aria-expanded`. *(Added 2026-10-11, Task 4 review.)*
 
@@ -362,7 +370,7 @@ A temporary Kestra from the local `kestra/kestra` image runs on a free port duri
 
 Differences go into §2.
 
-**Done, 2026-10-12 (Task 7).** The comparison ran against the local image `28f59bf175e1` (Kestra 2.0 nightly) in a temporary container `w7b-kestra-t7`, removed afterwards, with the end to end's flow (§12). Every difference found is in §2's second table; the ones not built are in §15. Resume matched: Kestra's Resume ended a 10-minute pause at once with `SUCCESS`, and egret's end to end does the same with a 5-minute one.
+**Done, 2026-10-12 (Task 7).** The comparison ran against the local image `28f59bf175e1` (Kestra 2.0 nightly) in a temporary container `w7b-kestra-t7`, removed afterwards, with the end to end's flow (§12). Every difference found is in §2: the deliberate ones in its second table, the engine's `Loop` divergence in the third; the ones not built are in §15. Resume matched: Kestra's Resume ended a 10-minute pause at once with `SUCCESS`, and egret's end to end does the same with a 5-minute one.
 
 ## 12. Testing
 
@@ -424,7 +432,7 @@ DOM measurements cover light and dark mode, plus the gantt at narrow widths.
 - Resume releases the pause long before its deadline, and the gantt then shows it `SUCCESS` and closed;
 - Replay opens a new execution whose header says "Replayed from" the first.
 
-It was run red against three mutations (`root_only` never sent, log polling never stopping, only the last attempt segment drawn) and against the code before §15's two layout fixes, each failing at its own assertion, and green after.
+It was run red against three mutations (`root_only` never sent, log polling never stopping, only the last attempt segment drawn), against the code before the Logs tab fix (its panel overflowed by 132 px) and against the code before the retry-count fix (the task id `flaky` truncated at 900 px), each failing at its own assertion, and green after. **The axis-inset fix has no red run** (fix round 1): with only the inset reverted, the end to end stayed green, because its last run, `after`, took about 1 s of a 30 s axis, 8 px, wider than a bar's 2 px minimum. The 900 px check runs again once the execution is complete, but it guards the inset only when the last run is that short. The inset's defect was measured in the browser instead (§15).
 
 **Gate:**
 - frontend: FE-TEST-4 (lint, tsc, test, build, every `test:bundle*`);
@@ -459,7 +467,8 @@ All of `docs/en/frontend-rules.md`. The rules most at stake:
 - A retry of a loop iteration or of a subflow child appears in the default list as a root. Its `CREATE_NEW_EXECUTION` replacement carries `parent_execution_id` (the child) with no `loop_index` and no `trigger_execution_id`, which is exactly the shape of a retry of a root, so `root_only` keeps it (§3.3). *(Found in the Task 2 review.)*
 - A `Pause` with `behavior`, `onPause`, `tasks` or `errors` is refused, not run (Kestra runs all four). An execution already stalled on one before 2026-10-11 stays stalled; replaying it is refused because its frozen source no longer plans. *(Ruled 2026-10-11, Task 4b.)*
 - **Found in Task 7, 2026-10-12**, by measuring in the browser:
-  - Two layout defects were fixed. The Logs tab's log had a fixed height, `100vh − 22rem`, which overran its panel (by 132 px at the end to end's 1280×720, and at 1440×900 too), so the panel scrolled around the log and hid its last lines; the log now fills the tab, with a 15 rem minimum. At 900 px a 2 px bar at the axis end stood 2 px outside its cell and gave the chart a sideways scroll, and "2 attempts" truncated the five-letter task id `flaky`; the timeline is now inset by 0.5 rem on both sides, and the count reads "↻ 2", with "attempts" for a screen reader and on hover.
+  - Two layout defects were fixed. The Logs tab's log had a fixed height, `100vh − 22rem`, which overran its panel (by 132 px at the end to end's 1280×720, and at 1440×900 too), so the panel scrolled around the log and hid its last lines; the log now fills the tab, with a 15 rem minimum. At 900 px, "2 attempts" truncated the five-letter task id `flaky`; the count now reads "↻ 2", with "attempts" for a screen reader and on hover. Also at 900 px, a run shorter than its bar's 2 px minimum width that ends at the axis end gets a bar that leaves the timeline cell. This was the `after` run, 0.07 s of a 17 s execution. With the inset reverted, its bar ended 1.1 px past the cell's right edge and gave the chart a 1 px sideways scroll (595 against 594). With the inset of 0.5 rem on both sides, both were gone. Both states were measured in the browser in fix round 1. The end to end cannot reach this case reliably (§12).
   - Safari's default Tab order skips buttons, so a log group's toggle is reached with Option+Tab there; the log itself is a tab stop in Chromium and WebKit alike, measured.
   - Below a viewport about 640 px tall, the Logs tab's log keeps its 15 rem minimum and the tab's panel scrolls.
   - From the Kestra comparison (§2), not built: a flat, time-ordered log view, level counters that jump between lines, folding of repeated lines, log search (the route has no text filter), a CSV preview as a table, and an End date column.
+- A flow version published before the 2026-10-12 ruling that uses `ForEach` is refused at every start, as the versions with a refused `Pause` are (Task 4b). *(Ruled 2026-10-12, Task 7 review.)*
