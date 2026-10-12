@@ -1826,3 +1826,25 @@ fn pruned_and_full_find_the_same_disagreements_on_a_seeded_corpus() {
     );
     assert!(pruned_total < full_total);
 }
+
+/// The trie half of candidacy at the gate: a changed policy that EXCLUDES
+/// `sales` is rejected by the matcher at `wh.sales.*` (match type `NONE`), but
+/// Ranger's trie cannot be shown to omit it (an `isExcludes` level is an
+/// inherited evaluator), and at offset 553 an evaluator that matched nothing
+/// still counts. So those coordinates must be KEPT.
+#[test]
+fn a_changed_excludes_policy_keeps_the_coordinates_the_matcher_rejects() {
+    let mut excluding = orders_like("not sales", "sales", "orders", &["alice"], &[], 0);
+    excluding["resources"]["schema"]["isExcludes"] = json!(true);
+    let other = orders_like("hr", "hr", "people", &["carol"], &[], 0);
+    let before = envelope(vec![other.clone()], vec![]);
+    let after = envelope(vec![other, excluding], vec![]);
+    let (plan, _, _) = pruned_agrees(&before, &after, &[], &BOTH);
+    assert_eq!(plan.fallback, None);
+    assert!(
+        plan.probes
+            .iter()
+            .any(|p| p.request.resource.get("schema") == Some("sales")),
+        "a coordinate the matcher rejects but the trie cannot exclude was dropped"
+    );
+}
