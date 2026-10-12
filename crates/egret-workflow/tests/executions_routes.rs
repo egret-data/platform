@@ -760,14 +760,14 @@ async fn insert_wired_task_run(db: &Db, execution: Uuid) {
         "INSERT INTO workflow.task_runs \
            (execution_id, run_ix, task_ix, task_id, type_id, parent_ix, value, \
             rendered, rendered_run_if, state, history, attempts, not_before_ms, \
-            claimed_at, outputs, message, created_seq, ended_seq, resume_with) \
+            claimed_at, outputs, message, created_seq, ended_seq, resume_with, started_at) \
          VALUES ($1, 7, 9, 'task-id-value', 'type-id-value', 11, 'value-value', \
                  'rendered-value', 'rendered-run-if-value', 'RUNNING', \
                  '[\"CREATED\",\"RUNNING\"]'::jsonb, \
                  '[{\"history\":[\"CREATED\"],\"started_at\":13}]'::jsonb, \
                  17, '2026-02-03T04:05:06Z'::timestamptz, \
                  '{\"outputs-key\":\"outputs-value\"}'::jsonb, 'message-value', \
-                 19, 23, 'TERMINAL:WARNING')",
+                 19, 23, 'TERMINAL:WARNING', '2026-02-01T02:03:04Z'::timestamptz)",
     )
     .bind(execution)
     .execute(&db.pool)
@@ -779,7 +779,7 @@ async fn insert_wired_task_run(db: &Db, execution: Uuid) {
 /// name, carrying its own value.**
 ///
 /// Step 2 of this task is a column list, so this asserts the list: `TaskRunRow`
-/// carries all twenty-two columns and `ExecutionRow` all of its own minus
+/// carries all twenty-four columns and `ExecutionRow` all of its own minus
 /// `source`, and a DTO that quietly dropped one would otherwise be discovered
 /// by W7 rather than here.
 ///
@@ -806,6 +806,21 @@ async fn every_repository_column_reaches_the_wire() {
     common::grant(&db, ws, user, &["workflow:read"]).await;
     let id = insert_execution(&db, ws, None, "a.keys", "f", "RUNNING", at(1)).await;
     insert_wired_task_run(&db, id).await;
+    // W7b Task 1's three execution columns, each with a value of its own. A
+    // RUNNING row cannot carry an `ended_at` (migration 0183's CHECK), so the
+    // end is asserted `null` -- still distinct from the start beside it, which
+    // is what would show a crossed wire.
+    let replayed_from =
+        insert_execution(&db, ws, None, "a.keys-source", "src", "SUCCESS", at(1)).await;
+    sqlx::query(
+        "UPDATE workflow.executions SET started_at = '2026-01-01T00:00:05Z', \
+                replayed_from_execution_id = $2 WHERE id = $1",
+    )
+    .bind(id)
+    .bind(replayed_from)
+    .execute(&db.pool)
+    .await
+    .expect("seed the W7b columns");
 
     let app = common::app(&db).await;
     let detail = common::json(
@@ -840,10 +855,15 @@ async fn every_repository_column_reaches_the_wire() {
         "loop_value",
         "attempt_number",
         "origin_offset_ms",
+        "replayed_from_execution_id",
+        "started_at",
+        "ended_at",
         "created_at",
         "updated_at",
         "source",
         "runs",
+        // Not a repository column: the PDP's `workflow:manage` answer (W7b Task 3).
+        "can_manage",
     ];
     let got: std::collections::BTreeSet<&str> = detail
         .as_object()
@@ -875,6 +895,8 @@ async fn every_repository_column_reaches_the_wire() {
         "created_seq",
         "ended_seq",
         "resume_with",
+        "started_at",
+        "ended_at",
         "created_at",
         "updated_at",
     ];
@@ -931,6 +953,8 @@ async fn every_repository_column_reaches_the_wire() {
     assert_eq!(run["created_seq"], 19, "{run}");
     assert_eq!(run["ended_seq"], 23, "{run}");
     assert_eq!(run["resume_with"], "TERMINAL:WARNING", "{run}");
+    assert_eq!(run["started_at"], "2026-02-01T02:03:04Z", "{run}");
+    assert_eq!(run["ended_at"], Value::Null, "{run}");
     assert!(
         run["id"]
             .as_str()
@@ -950,8 +974,18 @@ async fn every_repository_column_reaches_the_wire() {
     assert_eq!(detail["state"], "RUNNING", "{detail}");
     assert_eq!(detail["source"], SEEDED_SOURCE, "{detail}");
     assert_eq!(detail["created_at"], "2026-01-01T00:00:00Z", "{detail}");
+    assert_eq!(detail["started_at"], "2026-01-01T00:00:05Z", "{detail}");
+    assert_eq!(detail["ended_at"], Value::Null, "{detail}");
+    assert_eq!(
+        detail["replayed_from_execution_id"],
+        replayed_from.to_string(),
+        "{detail}"
+    );
 
-    // ---- and the list row: the same execution fields, WITHOUT source/runs ----
+    // `can_manage` is the caller's, on the detail only: a list row answers no PDP question.
+    assert_eq!(detail["can_manage"], false, "a reader: {detail}");
+
+    // ---- and the list row: the same execution fields, WITHOUT source/runs/can_manage ----
     let page = list(&app, ws, user, "namespace=a.keys").await;
     let row = &page["rows"][0];
     let got_list: std::collections::BTreeSet<&str> = row
@@ -963,12 +997,21 @@ async fn every_repository_column_reaches_the_wire() {
     let want_list: std::collections::BTreeSet<&str> = want_execution
         .iter()
         .copied()
-        .filter(|k| *k != "source" && *k != "runs")
+        .filter(|k| !matches!(*k, "source" | "runs" | "can_manage"))
         .collect();
     assert_eq!(got_list, want_list, "the list DTO's key set: {page}");
     // The flattened parent's fields carry the same values through the list
     // route as through the detail route -- two `From` impls, one contract.
-    for k in ["id", "namespace", "flow_key", "state", "created_at"] {
+    for k in [
+        "id",
+        "namespace",
+        "flow_key",
+        "state",
+        "created_at",
+        "started_at",
+        "ended_at",
+        "replayed_from_execution_id",
+    ] {
         assert_eq!(
             row[k], detail[k],
             "list and detail disagree about {k}: {page}"
@@ -1175,9 +1218,57 @@ async fn a_gantt_row_is_computable_from_the_execution_dto_alone(pool: sqlx::PgPo
     for entry in dto["history"].as_array().expect("execution history") {
         assert!(entry.is_string(), "{dto}");
     }
+    // `outputs` is `null`, present and not `{}`, on a run that has none yet:
+    // the in-flight `Pause`. The OpenAPI document says `["object", "null"]`
+    // (W7b Task 6 review): the UI's outputs tree crashed on this shape when
+    // the generated type claimed the field was never null.
+    let in_flight: Vec<&Value> = dto["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["ended_seq"].is_null())
+        .collect();
+    assert_eq!(in_flight.len(), 1, "{dto}");
+    assert!(
+        in_flight[0].as_object().unwrap().contains_key("outputs"),
+        "{dto}"
+    );
+    assert_eq!(in_flight[0]["outputs"], Value::Null, "{dto}");
+
+    // The OpenAPI document types these as `Vec<String>` and `Vec<AttemptDto>`
+    // while the DTO passes the stored `jsonb` through: the wire must decode
+    // into the documented types, or the generated client lies.
+    serde_json::from_value::<Vec<String>>(dto["history"].clone())
+        .expect("execution history is Vec<String>");
+    for run in dto["runs"].as_array().unwrap() {
+        serde_json::from_value::<Vec<String>>(run["history"].clone())
+            .expect("run history is Vec<String>");
+        let attempts: Vec<egret_workflow::routes::AttemptDto> =
+            serde_json::from_value(run["attempts"].clone()).expect("attempts are Vec<AttemptDto>");
+        for a in &attempts {
+            assert!(!a.history.is_empty(), "an attempt has a history: {run}");
+        }
+    }
 
     let rows = gantt_rows(&dto);
     assert_eq!(rows.len(), 2, "one bar per task run: {dto}");
+
+    // W7b Task 1: the real times beside the recipe's derived ones. The
+    // terminated run has both; the open pause has a start and NO end -- the
+    // in-flight case `updated_at` could never express.
+    let (first, pause) = (&dto["runs"][0], &dto["runs"][1]);
+    assert!(
+        first["started_at"].is_string() && first["ended_at"].is_string(),
+        "{first}"
+    );
+    assert!(
+        pause["started_at"].is_string() && pause["ended_at"].is_null(),
+        "{pause}"
+    );
+    assert!(
+        dto["started_at"].is_string() && dto["ended_at"].is_null(),
+        "{dto}"
+    );
 
     // Labels, in the executor's own creation order (`run_ix`), which is the
     // order the detail route promises.
@@ -1295,7 +1386,7 @@ fn runnable_source(id: &str) -> String {
 
 /// A flow that is a single **unbounded** `Pause` — neither `pauseDuration:`
 /// nor `timeout:`. `executor::Resume::Never`, which is the case the resume
-/// route cannot end; see [`an_unbounded_pause_is_not_ended_by_the_resume_route`].
+/// route used to leave alone; see [`a_resume_releases_every_bound_of_pause_at_once`].
 fn unbounded_pause_source(id: &str) -> String {
     format!(
         "id: {id}\nnamespace: a.write\ntasks:\n  \
@@ -2027,119 +2118,419 @@ async fn a_replay_of_an_unfinished_execution_is_a_conflict() {
     }
 }
 
-/// **The finding: an UNBOUNDED pause is not ended by the resume route, and a
-/// BOUNDED one is.**
+/// One `Pause` with `props`, nothing after it: a resumed execution ends there.
+fn pause_source(id: &str, props: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: a.write\ntasks:\n  \
+         - id: pause\n    type: io.kestra.plugin.core.flow.Pause\n{props}"
+    )
+}
+
+/// Start `flow` through the route; the id of an execution that is `PAUSED`.
+async fn start_paused(
+    app: &common::App,
+    db: &Db,
+    ws: Uuid,
+    user: egret_core::UserId,
+    flow: Uuid,
+) -> Uuid {
+    let res = common::post_no_body(
+        app,
+        &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 201);
+    let id: Uuid = common::json(res).await["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        state_of(db, id).await,
+        "PAUSED",
+        "the fixture must reach the pause"
+    );
+    id
+}
+
+async fn resume_status(app: &common::App, ws: Uuid, user: egret_core::UserId, id: Uuid) -> u16 {
+    common::post_no_body(
+        app,
+        &format!("/api/ws/{ws}/workflows/executions/{id}/resume"),
+        user,
+    )
+    .await
+    .status()
+    .as_u16()
+}
+
+/// The execution's history and `ended_at`, and each `pause*` run's history,
+/// `ended_at` and attempts, read from the tables.
+async fn pause_rows(
+    db: &Db,
+    id: Uuid,
+) -> (Vec<String>, bool, Vec<(String, Vec<String>, bool, Value)>) {
+    let (history, ended): (Value, Option<DateTime<Utc>>) =
+        sqlx::query_as("SELECT history, ended_at FROM workflow.executions WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let runs: Vec<(String, Value, Option<DateTime<Utc>>, Value)> = sqlx::query_as(
+        "SELECT task_id, history, ended_at, attempts FROM workflow.task_runs \
+         WHERE execution_id = $1 AND task_id LIKE 'pause%' ORDER BY run_ix",
+    )
+    .bind(id)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let names = |v: Value| -> Vec<String> { serde_json::from_value(v).unwrap() };
+    (
+        names(history),
+        ended.is_some(),
+        runs.into_iter()
+            .map(|(t, h, e, a)| (t, names(h), e.is_some(), a))
+            .collect(),
+    )
+}
+
+/// **A resume releases a paused `Pause` AT ONCE, whatever its bound, and it
+/// ends `SUCCESS`** (W7b Task 3 fix round 1; Kestra's `ExecutionService.resume`
+/// and `Pause.java`: a pause resumed by hand "will always succeed").
 ///
-/// `flowable::resume_paused` is the only thing that moves a run out of
-/// `PAUSED`; it is pure over `(state, run, now)` and its `Resume::Never` arm
-/// returns `Waiting` *before* it reads `now`, so no clock value and no number
-/// of calls can end such a wait. A `Pause` with neither `pauseDuration:` nor
-/// `timeout:` is exactly that case. The route is not broken — the command it
-/// would need does not exist, which is a capability `advance()` does not have
-/// and which this task is forbidden to add to it.
+/// Three bounds, none of them due: an unbounded pause (`Resume::Never`, which
+/// nothing ended before), an hour's `pauseDuration:`, and an hour's
+/// `timeout:` (whose natural end is `FAILED`). Each goes, in one call, to the
+/// natural end's shape: the run `CREATED RUNNING PAUSED SUCCESS`, its attempt
+/// closed with an end, `RESTARTED` on the execution, and every `ended_at` set.
+/// A second resume is a 409.
 ///
-/// **The fixture carries BOTH elements of the class**, which is the thing
-/// `a_gantt_row_is_computable_from_the_execution_dto_alone`'s first draft
-/// lacked: the unbounded pause (the gap) and a bounded one whose deadline has
-/// passed (the control that says the route itself works). Without the second,
-/// "resume changed nothing" is equally consistent with a route that does
-/// nothing at all.
-///
-/// `#[sqlx::test]` rather than the shared database: the bounded arm backdates
-/// `created_at` so the deadline is in the past, and `worker::wake` in a
-/// neighbouring test binary selects due deadlines **globally** — on a shared
-/// database it could resume this execution before the route does, and the
-/// control would pass for the wrong reason.
+/// `#[sqlx::test]`: the worker's waker selects due runs globally.
 #[sqlx::test(migrations = "../../migrations")]
-async fn an_unbounded_pause_is_not_ended_by_the_resume_route(pool: sqlx::PgPool) {
+async fn a_resume_releases_every_bound_of_pause_at_once(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let db = Db { pool: pool.clone() };
     let (ws, user) = common::seed_workspace(&db).await;
-    common::grant(&db, ws, user, &["workflow:manage"]).await;
-    let never = common::seed_flow(&db, ws, user, &unbounded_pause_source("never"), "draft").await;
-    let bounded = common::seed_flow(
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    for (label, props) in [
+        ("unbounded", ""),
+        ("pauseDuration", "    pauseDuration: PT1H\n"),
+        ("timeout", "    timeout: PT1H\n"),
+    ] {
+        let flow = common::seed_flow(&db, ws, user, &pause_source(label, props), "draft").await;
+        let id = start_paused(&app, &db, ws, user, flow).await;
+
+        let res = common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{id}/resume"),
+            user,
+        )
+        .await;
+        assert_eq!(res.status(), 200, "{label}");
+        let dto = common::json(res).await;
+        assert_eq!(
+            dto["state"], "SUCCESS",
+            "{label}: the answer is the state after the resume: {dto}"
+        );
+
+        let (history, ended, runs) = pause_rows(&db, id).await;
+        assert_eq!(
+            history,
+            [
+                "CREATED",
+                "RUNNING",
+                "PAUSED",
+                "RESTARTED",
+                "RUNNING",
+                "SUCCESS"
+            ],
+            "{label}"
+        );
+        assert!(ended, "{label}: the execution's ended_at");
+        assert_eq!(runs.len(), 1, "{label}");
+        let (_, run_history, run_ended, attempts) = &runs[0];
+        assert_eq!(
+            run_history,
+            &["CREATED", "RUNNING", "PAUSED", "SUCCESS"],
+            "{label}"
+        );
+        assert!(run_ended, "{label}: the run's ended_at");
+        assert_eq!(
+            attempts[0]["history"],
+            serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+            "{label}"
+        );
+        assert!(
+            attempts[0]["ended_at"].is_i64(),
+            "{label}: the attempt's end: {attempts}"
+        );
+
+        assert_eq!(
+            resume_status(&app, ws, user, id).await,
+            409,
+            "{label}: nothing is paused any more"
+        );
+    }
+}
+
+/// **Several parallel pauses are released by one resume**, and the flow runs on.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_resume_releases_every_parallel_pause(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let source = "id: fan\nnamespace: a.write\ntasks:\n  \
+         - id: both\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      \
+         - id: pause_a\n        type: io.kestra.plugin.core.flow.Pause\n      \
+         - id: pause_b\n        type: io.kestra.plugin.core.flow.Pause\n        pauseDuration: PT1H\n      \
+         - id: pause_c\n        type: io.kestra.plugin.core.flow.Pause\n        timeout: PT1H\n";
+    let flow = common::seed_flow(&db, ws, user, source, "draft").await;
+    let id = start_paused(&app, &db, ws, user, flow).await;
+    let (_, _, before) = pause_rows(&db, id).await;
+    assert_eq!(before.len(), 3, "all three branches reached their pause");
+    assert!(
+        before
+            .iter()
+            .all(|(_, h, _, _)| h.last().map(String::as_str) == Some("PAUSED")),
+        "{before:?}"
+    );
+
+    assert_eq!(resume_status(&app, ws, user, id).await, 200);
+    assert_eq!(state_of(&db, id).await, "SUCCESS");
+    let (_, _, runs) = pause_rows(&db, id).await;
+    for (task, history, ended, _) in &runs {
+        assert_eq!(
+            history,
+            &["CREATED", "RUNNING", "PAUSED", "SUCCESS"],
+            "{task}"
+        );
+        assert!(ended, "{task}");
+    }
+}
+
+/// **The race with the waker is decided by the execution's lock, and the
+/// run transitions once.** A `timeout:` pause whose deadline has passed (the
+/// execution is backdated) is due for the waker, whose natural end is `FAILED`.
+///
+/// 1. The waker first: the run ends `FAILED`, and the resume that follows is a
+///    409 that writes nothing.
+/// 2. The resume first: the run ends `SUCCESS` (a manual resume always
+///    succeeds), and the waker that follows finds nothing due.
+/// 3. Both at once, several times: exactly one terminal on the run, and the
+///    resume's answer agrees with which one won.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_resume_and_the_waker_transition_a_pause_once(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let flow = common::seed_flow(
         &db,
         ws,
         user,
-        "id: bounded\nnamespace: a.write\ntasks:\n  \
-         - id: pause\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n",
+        &pause_source("race", "    timeout: PT1S\n"),
         "draft",
     )
     .await;
+    let backdate = |id: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE workflow.executions SET created_at = created_at - interval '1 hour' WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    let run_history = |id: Uuid| {
+        let db = db.clone();
+        async move { pause_rows(&db, id).await.2.remove(0).1 }
+    };
 
-    let app = common::app(&db).await;
-    let start = |flow: Uuid| format!("/api/ws/{ws}/workflows/flows/{flow}/executions");
-
-    // ── The gap ──────────────────────────────────────────────────────────
-    let a: Uuid = common::json(common::post_no_body(&app, &start(never), user).await).await["id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert_eq!(state_of(&db, a).await, "PAUSED");
-    for round in 1..=3 {
-        assert_eq!(
-            common::post_no_body(
-                &app,
-                &format!("/api/ws/{ws}/workflows/executions/{a}/resume"),
-                user
-            )
+    // 1. The waker first.
+    let id = start_paused(&app, &db, ws, user, flow).await;
+    backdate(id).await;
+    assert_eq!(
+        egret_workflow::worker::wake(&pool, 10).await.unwrap(),
+        vec![id]
+    );
+    assert_eq!(
+        run_history(id).await,
+        ["CREATED", "RUNNING", "PAUSED", "FAILED"]
+    );
+    assert_eq!(resume_status(&app, ws, user, id).await, 409);
+    // The worker's own answer, under the lock, which is what decides a real
+    // race: the route's pre-check never lets this case reach it.
+    assert_eq!(
+        egret_workflow::worker::resume_by_hand(&pool, id)
             .await
-            .status(),
-            200,
-            "round {round}: the route accepts the request"
-        );
-        assert_eq!(
-            state_of(&db, a).await,
-            "PAUSED",
-            "round {round}: and the execution has not moved, because nothing \
-             egret holds can end a Resume::Never wait"
-        );
-    }
+            .unwrap(),
+        egret_workflow::worker::Resumed::NotPaused
+    );
+    assert_eq!(
+        run_history(id).await,
+        ["CREATED", "RUNNING", "PAUSED", "FAILED"],
+        "the 409 wrote nothing"
+    );
 
-    // ── The control ──────────────────────────────────────────────────────
-    let b: Uuid = common::json(common::post_no_body(&app, &start(bounded), user).await).await["id"]
+    // 2. The resume first.
+    let id = start_paused(&app, &db, ws, user, flow).await;
+    backdate(id).await;
+    assert_eq!(resume_status(&app, ws, user, id).await, 200);
+    assert_eq!(
+        run_history(id).await,
+        ["CREATED", "RUNNING", "PAUSED", "SUCCESS"]
+    );
+    assert!(
+        egret_workflow::worker::wake(&pool, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing is due"
+    );
+    assert_eq!(
+        run_history(id).await,
+        ["CREATED", "RUNNING", "PAUSED", "SUCCESS"]
+    );
+
+    // 3. Both at once.
+    for round in 0..6 {
+        let id = start_paused(&app, &db, ws, user, flow).await;
+        backdate(id).await;
+        // Alternate which future is polled first, so either may take the lock.
+        let (by_hand, woken) = if round % 2 == 0 {
+            tokio::join!(
+                egret_workflow::worker::resume_by_hand(&pool, id),
+                egret_workflow::worker::wake(&pool, 10),
+            )
+        } else {
+            let (w, r) = tokio::join!(
+                egret_workflow::worker::wake(&pool, 10),
+                egret_workflow::worker::resume_by_hand(&pool, id),
+            );
+            (r, w)
+        };
+        let history = run_history(id).await;
+        assert_eq!(
+            history.len(),
+            4,
+            "round {round}: one terminal, written once: {history:?}"
+        );
+        match by_hand.unwrap() {
+            egret_workflow::worker::Resumed::Released(1) => {
+                assert_eq!(history[3], "SUCCESS", "round {round}")
+            }
+            egret_workflow::worker::Resumed::NotPaused => {
+                assert_eq!(history[3], "FAILED", "round {round}");
+                assert_eq!(woken.unwrap(), vec![id], "round {round}");
+            }
+            other => panic!("round {round}: {other:?}"),
+        }
+    }
+}
+
+/// `task_id, state, resume_with, not_before_ms, updated_at` of one run.
+type RunRow = (String, String, Option<String>, Option<i64>, DateTime<Utc>);
+
+/// **An execution paused only by a waiting `LoopUntil` is a 409, and nothing
+/// changes** (W7b Task 3 fix round 2, review N-1). `pause_mark` puts the
+/// execution in `PAUSED` while a `LoopUntil` waits for its next iteration, but
+/// a resume releases `Pause` tasks only (Kestra too), so there is nothing for
+/// it to do -- and a 200 that changed nothing would be a silent success.
+///
+/// The control is the same route on a real `Pause` (above), which answers 200.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_resume_of_an_execution_paused_only_by_a_loop_until_is_a_conflict(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    let source = "id: until\nnamespace: a.write\ntasks:\n  - id: loop\n    \
+                  type: io.kestra.plugin.core.flow.LoopUntil\n    \
+                  condition: \"{{ false }}\"\n    \
+                  checkFrequency:\n      interval: PT1H\n      maxIterations: 3\n    \
+                  tasks:\n      \
+                  - id: work\n        type: io.kestra.plugin.core.log.Log\n        \
+                  message: hi\n";
+    let flow = common::seed_flow(&db, ws, user, source, "draft").await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 201);
+    let id: Uuid = common::json(res).await["id"]
         .as_str()
         .unwrap()
         .parse()
         .unwrap();
-    assert_eq!(state_of(&db, b).await, "PAUSED");
-    // `Tick` is milliseconds since `created_at` (`claim::load_with` computes it
-    // in SQL), so moving `created_at` back is the only way to put a PT1S
-    // deadline in the past without sleeping.
-    sqlx::query(
-        "UPDATE workflow.executions SET created_at = created_at - interval '1 hour' WHERE id = $1",
+    // The body's one task runs; the condition is false; the loop waits an hour.
+    drain_with(&pool).await;
+    assert_eq!(
+        state_of(&db, id).await,
+        "PAUSED",
+        "the fixture must reach the loop's wait"
+    );
+    let rows = |pool: sqlx::PgPool| async move {
+        let ex: (Value, DateTime<Utc>) =
+            sqlx::query_as("SELECT history, updated_at FROM workflow.executions WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let runs: Vec<RunRow> = sqlx::query_as(
+            "SELECT task_id, state, resume_with, not_before_ms, updated_at FROM workflow.task_runs \
+             WHERE execution_id = $1 ORDER BY run_ix",
+        )
+        .bind(id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        (ex, runs)
+    };
+    let before = rows(pool.clone()).await;
+    assert!(
+        before
+            .1
+            .iter()
+            .any(|r| r.0 == "loop" && r.1 == "PAUSED" && r.2.as_deref() == Some("ITERATE")),
+        "the loop is what waits: {before:?}"
+    );
+
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{id}/resume"),
+        user,
     )
-    .bind(b)
-    .execute(&pool)
-    .await
-    .expect("backdate the bounded pause");
-    assert_eq!(
-        common::post_no_body(
-            &app,
-            &format!("/api/ws/{ws}/workflows/executions/{b}/resume"),
-            user
-        )
-        .await
-        .status(),
-        200
+    .await;
+    assert_eq!(res.status(), 409);
+    let body = common::json(res).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("Nothing to resume: no Pause task is waiting"),
+        "{body}"
     );
+    assert_eq!(rows(pool.clone()).await, before, "nothing was written");
     assert_eq!(
-        state_of(&db, b).await,
-        "SUCCESS",
-        "a pauseDuration: ends SUCCESS, and the route is what drove it there"
+        egret_workflow::worker::resume_by_hand(&pool, id)
+            .await
+            .unwrap(),
+        egret_workflow::worker::Resumed::NoPauseWaiting
     );
-    // And the same route now refuses, because the execution is no longer paused
-    // -- which also says the 200 above was not the 409 arm in disguise.
-    assert_eq!(
-        common::post_no_body(
-            &app,
-            &format!("/api/ws/{ws}/workflows/executions/{b}/resume"),
-            user
-        )
-        .await
-        .status(),
-        409
+    assert!(
+        common::audit_mutations(&app)
+            .iter()
+            .all(|(a, _, _)| a != "workflow_execution:resume"),
+        "a refused resume leaves no audit record"
     );
 }
 
@@ -2412,4 +2803,593 @@ async fn a_start_runs_the_draft_even_when_a_published_version_exists() {
     .await
     .expect("read the started execution's frozen source");
     assert_eq!(stored, edited, "and the row agrees with the response");
+}
+
+// ── W7b Task 1: the `root_only` and `parent` filters ────────────────────────
+
+/// Insert a child execution of either kind, in the shape migration 0138's
+/// CHECKs admit: a loop iteration (`parent_execution_id` + run + index +
+/// value) or a subflow/flow-trigger child (`trigger_execution_id` + run).
+async fn insert_child(
+    db: &Db,
+    ws: Uuid,
+    parent: Option<(Uuid, i32, i32)>,
+    trigger: Option<(Uuid, i32)>,
+    created_at: DateTime<Utc>,
+) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (workspace_id, namespace, flow_key, source, state, history, created_at, \
+            parent_execution_id, parent_run_ix, loop_index, loop_value, \
+            trigger_execution_id, trigger_run_ix) \
+         VALUES ($1, 'a.tree', 'child', $2, 'SUCCESS', '[\"CREATED\",\"SUCCESS\"]', $3, \
+                 $4, $5, $6, $7, $8, $9) RETURNING id",
+    )
+    .bind(ws)
+    .bind(SEEDED_SOURCE)
+    .bind(created_at)
+    .bind(parent.map(|p| p.0))
+    .bind(parent.map(|p| p.1))
+    .bind(parent.map(|p| p.2))
+    .bind(parent.map(|p| p.2.to_string()))
+    .bind(trigger.map(|t| t.0))
+    .bind(trigger.map(|t| t.1))
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert child execution")
+}
+
+/// Insert the replacement a `CREATE_NEW_EXECUTION` retry starts, in the shape
+/// `worker::replay` writes: `parent_execution_id` alone (no run, no loop
+/// index), `attempt_number` 2 — the shape 0138/0139's CHECKs admit for it.
+async fn insert_retry(db: &Db, ws: Uuid, parent: Uuid, created_at: DateTime<Utc>) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (workspace_id, namespace, flow_key, source, state, history, created_at, \
+            parent_execution_id, attempt_number) \
+         VALUES ($1, 'a.tree', 'root', $2, 'SUCCESS', '[\"CREATED\",\"SUCCESS\"]', $3, $4, 2) \
+         RETURNING id",
+    )
+    .bind(ws)
+    .bind(SEEDED_SOURCE)
+    .bind(created_at)
+    .bind(parent)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert retry execution")
+}
+
+fn ids(page: &Value) -> std::collections::BTreeSet<String> {
+    page["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// **`root_only=true` hides loop iterations and subflow/flow-trigger
+/// children and keeps `CREATE_NEW_EXECUTION` retries (the user's ruling,
+/// 2026-10-11); `parent=<id>` lists exactly that execution's children, of
+/// every link kind; a foreign parent is an empty page; both at once, or a
+/// malformed value, is a 400.**
+///
+/// The fixture holds every kind of row each filter must tell apart: two
+/// roots, a loop iteration, a subflow child and a retry of the first, a
+/// grandchild (a child of the iteration, which `parent=<root>` must NOT reach
+/// — the filter is one level), and a root with a child in ANOTHER workspace.
+#[tokio::test]
+async fn the_root_only_and_parent_filters_split_the_tree() {
+    let Some(db) = common::db().await else { return };
+    // Arrange
+    let (ws, user) = common::seed_workspace(&db).await;
+    let (other_ws, _) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let root = insert_execution(&db, ws, None, "a.tree", "root", "SUCCESS", at(1)).await;
+    let lone = insert_execution(&db, ws, None, "a.tree", "lone", "SUCCESS", at(2)).await;
+    let iteration = insert_child(&db, ws, Some((root, 0, 0)), None, at(3)).await;
+    let subflow = insert_child(&db, ws, None, Some((root, 1)), at(4)).await;
+    let grandchild = insert_child(&db, ws, None, Some((iteration, 0)), at(5)).await;
+    let retry = insert_retry(&db, ws, root, at(6)).await;
+    let foreign = insert_execution(&db, other_ws, None, "a.tree", "far", "SUCCESS", at(1)).await;
+    insert_child(&db, other_ws, None, Some((foreign, 0)), at(2)).await;
+    let app = common::app(&db).await;
+    let set = |v: &[Uuid]| -> std::collections::BTreeSet<String> {
+        v.iter().map(Uuid::to_string).collect()
+    };
+
+    // Act + Assert: no filter is every row of the workspace (the control).
+    let all = list(&app, ws, user, "namespace=a.tree").await;
+    assert_eq!(
+        ids(&all),
+        set(&[root, lone, iteration, subflow, grandchild, retry]),
+        "{all}"
+    );
+
+    // The retry stays beside the roots; the iteration, the subflow child and
+    // the grandchild (a subflow child of the iteration) do not.
+    let roots = list(&app, ws, user, "namespace=a.tree&root_only=true").await;
+    assert_eq!(ids(&roots), set(&[root, lone, retry]), "{roots}");
+    assert_eq!(
+        roots["total"], 3,
+        "the count carries the same predicate: {roots}"
+    );
+    let everything = list(&app, ws, user, "namespace=a.tree&root_only=false").await;
+    assert_eq!(
+        everything["total"], 6,
+        "root_only=false is no filter: {everything}"
+    );
+
+    let kids = list(&app, ws, user, &format!("parent={root}")).await;
+    assert_eq!(
+        ids(&kids),
+        set(&[iteration, subflow, retry]),
+        "every link kind, one level only: {kids}"
+    );
+    assert_eq!(kids["total"], 3, "{kids}");
+    let grand = list(&app, ws, user, &format!("parent={iteration}")).await;
+    assert_eq!(ids(&grand), set(&[grandchild]), "{grand}");
+    let none = list(&app, ws, user, &format!("parent={lone}")).await;
+    assert_eq!(none["total"], 0, "{none}");
+
+    // Another workspace's parent: an empty page, never an error.
+    let res = common::get(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions?parent={foreign}"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    let page = common::json(res).await;
+    assert_eq!(
+        (page["total"].clone(), ids(&page).len()),
+        (Value::from(0), 0),
+        "{page}"
+    );
+
+    // 400s: both filters; a malformed uuid; a root_only that is not a bool.
+    for q in [
+        format!("root_only=true&parent={root}"),
+        "parent=not-a-uuid".to_string(),
+        "root_only=maybe".to_string(),
+    ] {
+        let res = common::get(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions?{q}"),
+            user,
+        )
+        .await;
+        assert_eq!(res.status(), 400, "{q}");
+    }
+    // `root_only=false` beside `parent` is the default spelled out, not a
+    // contradiction.
+    let ok = list(&app, ws, user, &format!("root_only=false&parent={root}")).await;
+    assert_eq!(ok["total"], 3, "{ok}");
+}
+
+/// **`namespace_prefix` is a namespace and its children, dot-anchored, in
+/// this workspace only; beside `namespace` it is a 400.**
+///
+/// The fixture holds what a prefix match could get wrong: the namespace
+/// itself, a child and a grandchild, a sibling that shares the prefix without
+/// the dot (`a.bc` against `a.b`), a parent (`a`), an underscore that `LIKE`
+/// would read as a wildcard (`a_b`), and the same namespace in ANOTHER
+/// workspace.
+#[tokio::test]
+async fn namespace_prefix_matches_a_namespace_and_its_children_only() {
+    let Some(db) = common::db().await else { return };
+    // Arrange
+    let (ws, user) = common::seed_workspace(&db).await;
+    let (other_ws, _) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let exact = insert_execution(&db, ws, None, "a.b", "f", "SUCCESS", at(1)).await;
+    let child = insert_execution(&db, ws, None, "a.b.c", "f", "SUCCESS", at(2)).await;
+    let grandchild = insert_execution(&db, ws, None, "a.b.c.d", "f", "SUCCESS", at(3)).await;
+    insert_execution(&db, ws, None, "a.bc", "f", "SUCCESS", at(4)).await;
+    insert_execution(&db, ws, None, "a", "f", "SUCCESS", at(5)).await;
+    insert_execution(&db, ws, None, "a_b", "f", "SUCCESS", at(6)).await;
+    insert_execution(&db, other_ws, None, "a.b", "f", "SUCCESS", at(7)).await;
+    insert_execution(&db, other_ws, None, "a.b.c", "f", "SUCCESS", at(8)).await;
+    let app = common::app(&db).await;
+    let set = |v: &[Uuid]| -> std::collections::BTreeSet<String> {
+        v.iter().map(Uuid::to_string).collect()
+    };
+
+    // Act + Assert: the subtree, and nothing beside or above it.
+    let tree = list(&app, ws, user, "namespace_prefix=a.b").await;
+    assert_eq!(ids(&tree), set(&[exact, child, grandchild]), "{tree}");
+    assert_eq!(tree["total"], 3, "the count carries the predicate: {tree}");
+
+    // A leaf prefix is the exact namespace.
+    let leaf = list(&app, ws, user, "namespace_prefix=a.b.c.d").await;
+    assert_eq!(ids(&leaf), set(&[grandchild]), "{leaf}");
+
+    // The exact filter, for contrast: the namespace alone.
+    let only = list(&app, ws, user, "namespace=a.b").await;
+    assert_eq!(ids(&only), set(&[exact]), "{only}");
+
+    // `_` is a character: `a_b` matches itself, not `a.b`.
+    let underscore = list(&app, ws, user, "namespace_prefix=a_b").await;
+    assert_eq!(underscore["total"], 1, "{underscore}");
+
+    // Both at once is a 400, whichever values they carry.
+    for q in [
+        "namespace=a.b&namespace_prefix=a.b",
+        "namespace=a&namespace_prefix=a.b",
+    ] {
+        let res = common::get(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions?{q}"),
+            user,
+        )
+        .await;
+        assert_eq!(res.status(), 400, "{q}");
+    }
+}
+
+// ── W7b Task 1: real times through the DTO, and the replay link ─────────────
+
+/// **A replay's DTO names what it replays, and its times are its own.**
+///
+/// Driven through the real worker and the real routes: start, finish, replay,
+/// finish. The replay's `started_at` is after the original's `ended_at`, and
+/// the original's times are untouched by it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_carries_its_source_and_fresh_times(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    // Arrange
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let flow = common::seed_flow(&db, ws, user, &runnable_source("timed"), "draft").await;
+    let app = common::app(&db).await;
+    let started = common::json(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+            user,
+        )
+        .await,
+    )
+    .await;
+    let original: Uuid = started["id"].as_str().unwrap().parse().unwrap();
+    drain_with(&pool).await;
+    let detail = |id: Uuid| {
+        let app = &app;
+        async move {
+            common::json(
+                common::get(
+                    app,
+                    &format!("/api/ws/{ws}/workflows/executions/{id}"),
+                    user,
+                )
+                .await,
+            )
+            .await
+        }
+    };
+    let before = detail(original).await;
+    assert_eq!(before["state"], "SUCCESS", "{before}");
+    assert_eq!(
+        before["replayed_from_execution_id"],
+        Value::Null,
+        "{before}"
+    );
+    let ts = |v: &Value, k: &str| -> DateTime<Utc> {
+        v[k].as_str()
+            .unwrap_or_else(|| panic!("{k} is set: {v}"))
+            .parse()
+            .unwrap()
+    };
+    let (o_start, o_end) = (ts(&before, "started_at"), ts(&before, "ended_at"));
+    for run in before["runs"].as_array().unwrap() {
+        assert!(
+            ts(run, "started_at") >= o_start && ts(run, "ended_at") <= o_end,
+            "{run}"
+        );
+        assert!(run["attempts"][0]["ended_at"].is_i64(), "{run}");
+    }
+
+    // Act
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{original}/replay"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 201);
+    let replay: Uuid = common::json(res).await["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    drain_with(&pool).await;
+
+    // Assert
+    let after = detail(replay).await;
+    assert_eq!(after["state"], "SUCCESS", "{after}");
+    assert_eq!(
+        after["replayed_from_execution_id"],
+        original.to_string(),
+        "{after}"
+    );
+    let (r_start, r_end) = (ts(&after, "started_at"), ts(&after, "ended_at"));
+    assert!(
+        r_start >= o_end && r_start <= r_end,
+        "fresh: {o_end} then {after}"
+    );
+    let row = list(&app, ws, user, &format!("flow_id={flow}")).await;
+    let listed = row["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == replay.to_string())
+        .expect("the replay is listed")
+        .clone();
+    assert_eq!(listed["replayed_from_execution_id"], original.to_string());
+    assert_eq!(listed["started_at"], after["started_at"]);
+    let again = detail(original).await;
+    assert_eq!(
+        (again["started_at"].clone(), again["ended_at"].clone()),
+        (before["started_at"].clone(), before["ended_at"].clone()),
+        "the original is untouched by its replay"
+    );
+}
+
+async fn drain_with(pool: &sqlx::PgPool) {
+    for _ in 0..32 {
+        if egret_workflow::worker::tick(pool, 8, &AlwaysSucceeds)
+            .await
+            .expect("tick")
+            == 0
+        {
+            return;
+        }
+    }
+    panic!("the worker never stopped claiming");
+}
+
+// ── `can_manage` on the execution (W7b Task 3, spec §5.2) ───────────────────
+
+/// `GET …/executions/{id}` carries `can_manage`, the PDP's `workflow:manage`
+/// answer, so the detail page can hide Resume and Replay from a reader. A
+/// reader gets `false`; the control, identical but for the grant, `true`.
+#[tokio::test]
+async fn get_execution_says_whether_the_caller_may_manage_it() {
+    let Some(db) = common::db().await else { return };
+    for (perms, expected) in [
+        (&["workflow:read"][..], false),
+        (&["workflow:read", "workflow:manage"][..], true),
+    ] {
+        let (ws, user) = common::seed_workspace(&db).await;
+        common::grant(&db, ws, user, perms).await;
+        let id = insert_execution(&db, ws, None, "a.cm", "f", "SUCCESS", at(1)).await;
+        let app = common::app(&db).await;
+        let res = common::get(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{id}"),
+            user,
+        )
+        .await;
+        assert_eq!(res.status(), 200, "{perms:?}");
+        let body = common::json(res).await;
+        assert_eq!(body["can_manage"], expected, "{perms:?}: {body}");
+        // An API start has no trigger record: the wire says `null`, which is
+        // what the schema now declares (`Option<Object>`).
+        assert!(body["execution_trigger"].is_null(), "{body}");
+    }
+}
+
+/// A PDP that fails while deciding `workflow:manage` is an error (500), not a
+/// "no": the page must not hide the actions on an outage. The control is the
+/// same request through an app whose PDP fails on an action nobody asks.
+#[tokio::test]
+async fn get_execution_answers_an_error_when_the_can_manage_decision_fails() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let id = insert_execution(&db, ws, None, "a.cmpdp", "f", "SUCCESS", at(1)).await;
+    let url = format!("/api/ws/{ws}/workflows/executions/{id}");
+
+    let ok = common::app_with_failing_pdp_action(&db, "no-such-action").await;
+    assert_eq!(common::get(&ok, &url, user).await.status(), 200);
+
+    let app = common::app_with_failing_pdp_action(&db, "workflow:manage").await;
+    assert_eq!(common::get(&app, &url, user).await.status(), 500);
+}
+
+/// Start, resume and replay answer `can_manage: true`: the caller just passed
+/// the `workflow:manage` check those routes make.
+#[tokio::test]
+async fn start_resume_and_replay_answer_can_manage_true() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let pause_flow =
+        common::seed_flow(&db, ws, user, &unbounded_pause_source("cm-pause"), "draft").await;
+    let source = runnable_source("cm-replay");
+    let flow = common::seed_flow(&db, ws, user, &source, "draft").await;
+    let done = insert_execution_with(
+        &db,
+        ws,
+        Some(flow),
+        "SUCCESS",
+        &source,
+        serde_json::json!({}),
+    )
+    .await;
+    let app = common::app(&db).await;
+
+    let started = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{pause_flow}/executions"),
+        user,
+    )
+    .await;
+    assert_eq!(started.status(), 201);
+    let started = common::json(started).await;
+    assert_eq!(started["can_manage"], true, "start: {started}");
+
+    let paused = started["id"].as_str().unwrap();
+    let resumed = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{paused}/resume"),
+        user,
+    )
+    .await;
+    assert_eq!(resumed.status(), 200);
+    let resumed = common::json(resumed).await;
+    assert_eq!(resumed["can_manage"], true, "resume: {resumed}");
+
+    let replayed = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{done}/replay"),
+        user,
+    )
+    .await;
+    assert_eq!(replayed.status(), 201);
+    let replayed = common::json(replayed).await;
+    assert_eq!(replayed["can_manage"], true, "replay: {replayed}");
+}
+
+/// **The 2026-10-11 ruling, on the API start.** A `Pause` declaring
+/// `behavior`, `onPause`, `tasks` or `errors` is a validation error, and a
+/// saved draft carrying one is refused at start with a 400 that names the
+/// property -- before the ruling it was a warning, the start answered 201, and
+/// the execution stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed).
+/// The refusal is `build_plan`'s `validate_for_run` gate inside
+/// `worker::start_execution`, the one function every start path goes through.
+///
+/// Each of the four properties is driven, and the control is the same draft
+/// with a plain bounded `Pause`, which starts: without it the first half
+/// passes under a route that refuses every `Pause`.
+#[tokio::test]
+async fn a_start_refuses_a_draft_whose_pause_egret_does_not_run() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let app = common::app(&db).await;
+    let pause = |id: &str, extra: &str| {
+        format!(
+            "id: {id}\nnamespace: a.write\ntasks:\n  - id: gate\n    \
+             type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n{extra}"
+        )
+    };
+
+    for (property, extra) in [
+        ("behavior", "    behavior: RESUME\n"),
+        (
+            "onPause",
+            "    onPause:\n      id: hi\n      type: io.kestra.plugin.core.log.Log\n      message: hi\n",
+        ),
+        (
+            "tasks",
+            "    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+        ),
+        (
+            "errors",
+            "    errors:\n      - id: oops\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+        ),
+    ] {
+        let flow = common::seed_flow(
+            &db,
+            ws,
+            user,
+            &pause(&format!("pause-{}", property.to_lowercase()), extra),
+            "draft",
+        )
+        .await;
+        let res = common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+            user,
+        )
+        .await;
+        assert_eq!(res.status(), 400, "{property}");
+        let body = common::body_text(res).await;
+        assert!(
+            body.contains("unsupported_pause_property")
+                && body.contains(&format!("tasks.gate.{property}")),
+            "{property}: the refusal names the finding and the property: {body}"
+        );
+        assert_eq!(
+            common::execution_count(&db, ws).await,
+            0,
+            "{property}: a refused start leaves no execution behind"
+        );
+    }
+
+    // The control: a plain bounded Pause starts.
+    let ok = common::seed_flow(&db, ws, user, &pause("pause-plain", ""), "draft").await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{ok}/executions"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 201);
+    assert_eq!(common::execution_count(&db, ws).await, 1);
+}
+
+/// **The 2026-10-12 ruling, on the API start.** `ForEach` is the validation
+/// error `unsupported_foreach`: a saved draft holding one is refused at start
+/// with a 400 naming the finding, and no execution is created. Before the
+/// ruling it started (only a draft could), then stalled with `NoHandler`,
+/// as Task 7b measured; it never ended SUCCESS. The control is the same draft with `Loop`.
+#[tokio::test]
+async fn a_start_refuses_a_draft_with_a_foreach() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let app = common::app(&db).await;
+
+    let flow = common::seed_flow(
+        &db,
+        ws,
+        user,
+        "id: fe\nnamespace: a.write\ntasks:\n  - id: fan\n    type: io.kestra.plugin.core.flow.ForEach\n    values: [1, 2]\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+        "draft",
+    )
+    .await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    let body = common::body_text(res).await;
+    assert!(
+        body.contains("unsupported_foreach") && body.contains("tasks.fan"),
+        "{body}"
+    );
+    assert_eq!(common::execution_count(&db, ws).await, 0);
+
+    let ok = common::seed_flow(
+        &db,
+        ws,
+        user,
+        "id: lp\nnamespace: a.write\ntasks:\n  - id: fan\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1, 2]\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+        "draft",
+    )
+    .await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{ok}/executions"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 201);
+    // Roots only: the Loop's iterations are child executions.
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM workflow.executions \
+              WHERE workspace_id = $1 AND parent_execution_id IS NULL",
+        )
+        .bind(ws)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
 }

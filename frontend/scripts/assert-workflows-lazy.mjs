@@ -18,7 +18,7 @@
  * module stayed out. There is one marker per guarded module below: a string literal from that
  * module that survives minification and that nothing outside the area spells. A static import of
  * `WorkflowsRoutes.tsx` is caught through `FlowsList.tsx`, which it imports. Modules with no such
- * literal (`queryKeys.ts`, whose strings are short words) are NOT guarded here; a module added to
+ * literal (`queryKeys.ts`, whose strings are short words; `components/workflows/ReasonButton.tsx`, which has none) are NOT guarded here; a module added to
  * the area gets a marker in this list or is not covered either.
  *
  * Each marker was proven by a scratch build that imported its module eagerly from `App.tsx`; the
@@ -38,7 +38,7 @@
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { entryChunkName } from "./dist-entry.mjs";
+import { entryChunkName, entryPreloadNames } from "./dist-entry.mjs";
 
 const DIST = "dist";
 const LIST_MARKER = "egret.wf.ns-collapsed.";
@@ -54,7 +54,6 @@ const MARKERS = [
   ["src/components/workflows/StateChip.tsx", "RESUBMITTED"],
   // `EMPTY_SEGMENT_LABEL`, this module's only string literal.
   ["src/components/workflows/namespaceTree.ts", "(empty segment)"],
-  ["src/routes/workflows/ExecutionsPlaceholder.tsx", "The executions list is not here yet"],
   // The flow editor's tabs (W7a Task 4), registered by the flow pages' chunk (Task 5).
   ["src/components/workflows/editor/CodeTab.tsx", "egret-validate", "editor"],
   ["src/components/workflows/editor/DocsTab.tsx", "This type has no documented outputs.", "editor"],
@@ -81,13 +80,51 @@ const MARKERS = [
   // chunk (`MonacoDiffEditor`, `assert-monaco-lazy.mjs`).
   ["src/routes/workflows/FlowRevisions.tsx", "The saved draft already has this text", "editor"],
   ["src/components/workflows/RevisionDiff.tsx", "Differences between ", "editor"],
-  // The minimal execution page (W7a Task 6), in the area's own chunk with the list.
-  ["src/routes/workflows/ExecutionMinimal.tsx", "The execution ended before any task ran."],
+  // The executions list (W7b Task 2), in the area's own chunk with the flow list; the flow page's
+  // Executions tab imports it from there. Its filter-miss sentence.
+  ["src/routes/workflows/ExecutionsList.tsx", "No executions match the current filters."],
+  // A time preset's label. ("Last 30 days" is also a dashboard filter's, so not that one.)
+  ["src/routes/workflows/executionsListModel.ts", "Last 24 hours"],
+  // `ESTIMATED_DURATION_TITLE`, shared with the execution detail (Tasks 3 and 4).
+  ["src/components/workflows/executions/timing.ts", "so its creation and last update stand in."],
+  ["src/components/workflows/executions/trigger.tsx", "Loop iteration"],
+  // `staleNote`'s sentence. Polling and the clock are shared by the list and the detail.
+  ["src/components/workflows/executions/polling.ts", "it keeps trying on its own."],
+  // The execution detail (W7b Task 3), a lazy chunk of its own like the flow pages, which the
+  // gantt, logs and outputs (Tasks 4–6) grow; flagged to stay out of the list's chunk too.
+  ["src/routes/workflows/ExecutionDetail.tsx", "Edits made to the flow since it ran are not used.", "editor"],
+  ["src/routes/workflows/ExecutionOverview.tsx", "No trigger started this execution, so it has no trigger variables.", "editor"],
+  // `REPLAY_NOT_FINISHED_REASON`.
+  ["src/components/workflows/executions/actions.ts", "Replay is available when the execution has finished", "editor"],
+  // The Gantt tab (W7b Task 4), in the execution detail's chunk. `markerReason`'s sentence, the
+  // run panel's close label, and the unknown-`?run=` note.
+  ["src/components/workflows/executions/gantt/ganttModel.ts", "Cancelled before it started.", "editor"],
+  ["src/components/workflows/executions/gantt/GanttView.tsx", "Close the task run", "editor"],
+  ["src/components/workflows/executions/gantt/ExecutionGanttTab.tsx", "The link may be from another execution.", "editor"],
+  // The logs (W7b Task 5), in the execution detail's chunk: the cursor hook's refusal sentence, the
+  // view's note above "Load earlier", and the Logs tab's unknown-`?run=` note. `logRows.ts` has no
+  // literal of its own worth a marker (its one string is "execution") and is reached only through
+  // `LogView.tsx`, so it is NOT guarded here.
+  ["src/components/workflows/executions/logs/useLogFollow.ts", "The logs could not be read.", "editor"],
+  ["src/components/workflows/executions/logs/LogView.tsx", "Older lines were set aside to keep the view fast.", "editor"],
+  ["src/components/workflows/executions/logs/ExecutionLogsTab.tsx", "so every run is shown", "editor"],
+  // Outputs and files (W7b Task 6), in the execution detail's chunk: `LOOP_ITERATION_NOTE`, the
+  // tree's empty sentence, the tab's unknown-`?run=` note, `NO_LONGER_AVAILABLE`, the row's
+  // unread-size sentence, and the drawer's not-previewable title.
+  ["src/components/workflows/executions/outputs/outputsModel.ts", "The parent execution cannot reach these outputs.", "editor"],
+  ["src/components/workflows/executions/outputs/OutputsTree.tsx", "This task run has no outputs.", "editor"],
+  ["src/components/workflows/executions/outputs/ExecutionOutputsTab.tsx", "has no outputs in this execution.", "editor"],
+  ["src/components/workflows/executions/files/fileModel.ts", "This file is no longer available", "editor"],
+  ["src/components/workflows/executions/files/FileRow.tsx", "The size could not be read; the file may still open.", "editor"],
+  ["src/components/workflows/executions/files/FilePreviewDrawer.tsx", "This file cannot be previewed", "editor"],
 ];
 
 const entry = entryChunkName(DIST);
-const entrySource = readFileSync(join(ASSETS, entry), "utf8");
-const others = readdirSync(ASSETS).filter((f) => f.endsWith(".js") && f !== entry);
+// The entry and the chunks it imports statically (preloaded by `index.html`): everything a page
+// downloads before any `lazy()` runs. A marker in any of them is eager.
+const eager = [entry, ...entryPreloadNames(DIST)];
+const entrySource = eager.map((f) => readFileSync(join(ASSETS, f), "utf8")).join("\n");
+const others = readdirSync(ASSETS).filter((f) => f.endsWith(".js") && !eager.includes(f));
 
 let failed = false;
 
@@ -113,7 +150,7 @@ for (const [module, marker, editor] of MARKERS) {
   }
   if (entrySource.includes(marker)) {
     console.error(
-      `✗ ${marker} (${module}) is in the entry chunk (${entry}).\n` +
+      `✗ ${marker} (${module}) is in the entry chunk (${entry}) or a chunk it preloads.\n` +
         `  That module is eager again: every page now downloads it, including the login screen.\n` +
         `  Look for a static import of it from a module the entry reaches (App.tsx, the layout,\n` +
         `  a shared helper).`,

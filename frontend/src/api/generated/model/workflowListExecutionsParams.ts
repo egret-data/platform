@@ -14,9 +14,17 @@ export type WorkflowListExecutionsParams = {
  */
 flow_id?: string | null;
 /**
+ * Exactly this namespace. Cannot be combined with `namespace_prefix` (400).
  * @nullable
  */
 namespace?: string | null;
+/**
+ * This namespace and every namespace beneath it, dot-anchored: `a.b`
+ * matches `a.b` and `a.b.c`, never `a.bc`. A `_` or `%` is a literal
+ * character, not a wildcard. Cannot be combined with `namespace` (400).
+ * @nullable
+ */
+namespace_prefix?: string | null;
 /**
  * The YAML's own `id` — the only filter that still finds an execution
  * whose `flow_id` was `NULL`ed by a real `DELETE`.
@@ -62,6 +70,24 @@ since?: string | null;
  * @nullable
  */
 until?: string | null;
+/**
+ * `true`: hide child executions — a loop iteration (`loop_index` set)
+ * and a subflow or flow-trigger child (`trigger_execution_id` set). A
+ * `CREATE_NEW_EXECUTION` retry is NOT hidden: it carries
+ * `parent_execution_id` without a `loop_index`, and continues a root run.
+ * Absent or `false` lists every execution. Cannot be combined with
+ * `parent` (400).
+ * @nullable
+ */
+root_only?: boolean | null;
+/**
+ * Only the direct children of this execution: the rows whose
+ * `parent_execution_id` or `trigger_execution_id` is this id. An id from
+ * another workspace answers an empty page, never an error. Cannot be
+ * combined with `root_only=true` (400).
+ * @nullable
+ */
+parent?: string | null;
 /**
  * How many rows to return. Default 50, maximum 200; a larger value is
  * clamped rather than refused, and the clamped value comes back in the

@@ -27,4 +27,28 @@ export const workflowsKeys = {
   version: (id: string, v: number) => ["workflows", "flow", id, "versions", v] as const,
   schema: (ws: string) => ["workflows", "ws", ws, "schema"] as const,
   execution: (id: string) => ["workflows", "execution", id] as const,
+  /**
+   * The direct children of an execution (`GET …/executions?parent=`), under
+   * `execution(id)` so refreshing the execution refreshes them too.
+   */
+  executionChildren: (id: string) => ["workflows", "execution", id, "children"] as const,
+  /**
+   * One file of an execution (`path` is its `kestra:///` URI), under
+   * `execution(id)`: every read of it (`metas`, a `preview` per row cap) is
+   * keyed beneath this one.
+   */
+  executionFile: (id: string, path: string) => ["workflows", "execution", id, "file", path] as const,
+  executionFileMetas: (id: string, path: string) => ["workflows", "execution", id, "file", path, "metas"] as const,
+  executionFilePreview: (id: string, path: string, maxRows: number) =>
+    ["workflows", "execution", id, "file", path, "preview", maxRows] as const,
+  /**
+   * A page of the executions list. `params` is what the list was asked for
+   * (`ExecutionsList`'s filters, the pinned flow, the expanded namespaces), not
+   * the request: a time preset is turned into `since` at fetch time, so the key
+   * stays the same between polls. Without `params` it reaches every page.
+   */
+  executions: (ws: string, params?: object) =>
+    params
+      ? (["workflows", "ws", ws, "executions", params] as const)
+      : (["workflows", "ws", ws, "executions"] as const),
 };

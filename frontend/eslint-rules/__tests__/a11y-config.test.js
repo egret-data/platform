@@ -32,6 +32,17 @@ describe("jsx-a11y configuration", { timeout: 30_000 }, () => {
     expect(await lint('export const A = () => <button role="button">a</button>;')).toHaveLength(1);
   });
 
+  it("lets a role=log scroller take tabIndex, and still refuses it on other non-interactive roles", async () => {
+    const lint = async (code) => {
+      const [result] = await eslint.lintText(code, { filePath: "src/components/explore/Probe.tsx" });
+      return result.messages.filter((m) => m.ruleId === "jsx-a11y/no-noninteractive-tabindex");
+    };
+    expect(await lint('export const A = () => <div role="log" aria-label="Lines" tabIndex={0}>a</div>;')).toEqual([]);
+    expect(await lint('export const A = () => <div role="tabpanel" tabIndex={0}>a</div>;')).toEqual([]);
+    expect(await lint('export const A = () => <div role="region" aria-label="R" tabIndex={0}>a</div>;')).toHaveLength(1);
+    expect(await lint("export const A = () => <div tabIndex={0}>a</div>;")).toHaveLength(1);
+  });
+
   it("lets the rules see through egret's primitives", async () => {
     const lint = async (code) => {
       const [result] = await eslint.lintText(code, { filePath: "src/components/explore/Probe.tsx" });

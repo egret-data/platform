@@ -87,6 +87,7 @@ mod registry;
 mod render;
 mod replay;
 mod spawn;
+mod stamps;
 mod subflow;
 mod timeout;
 pub(crate) mod txn;
@@ -99,9 +100,30 @@ pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
 #[cfg(any(test, feature = "test-util"))]
 pub use claim::{apply_outcome, start_execution_in};
 pub use claim::{
-    claim, commit_outcome, due_retries, resume, start_execution, start_execution_with_trigger,
-    tick, tick_with, wake, Claimed, NewExecution, WorkerTiming,
+    claim, commit_outcome, due_retries, resume, resume_by_hand, start_execution,
+    start_execution_with_trigger, tick, tick_with, wake, Claimed, NewExecution, Resumed,
+    WorkerTiming,
 };
+/// Test-only (`test-util`; W7b Task 1): `persist`'s two state `UPDATE`s, so
+/// `tests/execution_timestamps.rs` can drive the production text against a
+/// terminal row.
+#[cfg(any(test, feature = "test-util"))]
+pub use claim::{EXECUTION_STATE_UPDATE, RUN_STATE_UPDATE};
+
+/// Test-only (`test-util`; W7b Task 1 cleanup): `persist`'s per-transition
+/// stamp rule, `(entered_running, entered_terminal)` for a write that takes
+/// the loaded history `before` to `after`, both given as wire names. The test
+/// that re-sends the two statements above binds what production would bind.
+#[cfg(any(test, feature = "test-util"))]
+pub fn stamps_entered(before: &[&str], after: &[&str]) -> (bool, bool) {
+    let parse = |h: &[&str]| -> Vec<RunState> {
+        h.iter()
+            .map(|s| from_wire(s).unwrap_or_else(|| panic!("unknown state {s}")))
+            .collect()
+    };
+    let e = stamps::Entered::of(&parse(before), &parse(after), false);
+    (e.running, e.terminal)
+}
 pub use reaper::reap;
 pub use registry::Handlers;
 pub use render::execution_render_context;
@@ -673,7 +695,13 @@ pub enum WorkerError {
     ///
     /// It behaves exactly like [`WorkerError::NoHandler`]: the tick aborts for
     /// that run, the execution stalls, and the differential oracle's driver
-    /// carries on. Keeping it inside `Corrupt` is what stopped `Corrupt` from
+    /// carries on. **A `Pause` declaring `behavior:`, `onPause:`, `tasks:` or
+    /// `errors:` reached this arm until 2026-10-11** -- `plan::pause_gap`
+    /// planned it opaque -- and stalled every execution of it in `RUNNING`
+    /// silently, the reaper releasing and re-offering the claim for ever. The
+    /// user's ruling made it a validation error (`unsupported_pause_property`),
+    /// so `build_plan` refuses such a flow and no start path can create its
+    /// run. Keeping it inside `Corrupt` is what stopped `Corrupt` from
     /// ever being reportable as a driver failure.
     #[error("execution {0} claimed run {1:?}, whose task is not a leaf of its own source — the executor plans it opaque, so this worker has no properties for it")]
     NotALeaf(uuid::Uuid, String),

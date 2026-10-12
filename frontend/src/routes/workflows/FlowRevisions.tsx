@@ -25,7 +25,7 @@ import Editor from "@/components/monaco/MonacoEditor";
 import { RevisionDiff, type DiffSide } from "@/components/workflows/RevisionDiff";
 import { versionSourceOf, type Enablement } from "@/components/workflows/draftState";
 import { useIsDark } from "@/hooks/useIsDark";
-import { DisabledReasons, ReasonButton } from "@/routes/workflows/FlowEditPage";
+import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
 /** `?compare=` value naming the saved draft rather than a version. */

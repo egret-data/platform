@@ -12,13 +12,12 @@ import { disposeFlowModel } from "@/components/workflows/editor/flowModel";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import type { CarriedDraft } from "@/routes/workflows/FlowDetail";
 import {
-  DisabledReasons,
   FlowEditPage,
-  ReasonButton,
   storeFlowLayout,
   useFlowLayout,
   useSaveShortcut,
 } from "@/routes/workflows/FlowEditPage";
+import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
 /** The create page's starting text (spec §5.4), verbatim. */

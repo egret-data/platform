@@ -17,6 +17,9 @@ describe("workflowsKeys", () => {
       workflowsKeys.version("f", 2),
       workflowsKeys.schema("eng"),
       workflowsKeys.execution("e"),
+      workflowsKeys.executionChildren("e"),
+      workflowsKeys.executions("eng"),
+      workflowsKeys.executions("eng", { page: 2 }),
     ]) {
       expect(key[0]).toBe("workflows");
       expect(reaches(workflowsKeys.all, key)).toBe(true);
@@ -26,6 +29,32 @@ describe("workflowsKeys", () => {
   it("keeps one workspace's list and schema apart from another's", () => {
     expect(reaches(workflowsKeys.flows("a"), workflowsKeys.flows("b"))).toBe(false);
     expect(reaches(workflowsKeys.schema("a"), workflowsKeys.schema("b"))).toBe(false);
+    expect(reaches(workflowsKeys.executions("a"), workflowsKeys.executions("b", { page: 1 }))).toBe(false);
+  });
+
+  it("reaches every page and filter of a workspace's executions from its unfiltered key, and no execution", () => {
+    expect(reaches(workflowsKeys.executions("eng"), workflowsKeys.executions("eng", { states: ["FAILED"], page: 3 }))).toBe(true);
+    expect(reaches(workflowsKeys.executions("eng"), workflowsKeys.execution("e"))).toBe(false);
+    expect(reaches(workflowsKeys.executions("eng"), workflowsKeys.flows("eng"))).toBe(false);
+  });
+
+  it("refreshes an execution's children with the execution, and no other execution's", () => {
+    expect(reaches(workflowsKeys.execution("e"), workflowsKeys.executionChildren("e"))).toBe(true);
+    expect(reaches(workflowsKeys.execution("f"), workflowsKeys.executionChildren("e"))).toBe(false);
+    expect(reaches(workflowsKeys.executions("eng"), workflowsKeys.executionChildren("e"))).toBe(false);
+  });
+
+  it("reaches a file's reads from the file and the execution, and no other file's", () => {
+    const metas = workflowsKeys.executionFileMetas("e", "kestra:///a.csv");
+    const preview = workflowsKeys.executionFilePreview("e", "kestra:///a.csv", 100);
+    for (const key of [metas, preview]) {
+      expect(key[0]).toBe("workflows");
+      expect(reaches(workflowsKeys.executionFile("e", "kestra:///a.csv"), key)).toBe(true);
+      expect(reaches(workflowsKeys.execution("e"), key)).toBe(true);
+      expect(reaches(workflowsKeys.executionFile("e", "kestra:///b.csv"), key)).toBe(false);
+      expect(reaches(workflowsKeys.execution("f"), key)).toBe(false);
+    }
+    expect(reaches(preview, workflowsKeys.executionFilePreview("e", "kestra:///a.csv", 500))).toBe(false);
   });
 
   it("reaches every filtered list of a workspace from its unfiltered key", () => {

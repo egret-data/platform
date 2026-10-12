@@ -519,11 +519,15 @@ pub enum TaskKind {
     /// # What a `Pause` planned this way does NOT carry
     ///
     /// `tasks:`, `errors:`, `behavior:` and `onPause:`. A `Pause` declaring any
-    /// of them is planned an opaque [`Runnable`](TaskKind::Runnable) instead —
-    /// see [`pause_gap`] — under the rule [`build_plan`] already applies to
-    /// `AllowFailure` and `WorkingDirectory`: an unimplemented flowable
-    /// produces a visibly wrong trace and stays honestly baselined, rather than
-    /// a plausible-looking wrong one.
+    /// of them is flattened an opaque [`Runnable`](TaskKind::Runnable) instead —
+    /// see [`pause_gap`] — and then **refused**: since the user's ruling of
+    /// 2026-10-11 `spec::validate` reports it as the error
+    /// `unsupported_pause_property`, so [`build_plan`]'s validation gate
+    /// returns `Err` and no plan holding one is ever returned. The opaque
+    /// planning alone (the rule `AllowFailure` and `WorkingDirectory` get) was
+    /// not enough for a `Pause`: the opaque run got a `type_id`, the worker
+    /// claimed it and failed with `NotALeaf` before recording an outcome, and
+    /// the execution stalled in `RUNNING` for ever.
     Pause {
         duration: Option<String>,
     },
@@ -776,8 +780,9 @@ const WAIT_FOR_TYPE: &str = "waitfor";
 ///   `valids/pause_on_pause`'s golden records it as a run with `parent: null`,
 ///   i.e. a SIBLING of the pause rather than a child, `overlapping` it.
 ///
-/// The order decides only which name a warning prints; the decision is the
-/// same for any non-`None`.
+/// The order decides only which name the `unsupported_pause_property` error
+/// prints (`spec::validate`, which refuses any non-`None` since 2026-10-11);
+/// the decision is the same for any non-`None`.
 pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
     if !p.tasks.is_empty() {
         return Some("tasks");

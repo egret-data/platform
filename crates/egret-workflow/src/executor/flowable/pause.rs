@@ -4,8 +4,9 @@
 //! whole behaviour is *not running*. It starts like any other flowable, goes
 //! straight into `PAUSED`, and stays there until one of three things happens:
 //! its `pauseDuration:` elapses, its `timeout:` elapses, or a human resumes it.
-//! egret implements the first two. **It must not implement the third by
-//! accident**, which is what this module's `None` arm is about.
+//! egret implements all three; the third only through [`release_now`], which a
+//! person's resume calls (W7b Task 3 fix round 1). **No clock may implement it
+//! by accident**, which is what this module's `None` arm is about.
 //!
 //! # The two bounds are different constructs with different terminals
 //!
@@ -52,9 +53,11 @@
 //!
 //! `behavior:`, `onPause:`, a `Pause`'s own `tasks:` and its `errors:`. A
 //! `Pause` declaring any of them is not a [`TaskKind::Pause`] at all —
-//! [`plan::pause_gap`](crate::executor::plan) keeps it an opaque
-//! `TaskKind::Runnable`, so it reaches this module never rather than reaching
-//! it and being ignored.
+//! [`plan::pause_gap`](crate::executor::plan) flattens it an opaque
+//! `TaskKind::Runnable`, and since the 2026-10-11 ruling `spec::validate`
+//! refuses it (`unsupported_pause_property`), so `build_plan` returns no plan
+//! for it and it reaches this module never rather than reaching it and being
+//! ignored.
 
 use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx};
@@ -62,6 +65,48 @@ use crate::executor::retry::parse_duration;
 use crate::executor::state::{ExecutionState, Resume, RunIx, RunState, Tick};
 
 use super::{plus, Step};
+
+/// **A manual resume** (W7b Task 3 fix round 1, the user's ruling of
+/// 2026-10-11): move every `PAUSED` `Pause` run's deadline to `now`, with
+/// `SUCCESS` as its terminal, and return which runs were released.
+///
+/// Kestra's `ExecutionService.resume` marks a paused run's new state at once,
+/// whatever its bounds, and `Pause.java` says a pause *"resumed before the
+/// duration (for example, from the UI) will not use the behavior property but
+/// will always succeed"*. So the terminal is `SUCCESS` for every bound: an
+/// unbounded pause, a `pauseDuration:` (which would end `SUCCESS` anyway) and a
+/// `timeout:` (which would end `FAILED` had the deadline been reached first).
+///
+/// **It ends nothing itself.** It rewrites only the `Resume` this module wrote
+/// when the pause was entered, so the run then leaves `PAUSED` by the one door
+/// every pause leaves by: [`super::resume_paused`] answers
+/// `SetRunState { SUCCESS }` at the next `advance()`, `pause_mark` owes the
+/// execution `RESTARTED`, and the worker's settle writes the run, its attempt
+/// and their timestamps exactly as for a deadline that passed.
+///
+/// A `Pause` run is told apart by its `Resume`: [`drive`] writes `Never` or
+/// `Terminal`; a `LoopUntil` waiting for its next iteration carries `Iterate`
+/// and is left alone. `not_before` moves with the deadline, because migration
+/// 0141 pairs a `TERMINAL:*` discriminant with a non-NULL `not_before_ms`.
+///
+/// Idempotent: a run that is no longer `PAUSED` is not touched, which is what
+/// makes a resume that loses the race to the waker release nothing.
+pub(crate) fn release_now(state: &mut ExecutionState, now: Tick) -> Vec<RunIx> {
+    let mut released = Vec::new();
+    for (ix, r) in state.runs.iter_mut().enumerate() {
+        let paused = r.history.last() == Some(&RunState::Paused);
+        let a_pause = matches!(r.resume_with, Some(Resume::Never | Resume::Terminal { .. }));
+        if paused && a_pause {
+            r.resume_with = Some(Resume::Terminal {
+                at: now,
+                state: RunState::Success,
+            });
+            r.not_before = Some(now);
+            released.push(ix);
+        }
+    }
+    released
+}
 
 /// What one `Pause` run wants, at the round it is `RUNNING`.
 ///

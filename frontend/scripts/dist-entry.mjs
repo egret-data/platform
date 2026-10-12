@@ -34,3 +34,28 @@ export function entryChunkName(dist) {
   }
   return matches[0];
 }
+
+/**
+ * The chunks `dist/index.html` preloads beside the entry (`<link rel="modulepreload">`): the
+ * entry's static imports, which the browser downloads on every page just as it does the entry.
+ * Rollup moves a module the entry imports statically into one of these, instead of into the entry
+ * itself, when a lazy chunk imports it too, so "not in the entry chunk" alone does not mean lazy
+ * (W7b Task 3: an eager import of `executions/polling.ts` landed in `polling-<hash>.js`, preloaded,
+ * and the entry-only check passed).
+ *
+ * @param {string} dist  path to `dist/`
+ * @returns {string[]} basenames within `dist/assets`
+ */
+export function entryPreloadNames(dist) {
+  const html = readFileSync(join(dist, "index.html"), "utf8");
+  // Attribute order is Vite's to choose, so each `<link>` is read whole and its `rel` and `href`
+  // asked for separately (W7b Task 3 review, M-1): a regex that wanted `rel` first would answer
+  // `[]` for `<link href=… rel="modulepreload">`, and the guard would fall back to entry-only.
+  const names = [];
+  for (const [tag] of html.matchAll(/<link\b[^>]*>/g)) {
+    if (!/\brel="modulepreload"/.test(tag)) continue;
+    const href = /\bhref="\/assets\/([^"]+\.js)"/.exec(tag);
+    if (href) names.push(href[1]);
+  }
+  return names;
+}

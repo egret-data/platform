@@ -104,9 +104,16 @@ without it and put through three stages:
 |---|---|---|---|---|
 | any | new refusal | any | `refused` | no |
 | fails | -- | no | `refused` | no |
+| new error refusing the property by name (`unsupported_pause_property`) | -- | any | `refused` | no |
 | new `not_yet_enforced` warning | -- | any | `warned` | yes |
 | clean | clean | yes | `honoured` | yes |
 | clean | clean | no | `ignored` | no |
+
+The by-name row (2026-10-11 ruling) exists because a read property whose
+sample draws a validation error is otherwise kept `honoured` as a bad sample.
+`models::Pause` reads `behavior`, `onPause` and `errors`, but `spec::validate`
+refuses each of them whatever its value (`executor::pause_gap` names them), so
+they are `refused` and the editor no longer offers them.
 
 **Enum values.** Each served property's `enum` values are tried one by one;
 a value that does not parse or that stage 2 refuses is removed from the served
@@ -140,13 +147,13 @@ class needs `plugins::gate::check` (both features, a runner, its FQCN in
 
 ### Result
 
-1495 properties over 90 rows: 1034 honoured, 8 warned, 334 ignored, 119 refused.
+1495 properties over 90 rows: 1035 honoured, 4 warned, 334 ignored, 122 refused.
 
 *base 7* = `assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`, `workerSelector`: `ignored` on core tasks and flowables, `refused` on script and plugin tasks.
 
 | Row | honoured | warned | ignored | refused |
 |---|---|---|---|---|
-| `Flow` | 13 | `checks`, `concurrency`, `quotas`, `sla`, `triggers` | `deleted`, `draft`, `policyRefs`, `revision`, `updated`, `workerSelector` | — |
+| `Flow` | 14 | `checks`, `concurrency`, `quotas`, `sla` | `deleted`, `draft`, `policyRefs`, `revision`, `updated`, `workerSelector` | — |
 | `io.kestra.plugin.core.debug.Return` | 10 | — | *base 7* | — |
 | `io.kestra.plugin.core.execution.Fail` | 11 | — | *base 7* | — |
 | `io.kestra.plugin.core.flow.AllowFailure` | 10 | — | *base 7*, `errors`, `finally` | — |
@@ -155,7 +162,7 @@ class needs `plugins::gate::check` (both features, a runner, its FQCN in
 | `io.kestra.plugin.core.flow.Loop` | 13 | — | *base 7*, `errors`, `fetchType`, `finally`, `outputs` | — |
 | `io.kestra.plugin.core.flow.LoopUntil` | 13 | — | *base 7*, `errors`, `finally` | — |
 | `io.kestra.plugin.core.flow.Parallel` | 12 | — | *base 7*, `finally`, `onChildFailure` | — |
-| `io.kestra.plugin.core.flow.Pause` | 10 | `behavior`, `errors`, `onPause` | *base 7*, `finally`, `onResume` | — |
+| `io.kestra.plugin.core.flow.Pause` | 10 | — | *base 7*, `finally`, `onResume` | `behavior`, `errors`, `onPause` |
 | `io.kestra.plugin.core.flow.Sequential` | 11 | — | *base 7*, `finally` | — |
 | `io.kestra.plugin.core.flow.Sleep` | 10 | — | *base 7* | — |
 | `io.kestra.plugin.core.flow.Subflow` | 14 | — | *base 7*, `inheritLabels`, `labels`, `restartBehavior`, `revision`, `scheduleDate` | — |

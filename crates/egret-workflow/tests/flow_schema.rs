@@ -207,6 +207,37 @@ fn trigger_accepted(t: &str) -> bool {
     !matches!(flow.triggers[0].kind, TriggerKind::Leaf { .. })
 }
 
+/// The spellings of `ForEach`, which egret refuses as the validation error
+/// `unsupported_foreach` (the user's ruling of 2026-10-12).
+const FOREACH_SPELLINGS: [&str; 2] = ["io.kestra.plugin.core.flow.ForEach", "core.foreach"];
+
+/// The 2026-10-12 ruling: `ForEach` is refused (by validate, and by publish
+/// before that as an unknown type), so no feature combination offers it,
+/// while `Loop` -- what the refusal tells the author to use -- is offered
+/// under both spellings. Without the `Loop` half this passes under a schema
+/// that offers no flowable at all.
+#[test]
+fn foreach_is_never_offered_and_loop_is() {
+    for (name, d) in deployments() {
+        for f in ALL {
+            let s = served(&flow_schema(&f, &d));
+            for t in FOREACH_SPELLINGS {
+                assert!(!task_accepted(t, f, &d), "{name} {f:?}: {t} is accepted");
+                assert!(
+                    !s.task_spellings.contains_key(t),
+                    "{name} {f:?}: {t} is offered"
+                );
+            }
+            for t in ["io.kestra.plugin.core.flow.Loop", "core.loop"] {
+                assert!(
+                    s.task_spellings.contains_key(t),
+                    "{name} {f:?}: {t} is not offered"
+                );
+            }
+        }
+    }
+}
+
 /// Test 1: the schema offers exactly the type spellings parse and publish
 /// accept, for each combination of features.
 #[test]
@@ -229,6 +260,10 @@ fn the_served_type_set_is_the_accepted_type_set_for_every_feature_combination() 
                 candidates.extend(row.aliases.iter().map(|a| a.to_string()));
             }
             candidates.extend(plugins::prefixed_types().map(str::to_string));
+            // `ForEach` is in no export and no registry, so it would never be
+            // a candidate and this equality could say nothing about it. It
+            // is named so the equality covers it (the 2026-10-12 ruling).
+            candidates.extend(FOREACH_SPELLINGS.iter().map(|t| t.to_string()));
             let accepted: BTreeSet<String> = candidates
                 .into_iter()
                 .filter(|t| task_accepted(t, f, &d))
@@ -412,6 +447,40 @@ fn properties_egret_refuses_after_parsing_are_not_served() {
             measured().refused_downstream[def].contains_key(prop),
             "{def}.{prop} names its refusal site"
         );
+    }
+}
+
+/// The 2026-10-11 ruling: a `Pause` declaring `behavior`, `onPause` or
+/// `errors` is a validation error (`unsupported_pause_property`), so the
+/// measurement classifies the three `refused` and the editor stops offering
+/// them. (`tasks`, the fourth property `pause_gap` names, is not in Kestra's
+/// documented `Pause` schema, so there is no row to classify.) The control is
+/// `pauseDuration` and `timeout`, which are honoured and still offered.
+#[test]
+fn a_pause_does_not_offer_the_properties_egret_refuses() {
+    let schema = flow_schema(&ALL[3], &permissive_deployment());
+    let pause = "io.kestra.plugin.core.flow.Pause";
+    let props = &schema["$defs"][pause]["properties"];
+    assert!(props.is_object(), "Pause is served");
+    for prop in ["behavior", "onPause", "errors"] {
+        assert_eq!(
+            measured().properties[pause].get(prop),
+            Some(&Treatment::Refused),
+            "{prop}"
+        );
+        assert!(
+            props.get(prop).is_none(),
+            "Pause offers {prop}, which egret refuses"
+        );
+    }
+    assert_eq!(measured().properties[pause].get("tasks"), None);
+    for prop in ["pauseDuration", "timeout"] {
+        assert_eq!(
+            measured().properties[pause].get(prop),
+            Some(&Treatment::Honoured),
+            "{prop}"
+        );
+        assert!(props.get(prop).is_some(), "Pause must still offer {prop}");
     }
 }
 

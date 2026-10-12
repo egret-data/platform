@@ -71,6 +71,7 @@ use super::cancel;
 use super::render::{self, Pass, Surface};
 use super::replay;
 use super::spawn::{self, Requested};
+use super::stamps::{self, stamp_columns, stamp_set, stamp_values};
 use super::subflow;
 use super::timeout::{self, Budget};
 use super::txn::{transaction, Ended, Fetched, Finish, Gate, InTxn, Isolation, Txn};
@@ -2326,6 +2327,9 @@ async fn begin(
     // state `persist` writes and BEFORE `spawn::open_batch`, which reads the values.
     let mut side = render::RenderSide::default();
     let (spawns, subflows) = drive(ctx, &surface, state, now, &mut marks, &mut seq, &mut side)?;
+    // W7b Task 1: the attempt ends this settle produced, stamped into the state
+    // `persist` serialises, so they ride the same UPDATE as the terminal state.
+    stamps::stamp_attempt_ends(before, state, now);
     persist(conn, ctx, before, state, release, &marks, seq).await?;
     if !side.failures.is_empty() || !side.file_values.is_empty() {
         // Built and boxed in a SYNC callee: `settle` re-enters itself through
@@ -2633,14 +2637,19 @@ async fn start_execution_in_on(
     } else {
         serde_json::json!({})
     };
-    let id: Uuid = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar(concat!(
         "INSERT INTO workflow.executions \
            (id, workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
             execution_trigger, scheduled_date, trigger_execution_id, execution_depth, \
-            flow_trigger_event_id, replayed_from_execution_id) \
-         VALUES (COALESCE($13, gen_random_uuid()), $1, $2, $3, $4, $5, 'CREATED', \
-                 '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
-    )
+            flow_trigger_event_id, replayed_from_execution_id, ",
+        stamp_columns!(),
+        ") VALUES (COALESCE($13, gen_random_uuid()), $1, $2, $3, $4, $5, 'CREATED', \
+                 '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, $11, $12, ",
+        // Both NULL for a row born `CREATED`; spelled through the helper so the
+        // rule has no exception for the reader to remember (`stamps`).
+        stamp_values!("'CREATED'", "'[\"CREATED\"]'"),
+        ") RETURNING id",
+    ))
     .bind(workspace_id)
     .bind(flow_id)
     .bind(&flow.namespace)
@@ -2732,6 +2741,56 @@ pub async fn resume(pool: &PgPool, execution_id: Uuid) -> Result<()> {
         let (ctx, state, now) = load(conn, execution_id, Stack::Fresh(gate.clone())).await?;
         let before = state.clone();
         settle(conn, &ctx, &before, state, now, None).await
+    })
+}
+
+/// What a manual resume found under the execution's lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resumed {
+    /// The execution was `PAUSED`; this many `Pause` runs (at least one)
+    /// were released and the execution settled on from there.
+    Released(usize),
+    /// The execution is `PAUSED`, but no `Pause` task is waiting: only a
+    /// `LoopUntil` waits for its next iteration, which a resume does not end
+    /// (Kestra resumes `Pause` tasks only). Nothing written. (W7b Task 3 fix
+    /// round 2: this used to settle and answer `Released(0)`, a silent success.)
+    NoPauseWaiting,
+    /// The execution was no longer `PAUSED` when the lock was taken -- the
+    /// waker ended the pause first, or it was never paused. Nothing written.
+    NotPaused,
+}
+
+/// **Resume a paused execution by hand** (W7b Task 3 fix round 1; Kestra's
+/// `ExecutionService.resume`): every `PAUSED` `Pause` run is released NOW,
+/// whatever its bound, and ends `SUCCESS`; then the execution settles on.
+///
+/// Inside the same transaction model and the same `FOR NO KEY UPDATE` as
+/// every writer ([`load`]). The release only moves each paused `Pause`'s
+/// deadline to `now` (`executor::release_paused_pauses`); the run then leaves
+/// `PAUSED` through `flowable::resume_paused` inside this [`settle`], exactly
+/// as a passed deadline does, so the run's and attempt's ends and their
+/// timestamps are written by `persist` like every other transition.
+///
+/// **The race with the waker is decided by the lock.** Whichever takes it
+/// first wins: a `timeout:` pause the waker reached first has already ended
+/// `FAILED` (and the execution has moved on), so this answers
+/// [`Resumed::NotPaused`] and writes nothing; one still `PAUSED` when this
+/// takes the lock ends `SUCCESS`, and the waker then finds nothing due.
+pub async fn resume_by_hand(pool: &PgPool, execution_id: Uuid) -> Result<Resumed> {
+    transaction!(pool, |at| {
+        let (conn, gate) = at.parts();
+        let (ctx, mut state, now) = load(conn, execution_id, Stack::Fresh(gate.clone())).await?;
+        if state.history.last() != Some(&RunState::Paused) {
+            return Ok(Resumed::NotPaused);
+        }
+        let before = state.clone();
+        let released = crate::executor::release_paused_pauses(&mut state, now).len();
+        if released == 0 {
+            // Before any write: the transaction commits nothing.
+            return Ok(Resumed::NoPauseWaiting);
+        }
+        settle(conn, &ctx, &before, state, now, None).await?;
+        Ok(Resumed::Released(released))
     })
 }
 
@@ -3436,6 +3495,36 @@ fn note_create_beside_a_created_sibling(state: &ExecutionState, cmds: &[Command]
     }
 }
 
+/// `persist`'s write of an EXISTING run, `$1`..`$15` as bound there.
+/// `$14`/`$15` are [`stamps::Entered`]'s two booleans.
+///
+/// A `const` rather than inline for one reader besides `persist`:
+/// `tests/execution_timestamps.rs` drives this exact text against a terminal
+/// row to show that a later write does not move its `ended_at`. It is
+/// exported under `test-util`.
+pub const RUN_STATE_UPDATE: &str = concat!(
+    "UPDATE workflow.task_runs \
+        SET state = $1, history = $2, attempts = $3, rendered = $4, \
+            rendered_run_if = $5, not_before_ms = $6, \
+            claimed_at = CASE WHEN $7 THEN NULL ELSE claimed_at END, \
+            ended_seq = $10, \
+            created_seq = COALESCE($12, created_seq), \
+            resume_with = $13, ",
+    stamp_set!("$1", "$2", "$14", "$15"),
+    ", updated_at = now() \
+      WHERE execution_id = $8 AND run_ix = $9 \
+        AND ($11::timestamptz IS NULL OR claimed_at = $11)",
+);
+
+/// `persist`'s write of the execution's state: `$1` the state, `$2` the
+/// history, `$3` the id, and `$4`/`$5` [`stamps::Entered`]'s booleans.
+/// Exported under `test-util` for [`RUN_STATE_UPDATE`]'s reason.
+pub const EXECUTION_STATE_UPDATE: &str = concat!(
+    "UPDATE workflow.executions SET state = $1, history = $2, ",
+    stamp_set!("$1", "$2", "$4", "$5"),
+    ", updated_at = now() WHERE id = $3",
+);
+
 /// Write the difference between `before` and `after`.
 ///
 /// `release` names the run whose lease this write clears — `None` at
@@ -3493,58 +3582,56 @@ async fn persist(
             // is NULL for every other run, and `claimed_at IS NOT DISTINCT
             // FROM NULL` would be the wrong reading of that — so the term is
             // written as "`$11` is null, OR it equals the row's lease".
-            let hit = sqlx::query(
-                "UPDATE workflow.task_runs \
-                    SET state = $1, history = $2, attempts = $3, rendered = $4, \
-                        rendered_run_if = $5, not_before_ms = $6, \
-                        claimed_at = CASE WHEN $7 THEN NULL ELSE claimed_at END, \
-                        ended_seq = $10, \
-                        created_seq = COALESCE($12, created_seq), \
-                        resume_with = $13, \
-                        updated_at = now() \
-                  WHERE execution_id = $8 AND run_ix = $9 \
-                    AND ($11::timestamptz IS NULL OR claimed_at = $11)",
-            )
-            .bind(state)
-            .bind(&history)
-            .bind(&attempts)
-            .bind(run.rendered.as_deref())
-            .bind(run.rendered_run_if.as_deref())
-            .bind(run.not_before.map(|t| t.0))
-            .bind(lease.is_some())
-            .bind(execution_id)
-            .bind(ix as i32)
-            // **No `COALESCE`, and that is a measurement.** Two guards were
-            // written here and neither could be seen to fail: keeping the FIRST
-            // termination (`COALESCE(ended_seq, $10)`) killed nothing across
-            // the whole crate, and so did keeping any EXISTING value
-            // (`COALESCE($10, ended_seq)`). The second is not merely unkillable
-            // but wrong: `retry::reopen_due` puts a terminated run back to
-            // `CREATED`, and a run that is running again must not keep a right
-            // endpoint. So the plain assignment is both the simplest and the
-            // one `normalise.py` describes -- its `relation` reads
-            // `state.endDate`, the run's LAST termination.
-            .bind(marks.ended.get(&ix).copied())
-            .bind(lease.map(|l| l.claimed_at))
-            // **`COALESCE` here and NOT on `ended_seq` above, and the asymmetry
-            // is the two fields' rules rather than caution** — W8 Task 4.
-            // `Marks` is built per `settle`, so it holds a `created` entry only
-            // for a run this settle created or RESET; every other run must keep
-            // the column it already has, which a bare `$12` would null. The
-            // right endpoint has no such case: `marks.ended` is `None` exactly
-            // when nothing terminated, and the plain assignment is what
-            // `retry::reopen_due` needs (a run that is running again must not
-            // keep a right endpoint).
-            .bind(marks.created.get(&ix).copied())
-            // A plain assignment, like `ended_seq` and unlike `created_seq`:
-            // the state's value IS the answer, including when it goes back to
-            // `NULL` because `Command::RestartLoop` took the run out of
-            // `PAUSED`. A `COALESCE` here would leave a stale discriminant
-            // beside a NULL deadline, which migration 0141 refuses.
-            .bind(run.resume_with.as_ref().map(Resume::wire))
-            .execute(&mut *conn)
-            .await
-            .map_err(db_err)?;
+            // An EXISTING run in `marks.created` was emptied and built back in
+            // this settle (`Marks::observe`'s second loop). See `stamps`.
+            let entered = stamps::Entered::of(
+                &before.runs[ix].history,
+                &run.history,
+                marks.created.contains_key(&ix),
+            );
+            let hit = sqlx::query(RUN_STATE_UPDATE)
+                .bind(state)
+                .bind(&history)
+                .bind(&attempts)
+                .bind(run.rendered.as_deref())
+                .bind(run.rendered_run_if.as_deref())
+                .bind(run.not_before.map(|t| t.0))
+                .bind(lease.is_some())
+                .bind(execution_id)
+                .bind(ix as i32)
+                // **No `COALESCE`, and that is a measurement.** Two guards were
+                // written here and neither could be seen to fail: keeping the FIRST
+                // termination (`COALESCE(ended_seq, $10)`) killed nothing across
+                // the whole crate, and so did keeping any EXISTING value
+                // (`COALESCE($10, ended_seq)`). The second is not merely unkillable
+                // but wrong: `retry::reopen_due` puts a terminated run back to
+                // `CREATED`, and a run that is running again must not keep a right
+                // endpoint. So the plain assignment is both the simplest and the
+                // one `normalise.py` describes -- its `relation` reads
+                // `state.endDate`, the run's LAST termination.
+                .bind(marks.ended.get(&ix).copied())
+                .bind(lease.map(|l| l.claimed_at))
+                // **`COALESCE` here and NOT on `ended_seq` above, and the asymmetry
+                // is the two fields' rules rather than caution** — W8 Task 4.
+                // `Marks` is built per `settle`, so it holds a `created` entry only
+                // for a run this settle created or RESET; every other run must keep
+                // the column it already has, which a bare `$12` would null. The
+                // right endpoint has no such case: `marks.ended` is `None` exactly
+                // when nothing terminated, and the plain assignment is what
+                // `retry::reopen_due` needs (a run that is running again must not
+                // keep a right endpoint).
+                .bind(marks.created.get(&ix).copied())
+                // A plain assignment, like `ended_seq` and unlike `created_seq`:
+                // the state's value IS the answer, including when it goes back to
+                // `NULL` because `Command::RestartLoop` took the run out of
+                // `PAUSED`. A `COALESCE` here would leave a stale discriminant
+                // beside a NULL deadline, which migration 0141 refuses.
+                .bind(run.resume_with.as_ref().map(Resume::wire))
+                .bind(entered.running)
+                .bind(entered.terminal)
+                .execute(&mut *conn)
+                .await
+                .map_err(db_err)?;
             // Same rule as the `outputs` write: 0 rows affected and 1 are the
             // same value to `execute()`, so the fence has to be read.
             if let Some(l) = lease {
@@ -3570,13 +3657,16 @@ async fn persist(
                 TaskKind::Runnable { type_id } => Some(type_id.as_str()),
                 _ => None,
             };
-            sqlx::query(
+            sqlx::query(concat!(
                 "INSERT INTO workflow.task_runs \
                    (execution_id, run_ix, task_ix, task_id, type_id, parent_ix, value, \
                     rendered, rendered_run_if, state, history, attempts, not_before_ms, \
-                    created_seq, ended_seq, resume_with) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
-            )
+                    created_seq, ended_seq, resume_with, ",
+                stamp_columns!(),
+                ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, ",
+                stamp_values!("$10", "$11"),
+                ")",
+            ))
             .bind(execution_id)
             .bind(ix as i32)
             .bind(run.task as i32)
@@ -3615,23 +3705,23 @@ async fn persist(
         .map_err(db_err)?;
 
     if before.history != after.history {
-        sqlx::query(
-            "UPDATE workflow.executions SET state = $1, history = $2, updated_at = now() \
-              WHERE id = $3",
-        )
-        .bind(
-            after
-                .history
-                .last()
-                .copied()
-                .unwrap_or(RunState::Created)
-                .wire(),
-        )
-        .bind(states_json(&after.history))
-        .bind(execution_id)
-        .execute(&mut *conn)
-        .await
-        .map_err(db_err)?;
+        let entered = stamps::Entered::of(&before.history, &after.history, false);
+        sqlx::query(EXECUTION_STATE_UPDATE)
+            .bind(
+                after
+                    .history
+                    .last()
+                    .copied()
+                    .unwrap_or(RunState::Created)
+                    .wire(),
+            )
+            .bind(states_json(&after.history))
+            .bind(execution_id)
+            .bind(entered.running)
+            .bind(entered.terminal)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
     }
     Ok(())
 }
@@ -3650,10 +3740,17 @@ fn attempts_json(attempts: &[Attempt]) -> serde_json::Value {
         attempts
             .iter()
             .map(|a| {
-                serde_json::json!({
+                // `ended_at` only once there is one: an attempt written before
+                // migration 0183, or one still open, has no key rather than a
+                // `null` that reads like a measurement.
+                let mut o = serde_json::json!({
                     "history": states_json(&a.history),
                     "started_at": a.started_at.0,
-                })
+                });
+                if let Some(end) = a.ended_at {
+                    o["ended_at"] = serde_json::Value::from(end.0);
+                }
+                o
             })
             .collect(),
     )
@@ -3723,9 +3820,22 @@ fn parse_attempts(owner: Uuid, v: &serde_json::Value) -> Result<Vec<Attempt>> {
                         format!("attempt {a} has no started_at"),
                     ))
                 })?;
+            // Absent on an open attempt and on one written before
+            // migration 0183; a present key that is not an integer is
+            // corruption, like a missing `started_at`.
+            let ended_at = match a.get("ended_at") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(t) => Some(Tick(t.as_i64().ok_or_else(|| {
+                    worker_err(WorkerError::Corrupt(
+                        owner,
+                        format!("attempt {a} has a non-integer ended_at"),
+                    ))
+                })?)),
+            };
             Ok(Attempt {
                 history,
                 started_at: Tick(started_at),
+                ended_at,
             })
         })
         .collect()

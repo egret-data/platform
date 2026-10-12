@@ -11309,7 +11309,8 @@ left column is asserting nothing a reader can go and read.
 | `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank` | renamed at W3b Task 5 → `the_sub_executions_are_compared_and_this_is_what_they_cost` |
 | `every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran` | → `every_sub_execution_egret_runs_is_one_kestra_ran`. A prefix was all one batch could offer; the driver runs them all, so it is a whole-set comparison |
 | `a_null_task_list_is_an_over_refusal_that_reaches_the_http_api` | renamed on `main` by `05083cbc`, **before this branch** → `a_null_task_list_parses_and_the_two_accidental_refusals_stand_on_their_own` |
-| `every_flow_kestra_published_plans_except_three_named_over_refusals` | same commit → `…_except_two_named_over_refusals` |
+| `every_flow_kestra_published_plans_except_three_named_over_refusals` | same commit → `…_except_two_named_over_refusals`, then W7b Task 7b → `every_flow_kestra_published_plans_except_the_named_refusals` |
+| `every_flow_kestra_published_plans_except_two_named_over_refusals` | renamed at W7b Task 7b → `every_flow_kestra_published_plans_except_the_named_refusals`: since W7b Task 4b its table also holds three deliberate `Pause` refusals |
 | `a_skipped_run_still_gets_a_happens_before_endpoint` | **deleted** with W3a's harness at W3b Task 5 |
 | `an_order_pair_is_before_only_if_the_second_run_was_created_after_the_first_ended` | deleted with the harness |
 | `restricting_the_order_cannot_hide_a_disagreement_on_a_kept_pair` | deleted with the harness |
@@ -12699,6 +12700,14 @@ names all four with what holds each.
 `spec::validate` gives a `not_yet_enforced` warning for exactly the pauses
 `build_plan` leaves opaque. Two copies of the predicate would be a publish that
 says a `behavior:` is enforced over an executor that ignores it.
+
+**Correction, 2026-10-11 (W7b Task 4b, the user's ruling): the warning is an
+ERROR now.** `spec::validate` reports `unsupported_pause_property` for exactly
+those pauses, so `build_plan`'s `validate_for_run` gate refuses the flow and
+the three entries are refused at plan rather than planned opaque. The warning
+let such a flow publish and start, and in production the opaque run stalled
+its execution in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). They stay
+baselined either way; `pause_gap` is still the one predicate.
 
 **`valids/pause-behavior` is the one this task declines to bank on purpose.**
 Its golden is the artifact's own defect — see *Drift at the execution seam*:

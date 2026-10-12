@@ -8,5 +8,6 @@
 
 /**
  * The trigger record, `NULL` for an API start.
+ * @nullable
  */
-export type ExecutionListItemDtoExecutionTrigger = { [key: string]: unknown };
+export type ExecutionListItemDtoExecutionTrigger = { [key: string]: unknown } | null;

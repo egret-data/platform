@@ -908,3 +908,93 @@ async fn an_archived_workspace_freezes_its_schedules() {
         "every tick missed while archived is recovered"
     );
 }
+
+/// **The 2026-10-11 ruling, on a schedule fire.** A flow whose `Pause`
+/// declares `behavior:` no longer plans, so its tick is refused like any
+/// other flow that does not plan: no execution, taken off the queue, and the
+/// trigger's `last_error` names the property. Before the ruling it fired and
+/// the execution stalled in `RUNNING` for ever. The sibling, a plain `Pause`,
+/// fires in the same pass -- the control.
+#[tokio::test]
+async fn a_pause_egret_does_not_run_is_refused_at_fire_and_its_sibling_still_fires() {
+    let Some(fx) = fx().await else { return };
+    let pause = |id: &str, extra: &str| {
+        format!(
+            "id: {id}\nnamespace: w12\ntriggers:\n  - id: s\n    type: {SCHEDULE}\n    \
+             cron: \"*/1 * * * *\"\ntasks:\n  - id: gate\n    \
+             type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n{extra}"
+        )
+    };
+    let broken = fx
+        .flow(&pause("pause-behavior", "    behavior: RESUME\n"))
+        .await;
+    let sibling = fx.flow(&pause("pause-plain", "")).await;
+    common::make_due(&fx.db, broken, "s", 2).await;
+    common::make_due(&fx.db, sibling, "s", 1).await;
+
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            fired: 1,
+            errored: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(executions_of(&fx.db, broken).await, 0);
+    assert_eq!(executions_of(&fx.db, sibling).await, 1);
+    let after = row(&fx.db, broken).await.unwrap();
+    assert_eq!(after.next_evaluation_date, None, "off the queue");
+    let err = after.last_error.expect("and says why");
+    assert!(
+        err.contains("unsupported_pause_property") && err.contains("tasks.gate.behavior"),
+        "{err}"
+    );
+}
+
+/// **The 2026-10-12 ruling, on a schedule fire.** A flow holding a `ForEach`
+/// no longer plans, so its tick is refused: no execution, off the queue, and
+/// `last_error` names `unsupported_foreach`. The sibling, the same flow with
+/// `Loop`, fires in the same pass.
+#[tokio::test]
+async fn a_foreach_is_refused_at_fire_and_its_loop_sibling_still_fires() {
+    let Some(fx) = fx().await else { return };
+    let src = |id: &str, task: &str| {
+        format!(
+            "id: {id}\nnamespace: w12\ntriggers:\n  - id: s\n    type: {SCHEDULE}\n    \
+             cron: \"*/1 * * * *\"\ntasks:\n{task}"
+        )
+    };
+    let broken = fx.flow(&src("fe", "  - id: fan\n    type: io.kestra.plugin.core.flow.ForEach\n    values: [1, 2]\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n")).await;
+    let sibling = fx.flow(&src("lp", "  - id: fan\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1, 2]\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n")).await;
+    common::make_due(&fx.db, broken, "s", 2).await;
+    common::make_due(&fx.db, sibling, "s", 1).await;
+
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            fired: 1,
+            errored: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(executions_of(&fx.db, broken).await, 0);
+    // Roots only: the Loop's iterations are child executions.
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM workflow.executions \
+              WHERE flow_id = $1 AND parent_execution_id IS NULL",
+        )
+        .bind(sibling)
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    let after = row(&fx.db, broken).await.unwrap();
+    assert_eq!(after.next_evaluation_date, None, "off the queue");
+    let err = after.last_error.expect("and says why");
+    assert!(
+        err.contains("unsupported_foreach") && err.contains("tasks.fan"),
+        "{err}"
+    );
+}

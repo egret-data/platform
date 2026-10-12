@@ -2969,7 +2969,13 @@ const RETIRED_POINTERS: &[(&str, &str)] = &[
     ),
     (
         "every_flow_kestra_published_plans_except_three_named_over_refusals",
+        "every_flow_kestra_published_plans_except_the_named_refusals",
+    ),
+    // Renamed at W7b Task 7b: its table holds deliberate refusals now (the
+    // 2026-10-11 Pause ruling), not only over-refusals, and more than two.
+    (
         "every_flow_kestra_published_plans_except_two_named_over_refusals",
+        "every_flow_kestra_published_plans_except_the_named_refusals",
     ),
     // Renamed by W3b Task 5, because the question each asks changed. Both say
     // so in their own doc comments.
@@ -3822,6 +3828,7 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
     let mut order_only: Vec<String> = Vec::new();
     let mut unfinished: Vec<String> = Vec::new();
     let mut matched_while_stalled: Vec<String> = Vec::new();
+    let mut refused_ids: Vec<(String, String)> = Vec::new();
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         let expected = Trace::from(entry);
@@ -3831,8 +3838,9 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
                 t.restrict_order_to(&expected);
                 t
             }
-            Outcome::Refused(_) => {
+            Outcome::Refused(why) => {
                 refused += 1;
+                refused_ids.push((entry.id.clone(), why.clone()));
                 total += 1;
                 continue;
             }
@@ -3988,6 +3996,22 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
         );
     }
 
+    // The ONE deliberate refusal of a flow Kestra ran: the user's ruling of
+    // 2026-10-11 (W7b Task 4b). A `Pause` declaring `behavior:`, `errors:` or
+    // `onPause:` is `unsupported_pause_property`, because egret ran it as an
+    // opaque runnable no worker could claim and the execution stalled for
+    // ever. Named, so any OTHER refusal still fails here.
+    assert_eq!(
+        refused_ids
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        PAUSE_REFUSED,
+        "{refused_ids:?}"
+    );
+    for (id, why) in &refused_ids {
+        assert!(why.contains("unsupported_pause_property"), "{id}: {why}");
+    }
     assert_eq!(
         (execution, runs, order, spawned, refused, broken, total),
         (
@@ -3995,7 +4019,7 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
             MISMATCH_ON_RUNS,
             MISMATCH_ON_ORDER,
             MISMATCH_ON_SPAWNED,
-            0,
+            PAUSE_REFUSED.len(),
             0,
             MISMATCHING_RUNS_ENTRIES
         ),
@@ -4080,7 +4104,10 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 /// `RunState::Cancelled` existed.
 ///
 /// **71 since W9a Task 11**: `valids/loop-values-from-uri` banked.
-const MISMATCH_ON_EXECUTION: usize = 71;
+///
+/// **68 since W7b Task 4b**: the three `Pause` entries of [`PAUSE_REFUSED`]
+/// are refused now, so they differ on no field and count as `refused`.
+const MISMATCH_ON_EXECUTION: usize = 68;
 /// **112 through W8 Task 2, 104 after W8 Task 3, 103 after W8 Task 4, 96 after
 /// W8 Task 5, 94 now** -- the same eight, then `valids/waitfor-nested`, then
 /// the seven `allow*` entries, then W8 Task 6's two. The last pair differ on
@@ -4089,7 +4116,9 @@ const MISMATCH_ON_EXECUTION: usize = 71;
 /// rather than by a state.
 ///
 /// **93 since W9a Task 11**: `valids/loop-values-from-uri` banked.
-const MISMATCH_ON_RUNS: usize = 93;
+///
+/// **90 since W7b Task 4b**: the three of [`PAUSE_REFUSED`].
+const MISMATCH_ON_RUNS: usize = 90;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
@@ -4103,7 +4132,20 @@ const MISMATCH_ON_RUNS: usize = 93;
 /// `Loop`'s own `outputs:`, which egret does not produce -- now agrees on
 /// `order` and `spawned`, because its `Loop` iterates the ION file instead of
 /// failing at `CREATED`.
-const MISMATCH_ON_ORDER: usize = 55;
+///
+/// **53 since W7b Task 4b**: two of the three of [`PAUSE_REFUSED`] carried an
+/// ordered pair.
+const MISMATCH_ON_ORDER: usize = 53;
+/// The `runs` entries egret refuses on purpose (the user's ruling of
+/// 2026-10-11, W7b Task 4b): a `Pause` declaring `behavior:`, `errors:` or
+/// `onPause:` is the validation error `unsupported_pause_property` rather
+/// than an opaque runnable that stalled its execution for ever. In golden
+/// order.
+const PAUSE_REFUSED: [&str; 3] = [
+    "valids/pause-behavior",
+    "valids/pause-errors-finally-after-execution",
+    "valids/pause_on_pause",
+];
 const MISMATCH_ON_SPAWNED: usize = 13;
 /// **122 through W8 Task 2, 114 after W8 Task 3, 113 now** -- the eight `Pause`
 /// entries Task 3 banked and the one `LoopUntil` entry Task 4 did. The
@@ -4186,7 +4228,11 @@ const MISMATCHING_RUNS_ENTRIES: usize = 103;
 /// `valids/loop-outputs-auto` stalled at `write`, a
 /// `io.kestra.plugin.core.storage.Write` the driver had no handler for; both
 /// finish now.
-const ENTRIES_LEFT_UNFINISHED: usize = 45;
+///
+/// **42 since W7b Task 4b**: the three of [`PAUSE_REFUSED`] stalled at their
+/// opaque `Pause` run (the worker's `NotALeaf`, the very defect the user's
+/// ruling of 2026-10-11 closes) and are refused at start now.
+const ENTRIES_LEFT_UNFINISHED: usize = 42;
 
 /// **The guard W3a deleted did NOT come back, and this is why — measured, not
 /// assumed.**
@@ -4974,10 +5020,36 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     // below, for `in_an_errors_list`'s reason: constants swapped for whatever
     // today prints leave this test agreeing with itself.
     let mut is_a_subflow = 0usize;
+    // **W7b Task 4b (the user's ruling of 2026-10-11) narrowed it.** A `Pause`
+    // declaring `behavior:`/`errors:`/`onPause:` was planned an opaque
+    // `Runnable` -- `fed` and over-fed -- and is now refused at plan
+    // (`unsupported_pause_property`), so its runs land in `unplanned`. Derived
+    // here, for `in_an_errors_list`'s reason, and added back below.
+    let mut refused_pause_runs = 0usize;
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         let trace = Trace::from(entry);
-        let Ok(plan) = build_plan(&corpus_source(&entry.id)) else {
+        let planned = build_plan(&corpus_source(&entry.id));
+        if let Err(e) = &planned {
+            if e.message.starts_with("unsupported_pause_property:") {
+                // The pause's own runs: those were `fed` and over-fed. Every
+                // other run of the entry was `unplanned` already.
+                let flow = egret_workflow::spec::parse(&corpus_source(&entry.id))
+                    .expect("a refused-at-plan entry still parses");
+                let pauses: Vec<&str> = flow
+                    .tasks
+                    .iter()
+                    .filter(|t| t.r#type.ends_with("flow.Pause"))
+                    .map(|t| t.id.as_str())
+                    .collect();
+                refused_pause_runs += trace
+                    .runs
+                    .iter()
+                    .filter(|r| pauses.contains(&r.task.as_str()))
+                    .count();
+            }
+        }
+        let Ok(plan) = planned else {
             let mut stack: Vec<&Trace> = vec![&trace];
             while let Some(t) = stack.pop() {
                 unplanned += t.runs.len();
@@ -5056,11 +5128,17 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          `TaskKind::Executable`"
     );
     assert_eq!(
+        refused_pause_runs, 3,
+        "`valids/pause-behavior`, `valids/pause-errors-finally-after-execution` \
+         and `valids/pause_on_pause`: one `Pause` run each, fed and over-fed \
+         while it was planned opaque"
+    );
+    assert_eq!(
         (
-            fed - in_an_errors_list + is_a_subflow,
+            fed - in_an_errors_list + is_a_subflow + refused_pause_runs,
             flowable - is_a_subflow,
-            unplanned + in_an_errors_list,
-            over_fed.values().sum::<usize>() + is_a_subflow
+            unplanned + in_an_errors_list - refused_pause_runs,
+            over_fed.values().sum::<usize>() + is_a_subflow + refused_pause_runs
         ),
         (421, 95, 324, 96),
         "the reconstruction must reproduce Task 5's four committed figures -- up \
@@ -5109,14 +5187,23 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
         over_fed.get("io.kestra.plugin.core.flow.Subflow")
     );
     assert_eq!(
-        (flow_then + is_a_subflow, over_fed.len() + 1),
+        (
+            flow_then + is_a_subflow + refused_pause_runs,
+            over_fed.len() + 1 + usize::from(refused_pause_runs > 0)
+        ),
         (71, 10),
         "Task 5's flow bucket, reconstructed: 7 types and 89 runs, of which \
          `io.kestra.plugin.core.flow.Subflow` was one type and 22 runs until W6 \
          -- and of which `LoopUntil` (3 runs) and `WaitFor` (6) were two more \
          types and 9 more runs until W8 Task 4 planned them. 80 -> 71 and \
          12 -> 10, the same movement the four-bucket assertion above records \
-         from the other side"
+         from the other side. `io.kestra.plugin.core.flow.Pause` left as a type \
+         and 3 runs at W7b Task 4b (refused at plan) and is added back here"
+    );
+    assert!(
+        !over_fed.contains_key("io.kestra.plugin.core.flow.Pause"),
+        "no `Pause` is planned opaque since W7b Task 4b: {:?}",
+        over_fed.get("io.kestra.plugin.core.flow.Pause")
     );
 }
 
