@@ -1749,17 +1749,19 @@ fn walk_task(
         // opaque `spec` map), so:
         //   1. Anything spelled like Kestra's control-flow namespace (the
         //      FQCN prefix, or the `core.` alias this crate ALSO shares
-        //      with its own registered leaf types) warns unconditionally --
-        //      a table hit names the package; a miss still warns, just
-        //      without naming one, so the next class Kestra adds warns the
-        //      moment it's written, not the moment someone adds a row.
+        //      with its own registered leaf types) is the ERROR
+        //      `unsupported_flow_task` -- a table hit names the package; a
+        //      miss is still refused, just without naming one, so the next
+        //      class Kestra adds is refused the moment it's written, not the
+        //      moment someone adds a row.
         //   2. Anything else that is neither a `TaskKind` variant nor
-        //      `registry::known_type(...)` warns too, under its own code --
-        //      this is what catches a typo like `egret.sqll` before Task 6
-        //      turns it into a hard publish refusal.
+        //      `registry::known_type(...)` is the ERROR `unknown_task_type`
+        //      -- this is what catches a typo like `egret.sqll`.
+        // Both were warnings until no-silent-stall Task 1 made them errors,
+        // so publish and every start refuse them.
         // `registry::known_type` is checked FIRST, so `core.log`/`core.http`/
         // `core.slack` -- which share the `core.` alias spelling with real
-        // Kestra control-flow aliases -- never reach either warning: the
+        // Kestra control-flow aliases -- never reach either error: the
         // rule is "neither a control-flow variant nor a registered type",
         // not "starts with `core.`".
         // W5b: a `kestra.` type (in the catalog or not) and a bare catalog

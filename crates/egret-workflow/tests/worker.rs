@@ -1719,7 +1719,7 @@ async fn an_unplannable_source_still_aborts_the_tick_and_records_nothing(pool: s
         .expect_err("an unparseable source aborts the tick");
 
     assert!(
-        err.to_string().contains("no longer plans"),
+        err.to_string().contains("does not plan"),
         "the refusal is Unplannable: {err}"
     );
     assert_eq!(run_state(&pool, ex, "a").await.as_deref(), Some("RUNNING"));

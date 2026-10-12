@@ -5874,7 +5874,7 @@ tasks:
         assert_eq!(
             wide - without_errors,
             0,
-            "not one of those 89 is reached through an `errors:` list, so \
+            "not one of those 78 is reached through an `errors:` list, so \
              walking `errors` in `Plan::children_of` costs and buys nothing \
              here. It is Kestra's own walk and it stays; this is its price"
         );

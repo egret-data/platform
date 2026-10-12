@@ -628,7 +628,7 @@ pub enum WorkerError {
     /// stored sources with `build_plan`, so every construct Task 1 made an
     /// error landed here for the executions already running, and cycled
     /// through the reaper for ever.
-    #[error("execution {0} holds a source that no longer plans: {1}")]
+    #[error("execution {0} holds a source that does not plan: {1}")]
     Unplannable(uuid::Uuid, String),
 
     /// No handler is registered for a claimed run's `type_id`.

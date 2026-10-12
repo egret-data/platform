@@ -65,7 +65,7 @@ Mọi construct mà `build_plan` lập kế hoạch là một `Runnable` opaque 
 | Một type không xác định | `unknown_task_type`, từ cảnh báo thành lỗi | không đổi: kiểm tra lỗi gõ |
 
 **Các quy tắc giữ bảng này lại với nhau:**
-- **Mỗi cái một vị từ.** `pause_gap` và `loop_until_gap` vẫn là các vị từ duy nhất mà cả `build_plan` và `validate` cùng hỏi. Các lỗi được phát ở chỗ trước đây phát cảnh báo.
+- **Mỗi cái một vị từ.** `pause_gap` và `loop_until_gap` vẫn là các vị từ duy nhất mà cả `build_plan` và `validate` cùng hỏi. `unsupported_flow_task` và `unknown_task_type` được phát ở chỗ trước đây phát cảnh báo của chúng; `unsupported_loop_until_property` chưa từng có cảnh báo và được phát ở chỗ `validate` kiểm tra `loop_until_gap`.
 - **Draft vẫn lưu được.** `update_flow` và `create_flow` không từ chối vì lỗi validation, nên draft có bất kỳ cái nào trong số này vẫn được lưu. Editor hiển thị phát hiện đó như một lỗi.
 - **Các đường giữ nguyên lỗi của chúng.** `working_directory_tasks_required`, `working_directory_child_not_runnable`, `working_directory_namespace_files_invalid` và `allow_failure_tasks_required` vẫn giữ. Một `WorkingDirectory` giờ mang thêm `unsupported_working_directory`.
 - **Cả `errors:` lồng nhau.** `walk_task` chỉ đi xuống qua `children()`. `validate_script_tasks` ghi lại sự khác biệt đó, còn `build_plan` thì làm phẳng `errors:` riêng của một flowable (`Sequential`, `Parallel`, `If`, `Switch`, `Dag`). Vì vậy các kiểm tra của bảng này cũng phải chạm tới các task dưới `error_children()`; nếu không, một `AllowFailure` trong `errors:` của một `Sequential` sẽ lọt qua. Kế hoạch chọn việc để chính `walk_task` đi xuống hay để một lượt đi thứ hai làm, và nêu điều đó làm đổi gì với các kiểm tra khác.
@@ -186,4 +186,5 @@ Các vòng lặp lập kế hoạch lại source đã lưu của chính parent, 
 
 - Một deployment mà process API và process worker chạy với các cấu hình `workflow` khác nhau vẫn có thể nhận một start mà worker của nó không phục vụ được. §5 biến điều đó thành một run `FAILED` thay vì một chỗ kẹt.
 - Một flow đã publish với một construct của §3 hoặc §4 vẫn ở trạng thái đã publish và không start được. Editor hiện lý do.
-- Replay một execution mà source của nó nay bị từ chối thì chính nó bị từ chối, như với `ForEach` (W7b §15).
+- Replay một execution mà source của nó nay bị từ chối thì chính nó bị từ chối, như với `ForEach` (W7b §15). Đây là replay do người dùng yêu cầu, tức là một start; một retry `CREATE_NEW_EXECUTION` của một execution đã lưu không phải là start và replay source đã đóng băng bằng `executor::plan_stored` (§5).
+- `Unplannable` (một source đã lưu không parse hoặc không flatten được) và `Corrupt` vẫn là abort của tick: run bị reap rồi claim lại, kèm một `warn` mỗi vòng. Gói này không thêm cách mới nào để đi tới chúng.

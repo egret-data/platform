@@ -1830,9 +1830,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `WorkingDirectory`, ...) is covered too: the worker plans a stored
     // execution without validation (`executor::plan_stored`; validation gates
     // starts only), so its run reaches `NoHandler` or `NotALeaf` and fails.
-    // **Six of twenty-three
-    // registered types have no handler, whatever the runner**, and since
-    // Task 3 none of them publishes or starts (`egret.sql`,
+    // **Six of twenty-three registered types have no handler, whatever the
+    // runner**, and since Task 3 none of them publishes or starts (`egret.sql`,
     // `egret.dataapi.call`, `egret.dataset.refresh`,
     // `egret.report.send`, `core.http`, `core.slack`): 23 rows = these 6 + the
     // 13 core handlers above + the 4 script types a runner serves. All nine

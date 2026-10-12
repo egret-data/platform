@@ -63,7 +63,7 @@ Every construct `build_plan` plans as an opaque `Runnable` because egret has no 
 | An unknown type | `unknown_task_type`, from a warning to an error | unchanged: check for a typo |
 
 **Rules that hold the table together:**
-- **One predicate each.** `pause_gap` and `loop_until_gap` stay the single predicates that both `build_plan` and `validate` ask. The errors are emitted where the warnings were.
+- **One predicate each.** `pause_gap` and `loop_until_gap` stay the single predicates that both `build_plan` and `validate` ask. `unsupported_flow_task` and `unknown_task_type` are emitted where their warnings were; `unsupported_loop_until_property` never had a warning and is emitted where `validate` checks `loop_until_gap`.
 - **Drafts still save.** `update_flow` and `create_flow` do not refuse on validation errors, so a draft with any of these is stored. The editor shows the finding as an error.
 - **The paths that keep their errors.** `working_directory_tasks_required`, `working_directory_child_not_runnable`, `working_directory_namespace_files_invalid` and `allow_failure_tasks_required` stay. A `WorkingDirectory` now carries `unsupported_working_directory` too.
 - **Nested `errors:` too.** `walk_task` descends through `children()` only. `validate_script_tasks` documents that difference, and `build_plan` does flatten a flowable's own `errors:` (`Sequential`, `Parallel`, `If`, `Switch`, `Dag`). So the checks of this table must also reach tasks under `error_children()`; otherwise an `AllowFailure` inside a `Sequential`'s `errors:` slips through. The plan chooses whether `walk_task` itself descends or a second walk does it, and states what that changes for the other checks.
@@ -184,4 +184,5 @@ Loop iterations re-plan the parent's own stored source, with `executor::plan_sto
 
 - A deployment whose API process and worker process run with different `workflow` configurations can still accept a start that its worker cannot serve. §5 turns that into a `FAILED` run rather than a stall.
 - A flow already published with a construct of §3 or §4 stays published and cannot start. The editor shows why.
-- A replay of an execution whose source is now refused is itself refused, as for `ForEach` (W7b §15).
+- A replay of an execution whose source is now refused is itself refused, as for `ForEach` (W7b §15). This is the replay a user asks for, which is a start; a `CREATE_NEW_EXECUTION` retry of a stored execution is not a start and replays the frozen source with `executor::plan_stored` (§5).
+- `Unplannable` (a stored source that does not parse or flatten) and `Corrupt` remain tick aborts: the run is reaped and re-claimed, with a `warn` per cycle. This package adds no new way to reach them.

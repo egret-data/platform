@@ -4048,10 +4048,10 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
             0,
             MISMATCHING_RUNS_ENTRIES
         ),
-        "the field breakdown. `refused` and `broken` are both 0 and that is the \
-         load-bearing half: a `refused` here would be egret refusing a flow \
-         Kestra ran, and a `broken` would be the DRIVER failing rather than the \
-         flow diverging"
+        "the field breakdown. `refused` is exactly `RUNS_REFUSED` -- egret's \
+         deliberate refusals at start, each with its code above -- and `broken` \
+         is 0, which is the load-bearing half: a `broken` would be the DRIVER \
+         failing rather than the flow diverging"
     );
     assert_eq!(
         order_only,

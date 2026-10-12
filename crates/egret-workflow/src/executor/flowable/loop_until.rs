@@ -190,6 +190,9 @@ pub fn iteration(state: &ExecutionState, run: RunIx) -> usize {
 /// `baseline.txt`**, held one run lower down by an
 /// `io.kestra.plugin.core.output.OutputValues` child no handler exists for —
 /// measured by unbaselining it, so *held twice* is a fact rather than a claim.
+/// *(Since no-silent-stall Task 1 that child is `unknown_task_type`, so the
+/// entry is refused at start rather than stalling on it; a stored execution
+/// that reaches it fails the run with `WorkerError::NoHandler`'s line.)*
 pub(crate) fn children_executed(state: &ExecutionState, run: RunIx, tasks: &[TaskIx]) -> bool {
     tasks.iter().all(|&task| {
         super::run_of(state, Some(run), task)

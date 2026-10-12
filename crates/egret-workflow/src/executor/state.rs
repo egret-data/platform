@@ -370,8 +370,11 @@ pub struct Attempt {
 /// **W8 Task 5 closed both halves and the entry is still baselined.** Its
 /// `WARNING` child is byte-identical to the golden and `children_executed`
 /// lets it through, so the loop reaches its SECOND child for the first time —
-/// an `io.kestra.plugin.core.output.OutputValues` with no handler — and stalls
-/// there. Measured by unbaselining it, not inferred.
+/// an `io.kestra.plugin.core.output.OutputValues` with no handler — and stalled
+/// there. Measured by unbaselining it, not inferred. *(Since no-silent-stall
+/// Task 1 `OutputValues` is `unknown_task_type`, so the entry is refused at
+/// start and never reaches that child; a stored execution of it that does
+/// fails the run with `WorkerError::NoHandler`'s line, spec §5.)*
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunState {
     Created,
