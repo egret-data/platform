@@ -322,6 +322,44 @@ describe("PolicyMigrationPage — preview before migrate", () => {
     expect(screen.getByText(GENERATED_NOTICE)).toBeInTheDocument();
   });
 
+  /** SP4d-4 live D-3: the preview says how much pruning saved, and why it
+   *  kept every probe when it did. */
+  it("shows the pruned probe count beside the full one, and the reason when pruning fell back", async () => {
+    const user = userEvent.setup();
+    const base = proved();
+    vi.mocked(migrateServicePolicies).mockResolvedValueOnce(
+      proved({
+        profiles: [
+          { ...base.profiles[0], probes: 6210, probes_full: 273240 },
+          {
+            ...base.profiles[1],
+            probes: 40,
+            probes_full: 40,
+            pruning_fallback: "ContentFreeConstruct",
+          },
+        ],
+      }),
+    );
+    renderPage();
+    await rowOf("allow-analysts");
+    await user.click(screen.getByRole("checkbox", { name: "Select allow-analysts" }));
+    await user.click(screen.getByRole("button", { name: "Preview migration" }));
+
+    const panel = await screen.findByRole("region", { name: "Affected profiles" });
+    const pruned = within(panel).getByText("trino-prod").closest("tr") as HTMLElement;
+    expect(within(pruned).getByText("6210")).toBeInTheDocument();
+    expect(within(pruned).getByText("of 273240 without pruning")).toBeInTheDocument();
+    expect(within(pruned).queryByText(/Not pruned/)).toBeNull();
+
+    const full = within(panel).getByText("trino-analytics").closest("tr") as HTMLElement;
+    expect(within(full).getByText("of 40 without pruning")).toBeInTheDocument();
+    expect(
+      within(full).getByText(
+        "Not pruned: a policy uses conditions, schedules or delegation the checker cannot decide around",
+      ),
+    ).toBeInTheDocument();
+  });
+
   /** Final review (Task 10 Minor 1): a preview is rolled back, so the compiled
    *  policy's `perm-grant-<id>` name carries an id that will never exist. The
    *  preview counts it by kind instead of presenting that id as a fact. */

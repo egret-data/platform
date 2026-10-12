@@ -588,6 +588,18 @@ const TAGGING_LABEL: Record<string, string> = {
 };
 const versionLabel = (v: string) => PLUGIN_VERSION_LABEL[v] ?? v;
 
+/** Why the gate kept every probe instead of pruning (`GatedProfile.pruning_fallback`
+ *  is the server's variant name). An unknown name is shown as sent. */
+const PRUNING_FALLBACK_LABEL: Record<string, string> = {
+  EnvelopeDiffers: "something in the download other than the policy lists changed",
+  EnvelopeUnmodelled: "the download carries a construct the checker does not model",
+  ContentFreeConstruct: "a policy uses conditions, schedules or delegation the checker cannot decide around",
+  EmptyDelta: "no policy differs between before and after",
+  DenyAllElseInDelta: "a changed policy denies all else",
+  NonZeroPriorityInDelta: "a changed policy has a non-zero priority",
+};
+const pruningFallbackLabel = (r: string) => PRUNING_FALLBACK_LABEL[r] ?? r;
+
 function PreviewResult({
   preview,
   currentServiceId,
@@ -719,7 +731,17 @@ function AffectedProfiles({
                     ))}
                   </div>
                 </TableCell>
-                <TableCell className="text-right tabular-nums">{p.probes}</TableCell>
+                <TableCell className="whitespace-normal text-right tabular-nums">
+                  <div>{p.probes}</div>
+                  <div className="text-xs font-normal text-muted-foreground">
+                    of {p.probes_full} without pruning
+                  </div>
+                  {p.pruning_fallback && (
+                    <div className="text-xs font-normal text-muted-foreground">
+                      Not pruned: {pruningFallbackLabel(p.pruning_fallback)}
+                    </div>
+                  )}
+                </TableCell>
                 <TableCell className="text-right tabular-nums">{p.disagreements}</TableCell>
                 <TableCell className="whitespace-normal font-mono text-xs">
                   {describeServed(p.added_policies, written)}
