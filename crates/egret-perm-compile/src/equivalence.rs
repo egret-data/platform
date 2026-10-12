@@ -83,11 +83,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use egret_ranger_eval::eval::{
-    evaluate_data_mask_prepared, evaluate_prepared, evaluate_row_filter_prepared, AccessRequest,
-    Decision, DenyReason, EngineConfig, MaskDecision, MaskResult, PluginVersion, PreparedPolicySet,
-    ResolvedTag, RowFilterDecision, TagServiceResource, UnenrichedTags,
+    evaluate_data_mask_prepared, evaluate_prepared, evaluate_row_filter_prepared, may_be_candidate,
+    may_be_tag_candidate, AccessRequest, Decision, DenyReason, EngineConfig, MaskDecision,
+    MaskResult, PluginVersion, PreparedPolicySet, ResolvedTag, RowFilterDecision,
+    TagServiceResource, UnenrichedTags,
 };
-use egret_ranger_eval::model::{PolicyItem, RangerPolicy, ResourceLevel, ServicePolicySet};
+use egret_ranger_eval::model::{
+    PolicyItem, RangerPolicy, ResourceLevel, ServicePolicySet, TagPolicyBlock, Unmodelled,
+};
 use egret_ranger_eval::resource::{MatchType, RequestResource};
 use egret_ranger_eval::servicedef::{PolicyType, ServiceDef};
 
@@ -329,6 +332,265 @@ pub fn probe_count(
     ProbeFactors::new(before, after, service_def, assignments).count()
 }
 
+// ── pruning (SP4d-4 Task 5) ──────────────────────────────────────────────
+
+/// Which probes [`plan_probes`] builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PruneMode {
+    /// Every probe [`derive_probes`] builds (SP4d-3 behaviour).
+    Full,
+    /// Only probes where some changed policy may be a candidate — unless a
+    /// fallback condition holds, in which case this is [`PruneMode::Full`].
+    Pruned,
+}
+
+/// Why [`PruneMode::Pruned`] gave the full probe set instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackReason {
+    /// `E(B) != E(A)`: something in the download other than the two policy
+    /// lists differs (service-def, tag service-def, `serviceName`/`serviceId`,
+    /// envelope-level constructs). The lemma's other input moved.
+    EnvelopeDiffers,
+    /// Either side carries an envelope-level construct the evaluator does not
+    /// model (zones, deltas, `serviceConfig`, an unreadable tag block). Every
+    /// decision is then `Undecidable` on both sides and pruning would only
+    /// change WHICH of them are reported.
+    EnvelopeUnmodelled,
+    /// No policy differs. Nothing to prune towards; the gate keeps asking
+    /// every question, as before.
+    EmptyDelta,
+    /// A changed policy has `isDenyAllElse: true`.
+    DenyAllElseInDelta,
+    /// A changed policy has a non-zero `policyPriority`.
+    NonZeroPriorityInDelta,
+}
+
+/// The probes to evaluate, and how they were chosen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbePlan {
+    pub probes: Vec<Probe>,
+    /// What [`probe_count`] says the FULL set would be.
+    pub full_count: usize,
+    /// `Some` when [`PruneMode::Pruned`] fell back to the full set.
+    pub fallback: Option<FallbackReason>,
+}
+
+/// Δ: the policies whose `(name, body without id)` differs between the two
+/// sets, or that exist on one side only — BOTH versions of a changed policy.
+/// Resource policies first, then tag policies.
+///
+/// Bodies are compared as parsed values (`RangerPolicy: PartialEq`, whose maps
+/// are `BTreeMap`s and whose scalars are typed), never through a rendered
+/// string: the stored body is `jsonb`, which reorders keys, and two equivalent
+/// bodies must not read as "changed".
+pub fn changed_policies<'a>(
+    before: &'a ServicePolicySet,
+    after: &'a ServicePolicySet,
+) -> Vec<&'a RangerPolicy> {
+    let (resource, tag) = delta(before, after);
+    resource.into_iter().chain(tag).collect()
+}
+
+fn same_policy(a: &RangerPolicy, b: &RangerPolicy) -> bool {
+    a.name == b.name && {
+        let (mut a, mut b) = (a.clone(), b.clone());
+        a.id = None;
+        b.id = None;
+        a == b
+    }
+}
+
+/// Policies of `before` with no equal in `after`, then policies of `after`
+/// with no equal in `before` (multiset difference on [`same_policy`]).
+fn list_delta<'a>(before: &'a [RangerPolicy], after: &'a [RangerPolicy]) -> Vec<&'a RangerPolicy> {
+    let mut unmatched_after: Vec<&RangerPolicy> = after.iter().collect();
+    let mut out = Vec::new();
+    for b in before {
+        match unmatched_after.iter().position(|a| same_policy(a, b)) {
+            Some(i) => {
+                unmatched_after.remove(i);
+            }
+            None => out.push(b),
+        }
+    }
+    out.extend(unmatched_after);
+    out
+}
+
+fn delta<'a>(
+    before: &'a ServicePolicySet,
+    after: &'a ServicePolicySet,
+) -> (Vec<&'a RangerPolicy>, Vec<&'a RangerPolicy>) {
+    (
+        list_delta(&before.policies, &after.policies),
+        list_delta(&before.tag_policies, &after.tag_policies),
+    )
+}
+
+/// The envelope-level constructs that are not just the tag block's policy
+/// COUNT (which is derived from `tag_policies` and so belongs to Δ).
+fn envelope_constructs(set: &ServicePolicySet) -> Vec<&Unmodelled> {
+    set.unmodelled
+        .iter()
+        .filter(|c| !matches!(c, Unmodelled::TagPolicies(TagPolicyBlock::Policies(_))))
+        .collect()
+}
+
+/// `E(B) == E(A)`: everything but the two policy lists (and the download's
+/// `policyVersion`, which every write bumps).
+fn envelopes_equal(before: &ServicePolicySet, after: &ServicePolicySet) -> bool {
+    before.service_name == after.service_name
+        && before.service_id == after.service_id
+        && before.service_def == after.service_def
+        && before.tag_service_def == after.tag_service_def
+        && envelope_constructs(before) == envelope_constructs(after)
+}
+
+/// The probes for one profile, optionally pruned to where a changed policy may
+/// matter.
+///
+/// # The argument (full version: design spec Part D, `2026-10-11-sp4d-4-closing-the-review-design.md`)
+///
+/// Ranger's access, mask and row-filter decisions for a request `r` are a
+/// function of the envelope `E`, `r`, the engine config, and the ORDERED list
+/// of policies in Ranger's candidate lists for `r` (the resource trie's answer
+/// and the tag trie's answer for `r`'s resolved tags). A policy in neither list
+/// is never invoked. Let Δ be [`changed_policies`]. If `E(B) == E(A)` and no
+/// policy in Δ may be a candidate for `r`, the candidate lists on both sides
+/// consist of byte-identical policies in the same relative order, so `B` and
+/// `A` decide `r` identically — such a probe cannot disagree and is dropped.
+/// "May be a candidate" OVER-approximates Ranger's list:
+/// [`egret_ranger_eval::eval::may_be_candidate`] for a resource policy (a
+/// non-`NONE` match type, or the trie fails to exclude it — asked under all
+/// three policy types, because a probe asks all three questions) and
+/// [`egret_ranger_eval::eval::may_be_tag_candidate`] for a tag policy against
+/// each tag in the probe's resolved tags, actual or hypothetical.
+///
+/// Only coordinates (with their tagging) are pruned; every principal and every
+/// access type is kept.
+///
+/// # Fallbacks to the full set ([`FallbackReason`])
+///
+/// 1. `E(B) != E(A)` ([`FallbackReason::EnvelopeDiffers`]), or either side has
+///    an unmodelled envelope construct ([`FallbackReason::EnvelopeUnmodelled`]).
+/// 2. A Δ policy with `isDenyAllElse: true`
+///    ([`FallbackReason::DenyAllElseInDelta`]) or a non-zero `policyPriority`
+///    ([`FallbackReason::NonZeroPriorityInDelta`]) — not needed by the theorem,
+///    but cheap, and the SP4d-3 grammar produces neither.
+/// 3. Δ empty ([`FallbackReason::EmptyDelta`]).
+///
+/// A pruned set that is empty while Δ is not is returned empty with no
+/// fallback: [`compare`] then refuses with [`GateRefusal::NoProbes`], never
+/// "equivalent".
+pub fn plan_probes(
+    before: &ServicePolicySet,
+    after: &ServicePolicySet,
+    service_def: &ServiceDef,
+    assignments: &[TagAssignment],
+    mode: PruneMode,
+) -> ProbePlan {
+    let factors = ProbeFactors::new(before, after, service_def, assignments);
+    let full_count = factors.count();
+    let (fallback, keep) = pruning(before, after, service_def, mode);
+    let probes = match &keep {
+        Some(keep) => factors.build_where(assignments, &|r, t| keep.admits(r, t)),
+        None => factors.build(assignments),
+    };
+    ProbePlan {
+        probes,
+        full_count,
+        fallback,
+    }
+}
+
+/// The count `plan_probes(..).probes.len()` would have, without building.
+pub fn planned_probe_count(
+    before: &ServicePolicySet,
+    after: &ServicePolicySet,
+    service_def: &ServiceDef,
+    assignments: &[TagAssignment],
+    mode: PruneMode,
+) -> usize {
+    let factors = ProbeFactors::new(before, after, service_def, assignments);
+    match pruning(before, after, service_def, mode).1 {
+        Some(keep) => factors.count_where(assignments, &|r, t| keep.admits(r, t)),
+        None => factors.count(),
+    }
+}
+
+/// The fallback taken (if any) and, when pruning is on, the keep predicate.
+fn pruning<'a>(
+    before: &'a ServicePolicySet,
+    after: &'a ServicePolicySet,
+    service_def: &'a ServiceDef,
+    mode: PruneMode,
+) -> (Option<FallbackReason>, Option<Keep<'a>>) {
+    if mode == PruneMode::Full {
+        return (None, None);
+    }
+    let (resource, tag) = delta(before, after);
+    let fallback = if !envelopes_equal(before, after) {
+        Some(FallbackReason::EnvelopeDiffers)
+    } else if !envelope_constructs(before).is_empty() {
+        Some(FallbackReason::EnvelopeUnmodelled)
+    } else if resource.is_empty() && tag.is_empty() {
+        Some(FallbackReason::EmptyDelta)
+    } else if resource.iter().chain(&tag).any(|p| p.is_deny_all_else) {
+        Some(FallbackReason::DenyAllElseInDelta)
+    } else if resource.iter().chain(&tag).any(|p| p.policy_priority != 0) {
+        Some(FallbackReason::NonZeroPriorityInDelta)
+    } else {
+        None
+    };
+    if fallback.is_some() {
+        return (fallback, None);
+    }
+    let tag_def = ServiceDef::parse(&before.tag_service_def);
+    (
+        None,
+        Some(Keep {
+            resource,
+            tag,
+            service_def,
+            tag_def,
+        }),
+    )
+}
+
+/// "Some changed policy may be a candidate" for a (coordinate, tagging).
+struct Keep<'a> {
+    resource: Vec<&'a RangerPolicy>,
+    tag: Vec<&'a RangerPolicy>,
+    service_def: &'a ServiceDef,
+    tag_def: ServiceDef,
+}
+
+impl Keep<'_> {
+    fn admits(&self, resource: &RequestResource, tags: &[ResolvedTag]) -> bool {
+        // A probe asks the access, mask and row-filter questions, so a policy
+        // is asked under each policy type's hierarchy.
+        let by_resource = self.resource.iter().any(|p| {
+            [
+                PolicyType::Access,
+                PolicyType::DataMask,
+                PolicyType::RowFilter,
+            ]
+            .into_iter()
+            .any(|pt| may_be_candidate(p, resource, self.service_def, pt))
+        });
+        // A tag def that cannot even name the `tag` resource proves nothing:
+        // keep, as the over-approximation requires.
+        let tag_def_usable = self.tag_def.resource(PolicyType::Access, "tag").is_some();
+        by_resource
+            || self.tag.iter().any(|p| {
+                !tag_def_usable
+                    || tags
+                        .iter()
+                        .any(|t| may_be_tag_candidate(p, &t.name, &self.tag_def))
+            })
+    }
+}
+
 /// The three axes of the probe cross product, plus the tag names that
 /// multiply the table coordinates — computed once, then either counted or
 /// built, so the count and the build cannot disagree.
@@ -383,37 +645,84 @@ impl ProbeFactors {
         }
     }
 
-    fn taggings_at(&self, coordinate: &Coordinate) -> usize {
-        let resource: RequestResource = coordinate.iter().cloned().collect();
-        1 + if table_of(&resource).is_some() {
-            self.tag_names.len()
-        } else {
-            0
+    /// The taggings one coordinate is probed under: the profile's real tags,
+    /// then (for a coordinate naming a table) one hypothetical tagging per tag
+    /// name either set's tag policies address.
+    fn taggings(
+        &self,
+        resource: &RequestResource,
+        assignments: &[TagAssignment],
+    ) -> Vec<(Tagging, Vec<ResolvedTag>)> {
+        let mut taggings = vec![(Tagging::Actual, resolve_tags(resource, assignments))];
+        if table_of(resource).is_some() {
+            for name in &self.tag_names {
+                taggings.push((
+                    Tagging::Hypothetical,
+                    vec![attachment(name, MatchType::Self_, resource)],
+                ));
+            }
         }
+        taggings
+    }
+
+    /// Principals × access types: what every kept (coordinate, tagging) is
+    /// multiplied by. Never pruned.
+    fn per_tagging(&self) -> usize {
+        self.principals.len() * self.access_types.len()
     }
 
     fn count(&self) -> usize {
-        let per_tagging = self.principals.len() * self.access_types.len();
         self.coordinates
             .iter()
-            .map(|c| self.taggings_at(c) * per_tagging)
+            .map(|c| {
+                let resource: RequestResource = c.iter().cloned().collect();
+                (1 + if table_of(&resource).is_some() {
+                    self.tag_names.len()
+                } else {
+                    0
+                }) * self.per_tagging()
+            })
             .sum()
     }
 
-    fn build(self, assignments: &[TagAssignment]) -> Vec<Probe> {
-        let mut out = Vec::with_capacity(self.count());
+    /// [`ProbeFactors::count`] over the (coordinate, tagging) pairs `keep`
+    /// admits, without building a probe.
+    fn count_where(
+        &self,
+        assignments: &[TagAssignment],
+        keep: &dyn Fn(&RequestResource, &[ResolvedTag]) -> bool,
+    ) -> usize {
+        let mut kept = 0;
         for coordinate in &self.coordinates {
             let resource: RequestResource = coordinate.iter().cloned().collect();
-            let mut taggings = vec![(Tagging::Actual, resolve_tags(&resource, assignments))];
-            if table_of(&resource).is_some() {
-                for name in &self.tag_names {
-                    taggings.push((
-                        Tagging::Hypothetical,
-                        vec![attachment(name, MatchType::Self_, &resource)],
-                    ));
+            kept += self
+                .taggings(&resource, assignments)
+                .iter()
+                .filter(|(_, tags)| keep(&resource, tags))
+                .count();
+        }
+        kept * self.per_tagging()
+    }
+
+    fn build(self, assignments: &[TagAssignment]) -> Vec<Probe> {
+        self.build_where(assignments, &|_, _| true)
+    }
+
+    /// The probes at the (coordinate, tagging) pairs `keep` admits — every
+    /// principal and every access type at each. Pruning is by coordinate and
+    /// tagging ONLY.
+    fn build_where(
+        self,
+        assignments: &[TagAssignment],
+        keep: &dyn Fn(&RequestResource, &[ResolvedTag]) -> bool,
+    ) -> Vec<Probe> {
+        let mut out = Vec::new();
+        for coordinate in &self.coordinates {
+            let resource: RequestResource = coordinate.iter().cloned().collect();
+            for (tagging, tags) in self.taggings(&resource, assignments) {
+                if !keep(&resource, &tags) {
+                    continue;
                 }
-            }
-            for (tagging, tags) in taggings {
                 let tags = UnenrichedTags::new(tags);
                 for (user, groups, roles) in &self.principals {
                     for access_type in &self.access_types {
