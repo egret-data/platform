@@ -12704,7 +12704,7 @@ says a `behavior:` is enforced over an executor that ignores it.
 **Correction, 2026-10-11 (W7b Task 4b, the user's ruling): the warning is an
 ERROR now.** `spec::validate` reports `unsupported_pause_property` for exactly
 those pauses, so `build_plan`'s `validate_for_run` gate refuses the flow and
-the four entries are refused at plan rather than planned opaque. The warning
+the three entries are refused at plan rather than planned opaque. The warning
 let such a flow publish and start, and in production the opaque run stalled
 its execution in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). They stay
 baselined either way; `pause_gap` is still the one predicate.

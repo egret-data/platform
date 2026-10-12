@@ -156,7 +156,7 @@ describe("OutputsTree", () => {
     await userEvent.click(screen.getByRole("button", { name: "Copy expression" }));
     expect(writeText).toHaveBeenLastCalledWith("{{ outputs.t1.rows[0] }}");
     // No loop note for a run without a value.
-    expect(screen.queryByText(/reached through its value/)).toBeNull();
+    expect(screen.queryByText(/The parent execution cannot reach these outputs/)).toBeNull();
   });
 
   it("writes paths flat by task id, even for a run that carries a value", async () => {

@@ -3334,8 +3334,8 @@ async fn a_start_refuses_a_draft_whose_pause_egret_does_not_run() {
 /// **The 2026-10-12 ruling, on the API start.** `ForEach` is the validation
 /// error `unsupported_foreach`: a saved draft holding one is refused at start
 /// with a 400 naming the finding, and no execution is created. Before the
-/// ruling it started, its body was skipped as an inert no-op, and the
-/// execution ended SUCCESS. The control is the same draft with `Loop`.
+/// ruling it started (only a draft could), then stalled with `NoHandler`,
+/// as Task 7b measured; it never ended SUCCESS. The control is the same draft with `Loop`.
 #[tokio::test]
 async fn a_start_refuses_a_draft_with_a_foreach() {
     let Some(db) = common::db().await else { return };

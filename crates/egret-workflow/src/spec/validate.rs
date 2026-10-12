@@ -1732,8 +1732,8 @@ fn walk_task(
                     message: format!(
                         "task '{}' has type '{}', which is spelled like a Kestra control-flow \
                          task (a `io.kestra.plugin.core.flow.*` FQCN or its `core.` alias) but \
-                         egret does not implement it yet; it currently runs as an inert no-op \
-                         instead of doing what it declares",
+                         egret does not implement it yet; no handler serves it, so a run that \
+                         reaches it stalls instead of doing what it declares",
                         task.id, task.r#type
                     ),
                     path: path.clone(),
@@ -2924,9 +2924,10 @@ mod tests {
     /// The user's ruling of 2026-10-12 (W7b Task 7b). `ForEach` is not a type
     /// egret runs -- Kestra's own name for it in the pinned checkout is
     /// `Loop`, and Kestra 2.0 refuses `ForEach` with a 422 -- and until the
-    /// ruling it drew only the generic `not_yet_enforced` warning, then ran
-    /// as an inert no-op: its body was skipped and the execution could end
-    /// SUCCESS. It is an ERROR now, at the top level and nested inside a
+    /// ruling it drew only the generic `not_yet_enforced` warning, so only a
+    /// saved draft could start (publish already refused it), and the run
+    /// stalled with `NoHandler`, as measured in Task 7b: no handler serves
+    /// it, and it did not end SUCCESS. It is an ERROR now, at the top level and nested inside a
     /// flowable, under every spelling `canonical_flow_type` folds to
     /// `foreach`, and the message names `Loop` and its alias. `Loop` itself,
     /// under both spellings, stays valid and silent: the control.

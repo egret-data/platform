@@ -6,8 +6,10 @@
 -- file).
 --
 -- Until now the only "end" a run had was `updated_at`, which moves on every
--- write. The gantt needs an instant that is written ONCE, by the write that
--- ends the row, and never again.
+-- write. The gantt needs an instant that is written once per life of the row,
+-- by the write that ends it, and kept while the row stays terminal. It is
+-- cleared when the row leaves a terminal state, and written afresh when a
+-- `LoopUntil` rebuilds the row.
 --
 -- WHO WRITES THESE COLUMNS
 --

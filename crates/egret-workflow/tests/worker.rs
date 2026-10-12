@@ -9489,8 +9489,8 @@ async fn a_subflow_to_a_pause_egret_does_not_run_creates_no_child_and_fails(pool
 /// holds a `ForEach` creates no child: the target does not plan, so the
 /// `Subflow` run FAILS with `cannot execute an invalid flow` naming
 /// `unsupported_foreach`, and the parent ends `FAILED` -- where before the
-/// child ran the `ForEach` as a no-op and the parent SUCCEEDED. The control is
-/// the same call to a `Loop` target, which creates its child.
+/// child stalled on the `ForEach` (`NoHandler`, as Task 7b measured) and the
+/// parent never settled. The control is the same call to a `Loop` target, which creates its child.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_subflow_to_a_foreach_creates_no_child_and_fails(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();

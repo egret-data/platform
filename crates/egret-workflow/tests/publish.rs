@@ -210,7 +210,8 @@ async fn a_pause_egret_does_not_run_cannot_be_published() {
 /// The 2026-10-12 ruling: `ForEach` is the validation error
 /// `unsupported_foreach`, so publish refuses it naming `Loop`. It was
 /// already refused here before the ruling, but only as an unknown task type
-/// at step 4, while every start path ran it as a silent no-op; the assertion
+/// at step 4, while a saved draft could start and then stalled on it with
+/// `NoHandler` (Task 7b); the assertion
 /// is on the ruling's own message. The control is the same flow with `Loop`.
 #[tokio::test]
 async fn a_foreach_cannot_be_published_and_the_error_names_loop() {
