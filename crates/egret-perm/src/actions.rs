@@ -78,14 +78,24 @@ pub struct OverlapRule {
 /// on, so the answer the API reports (`rangerPluginVersionModelled`), the one
 /// the migration gate proves on and the one `explain` evaluates at are ONE
 /// predicate, [`ranger_plugin_is_modelled`].
-pub const MODELLED_RANGER_PLUGINS: [(&str, &str); 2] =
-    [("trino", "2.5.0"), ("starrocks", "2.8.0")];
+pub const MODELLED_RANGER_PLUGINS: [(&str, &str); 2] = [("trino", "2.5.0"), ("starrocks", "2.8.0")];
 
 /// Whether `engine_type` (`trino` / `starrocks`) at Ranger plugin `version` is a
 /// modelled pair.
 pub fn ranger_plugin_is_modelled(engine_type: &str, version: &str) -> bool {
     MODELLED_RANGER_PLUGINS.contains(&(engine_type, version))
 }
+
+/// What egret's `explain` and the SP4d-3 migration gate assume about an
+/// engine's Ranger plugin. egret guarantees them for the engines it provisions
+/// (its renderer sets them); for an external engine the admin's own plugin
+/// configuration decides, and egret cannot check it. The plugin-config page and
+/// `explain` quote these same sentences.
+pub const EXTERNAL_PLUGIN_ASSUMPTIONS: [&str; 3] = [
+    "The plugin has no super-users configured (no ranger.plugin.*.super.users), so every request is evaluated against the downloaded policies.",
+    "The plugin has no group provider and no usersync, so a user belongs to no group beyond the one egret's policies name.",
+    "Plugin audit is off, so egret's policy evaluation is the only decision record.",
+];
 
 /// `Trino@2.5.0 and StarRocks@2.8.0`, for sentences.
 pub fn modelled_ranger_plugins_sentence() -> String {

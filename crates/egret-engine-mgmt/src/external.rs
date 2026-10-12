@@ -33,11 +33,11 @@
 use axum::extract::Path;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::{patch, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
 use egret_core::http::ErrorBody;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -142,8 +142,13 @@ fn present_or_null<'de, D: serde::Deserializer<'de>>(
 /// [`crate::openapi`].
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(register_external_engine, update_external_engine),
-    components(schemas(RegisterExternalEngine, UpdateExternalEngine))
+    paths(register_external_engine, update_external_engine, ranger_plugin_config),
+    components(schemas(
+        RegisterExternalEngine,
+        UpdateExternalEngine,
+        RangerPluginConfigDto,
+        RangerPluginFileDto
+    ))
 )]
 pub struct ExternalEngineApi;
 
@@ -151,6 +156,10 @@ pub fn routes() -> Router<CpState> {
     Router::new()
         .route("/engines/external", post(register_external_engine))
         .route("/engines/{id}/external", patch(update_external_engine))
+        .route(
+            "/engines/{id}/ranger-plugin-config",
+            get(ranger_plugin_config),
+        )
 }
 
 fn validate_name(name: &str) -> Result<(), CpError> {
@@ -564,4 +573,265 @@ async fn insert_external_row_in_tx(
         }
         _ => crate::http_error::db_error(e),
     })
+}
+
+/// One file the admin of an external engine installs.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RangerPluginFileDto {
+    /// File name; for StarRocks `fe.conf (add this line)` is a line to add to
+    /// the FE's existing `fe.conf`, not a file to replace it with.
+    pub name: String,
+    pub content: String,
+}
+
+/// The Ranger plugin configuration an external engine's admin installs.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RangerPluginConfigDto {
+    /// The bound policy profile: the Ranger service name the plugin asks for.
+    pub service_name: String,
+    /// `{public_url}/service/plugins/policies/download/{serviceName}`: where the
+    /// plugin's download lands. The files below carry `public_url` itself (the
+    /// plugin appends the path).
+    pub download_url: String,
+    /// `anonymous`, or `bearer-configured` (egret requires a bearer token on
+    /// `/service`; the token is never shown here).
+    pub auth_mode: String,
+    /// The plugin version the engine was DECLARED to run.
+    pub ranger_plugin_version: Option<String>,
+    /// Whether egret's evaluator models the (type, version) pair. When `false`,
+    /// migrations into this profile are refused.
+    pub ranger_plugin_version_modelled: bool,
+    /// Things that make the install not work, or not safe, as configured.
+    pub warnings: Vec<String>,
+    /// What egret's `explain` and migration gate assume about the plugin and
+    /// cannot check on an external engine.
+    pub assumptions: Vec<String>,
+    /// What the admin must supply themselves. egret renders no credential and
+    /// invents none.
+    pub admin_must_supply: Vec<String>,
+    pub files: Vec<RangerPluginFileDto>,
+}
+
+const IN_CLUSTER_DEFAULT_URL: &str = "http://egret:8080";
+
+/// Everything in the response that is a judgement about the deployment, as a
+/// pure function of the facts (so each branch is tested without a server).
+struct PluginConfigFacts<'a> {
+    engine_type: &'a str,
+    public_url: &'a str,
+    bearer_configured: bool,
+    ranger_enabled: bool,
+    version: Option<&'a str>,
+}
+
+fn plugin_config_judgements(
+    f: &PluginConfigFacts<'_>,
+) -> (&'static str, Vec<String>, Vec<String>, bool) {
+    let mut warnings = Vec::new();
+    let mut must_supply = vec![
+        "A network path from the engine to the download URL.".to_string(),
+        "The files below, installed by you: egret never connects to this engine.".to_string(),
+    ];
+    let host_part = f.public_url.trim_end_matches('/');
+    if host_part == IN_CLUSTER_DEFAULT_URL || host_part.contains(".svc") {
+        warnings.push(format!(
+            "The download URL ({host_part}) is an in-cluster address: an engine outside the \
+             cluster cannot reach it. Set `[catalog] public_url` to an address the engine can reach."
+        ));
+    }
+    let auth_mode = if f.bearer_configured {
+        warnings.push(
+            "egret requires a bearer token on /service, and a stock Ranger plugin cannot send \
+             it: the download will be refused (401) unless something in front of egret adds the \
+             token or exempts this engine."
+                .to_string(),
+        );
+        must_supply.push(
+            "A way to present egret's bearer token on the download (a proxy that adds it). \
+             egret does not show or issue the token here."
+                .to_string(),
+        );
+        "bearer-configured"
+    } else {
+        warnings.push(
+            "The download is anonymous: anyone who can reach this URL can download every \
+             profile's policies. Restrict it at the network level."
+                .to_string(),
+        );
+        "anonymous"
+    };
+    if !f.ranger_enabled {
+        warnings.push(
+            "Ranger is disabled on this egret (`[ranger] enabled = false`): /service is not \
+             served and the plugin has nothing to download."
+                .to_string(),
+        );
+    }
+    let modelled = f
+        .version
+        .is_some_and(|v| plugin_version_is_modelled(f.engine_type, v));
+    if !modelled {
+        warnings.push(format!(
+            "egret's evaluator models only {}: for plugin version {} on {}, migrations into this \
+             profile are refused.",
+            egret_perm::modelled_ranger_plugins_sentence(),
+            f.version.unwrap_or("(none declared)"),
+            f.engine_type
+        ));
+    }
+    (auth_mode, warnings, must_supply, modelled)
+}
+
+/// `GET /api/control-plane/engines/{id}/ranger-plugin-config`.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}/ranger-plugin-config",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 200, description = "The Ranger plugin files to install on this external engine, rendered by the same code that renders the files egret mounts into its own engines. No credential is included or minted", body = RangerPluginConfigDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine is provisioned (egret mounts these files itself), or it is bound to no policy profile (bind one first)", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn ranger_plugin_config(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<RangerPluginConfigDto>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    if !is_external(&engine) {
+        return Err(CpError::Conflict(format!(
+            "engine {} is provisioned: egret mounts its Ranger plugin files itself",
+            engine.name
+        )));
+    }
+    let Some(service_name) =
+        crate::engines::resolve_ranger_service_name(&st, engine.authz_service_id).await?
+    else {
+        return Err(CpError::Conflict(format!(
+            "engine {} is bound to no policy profile: bind a profile first",
+            engine.name
+        )));
+    };
+    let kind = egret_engine_mgmt_api::EngineKind::parse(&engine.r#type).ok_or_else(|| {
+        tracing::error!(engine = %engine.name, r#type = %engine.r#type, "external engine of unknown type");
+        CpError::Internal
+    })?;
+    let rendered = egret_provisioner::ranger_plugin_files(
+        kind,
+        &service_name,
+        &st.engine_egret_url,
+        crate::engines::RANGER_POLL_INTERVAL_MS.into(),
+    );
+    let (auth_mode, warnings, admin_must_supply, modelled) =
+        plugin_config_judgements(&PluginConfigFacts {
+            engine_type: &engine.r#type,
+            public_url: &st.engine_egret_url,
+            bearer_configured: st.ranger_bearer_configured,
+            ranger_enabled: st.ranger_enabled,
+            version: engine.ranger_plugin_version.as_deref(),
+        });
+    Ok(Json(RangerPluginConfigDto {
+        download_url: format!(
+            "{}/service/plugins/policies/download/{service_name}",
+            st.engine_egret_url.trim_end_matches('/')
+        ),
+        service_name,
+        auth_mode: auth_mode.into(),
+        ranger_plugin_version: engine.ranger_plugin_version.clone(),
+        ranger_plugin_version_modelled: modelled,
+        warnings,
+        assumptions: egret_perm::EXTERNAL_PLUGIN_ASSUMPTIONS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        admin_must_supply,
+        files: rendered
+            .files
+            .into_iter()
+            .map(|(name, content)| RangerPluginFileDto { name, content })
+            .collect(),
+    }))
+}
+
+#[cfg(test)]
+mod plugin_config_tests {
+    use super::*;
+
+    fn facts<'a>(
+        url: &'a str,
+        bearer: bool,
+        enabled: bool,
+        v: Option<&'a str>,
+    ) -> PluginConfigFacts<'a> {
+        PluginConfigFacts {
+            engine_type: "starrocks",
+            public_url: url,
+            bearer_configured: bearer,
+            ranger_enabled: enabled,
+            version: v,
+        }
+    }
+
+    #[test]
+    fn the_in_cluster_default_and_svc_urls_warn() {
+        for url in [
+            "http://egret:8080",
+            "http://egret:8080/",
+            "http://egret.data.svc:8080",
+        ] {
+            let (_, w, _, _) = plugin_config_judgements(&facts(url, false, true, Some("2.8.0")));
+            assert!(w.iter().any(|m| m.contains("public_url")), "{url}");
+        }
+        let (_, w, _, _) = plugin_config_judgements(&facts(
+            "https://egret.example.com",
+            false,
+            true,
+            Some("2.8.0"),
+        ));
+        assert!(!w.iter().any(|m| m.contains("public_url")));
+    }
+
+    #[test]
+    fn bearer_configured_says_a_stock_plugin_cannot_send_it_and_never_shows_a_token() {
+        let (mode, w, must, _) =
+            plugin_config_judgements(&facts("https://e.example.com", true, true, Some("2.8.0")));
+        assert_eq!(mode, "bearer-configured");
+        assert!(w.iter().any(|m| m.contains("cannot send")));
+        assert!(must.iter().any(|m| m.contains("bearer token")));
+        assert!(!w.iter().any(|m| m.contains("anonymous")));
+    }
+
+    #[test]
+    fn anonymous_says_anyone_who_can_reach_it_downloads_every_profile() {
+        let (mode, w, _, _) =
+            plugin_config_judgements(&facts("https://e.example.com", false, true, Some("2.8.0")));
+        assert_eq!(mode, "anonymous");
+        assert!(w.iter().any(|m| m.contains("every profile's policies")));
+    }
+
+    #[test]
+    fn an_unmodelled_pair_or_disabled_ranger_is_stated() {
+        let (_, w, _, modelled) =
+            plugin_config_judgements(&facts("https://e.example.com", false, false, Some("2.4.0")));
+        assert!(!modelled);
+        assert!(w
+            .iter()
+            .any(|m| m.contains("refused") && m.contains("2.4.0")));
+        assert!(w.iter().any(|m| m.contains("Ranger is disabled")));
+        let (_, _, _, modelled) =
+            plugin_config_judgements(&facts("https://e.example.com", false, true, Some("2.8.0")));
+        assert!(modelled);
+    }
 }

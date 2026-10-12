@@ -690,7 +690,7 @@ pub(crate) async fn build_provision_req_with(
             .map(|service_name| egret_engine_mgmt_api::RangerBinding {
                 service_name,
                 egret_url: st.engine_egret_url.clone(),
-                poll_interval_ms: 30_000,
+                poll_interval_ms: RANGER_POLL_INTERVAL_MS,
             });
     Ok(BuiltReq {
         req: EngineProvisionReq {
@@ -2503,6 +2503,10 @@ async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
     }
 }
 
+/// How often an engine's Ranger plugin polls egret for policy: one value for the
+/// engines egret provisions and the files an external engine's admin installs.
+pub(crate) const RANGER_POLL_INTERVAL_MS: u32 = 30_000;
+
 /// Resolve the Ranger service NAME an engine's `authz_service_id` actually
 /// names, by reading the bound profile row (`policy.authz_services`) — never
 /// by assuming it is spelled like the engine (SP4a Task 3b).
@@ -2521,7 +2525,7 @@ async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
 /// profile rows are never deleted by bind/unbind (standing constraint), so
 /// this should only ever fire on genuine data corruption; when it does, the
 /// caller must see it rather than quietly enforce the wrong (or no) policy.
-async fn resolve_ranger_service_name(
+pub(crate) async fn resolve_ranger_service_name(
     st: &CpState,
     authz_service_id: Option<i64>,
 ) -> Result<Option<String>, CpError> {
@@ -3286,7 +3290,7 @@ async fn build_starrocks_provision_req(
             .map(|service_name| egret_engine_mgmt_api::RangerBinding {
                 service_name,
                 egret_url: st.engine_egret_url.clone(),
-                poll_interval_ms: 30_000,
+                poll_interval_ms: RANGER_POLL_INTERVAL_MS,
             });
 
     // Delegation wiring: provision (idempotently reuse) the TLS cert + delegator
@@ -7682,6 +7686,7 @@ mod tests {
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
             ranger_enabled: false,
+            ranger_bearer_configured: false,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(crate::starrocks_ddl::FakeStarRocksDdl::default()),
             perm_compiler: None,

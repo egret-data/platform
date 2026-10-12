@@ -241,6 +241,7 @@ fn build_app(
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
             ranger_enabled,
+            ranger_bearer_configured: false,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(starrocks_ddl),
             perm_compiler,
@@ -12626,4 +12627,141 @@ async fn patching_a_provisioned_engine_is_400_and_needs_engine_update() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{j}");
+}
+
+// ---------------------------------------------------------------------------
+// External engines: the Ranger plugin configuration the admin installs (Task 9)
+// ---------------------------------------------------------------------------
+
+async fn profile_name(f: &Fixture, id: i64) -> String {
+    egret_policy_api::PolicyPort::list_services(&egret_policy::PolicyStore::new(f.db.clone()))
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == id)
+        .expect("profile row")
+        .name
+}
+
+#[tokio::test]
+async fn an_external_starrocks_engine_gets_the_three_files_and_the_default_url_warning() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cfg_admin", true).await;
+    let profile = starrocks_profile(&f).await;
+    let service = profile_name(&f, profile).await;
+    let (id, _name) = register_external(&f, &token, "starrocks", "2.8.0", Some(profile), &[]).await;
+
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/ranger-plugin-config"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["serviceName"], service);
+    assert!(
+        j["downloadUrl"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("/service/plugins/policies/download/{service}")),
+        "{j}"
+    );
+    assert_eq!(j["authMode"], "anonymous");
+    assert_eq!(j["rangerPluginVersion"], "2.8.0");
+    assert_eq!(j["rangerPluginVersionModelled"], true);
+    let warnings = j["warnings"].to_string();
+    assert!(warnings.contains("public_url"), "default-URL warning: {j}");
+    assert!(warnings.contains("every profile's policies"), "{j}");
+    assert_eq!(j["assumptions"].as_array().unwrap().len(), 3);
+    let names: Vec<&str> = j["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "fe.conf (add this line)",
+            "ranger-starrocks-security.xml",
+            "ranger-starrocks-audit.xml"
+        ]
+    );
+    // The security file is the renderer's, for this profile and this egret URL.
+    let want = egret_provisioner::ranger_plugin_files(
+        egret_engine_mgmt_api::EngineKind::StarRocks,
+        &service,
+        "http://egret:8080",
+        30_000,
+    );
+    assert_eq!(
+        j["files"][1]["content"].as_str().unwrap(),
+        want.get("ranger-starrocks-security.xml").unwrap()
+    );
+    // No credential anywhere in the answer.
+    assert!(!j.to_string().to_lowercase().contains("secret"), "{j}");
+}
+
+#[tokio::test]
+async fn an_unmodelled_declared_version_is_stated_on_the_plugin_config() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_cfg_unmodelled_admin", true).await;
+    let profile = starrocks_profile(&f).await;
+    let (id, _name) = register_external(&f, &token, "starrocks", "2.4.0", Some(profile), &[]).await;
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/ranger-plugin-config"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["rangerPluginVersion"], "2.4.0");
+    assert_eq!(j["rangerPluginVersionModelled"], false);
+    assert!(j["warnings"].to_string().contains("refused"), "{j}");
+}
+
+#[tokio::test]
+async fn the_plugin_config_of_a_provisioned_or_unbound_engine_is_409_and_needs_engine_read() {
+    let Some(mut f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "ext_cfg_perm_admin", true).await;
+    let reader = session_for_with_permission(&f, "ext_cfg_reader", "engine:read").await;
+    let nobody = session_for_with_permission(&f, "ext_cfg_nobody", "workspace:read").await;
+    attach_real_pdp(&mut f).await;
+    let _wh = seed_provisioned_warehouse(&f).await;
+    let provisioned = seed_jwt_engine(&f).await;
+    let (unbound, _n) = register_external(&f, &admin, "starrocks", "2.8.0", None, &[]).await;
+    let profile = starrocks_profile(&f).await;
+    let (bound, _n) = register_external(&f, &admin, "starrocks", "2.8.0", Some(profile), &[]).await;
+
+    let path = |id: Uuid| format!("/engines/{id}/ranger-plugin-config");
+    let (status, j) = call(&f, "GET", &path(provisioned), &admin, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    let (status, j) = call(&f, "GET", &path(unbound), &admin, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap()
+            .contains("bind a profile first"),
+        "{j}"
+    );
+    let (status, j) = call(&f, "GET", &path(bound), &nobody, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{j}");
+    let (status, j) = call(&f, "GET", &path(bound), &reader, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    let (status, j) = call(&f, "GET", &path(Uuid::new_v4()), &admin, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{j}");
 }
