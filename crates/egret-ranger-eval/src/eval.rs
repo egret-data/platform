@@ -2713,6 +2713,48 @@ fn tag_policies_can_decide(
     }
 }
 
+/// Whether Ranger's candidate list for `request` MAY contain `policy` —
+/// `true` unless it provably does not.
+///
+/// A resource policy is in Ranger's list only if some resource map's match
+/// type is not `NONE` (what [`PolicyView::provably_a_candidate`] reads) **or**
+/// the resource trie fails to exclude it ([`trie_excludes`]; a trie false
+/// positive, which matters at offset 553 where `hasDeny()` alone is read).
+/// Both halves are the evaluator's own; this is the one spelling of their
+/// disjunction, for callers that must OVER-approximate candidacy (the
+/// equivalence gate's coordinate pruning, SP4d-4 Task 5).
+///
+/// Deliberately ignores `isEnabled` and the policy's type: a caller that asks
+/// "could this policy matter here?" must not narrow on either, so the answer
+/// can only err towards `true`. `policy_type` selects which hierarchy the trie
+/// proof reads the request's levels against.
+pub fn may_be_candidate(
+    policy: &RangerPolicy,
+    request: &RequestResource,
+    service_def: &ServiceDef,
+    policy_type: PolicyType,
+) -> bool {
+    match_policy_resources(policy, request, service_def)
+        .iter()
+        .any(|m| m.match_type != MatchType::None)
+        || !trie_excludes(policy, request, service_def, policy_type)
+}
+
+/// Whether a TAG policy is in Ranger's candidate list for a request carrying
+/// the tag `tag_name`: some resource map's match type for `{tag: tag_name}`,
+/// against the tag service-def, is not `NONE`. [`tag_candidates`] filters by
+/// exactly this.
+pub fn may_be_tag_candidate(
+    policy: &RangerPolicy,
+    tag_name: &str,
+    tag_service_def: &ServiceDef,
+) -> bool {
+    let tag_resource = RequestResource::new().with(TAG_RESOURCE_KEY, tag_name);
+    match_policy_resources(policy, &tag_resource, tag_service_def)
+        .into_iter()
+        .any(|m| m.match_type != MatchType::None)
+}
+
 /// Whether Ranger's candidate filter — `RangerPolicyRepository.getLikelyMatchPolicyEvaluators`,
 /// i.e. the `policyResourceTrie` — provably does **not** return `policy` for
 /// `request`.
@@ -4981,12 +5023,8 @@ fn tag_candidates<'a>(
 
     let mut candidates: Vec<TagCandidate<'a>> = Vec::new();
     for tag in admitted {
-        let tag_resource = RequestResource::new().with(TAG_RESOURCE_KEY, tag.name.as_str());
         for policy in &of_kind {
-            let in_candidate_set = match_policy_resources(policy, &tag_resource, tag_service_def)
-                .into_iter()
-                .any(|m| m.match_type != MatchType::None);
-            if !in_candidate_set {
+            if !may_be_tag_candidate(policy, tag.name.as_str(), tag_service_def) {
                 continue;
             }
             candidates.push(TagCandidate {
@@ -5665,6 +5703,101 @@ fn issue_affects_access(issue: &ServiceDefIssue) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn trino_def_for_candidacy() -> ServiceDef {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../egret-policy/src/service-defs/trino.json"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read trino.json"))
+                .expect("parse trino.json");
+        ServiceDef::parse(&json)
+    }
+
+    /// One access policy whose resource map is `levels` (`(level, values,
+    /// isExcludes)`), parsed through the crate's own reader.
+    fn policy_on(levels: &[(&str, &[&str], bool)]) -> RangerPolicy {
+        let resources: serde_json::Map<String, serde_json::Value> = levels
+            .iter()
+            .map(|(name, values, excludes)| {
+                (
+                    (*name).to_string(),
+                    serde_json::json!({"values": values, "isExcludes": excludes, "isRecursive": false}),
+                )
+            })
+            .collect();
+        let set: ServicePolicySet = serde_json::from_value(serde_json::json!({
+            "serviceName": "t", "policyVersion": 1,
+            "policies": [{
+                "id": 1, "name": "p", "service": "t", "policyType": 0, "isEnabled": true,
+                "resources": resources,
+                "policyItems": [], "denyPolicyItems": []
+            }]
+        }))
+        .expect("parse");
+        set.policies.into_iter().next().expect("one policy")
+    }
+
+    fn request_of(levels: &[(&str, &str)]) -> RequestResource {
+        levels
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    /// The exported candidacy predicate, cell by cell. Each `false` is a claim
+    /// that Ranger's trie cannot return the policy; each `true` is "cannot
+    /// prove absence", which is the safe side.
+    #[test]
+    fn may_be_candidate_is_true_for_an_ancestor_and_false_for_a_provably_absent_sibling() {
+        let def = trino_def_for_candidacy();
+        let schema_policy = policy_on(&[("catalog", &["wh"], false), ("schema", &["sales"], false)]);
+        let orders = request_of(&[
+            ("catalog", "wh"),
+            ("schema", "sales"),
+            ("table", "orders"),
+            ("column", "email"),
+        ]);
+        let other = request_of(&[
+            ("catalog", "wh"),
+            ("schema", "other"),
+            ("table", "orders"),
+            ("column", "email"),
+        ]);
+        // ANCESTOR: the policy declares fewer levels than the request.
+        assert!(may_be_candidate(&schema_policy, &orders, &def, PolicyType::Access));
+        // A sibling schema with plain literal values: the trie proves absence.
+        assert!(!may_be_candidate(&schema_policy, &other, &def, PolicyType::Access));
+
+        // `isExcludes` on `schema`: the matcher says the sibling schema
+        // matches (anything but `sales`), and the trie cannot prove absence.
+        let excluding = policy_on(&[("catalog", &["wh"], false), ("schema", &["sales"], true)]);
+        assert!(may_be_candidate(&excluding, &other, &def, PolicyType::Access));
+        // ...and `sales` itself, which the matcher rejects, is still not
+        // provably absent from Ranger's list: the trie holds an excludes
+        // level as an inherited evaluator.
+        assert!(may_be_candidate(&excluding, &orders, &def, PolicyType::Access));
+    }
+
+    /// Tag candidacy: Ranger's wildcard, case-folded.
+    #[test]
+    fn may_be_tag_candidate_follows_the_tag_def_wildcard_and_case() {
+        let tag_def_json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../egret-policy/src/service-defs/tag.json"
+            ))
+            .expect("read tag.json"),
+        )
+        .expect("parse tag.json");
+        let tag_def = ServiceDef::parse(&tag_def_json);
+        let pii = policy_on(&[("tag", &["pii"], false)]);
+        let any = policy_on(&[("tag", &["*"], false)]);
+        assert!(may_be_tag_candidate(&pii, "pii", &tag_def));
+        assert!(!may_be_tag_candidate(&pii, "phi", &tag_def));
+        assert!(may_be_tag_candidate(&any, "anything", &tag_def));
+    }
 
     /// `MATCH_TYPE_COMPARATOR`'s order, pinned against a MEASUREMENT rather
     /// than against the enum.
