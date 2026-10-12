@@ -311,7 +311,9 @@ and a five-minute `Pause`. It then asserts:
 
 The stack is private, as for `workflows-flows.spec.ts`:
 
-- a database of its own on the branch's Postgres (`egret_w7b_e2e` on `egret-w7b-postgres`, :5442);
+- a database of its own on the branch's Postgres (`egret_w7b_e2e` on `egret-w7b-postgres`, :5442; if the branch has none,
+  `docker run -d --name egret-w7b-postgres -p 5442:5432 -e POSTGRES_USER=egret -e POSTGRES_PASSWORD=egret postgres:16`,
+  or any Postgres you own);
 - a private RustFS with one bucket (the `Write` task stores its file there);
 - `serve` on :8197 with the worker on;
 - Vite on :5207 through the committed `tests/e2e/vite.e2e.config.mts`.

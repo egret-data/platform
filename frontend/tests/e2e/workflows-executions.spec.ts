@@ -18,6 +18,8 @@ import { csrf, firstWorkspace, loginLocalAdmin, postJson } from "./helpers";
  *
  * ```bash
  * # 1. A database of its own on the branch's Postgres (:5442), a private RustFS with one bucket.
+ * #    The branch's Postgres, once, if it does not exist yet (any Postgres you own will do):
+ * docker run -d --name egret-w7b-postgres -p 5442:5432 -e POSTGRES_USER=egret -e POSTGRES_PASSWORD=egret postgres:16
  * docker exec egret-w7b-postgres psql -U egret -d postgres -c "CREATE DATABASE egret_w7b_e2e"
  * docker run -d --name w7b-t7-rustfs -p 9457:9000 \
  *   -e RUSTFS_ACCESS_KEY=egret -e RUSTFS_SECRET_KEY=egretsecret rustfs/rustfs:1.0.1
@@ -114,6 +116,31 @@ async function rects(page: Page, selectors: string[]): Promise<(DOMRect | null)[
   return page.evaluate((sels) => sels.map((s) => document.querySelector(s)?.getBoundingClientRect().toJSON() ?? null), selectors);
 }
 
+/**
+ * At 900 px: every bar, attempt and marker inside its timeline cell, no
+ * sideways scroll in the chart, and the retried row's task id not truncated.
+ * Back to the default viewport afterwards.
+ */
+async function expectNarrowGanttFits(page: Page): Promise<void> {
+  await page.setViewportSize({ width: 900, height: 720 });
+  await expect(page.locator('[role="treegrid"]')).toBeVisible();
+  const narrow = await page.evaluate(() => {
+    const grid = document.querySelector('[role="treegrid"]')!;
+    const outside: string[] = [];
+    for (const row of grid.querySelectorAll('[role="row"][data-run-ix]')) {
+      const cell = row.querySelector('[role="gridcell"]:last-child')!.getBoundingClientRect();
+      for (const m of row.querySelectorAll<HTMLElement>('[data-testid^="gantt-"]')) {
+        const r = m.getBoundingClientRect();
+        if (r.left < cell.left - 0.5 || r.right > cell.right + 0.5) outside.push(m.dataset.testid!);
+      }
+    }
+    const label = grid.querySelector('[role="row"][data-run-ix="0"] span.truncate')!;
+    return { outside, sideways: grid.parentElement!.scrollWidth - grid.parentElement!.clientWidth, labelClipped: label.scrollWidth > label.clientWidth };
+  });
+  expect(narrow).toEqual({ outside: [], sideways: 0, labelClipped: false });
+  await page.setViewportSize({ width: 1280, height: 720 });
+}
+
 test.describe("W7b executions: list, gantt, logs, files, resume, replay", () => {
   test.skip(!ENABLED, "opt-in: set EGRET_E2E_WORKFLOWS=1 with a private local stack up (see the comment above)");
   test.setTimeout(240_000);
@@ -204,22 +231,7 @@ test.describe("W7b executions: list, gantt, logs, files, resume, replay", () => 
     expect(a0!.right).toBeLessThanOrEqual(a1!.left + 1);
     // At 900 px every bar, attempt and marker stays inside its timeline cell, the chart does not
     // scroll sideways, and the retried row's task id is not truncated.
-    await page.setViewportSize({ width: 900, height: 720 });
-    const narrow = await page.evaluate(() => {
-      const grid = document.querySelector('[role="treegrid"]')!;
-      const outside: string[] = [];
-      for (const row of grid.querySelectorAll('[role="row"][data-run-ix]')) {
-        const cell = row.querySelector('[role="gridcell"]:last-child')!.getBoundingClientRect();
-        for (const m of row.querySelectorAll<HTMLElement>('[data-testid^="gantt-"]')) {
-          const r = m.getBoundingClientRect();
-          if (r.left < cell.left - 0.5 || r.right > cell.right + 0.5) outside.push(m.dataset.testid!);
-        }
-      }
-      const label = grid.querySelector('[role="row"][data-run-ix="0"] span.truncate')!;
-      return { outside, sideways: grid.parentElement!.scrollWidth - grid.parentElement!.clientWidth, labelClipped: label.scrollWidth > label.clientWidth };
-    });
-    expect(narrow).toEqual({ outside: [], sideways: 0, labelClipped: false });
-    await page.setViewportSize({ width: 1280, height: 720 });
+    await expectNarrowGanttFits(page);
     // The paused run's bar is still open: it runs to now.
     await expect(page.getByTestId("gantt-bar-4")).toHaveAttribute("data-open", "true");
 
@@ -291,6 +303,11 @@ test.describe("W7b executions: list, gantt, logs, files, resume, replay", () => 
     await page.getByRole("tab", { name: "Gantt" }).click();
     await expect(page.locator('[role="row"][data-run-ix="4"] [data-state="SUCCESS"]').first()).toBeVisible();
     await expect(page.getByTestId("gantt-bar-4")).not.toHaveAttribute("data-open", "true");
+    // Finished, the last run (`after`) ends at the axis end. Without the axis inset its bar leaves
+    // the cell only when the run is shorter than its 2 px minimum width in axis time; here `after`
+    // took about 1 s of a 30 s axis (8 px), so this check stayed green with the inset reverted
+    // (Task 7 fix round 1). The overflow was measured on a 0.07 s run instead; see W7b spec §15.
+    await expectNarrowGanttFits(page);
 
     // ── 6. Replay: a new execution that says where it came from ─────────
     await page.getByRole("button", { name: "Replay", exact: true }).click();
