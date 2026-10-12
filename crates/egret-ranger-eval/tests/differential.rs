@@ -7618,6 +7618,465 @@ fn a_migration_the_grammar_accepts_decides_identically_on_the_real_engine() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+// ── SP4d-4 Task 6: the probes the gate PRUNES, on the real engines ───────────
+//
+// Pruning (`egret_perm_compile::equivalence::PruneMode::Pruned`) drops every probe
+// at which no changed policy may be a candidate, on the argument that the two
+// downloads decide there exactly as they did before. Task 5 checked that argument
+// against egret's own evaluator, which is the instrument whose agreement with the
+// migration it is being used to establish. This test asks the real 2.5.0 and 2.8.0
+// jars about exactly the probes pruning DROPPED, on both sides of each pair, and
+// requires every one to decide identically: `isAllowed`, `isAccessDetermined`,
+// `maskType`, `maskedValue`, `maskCondition` and `filterExpr` (never `policyId`,
+// which differs by construction).
+//
+// Pairs: the migration corpus on both engines; the seeded random corpus Task 5
+// built (400 pairs, Trino); and one pair whose changed policy is rejected by the
+// matcher but cannot be excluded by Ranger's trie (offset 553, where
+// `hasDeny()` alone is read), where the KEPT probes are asked too.
+
+#[path = "../../egret-perm-compile/tests/common/corpus.rs"]
+mod prune_corpus;
+
+/// The most dropped probes sent per (source, Ranger version).
+const PRUNE_SAMPLE_CAP: usize = 4000;
+
+struct PrunePair {
+    label: String,
+    before: Value,
+    after: Value,
+    assignments: Vec<egret_perm_compile::equivalence::TagAssignment>,
+}
+
+/// A download envelope the Java half can load: no `contextEnrichers` on either
+/// def (see [`load_engine`] and [`load_tag_def`]).
+fn prune_strip_enrichers(mut envelope: Value) -> Value {
+    for pointer in ["/serviceDef", "/tagPolicies/serviceDef"] {
+        if let Some(obj) = envelope.pointer_mut(pointer).and_then(Value::as_object_mut) {
+            obj.remove("contextEnrichers");
+        }
+    }
+    envelope
+}
+
+struct PruneDropped {
+    /// The probes pruning dropped, in `derive_probes`' order.
+    dropped: Vec<egret_perm_compile::equivalence::Probe>,
+    /// Indices into `dropped` the evaluator answers `Undecidable` on BOTH sides.
+    undecidable: Vec<usize>,
+    kept: Vec<egret_perm_compile::equivalence::Probe>,
+    full: usize,
+    fallback: Option<egret_perm_compile::equivalence::FallbackReason>,
+}
+
+fn prune_dropped(pair: &PrunePair, def: &ServiceDef) -> PruneDropped {
+    use egret_perm_compile::equivalence::{compare, plan_probes, ProfileCase, PruneMode};
+    let parse = |v: &Value| -> ServicePolicySet {
+        serde_json::from_value(v.clone())
+            .unwrap_or_else(|e| panic!("`{}`: the envelope does not parse: {e}", pair.label))
+    };
+    let (before, after) = (parse(&pair.before), parse(&pair.after));
+    let full = plan_probes(&before, &after, def, &pair.assignments, PruneMode::Full);
+    let pruned = plan_probes(&before, &after, def, &pair.assignments, PruneMode::Pruned);
+    // Pruning keeps `derive_probes`' order: full minus pruned is a subsequence walk.
+    let mut rest = pruned.probes.iter().peekable();
+    let mut dropped = Vec::new();
+    for probe in &full.probes {
+        if rest.peek() == Some(&probe) {
+            rest.next();
+        } else {
+            dropped.push(probe.clone());
+        }
+    }
+    assert!(
+        rest.next().is_none(),
+        "`{}`: the pruned probes are not a subsequence of the full set",
+        pair.label
+    );
+    let case = |probes: Vec<egret_perm_compile::equivalence::Probe>| ProfileCase {
+        service_id: 1,
+        service_name: pair.label.clone(),
+        before: &before,
+        after: &after,
+        service_def: def,
+        engine: EngineConfig::without_super_users(),
+        versions: vec![PluginVersion::Ranger2_5_0, PluginVersion::Ranger2_8_0],
+        probes,
+    };
+    let mut undecidable = Vec::new();
+    if !dropped.is_empty() {
+        let ds = compare(&case(dropped.clone())).unwrap_or_else(|r| {
+            panic!(
+                "`{}`: the gate refused its dropped probes: {r:?}",
+                pair.label
+            )
+        });
+        for d in &ds {
+            assert!(
+                d.before == d.after && d.before.starts_with("cannot be decided"),
+                "`{}`: egret's own evaluator finds a disagreement on a DROPPED probe: {d:?}",
+                pair.label
+            );
+        }
+        if !ds.is_empty() {
+            for (i, probe) in dropped.iter().enumerate() {
+                if !compare(&case(vec![probe.clone()]))
+                    .expect("one probe")
+                    .is_empty()
+                {
+                    undecidable.push(i);
+                }
+            }
+            assert!(!undecidable.is_empty(), "`{}`: not located", pair.label);
+        }
+    }
+    PruneDropped {
+        dropped,
+        undecidable,
+        kept: pruned.probes,
+        full: full.full_count,
+        fallback: pruned.fallback,
+    }
+}
+
+/// Which `(pair, probe)` to send: every undecidable one, the first dropped
+/// probe of every pair, and evenly spaced others up to `cap` in all.
+fn prune_sample(per_pair: &[PruneDropped], cap: usize) -> Vec<(usize, usize)> {
+    let mut chosen: BTreeSet<(usize, usize)> = BTreeSet::new();
+    for (pi, d) in per_pair.iter().enumerate() {
+        for &i in &d.undecidable {
+            chosen.insert((pi, i));
+        }
+    }
+    for (pi, d) in per_pair.iter().enumerate() {
+        if !d.dropped.is_empty() {
+            chosen.insert((pi, 0));
+        }
+    }
+    let rest: Vec<(usize, usize)> = per_pair
+        .iter()
+        .enumerate()
+        .flat_map(|(pi, d)| (0..d.dropped.len()).map(move |i| (pi, i)))
+        .filter(|c| !chosen.contains(c))
+        .collect();
+    let room = cap.saturating_sub(chosen.len());
+    if rest.len() <= room {
+        chosen.extend(rest);
+    } else {
+        for j in 0..room {
+            chosen.insert(rest[j * rest.len() / room]);
+        }
+    }
+    assert!(
+        chosen.len() <= cap.max(per_pair.iter().map(|d| d.undecidable.len()).sum::<usize>()),
+        "sample over the cap"
+    );
+    chosen.into_iter().collect()
+}
+
+/// Ask `(pair, probe)` items at one Ranger version, all three policy types, both
+/// sides, batched across pairs (each `ask_ranger` call starts a JVM). Returns,
+/// per item, the comparison fields on which the sides differ.
+fn prune_ask(
+    profile: &Profile,
+    items: &[(&PrunePair, &egret_perm_compile::equivalence::Probe)],
+    ranger_version: &str,
+) -> Vec<Vec<&'static str>> {
+    let mut cases = Vec::with_capacity(items.len() * 6);
+    for (k, (pair, probe)) in items.iter().enumerate() {
+        for policy_type in 0..=2 {
+            for (side, set) in [("before", &pair.before), ("after", &pair.after)] {
+                cases.push(Case {
+                    id: format!("prune-{k:06}-{policy_type}-{side}"),
+                    policy_type,
+                    duel: false,
+                    composed_duel: false,
+                    candidacy_duel: false,
+                    restore_duel: false,
+                    version_split_duel: false,
+                    service_policies: set.clone(),
+                    request: probe.request.clone(),
+                });
+            }
+        }
+    }
+    let mut verdicts: Vec<Value> = Vec::with_capacity(cases.len());
+    for (chunk_no, chunk) in cases.chunks(MIG_CHUNK).enumerate() {
+        verdicts.extend(ask_ranger(
+            chunk,
+            profile.engine.service_def_name(),
+            ranger_version,
+            &format!("prune-{}-{chunk_no}", profile.engine.service_def_name()),
+        ));
+    }
+    assert_eq!(verdicts.len(), cases.len(), "one verdict per case");
+    let mut out = Vec::with_capacity(items.len());
+    for (k, (pair, probe)) in items.iter().enumerate() {
+        let mut differing: Vec<&'static str> = Vec::new();
+        for t in 0..3 {
+            let i = (k * 3 + t) * 2;
+            let (before, after) = (&verdicts[i], &verdicts[i + 1]);
+            assert_eq!(before["id"], json!(cases[i].id), "verdict order");
+            assert_eq!(after["id"], json!(cases[i + 1].id), "verdict order");
+            for v in [before, after] {
+                assert!(
+                    v["error"].is_null(),
+                    "ranger {ranger_version} threw on {} (`{}`, user {:?}, resource {:?}): {}",
+                    v["id"],
+                    pair.label,
+                    probe.request.user,
+                    probe.request.resource,
+                    v["error"]
+                );
+            }
+            for f in MIG_COMPARED_FIELDS {
+                if before.get(*f) != after.get(*f) && !differing.contains(f) {
+                    differing.push(f);
+                }
+            }
+        }
+        out.push(differing);
+    }
+    out
+}
+
+#[test]
+fn probes_the_gate_prunes_decide_identically_on_the_real_engine() {
+    if std::env::var("EGRET_TEST_RANGER_E2E").ok().as_deref() != Some("1") {
+        eprintln!("EGRET_TEST_RANGER_E2E != 1 — skipping the pruning differential");
+        return;
+    }
+    let started = std::time::Instant::now();
+    let tag_def_json = load_tag_def();
+    let mut all_mask_types: Vec<String> = Vec::new();
+    for profile in [trino(), starrocks()] {
+        let (def_json, _, _) = load_engine(&profile);
+        for t in mig_def_names(&def_json, "/dataMaskDef/maskTypes") {
+            if !all_mask_types.contains(&t) {
+                all_mask_types.push(t);
+            }
+        }
+    }
+
+    // ── the sources: (name, profile, parsed def, pairs) ──────────────────────
+    let mut sources: Vec<(String, Profile, ServiceDef, Vec<PrunePair>)> = Vec::new();
+    for profile in [trino(), starrocks()] {
+        let (def_json, def, _) = load_engine(&profile);
+        let mut tally = MigTally::default();
+        let (mut refusals, mut accepted) = (Vec::new(), Vec::new());
+        let pairs = mig_prepare(
+            &profile,
+            &def_json,
+            &tag_def_json,
+            &all_mask_types,
+            &mut tally,
+            &mut refusals,
+            &mut accepted,
+        );
+        let name = format!("migration corpus [{}]", profile.engine.service_def_name());
+        let pairs = pairs
+            .into_iter()
+            .map(|p| PrunePair {
+                label: p.label,
+                before: p.before,
+                after: p.after,
+                assignments: Vec::new(),
+            })
+            .collect();
+        sources.push((name, profile, def, pairs));
+    }
+    {
+        let profile = trino();
+        let (_, def, _) = load_engine(&profile);
+        let pairs = prune_corpus::corpus_json(prune_corpus::LARGE_CORPUS_PAIRS)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (before, after, assignments))| PrunePair {
+                label: format!("random pair {i}"),
+                before: prune_strip_enrichers(before),
+                after: prune_strip_enrichers(after),
+                assignments,
+            })
+            .collect();
+        sources.push((
+            format!("random corpus (seed {:#x})", prune_corpus::CORPUS_SEED),
+            profile,
+            def,
+            pairs,
+        ));
+    }
+    // The trie false positive: the changed policy EXCLUDES `sales`, so the
+    // matcher rejects it at `wh.sales.*` while the trie cannot omit it.
+    let trie_pairs = {
+        use prune_corpus::{envelope_json, item, level};
+        let at = |name: &str, schema: &str, table: &str, users: &[&str]| {
+            json!({
+                "id": 500, "name": name, "service": "trino-p", "policyType": 0,
+                "isEnabled": true, "policyPriority": 0,
+                "resources": {"catalog": level(&["wh"]), "schema": level(&[schema]),
+                              "table": level(&[table]), "column": level(&["*"])},
+                "policyItems": [item(users, &[], &["select"])],
+                "denyPolicyItems": [], "allowExceptions": [], "denyExceptions": []
+            })
+        };
+        let mut excluding = at("not sales", "sales", "orders", &["alice"]);
+        excluding["resources"]["schema"]["isExcludes"] = json!(true);
+        let other = at("hr", "hr", "people", &["carol"]);
+        // The same shape as a DENY: where the trie keeps an evaluator the matcher
+        // rejected, offset 553 reads `hasDeny()` alone, which a deny evaluator makes true.
+        let mut deny_excluding = at("deny not sales", "sales", "orders", &[]);
+        deny_excluding["resources"]["schema"]["isExcludes"] = json!(true);
+        deny_excluding["policyItems"] = json!([]);
+        deny_excluding["denyPolicyItems"] = json!([item(&["alice"], &[], &["select"])]);
+        let allow_sales = at("allow sales", "sales", "orders", &["alice"]);
+        let pair = |label: &str, base: Vec<Value>, changed: Value| {
+            let mut after = base.clone();
+            after.push(changed);
+            PrunePair {
+                label: label.into(),
+                before: prune_strip_enrichers(envelope_json(base, vec![])),
+                after: prune_strip_enrichers(envelope_json(after, vec![])),
+                assignments: Vec::new(),
+            }
+        };
+        vec![
+            pair(
+                "trie false positive (allow)",
+                vec![other.clone()],
+                excluding,
+            ),
+            pair(
+                "trie false positive (deny)",
+                vec![other, allow_sales],
+                deny_excluding,
+            ),
+        ]
+    };
+    {
+        let profile = trino();
+        let (_, def, _) = load_engine(&profile);
+        sources.push(("trie false positive".into(), profile, def, trie_pairs));
+    }
+
+    // ── what pruning dropped, per source ─────────────────────────────────────
+    let mut failures: Vec<String> = Vec::new();
+    let (mut grand_dropped, mut grand_sent, mut grand_undecidable) = (0usize, 0usize, 0usize);
+    for (name, profile, def, pairs) in &sources {
+        let t = std::time::Instant::now();
+        let per_pair: Vec<PruneDropped> = pairs.iter().map(|p| prune_dropped(p, def)).collect();
+        let dropped: usize = per_pair.iter().map(|d| d.dropped.len()).sum();
+        let full: usize = per_pair.iter().map(|d| d.full).sum();
+        let undecidable: usize = per_pair.iter().map(|d| d.undecidable.len()).sum();
+        let fell_back = per_pair.iter().filter(|d| d.fallback.is_some()).count();
+        let with_dropped = per_pair.iter().filter(|d| !d.dropped.is_empty()).count();
+        eprintln!(
+            "pruning differential [{name}]: {} pairs, {fell_back} fell back, {with_dropped} dropped \
+             something; probes full {full}, dropped {dropped} (undecidable on both sides in \
+             egret's evaluator: {undecidable}); planned in {:.2} s",
+            pairs.len(),
+            t.elapsed().as_secs_f64()
+        );
+        assert!(
+            dropped > 0,
+            "[{name}] pruning dropped nothing, so the oracle below would be vacuous"
+        );
+        let sample = prune_sample(&per_pair, PRUNE_SAMPLE_CAP);
+        assert!(
+            sample.len() >= undecidable,
+            "every undecidable dropped probe is sent"
+        );
+        grand_dropped += dropped;
+        grand_sent += sample.len();
+        grand_undecidable += undecidable;
+
+        for version in ["2.5.0", "2.8.0"] {
+            let t = std::time::Instant::now();
+            let items: Vec<(&PrunePair, &egret_perm_compile::equivalence::Probe)> = sample
+                .iter()
+                .map(|&(pi, i)| (&pairs[pi], &per_pair[pi].dropped[i]))
+                .collect();
+            let undecidable_sent = sample
+                .iter()
+                .filter(|(pi, i)| per_pair[*pi].undecidable.contains(i))
+                .count();
+            let results = prune_ask(profile, &items, version);
+            let mut disagreements: Vec<String> = Vec::new();
+            for ((pair, probe), differing) in items.iter().zip(&results) {
+                if !differing.is_empty() && disagreements.len() < 20 {
+                    disagreements.push(format!(
+                        "ranger {version} DISAGREES on a probe pruning DROPPED, pair `{}`: \
+                         fields {differing:?}; user {:?} groups {:?} access {:?} resource {:?} \
+                         tagging {:?}\n  before: {}\n  after: {}",
+                        pair.label,
+                        probe.request.user,
+                        probe.request.groups,
+                        probe.request.access_type,
+                        probe.request.resource,
+                        probe.tagging,
+                        pair.before,
+                        pair.after,
+                    ));
+                }
+            }
+            eprintln!(
+                "pruning differential [{name} @ ranger {version}]: {} dropped probes sent \
+                 ({} cases), {undecidable_sent} of them undecidable on both sides in egret's \
+                 evaluator, in {:.2} s; disagreements {}",
+                items.len(),
+                items.len() * 6,
+                t.elapsed().as_secs_f64(),
+                results.iter().filter(|d| !d.is_empty()).count()
+            );
+            if results.iter().any(|d| !d.is_empty()) {
+                failures.push(format!(
+                    "[{name} @ {version}] SOUNDNESS DEFECT, pruning dropped probes the real engine \
+                     decides differently:\n{}",
+                    disagreements.join("\n")
+                ));
+            }
+        }
+
+        // The trie pair: ask the KEPT probes too, so the retention is shown to matter.
+        if name == "trie false positive" {
+            for (pi, pair) in pairs.iter().enumerate() {
+                for version in ["2.5.0", "2.8.0"] {
+                    let kept: Vec<&_> = per_pair[pi].kept.iter().collect();
+                    let items: Vec<(&PrunePair, &_)> = kept.iter().map(|p| (pair, *p)).collect();
+                    let results = prune_ask(profile, &items, version);
+                    let at_sales: Vec<_> = kept
+                        .iter()
+                        .zip(&results)
+                        .filter(|(p, _)| p.request.resource.get("schema") == Some("sales"))
+                        .collect();
+                    let differing = at_sales.iter().filter(|(_, d)| !d.is_empty()).count();
+                    eprintln!(
+                        "{} @ ranger {version}: {} kept probes ({} at schema=sales, \
+                     where the matcher rejects the changed policy but the trie keeps it); the real \
+                     engine decides {differing} of those differently before vs after; \
+                     {} kept probes differ in all",
+                        pair.label,
+                        kept.len(),
+                        at_sales.len(),
+                        results.iter().filter(|d| !d.is_empty()).count()
+                    );
+                    assert!(
+                        !at_sales.is_empty(),
+                        "the trie false positive kept no probe at schema=sales"
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "pruning differential: dropped {grand_dropped} probes in all, sent {grand_sent} per \
+         version (of which {grand_undecidable} undecidable on both sides in egret's evaluator), \
+         in {:.2} s",
+        started.elapsed().as_secs_f64()
+    );
+    assert!(grand_dropped > 0 && grand_sent > 0);
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
 // ── SP4d-4 Task 1: what an absent level grants on the real jars ─────────────
 //
 // The policy editor saves a level the steward left empty by OMITTING it, so a
