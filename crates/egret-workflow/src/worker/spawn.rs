@@ -67,7 +67,7 @@ use uuid::Uuid;
 
 use super::{claim, WorkerError};
 use crate::executor::{
-    apply, build_plan, resolve_loop_values, Command, ExecutionState, LoopValues, RunIx, RunState,
+    apply, plan_stored, resolve_loop_values, Command, ExecutionState, LoopValues, RunIx, RunState,
     TaskIx, TaskKind,
 };
 use crate::models::{Flow, Task, TaskKind as ModelTaskKind};
@@ -355,7 +355,9 @@ async fn insert_iteration(
     let source = sub_flow_source(&parent.source, loop_id, parent.id)?;
     let flow = crate::spec::parse(&source)
         .map_err(|e| worker_err(WorkerError::Unplannable(parent.id, e.message)))?;
-    let plan = build_plan(&source)
+    // The parent's own stored source, cut down: planned by the rules the
+    // parent started under (`executor::plan_stored`; user ruling 2026-10-12).
+    let plan = plan_stored(&source)
         .map_err(|e| worker_err(WorkerError::Unplannable(parent.id, e.to_string())))?;
 
     // **`inputs` is the PARENT's, and it has to be copied here.**
@@ -387,16 +389,18 @@ async fn insert_iteration(
     // In a savepoint, for `subflow::spawn_one`'s reason: the FILE-input check
     // below needs the row and may refuse it.
     let mut sp = sqlx::Connection::begin(&mut *conn).await.map_err(db_err)?;
-    let (id, inputs): (Uuid, serde_json::Value) = sqlx::query_as(
+    let (id, inputs): (Uuid, serde_json::Value) = sqlx::query_as(concat!(
         "INSERT INTO workflow.executions \
-           (workspace_id, flow_id, namespace, flow_key, source, state, history, \
-            parent_execution_id, parent_run_ix, loop_index, loop_value, inputs, \
-            execution_depth) \
-         VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9, \
+               (workspace_id, flow_id, namespace, flow_key, source, state, history, \
+                parent_execution_id, parent_run_ix, loop_index, loop_value, inputs, \
+                execution_depth, ",
+        super::stamps::stamp_columns!(),
+        ") VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9, \
                  COALESCE((SELECT inputs FROM workflow.executions WHERE id = $6), '{}'::jsonb), \
-                 (SELECT execution_depth FROM workflow.executions WHERE id = $6)) \
-         RETURNING id, inputs",
-    )
+                 (SELECT execution_depth FROM workflow.executions WHERE id = $6), ",
+        super::stamps::stamp_values!("'CREATED'", "'[\"CREATED\"]'"),
+        ") RETURNING id, inputs",
+    ))
     .bind(parent.workspace_id)
     .bind(parent.flow_id)
     .bind(&flow.namespace)

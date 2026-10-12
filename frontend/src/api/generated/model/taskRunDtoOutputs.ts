@@ -6,4 +6,9 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export type TaskRunDtoOutputs = { [key: string]: unknown };
+/**
+ * The run's outputs, `NULL` for a run that has none: a handler that
+ * returned nothing (a `Log`, a `Sleep`) and any run not yet terminal.
+ * @nullable
+ */
+export type TaskRunDtoOutputs = { [key: string]: unknown } | null;

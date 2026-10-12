@@ -103,8 +103,10 @@
 //! `plan::TaskKind::LoopUntil`, so `claim::persist` writes no `type_id` and the
 //! claim never takes one. The residue is per-TASK rather than per-type: a
 //! `LoopUntil` whose `checkFrequency:` bound this pure builder cannot read is
-//! still planned opaque (`executor::plan::loop_until_gap`), and no corpus flow
-//! writes one.
+//! still planned opaque (`executor::plan::loop_until_gap`) -- and, since
+//! no-silent-stall Task 1, refused at validate as
+//! `unsupported_loop_until_property`, so no execution of it starts -- and no
+//! corpus flow writes one.
 //!
 //! **`Pause` was the fourth member of that list and the one the divergence was
 //! written about, and W8 Task 3 removed it.** It is a `TaskKind::Pause` now:
@@ -238,6 +240,11 @@ pub(super) enum Budget {
     /// started**, carrying this message. The artifact does the same: all three
     /// bad spellings produce a FAILED task run whose only attempt never ran
     /// the task body.
+    ///
+    /// **Also the run whose task is not a leaf** (`WorkerError::NotALeaf`,
+    /// no-silent-stall spec §5): `Claimed::input` builds this with the §5 line,
+    /// because "fail without calling a handler, through the normal commit" is
+    /// exactly this variant's path, and there is no `timeout:` to read.
     Refused(String),
 }
 

@@ -21,4 +21,10 @@ export type ExecutionDto = ExecutionListItemDto & {
   source: string;
   /** Every task run, in `run_ix` order — the executor's creation order. */
   runs: TaskRunDto[];
+  /**
+     * Whether the caller may resume and replay this execution: they hold
+     * `workflow:manage` in this workspace. A detail page hides both actions
+     * when this is false; the routes still check for themselves.
+     */
+  can_manage: boolean;
 };

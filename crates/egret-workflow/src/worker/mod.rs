@@ -87,6 +87,7 @@ mod registry;
 mod render;
 mod replay;
 mod spawn;
+mod stamps;
 mod subflow;
 mod timeout;
 pub(crate) mod txn;
@@ -99,9 +100,30 @@ pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
 #[cfg(any(test, feature = "test-util"))]
 pub use claim::{apply_outcome, start_execution_in};
 pub use claim::{
-    claim, commit_outcome, due_retries, resume, start_execution, start_execution_with_trigger,
-    tick, tick_with, wake, Claimed, NewExecution, WorkerTiming,
+    claim, commit_outcome, due_retries, resume, resume_by_hand, start_execution,
+    start_execution_with_trigger, tick, tick_with, wake, Claimed, NewExecution, Resumed,
+    WorkerTiming,
 };
+/// Test-only (`test-util`; W7b Task 1): `persist`'s two state `UPDATE`s, so
+/// `tests/execution_timestamps.rs` can drive the production text against a
+/// terminal row.
+#[cfg(any(test, feature = "test-util"))]
+pub use claim::{EXECUTION_STATE_UPDATE, RUN_STATE_UPDATE};
+
+/// Test-only (`test-util`; W7b Task 1 cleanup): `persist`'s per-transition
+/// stamp rule, `(entered_running, entered_terminal)` for a write that takes
+/// the loaded history `before` to `after`, both given as wire names. The test
+/// that re-sends the two statements above binds what production would bind.
+#[cfg(any(test, feature = "test-util"))]
+pub fn stamps_entered(before: &[&str], after: &[&str]) -> (bool, bool) {
+    let parse = |h: &[&str]| -> Vec<RunState> {
+        h.iter()
+            .map(|s| from_wire(s).unwrap_or_else(|| panic!("unknown state {s}")))
+            .collect()
+    };
+    let e = stamps::Entered::of(&parse(before), &parse(after), false);
+    (e.running, e.terminal)
+}
 pub use reaper::reap;
 pub use registry::Handlers;
 pub use render::execution_render_context;
@@ -593,17 +615,40 @@ pub enum WorkerError {
     )]
     PrefetchMiss,
 
-    /// The stored `source` no longer builds a plan.
-    #[error("execution {0} holds a source that no longer plans: {1}")]
+    /// The stored `source` does not parse, or does not flatten into a plan
+    /// (a structural error the flattening in `executor::plan_stored`
+    /// reports). Damaged data, not a
+    /// missing handler, so it still aborts the tick and records nothing
+    /// (no-silent-stall spec §5).
+    ///
+    /// **Never a validation refusal.** A stored execution is planned without
+    /// `validate_for_run` (user ruling 2026-10-12: an execution that started
+    /// runs by the rules it started under; validation gates starts only). From
+    /// no-silent-stall Task 1 until Task 4 fix round 1 the worker re-planned
+    /// stored sources with `build_plan`, so every construct Task 1 made an
+    /// error landed here for the executions already running, and cycled
+    /// through the reaper for ever.
+    #[error("execution {0} holds a source that does not plan: {1}")]
     Unplannable(uuid::Uuid, String),
 
     /// No handler is registered for a claimed run's `type_id`.
     ///
-    /// **A refusal, and it aborts the tick for that run** rather than
-    /// completing it in some state. An unknown type that "succeeded" would be
-    /// the over-acceptance shape spec §7 forbids, and an unknown type that
-    /// "failed" would be worse: it would look like the author's flow was
-    /// wrong.
+    /// **The run FAILS, with a line that says it is not the flow's fault**
+    /// (no-silent-stall spec §5). `claim::run_one` downcasts this out of the
+    /// handler's `Err` and commits `Outcome::failed_with` the run-log line
+    /// *"egret cannot run task type `X` on this deployment: no handler is
+    /// registered for it. This is not an error in the flow."*, at `ERROR`,
+    /// through the same commit, fence, `ended_at` stamp and retry evaluation
+    /// as any handler's failure; `retry:` and `errors:` apply as for any
+    /// `FAILED`, and the server log still gets a `warn`.
+    ///
+    /// **Until no-silent-stall Task 4 it aborted the tick for that run**, on
+    /// the argument that a `SUCCESS` would be the over-acceptance spec §7
+    /// forbids and a `FAILED` would make the author's flow look wrong. The
+    /// first half stands. The second was answered by the line, and the
+    /// abort's cost was worse than either: the run kept its lease, the reaper
+    /// released it, the next tick refused it again, and the execution never
+    /// ended. `Registry::cancel` still refuses with this error on a miss.
     #[error("no handler is registered for task type {0:?}")]
     NoHandler(String),
 
@@ -671,9 +716,32 @@ pub enum WorkerError {
     /// top-level `Subflow` were in this population for that reason and none is
     /// now**, so read it as *40-odd, of which 21 left at W6 Task 3*.
     ///
-    /// It behaves exactly like [`WorkerError::NoHandler`]: the tick aborts for
-    /// that run, the execution stalls, and the differential oracle's driver
-    /// carries on. Keeping it inside `Corrupt` is what stopped `Corrupt` from
+    /// **It now behaves exactly like [`WorkerError::NoHandler`]: the run
+    /// FAILS** (no-silent-stall spec §5). `Claimed::input` hands `run_one` a
+    /// `Budget::Refused` carrying the line *"egret cannot run task `id`: it is
+    /// a control-flow task (`X`) that egret does not execute. This is not an
+    /// error in the flow."*, so no handler is called and the outcome commits
+    /// through the path a refused `timeout:` takes. Until no-silent-stall Task
+    /// 4 the tick aborted for that run, the execution stalled, and the
+    /// differential oracle's driver carried on past it.
+    ///
+    /// **What reaches it now is old executions only.** No-silent-stall Task 1
+    /// refuses `AllowFailure`, `WorkingDirectory` and an expression-bounded
+    /// `LoopUntil` at validation, so no new start creates such a run. An
+    /// execution started before that still holds one, and `claim::load` plans
+    /// it with `executor::plan_stored` -- parse and flatten, no validation --
+    /// so its run arrives here and fails rather than stopping at
+    /// [`WorkerError::Unplannable`]. `tests/worker.rs`'s
+    /// `a_stored_working_directory_run_fails_with_the_not_a_leaf_line` and
+    /// `a_stored_allow_failure_run_fails_with_the_not_a_leaf_line` drive it.
+    ///
+    /// **A `Pause` declaring `behavior:`, `onPause:`, `tasks:` or
+    /// `errors:` reached this arm until 2026-10-11** -- `plan::pause_gap`
+    /// planned it opaque -- and stalled every execution of it in `RUNNING`
+    /// silently, the reaper releasing and re-offering the claim for ever. The
+    /// user's ruling made it a validation error (`unsupported_pause_property`),
+    /// so `build_plan` refuses such a flow and no start path can create its
+    /// run. Keeping it inside `Corrupt` is what stopped `Corrupt` from
     /// ever being reportable as a driver failure.
     #[error("execution {0} claimed run {1:?}, whose task is not a leaf of its own source — the executor plans it opaque, so this worker has no properties for it")]
     NotALeaf(uuid::Uuid, String),

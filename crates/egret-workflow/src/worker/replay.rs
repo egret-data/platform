@@ -233,14 +233,22 @@ pub(super) async fn spawn_due(
 
     // In a savepoint, for `subflow::spawn_one`'s reason: the FILE-input check
     // below needs the row and may refuse it.
+    //
+    // **This INSERT deliberately skips the start gate** (`build_plan`'s
+    // validation, `spec::unrunnable`): the parent's frozen source already
+    // passed it when the original started, and the replay is planned below
+    // with `executor::plan_stored` per the user's ruling of 2026-10-12.
     let mut sp = sqlx::Connection::begin(&mut *conn).await.map_err(db_err)?;
-    let child: Uuid = sqlx::query_scalar(
+    let child: Uuid = sqlx::query_scalar(concat!(
         "INSERT INTO workflow.executions \
-           (workspace_id, flow_id, namespace, flow_key, source, state, history, \
-            parent_execution_id, attempt_number, origin_offset_ms, inputs, execution_depth) \
-         VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9,$10) \
-         RETURNING id",
-    )
+               (workspace_id, flow_id, namespace, flow_key, source, state, history, \
+                parent_execution_id, attempt_number, origin_offset_ms, inputs, \
+                execution_depth, ",
+        super::stamps::stamp_columns!(),
+        ") VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9,$10, ",
+        super::stamps::stamp_values!("'CREATED'", "'[\"CREATED\"]'"),
+        ") RETURNING id",
+    ))
     .bind(ctx.workspace_id)
     .bind(row.get::<Option<Uuid>, _>("flow_id"))
     .bind(row.get::<String, _>("namespace"))
@@ -308,12 +316,15 @@ pub(super) async fn spawn_due(
         workspace_id: ctx.workspace_id,
         flow_id: row.get("flow_id"),
         source: ctx.source.clone(),
-        // `build_plan` is deterministic over the source and the source is the
-        // same string, so this is the parent's plan by construction. It is
+        // `plan_stored`, as the parent's own context was planned (`claim::load`):
+        // the retry runs the source the original started under, by the rules
+        // it started under (user ruling 2026-10-12). Deterministic over the
+        // source, and the source is the same string, so this is the parent's
+        // plan by construction. It is
         // rebuilt rather than cloned because `Plan` is not `Clone` and a plan
         // that could be moved between two contexts is a plan two executions
         // could disagree about.
-        plan: crate::executor::build_plan(&ctx.source)
+        plan: crate::executor::plan_stored(&ctx.source)
             .map_err(|e| worker_err(WorkerError::Unplannable(child, e.to_string())))?,
         // Its own logical clock, for `spawn::spawn_one`'s reason: the
         // happens-before relation is compared PER EXECUTION.

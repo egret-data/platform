@@ -24,6 +24,11 @@
 //! * minus what the workspace's features turn off: the script types need
 //!   `workflow_containers`, the plugin types need it **and**
 //!   `workflow_kestra_plugins` -- the order the two publish gates check;
+//! * minus every task type this deployment does not serve
+//!   (`runtime::served()`, no-silent-stall §4.4): `egret.sql`, `core.http`
+//!   and the other types no handler runs, and, with no container runner,
+//!   the script and plugin types -- the types publish refuses as
+//!   `task_type_not_served`;
 //! * of each Kestra type, only the properties egret honours or warns about.
 //!   An ignored property is never offered (completion would suggest something
 //!   egret silently drops), and neither is a refused one (it would suggest a
@@ -34,8 +39,8 @@
 //!   would refuse is not offered, and neither are refused `enum` values.
 //!
 //! Which gated types are offered follows the publish gates for the
-//! workspace's features AND the deployment's `plugin_configurations` and
-//! default runner; each outcome is built once and kept.
+//! workspace's features AND the deployment's `plugin_configurations`,
+//! default runner and served set; each outcome is built once and kept.
 
 use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -74,12 +79,21 @@ struct Accepted {
     /// runner, which `publish::check_script_tasks` requires.
     scripts: bool,
     /// The catalog classes `plugins::gate::check` lets through (both
-    /// features, a runner, `allowed-types`).
+    /// features, a runner, `allowed-types`) and this deployment serves.
     plugins: Vec<String>,
+    /// The `registry::TASK_TYPES` rows this deployment serves
+    /// (`runtime::Served`, no-silent-stall §4.4), by canonical spelling.
+    /// Part of the cache key, so a schema built for one served set is never
+    /// answered for another.
+    served_types: Vec<&'static str>,
 }
 
 impl Accepted {
-    fn of(features: SchemaFeatures, deployment: &crate::scripts::ScriptSettings) -> Self {
+    fn of(
+        features: SchemaFeatures,
+        deployment: &crate::scripts::ScriptSettings,
+        served: &crate::runtime::Served,
+    ) -> Self {
         let cfg = &deployment.plugin_configurations;
         let scripts = deployment.default_runner.is_some_and(|runner| {
             crate::scripts::gate::check_unrendered(features.containers, runner, cfg).is_ok()
@@ -97,12 +111,19 @@ impl Accepted {
                 })
                 .is_ok()
             })
+            .filter(|fqcn| served.serves(&format!("{}{fqcn}", crate::plugins::PREFIX)))
             .cloned()
+            .collect();
+        let served_types = registry::TASK_TYPES
+            .iter()
+            .map(|row| row.r#type)
+            .filter(|t| served.serves(t))
             .collect();
         Accepted {
             features,
             scripts,
             plugins,
+            served_types,
         }
     }
 }
@@ -224,16 +245,36 @@ pub struct ServedSchema {
 }
 
 /// The schema for a workspace with `features` on this `deployment` (its
-/// `workflow.plugin_configurations` and default runner), built on first use
-/// and kept. The key is what the two publish gates accept, so a deployment
-/// has at most four entries.
+/// `workflow.plugin_configurations` and default runner) and this process's
+/// served set (`runtime::served()`), built on first use and kept. The key is
+/// what the two publish gates accept and the served set lets through, so a
+/// deployment, whose served set is fixed at start-up, has at most four
+/// entries.
+///
+/// # Panics
+///
+/// When no served set is installed (`runtime::served`).
 pub fn served(
     features: &SchemaFeatures,
     deployment: &crate::scripts::ScriptSettings,
 ) -> Arc<ServedSchema> {
+    served_with(features, deployment, crate::runtime::served())
+}
+
+/// [`served`] for the task types `served` names rather than the ones this
+/// process installed: for a test that compares two sets in one process.
+///
+/// The cache is keyed by what is offered, served types included, so two sets
+/// never share an entry; in production the set is fixed per process and
+/// this adds no entry.
+pub fn served_with(
+    features: &SchemaFeatures,
+    deployment: &crate::scripts::ScriptSettings,
+    served: &crate::runtime::Served,
+) -> Arc<ServedSchema> {
     static CACHE: LazyLock<Mutex<HashMap<Accepted, Arc<ServedSchema>>>> =
         LazyLock::new(Default::default);
-    let accepted = Accepted::of(*features, deployment);
+    let accepted = Accepted::of(*features, deployment, served);
     let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
     cache
         .entry(accepted.clone())
@@ -316,6 +357,9 @@ fn build_with(accepted: &Accepted, defer_required: bool) -> Value {
     let mut tasks: Vec<String> = Vec::new();
     for row in registry::TASK_TYPES {
         if crate::scripts::kind_of(row.r#type).is_some() && !accepted.scripts {
+            continue;
+        }
+        if !accepted.served_types.contains(&row.r#type) {
             continue;
         }
         let def = match inputs.kestra_defs.get(row.r#type) {
@@ -787,6 +831,53 @@ pub fn wire_fields_of<T: serde::de::DeserializeOwned>() -> Vec<&'static str> {
 mod tests {
     use super::*;
 
+    /// The served set of a deployment with a container runner: every type
+    /// some configuration serves. This binary installs no set, so every
+    /// test here names its own.
+    fn runner() -> crate::runtime::Served {
+        let mut cfg = egret_config::Config::default().workflow;
+        cfg.container_runner = egret_config::ContainerRunner::Docker;
+        crate::runtime::served_for(&cfg)
+    }
+
+    /// Every type the registry and the catalog name: the runner set plus the
+    /// types no handler runs yet. The schema's own properties hold for every
+    /// type it can offer, so they are checked on all of them.
+    fn all_types() -> crate::runtime::Served {
+        crate::runtime::Served::from_type_ids(
+            runner()
+                .type_ids()
+                .chain(registry::TASK_TYPES.iter().map(|row| row.r#type))
+                .map(str::to_string),
+        )
+    }
+
+    /// No-silent-stall §4.4: a type the set lacks is not offered, the cache
+    /// keeps the two sets apart, and the `ETag` changes with the set.
+    #[test]
+    fn the_served_set_decides_the_registry_types_and_the_etag() {
+        let f = SchemaFeatures {
+            kestra_plugins: true,
+            containers: true,
+        };
+        let d = permissive_deployment();
+        let runner = runner();
+        let with_sql = crate::runtime::Served::from_type_ids(
+            runner
+                .type_ids()
+                .map(str::to_string)
+                .chain(["egret.sql".to_string()]),
+        );
+        let without = served_with(&f, &d, &runner);
+        let with = served_with(&f, &d, &with_sql);
+        assert!(without.value["$defs"].get("egret.sql").is_none());
+        assert!(with.value["$defs"]["egret.sql"].is_object());
+        assert!(without.value["$defs"]["io.kestra.plugin.core.log.Log"].is_object());
+        assert_ne!(without.etag, with.etag);
+        // Asked again in the other order: each set still gets its own entry.
+        assert_eq!(served_with(&f, &d, &runner).etag, without.etag);
+    }
+
     fn all_features() -> Vec<SchemaFeatures> {
         let mut v = Vec::new();
         for kestra_plugins in [false, true] {
@@ -805,7 +896,9 @@ mod tests {
     #[test]
     fn every_reference_in_every_served_schema_resolves() {
         for f in all_features() {
-            let s = flow_schema(&f, &permissive_deployment());
+            let s = served_with(&f, &permissive_deployment(), &all_types())
+                .value
+                .clone();
             let defs = s["$defs"].as_object().unwrap();
             let names = reachable_defs(&s, defs);
             let missing: Vec<_> = names.iter().filter(|n| !defs.contains_key(*n)).collect();
@@ -831,7 +924,9 @@ mod tests {
                 .unwrap_or_default()
         };
         for f in all_features() {
-            let s = flow_schema(&f, &permissive_deployment());
+            let s = served_with(&f, &permissive_deployment(), &all_types())
+                .value
+                .clone();
             let defs = s["$defs"].as_object().unwrap();
             let mut deferred = 0;
             for union in ["egret.task", "egret.trigger"] {
@@ -897,7 +992,7 @@ mod tests {
         };
         let d = permissive_deployment();
         for f in all_features() {
-            let accepted = Accepted::of(f, &d);
+            let accepted = Accepted::of(f, &d, &all_types());
             let before = build_with(&accepted, false);
             let after = build_with(&accepted, true);
             let mut members = 0;
@@ -944,10 +1039,17 @@ mod tests {
         let d = permissive_deployment();
         let mut etags = BTreeSet::new();
         for f in all_features() {
-            assert_eq!(served(&f, &d).etag, served(&f, &d).etag);
-            let rebuilt = serde_json::to_vec(&build(&Accepted::of(f, &d))).unwrap();
-            assert_eq!(rebuilt, served(&f, &d).bytes, "{f:?} is not deterministic");
-            etags.insert(served(&f, &d).etag.clone());
+            assert_eq!(
+                served_with(&f, &d, &all_types()).etag,
+                served_with(&f, &d, &all_types()).etag
+            );
+            let rebuilt = serde_json::to_vec(&build(&Accepted::of(f, &d, &all_types()))).unwrap();
+            assert_eq!(
+                rebuilt,
+                served_with(&f, &d, &all_types()).bytes,
+                "{f:?} is not deterministic"
+            );
+            etags.insert(served_with(&f, &d, &all_types()).etag.clone());
         }
         // `kestra_plugins` without `containers` serves no plugin types, so
         // it is the same TYPE set as neither -- but the features are named

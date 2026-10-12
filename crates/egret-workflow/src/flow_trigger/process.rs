@@ -106,7 +106,8 @@ pub struct EventReport {
     /// its dependencies ([`NO_DEPENDENCY_MET`]), or one outside its window.
     pub refused: usize,
     /// Listeners that failed. Either deterministically -- the flow does not
-    /// parse, resolve or plan -- and the event is done with them, or possibly
+    /// parse, resolve or plan, or uses a task type this deployment does not
+    /// serve -- and the event is done with them, or possibly
     /// transiently, and the event is kept for them (spec §4.4 point 1).
     pub errored: usize,
     /// `dependsOn` listeners whose window took this event without being
@@ -214,7 +215,9 @@ enum Fate {
     Refused(String),
     /// The unique index says this (event, listener) already fired. Done with.
     AlreadyFired(String),
-    /// Deterministic in the listener's source. Done with: only a save helps.
+    /// Deterministic in the listener's source and this deployment: only a
+    /// save, or a deployment that serves its task types
+    /// (`task_type_not_served`, no-silent-stall Task 3), helps. Done with.
     Broken(String),
     /// Possibly transient. The listener's savepoint rolled back and the event
     /// is kept for it.
@@ -665,7 +668,8 @@ async fn process_one(
                     event_id = ev.id,
                     listener = %key,
                     reason = %why,
-                    "a flow-trigger listener cannot fire until its flow is saved again"
+                    "a flow-trigger listener cannot fire until its flow is saved again \
+                     or this deployment serves its task types (see reason)"
                 );
                 done.push(key);
             }

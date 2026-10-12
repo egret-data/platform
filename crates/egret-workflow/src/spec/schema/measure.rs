@@ -32,13 +32,20 @@
 //! | stage 1 | stage 2 | read | treatment |
 //! |---|---|---|---|
 //! | any | new refusal | any | `refused` |
+//! | new error refusing the property by name | -- | any | `refused` |
 //! | fails | -- | no | `refused` |
 //! | new `not_yet_enforced` warning | -- | any | `warned` |
 //! | clean | clean | yes | `honoured` |
 //! | clean | clean | no | `ignored` |
 //!
 //! A read property whose sample fails stage 1 stays `honoured` and is
-//! printed, so a bad sample is visible rather than turning it into `refused`.
+//! printed, so a bad sample is visible rather than turning it into `refused`
+//! -- **unless** the new error is one of [`REFUSED_BY_NAME`] at the
+//! property's own path. Such an error is not about the sample's value: it
+//! refuses the property whatever it holds. `Pause`'s `behavior`, `onPause`
+//! and `errors` are the case (2026-10-11 ruling): `models::Pause` reads them,
+//! so they are in the read set, and `spec::validate` refuses each by name
+//! through `executor::pause_gap`.
 //!
 //! **Enum values.** For each served property whose schema has an `enum`,
 //! each value is tried alone; a value that fails to parse, or that stage 2
@@ -61,6 +68,13 @@ use crate::worker::handlers as h;
 /// the script tasks' `warningOnStdErr` ("Not used anymore, will be removed
 /// soon"; W5a Task 1 measured no effect with `true`, `false` or unset).
 const NO_EFFECT: &[&str] = &["warningOnStdErr"];
+
+/// Validation error codes that refuse a property by NAME, whatever its value,
+/// so a read property drawing one at its own path is `refused` rather than a
+/// bad sample. `unsupported_pause_property` is `spec::validate`'s refusal of a
+/// `Pause` declaring a property `executor::pause_gap` names (the user's ruling
+/// of 2026-10-11): the model parses it, egret does not run it.
+const REFUSED_BY_NAME: &[&str] = &["unsupported_pause_property"];
 
 /// The base trigger fields each trigger's own firing path reads, measured by
 /// searching that path for each `models::Trigger` field (fix round 1):
@@ -690,9 +704,14 @@ fn classify(site: &Site, notes: &mut Vec<String>) -> RowResult {
                 .and_then(Value::as_object)
                 .is_some_and(|m| m.contains_key(prop)),
         };
+        let refused_by_name = new_errors.iter().any(|(code, path)| {
+            REFUSED_BY_NAME.contains(&code.as_str()) && path.ends_with(&format!(".{prop}"))
+        });
         let t = if o.downstream.is_some() && o.downstream != baseline.downstream {
             out.downstream
                 .insert(prop.clone(), o.downstream.clone().unwrap_or_default());
+            Treatment::Refused
+        } else if refused_by_name {
             Treatment::Refused
         } else if !o.parsed || !new_errors.is_empty() {
             if is_read || matches!(site.read, Read::Kept(_)) && o.parsed {

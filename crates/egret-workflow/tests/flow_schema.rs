@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use egret_workflow::models::{TaskKind, TriggerKind};
 use egret_workflow::scripts::ScriptSettings;
 use egret_workflow::spec::schema::{
-    flow_schema, kestra_definition, measured, permissive_deployment, property_treatment,
-    wire_fields_of, SchemaFeatures, Treatment,
+    kestra_definition, measured, permissive_deployment, property_treatment, wire_fields_of,
+    SchemaFeatures, Treatment,
 };
 use egret_workflow::spec::{parse, registry};
 use egret_workflow::{plugins, scripts};
@@ -37,6 +37,22 @@ const ALL: [SchemaFeatures; 4] = [
         containers: true,
     },
 ];
+
+/// The task types this binary serves (no-silent-stall §4.4): a deployment
+/// with a container runner, so every script and plugin type is served and
+/// the publish gates alone decide them, as before; the types no handler runs
+/// (`egret.sql`, `core.http`, ...) are served by no deployment.
+fn served_set() -> &'static egret_workflow::runtime::Served {
+    let mut cfg = egret_config::Config::default().workflow;
+    cfg.container_runner = egret_config::ContainerRunner::Docker;
+    egret_workflow::runtime::install_served_for_tests(egret_workflow::runtime::served_for(&cfg))
+}
+
+/// `spec::schema::flow_schema`, under [`served_set`].
+fn flow_schema(f: &SchemaFeatures, d: &ScriptSettings) -> Value {
+    served_set();
+    egret_workflow::spec::schema::flow_schema(f, d)
+}
 
 /// The committed export, for its list of every task and trigger type Kestra
 /// knows -- the candidate spellings the acceptance check probes.
@@ -124,7 +140,9 @@ fn short_spellings(names: &[String], package: &str) -> Vec<String> {
 /// functions: the parser's dispatch, `registry::known_type`,
 /// `publish::check_script_tasks` (on a script task whose image is an
 /// expression, so only the type-level rules apply) and `plugins::gate::check`
-/// (what `publish::check_plugin_tasks` calls once the properties parse).
+/// (what `publish::check_plugin_tasks` calls once the properties parse),
+/// and `spec::unrunnable` against the served set (publish step 3's
+/// `task_type_not_served`).
 fn task_accepted(t: &str, f: SchemaFeatures, d: &ScriptSettings) -> bool {
     let mut task = json!({ "id": "t", "type": t });
     if let Some(kind) = scripts::kind_of(t) {
@@ -138,6 +156,9 @@ fn task_accepted(t: &str, f: SchemaFeatures, d: &ScriptSettings) -> bool {
     let flow = parse(&source).expect("a one-task flow parses");
     if !matches!(flow.tasks[0].kind, TaskKind::Leaf { .. }) {
         return true; // a typed flowable: no type refusal anywhere
+    }
+    if !egret_workflow::spec::unrunnable(&flow, served_set()).is_empty() {
+        return false;
     }
     let gate = egret_workflow::ScriptGate {
         feature_enabled: f.containers,
@@ -207,6 +228,37 @@ fn trigger_accepted(t: &str) -> bool {
     !matches!(flow.triggers[0].kind, TriggerKind::Leaf { .. })
 }
 
+/// The spellings of `ForEach`, which egret refuses as the validation error
+/// `unsupported_foreach` (the user's ruling of 2026-10-12).
+const FOREACH_SPELLINGS: [&str; 2] = ["io.kestra.plugin.core.flow.ForEach", "core.foreach"];
+
+/// The 2026-10-12 ruling: `ForEach` is refused (by validate, and by publish
+/// before that as an unknown type), so no feature combination offers it,
+/// while `Loop` -- what the refusal tells the author to use -- is offered
+/// under both spellings. Without the `Loop` half this passes under a schema
+/// that offers no flowable at all.
+#[test]
+fn foreach_is_never_offered_and_loop_is() {
+    for (name, d) in deployments() {
+        for f in ALL {
+            let s = served(&flow_schema(&f, &d));
+            for t in FOREACH_SPELLINGS {
+                assert!(!task_accepted(t, f, &d), "{name} {f:?}: {t} is accepted");
+                assert!(
+                    !s.task_spellings.contains_key(t),
+                    "{name} {f:?}: {t} is offered"
+                );
+            }
+            for t in ["io.kestra.plugin.core.flow.Loop", "core.loop"] {
+                assert!(
+                    s.task_spellings.contains_key(t),
+                    "{name} {f:?}: {t} is not offered"
+                );
+            }
+        }
+    }
+}
+
 /// Test 1: the schema offers exactly the type spellings parse and publish
 /// accept, for each combination of features.
 #[test]
@@ -229,6 +281,10 @@ fn the_served_type_set_is_the_accepted_type_set_for_every_feature_combination() 
                 candidates.extend(row.aliases.iter().map(|a| a.to_string()));
             }
             candidates.extend(plugins::prefixed_types().map(str::to_string));
+            // `ForEach` is in no export and no registry, so it would never be
+            // a candidate and this equality could say nothing about it. It
+            // is named so the equality covers it (the 2026-10-12 ruling).
+            candidates.extend(FOREACH_SPELLINGS.iter().map(|t| t.to_string()));
             let accepted: BTreeSet<String> = candidates
                 .into_iter()
                 .filter(|t| task_accepted(t, f, &d))
@@ -415,6 +471,40 @@ fn properties_egret_refuses_after_parsing_are_not_served() {
     }
 }
 
+/// The 2026-10-11 ruling: a `Pause` declaring `behavior`, `onPause` or
+/// `errors` is a validation error (`unsupported_pause_property`), so the
+/// measurement classifies the three `refused` and the editor stops offering
+/// them. (`tasks`, the fourth property `pause_gap` names, is not in Kestra's
+/// documented `Pause` schema, so there is no row to classify.) The control is
+/// `pauseDuration` and `timeout`, which are honoured and still offered.
+#[test]
+fn a_pause_does_not_offer_the_properties_egret_refuses() {
+    let schema = flow_schema(&ALL[3], &permissive_deployment());
+    let pause = "io.kestra.plugin.core.flow.Pause";
+    let props = &schema["$defs"][pause]["properties"];
+    assert!(props.is_object(), "Pause is served");
+    for prop in ["behavior", "onPause", "errors"] {
+        assert_eq!(
+            measured().properties[pause].get(prop),
+            Some(&Treatment::Refused),
+            "{prop}"
+        );
+        assert!(
+            props.get(prop).is_none(),
+            "Pause offers {prop}, which egret refuses"
+        );
+    }
+    assert_eq!(measured().properties[pause].get("tasks"), None);
+    for prop in ["pauseDuration", "timeout"] {
+        assert_eq!(
+            measured().properties[pause].get(prop),
+            Some(&Treatment::Honoured),
+            "{prop}"
+        );
+        assert!(props.get(prop).is_some(), "Pause must still offer {prop}");
+    }
+}
+
 /// Fix round 1, I2: an enum value refused at firing is not offered.
 #[test]
 fn webhook_fetch_type_does_not_offer_store() {
@@ -526,19 +616,33 @@ fn every_type_with_known_outputs_carries_x_egret_outputs() {
     assert_eq!(names, ["row", "rows", "size", "uri"]);
 }
 
+/// The six egret-only types, which no deployment serves yet.
+const EGRET_ONLY: [&str; 6] = [
+    "egret.sql",
+    "egret.dataapi.call",
+    "egret.dataset.refresh",
+    "egret.report.send",
+    "core.http",
+    "core.slack",
+];
+
 /// Test 6: egret's own types are described, and require at least the
-/// fields publish resolves.
+/// fields publish resolves -- in the schema of a deployment that serves them
+/// (none does yet, so the test names such a set; their definitions are kept
+/// for the day a handler is wired).
 #[test]
 fn egret_only_types_are_described_with_their_required_properties() {
-    let schema = flow_schema(&ALL[3], &permissive_deployment());
-    for t in [
-        "egret.sql",
-        "egret.dataapi.call",
-        "egret.dataset.refresh",
-        "egret.report.send",
-        "core.http",
-        "core.slack",
-    ] {
+    let with_them = egret_workflow::runtime::Served::from_type_ids(
+        served_set()
+            .type_ids()
+            .chain(EGRET_ONLY)
+            .map(str::to_string),
+    );
+    let schema =
+        egret_workflow::spec::schema::served_with(&ALL[3], &permissive_deployment(), &with_them)
+            .value
+            .clone();
+    for t in EGRET_ONLY {
         let def = &schema["$defs"][t];
         assert!(def.is_object(), "{t} has no definition");
         let described = ["title", "markdownDescription", "description"]
@@ -561,6 +665,25 @@ fn egret_only_types_are_described_with_their_required_properties() {
         schema["$defs"]["egret.sql"]["then"]["required"],
         json!(["database", "sql"])
     );
+}
+
+/// No-silent-stall §4.4: under this binary's set none of the six is offered,
+/// for any features or deployment, and `Log` still is.
+#[test]
+fn no_type_the_deployment_does_not_serve_is_offered() {
+    for (name, d) in deployments() {
+        for f in ALL {
+            let s = served(&flow_schema(&f, &d));
+            for t in EGRET_ONLY {
+                assert!(!s.task_spellings.contains_key(t), "{name} {f:?}: {t}");
+            }
+            assert!(
+                s.task_spellings
+                    .contains_key("io.kestra.plugin.core.log.Log"),
+                "{name} {f:?}"
+            );
+        }
+    }
 }
 
 /// A served type's required properties: `id` and `type` outright, the rest

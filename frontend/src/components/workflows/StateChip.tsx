@@ -29,7 +29,8 @@ import { cn } from "@/lib/utils";
  * (`muted`, not started yet) and neutral (`muted-foreground`, finished without
  * an outcome) are told apart by the spec's table.
  */
-type Tone = "muted" | "primary" | "success" | "highlight" | "destructive" | "neutral";
+export type StateTone = "muted" | "primary" | "success" | "highlight" | "destructive" | "neutral";
+type Tone = StateTone;
 
 const TONE_CLASS: Record<Tone, string> = {
   muted: "border-transparent bg-muted text-foreground",
@@ -104,6 +105,14 @@ export type FlowActivity = "active" | "disabled";
 export function flowActivity(state: string): FlowActivity | undefined {
   if (state === "disabled") return "disabled";
   return state === "draft" || state === "live" ? "active" : undefined;
+}
+
+/**
+ * The tone an execution state is drawn in, for a mark that is not a chip (the
+ * gantt's bars). The mark beside it must still say the state in words.
+ */
+export function executionStateTone(state: string): StateTone {
+  return (EXECUTION_STATES.get(state) ?? UNKNOWN).tone;
 }
 
 /** `SUCCESS` → `Success`, `draft` → `Draft`. */

@@ -281,6 +281,19 @@ pub struct Attempt {
     /// `maxDuration`) are the two that need it; see [`TaskRun::started_at`] for
     /// the Kestra line each is measured from.
     pub started_at: Tick,
+    /// When this attempt reached a terminal state, on the same clock as
+    /// [`Self::started_at`]; `None` while it is open, and for an attempt
+    /// written before migration 0183.
+    ///
+    /// **[`apply`] never writes it, and [`advance`](super::advance) never
+    /// reads it.** It is a fact about when the environment committed the end,
+    /// not one of the executor's decisions: `worker::stamps::
+    /// stamp_attempt_ends` sets it in the settle that ended the attempt, so
+    /// the `UPDATE` that writes the attempt's terminal state writes its end
+    /// too (W7b Task 1). It is carried here, rather than only in the jsonb,
+    /// because `persist` re-serialises `attempts` whole and would otherwise
+    /// drop it on the run's next write.
+    pub ended_at: Option<Tick>,
 }
 
 /// The states a run passes through — **and, through
@@ -357,8 +370,11 @@ pub struct Attempt {
 /// **W8 Task 5 closed both halves and the entry is still baselined.** Its
 /// `WARNING` child is byte-identical to the golden and `children_executed`
 /// lets it through, so the loop reaches its SECOND child for the first time —
-/// an `io.kestra.plugin.core.output.OutputValues` with no handler — and stalls
-/// there. Measured by unbaselining it, not inferred.
+/// an `io.kestra.plugin.core.output.OutputValues` with no handler — and stalled
+/// there. Measured by unbaselining it, not inferred. *(Since no-silent-stall
+/// Task 1 `OutputValues` is `unknown_task_type`, so the entry is refused at
+/// start and never reaches that child; a stored execution of it that does
+/// fails the run with `WorkerError::NoHandler`'s line, spec §5.)*
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunState {
     Created,
@@ -835,6 +851,7 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
             r.attempts.push(Attempt {
                 history: vec![RunState::Created, RunState::Running],
                 started_at: *at,
+                ended_at: None,
             });
         }
         // The `SKIPPED` state and the one attempt Kestra records with it, in
@@ -848,6 +865,7 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
             r.attempts.push(Attempt {
                 history: vec![RunState::Created, RunState::Skipped],
                 started_at: *at,
+                ended_at: None,
             });
         }
         Command::ScheduleRetry { run, not_before } => {

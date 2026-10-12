@@ -11,13 +11,16 @@ use egret_core::Result;
 
 /// The handlers this worker can run, keyed by the `type:` a flow writes.
 ///
-/// # An unknown type is a refusal, not a state
+/// # An unknown type is a refusal here, and a FAILED run in the worker
 ///
 /// [`Registry::run`] returns `Err(WorkerError::NoHandler)` for a type nothing
-/// serves, which aborts the tick for that run and leaves the execution where
-/// it was. Neither alternative is acceptable: a silent `SUCCESS` is the
-/// over-acceptance shape the spec §7 forbids, and a `FAILED` would report the
-/// author's flow as wrong when it is egret that is incomplete.
+/// serves -- never a silent `SUCCESS`, the over-acceptance shape the spec §7
+/// forbids. **What the worker does with that refusal changed at
+/// no-silent-stall Task 4** (spec §5): `claim::run_one` turns it into a
+/// `FAILED` outcome whose line says the deployment, not the flow, is at fault.
+/// Until then it aborted the tick for that run and left the execution where
+/// it was, on the argument that a `FAILED` would report the author's flow as
+/// wrong -- and the run was reaped and refused again for ever.
 ///
 /// # The type-id spellings here and `spec::registry::TASK_TYPES` agree, and a
 /// # single table is why
@@ -210,7 +213,8 @@ impl Handlers {
         // an ALIAS (their rows became `io.kestra.plugin.scripts.*`), and
         // without this line publish would accept the FQCN and this registry
         // would not serve it -- the NoHandler loop `spec::registry`'s doc
-        // describes.
+        // describes (a FAILED run with a system line since no-silent-stall
+        // Task 4, and refused at publish since Task 3).
         self.register(row.r#type, handler.clone());
         self.add(handler)
     }

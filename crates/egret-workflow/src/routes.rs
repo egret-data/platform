@@ -468,8 +468,9 @@ pub struct PublishFlowRequest {
     pub note: String,
 }
 
-/// Parse `source`, run [`validate`], and build the wire DTO for a stored
-/// draft row. A parse failure here is a bug, not a caller error — `source`
+/// Parse `source`, run [`validate`] and [`crate::spec::unrunnable`] against
+/// this deployment's served set, and build the wire DTO for a stored draft
+/// row. A parse failure here is a bug, not a caller error — `source`
 /// only reaches storage after successfully parsing in [`create_flow`]/
 /// [`update_flow`] — so it is mapped to `Error::Internal` rather than
 /// `InvalidInput`, which would misattribute a storage-layer inconsistency to
@@ -484,7 +485,10 @@ fn draft_dto(row: FlowRow, can_manage: bool) -> EgretResult<FlowDto> {
             e.column
         ))
     })?;
-    let report = validate(&parsed);
+    let mut report = validate(&parsed);
+    report
+        .errors
+        .extend(crate::spec::unrunnable(&parsed, crate::runtime::served()));
     Ok(FlowDto {
         id: row.id,
         folder_id: row.folder_id,
@@ -690,12 +694,7 @@ async fn get_flow(
     let row = st.repo.get(ctx.workspace_id.0, id).await?;
     // The check the mutating routes make, so the editor and the routes
     // cannot disagree about who may write.
-    // A PDP that failed is an error, not a "no": only a refusal reads as false.
-    let can_manage = match egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await {
-        Ok(()) => true,
-        Err(Error::Forbidden) => false,
-        Err(e) => return Err(e),
-    };
+    let can_manage = caller_may_manage(&st, &ctx).await?;
     Ok(Json(draft_dto(row, can_manage)?))
 }
 
@@ -868,7 +867,8 @@ async fn validate_flow(
 
 /// The report both validate routes answer for `source`: parse (a YAML that
 /// does not parse is a 400 whose message carries the line and column), then
-/// [`validate`]. Writes nothing.
+/// [`validate`], plus [`crate::spec::unrunnable`] against this deployment's
+/// served set. Writes nothing.
 fn validate_flow_source(source: &str) -> EgretResult<ValidationReportDto> {
     let flow = parse(source).map_err(|e| {
         Error::InvalidInput(match (e.line, e.column) {
@@ -876,7 +876,10 @@ fn validate_flow_source(source: &str) -> EgretResult<ValidationReportDto> {
             _ => e.message,
         })
     })?;
-    let report = validate(&flow);
+    let mut report = validate(&flow);
+    report
+        .errors
+        .extend(crate::spec::unrunnable(&flow, crate::runtime::served()));
     Ok(ValidationReportDto::from(&report))
 }
 
@@ -971,7 +974,7 @@ fn if_none_match(headers: &axum::http::HeaderMap, etag: &str) -> bool {
     request_body = PublishFlowRequest,
     responses(
         (status = 200, description = "A new immutable version was frozen and is now live", body = FlowVersionDto),
-        (status = 400, description = "The draft does not parse or validate, a task names an unknown type, or a script task is refused by the container gate (workflow_containers off, no or empty allowed-images for its runner, image not allowed)", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The draft does not parse or validate, a task names an unknown type or a type this deployment does not serve (`task_type_not_served`), or a script task is refused by the container gate (workflow_containers off, no or empty allowed-images for its runner, image not allowed)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace, or the flow calls secret() and the caller lacks workflow:use_secrets", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such flow in this workspace, or a task references an object that does not exist or belongs to another workspace", body = egret_core::http::ErrorBody),
@@ -1152,13 +1155,13 @@ pub struct ExecutionListItemDto {
     /// The state timeline, as stored: an array of state NAMES, e.g.
     /// `["CREATED","RUNNING","SUCCESS"]`. It carries no timestamps — see
     /// [`TaskRunDto::history`], which is written by the same function.
-    #[schema(value_type = Object)]
+    #[schema(value_type = Vec<String>)]
     pub history: serde_json::Value,
     #[schema(value_type = Object)]
     pub inputs: serde_json::Value,
     pub seq: i64,
     /// The trigger record, `NULL` for an API start.
-    #[schema(value_type = Object)]
+    #[schema(value_type = Option<Object>)]
     pub execution_trigger: Option<serde_json::Value>,
     pub trigger_execution_id: Option<Uuid>,
     pub trigger_run_ix: Option<i32>,
@@ -1168,6 +1171,20 @@ pub struct ExecutionListItemDto {
     pub loop_value: Option<String>,
     pub attempt_number: i32,
     pub origin_offset_ms: i64,
+    /// The execution this one is a manual replay of (`POST …/replay`), `NULL`
+    /// for every other start. A `CREATE_NEW_EXECUTION` retry is NOT linked
+    /// here; it carries `parent_execution_id` instead.
+    pub replayed_from_execution_id: Option<Uuid>,
+    /// The first time the execution entered `RUNNING`. `NULL` before it runs,
+    /// for one that never ran (an SLA that cancelled it at creation), and for
+    /// an execution recorded before these times existed — a UI shows that last
+    /// case as estimated, never as "not started".
+    pub started_at: Option<DateTime<Utc>>,
+    /// When the execution entered a terminal state; `NULL` while it has not
+    /// (a paused execution has none), and for an execution recorded before
+    /// these times existed. Written once: later writes to a finished
+    /// execution do not move it.
+    pub ended_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1192,13 +1209,36 @@ impl From<ExecutionRow> for ExecutionListItemDto {
             loop_value: r.loop_value,
             attempt_number: r.attempt_number,
             origin_offset_ms: r.origin_offset_ms,
+            replayed_from_execution_id: r.replayed_from_execution_id,
+            started_at: r.started_at,
+            ended_at: r.ended_at,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }
     }
 }
 
-/// One task run, whole — all twenty-two columns.
+/// One element of [`TaskRunDto::attempts`], as `worker::claim`'s
+/// `attempts_json` writes it.
+///
+/// **The schema of a field that is passed through as stored.** `attempts` is
+/// served as the stored `jsonb` (`serde_json::Value`), and this type is what
+/// the document says it holds; `tests/executions_routes.rs`
+/// (`a_gantt_row_is_computable_from_the_execution_dto_alone`) deserialises a
+/// real run's `attempts` into it, so the two cannot drift silently.
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AttemptDto {
+    /// The attempt's state names, in order, e.g. `["RUNNING","FAILED"]`.
+    pub history: Vec<String>,
+    /// Milliseconds after the execution's `created_at`.
+    pub started_at: i64,
+    /// Milliseconds after the execution's `created_at`. Absent while the
+    /// attempt is open, and on an attempt recorded before migration 0183.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<i64>,
+}
+
+/// One task run, whole — all twenty-four columns.
 ///
 /// Unlike the execution's own row there is nothing dropped here: a detail page
 /// reads ONE execution's runs, so there is no page-sized multiplier the way
@@ -1210,8 +1250,8 @@ impl From<ExecutionRow> for ExecutionListItemDto {
 /// discover a missing field after this package closes. What it uses:
 /// [`Self::task_id`] and [`Self::parent_ix`] for the label and the nesting,
 /// [`Self::state`] for the bar, [`Self::created_seq`]/[`Self::ended_seq`] for
-/// LOGICAL time, and [`Self::created_at`]/[`Self::updated_at`] plus
-/// `attempts[].started_at` for WALL-CLOCK time.
+/// LOGICAL time, and [`Self::started_at`]/[`Self::ended_at`] plus
+/// `attempts[].started_at`/`attempts[].ended_at` for WALL-CLOCK time.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct TaskRunDto {
     pub id: Uuid,
@@ -1246,16 +1286,21 @@ pub struct TaskRunDto {
     /// [`Self::created_at`], [`Self::updated_at`], and `attempts[].started_at`
     /// (milliseconds after the EXECUTION's `created_at`, which is what a
     /// `Tick` is in this engine).
-    #[schema(value_type = Object)]
+    #[schema(value_type = Vec<String>)]
     pub history: serde_json::Value,
-    /// One entry per attempt: `{"history": [...], "started_at": <ms>}`, where
-    /// `started_at` is milliseconds after the execution's `created_at`.
-    #[schema(value_type = Object)]
+    /// One entry per attempt: `{"history": [...], "started_at": <ms>,
+    /// "ended_at": <ms>}`, both in milliseconds after the execution's
+    /// `created_at`. `ended_at` is absent while the attempt is open and on an
+    /// attempt recorded before it existed; an attempt that a retry followed
+    /// ends no later than the next one starts.
+    #[schema(value_type = Vec<AttemptDto>)]
     pub attempts: serde_json::Value,
     pub not_before_ms: Option<i64>,
     /// The lease. `NULL` means unclaimed.
     pub claimed_at: Option<DateTime<Utc>>,
-    #[schema(value_type = Object)]
+    /// The run's outputs, `NULL` for a run that has none: a handler that
+    /// returned nothing (a `Log`, a `Sleep`) and any run not yet terminal.
+    #[schema(value_type = Option<Object>)]
     pub outputs: Option<serde_json::Value>,
     pub message: Option<String>,
     /// The executor round this run was created in — LOGICAL time. Two bars
@@ -1265,6 +1310,17 @@ pub struct TaskRunDto {
     /// The executor round this run terminated in; `NULL` while it has not.
     pub ended_seq: Option<i64>,
     pub resume_with: Option<String>,
+    /// The first time the run entered `RUNNING`: for a worker task, when the
+    /// executor handed it to the workers (equal, to the millisecond, to
+    /// `attempts[0].started_at`); for a flowable, when the executor first ran
+    /// it. Not moved by a resumed pause or a retry. `NULL` for a run that
+    /// never ran — `SKIPPED` by `runIf`, or not yet started — and for a run
+    /// recorded before these times existed.
+    pub started_at: Option<DateTime<Utc>>,
+    /// When the run entered a terminal state; `NULL` while it has not, and
+    /// cleared if a retry reopens it. Written once per terminal: a later
+    /// write to a finished run does not move it.
+    pub ended_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1292,6 +1348,8 @@ impl From<TaskRunRow> for TaskRunDto {
             created_seq: r.created_seq,
             ended_seq: r.ended_seq,
             resume_with: r.resume_with,
+            started_at: r.started_at,
+            ended_at: r.ended_at,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }
@@ -1310,15 +1368,36 @@ pub struct ExecutionDto {
     pub source: String,
     /// Every task run, in `run_ix` order — the executor's creation order.
     pub runs: Vec<TaskRunDto>,
+    /// Whether the caller may resume and replay this execution: they hold
+    /// `workflow:manage` in this workspace. A detail page hides both actions
+    /// when this is false; the routes still check for themselves.
+    // W7b spec §5.2. The same PDP decision `FlowDto::can_manage` carries, on
+    // the execution itself because its flow may be trashed (a 404 to read)
+    // while the execution is still readable.
+    pub can_manage: bool,
 }
 
-impl From<ExecutionDetail> for ExecutionDto {
-    fn from(d: ExecutionDetail) -> Self {
+impl ExecutionDto {
+    fn new(d: ExecutionDetail, can_manage: bool) -> Self {
         Self {
             execution: ExecutionListItemDto::from(d.execution),
             source: d.source,
             runs: d.runs.into_iter().map(TaskRunDto::from).collect(),
+            can_manage,
         }
+    }
+}
+
+/// The PDP's answer to the check every mutating workflow route makes. A PDP
+/// that failed is an error, not a "no": only a refusal reads as false.
+async fn caller_may_manage(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+) -> EgretResult<bool> {
+    match egret_core::authz::require(&*st.pdp, ctx, WF_MANAGE).await {
+        Ok(()) => Ok(true),
+        Err(Error::Forbidden) => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
@@ -1352,7 +1431,12 @@ pub struct ListExecutionsQuery {
     /// Only executions started from this draft. A trashed draft still matches:
     /// `FlowRepo`'s delete is soft, so the column keeps pointing at it.
     pub flow_id: Option<Uuid>,
+    /// Exactly this namespace. Cannot be combined with `namespace_prefix` (400).
     pub namespace: Option<String>,
+    /// This namespace and every namespace beneath it, dot-anchored: `a.b`
+    /// matches `a.b` and `a.b.c`, never `a.bc`. A `_` or `%` is a literal
+    /// character, not a wildcard. Cannot be combined with `namespace` (400).
+    pub namespace_prefix: Option<String>,
     /// The YAML's own `id` — the only filter that still finds an execution
     /// whose `flow_id` was `NULL`ed by a real `DELETE`.
     pub flow_key: Option<String>,
@@ -1386,6 +1470,18 @@ pub struct ListExecutionsQuery {
     /// Window over the execution's `created_at`, **exclusive**, so consecutive
     /// windows tile without double-counting the row on the boundary.
     pub until: Option<DateTime<Utc>>,
+    /// `true`: hide child executions — a loop iteration (`loop_index` set)
+    /// and a subflow or flow-trigger child (`trigger_execution_id` set). A
+    /// `CREATE_NEW_EXECUTION` retry is NOT hidden: it carries
+    /// `parent_execution_id` without a `loop_index`, and continues a root run.
+    /// Absent or `false` lists every execution. Cannot be combined with
+    /// `parent` (400).
+    pub root_only: Option<bool>,
+    /// Only the direct children of this execution: the rows whose
+    /// `parent_execution_id` or `trigger_execution_id` is this id. An id from
+    /// another workspace answers an empty page, never an error. Cannot be
+    /// combined with `root_only=true` (400).
+    pub parent: Option<Uuid>,
     /// How many rows to return. Default 50, maximum 200; a larger value is
     /// clamped rather than refused, and the clamped value comes back in the
     /// response's own `limit`.
@@ -1423,7 +1519,7 @@ fn parse_state_filter(raw: Option<String>) -> Option<Vec<String>> {
     params(WorkspacePath, ListExecutionsQuery),
     responses(
         (status = 200, description = "One page of the workspace's executions, newest first, with the total behind it", body = ExecutionPageDto),
-        (status = 400, description = "The query string does not decode — a malformed `flow_id`/`since`/`until`, a non-numeric `limit`/`offset`, or a **repeated** key (`?state=A&state=B` answers `duplicate field state`; several states go in ONE comma-separated `state=`)", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The query string does not decode — a malformed `flow_id`/`parent`/`since`/`until`, a `root_only` that is not `true`/`false`, a non-numeric `limit`/`offset`, or a **repeated** key (`?state=A&state=B` answers `duplicate field state`; several states go in ONE comma-separated `state=`); or `root_only=true` and `parent` were both sent; or `namespace` and `namespace_prefix` were both sent", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such workspace", body = egret_core::http::ErrorBody),
@@ -1446,13 +1542,34 @@ async fn list_executions(
         limit: q.limit.clamp(1, MAX_PAGE_LIMIT),
         offset: q.offset.max(0),
     };
+    let root_only = q.root_only.unwrap_or(false);
+    // Two views of the tree that do not compose: `parent` lists one level
+    // beneath an execution, `root_only` hides the children that `parent` is
+    // for. A caller who sent both has a bug worth naming. `root_only=false`
+    // beside `parent` is the default spelled out and is accepted.
+    if root_only && q.parent.is_some() {
+        return Err(Error::InvalidInput(
+            "`root_only=true` and `parent` cannot be combined: `parent` lists children, which `root_only` hides"
+                .into(),
+        ));
+    }
+    // Two answers to one question: the exact namespace, or it and its
+    // children. Sending both is a caller bug, named rather than intersected.
+    if q.namespace.is_some() && q.namespace_prefix.is_some() {
+        return Err(Error::InvalidInput(
+            "`namespace` and `namespace_prefix` cannot be combined: send one".into(),
+        ));
+    }
     let filter = ExecutionFilter {
         flow_id: q.flow_id,
         namespace: q.namespace,
+        namespace_prefix: q.namespace_prefix,
         flow_key: q.flow_key,
         states: parse_state_filter(q.state),
         since: q.since,
         until: q.until,
+        root_only,
+        parent: q.parent,
     };
     let found = st
         .executions
@@ -1497,7 +1614,8 @@ async fn get_execution(
     // a SINGLE call that already answers `NotFound` for a foreign id, so there
     // is no second statement whose empty result could be mistaken for one.
     let detail = st.executions.get(ctx.workspace_id.0, id).await?;
-    Ok(Json(ExecutionDto::from(detail)))
+    let can_manage = caller_may_manage(&st, &ctx).await?;
+    Ok(Json(ExecutionDto::new(detail, can_manage)))
 }
 
 // ---------- Execution logs (W11 Task 5, spec §6) ----------
@@ -2006,7 +2124,7 @@ fn core_refusal(e: Error) -> axum::response::Response {
     ),
     responses(
         (status = 201, description = "The execution was created and driven as far as it goes without a worker; the body is its detail, read back after the start committed. Its uploaded files and its row were committed in one transaction.", body = ExecutionDto),
-        (status = 400, description = "`inputs` is not a JSON object; the flow's stored source does not parse or plan; a `FILE` input's value is not a readable `kestra://` URI or its extension is not allowed; a multipart part names no declared input, names one twice, carries a file for a non-`FILE` input, or has a file name no storage URI can hold; or egret has no internal storage (`[storage]`) for an upload. The message names the input.", body = egret_core::http::ErrorBody),
+        (status = 400, description = "`inputs` is not a JSON object; the flow's stored source does not parse or plan, or uses a task type this deployment does not serve; a `FILE` input's value is not a readable `kestra://` URI or its extension is not allowed; a multipart part names no declared input, names one twice, carries a file for a non-`FILE` input, or has a file name no storage URI can hold; or egret has no internal storage (`[storage]`) for an upload. The message names the input.", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough** — starting an execution is a write.", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such flow in this workspace, or it is in the trash. **A flow belonging to another workspace answers exactly this**, indistinguishably from one that never existed.", body = egret_core::http::ErrorBody),
@@ -2121,7 +2239,7 @@ async fn start_flow_execution(
         .get(ctx.workspace_id.0, execution_id)
         .await
         .map_err(core_refusal)?;
-    Ok((StatusCode::CREATED, Json(ExecutionDto::from(detail))))
+    Ok((StatusCode::CREATED, Json(ExecutionDto::new(detail, true))))
 }
 
 /// The multipart start (W9a spec §7.1), in its order: the execution id is
@@ -2362,40 +2480,28 @@ fn upload_refusal(
         ("id" = Uuid, Path, description = "Execution id"),
     ),
     responses(
-        (status = 200, description = "The execution was driven forward; the body is its detail afterwards. **A `Pause` with neither `pauseDuration:` nor `timeout:` comes back still `PAUSED`** — see the handler's own doc for why, and note the state rather than assuming the call moved it.", body = ExecutionDto),
+        (status = 200, description = "Every paused `Pause` run was released at once and ends `SUCCESS`, whatever its `pauseDuration:` or `timeout:` (Kestra: a pause resumed by hand always succeeds); the execution then runs on. The body is its detail afterwards.", body = ExecutionDto),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed", body = egret_core::http::ErrorBody),
-        (status = 409, description = "The execution is not PAUSED. Resuming something that is not waiting is a no-op that would answer 200, and a silent success is the answer this route must not give.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "The execution is not PAUSED (or its pause ended before the resume took the execution's lock), or it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting. A resume that changes nothing must not answer 200.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
-/// Resume a `PAUSED` execution.
+/// Resume a `PAUSED` execution by hand.
 ///
-/// # What this route can and cannot do, measured
+/// W7b Task 3 fix round 1, the user's ruling of 2026-10-11, after review
+/// found the old route released nothing a human needs: it only re-settled,
+/// which ends a pause whose deadline had passed -- what the waker does anyway.
+/// It now calls [`worker::resume_by_hand`](crate::worker::resume_by_hand),
+/// Kestra's `ExecutionService.resume`: every paused `Pause` run ends `SUCCESS`
+/// now, through the natural end's own path, and the execution settles on.
 ///
-/// It calls [`worker::resume`](crate::worker::resume), which takes the same
-/// `FOR NO KEY UPDATE` and runs the same `settle` as every other writer. That drives
-/// `advance()` once more against the row as it now stands — which is exactly
-/// what un-parks a pause whose **deadline** has passed.
-///
-/// **It cannot end an unbounded pause, and that is a capability `advance()`
-/// does not have rather than a bug here.** `flowable::resume_paused` is the
-/// only thing that moves a run out of `PAUSED`, it is pure over
-/// `(state, run, now)`, and its `Resume::Never` arm returns `Step::Waiting`
-/// *before* it looks at `now` — so no value of the clock ends such a wait and
-/// no number of calls to this route will either. `Resume::Never` is a `Pause`
-/// with neither `pauseDuration:` nor `timeout:`; `RunState::Resume`'s own doc
-/// records seven corpus flows written that way, every one of which "reached
-/// PAUSED and stayed there for the full 90s" on the pinned artifact, because
-/// such a pause ends only on an explicit resume signal. egret has no command
-/// that carries one.
-///
-/// The route is still the right shape for the signal when it arrives: it is the
-/// gate, the 404 and the 409 that a resume needs, and the missing piece is a
-/// `Command` beneath it. `an_unbounded_pause_is_not_ended_by_the_resume_route`
-/// pins the gap so that a future command makes a test fail rather than a
-/// paragraph stale.
+/// The `PAUSED` check is made twice: here off the scoped read (so a foreign id
+/// never reaches the unscoped worker, and the common refusal is cheap), and
+/// again by the worker under the execution's lock, which decides the race with
+/// the waker. A pause the waker ended first is a 409, like any execution that
+/// is not paused.
 async fn resume_execution(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
@@ -2403,7 +2509,7 @@ async fn resume_execution(
 ) -> EgretResult<Json<ExecutionDto>> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
     // The containment check AND the state check off one scoped read, so a
-    // foreign id never reaches `worker::resume` -- which is unscoped by
+    // foreign id never reaches `worker::resume_by_hand` -- which is unscoped by
     // workspace, as every `worker::` entry point is.
     let before = st.executions.get(ctx.workspace_id.0, id).await?;
     if crate::worker::from_wire(&before.execution.state) != Some(RunState::Paused) {
@@ -2412,7 +2518,22 @@ async fn resume_execution(
             before.execution.state
         )));
     }
-    crate::worker::resume(&st.db.pool, id).await?;
+    match crate::worker::resume_by_hand(&st.db.pool, id).await? {
+        crate::worker::Resumed::Released(_) => {}
+        crate::worker::Resumed::NotPaused => {
+            return Err(Error::Conflict(format!(
+                "execution {id} is no longer PAUSED; its pause ended before the resume reached it"
+            )));
+        }
+        // An execution paused only by a waiting `LoopUntil` (W7b Task 3 fix
+        // round 2): a 409, never a 200 that changed nothing.
+        crate::worker::Resumed::NoPauseWaiting => {
+            return Err(Error::Conflict(
+                "Nothing to resume: no Pause task is waiting. The execution is waiting on a loop condition, which ends on its own schedule."
+                    .to_string(),
+            ));
+        }
+    }
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
         Some(ctx.workspace_id.0),
@@ -2422,7 +2543,7 @@ async fn resume_execution(
         serde_json::json!({ "from_state": before.execution.state }),
     ));
     let detail = st.executions.get(ctx.workspace_id.0, id).await?;
-    Ok(Json(ExecutionDto::from(detail)))
+    Ok(Json(ExecutionDto::new(detail, true)))
 }
 
 #[utoipa::path(
@@ -2435,7 +2556,7 @@ async fn resume_execution(
     ),
     responses(
         (status = 201, description = "A NEW execution, started from the replayed one's frozen source and inputs. The body is the new execution, not the old one — read its `id`.", body = ExecutionDto),
-        (status = 400, description = "The execution is a **loop iteration** (replay its loop root instead); or the **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The execution is a **loop iteration** (replay its loop root instead); or the **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans, or uses a task type this deployment does not serve", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed — **or its flow is in the trash, or no longer exists at all**. A replay is a run of the flow and answers to the flow's current state.", body = egret_core::http::ErrorBody),
@@ -2574,7 +2695,7 @@ async fn replay_execution(
         serde_json::json!({ "replayed_from": id, "replacement": replacement }),
     ));
     let detail = st.executions.get(ctx.workspace_id.0, replacement).await?;
-    Ok((StatusCode::CREATED, Json(ExecutionDto::from(detail))))
+    Ok((StatusCode::CREATED, Json(ExecutionDto::new(detail, true))))
 }
 
 /// The Workflow management router. Mount under `/api` so the live paths are

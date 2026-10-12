@@ -1239,31 +1239,19 @@ export const getWorkflowResumeExecutionUrl = (workspace: string,
 }
 
 /**
- * # What this route can and cannot do, measured
+ * W7b Task 3 fix round 1, the user's ruling of 2026-10-11, after review
+ * found the old route released nothing a human needs: it only re-settled,
+ * which ends a pause whose deadline had passed -- what the waker does anyway.
+ * It now calls [`worker::resume_by_hand`](crate::worker::resume_by_hand),
+ * Kestra's `ExecutionService.resume`: every paused `Pause` run ends `SUCCESS`
+ * now, through the natural end's own path, and the execution settles on.
  *
- * It calls [`worker::resume`](crate::worker::resume), which takes the same
- * `FOR NO KEY UPDATE` and runs the same `settle` as every other writer. That drives
- * `advance()` once more against the row as it now stands — which is exactly
- * what un-parks a pause whose **deadline** has passed.
- *
- * **It cannot end an unbounded pause, and that is a capability `advance()`
- * does not have rather than a bug here.** `flowable::resume_paused` is the
- * only thing that moves a run out of `PAUSED`, it is pure over
- * `(state, run, now)`, and its `Resume::Never` arm returns `Step::Waiting`
- * *before* it looks at `now` — so no value of the clock ends such a wait and
- * no number of calls to this route will either. `Resume::Never` is a `Pause`
- * with neither `pauseDuration:` nor `timeout:`; `RunState::Resume`'s own doc
- * records seven corpus flows written that way, every one of which "reached
- * PAUSED and stayed there for the full 90s" on the pinned artifact, because
- * such a pause ends only on an explicit resume signal. egret has no command
- * that carries one.
- *
- * The route is still the right shape for the signal when it arrives: it is the
- * gate, the 404 and the 409 that a resume needs, and the missing piece is a
- * `Command` beneath it. `an_unbounded_pause_is_not_ended_by_the_resume_route`
- * pins the gap so that a future command makes a test fail rather than a
- * paragraph stale.
- * @summary Resume a `PAUSED` execution.
+ * The `PAUSED` check is made twice: here off the scoped read (so a foreign id
+ * never reaches the unscoped worker, and the common refusal is cheap), and
+ * again by the worker under the execution's lock, which decides the race with
+ * the waker. A pause the waker ended first is a 409, like any execution that
+ * is not paused.
+ * @summary Resume a `PAUSED` execution by hand.
  */
 export const workflowResumeExecution = async (workspace: string,
     id: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowResumeExecutionResponse> => {
@@ -1313,7 +1301,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type WorkflowResumeExecutionMutationError = ErrorBody
 
     /**
- * @summary Resume a `PAUSED` execution.
+ * @summary Resume a `PAUSED` execution by hand.
  */
 export const useWorkflowResumeExecution = <TError = ErrorBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecution>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}

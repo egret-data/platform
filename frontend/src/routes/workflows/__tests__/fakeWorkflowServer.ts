@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { FlowDto, FlowVersionDto, ValidationReportDto } from "@/api/generated/model";
+import type { ExecutionListItemDto, FlowDto, FlowVersionDto, ValidationReportDto } from "@/api/generated/model";
 
 /**
  * The workflow routes the flow pages call, served from memory through a
@@ -10,7 +10,7 @@ import type { FlowDto, FlowVersionDto, ValidationReportDto } from "@/api/generat
  * parsed and re-formatted one (a JS `Date` keeps milliseconds) would send a
  * different string and be refused.
  */
-export type Call = { method: string; path: string; body: unknown };
+export type Call = { method: string; path: string; body: unknown; query?: URLSearchParams };
 type Reply = { status: number; body: unknown };
 
 export const WS = "eng";
@@ -41,6 +41,8 @@ export class FakeWorkflowServer {
   getFlowFailures = 0;
   /** Answers `GET …/flows/{id}/versions` with this instead of the versions. */
   versionsReply: Reply | null = null;
+  /** What `GET …/executions` lists, unfiltered: the flow's Executions tab reads it. */
+  executions: ExecutionListItemDto[] = [];
   /** While set, `GET …/flows/{id}/versions` waits for it before answering. */
   versionsGate: Promise<void> | null = null;
   /** While set, `PUT …/flows/{id}` waits for it before answering. */
@@ -98,9 +100,9 @@ export class FakeWorkflowServer {
   install(): void {
     vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
       const method = (init?.method ?? "GET").toUpperCase();
-      const path = String(input).split("?")[0];
+      const [path, qs] = String(input).split("?");
       const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
-      this.calls.push({ method, path, body });
+      this.calls.push({ method, path, body, query: new URLSearchParams(qs ?? "") });
       if (method === "POST" && path === `/api/ws/${WS}/workflows/flows` && this.createGate) await this.createGate;
       if (method === "GET" && path.endsWith("/versions") && this.versionsGate) await this.versionsGate;
       if (method === "PUT" && this.putGate) await this.putGate;
@@ -117,6 +119,9 @@ export class FakeWorkflowServer {
     const flowPath = `${base}/flows/${FLOW_ID}`;
     if (method === "GET" && path === `${base}/schema`) return { status: 200, body: {}, headers: { etag: '"s1"' } };
     if (method === "GET" && path === `${base}/flows`) return { status: 200, body: this.flow ? [this.flow] : [] };
+    if (method === "GET" && path === `${base}/executions`) {
+      return { status: 200, body: { rows: this.executions, total: this.executions.length, limit: 50, offset: 0 } };
+    }
     if (method === "POST" && (path === `${base}/flows/validate` || path === `${flowPath}/validate`)) return this.validation;
     if (method === "POST" && path === `${base}/flows`) {
       if (this.createReply) return this.createReply;

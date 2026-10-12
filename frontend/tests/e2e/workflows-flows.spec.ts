@@ -34,7 +34,9 @@ import { firstWorkspace, loginLocalAdmin } from "./helpers";
  * # is limited to 5 attempts per 5 minutes, and every run signs in once.
  * # export EGRET_RATE_LIMIT__LOGIN_MAX_ATTEMPTS=200
  * cargo build -p egret-bin
- * ./target/debug/egret migrate && ./target/debug/egret init   # admin@egret.local / Admin12345!
+ * # `init` generates a random password unless one is given; the spec signs in with this one.
+ * export EGRET_ADMIN_PASSWORD='Admin12345!'
+ * ./target/debug/egret migrate && ./target/debug/egret init   # admin@egret.local
  * ./target/debug/egret serve
  *
  * # 3. The frontend on :5197, proxying /api to :8097 (the committed config next to this spec;

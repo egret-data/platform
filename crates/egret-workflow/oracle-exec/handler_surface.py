@@ -925,9 +925,11 @@ def check_inputs(flows, kinds, golden, baseline):
     # two `sla:` entries whose `EXECUTION_ASSERTION` cancels the execution,
     # `valids/flow-concurrency-sla-assert-cancel` and
     # `valids/sla-execution-condition`; 108 since W9a Task 11 banked
-    # `valids/loop-values-from-uri` (a `Loop` over an ION file).
-    if len(baseline) != 108:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 108; the split "
+    # `valids/loop-values-from-uri` (a `Loop` over an ION file); 107 since
+    # no-silent-stall Task 1 banked `invalids/invalid-task` (egret refuses an
+    # unknown task type now, as Kestra does).
+    if len(baseline) != 107:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 107; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1562,8 +1564,8 @@ def self_test():
          "not 266",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 108",
-         "not 108",
+    case("baseline.txt is no longer 107",
+         "not 107",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

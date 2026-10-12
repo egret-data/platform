@@ -40,7 +40,7 @@ import {
   type FieldValue,
   type RunInput,
 } from "@/components/workflows/run/inputModel";
-import { DisabledReasons } from "@/routes/workflows/FlowEditPage";
+import { DisabledReasons } from "@/components/workflows/ReasonButton";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
 export interface RunFlowProps {

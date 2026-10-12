@@ -1619,6 +1619,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     {
         anyhow::bail!("the workflow file store was installed twice");
     }
+    // no-silent-stall §4.1: the task types this deployment's worker runs,
+    // from the same configuration `handlers_for` builds the worker's handlers
+    // from below (a unit test holds the two together). Installed process-wide
+    // BEFORE the router and the worker start: `spec::unrunnable` judges a flow
+    // against it, and `runtime::served()` panics rather than defaulting to
+    // "serve everything" in a process that never installed one.
+    if egret_workflow::runtime::install_served(egret_workflow::runtime::served_for(
+        &config.workflow,
+    ))
+    .is_err()
+    {
+        anyhow::bail!("the workflow's served task types were installed twice");
+    }
     // W9b: namespace-file lookups at render time (`fileURI`, `read` of a
     // namespace file) run on their own connection, made from this pool's
     // options, for the reason above: a render's entry points hold no pool.
@@ -1819,12 +1832,31 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `egret.sql` is not registered: it needs an `Arc<dyn QueryExecPort>`
     // that nothing here provides.
     //
-    // **A flow whose task type is unregistered HANGS.** `WorkerError::NoHandler`
-    // does not fail the run: it propagates out of `run_one`, the run keeps its
-    // lease, `reap` clears only `claimed_at` a `working_timeout` later, `claim`
-    // re-selects it, and the cycle repeats for ever with one `warn` per cycle.
-    // `oracle-exec/README.md` item 19 carries this. **Six of twenty-three
-    // publishable types hang in production, whatever the runner** (`egret.sql`,
+    // **A flow whose task type has no handler here no longer HANGS** (a
+    // `TASK_TYPES` type this deployment does not wire in). Since
+    // no-silent-stall Task 2 the set this deployment
+    // serves is installed above (`runtime::served_for`, the same keys these
+    // handlers are registered under) and `spec::unrunnable` names each task
+    // it lacks (`task_type_not_served`). Since Task 3 every validation report
+    // carries it, and publish, every start (API, webhook, schedule, Flow
+    // trigger, replay) and a `Subflow` target refuse it, so no NEW execution
+    // of such a flow is created. What still reaches the worker is an
+    // execution started before that refusal (on an older binary, or under a
+    // configuration that served the type), and since Task 4 the worker FAILS
+    // that run (`WorkerError::NoHandler`, spec §5) with the run-log line "egret
+    // cannot run task type `X` on this deployment: no handler is registered
+    // for it. This is not an error in the flow.", a `warn` in the server log,
+    // and `retry:`/`errors:` applied as for any `FAILED`. Until Task 4 the
+    // error propagated out of `run_one`, the run kept its lease, `reap`
+    // cleared only `claimed_at` a `working_timeout` later, `claim` re-selected
+    // it, and the cycle repeated for ever; `oracle-exec/README.md` item 19
+    // records that history. An old execution whose stored source validation
+    // now refuses (a type with no `TASK_TYPES` row, an `AllowFailure`, a
+    // `WorkingDirectory`, ...) is covered too: the worker plans a stored
+    // execution without validation (`executor::plan_stored`; validation gates
+    // starts only), so its run reaches `NoHandler` or `NotALeaf` and fails.
+    // **Six of twenty-three registered types have no handler, whatever the
+    // runner**, and since Task 3 none of them publishes or starts (`egret.sql`,
     // `egret.dataapi.call`, `egret.dataset.refresh`,
     // `egret.report.send`, `core.http`, `core.slack`): 23 rows = these 6 + the
     // 13 core handlers above + the 4 script types a runner serves. All nine
@@ -1838,10 +1870,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // into aliases of four script types that a runner now serves. Publish
     // (`publish::check_script_tasks`) refuses EVERY script task when no
     // runner is configured -- with or without a `taskRunner:` -- and one whose
-    // `taskRunner:` names a runner other than the configured one. So with
-    // `none`, a script task reaches that loop only from a version published
-    // under an earlier configuration, or from an execution started without
-    // publish (a draft run); both are outside what this binary can refuse.
+    // `taskRunner:` names a runner other than the configured one. With
+    // `none`, since Task 3, every start refuses a script task too (a draft
+    // run included), so one reaches that loop only from an execution started
+    // under an earlier configuration, which this binary cannot refuse.
     //
     // W11: `spawn_with_logs` takes the `Handlers` unshared so it can give them
     // the Postgres log sink (`Handlers::with_log_sink`) before wrapping them;

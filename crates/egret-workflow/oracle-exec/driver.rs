@@ -48,11 +48,14 @@
 //! The harness completed every `Runnable` from the golden, so an execution that
 //! could not finish meant the state machine was spinning, and it was reported
 //! as `Broken` — an unbaselineable failure. With real handlers that is no
-//! longer true: a flow whose task type has no handler *stalls*, because
+//! longer true: a flow whose task type had no handler *stalled*, because
 //! `Registry::run` refuses an unknown type rather than inventing a state for
-//! it, and stalling is what the shipping worker really does. So this driver
+//! it, and stalling was what the shipping worker really did. So this driver
 //! returns the **partial trace** when nothing can move, and only a run that
-//! exceeds [`STEP_BOUND`] or panics is `Broken`.
+//! exceeds [`STEP_BOUND`] or panics is `Broken`. *(Since no-silent-stall Task
+//! 4 the worker FAILS a run with no handler, or whose task is not a leaf, so
+//! such an entry's trace carries that `FAILED` rather than stopping; the
+//! partial trace remains for any other abort, e.g. `WorkerError::Unplannable`.)*
 //! `every_mismatching_entry_is_attributed_to_the_field_it_differs_on` in
 //! `tests/executor.rs` counts and names them, which keeps
 //! that population from growing silently.
@@ -788,7 +791,35 @@ const CREATE_REFUSED: usize = 4;
 /// `io.kestra.plugin.core.kv.*` FQCNs, and `kv.Set` was the only type it
 /// lacked. An over-refusal closing; [`UNKNOWN_TYPE_REFUSED`] fell by 1. Its
 /// golden entry stays baselined: `AllowFailure` is still planned opaque.
-const LIVE: usize = 248;
+///
+/// # 248 → **245** at W7b Task 4b (the user's ruling of 2026-10-11)
+///
+/// `valids/pause-behavior`, `valids/pause-errors-finally-after-execution` and
+/// `valids/pause_on_pause`: a `Pause` declaring `behavior:`, `errors:` or
+/// `onPause:` is now the validation error `unsupported_pause_property`, so
+/// publish refuses it. **A deliberate refusal, not an over-refusal to close**:
+/// before the ruling such a flow published with a warning and every
+/// execution of it stalled in `RUNNING` for ever. They moved to
+/// [`VALIDATE_REFUSED`], and `executor`'s `PUBLISHED_BUT_REFUSED` names all
+/// three.
+///
+/// # 245 → **237** at no-silent-stall Task 1 (2026-10-12)
+///
+/// Four `AllowFailure` flows (`valids/allow-failure`,
+/// `-allow-failure-with-retry`, `valids/finally-allowfailure`,
+/// `valids/retry-with-flowable-errors`) and four `WorkingDirectory` flows
+/// (`valids/task-runif-workingdirectory`,
+/// `valids/working-directory-invalid-runif`,
+/// `valids/working-directory-taskrun`, `-taskrun-nested`). egret plans both
+/// constructs an opaque runnable no handler serves, so every execution of
+/// them stalled; they are the validation errors `unsupported_allow_failure`
+/// and `unsupported_working_directory` now, and publish refuses them. **A
+/// deliberate refusal, not an over-refusal to close.** They moved to
+/// [`VALIDATE_REFUSED`], and `executor`'s `PUBLISHED_BUT_REFUSED` names all
+/// eight. `unknown_task_type` becoming an error moved nothing here: publish
+/// already refused every flow it names, through reference resolution, and
+/// [`publish_class`] still files them under [`UNKNOWN_TYPE_REFUSED`].
+const LIVE: usize = 237;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -863,7 +894,13 @@ const UNKNOWN_TYPE_REFUSED: usize = 65;
 ///
 /// **20 → 22 at W5b final fix round 1**: the two `secret()` flows [`LIVE`]
 /// names, refused by W5b spec §6's publish-time rule.
-const VALIDATE_REFUSED: usize = 22;
+///
+/// **22 → 25 at W7b Task 4b**: the three `Pause` flows [`LIVE`] names, refused
+/// by `unsupported_pause_property` (the user's ruling of 2026-10-11).
+///
+/// **25 → 33 at no-silent-stall Task 1**: the eight flows [`LIVE`] names,
+/// refused by `unsupported_allow_failure` and `unsupported_working_directory`.
+const VALIDATE_REFUSED: usize = 33;
 
 /// Every corpus flow that has a draft row and no live version — the sum of the
 /// two above, derived rather than written down a third time.
@@ -952,14 +989,35 @@ fn census(filed: &BTreeMap<String, Filed>) {
 
 /// Group a publish refusal by its cause, so the census names classes rather
 /// than 300 individual messages.
+///
+/// **Two spellings of "unported type" since no-silent-stall Task 1.** Until
+/// then publish's reference resolution was the first to say it (`unknown type
+/// 'X'`). Now `validate` says it first, as the error `unknown_task_type` (or
+/// `unsupported_flow_task`, for an unregistered type spelled like Kestra
+/// control flow), and anywhere in the joined message rather than first: a flow
+/// whose `AllowFailure` or `WorkingDirectory` holds an unported child reports
+/// the flowable's refusal before the child's. Both are the same finding the
+/// [`UNKNOWN_TYPE_REFUSED`] bucket has always counted, so they keep landing
+/// in it, and that constant does not move.
 fn publish_class(message: &str) -> String {
-    match message.split_once("unknown type '") {
-        Some((_, rest)) => format!(
+    if let Some((_, rest)) = message.split_once("unknown type '") {
+        return format!(
             "unknown task type '{}'",
             rest.split_once('\'').map(|(t, _)| t).unwrap_or(rest)
-        ),
-        None => message.chars().take(60).collect(),
+        );
     }
+    let mut rest = message;
+    while let Some((_, after)) = rest.split_once("has type '") {
+        if let Some((ty, tail)) = after.split_once('\'') {
+            if tail.starts_with(", which egret does not recognise as a task type")
+                || tail.starts_with(", which is spelled like a Kestra control-flow task")
+            {
+                return format!("unknown task type '{ty}'");
+            }
+        }
+        rest = after;
+    }
+    message.chars().take(60).collect()
 }
 
 /// `RefKind::DataApiEndpoint` is structurally unreachable from this corpus,
@@ -1022,11 +1080,15 @@ pub async fn run(
                 "did not settle within {STEP_BOUND} steps; execution {id}"
             ));
         }
-        // A worker error is NOT a driver error. `Registry::run` refuses a type
-        // it has no handler for, which leaves that one run leased and unmoved —
-        // exactly what the shipping worker does — and the driver carries on so
-        // that the rest of the execution still produces the trace it produces.
-        // With `BATCH == 1` the refusal can only ever concern the run it names.
+        // A worker error is NOT a driver error. A tick that aborts leaves that
+        // one run leased and unmoved — exactly what the shipping worker does —
+        // and the driver carries on so that the rest of the execution still
+        // produces the trace it produces. With `BATCH == 1` the abort can only
+        // ever concern the run it names. **A type with no handler is no longer
+        // such an abort** (no-silent-stall Task 4): the worker fails that run
+        // with a system line, as it fails a task that is not a leaf, and the
+        // tick returns `Ok`. What still arrives here is the rest, e.g.
+        // `WorkerError::Unplannable`.
         //
         // **`WorkerError::Corrupt` is the exception, and it used to be swallowed
         // with everything else.** It means a stored row cannot be read back into

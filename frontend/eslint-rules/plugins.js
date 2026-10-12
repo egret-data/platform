@@ -34,4 +34,15 @@ export const a11yRules = {
   // (VoiceOver) drops the implicit list role once CSS removes list styling,
   // which the Tailwind reset does to every list (FE-A11Y-1; W7a final review).
   "jsx-a11y/no-redundant-roles": ["error", { ul: ["list"], ol: ["list"] }],
+  // Still an error, with the fork's own options, plus `log`: a scrollable
+  // `role="log"` region takes `tabIndex={0}` so the keyboard can scroll it, as
+  // axe's scrollable-region-focusable expects (FE-A11Y-3; the user's ruling of
+  // 2026-10-11, W7b Task 5). Every other non-interactive role stays refused.
+  "jsx-a11y/no-noninteractive-tabindex": [
+    "error",
+    {
+      ...jsxA11yX.configs.recommended.rules["jsx-a11y-x/no-noninteractive-tabindex"][1],
+      roles: [...jsxA11yX.configs.recommended.rules["jsx-a11y-x/no-noninteractive-tabindex"][1].roles, "log"],
+    },
+  ],
 };

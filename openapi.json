@@ -27862,6 +27862,19 @@
           {
             "name": "namespace",
             "in": "query",
+            "description": "Exactly this namespace. Cannot be combined with `namespace_prefix` (400).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "namespace_prefix",
+            "in": "query",
+            "description": "This namespace and every namespace beneath it, dot-anchored: `a.b`\nmatches `a.b` and `a.b.c`, never `a.bc`. A `_` or `%` is a literal\ncharacter, not a wildcard. Cannot be combined with `namespace` (400).",
             "required": false,
             "schema": {
               "type": [
@@ -27921,6 +27934,31 @@
             }
           },
           {
+            "name": "root_only",
+            "in": "query",
+            "description": "`true`: hide child executions — a loop iteration (`loop_index` set)\nand a subflow or flow-trigger child (`trigger_execution_id` set). A\n`CREATE_NEW_EXECUTION` retry is NOT hidden: it carries\n`parent_execution_id` without a `loop_index`, and continues a root run.\nAbsent or `false` lists every execution. Cannot be combined with\n`parent` (400).",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "parent",
+            "in": "query",
+            "description": "Only the direct children of this execution: the rows whose\n`parent_execution_id` or `trigger_execution_id` is this id. An id from\nanother workspace answers an empty page, never an error. Cannot be\ncombined with `root_only=true` (400).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "How many rows to return. Default 50, maximum 200; a larger value is\nclamped rather than refused, and the clamped value comes back in the\nresponse's own `limit`.",
@@ -27953,7 +27991,7 @@
             }
           },
           "400": {
-            "description": "The query string does not decode — a malformed `flow_id`/`since`/`until`, a non-numeric `limit`/`offset`, or a **repeated** key (`?state=A&state=B` answers `duplicate field state`; several states go in ONE comma-separated `state=`)",
+            "description": "The query string does not decode — a malformed `flow_id`/`parent`/`since`/`until`, a `root_only` that is not `true`/`false`, a non-numeric `limit`/`offset`, or a **repeated** key (`?state=A&state=B` answers `duplicate field state`; several states go in ONE comma-separated `state=`); or `root_only=true` and `parent` were both sent; or `namespace` and `namespace_prefix` were both sent",
             "content": {
               "application/json": {
                 "schema": {
@@ -28651,7 +28689,7 @@
             }
           },
           "400": {
-            "description": "The execution is a **loop iteration** (replay its loop root instead); or the **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans",
+            "description": "The execution is a **loop iteration** (replay its loop root instead); or the **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans, or uses a task type this deployment does not serve",
             "content": {
               "application/json": {
                 "schema": {
@@ -28718,8 +28756,8 @@
         "tags": [
           "workflow"
         ],
-        "summary": "Resume a `PAUSED` execution.",
-        "description": "# What this route can and cannot do, measured\n\nIt calls [`worker::resume`](crate::worker::resume), which takes the same\n`FOR NO KEY UPDATE` and runs the same `settle` as every other writer. That drives\n`advance()` once more against the row as it now stands — which is exactly\nwhat un-parks a pause whose **deadline** has passed.\n\n**It cannot end an unbounded pause, and that is a capability `advance()`\ndoes not have rather than a bug here.** `flowable::resume_paused` is the\nonly thing that moves a run out of `PAUSED`, it is pure over\n`(state, run, now)`, and its `Resume::Never` arm returns `Step::Waiting`\n*before* it looks at `now` — so no value of the clock ends such a wait and\nno number of calls to this route will either. `Resume::Never` is a `Pause`\nwith neither `pauseDuration:` nor `timeout:`; `RunState::Resume`'s own doc\nrecords seven corpus flows written that way, every one of which \"reached\nPAUSED and stayed there for the full 90s\" on the pinned artifact, because\nsuch a pause ends only on an explicit resume signal. egret has no command\nthat carries one.\n\nThe route is still the right shape for the signal when it arrives: it is the\ngate, the 404 and the 409 that a resume needs, and the missing piece is a\n`Command` beneath it. `an_unbounded_pause_is_not_ended_by_the_resume_route`\npins the gap so that a future command makes a test fail rather than a\nparagraph stale.",
+        "summary": "Resume a `PAUSED` execution by hand.",
+        "description": "W7b Task 3 fix round 1, the user's ruling of 2026-10-11, after review\nfound the old route released nothing a human needs: it only re-settled,\nwhich ends a pause whose deadline had passed -- what the waker does anyway.\nIt now calls [`worker::resume_by_hand`](crate::worker::resume_by_hand),\nKestra's `ExecutionService.resume`: every paused `Pause` run ends `SUCCESS`\nnow, through the natural end's own path, and the execution settles on.\n\nThe `PAUSED` check is made twice: here off the scoped read (so a foreign id\nnever reaches the unscoped worker, and the common refusal is cheap), and\nagain by the worker under the execution's lock, which decides the race with\nthe waker. A pause the waker ended first is a 409, like any execution that\nis not paused.",
         "operationId": "resume_execution",
         "parameters": [
           {
@@ -28752,7 +28790,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The execution was driven forward; the body is its detail afterwards. **A `Pause` with neither `pauseDuration:` nor `timeout:` comes back still `PAUSED`** — see the handler's own doc for why, and note the state rather than assuming the call moved it.",
+            "description": "Every paused `Pause` run was released at once and ends `SUCCESS`, whatever its `pauseDuration:` or `timeout:` (Kestra: a pause resumed by hand always succeeds); the execution then runs on. The body is its detail afterwards.",
             "content": {
               "application/json": {
                 "schema": {
@@ -28792,7 +28830,7 @@
             }
           },
           "409": {
-            "description": "The execution is not PAUSED. Resuming something that is not waiting is a no-op that would answer 200, and a silent success is the answer this route must not give.",
+            "description": "The execution is not PAUSED (or its pause ended before the resume took the execution's lock), or it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting. A resume that changes nothing must not answer 200.",
             "content": {
               "application/json": {
                 "schema": {
@@ -29434,7 +29472,7 @@
             }
           },
           "400": {
-            "description": "`inputs` is not a JSON object; the flow's stored source does not parse or plan; a `FILE` input's value is not a readable `kestra://` URI or its extension is not allowed; a multipart part names no declared input, names one twice, carries a file for a non-`FILE` input, or has a file name no storage URI can hold; or egret has no internal storage (`[storage]`) for an upload. The message names the input.",
+            "description": "`inputs` is not a JSON object; the flow's stored source does not parse or plan, or uses a task type this deployment does not serve; a `FILE` input's value is not a readable `kestra://` URI or its extension is not allowed; a multipart part names no declared input, names one twice, carries a file for a non-`FILE` input, or has a file name no storage URI can hold; or egret has no internal storage (`[storage]`) for an upload. The message names the input.",
             "content": {
               "application/json": {
                 "schema": {
@@ -29583,7 +29621,7 @@
             }
           },
           "400": {
-            "description": "The draft does not parse or validate, a task names an unknown type, or a script task is refused by the container gate (workflow_containers off, no or empty allowed-images for its runner, image not allowed)",
+            "description": "The draft does not parse or validate, a task names an unknown type or a type this deployment does not serve (`task_type_not_served`), or a script task is refused by the container gate (workflow_containers off, no or empty allowed-images for its runner, image not allowed)",
             "content": {
               "application/json": {
                 "schema": {
@@ -33813,6 +33851,36 @@
           }
         }
       },
+      "AttemptDto": {
+        "type": "object",
+        "description": "One element of [`TaskRunDto::attempts`], as `worker::claim`'s\n`attempts_json` writes it.\n\n**The schema of a field that is passed through as stored.** `attempts` is\nserved as the stored `jsonb` (`serde_json::Value`), and this type is what\nthe document says it holds; `tests/executions_routes.rs`\n(`a_gantt_row_is_computable_from_the_execution_dto_alone`) deserialises a\nreal run's `attempts` into it, so the two cannot drift silently.",
+        "required": [
+          "history",
+          "started_at"
+        ],
+        "properties": {
+          "history": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The attempt's state names, in order, e.g. `[\"RUNNING\",\"FAILED\"]`."
+          },
+          "started_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Milliseconds after the execution's `created_at`."
+          },
+          "ended_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Milliseconds after the execution's `created_at`. Absent while the\nattempt is open, and on an attempt recorded before migration 0183."
+          }
+        }
+      },
       "AuditEntryDto": {
         "type": "object",
         "required": [
@@ -37688,7 +37756,8 @@
             "type": "object",
             "required": [
               "source",
-              "runs"
+              "runs",
+              "can_manage"
             ],
             "properties": {
               "source": {
@@ -37701,6 +37770,10 @@
                   "$ref": "#/components/schemas/TaskRunDto"
                 },
                 "description": "Every task run, in `run_ix` order — the executor's creation order."
+              },
+              "can_manage": {
+                "type": "boolean",
+                "description": "Whether the caller may resume and replay this execution: they hold\n`workflow:manage` in this workspace. A detail page hides both actions\nwhen this is false; the routes still check for themselves."
               }
             }
           }
@@ -37718,7 +37791,6 @@
           "history",
           "inputs",
           "seq",
-          "execution_trigger",
           "attempt_number",
           "origin_offset_ms",
           "created_at",
@@ -37749,7 +37821,10 @@
             "description": "Kestra's wire spelling — `RUNNING`, `SUCCESS`, `FAILED`, …"
           },
           "history": {
-            "type": "object",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
             "description": "The state timeline, as stored: an array of state NAMES, e.g.\n`[\"CREATED\",\"RUNNING\",\"SUCCESS\"]`. It carries no timestamps — see\n[`TaskRunDto::history`], which is written by the same function."
           },
           "inputs": {
@@ -37760,7 +37835,10 @@
             "format": "int64"
           },
           "execution_trigger": {
-            "type": "object",
+            "type": [
+              "object",
+              "null"
+            ],
             "description": "The trigger record, `NULL` for an API start."
           },
           "trigger_execution_id": {
@@ -37811,6 +37889,30 @@
           "origin_offset_ms": {
             "type": "integer",
             "format": "int64"
+          },
+          "replayed_from_execution_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The execution this one is a manual replay of (`POST …/replay`), `NULL`\nfor every other start. A `CREATE_NEW_EXECUTION` retry is NOT linked\nhere; it carries `parent_execution_id` instead."
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The first time the execution entered `RUNNING`. `NULL` before it runs,\nfor one that never ran (an SLA that cancelled it at creation), and for\nan execution recorded before these times existed — a UI shows that last\ncase as estimated, never as \"not started\"."
+          },
+          "ended_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the execution entered a terminal state; `NULL` while it has not\n(a paused execution has none), and for an execution recorded before\nthese times existed. Written once: later writes to a finished\nexecution do not move it."
           },
           "created_at": {
             "type": "string",
@@ -44103,7 +44205,7 @@
       },
       "TaskRunDto": {
         "type": "object",
-        "description": "One task run, whole — all twenty-two columns.\n\nUnlike the execution's own row there is nothing dropped here: a detail page\nreads ONE execution's runs, so there is no page-sized multiplier the way\n`executions.source` has one.\n\n**These are the fields a gantt is drawn from**, and\n`tests/executions_routes.rs::a_gantt_row_is_computable_from_the_execution_\ndto_alone` computes one from this DTO and nothing else, so W7 cannot\ndiscover a missing field after this package closes. What it uses:\n[`Self::task_id`] and [`Self::parent_ix`] for the label and the nesting,\n[`Self::state`] for the bar, [`Self::created_seq`]/[`Self::ended_seq`] for\nLOGICAL time, and [`Self::created_at`]/[`Self::updated_at`] plus\n`attempts[].started_at` for WALL-CLOCK time.",
+        "description": "One task run, whole — all twenty-four columns.\n\nUnlike the execution's own row there is nothing dropped here: a detail page\nreads ONE execution's runs, so there is no page-sized multiplier the way\n`executions.source` has one.\n\n**These are the fields a gantt is drawn from**, and\n`tests/executions_routes.rs::a_gantt_row_is_computable_from_the_execution_\ndto_alone` computes one from this DTO and nothing else, so W7 cannot\ndiscover a missing field after this package closes. What it uses:\n[`Self::task_id`] and [`Self::parent_ix`] for the label and the nesting,\n[`Self::state`] for the bar, [`Self::created_seq`]/[`Self::ended_seq`] for\nLOGICAL time, and [`Self::started_at`]/[`Self::ended_at`] plus\n`attempts[].started_at`/`attempts[].ended_at` for WALL-CLOCK time.",
         "required": [
           "id",
           "execution_id",
@@ -44113,7 +44215,6 @@
           "state",
           "history",
           "attempts",
-          "outputs",
           "created_at",
           "updated_at"
         ],
@@ -44177,12 +44278,18 @@
             "type": "string"
           },
           "history": {
-            "type": "object",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
             "description": "**An array of state NAMES and nothing else** — `[\"CREATED\",\"RUNNING\",\n\"SUCCESS\"]` — written by `worker::claim`'s `states_json`, which maps\neach `RunState` to its wire spelling. It is **not** Kestra's\n`State.History`, and it carries **no dates**: a timeline drawn from\nthis alone has an order but no clock. The wall-clock instants are\n[`Self::created_at`], [`Self::updated_at`], and `attempts[].started_at`\n(milliseconds after the EXECUTION's `created_at`, which is what a\n`Tick` is in this engine)."
           },
           "attempts": {
-            "type": "object",
-            "description": "One entry per attempt: `{\"history\": [...], \"started_at\": <ms>}`, where\n`started_at` is milliseconds after the execution's `created_at`."
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttemptDto"
+            },
+            "description": "One entry per attempt: `{\"history\": [...], \"started_at\": <ms>,\n\"ended_at\": <ms>}`, both in milliseconds after the execution's\n`created_at`. `ended_at` is absent while the attempt is open and on an\nattempt recorded before it existed; an attempt that a retry followed\nends no later than the next one starts."
           },
           "not_before_ms": {
             "type": [
@@ -44200,7 +44307,11 @@
             "description": "The lease. `NULL` means unclaimed."
           },
           "outputs": {
-            "type": "object"
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The run's outputs, `NULL` for a run that has none: a handler that\nreturned nothing (a `Log`, a `Sleep`) and any run not yet terminal."
           },
           "message": {
             "type": [
@@ -44229,6 +44340,22 @@
               "string",
               "null"
             ]
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The first time the run entered `RUNNING`: for a worker task, when the\nexecutor handed it to the workers (equal, to the millisecond, to\n`attempts[0].started_at`); for a flowable, when the executor first ran\nit. Not moved by a resumed pause or a retry. `NULL` for a run that\nnever ran — `SKIPPED` by `runIf`, or not yet started — and for a run\nrecorded before these times existed."
+          },
+          "ended_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the run entered a terminal state; `NULL` while it has not, and\ncleared if a retry reopens it. Written once per terminal: a later\nwrite to a finished run does not move it."
           },
           "created_at": {
             "type": "string",

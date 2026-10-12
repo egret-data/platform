@@ -290,7 +290,8 @@ egret-storage.workspace = true
 crc32fast = "=1.5.0"
 
 [features]
-# `storage::install_mem_for_tests` and `egret_storage::MemStore`.
+# `storage::install_mem_for_tests` and `egret_storage::MemStore`; and
+# `runtime::install_served_for_tests` (no-silent-stall Task 2).
 test-util = ["egret-storage/test-util"]
 
 [dev-dependencies]

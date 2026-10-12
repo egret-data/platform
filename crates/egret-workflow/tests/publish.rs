@@ -5,6 +5,36 @@ mod common;
 use egret_workflow::{RefKind, WorkflowRefPort};
 use uuid::Uuid;
 
+/// The task types this binary serves: the runner set, plus `egret.sql`.
+///
+/// No deployment serves `egret.sql` today, so since no-silent-stall Task 3
+/// publish refuses it at step 3 (`task_type_not_served`), before the
+/// reference resolution these tests are about. `egret.sql` is the one task
+/// type with a `RefField` (`database`), so the tests keep it and run as a
+/// deployment that serves it would: the resolution of steps 4-6 is the same
+/// code either way. The refusal itself is `tests/not_served.rs`'s.
+///
+/// Every test here calls [`db`] first, so this is the set installed before
+/// any `common` helper installs its default.
+fn served_with_sql() -> &'static egret_workflow::runtime::Served {
+    let mut cfg = egret_config::Config::default().workflow;
+    cfg.container_runner = egret_config::ContainerRunner::Docker;
+    let runner = egret_workflow::runtime::served_for(&cfg);
+    egret_workflow::runtime::install_served_for_tests(
+        egret_workflow::runtime::Served::from_type_ids(
+            runner
+                .type_ids()
+                .map(str::to_string)
+                .chain(["egret.sql".to_string()]),
+        ),
+    )
+}
+
+async fn db() -> Option<egret_metastore::Db> {
+    served_with_sql();
+    common::db().await
+}
+
 /// A fake that owns objects in a NAMED workspace, so a test can put an object in
 /// a different workspace than the caller's and watch publish refuse.
 #[derive(Default)]
@@ -30,7 +60,7 @@ impl WorkflowRefPort for FakeRefs {
 /// something a handler must remember to refuse later.
 #[tokio::test]
 async fn a_flow_referencing_another_workspace_cannot_be_published() {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let other_ws = Uuid::new_v4();
 
@@ -63,7 +93,7 @@ async fn a_flow_referencing_another_workspace_cannot_be_published() {
 /// different errors, the difference would be the probe.
 #[tokio::test]
 async fn an_unknown_reference_fails_the_same_way_as_a_foreign_one() {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
     let f = common::draft(
@@ -80,7 +110,7 @@ async fn an_unknown_reference_fails_the_same_way_as_a_foreign_one() {
 
 #[tokio::test]
 async fn a_resolvable_flow_publishes_and_freezes_its_references() {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let db_id = Uuid::new_v4();
 
@@ -117,7 +147,7 @@ async fn a_resolvable_flow_publishes_and_freezes_its_references() {
 /// publishes cleanly and fails only at run time, in W3, with no author present.
 #[tokio::test]
 async fn an_unknown_task_type_cannot_be_published() {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
     let f = common::draft(
@@ -138,7 +168,7 @@ async fn an_unknown_task_type_cannot_be_published() {
 /// `concurrency` must publish -- it just is not enforced yet.
 #[tokio::test]
 async fn warnings_do_not_block_publish_but_errors_do() {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
 
@@ -165,6 +195,81 @@ async fn warnings_do_not_block_publish_but_errors_do() {
     );
 }
 
+/// The 2026-10-11 ruling: a `Pause` declaring `behavior`, `onPause`, `tasks`
+/// or `errors` is a validation error, so it cannot be versioned. Before the
+/// ruling it published with a warning and every execution of it stalled in
+/// `RUNNING`. The control is the same flow with a plain bounded `Pause`,
+/// which publishes -- without it a publish that refused every `Pause` would
+/// pass.
+#[tokio::test]
+async fn a_pause_egret_does_not_run_cannot_be_published() {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let pause = |id: &str, extra: &str| {
+        format!(
+            "id: {id}\nnamespace: a.b\ntasks:\n  - id: gate\n    \
+             type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n{extra}"
+        )
+    };
+
+    let bad = common::draft(&repo, ws, user, &pause("pb", "    behavior: RESUME\n")).await;
+    let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, bad.id, "")
+        .await
+        .expect_err("a Pause with `behavior:` must not publish");
+    match &err {
+        egret_core::Error::InvalidInput(m) => {
+            assert!(
+                m.contains("'behavior'") && m.contains("(tasks.gate.behavior)"),
+                "{m}"
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        repo.get(ws, bad.id).await.expect("get").live_version_id,
+        None
+    );
+
+    let ok = common::draft(&repo, ws, user, &pause("pok", "")).await;
+    egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, ok.id, "")
+        .await
+        .expect("a plain Pause publishes");
+}
+
+/// The 2026-10-12 ruling: `ForEach` is the validation error
+/// `unsupported_foreach`, so publish refuses it naming `Loop`. It was
+/// already refused here before the ruling, but only as an unknown task type
+/// at step 4, while a saved draft could start and then stalled on it with
+/// `NoHandler` (Task 7b); the assertion
+/// is on the ruling's own message. The control is the same flow with `Loop`.
+#[tokio::test]
+async fn a_foreach_cannot_be_published_and_the_error_names_loop() {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let bad = common::draft(&repo, ws, user, "id: fe\nnamespace: a.b\ntasks:\n  - id: fan\n    type: io.kestra.plugin.core.flow.ForEach\n    values: [1, 2]\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n").await;
+    let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, bad.id, "")
+        .await
+        .expect_err("a ForEach must not publish");
+    match &err {
+        egret_core::Error::InvalidInput(m) => assert!(
+            m.contains("io.kestra.plugin.core.flow.Loop") && m.contains("(tasks.fan)"),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        repo.get(ws, bad.id).await.expect("get").live_version_id,
+        None
+    );
+
+    let ok = common::draft(&repo, ws, user, "id: lp\nnamespace: a.b\ntasks:\n  - id: fan\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1, 2]\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n").await;
+    egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, ok.id, "")
+        .await
+        .expect("a Loop publishes");
+}
+
 // -- Fix round 1: `subflow:` was the sixth row in spec section 8's own
 // reference table (`workflow.flows`, "this crate") and had no resolution at
 // all -- no `RefField`, no arm in `resolve_task`. Same three-way coverage as
@@ -173,7 +278,7 @@ async fn warnings_do_not_block_publish_but_errors_do() {
 /// The subflow twin of `a_flow_referencing_another_workspace_cannot_be_published`.
 #[tokio::test]
 async fn a_subflow_naming_another_workspaces_flow_cannot_be_published() {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let other_ws = Uuid::new_v4();
 
@@ -202,7 +307,7 @@ async fn a_subflow_naming_another_workspaces_flow_cannot_be_published() {
 /// The subflow twin of `an_unknown_reference_fails_the_same_way_as_a_foreign_one`.
 #[tokio::test]
 async fn a_subflow_naming_a_nonexistent_flow_fails_the_same_way() {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
     let f = common::draft(
@@ -220,7 +325,7 @@ async fn a_subflow_naming_a_nonexistent_flow_fails_the_same_way() {
 /// The subflow twin of `a_resolvable_flow_publishes_and_freezes_its_references`.
 #[tokio::test]
 async fn a_subflow_naming_a_flow_in_the_callers_own_workspace_publishes_and_freezes_its_id() {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let target_id = Uuid::new_v4();
 
@@ -257,7 +362,7 @@ async fn a_subflow_naming_a_flow_in_the_callers_own_workspace_publishes_and_free
 /// its own `/` must not publish.
 #[tokio::test]
 async fn a_subflow_namespace_containing_a_slash_cannot_be_published() {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
     let f = common::draft(
@@ -276,7 +381,7 @@ async fn a_subflow_namespace_containing_a_slash_cannot_be_published() {
 /// still publish -- the fix must not reject every subflow with a `.` in it.
 #[tokio::test]
 async fn a_subflow_with_a_legitimate_dotted_namespace_still_publishes() {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let target_id = Uuid::new_v4();
 
@@ -328,7 +433,7 @@ fn flow_with_trigger_dependency(namespace: &str, flow_id: &str) -> String {
 #[tokio::test]
 async fn a_trigger_dependency_naming_a_flow_in_the_callers_own_workspace_publishes_and_freezes_its_id(
 ) {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let target_id = Uuid::new_v4();
 
@@ -361,7 +466,7 @@ async fn a_trigger_dependency_naming_a_flow_in_the_callers_own_workspace_publish
 /// `a_subflow_naming_another_workspaces_flow_cannot_be_published`.
 #[tokio::test]
 async fn a_trigger_dependency_naming_another_workspaces_flow_cannot_be_published() {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let other_ws = Uuid::new_v4();
 
@@ -393,7 +498,7 @@ async fn a_trigger_dependency_naming_another_workspaces_flow_cannot_be_published
 /// The trigger twin of `a_subflow_naming_a_nonexistent_flow_fails_the_same_way`.
 #[tokio::test]
 async fn a_trigger_dependency_naming_a_nonexistent_flow_fails_the_same_way() {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
     let f = common::draft(
@@ -416,7 +521,7 @@ async fn a_trigger_dependency_naming_a_nonexistent_flow_fails_the_same_way() {
 /// `nsfiles::access`'s `a_files_segment_namespace_is_refused_for_every_access_and_actor`).
 #[tokio::test]
 async fn publish_refuses_a_files_segment_namespace_by_name() {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
     let bad = common::draft(
@@ -455,7 +560,7 @@ async fn publish_refuses_a_files_segment_namespace_by_name() {
 /// `nsfiles::access`'s `a_kv_segment_namespace_is_refused_for_every_resource_access_and_actor`).
 #[tokio::test]
 async fn publish_refuses_a_kv_segment_namespace_by_name() {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
     let bad = common::draft(
@@ -498,11 +603,13 @@ fn working_directory(id: &str, block: &str) -> String {
 
 /// W9b Task 5 (spec §7, the user's ruling): a `WorkingDirectory`'s
 /// `namespaceFiles` is parsed at publish by the script tasks' own parse; a
-/// malformed block is refused naming the property, a valid one publishes.
+/// malformed block is refused naming the property, a valid one draws no
+/// `namespaceFiles` finding. (It published until no-silent-stall Task 1, which
+/// refuses every `WorkingDirectory` as `unsupported_working_directory`.)
 #[tokio::test]
-async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name_and_a_valid_one_publishes(
+async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name_and_a_valid_one_is_not(
 ) {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
     for (id, block, property) in [
@@ -531,7 +638,11 @@ async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name
             other => panic!("{id}: {other:?}"),
         }
     }
-    // The control: the corpus flow's block, and a templated one, publish.
+    // The control: the corpus flow's block, and a templated one, raise no
+    // `namespaceFiles` finding. Since no-silent-stall Task 1 a
+    // `WorkingDirectory` does not PUBLISH at all -- egret cannot run it, so it
+    // is refused as `unsupported_working_directory` at the task's own path --
+    // so the control is that the refusal is that one alone.
     for (id, block) in [
         (
             "good",
@@ -549,9 +660,16 @@ async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name
         ),
     ] {
         let good = common::draft(&repo, ws, user, &working_directory(id, block)).await;
-        egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, good.id, "")
+        let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, good.id, "")
             .await
-            .unwrap_or_else(|e| panic!("{id} publishes: {e:?}"));
+            .expect_err("a WorkingDirectory is refused: egret cannot run it");
+        match err {
+            egret_core::Error::InvalidInput(m) => {
+                assert!(m.contains("(tasks.wd)") && m.contains("outputFiles"), "{id}: {m}");
+                assert!(!m.contains("namespaceFiles"), "{id}: a valid block: {m}");
+            }
+            other => panic!("{id}: {other:?}"),
+        }
     }
 }
 
@@ -600,7 +718,7 @@ async fn a_working_directory_namespace_files_round_trips_through_the_model() {
 /// `a_secret_in_a_set_or_put_value_is_refused_with_its_own_code_and_message`.
 #[tokio::test]
 async fn a_secret_in_a_kv_value_is_refused_at_publish_by_its_own_message() {
-    let Some(db) = common::db().await else { return };
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
     for (id, ty) in [
@@ -637,20 +755,33 @@ async fn a_secret_in_a_kv_value_is_refused_at_publish_by_its_own_message() {
 /// W9c Task 4: the corpus's `valids/kv` (two `kv()` calls in `Return`
 /// tasks) publishes. `valids/retry-with-flowable-errors` carries no
 /// `secret()` either; it stopped only at the unknown `kv.Set` type until W9c
-/// Task 5 registered the six KV tasks, and it publishes now (it still needs
-/// the `AllowFailure` flowable to run as Kestra ran it).
+/// Task 5 registered the six KV tasks, and it published from then until
+/// no-silent-stall Task 1, which refuses its `AllowFailure` flowable
+/// (`unsupported_allow_failure`: egret cannot run it, and every execution of it
+/// stalled). So it is refused now, and for that reason alone.
 #[tokio::test]
-async fn valids_kv_and_retry_with_flowable_errors_publish() {
-    let Some(db) = common::db().await else { return };
+async fn valids_kv_publishes_and_retry_with_flowable_errors_is_refused_only_for_its_allow_failure()
+{
+    let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
-    for source in [
-        include_str!("../oracle-exec/corpus/valids/kv.yaml"),
-        include_str!("../oracle-exec/corpus/valids/retry-with-flowable-errors.yaml"),
-    ] {
-        let draft = common::draft(&repo, ws, user, source).await;
-        egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "")
-            .await
-            .unwrap_or_else(|e| panic!("{e}: {source}"));
+    let kv = include_str!("../oracle-exec/corpus/valids/kv.yaml");
+    let draft = common::draft(&repo, ws, user, kv).await;
+    egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "")
+        .await
+        .unwrap_or_else(|e| panic!("{e}: {kv}"));
+
+    let af = include_str!("../oracle-exec/corpus/valids/retry-with-flowable-errors.yaml");
+    let draft = common::draft(&repo, ws, user, af).await;
+    match egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "").await {
+        Err(egret_core::Error::InvalidInput(m)) => {
+            assert!(
+                m.contains("set `allowFailure: true` on each child task instead")
+                    && m.contains("(tasks.retry_block)"),
+                "{m}"
+            );
+            assert_eq!(m.matches("; ").count(), 0, "the only finding: {m}");
+        }
+        other => panic!("{other:?}"),
     }
 }
