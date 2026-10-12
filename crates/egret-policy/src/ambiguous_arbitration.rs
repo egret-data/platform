@@ -941,6 +941,139 @@ pub fn ambiguous_arbitrations_in<'a>(
     out
 }
 
+/// One stored policy that an editor save's level fill moves this policy AHEAD
+/// of within one Ranger band (SP4d-4 Task 11, the user's ordering ruling).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalOrderShift {
+    /// The other policy's name.
+    pub other: String,
+    /// Its `policy.authz_policies.id`, when the caller's body carries one.
+    pub other_id: Option<i64>,
+    /// Its Ranger `policyType` (0 access, 1 mask, 2 row filter).
+    pub policy_type: i64,
+    /// Where the two may both decide one request — the same rendering the
+    /// overlap refusal names ([`coordinate_hint`]).
+    pub coordinate_hint: String,
+}
+
+impl EvalOrderShift {
+    /// The sentence a steward reads. It states the direction Ranger orders in
+    /// — the BROADER policy (more `*` levels, other things equal) is evaluated
+    /// first — and never claims the more specific one wins.
+    pub fn sentence(&self, this: &str) -> String {
+        let noun = match self.policy_type {
+            1 => "mask",
+            2 => "row filter",
+            _ => "access policy",
+        };
+        format!(
+            "Saving {this:?} with `*` in its emptied levels moves it AHEAD of the {noun} {other:?} \
+             in Ranger's evaluation order: both are in the same priority band and may decide the \
+             same request (where they meet: {coord}). Ranger evaluates the broader policy — the \
+             one with more `*` levels, other things equal — first, not the more specific one, so \
+             where the two differ {this:?} is now consulted before {other:?}. Check that the \
+             result is what you intend; if it is not, narrow {this:?}, or set Override on the \
+             policy that should be evaluated first.",
+            other = self.other,
+            coord = self.coordinate_hint,
+        )
+    }
+}
+
+/// `RangerPolicyRepository`'s access order matters for a pair only when one of
+/// them can deny or carve an exception out: with allow items alone, any order
+/// reaches the same union. A mask or a row filter is "first yielding evaluator
+/// is final", so there it matters whenever the decisive items differ.
+fn order_matters(a: &Value, b: &Value) -> bool {
+    let policy_type = int_field(a, "policyType");
+    match policy_type {
+        0 => {
+            let carves = |p: &Value| {
+                has_deny(p)
+                    || ["allowExceptions", "denyExceptions"].iter().any(|k| {
+                        p.get(*k)
+                            .and_then(Value::as_array)
+                            .is_some_and(|x| !x.is_empty())
+                    })
+            };
+            carves(a) || carves(b)
+        }
+        1 | 2 => {
+            let key = item_key(policy_type);
+            a.get(key) != b.get(key)
+        }
+        _ => false,
+    }
+}
+
+/// **Does filling emptied levels with `*` move `filled` ahead of any policy in
+/// `others`?** `unfilled` is the body the same form renders without the fill;
+/// `filled` is the body that will be stored; `others` are the OTHER enabled
+/// policies of the same download (the row a `PUT` replaces excluded by the
+/// caller).
+///
+/// `computeEvalOrder()` gives each match-any `*` level a discount of 25,
+/// capped at 100 in total, and an omitted level none; the comparator sorts
+/// ascending after `(policyPriority, hasDeny)` (measured:
+/// `docs/en/plans/2026-10-11-sp4d-4-task1-levels-result.md` §4, §7), so the
+/// fill can only move the policy EARLIER. A pair is reported when
+///
+/// 1. it is in one band — same `policyType`, `hasDeny` and `policyPriority`;
+/// 2. the two may select a common request ([`bodies_may_intersect`] — the
+///    guard's own machinery, not a second spelling);
+/// 3. their order matters ([`order_matters`]); and
+/// 4. the fill carries `filled`'s resource discount from at or below the
+///    other's to at or above it ([`match_any_levels`], the discount
+///    [`served_today`] uses). A discount this module does not reproduce (any
+///    wildcard but a bare `*`, an exclude, `additionalResources`) reads as
+///    unknown and is reported — fail-closed.
+///
+/// Principal, access and condition discounts are not compared; the report is
+/// therefore "may be consulted first", which is all the sentence claims.
+pub fn eval_order_shifts<'a>(
+    unfilled: &Value,
+    filled: &Value,
+    others: impl IntoIterator<Item = (&'a str, &'a Value)>,
+) -> Vec<EvalOrderShift> {
+    if !is_enabled(filled) {
+        return Vec::new();
+    }
+    let discount = |n: u32| (25 * n).min(100);
+    let (before, after) = (
+        match_any_levels(unfilled).map(discount),
+        match_any_levels(filled).map(discount),
+    );
+    if let (Some(b), Some(a)) = (before, after) {
+        if a <= b {
+            return Vec::new();
+        }
+    }
+    let mut out: Vec<EvalOrderShift> = others
+        .into_iter()
+        .filter(|(_, o)| is_enabled(o))
+        .filter(|(_, o)| {
+            int_field(o, "policyType") == int_field(filled, "policyType")
+                && has_deny(o) == has_deny(filled)
+                && int_field(o, "policyPriority") == int_field(filled, "policyPriority")
+        })
+        .filter(|(_, o)| bodies_may_intersect(filled, o) && order_matters(filled, o))
+        .filter(
+            |(_, o)| match (before, after, match_any_levels(o).map(discount)) {
+                (Some(b), Some(a), Some(other)) => b <= other && other <= a,
+                _ => true,
+            },
+        )
+        .map(|(name, o)| EvalOrderShift {
+            other: name.to_string(),
+            other_id: o.get("id").and_then(Value::as_i64),
+            policy_type: int_field(o, "policyType"),
+            coordinate_hint: coordinate_hint(filled, o),
+        })
+        .collect();
+    out.sort_by(|x, y| x.other.cmp(&y.other));
+    out
+}
+
 /// The first of [`ambiguous_arbitrations_in`], for write paths that report
 /// one. `None` means the set would be served with no pair whose arbitration
 /// the artifact does not express.
@@ -1000,6 +1133,101 @@ mod tests {
     fn at(level: &str, value: &str, (name, mut body): (String, Value)) -> (String, Value) {
         body["resources"][level]["values"] = json!([value]);
         (name, body)
+    }
+
+    // ── SP4d-4 Task 11: the evaluation-order shift of a level fill ─────────
+
+    fn access(name: &str, column: Option<&str>, deny: bool) -> Value {
+        let mut res = serde_json::Map::new();
+        for (l, v) in [("catalog", "wh"), ("schema", "sales"), ("table", "orders")] {
+            res.insert(
+                l.into(),
+                json!({"values": [v], "isExcludes": false, "isRecursive": false}),
+            );
+        }
+        if let Some(c) = column {
+            res.insert(
+                "column".into(),
+                json!({"values": [c], "isExcludes": false, "isRecursive": false}),
+            );
+        }
+        json!({
+            "name": name, "policyType": 0, "isEnabled": true, "policyPriority": 0,
+            "resources": res,
+            "policyItems": [{"users": ["a"], "accesses": [{"type": "select", "isAllowed": true}]}],
+            "denyPolicyItems": if deny {
+                json!([{"users": ["b"], "accesses": [{"type": "select", "isAllowed": true}]}])
+            } else { json!([]) },
+        })
+    }
+
+    #[test]
+    fn a_fill_that_passes_a_same_band_deny_policy_is_reported_and_its_direction_is_broader_first() {
+        let (unfilled, filled) = (access("n", None, true), access("n", Some("*"), true));
+        let other = access("o", Some("secret"), true);
+        let shifts = eval_order_shifts(&unfilled, &filled, [("o", &other)]);
+        assert_eq!(shifts.len(), 1);
+        assert_eq!(shifts[0].other, "o");
+        let sentence = shifts[0].sentence("n");
+        assert!(
+            sentence.contains("broader policy") && sentence.contains("not the more specific one")
+        );
+    }
+
+    #[test]
+    fn a_fill_is_not_reported_against_a_policy_it_does_not_pass() {
+        let (unfilled, filled) = (access("n", None, true), access("n", Some("*"), true));
+        // Already ahead: two `*` levels (50) beat the filled policy's one (25).
+        let mut broader = access("o", Some("*"), true);
+        broader["resources"]["table"]["values"] = json!(["*"]);
+        // Allow-only pair: the filled policy has a deny, the other does not, so
+        // they are different bands; and an allow-only pair is order-free.
+        let allow = access("p", Some("secret"), false);
+        let (u2, f2) = (access("n", None, false), access("n", Some("*"), false));
+        // Another table: cannot decide the same request.
+        let mut elsewhere = access("q", Some("secret"), true);
+        elsewhere["resources"]["table"]["values"] = json!(["invoices"]);
+        // Another priority band.
+        let mut over = access("r", Some("secret"), true);
+        over["policyPriority"] = json!(1);
+        assert!(eval_order_shifts(
+            &unfilled,
+            &filled,
+            [
+                ("o", &broader),
+                ("p", &allow),
+                ("q", &elsewhere),
+                ("r", &over)
+            ]
+        )
+        .is_empty());
+        assert!(eval_order_shifts(&u2, &f2, [("p", &allow)]).is_empty());
+        // And a save that filled nothing moves nothing.
+        assert!(eval_order_shifts(
+            &filled,
+            &filled,
+            [("o", &access("o", Some("secret"), true))]
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn a_mask_pair_is_reported_whatever_its_items_because_the_first_yielding_one_is_final() {
+        let (_, mut stored) = mask("m1", "email", "MASK_NULL");
+        stored["resources"]["table"]["values"] = json!(["orders"]);
+        let (_, mut filled) = mask("m2", "*", "MASK_HASH");
+        let mut unfilled = filled.clone();
+        unfilled["resources"]
+            .as_object_mut()
+            .unwrap()
+            .remove("column");
+        filled["resources"]["column"]["values"] = json!(["*"]);
+        let shifts = eval_order_shifts(&unfilled, &filled, [("m1", &stored)]);
+        assert_eq!(shifts.len(), 1, "{shifts:?}");
+        assert_eq!(shifts[0].policy_type, 1);
+        // Agreeing items decide the same either way: nothing to report.
+        let (_, same) = mask("m3", "email", "MASK_HASH");
+        assert!(eval_order_shifts(&unfilled, &filled, [("m3", &same)]).is_empty());
     }
 
     fn check_all(set: &[(String, Value)]) -> Vec<AmbiguousArbitration> {

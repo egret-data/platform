@@ -85,6 +85,42 @@ pub struct ClassifiedPolicy {
     /// hand (both have `enabled = false`). A migrated policy is never
     /// `migratable`, and its one blocker sentence says how to undo it.
     pub migrated: Option<MigrationRecord>,
+    /// SP4d-4 Task 11: what this policy's resource levels mean to Ranger,
+    /// independent of migration — a policy that stops above `column` and
+    /// allows `select` grants no column read, and one with a gap decides
+    /// nothing. Empty for every row that is neither a hand-written
+    /// (`operator`) policy of a resource profile nor affected. **Flagged,
+    /// never rewritten**: nothing here edits a stored row.
+    pub warnings: Vec<PolicyWarning>,
+}
+
+/// One finding about a stored policy's resource levels (SP4d-4 Task 11).
+/// `kind` is `select_stops_above_column` (with `level`: the deepest level the
+/// policy names) or `level_gap` (with `missing`: the absent level that has a
+/// named level beneath it); each carries the `sentence` an operator reads.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+pub struct PolicyWarning {
+    pub kind: String,
+    pub level: Option<String>,
+    pub missing: Option<String>,
+    pub sentence: String,
+}
+
+/// The `policyId`-keyed answer of `GET .../warnings`: how many warnings the
+/// profile carries in all and which policies carry them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+pub struct ProfileWarnings {
+    #[serde(rename = "warningCount")]
+    pub warning_count: usize,
+    pub policies: Vec<WarnedPolicy>,
+}
+
+/// One policy that carries at least one [`PolicyWarning`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+pub struct WarnedPolicy {
+    pub id: i64,
+    pub name: String,
+    pub warnings: Vec<PolicyWarning>,
 }
 
 /// One `perm.migrated_from` row, as the classifier and the page read it.
@@ -171,6 +207,7 @@ pub fn classify_policy_objects(
                 blockers,
                 proposed: None,
                 migrated: None,
+                warnings: level_warnings(rec, target),
             },
             None,
         )
@@ -257,12 +294,156 @@ pub fn classify_policy_objects(
                     blockers: Vec::new(),
                     proposed: Some(proposed),
                     migrated: None,
+                    warnings: level_warnings(rec, target),
                 },
                 Some(candidates),
             )
         }
         Err(blockers) => refuse(blockers.iter().map(render_blocker).collect()),
     }
+}
+
+/// The measurement every sentence below cites.
+const LEVELS_RESULT_DOC: &str = "docs/en/plans/2026-10-11-sp4d-4-task1-levels-result.md";
+
+/// Access types that, held by an item, allow `select`: `select` itself and any
+/// access type whose `impliedGrants` include it — read from the embedded
+/// service-def with the evaluator's own `implied_access_grants`, never
+/// restated here. Computed once per engine.
+fn select_granting_access_types(engine: EngineType) -> &'static [String] {
+    use std::sync::OnceLock;
+    static TRINO: OnceLock<Vec<String>> = OnceLock::new();
+    static STARROCKS: OnceLock<Vec<String>> = OnceLock::new();
+    let (cell, def) = match engine {
+        EngineType::Trino => (&TRINO, egret_policy::trino_service_def()),
+        EngineType::StarRocks => (&STARROCKS, egret_policy::starrocks_service_def()),
+    };
+    cell.get_or_init(|| {
+        let mut out = vec!["select".to_string()];
+        if let Ok(def) = def {
+            let parsed = egret_ranger_eval::servicedef::ServiceDef::parse(&def);
+            for (implier, implied) in parsed.implied_access_grants() {
+                if implied.contains("select") && !out.iter().any(|o| o == implier) {
+                    out.push(implier.to_string());
+                }
+            }
+        }
+        out
+    })
+}
+
+/// Whether any ALLOW item of `body` grants `select` on `engine`.
+fn allows_select(body: &Value, engine: EngineType) -> bool {
+    let granting = select_granting_access_types(engine);
+    body.get("policyItems")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|item| item.get("accesses").and_then(Value::as_array))
+        .flatten()
+        .filter(|a| a.get("isAllowed").and_then(Value::as_bool).unwrap_or(true))
+        .filter_map(|a| a.get("type").and_then(Value::as_str))
+        .any(|t| granting.iter().any(|g| g == t))
+}
+
+/// SP4d-4 Task 11: the per-policy findings about a stored policy's resource
+/// levels. Pure. Only a hand-written (`operator`) policy of a RESOURCE profile
+/// is examined — a compiled or infra row always carries every level it needs,
+/// and a tag policy has none of these levels. The levels are read from the
+/// primary `resources` map only.
+///
+/// - `level_gap`: a named level beneath an absent one. Ranger decides nothing
+///   for such a policy at any depth (Task 1, `gap`).
+/// - `select_stops_above_column`: an ACCESS policy whose chain ends above
+///   `column` and whose allow items grant `select`. Both plugins check
+///   `SELECT col` per column, so it grants no column read.
+///
+/// Nothing here rewrites a stored row; filling a level is the operator's edit.
+fn level_warnings(
+    rec: &PolicyRecord,
+    target: Result<(ServiceKind, EngineType), &str>,
+) -> Vec<PolicyWarning> {
+    let Ok((ServiceKind::Resource, engine)) = target else {
+        return Vec::new();
+    };
+    if rec.managed_by != "operator" {
+        return Vec::new();
+    }
+    let policy_type = rec
+        .policy_jsonb
+        .get("policyType")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let all = crate::grants::resource_level_names(engine);
+    let chain: &[&str] = match policy_type {
+        0 | 1 => &all,
+        2 => &all[..crate::grants::ROW_FILTER_LEVELS],
+        _ => return Vec::new(),
+    };
+    let named = |name: &str| {
+        rec.policy_jsonb
+            .pointer(&format!("/resources/{name}/values"))
+            .and_then(Value::as_array)
+            .is_some_and(|vs| vs.iter().any(|v| v.as_str().is_some_and(|s| !s.is_empty())))
+    };
+    if !chain.iter().any(|n| named(n)) {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let mut first_absent: Option<&str> = None;
+    let mut reported_gap_at: Option<&str> = None;
+    for name in chain {
+        match (named(name), first_absent) {
+            (false, None) => first_absent = Some(name),
+            (true, Some(missing)) if reported_gap_at != Some(missing) => {
+                reported_gap_at = Some(missing);
+                out.push(PolicyWarning {
+                    kind: "level_gap".into(),
+                    level: None,
+                    missing: Some(missing.to_string()),
+                    sentence: format!(
+                        "The policy names `{name}` but not `{missing}`, the level above it. \
+                         Ranger decides nothing for a policy with a gap in its resource \
+                         levels (measured: {LEVELS_RESULT_DOC}), so this policy grants \
+                         nothing at any depth. Name `{missing}` (use `*` for every {missing}) \
+                         or remove `{name}`; the editor refuses to save such a gap."
+                    ),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // Stops above `column`: the chain has no gap and ends before the last level.
+    let last = chain.len() - 1;
+    if policy_type == 0 && reported_gap_at.is_none() && !named(chain[last]) {
+        if let Some(stops_at) = chain.iter().rev().find(|n| named(n)) {
+            if allows_select(&rec.policy_jsonb, engine) {
+                out.push(PolicyWarning {
+                    kind: "select_stops_above_column".into(),
+                    level: Some((*stops_at).to_string()),
+                    missing: None,
+                    sentence: format!(
+                        "The policy stops at `{stops_at}` and allows `select`. Trino and \
+                         StarRocks check `SELECT` on each column, and Ranger does not apply a \
+                         policy that stops above `{last_level}` to {last_level}-level requests, \
+                         so today it lets nobody read a column; it grants only the checks made \
+                         at the depth it stops at (for example INSERT, DELETE, UPDATE, and \
+                         Trino's `count(*)`). Measured on the real Ranger jars: \
+                         {LEVELS_RESULT_DOC}. To grant the columns, set `{last_level}` to `*` \
+                         in the editor — that extends the policy to every {last_level} under \
+                         `{stops_at}` and moves it EARLIER in Ranger's evaluation order within \
+                         its priority band (the broader policy is evaluated first, not the \
+                         more specific one); the save names any policy it now precedes. \
+                         egret does not rewrite stored policies.",
+                        last_level = chain[last],
+                    ),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// The one sentence a migrated original carries, in place of every other.
@@ -399,13 +580,16 @@ pub fn render_blocker(b: &Blocker) -> String {
              if that is the intent — or keep the policy hand-written."
             .to_string(),
         Blocker::MissingLevel { level } => format!(
-            "The policy names no `{level}` level. egret's policy editor drops a level left empty \
-             when it saves, so this is how most editor-saved policies look. Ranger does not read \
-             an absent level as `*`: a policy that stops above `{level}` does not match \
-             `{level}`-level requests the way every egret permission does, so it cannot be \
-             migrated as it stands. Setting `{level}` to `*` in the editor makes it expressible \
-             — but that also extends the policy to every `{level}` under what it names, so do \
-             it only if that is what the policy is meant to grant."
+            "The policy names no `{level}` level, so it stops above `{level}`, and Ranger does \
+             not apply it to `{level}`-level requests (measured: {LEVELS_RESULT_DOC}). Today it \
+             grants only the checks made at the depth it stops at (for example INSERT, DELETE \
+             and UPDATE, and Trino's `count(*)`) — not reading `{level}`-level data. Ranger does \
+             not read an absent level as `*`, so it cannot be migrated as it stands; see the \
+             policy's warnings. Setting `{level}` to `*` in the editor makes it expressible, but \
+             that extends the policy to every `{level}` under what it names and also moves it \
+             EARLIER in Ranger's evaluation order within its priority band (the broader policy \
+             is evaluated first, not the more specific one), so do it only if that is what the \
+             policy is meant to grant."
         ),
         Blocker::UnknownLevel { level } => format!(
             "Resource `{level}` is not a level egret addresses for this engine and policy kind \
@@ -704,6 +888,28 @@ pub async fn classify_service(
 ) -> Result<Vec<ClassifiedPolicy>, PolicyStoreError> {
     let inputs = ServiceInputs::load(conn, service_id).await?;
     Ok(inputs.rows.iter().map(|r| inputs.classify(r).0).collect())
+}
+
+/// The profile's warnings (SP4d-4 Task 11): the policies of `service_id` that
+/// carry at least one [`PolicyWarning`], and the total. Ordered by policy id.
+pub async fn profile_warnings(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<ProfileWarnings, PolicyStoreError> {
+    let policies: Vec<WarnedPolicy> = classify_service(conn, service_id)
+        .await?
+        .into_iter()
+        .filter(|p| !p.warnings.is_empty())
+        .map(|p| WarnedPolicy {
+            id: p.id,
+            name: p.name,
+            warnings: p.warnings,
+        })
+        .collect();
+    Ok(ProfileWarnings {
+        warning_count: policies.iter().map(|p| p.warnings.len()).sum(),
+        policies,
+    })
 }
 
 #[cfg(test)]

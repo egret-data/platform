@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { MigrationRecord } from './migrationRecord';
+import type { PolicyWarning } from './policyWarning';
 import type { ProposedObjects } from './proposedObjects';
 
 /**
@@ -26,4 +27,13 @@ export interface ClassifiedPolicy {
   blockers: string[];
   proposed?: null | ProposedObjects;
   migrated?: null | MigrationRecord;
+  /**
+     * SP4d-4 Task 11: what this policy's resource levels mean to Ranger,
+     * independent of migration — a policy that stops above `column` and
+     * allows `select` grants no column read, and one with a gap decides
+     * nothing. Empty for every row that is neither a hand-written
+     * (`operator`) policy of a resource profile nor affected. **Flagged,
+     * never rewritten**: nothing here edits a stored row.
+     */
+  warnings: PolicyWarning[];
 }

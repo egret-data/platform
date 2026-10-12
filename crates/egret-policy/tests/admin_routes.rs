@@ -3441,3 +3441,366 @@ async fn two_concurrent_editor_writes_forming_a_pair_store_exactly_one() {
     f.store.delete_service(trino.id).await.expect("cleanup");
     f.store.delete_service(tag_svc.id).await.expect("cleanup");
 }
+
+// ── SP4d-4 Task 11 (B1): the editor's absent levels ──────────────────────────
+//
+// Measured on the real Ranger jars (docs/en/plans/2026-10-11-sp4d-4-task1-
+// levels-result.md): a policy that stops above `column` is denied `select` at
+// column depth on both engines. An emptied level is therefore saved as `*`;
+// an emptied CATALOG is refused; a level the form removed ("— none —") stays
+// absent; a gap is refused. Every test below runs against the per-process
+// test database and deletes its own service.
+
+fn level(values: &[&str]) -> serde_json::Value {
+    serde_json::json!({ "values": values, "isExcludes": false, "isRecursive": false })
+}
+
+async fn post_policy(
+    f: &Fixture,
+    token: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    into_json(
+        f.app_empty()
+            .oneshot(req("POST", "/policies", token, Some(body)))
+            .await
+            .unwrap(),
+    )
+    .await
+}
+
+async fn stored_policy_count(f: &Fixture, service_id: i64) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM policy.authz_policies WHERE service_id = $1")
+        .bind(service_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count")
+}
+
+#[tokio::test]
+async fn an_editor_body_with_a_level_gap_is_refused() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11gap", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    // `column` is named but `schema` and `table` are absent: Ranger decides
+    // nothing for it (Task 1, `gap`).
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "gap", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"]), "column": level(&["email"])},
+            "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let msg = body["error"]
+        .as_str()
+        .or(body["message"].as_str())
+        .unwrap_or_default();
+    assert!(
+        msg.contains("`column`") && msg.contains("`schema`"),
+        "the refusal must name the named level and the missing one: {body}"
+    );
+    assert_eq!(stored_policy_count(&f, svc_id).await, 0, "nothing stored");
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn an_empty_catalog_is_refused() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11cat", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "no-catalog", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&[]), "schema": level(&["s"])},
+            "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let msg = body["error"]
+        .as_str()
+        .or(body["message"].as_str())
+        .unwrap_or_default();
+    assert!(
+        msg.contains("name a catalog") && msg.contains("every catalog"),
+        "the refusal must say why `*` is not offered here: {body}"
+    );
+    assert_eq!(stored_policy_count(&f, svc_id).await, 0, "nothing stored");
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn an_empty_non_root_level_is_stored_as_star() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11fill", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "table-all-columns", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"]), "schema": level(&["s"]),
+                          "table": level(&["orders"]), "column": level(&[])},
+            "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["filledLevels"],
+        serde_json::json!(["column"]),
+        "{body}"
+    );
+    let note = body["note"].as_str().unwrap_or_default();
+    assert!(
+        note.contains("broader policy") && !note.contains("more specific one wins"),
+        "the note must say the BROADER policy is evaluated first, never that the specific one wins: {body}"
+    );
+    let stored = f
+        .store
+        .get_policy(body["id"].as_i64().unwrap())
+        .await
+        .expect("get");
+    assert_eq!(
+        stored.policy_jsonb["resources"]["column"],
+        serde_json::json!({"values": ["*"], "isExcludes": false, "isRecursive": false}),
+        "the emptied level is stored as `*`: {}",
+        stored.policy_jsonb
+    );
+    // The named levels are untouched.
+    assert_eq!(
+        stored.policy_jsonb["resources"]["table"],
+        level(&["orders"])
+    );
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn a_truncated_chain_stays_truncated() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11trunc", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    // The form removed `column` ("— none —"): the KEY is absent, which is not
+    // the same as an emptied level.
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "stops-at-table", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"]), "schema": level(&["s"]),
+                          "table": level(&["orders"])},
+            "items": [{"users": ["alice"], "accesses": ["insert"], "effect": "allow"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.get("filledLevels").is_none() && body.get("note").is_none(),
+        "{body}"
+    );
+    let stored = f
+        .store
+        .get_policy(body["id"].as_i64().unwrap())
+        .await
+        .expect("get");
+    assert!(
+        stored.policy_jsonb["resources"].get("column").is_none(),
+        "an absent level stays absent: {}",
+        stored.policy_jsonb
+    );
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// The ordering ruling (user, 2026-10-12). `deny-secret` and the new policy are
+/// both access policies with a deny item (so they share a `hasDeny` band) and
+/// the new one's emptied `column` becomes `*`: its evalOrder drops by 25 and it
+/// is now consulted BEFORE `deny-secret`, which names the column literally.
+#[tokio::test]
+async fn a_fill_that_moves_ahead_of_a_deny_policy_warns_naming_it() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11ord", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    let (status, other) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "deny-secret", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"]), "schema": level(&["s"]),
+                          "table": level(&["orders"]), "column": level(&["secret"])},
+            "items": [{"users": ["bob"], "accesses": ["select"], "effect": "deny"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    assert!(
+        other.get("warnings").is_none(),
+        "no fill, no warning: {other}"
+    );
+
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "orders-all-columns", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"]), "schema": level(&["s"]),
+                          "table": level(&["orders"]), "column": level(&[])},
+            "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"},
+                      {"users": ["carol"], "accesses": ["delete"], "effect": "deny"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let warnings = body["warnings"].as_array().expect("warnings");
+    assert_eq!(warnings.len(), 1, "{body}");
+    let w = &warnings[0];
+    assert_eq!(w["kind"], "evaluation_order_changed", "{body}");
+    assert_eq!(w["policy"], "deny-secret", "{body}");
+    assert_eq!(w["policyId"], other["id"], "{body}");
+    assert_eq!(w["policyKind"], "access", "{body}");
+    let sentence = w["sentence"].as_str().unwrap_or_default();
+    assert!(
+        sentence.contains("\"orders-all-columns\"")
+            && sentence.contains("\"deny-secret\"")
+            && sentence.contains("broader policy")
+            && sentence.contains("not the more specific one"),
+        "the sentence names both policies and states the real direction: {body}"
+    );
+    assert!(
+        body["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("EARLIER"),
+        "the note explains the reorder: {body}"
+    );
+
+    // An UPDATE of the same policy reports the same pair (and does not pair
+    // the new body against the row it replaces).
+    let new_id = body["id"].as_i64().unwrap();
+    let resp = f
+        .app_empty()
+        .oneshot(req(
+            "PUT",
+            &format!("/policies/{new_id}"),
+            &token,
+            Some(serde_json::json!({
+                "name": "orders-all-columns", "service": svc_name, "isEnabled": true,
+                "resources": {"catalog": level(&["c"]), "schema": level(&["s"]),
+                              "table": level(&["orders"]), "column": level(&[])},
+                "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"},
+                          {"users": ["carol"], "accesses": ["delete"], "effect": "deny"}]
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, put) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{put}");
+    assert_eq!(put["warnings"].as_array().map(Vec::len), Some(1), "{put}");
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// The controls for the test above: each is a fill (or not) that moves the
+/// policy ahead of nobody that matters, so no warning is carried.
+#[tokio::test]
+async fn a_fill_that_does_not_reorder_warns_nobody() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11ordctl", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    let body_for = |name: &str, table: &str, column: &[&str], effect: &str, priority: bool| {
+        serde_json::json!({
+            "name": name, "service": svc_name, "isEnabled": true, "isOverride": priority,
+            "resources": {"catalog": level(&["c"]), "schema": level(&["s"]),
+                          "table": level(&[table]), "column": level(column)},
+            "items": [{"users": ["bob"], "accesses": ["select"], "effect": effect},
+                      {"users": ["carol"], "accesses": ["delete"], "effect": "deny"}]
+        })
+    };
+    // Four stored neighbours, each one a reason NOT to warn about the fill below.
+    for (name, table, column, effect, override_band) in [
+        // a different table: the two cannot decide the same request
+        ("other-table", "invoices", vec!["secret"], "allow", false),
+        // a different priority band (Override): Ranger orders bands first
+        ("override-band", "orders", vec!["secret"], "allow", true),
+        // already BROADER than the filled policy (table `*` and column `*`):
+        // it stays ahead of it, so the fill reorders nothing against it
+        ("broader", "*", vec!["*"], "allow", false),
+    ] {
+        let (status, b) = post_policy(
+            &f,
+            &token,
+            body_for(name, table, &column, effect, override_band),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{name}: {b}");
+    }
+    // Allow items only on both sides (no deny, no exception): any order reaches
+    // the same union, so there is nothing to warn about. Needs its own band
+    // (hasDeny false), hence its own policy pair.
+    let allow_only = |name: &str, column: &[&str]| {
+        serde_json::json!({
+            "name": name, "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"]), "schema": level(&["s"]),
+                          "table": level(&["lines"]), "column": level(column)},
+            "items": [{"users": ["bob"], "accesses": ["select"], "effect": "allow"}]
+        })
+    };
+    let (status, b) = post_policy(&f, &token, allow_only("lines-secret", &["secret"])).await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+
+    let (status, b) =
+        post_policy(&f, &token, body_for("filled", "orders", &[], "deny", false)).await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+    assert_eq!(
+        b["filledLevels"],
+        serde_json::json!(["column"]),
+        "the fill happened: {b}"
+    );
+    assert!(
+        b.get("warnings").is_none(),
+        "no stored same-band policy is overtaken by this fill: {b}"
+    );
+
+    let (status, b) = post_policy(&f, &token, allow_only("lines-all", &[])).await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+    assert_eq!(b["filledLevels"], serde_json::json!(["column"]), "{b}");
+    assert!(
+        b.get("warnings").is_none(),
+        "allow-only pairs are order-free: {b}"
+    );
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}

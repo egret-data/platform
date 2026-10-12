@@ -132,6 +132,10 @@ pub fn perm_router() -> Router<PermState> {
             get(classify_service_policies),
         )
         .route(
+            "/perm/policies/services/{service_id}/warnings",
+            get(service_policy_warnings),
+        )
+        .route(
             "/perm/policies/services/{service_id}/migrate",
             post(migrate_service_policies),
         )
@@ -165,6 +169,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         explain,
         compile,
         classify_service_policies,
+        service_policy_warnings,
         migrate_service_policies,
         undo_service_policy_migration
     ),
@@ -213,6 +218,9 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::explain_wire::WirePluginVersion,
         CompileResponse,
         crate::classify::ClassifiedPolicy,
+        crate::classify::PolicyWarning,
+        crate::classify::ProfileWarnings,
+        crate::classify::WarnedPolicy,
         crate::classify::ProposedObjects,
         crate::classify::MigrationRecord,
         crate::migrate::MigrateRequest,
@@ -3278,6 +3286,37 @@ async fn classify_service_policies(
     ))
 }
 
+/// SP4d-4 Task 11: the policies of one profile whose stored resource levels
+/// Ranger reads differently from how the editor shows them — a policy that
+/// stops above `column` and allows `select` (it grants no column read), or one
+/// with a gap (it decides nothing) — with `warningCount` for the profile.
+/// Read-only: a stored row is flagged here, never rewritten. The same
+/// `warnings` ride on each policy of `GET .../classify`.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/policies/services/{service_id}/warnings",
+    tag = "perm",
+    params(("service_id" = i64, Path, description = "policy.authz_services id")),
+    responses(
+        (status = 200, description = "`warningCount` and, ordered by id, the policies of the profile that carry a warning", body = crate::classify::ProfileWarnings),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn service_policy_warnings(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(service_id): Path<i64>,
+) -> Result<Json<crate::classify::ProfileWarnings>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
+    Ok(Json(
+        crate::classify::profile_warnings(&mut conn, service_id).await?,
+    ))
+}
+
 /// SP4d-3 Task 7: migrate hand-written policies of one profile into the
 /// permission model, PROVABLY — see `crate::migrate` for the transaction, its
 /// order, and the refusal order. The equivalence gate runs inside the
@@ -4508,7 +4547,11 @@ mod engine_plugin_version_tests {
                 modelled,
                 "{t}@{v}"
             );
-            assert_eq!(egret_perm::ranger_plugin_is_modelled(t, v), modelled, "{t}@{v}");
+            assert_eq!(
+                egret_perm::ranger_plugin_is_modelled(t, v),
+                modelled,
+                "{t}@{v}"
+            );
         }
     }
 

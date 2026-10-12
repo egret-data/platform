@@ -1041,6 +1041,75 @@ async fn list_principals(
 pub struct CreatedPolicyId {
     /// The created/updated policy's id.
     pub id: i64,
+    /// Present only when this save stored an emptied resource level as `*`
+    /// (SP4d-4 Task 11): the level names, root first.
+    #[serde(rename = "filledLevels", skip_serializing_if = "Option::is_none")]
+    pub filled_levels: Option<Vec<String>>,
+    /// Present with `filledLevels`: what the fill means in Ranger — the policy
+    /// now covers every child of those levels, and it moved earlier in the
+    /// evaluation order of its priority band.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Present only when the fill moved the saved policy ahead of another
+    /// same-band policy that may decide the same request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<PolicyWriteWarning>>,
+}
+
+/// One warning on a policy write's response (`kind: "evaluation_order_changed"`).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PolicyWriteWarning {
+    pub kind: String,
+    /// The other policy's name.
+    pub policy: String,
+    /// The other policy's id, when known.
+    #[serde(rename = "policyId")]
+    pub policy_id: Option<i64>,
+    /// `access` | `mask` | `row_filter`.
+    #[serde(rename = "policyKind")]
+    pub policy_kind: String,
+    /// Operator-readable explanation.
+    pub sentence: String,
+}
+
+/// What a save that filled emptied levels says to the operator. It never says
+/// the more specific policy wins: Ranger evaluates the BROADER one first.
+const FILLED_LEVELS_NOTE: &str = "Levels left empty in the form were saved as `*` (every child \
+    of the level above). Ranger does not apply a policy that stops above the column to column \
+    requests, so an empty level would have granted no column read. A `*` level also moves \
+    this policy EARLIER in Ranger's evaluation order within its priority band: Ranger \
+    evaluates the broader policy (more `*` levels, other things equal) first, not the more \
+    specific one. Where it may now be consulted before another policy that can decide the \
+    same request, `warnings` names that policy.";
+
+/// The 200 body of a create/update: `{id}` alone for an ordinary save, plus
+/// `filledLevels`, `note` and any `warnings` when the save filled levels.
+fn write_response(
+    id: i64,
+    pol: &RangerPolicy,
+    shifts: &[crate::ambiguous_arbitration::EvalOrderShift],
+) -> Value {
+    let mut out = json!({ "id": id });
+    let Some(filled) = &pol.filled else {
+        return out;
+    };
+    out["filledLevels"] = json!(filled.names);
+    out["note"] = json!(FILLED_LEVELS_NOTE);
+    if !shifts.is_empty() {
+        out["warnings"] = shifts
+            .iter()
+            .map(|s| {
+                json!({
+                    "kind": "evaluation_order_changed",
+                    "policy": s.other,
+                    "policyId": s.other_id,
+                    "policyKind": match s.policy_type { 1 => "mask", 2 => "row_filter", _ => "access" },
+                    "sentence": s.sentence(&pol.name),
+                })
+            })
+            .collect();
+    }
+    out
 }
 
 /// Doc-only mirror of the `{ "created": <n> }` body `seed_defaults` returns.
@@ -1192,7 +1261,7 @@ async fn write_policy_checked(
     service_id: i64,
     write: PolicyWrite,
     pol: &RangerPolicy,
-) -> Result<i64, PolicyHttpError> {
+) -> Result<(i64, Vec<crate::ambiguous_arbitration::EvalOrderShift>), PolicyHttpError> {
     let mut tx = st.store.begin().await?;
     if is_mask_or_filter(&pol.body) {
         let mut rows: Vec<i64> = crate::unit_overlap::units_for_service_via(&mut tx, service_id)
@@ -1211,6 +1280,27 @@ async fn write_policy_checked(
         PolicyWrite::Replace(id) => Some(id),
     };
     refuse_ambiguous_arbitration(&mut tx, service_id, replacing, pol).await?;
+    // SP4d-4 Task 11: a save that filled emptied levels with `*` lowers the
+    // policy's evalOrder; report whom it now precedes. Runs after the
+    // refusal, so a pair that guard refuses is refused, not merely warned.
+    let shifts = match &pol.filled {
+        None => Vec::new(),
+        Some(f) => {
+            let stored =
+                crate::store::enabled_policies_for_service_via(&mut tx, service_id).await?;
+            let is_replaced = |p: &Value| {
+                replacing.is_some_and(|id| p.get("id").and_then(Value::as_i64) == Some(id))
+            };
+            crate::ambiguous_arbitration::eval_order_shifts(
+                &f.unfilled_body,
+                &pol.body,
+                stored
+                    .iter()
+                    .filter(|p| !is_replaced(p))
+                    .map(|p| (p.get("name").and_then(Value::as_str).unwrap_or_default(), p)),
+            )
+        }
+    };
     let id = match write {
         PolicyWrite::Create => {
             let id = crate::insert_policy_owned_by_via(
@@ -1229,7 +1319,7 @@ async fn write_policy_checked(
         }
     };
     tx.commit().await.map_err(crate::PolicyStoreError::from)?;
-    Ok(id)
+    Ok((id, shifts))
 }
 
 /// **The editor's half of SP4d debt Task 6's one rule.** Would storing `pol`
@@ -1523,8 +1613,8 @@ fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
     tag = "policy-admin",
     request_body = Object,
     responses(
-        (status = 200, description = "Policy created", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input, missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)", body = ErrorBody),
+        (status = 200, description = "Policy created. When the save stored an emptied resource level as `*`, the body adds `filledLevels`, a `note` (the broader policy is evaluated first within a priority band) and, where the fill moved this policy ahead of another same-band policy that may decide the same request, `warnings`", body = CreatedPolicyId),
+        (status = 400, description = "Invalid editor input (including an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:create permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
@@ -1558,7 +1648,7 @@ async fn create_policy(
         // `generated_profile_guard` caught it.
         st.store.preflight_policy_insert(svc.id, &pol.name).await?;
         guard_tag_policy_authoring(&st, &pol).await?;
-        let id = write_policy_checked(&st, svc.id, PolicyWrite::Create, &pol).await?;
+        let (id, _) = write_policy_checked(&st, svc.id, PolicyWrite::Create, &pol).await?;
         return Ok(Json(json!({ "id": id })));
     }
 
@@ -1575,8 +1665,8 @@ async fn create_policy(
     st.store.preflight_policy_insert(svc.id, &pol.name).await?;
     // SP4d debt Task 6, item 1 — the editor's half, checked and written under
     // the unit's row locks. See `write_policy_checked`.
-    let id = write_policy_checked(&st, svc.id, PolicyWrite::Create, &pol).await?;
-    Ok(Json(json!({ "id": id })))
+    let (id, shifts) = write_policy_checked(&st, svc.id, PolicyWrite::Create, &pol).await?;
+    Ok(Json(write_response(id, &pol, &shifts)))
 }
 
 /// PUT /policies/{id} — replace a policy's body (any kind).
@@ -1608,8 +1698,8 @@ async fn create_policy(
     params(("id" = i64, Path, description = "Policy id")),
     request_body = Object,
     responses(
-        (status = 200, description = "Policy replaced", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input, missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)", body = ErrorBody),
+        (status = 200, description = "Policy replaced. Same optional `filledLevels` / `note` / `warnings` as create", body = CreatedPolicyId),
+        (status = 400, description = "Invalid editor input (including an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
@@ -1666,8 +1756,8 @@ async fn update_policy(
     st.store.preflight_policy_update(id, &pol.name).await?;
     // SP4d debt Task 6, item 1 — the editor's half, with `replacing: Some(id)`
     // so the new body is not compared against the row it is replacing.
-    write_policy_checked(&st, svc.id, PolicyWrite::Replace(id), &pol).await?;
-    Ok(Json(json!({ "id": id })))
+    let (_, shifts) = write_policy_checked(&st, svc.id, PolicyWrite::Replace(id), &pol).await?;
+    Ok(Json(write_response(id, &pol, &shifts)))
 }
 
 /// DELETE /policies/{id}
@@ -1761,6 +1851,7 @@ async fn set_policy_enabled(
         Principal,
         EnabledBody,
         CreatedPolicyId,
+        PolicyWriteWarning,
         SeedResult,
         ranger_json::AccessPolicyInput,
         ranger_json::AccessItemInput,

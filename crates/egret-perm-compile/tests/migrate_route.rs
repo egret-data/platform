@@ -1393,5 +1393,8 @@ async fn an_external_trino_declaring_2_5_0_is_proved_on_2_5_0() {
 
     let (status, body) = migrate(&f, f.p, &[&name], true).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["profiles"][0]["plugin_versions"], json!(["ranger_2_5_0"]));
+    assert_eq!(
+        body["profiles"][0]["plugin_versions"],
+        json!(["ranger_2_5_0"])
+    );
 }

@@ -7256,6 +7256,79 @@
         }
       }
     },
+    "/api/control-plane/perm/policies/services/{service_id}/warnings": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP4d-4 Task 11: the policies of one profile whose stored resource levels\nRanger reads differently from how the editor shows them — a policy that\nstops above `column` and allows `select` (it grants no column read), or one\nwith a gap (it decides nothing) — with `warningCount` for the profile.\nRead-only: a stored row is flagged here, never rewritten. The same\n`warnings` ride on each policy of `GET .../classify`.",
+        "operationId": "service_policy_warnings",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "description": "policy.authz_services id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`warningCount` and, ordered by id, the policies of the profile that carry a warning",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileWarnings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/preview": {
       "post": {
         "tags": [
@@ -7815,7 +7888,7 @@
         },
         "responses": {
           "200": {
-            "description": "Policy created",
+            "description": "Policy created. When the save stored an emptied resource level as `*`, the body adds `filledLevels`, a `note` (the broader policy is evaluated first within a priority band) and, where the fill moved this policy ahead of another same-band policy that may decide the same request, `warnings`",
             "content": {
               "application/json": {
                 "schema": {
@@ -7825,7 +7898,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input, missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)",
+            "description": "Invalid editor input (including an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)",
             "content": {
               "application/json": {
                 "schema": {
@@ -8560,7 +8633,7 @@
         },
         "responses": {
           "200": {
-            "description": "Policy replaced",
+            "description": "Policy replaced. Same optional `filledLevels` / `note` / `warnings` as create",
             "content": {
               "application/json": {
                 "schema": {
@@ -8570,7 +8643,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input, missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)",
+            "description": "Invalid editor input (including an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)",
             "content": {
               "application/json": {
                 "schema": {
@@ -34481,7 +34554,8 @@
           "managed_by",
           "enabled",
           "migratable",
-          "blockers"
+          "blockers",
+          "warnings"
         ],
         "properties": {
           "id": {
@@ -34530,6 +34604,13 @@
                 "description": "Present iff `perm.migrated_from` records this policy as migrated —\nwhich is what tells a migrated original apart from one switched off by\nhand (both have `enabled = false`). A migrated policy is never\n`migratable`, and its one blocker sentence says how to undo it."
               }
             ]
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PolicyWarning"
+            },
+            "description": "SP4d-4 Task 11: what this policy's resource levels mean to Ranger,\nindependent of migration — a policy that stops above `column` and\nallows `select` grants no column read, and one with a gap decides\nnothing. Empty for every row that is neither a hand-written\n(`operator`) policy of a resource profile nor affected. **Flagged,\nnever rewritten**: nothing here edits a stored row."
           }
         }
       },
@@ -35726,6 +35807,33 @@
             "type": "integer",
             "format": "int64",
             "description": "The created/updated policy's id."
+          },
+          "filledLevels": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Present only when this save stored an emptied resource level as `*`\n(SP4d-4 Task 11): the level names, root first."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present with `filledLevels`: what the fill means in Ranger — the policy\nnow covers every child of those levels, and it moved earlier in the\nevaluation order of its priority band."
+          },
+          "warnings": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/PolicyWriteWarning"
+            },
+            "description": "Present only when the fill moved the saved policy ahead of another\nsame-band policy that may decide the same request."
           }
         }
       },
@@ -40329,6 +40437,69 @@
           }
         }
       },
+      "PolicyWarning": {
+        "type": "object",
+        "description": "One finding about a stored policy's resource levels (SP4d-4 Task 11).\n`kind` is `select_stops_above_column` (with `level`: the deepest level the\npolicy names) or `level_gap` (with `missing`: the absent level that has a\nnamed level beneath it); each carries the `sentence` an operator reads.",
+        "required": [
+          "kind",
+          "sentence"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "level": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "missing": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sentence": {
+            "type": "string"
+          }
+        }
+      },
+      "PolicyWriteWarning": {
+        "type": "object",
+        "description": "One warning on a policy write's response (`kind: \"evaluation_order_changed\"`).",
+        "required": [
+          "kind",
+          "policy",
+          "policyKind",
+          "sentence"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "policy": {
+            "type": "string",
+            "description": "The other policy's name."
+          },
+          "policyId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The other policy's id, when known."
+          },
+          "policyKind": {
+            "type": "string",
+            "description": "`access` | `mask` | `row_filter`."
+          },
+          "sentence": {
+            "type": "string",
+            "description": "Operator-readable explanation."
+          }
+        }
+      },
       "PreviewEndpointInput": {
         "allOf": [
           {
@@ -40589,6 +40760,26 @@
           },
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "ProfileWarnings": {
+        "type": "object",
+        "description": "The `policyId`-keyed answer of `GET .../warnings`: how many warnings the\nprofile carries in all and which policies carry them.",
+        "required": [
+          "warningCount",
+          "policies"
+        ],
+        "properties": {
+          "warningCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "policies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WarnedPolicy"
+            }
           }
         }
       },
@@ -45116,6 +45307,30 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "WarnedPolicy": {
+        "type": "object",
+        "description": "One policy that carries at least one [`PolicyWarning`].",
+        "required": [
+          "id",
+          "name",
+          "warnings"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PolicyWarning"
+            }
           }
         }
       },
