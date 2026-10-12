@@ -303,7 +303,7 @@ Một component Logs duy nhất phục vụ cả tab Logs và panel run trong Ga
 **Giá trị:**
 - Mỗi giá trị copy được.
 - Mỗi đường dẫn copy được dưới dạng biểu thức, ví dụ `{{ outputs.<taskId>.<key> }}`.
-- Bên trong loop, biểu thức theo dạng `outputs.<taskId>[value]` của Kestra, và có ghi chú điều đó.
+- Key không phải định danh hợp lệ dùng dạng ngoặc vuông. *(Đính chính 2026-10-11, Task 6: không dùng dạng loop `outputs.<taskId>[value]` của Kestra. Renderer của egret lưu output phẳng theo task id, và không task run nào mang `value`. Mỗi iteration của loop là một execution con riêng: biểu thức của nó hợp lệ bên trong iteration đó, và trang ghi chú rằng execution cha không truy cập được các output này.)*
 
 **File:** mọi chuỗi bắt đầu bằng `kestra:///` trong output hoặc inputs được hiện thành một hàng file, gồm:
 - tên file;

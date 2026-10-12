@@ -297,7 +297,7 @@ The Logs component serves both the Logs tab and the Gantt's run panel.
 
 **Values**
 - Each value can be copied.
-- Each path can be copied as an expression, for example `{{ outputs.<taskId>.<key> }}`. Inside a loop, the expression form follows Kestra's `outputs.<taskId>[value]` and is noted as such.
+- Each path can be copied as an expression, for example `{{ outputs.<taskId>.<key> }}`. Keys that are not identifiers use bracket notation. *(Corrected 2026-10-11, Task 6: the Kestra loop form `outputs.<taskId>[value]` is not used. egret's renderer stores outputs flat by task id, and no task run carries a `value`. A loop iteration is its own child execution: its expressions are valid inside that iteration, and the page notes that the parent execution cannot reach them.)*
 
 **Files**
 - Any string starting with `kestra:///` in outputs or inputs renders as a file row:
