@@ -776,7 +776,10 @@ async fn a_rule_completing_a_pair_with_a_hand_written_mask_is_409_naming_both() 
     .await;
     assert_mixed_overlap(status, &body, &hand, &rule);
     assert!(
-        body["error"].as_str().unwrap().contains(&format!("policy {hand:?}")),
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("policy {hand:?}")),
         "{body}"
     );
     assert_eq!(body["kind"], "mask");
