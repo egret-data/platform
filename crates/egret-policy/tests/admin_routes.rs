@@ -3566,6 +3566,69 @@ async fn a_ranger_shaped_body_is_refused_naming_the_keys_and_stores_nothing() {
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 
+/// The PUT half: a Ranger-shaped body used to replace the stored policy with
+/// one that has no items. It is a 400 naming the key, and the row is unchanged.
+#[tokio::test]
+async fn a_ranger_shaped_put_is_refused_and_the_stored_items_survive() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11rangerput", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let form = serde_json::json!({
+        "name": "put-target", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": level(&["c"])},
+        "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+    });
+    let (status, body) = post_policy(&f, &token, form.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = body["id"].as_i64().expect("id");
+    let stored = |f: &Fixture| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT policy_jsonb FROM policy.authz_policies WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the stored body")
+        }
+    };
+    let before = stored(&f).await;
+    assert!(
+        !before["policyItems"].as_array().expect("items").is_empty(),
+        "the created policy grants something: {before}"
+    );
+
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "PUT",
+                &format!("/policies/{id}"),
+                &token,
+                Some(serde_json::json!({
+                    "name": "put-target", "service": svc_name, "isEnabled": true,
+                    "resources": {"catalog": level(&["c"])},
+                    "policyItems": [{"users": ["bob"], "accesses": [{"type": "select", "isAllowed": true}]}]
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let msg = body["error"]
+        .as_str()
+        .or(body["message"].as_str())
+        .unwrap_or_default();
+    assert!(msg.contains("policyItems"), "names the key: {body}");
+    assert_eq!(stored(&f).await, before, "the stored policy is unchanged");
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
 #[tokio::test]
 async fn an_empty_catalog_is_refused() {
     let Some(f) = setup().await else {

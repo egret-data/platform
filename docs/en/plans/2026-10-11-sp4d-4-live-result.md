@@ -70,6 +70,7 @@ Migration of `hw-01-dave-orders` through the SP4d-3 page (`/governance/policies/
 - Undo through the UI: 200, **271 ms**; row back to "Migratable"; dave's query unchanged after the next poll.
 - **The page does not show `probes_full` or `pruning_fallback`** (grep: only the generated model and a test reference them; the page prints just "Probes 6210"). The brief expected both on the preview. Minor (the claim is in the API, not the page).
 - Near the cap: profile `sr4big` (hand-written policies, then trimmed): 103 policies -> **422 refusal in 0.2 s**: "14985 probe evaluations ... 3086910 units of work ... over the limit of 1600000". 93 and 83 and 78 policies also refused (2.54 M, 2.04 M, 1.81 M units, 0.18-0.2 s each). At **73 policies: 10,935 probes (full 1,727,730, no fallback), dry run 6.98 s, committed migrate 6.72 s**, undo 48 ms. So the planning/proof inside the locked transaction costs about 7 s at the cap, ~3 s at 43 policies; it was never timed before. The refusal itself is cheap (0.2 s). Verdict: acceptable but the migrate holds its profile lock for ~7 s at the cap.
+  *2026-10-13 note: the cap was later lowered to 1,300,000 after the end-to-end release timing (planning, probe build and compare, both plugin versions, deny and wildcard shapes); see `migrate::MAX_PROBE_WORK`.*
 - A 40-policy profile (before: refused by count) fits: 6210 probes x 43 policies.
 
 ## 5. Step 5 — B: in the browser — PASS with findings

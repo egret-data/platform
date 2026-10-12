@@ -1616,7 +1616,7 @@ fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
     request_body = Object,
     responses(
         (status = 200, description = "Policy created. When the save stored an emptied resource level as `*`, the body adds `filledLevels`, a `note` (the broader policy is evaluated first within a priority band) and, where the fill moved this policy ahead of another same-band policy that may decide the same request, `warnings`", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input (including an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)", body = ErrorBody),
+        (status = 400, description = "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:create permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
@@ -1702,7 +1702,7 @@ async fn create_policy(
     request_body = Object,
     responses(
         (status = 200, description = "Policy replaced. Same optional `filledLevels` / `note` / `warnings` as create", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input (including an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)", body = ErrorBody),
+        (status = 400, description = "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
@@ -1717,6 +1717,7 @@ async fn update_policy(
     Json(v): Json<Value>,
 ) -> Result<Json<Value>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    ranger_json::refuse_ranger_shaped_body(&v).map_err(PolicyHttpError::BadRequest)?;
     // The row this `PUT` replaces, read before anything else, so both branches
     // can check the body's `service` against the profile the policy actually
     // lives under — see `refuse_service_mismatch`. 404s here for an unknown id,
