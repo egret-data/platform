@@ -37,7 +37,7 @@ Bộ rule frontend `docs/en/frontend-rules.md` ràng buộc mọi dòng code fro
 - **Một `Pause` mà egret không chạy được bị từ chối ngay ở bước validate.** `Pause` khai báo `behavior`, `onPause`, `tasks` hoặc `errors` là một lỗi validate, `unsupported_pause_property`, nêu tên thuộc tính và bảo người viết bỏ nó đi hoặc dùng một `Pause` thường. Trước quyết định này nó chỉ là cảnh báo `not_yet_enforced`: flow vẫn publish và chạy được, task bị lập kế hoạch thành một runnable mờ (opaque), worker báo `NotALeaf` trước khi ghi kết quả, và reaper nhả claim mãi mãi, nên execution kẹt ở `RUNNING` mà không có thông báo nào. Giờ editor hiện lỗi, publish từ chối, và không đường khởi chạy nào chạy được nó: API start, webhook, schedule, Flow trigger và lời gọi `Subflow` đều lập kế hoạch qua `build_plan`, mà cổng `validate_for_run` của nó vốn đã từ chối một bản nháp đã lưu có lỗi. `executor::pause_gap` vẫn là danh sách duy nhất của bốn thuộc tính, và flow schema xếp `behavior`, `onPause`, `errors` vào `refused`, nên editor không gợi ý chúng nữa.
 
 **Đã quyết với người dùng, 2026-10-12 (review Task 7, một lỗi có từ trước W7b):**
-- **`ForEach` bị từ chối khi validate.** Một task kiểu `io.kestra.plugin.core.flow.ForEach` là một lỗi validation; thông báo của nó chỉ sang `io.kestra.plugin.core.flow.Loop`, loop của egret, và flow schema không còn gợi ý `ForEach`. Trước phán quyết này nó chỉ bị cảnh báo `not_yet_enforced`, nên flow vẫn publish và start được, nhưng thân vòng lặp không bao giờ chạy: mọi đường khởi chạy lập kế hoạch nó như một task đóng mà không handler nào phục vụ. *(Đính chính 2026-10-12, Task 7b: đo với bộ handler lõi, worker báo lỗi `NoHandler` và execution bị kẹt, giống `Pause` của Task 4b; nó không kết thúc `SUCCESS`. Chưa đo trường hợp thành công giả với registry production.)* Mã lỗi là `unsupported_foreach`, áp cho mọi cách viết quy về `foreach` (`core.foreach`, mọi kiểu hoa thường), và thông báo nêu `io.kestra.plugin.core.flow.Loop` (alias `core.loop`). Start qua API, webhook, lần chạy theo schedule, Flow trigger và lời gọi `Subflow` đều từ chối nó qua cổng `validate_for_run` của `build_plan`. Schema chưa bao giờ gợi ý nó. Kestra 2.0, image ở §11, cũng từ chối `ForEach`: tạo flow dùng nó nhận 422 "Invalid type: io.kestra.plugin.core.flow.ForEach", còn cùng flow đó dùng `Loop` thì được tạo (đo ngày 2026-10-12). Task 7b cài phần từ chối này.
+- **`ForEach` bị từ chối khi validate.** Một task kiểu `io.kestra.plugin.core.flow.ForEach` là một lỗi validation; thông báo của nó chỉ sang `io.kestra.plugin.core.flow.Loop`, loop của egret, và flow schema không còn gợi ý `ForEach`. Trước phán quyết này nó chỉ bị cảnh báo `not_yet_enforced`, nên một bản nháp đã lưu vẫn start được (publish đã từ chối nó như một kiểu task không biết), nhưng thân vòng lặp không bao giờ chạy: mọi đường khởi chạy lập kế hoạch nó như một task đóng mà không handler nào phục vụ. *(Đính chính 2026-10-12, Task 7b: đo với bộ handler lõi, worker báo lỗi `NoHandler` và execution bị kẹt, giống `Pause` của Task 4b; nó không kết thúc `SUCCESS`. Chưa đo trường hợp thành công giả với registry production.)* Mã lỗi là `unsupported_foreach`, áp cho mọi cách viết quy về `foreach` (`core.foreach`, mọi kiểu hoa thường), và thông báo nêu `io.kestra.plugin.core.flow.Loop` (alias `core.loop`). Start qua API, webhook, lần chạy theo schedule, Flow trigger và lời gọi `Subflow` đều từ chối nó qua cổng `validate_for_run` của `build_plan`. Schema chưa bao giờ gợi ý nó. Kestra 2.0, image ở §11, cũng từ chối `ForEach`: tạo flow dùng nó nhận 422 "Invalid type: io.kestra.plugin.core.flow.ForEach", còn cùng flow đó dùng `Loop` thì được tạo (đo ngày 2026-10-12). Task 7b cài phần từ chối này.
 
 ## 1. Vì sao
 
@@ -101,21 +101,23 @@ Các hàng đã có giữ `NULL`, không đoán. UI đánh dấu thời gian c�
 ### 3.2 Khi nào ghi từng mốc
 
 **Execution:**
-- `started_at` được gán một lần, khi execution vào `RUNNING` lần đầu.
-- `ended_at` được gán một lần, khi execution vào một state kết thúc (`is_terminated` trong `models/state.rs`).
+- `started_at` được gán khi execution vào `RUNNING` lần đầu, rồi được giữ nguyên.
+- `ended_at` được gán khi execution đi từ state chưa kết thúc sang state kết thúc (`is_terminated` trong `models/state.rs`), và được giữ trong khi hàng còn ở state kết thúc.
 - Một lần resume sau pause không làm dời `started_at`.
 - Khi một lần chuyển state rời khỏi state kết thúc, `ended_at` bị xoá về null, và được gán lại khi hàng đó kết thúc lần nữa. *(Đính chính 2026-10-11, Task 1: `RETRY_FAILED_TASK` đang làm đúng như vậy — RUNNING, FAILED, RETRYING, RUNNING, SUCCESS — và có test giữ điều này.)*
 
 **Task run:**
-- `started_at` được gán một lần, khi run vào `RUNNING` lần đầu: với task do worker chạy là lúc run vào `RUNNING`, cũng là lúc attempt đầu tiên bắt đầu; việc worker nhận task chỉ đặt lease, nên thời gian chờ trong hàng đợi trước khi được nhận nằm trong thanh; với task flowable là lúc executor chạy nó lần đầu.
-- `ended_at` được gán một lần, khi run vào một state kết thúc.
+- `started_at` được gán khi run vào `RUNNING` lần đầu, rồi được giữ nguyên: với task do worker chạy là lúc run vào `RUNNING`, cũng là lúc attempt đầu tiên bắt đầu; việc worker nhận task chỉ đặt lease, nên thời gian chờ trong hàng đợi trước khi được nhận nằm trong thanh; với task flowable là lúc executor chạy nó lần đầu.
+- `ended_at` được gán khi run đi từ state chưa kết thúc sang state kết thúc, và được giữ trong khi nó còn ở state kết thúc.
+- Cả hai quy tắc áp dụng một lần cho mỗi vòng đời của hàng. Khi `LoopUntil` dựng lại một hậu duệ (`RestartLoop` làm rỗng nó, rồi lượt duyệt dựng lại trong cùng một lần settle), hàng bắt đầu vòng đời mới: `started_at` và `ended_at` được ghi lại.
+- *(Đính chính 2026-10-12, review cuối: bản đầu viết "gán một lần" và dùng `COALESCE(ended_at, now())`. Code xét từng lần chuyển state (`Entered::of` trong `worker/stamps.rs`), nên hàng được mở lại hoặc dựng lại sẽ được đóng dấu lại.)*
 
 **Attempt:**
 - Mỗi phần tử của `attempts` có thêm `ended_at`, tính bằng mili giây kể từ `created_at` của execution, cùng mốc gốc với `started_at` đang có.
 - Trường này được gán khi attempt đó vào một state kết thúc, kể cả state nó kết thúc trước khi retry khởi động attempt kế tiếp.
 
 **Cách ghi:**
-- Mọi lần ghi nằm trong chính câu `UPDATE` đổi state: `SET state = $s, ended_at = CASE WHEN … THEN COALESCE(ended_at, now()) END …`. Không bao giờ đọc state rồi mới ghi.
+- Mọi lần ghi nằm trong chính câu `UPDATE` đổi state: `SET state = $s, ended_at = CASE WHEN workflow.state_is_terminal($s) THEN CASE WHEN <entered terminal> THEN GREATEST(now(), started_at) ELSE ended_at END END …`, trong đó `<entered terminal>` là một boolean tính từ lịch sử mà lần settle đã tải dưới khoá hàng. `GREATEST` giữ cho mốc kết thúc không đứng trước mốc bắt đầu khi một transaction phải chờ khoá. Không bao giờ đọc state rồi mới ghi.
 - Khi cài, liệt kê mọi chỗ ghi state của execution và task run: executor, worker, subflow, loop, retry, resume, SLA cancel, replay. Sửa từng chỗ.
 - Có test sẽ đỏ nếu một chỗ đổi state mà không gán mốc thời gian.
 
@@ -344,7 +346,7 @@ Một component Logs duy nhất phục vụ cả tab Logs và panel run trong Ga
 **Trang:** `frontend/src/routes/workflows/` chứa:
 - `ExecutionsList.tsx`, dùng chung cho trang danh sách và tab trong flow;
 - `ExecutionDetail.tsx`, gồm header, tab và hành động;
-- mỗi tab một file riêng.
+- tab Overview (`ExecutionOverview.tsx`) cùng `executionsListModel.ts` và `queryKeys.ts` dùng chung; các tab Gantt, Logs và Outputs nằm trong `components/workflows/executions/` (bên dưới). *(Đính chính 2026-10-12, review cuối.)*
 
 **Component:** `frontend/src/components/workflows/executions/` chứa:
 - `gantt/`: `ganttModel.ts` (một model thuần, không phụ thuộc UI) và phần hiển thị;
@@ -355,7 +357,10 @@ Một component Logs duy nhất phục vụ cả tab Logs và panel run trong Ga
 **Query key:** `workflowsKeys` có thêm:
 - `executions(ws, params)`;
 - `execution(id)` (đã có);
-- `executionFile(id, path)`.
+- `executionChildren(id)` (dưới `execution(id)`);
+- `executionFile(id, path)`, kèm `executionFileMetas(id, path)` và `executionFilePreview(id, path, maxRows)` bên dưới nó.
+
+Các key nằm trong `routes/workflows/queryKeys.ts`. *(Đính chính 2026-10-12, review cuối.)*
 
 Log không có query key. `useLogFollow` giữ con trỏ (cursor) qua nhiều trang, điều mà một query key không giữ được, nên nó gọi thẳng hàm fetch do orval sinh ra `workflowGetExecutionLogs`, theo ngoại lệ của FE-DATA-2 cho con trỏ qua nhiều trang (phán quyết của người dùng, 2026-10-11, review Task 5).
 
@@ -442,7 +447,7 @@ Spec được chạy đỏ với ba mutation (`root_only` không bao giờ đư�
 
 ## 13. Hình dạng plan
 
-1. Backend: migration 0180, ghi mốc thời gian ở mọi chỗ đổi state, thời điểm kết thúc của attempt, `root_only`/`parent` kèm index, trường mới trong DTO, sinh lại API.
+1. Backend: migration 0180, ghi mốc thời gian ở mọi chỗ đổi state, thời điểm kết thúc của attempt, `root_only`/`parent` (không thêm index mới, §3.3), trường mới trong DTO, sinh lại API.
 2. Danh sách execution và tab Executions trong trang flow.
 3. Khung trang chi tiết: route, header, polling, tab, Overview, hành động.
 4. Gantt.
@@ -473,4 +478,10 @@ Toàn bộ `docs/en/frontend-rules.md`. Những rule quan trọng nhất ở đ�
   - Thứ tự Tab mặc định của Safari bỏ qua button, nên ở đó nút đóng/mở một nhóm log phải dùng Option+Tab; bản thân log là một tab stop trên cả Chromium lẫn WebKit, đã đo.
   - Khi viewport thấp hơn khoảng 640 px, log ở tab Logs giữ mức tối thiểu 15 rem và panel của tab cuộn.
   - Từ đối chiếu với Kestra (§2), chưa dựng: kiểu xem log phẳng theo thời gian, bộ đếm theo mức để nhảy giữa các dòng, gộp dòng lặp, tìm trong log (route không có bộ lọc chữ), preview CSV dạng bảng, và cột End date.
-- Một phiên bản flow publish trước phán quyết ngày 2026-10-12 mà dùng `ForEach` sẽ bị từ chối ở mọi lần start, như các phiên bản có `Pause` bị từ chối (Task 4b). *(Quyết định 2026-10-12, review Task 7.)* Execution start trước thời điểm đó mà chạy tới `ForEach` vẫn bị kẹt, và replay nó bị từ chối vì source đã đóng băng của nó không còn lập kế hoạch được. *(Task 7b.)*
+- Một bản nháp đã lưu mà dùng `ForEach` sẽ bị từ chối ở mọi lần start, như các phiên bản có `Pause` bị từ chối (Task 4b); publish đã từ chối nó từ trước. *(Quyết định 2026-10-12, review Task 7. Đính chính 2026-10-12, review cuối: trước đây ghi "phiên bản flow publish", nhưng chỉ bản nháp mới start được.)* Execution start trước thời điểm đó mà chạy tới `ForEach` vẫn bị kẹt, và replay nó bị từ chối vì source đã đóng băng của nó không còn lập kế hoạch được. *(Task 7b.)*
+- **Lớp lỗi kẹt im lặng chuyển sang một gói engine riêng, ngay sau W7b.** *(Quyết định 2026-10-12, review cuối.)* Hiện có ba trường hợp làm execution kẹt mà không có thông báo:
+  - `AllowFailure` và `WorkingDirectory` publish không cảnh báo, nhưng mọi execution chạy tới chúng đều kẹt với `NotALeaf`;
+  - `LoopUntil` và `WaitFor` có cận là biểu thức kẹt theo cùng cách, vì `loop_until_gap` chỉ được executor gọi;
+  - một bản nháp có kiểu task không biết chỉ bị `validate_for_run` cảnh báo, nên nó start rồi kẹt với `NoHandler`.
+
+  Quy tắc dự kiến: từ chối mọi task được lập kế hoạch như task đóng mà không có handler chạy được, ở cả bước validate lẫn bước start. W7b chỉ từ chối `Pause` và `ForEach`.

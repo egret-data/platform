@@ -30,7 +30,7 @@ The frontend rulebook `docs/en/frontend-rules.md` binds every frontend line.
 - **A `Pause` egret cannot run is refused at validation.** A `Pause` that declares `behavior`, `onPause`, `tasks` or `errors` is a validation error, `unsupported_pause_property`, naming the property and saying to remove it or use a plain `Pause`. Until this ruling it was a `not_yet_enforced` warning: the flow published and started, the task was planned an opaque runnable, the worker failed it with `NotALeaf` before recording an outcome, and the reaper released the claim for ever, so the execution stalled in `RUNNING` with no message. The editor now shows the error, publish refuses it, and no start path can run it: the API start, the webhook, a schedule fire, a Flow trigger and a `Subflow` call all plan through `build_plan`, whose `validate_for_run` gate already refuses a saved draft with errors. `executor::pause_gap` remains the single list of the four properties, and the flow schema classifies `behavior`, `onPause` and `errors` as `refused`, so the editor no longer offers them.
 
 **Decided with the user, 2026-10-12 (Task 7 review, a defect that predates W7b):**
-- **`ForEach` is refused at validation.** A task of type `io.kestra.plugin.core.flow.ForEach` is a validation error whose message points to `io.kestra.plugin.core.flow.Loop`, egret's loop, and the flow schema stops offering `ForEach`. Until this ruling it drew only a `not_yet_enforced` warning, so the flow published and started, but its body never ran: every start path planned it as an opaque task that no handler serves. *(Corrected 2026-10-12, Task 7b: measured with the core handler set, the worker fails it with `NoHandler` and the execution stalls, as Task 4b's `Pause` did; it does not end `SUCCESS`. A silent success in the production registry was not measured.)* The error code is `unsupported_foreach`, under every spelling that folds to `foreach` (`core.foreach`, any case), and the message names `io.kestra.plugin.core.flow.Loop` (alias `core.loop`). The API start, the webhook, a schedule fire, a Flow trigger and a `Subflow` call all refuse it through `build_plan`'s `validate_for_run` gate. The schema never offered it. Kestra 2.0, the image of §11, also refuses `ForEach`: creating a flow with it answers 422 "Invalid type: io.kestra.plugin.core.flow.ForEach", and the same flow with `Loop` is created (measured 2026-10-12). Task 7b implements the refusal.
+- **`ForEach` is refused at validation.** A task of type `io.kestra.plugin.core.flow.ForEach` is a validation error whose message points to `io.kestra.plugin.core.flow.Loop`, egret's loop, and the flow schema stops offering `ForEach`. Until this ruling it drew only a `not_yet_enforced` warning, so a saved draft could start (publish already refused it as an unknown task type), but its body never ran: every start path planned it as an opaque task that no handler serves. *(Corrected 2026-10-12, Task 7b: measured with the core handler set, the worker fails it with `NoHandler` and the execution stalls, as Task 4b's `Pause` did; it does not end `SUCCESS`. A silent success in the production registry was not measured.)* The error code is `unsupported_foreach`, under every spelling that folds to `foreach` (`core.foreach`, any case), and the message names `io.kestra.plugin.core.flow.Loop` (alias `core.loop`). The API start, the webhook, a schedule fire, a Flow trigger and a `Subflow` call all refuse it through `build_plan`'s `validate_for_run` gate. The schema never offered it. Kestra 2.0, the image of §11, also refuses `ForEach`: creating a flow with it answers 422 "Invalid type: io.kestra.plugin.core.flow.ForEach", and the same flow with `Loop` is created (measured 2026-10-12). Task 7b implements the refusal.
 
 ## 1. Why
 
@@ -94,20 +94,22 @@ Existing rows keep `NULL`; nothing is guessed. The UI marks their times as estim
 ### 3.2 When each timestamp is written
 
 **Executions**
-- `started_at` is set once, the first time the execution enters `RUNNING`.
-- `ended_at` is set once, when the execution enters a terminal state (`models/state.rs` `is_terminated`).
+- `started_at` is set the first time the execution enters `RUNNING`, and kept after that.
+- `ended_at` is set when the execution goes from a non-terminal state to a terminal one (`models/state.rs` `is_terminated`), and kept while it stays terminal.
 - A resumed pause does not move `started_at`.
 - When a transition leaves a terminal state, `ended_at` is cleared, and it is set afresh when the row next becomes terminal. *(Corrected 2026-10-11, Task 1: `RETRY_FAILED_TASK` does this today — RUNNING, FAILED, RETRYING, RUNNING, SUCCESS — and a test pins it.)*
 
 **Task runs**
-- `started_at` is set once, the first time the run enters `RUNNING`. For a worker task, that is when the run enters `RUNNING`, which is the first attempt's start; a worker's claim sets only a lease, so time queued before the claim is inside the bar. For a flowable, it is when the executor first runs it.
-- `ended_at` is set once, when the run enters a terminal state.
+- `started_at` is set the first time the run enters `RUNNING`, and kept after that. For a worker task, that is when the run enters `RUNNING`, which is the first attempt's start; a worker's claim sets only a lease, so time queued before the claim is inside the bar. For a flowable, it is when the executor first runs it.
+- `ended_at` is set when the run goes from a non-terminal state to a terminal one, and kept while it stays terminal.
+- Both rules hold once per life of the row. A `LoopUntil` that rebuilds a descendant (`RestartLoop` empties it, the walk builds it again in the same settle) starts a new life: `started_at` and `ended_at` are written afresh.
+- *(Corrected 2026-10-12, final review: the first draft said "set once" and used `COALESCE(ended_at, now())`. The code judges each transition (`Entered::of` in `worker/stamps.rs`), so a reopened or rebuilt row is stamped again.)*
 
 **Attempts**
 - Each element of `attempts` gains `ended_at`. It is in milliseconds after the execution's `created_at`, the same base as the existing `started_at`. It is set when that attempt reaches a terminal state, including the state it ends in before a retry starts the next attempt.
 
 **Where the writes happen**
-- Every write is part of the same `UPDATE` that changes the state: `SET state = $s, ended_at = CASE WHEN … THEN COALESCE(ended_at, now()) END …`. A state change is never read and then written.
+- Every write is part of the same `UPDATE` that changes the state: `SET state = $s, ended_at = CASE WHEN workflow.state_is_terminal($s) THEN CASE WHEN <entered terminal> THEN GREATEST(now(), started_at) ELSE ended_at END END …`, where `<entered terminal>` is a boolean from the history the settle loaded under the row lock. `GREATEST` keeps an end from preceding the start when a transaction waited on the lock. A state change is never read and then written.
 - The implementation lists every state-writing site of executions and task runs (executor, worker, subflow, loop, retry, resume, SLA cancel, replay) and changes each one.
 - A test fails if a site that changes state does not set the timestamps.
 
@@ -336,7 +338,7 @@ The Logs component serves both the Logs tab and the Gantt's run panel.
 **Pages:** `frontend/src/routes/workflows/` holds:
 - `ExecutionsList.tsx`, shared by the list page and the flow tab;
 - `ExecutionDetail.tsx`, the header, the tabs and the actions;
-- one file per tab.
+- the Overview tab (`ExecutionOverview.tsx`) and the shared `executionsListModel.ts`, `queryKeys.ts`; the Gantt, Logs and Outputs tabs live under `components/workflows/executions/` (below). *(Corrected 2026-10-12, final review.)*
 
 **Components:** `frontend/src/components/workflows/executions/` holds:
 - `gantt/` (`ganttModel.ts`, a pure model, and its view);
@@ -347,7 +349,10 @@ The Logs component serves both the Logs tab and the Gantt's run panel.
 **Query keys:** `workflowsKeys` gains
 - `executions(ws, params)`;
 - `execution(id)` (existing);
-- `executionFile(id, path)`.
+- `executionChildren(id)` (under `execution(id)`);
+- `executionFile(id, path)`, with `executionFileMetas(id, path)` and `executionFilePreview(id, path, maxRows)` under it.
+
+The keys are in `routes/workflows/queryKeys.ts`. *(Corrected 2026-10-12, final review.)*
 
 The logs have no query key. `useLogFollow` keeps a cursor across pages, which one query key cannot hold, so it calls the generated fetcher `workflowGetExecutionLogs` directly, under FE-DATA-2's exception for a cursor across pages (the user's ruling, 2026-10-11, Task 5 review).
 
@@ -440,7 +445,7 @@ It was run red against three mutations (`root_only` never sent, log polling neve
 
 ## 13. Plan shape
 
-1. Backend: migration 0180, timestamp writes at every state site, attempt ends, `root_only`/`parent` plus indexes, DTO fields, and the regenerated API.
+1. Backend: migration 0180, timestamp writes at every state site, attempt ends, `root_only`/`parent` (no new index, §3.3), DTO fields, and the regenerated API.
 2. The executions list and the flow's Executions tab.
 3. The execution detail frame: routes, header, polling, tabs, Overview, and the actions.
 4. The Gantt.
@@ -471,4 +476,10 @@ All of `docs/en/frontend-rules.md`. The rules most at stake:
   - Safari's default Tab order skips buttons, so a log group's toggle is reached with Option+Tab there; the log itself is a tab stop in Chromium and WebKit alike, measured.
   - Below a viewport about 640 px tall, the Logs tab's log keeps its 15 rem minimum and the tab's panel scrolls.
   - From the Kestra comparison (§2), not built: a flat, time-ordered log view, level counters that jump between lines, folding of repeated lines, log search (the route has no text filter), a CSV preview as a table, and an End date column.
-- A flow version published before the 2026-10-12 ruling that uses `ForEach` is refused at every start, as the versions with a refused `Pause` are (Task 4b). An execution started before then that reached one stays stalled, and replaying it is refused because its frozen source no longer plans. *(Ruled 2026-10-12, Task 7 review; Task 7b.)*
+- A saved draft that uses `ForEach` is refused at every start, as the versions with a refused `Pause` are (Task 4b); publish already refused it. An execution started before then that reached one stays stalled, and replaying it is refused because its frozen source no longer plans. *(Ruled 2026-10-12, Task 7 review; Task 7b. Corrected 2026-10-12, final review: it said "a flow version published", but only drafts could start.)*
+- **The silent-stall class goes to a separate engine package, right after W7b.** *(Ruled 2026-10-12, final review.)* Three cases stall an execution without a message today:
+  - `AllowFailure` and `WorkingDirectory` publish without a warning, but every execution that reaches one stalls with `NotALeaf`;
+  - `LoopUntil` and `WaitFor` with expression bounds stall the same way, because `loop_until_gap` is called only by the executor;
+  - a draft with an unknown task type is only warned by `validate_for_run`, so it starts and then stalls with `NoHandler`.
+
+  The planned rule: refuse any task planned as opaque that has no runnable handler, at validate time and at start time. W7b refuses only `Pause` and `ForEach`.
