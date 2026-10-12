@@ -8063,6 +8063,17 @@ fn probes_the_gate_prunes_decide_identically_on_the_real_engine() {
                         !at_sales.is_empty(),
                         "the trie false positive kept no probe at schema=sales"
                     );
+                    // Measured on both jars: with a DENY evaluator the trie keeps and
+                    // the matcher rejects, the real engine does decide kept probes at
+                    // schema=sales differently, so the retention is load-bearing, not
+                    // caution. (The allow variant shows none, and is not asserted.)
+                    if pair.label.ends_with("(deny)") {
+                        assert!(
+                            differing > 0,
+                            "{version}: the real engine decides no kept probe at schema=sales \
+                             differently, so the trie false positive is not shown to matter"
+                        );
+                    }
                 }
             }
         }

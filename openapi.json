@@ -38538,6 +38538,7 @@
           "service_name",
           "plugin_versions",
           "probes",
+          "probes_full",
           "disagreements",
           "removed_policies",
           "added_policies"
@@ -38558,7 +38559,20 @@
           },
           "probes": {
             "type": "integer",
+            "description": "Probes evaluated (after pruning).",
             "minimum": 0
+          },
+          "probes_full": {
+            "type": "integer",
+            "description": "Probes the unpruned gate would have evaluated.",
+            "minimum": 0
+          },
+          "pruning_fallback": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why pruning gave the full set, when it did."
           },
           "disagreements": {
             "type": "integer",
