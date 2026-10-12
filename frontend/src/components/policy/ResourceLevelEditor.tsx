@@ -1,3 +1,4 @@
+import { useId } from "react";
 import { Settings2 } from "lucide-react";
 import { type ResourceLevel, resourceLookup } from "@/api/policies";
 import { cn } from "@/lib/utils";
@@ -20,6 +21,10 @@ interface Props {
   mandatory?: boolean;
   /** True when `mandatory` and no value has been provided yet. */
   invalid?: boolean;
+  /** What to tell the user while `mandatory && invalid` (shown under the field, tied to it). */
+  invalidMessage?: string;
+  /** A hint tied to the field, e.g. what an empty value will be saved as. */
+  hint?: string;
 }
 
 /**
@@ -39,17 +44,18 @@ export function ResourceLevelEditor({
   recursiveSupported = false,
   mandatory = false,
   invalid = false,
+  invalidMessage,
+  hint,
 }: Props) {
   const showAdvanced = excludesSupported || recursiveSupported;
+  const noteId = useId();
+  const isInvalid = mandatory && invalid;
+  const note = isInvalid ? invalidMessage : hint;
 
   return (
-    <div className="flex min-w-0 flex-1 items-center gap-1">
-      <div
-        className={cn(
-          "min-w-0 flex-1",
-          mandatory && invalid && "rounded-md ring-1 ring-destructive",
-        )}
-      >
+    <div className="flex min-w-0 flex-1 items-start gap-1">
+      <div className="min-w-0 flex-1">
+      <div className={cn(isInvalid && "rounded-md ring-1 ring-destructive")}>
         <TagCombobox
           values={value.values}
           onChange={(vals) => onChange({ ...value, values: vals })}
@@ -60,7 +66,17 @@ export function ResourceLevelEditor({
           placeholder="value or * (Enter to add)"
           creatable
           ariaLabel={`${label} value`}
+          ariaDescribedBy={note ? noteId : undefined}
         />
+      </div>
+      {note && (
+        <p
+          id={noteId}
+          className={cn("mt-1 text-xs", isInvalid ? "text-destructive" : "text-muted-foreground")}
+        >
+          {note}
+        </p>
+      )}
       </div>
       {showAdvanced && (
         <Popover>

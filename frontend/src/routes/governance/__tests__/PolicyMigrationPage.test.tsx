@@ -46,6 +46,7 @@ const ROWS: ClassifiedPolicy[] = [
     managed_by: "compiler",
     enabled: true,
     migratable: false,
+    warnings: [],
     blockers: [COMPILER_REASON],
   },
   {
@@ -54,6 +55,7 @@ const ROWS: ClassifiedPolicy[] = [
     managed_by: "operator",
     enabled: true,
     migratable: true,
+    warnings: [],
     blockers: [],
     proposed: { grants: 1, rules: 0 },
   },
@@ -63,6 +65,7 @@ const ROWS: ClassifiedPolicy[] = [
     managed_by: "infra",
     enabled: true,
     migratable: false,
+    warnings: [],
     blockers: [INFRA_REASON],
   },
   {
@@ -71,6 +74,7 @@ const ROWS: ClassifiedPolicy[] = [
     managed_by: "operator",
     enabled: true,
     migratable: false,
+    warnings: [],
     blockers: [CATALOG_BLOCKER],
   },
   {
@@ -79,6 +83,7 @@ const ROWS: ClassifiedPolicy[] = [
     managed_by: "operator",
     enabled: true,
     migratable: true,
+    warnings: [],
     blockers: [],
     proposed: { grants: 2, rules: 1 },
   },
@@ -88,6 +93,7 @@ const ROWS: ClassifiedPolicy[] = [
     managed_by: "operator",
     enabled: false,
     migratable: false,
+    warnings: [],
     blockers: [MIGRATED_SENTENCE],
     migrated: {
       policy_name: "old-sales",

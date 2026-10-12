@@ -24,6 +24,7 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TrinoConfigDialog } from "@/components/policy/TrinoConfigDialog";
 import { OverlapReport } from "./OverlapReport";
+import { PolicyWarningsCallout } from "./PolicyWarningsCallout";
 import { refusalMessage, usePolicyPermissions } from "./policyWrites";
 
 /** Why an infra row offers no edit, toggle or delete — the server refuses all
@@ -219,6 +220,8 @@ export default function ProfileDetailPage() {
           </AlertDescription>
         </Alert>
       )}
+
+      <PolicyWarningsCallout service={service} serviceId={profile?.id} />
 
       <OverlapReport serviceName={service} />
 

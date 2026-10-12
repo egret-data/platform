@@ -180,6 +180,15 @@ export default function MaskFilterRules() {
 
       <OverlapReport />
 
+      {wanted && !canWrite && (
+        <Alert>
+          <AlertDescription>
+            You followed a link to edit a rule, but editing needs the <code>policy:update</code>{" "}
+            permission, which this account does not have. The list is shown instead.
+          </AlertDescription>
+        </Alert>
+      )}
+
       <div className="space-y-4">
         {rulesQ.isLoading ? (
           <ListSkeleton rows={6} cols={4} />

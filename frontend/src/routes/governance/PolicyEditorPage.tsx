@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Loader2, Plus, Trash2, X } from "lucide-react";
+import { ArrowLeft, Loader2, Plus, Trash2, TriangleAlert, X } from "lucide-react";
 
 import {
   type AccessItem,
+  type CreatedPolicyId,
   type MaskItem,
   type ResourceLevel,
   type RowFilterItem,
@@ -25,7 +26,17 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
@@ -39,6 +50,7 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { MaskItemTable } from "@/components/policy/MaskItemTable";
 import { PermissionTable } from "@/components/policy/PermissionTable";
 import { ResourceSelector } from "@/components/policy/ResourceSelector";
+import { grantsSelect, levelGaps, levelsToFill } from "@/components/policy/resourceLevels";
 import { RowFilterItemTable } from "@/components/policy/RowFilterItemTable";
 import { ConfigSection } from "@/components/form/ConfigSection";
 import { FieldLabel } from "@/routes/control-plane/config/FieldLabel";
@@ -398,10 +410,21 @@ export default function PolicyEditorPage() {
   const canSave = can(savePermission);
   const canDelete = can("policy:delete");
 
-  const save = useMutation<{ id: number }, ApiError>({
+  // What the server did with the levels left empty (SP4d-4 B1). A plain
+  // `{ id }` save navigates away; a save that filled a level (or overtook
+  // another policy) stays, because the response IS the point (FE-ACTION-2):
+  // the operator must read what the save changed before leaving.
+  const [saved, setSaved] = useState<CreatedPolicyId | null>(null);
+  const [confirmWiden, setConfirmWiden] = useState(false);
+
+  const save = useMutation<CreatedPolicyId, ApiError>({
     mutationFn: () => (id ? updatePolicy(Number(id), buildPayload()) : createPolicy(buildPayload())),
-    onSuccess: () => {
+    onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
+      if (res?.filledLevels?.length || res?.warnings?.length) {
+        setSaved(res);
+        return;
+      }
       navigate(profileUrl);
     },
   });
@@ -426,12 +449,50 @@ export default function PolicyEditorPage() {
   // blocks Save. (Per-field "Required" hint is rendered by ResourceSelector
   // itself via ResourceLevelEditor's `invalid` prop.) In Tag mode, a tag
   // must be selected instead.
+  // Only a ROOT level (catalog, role…) blocks: the server saves an empty
+  // deeper level as `*`, and the selector says so under the field.
+  const isRoot = (name: string) => !resDefByName(name)?.parent;
   const missingRequired: boolean =
     scope === "tag"
       ? !tag
       : Object.entries(form.resources as Record<string, ResourceLevel>).some(
-          ([name, lvl]) => resDefByName(name)?.mandatory && lvl.values.length === 0,
+          ([name, lvl]) => resDefByName(name)?.mandatory && isRoot(name) && lvl.values.length === 0,
         );
+
+  // Resource maps of the primary resource and every additional one.
+  const resourceMaps: Record<string, ResourceLevel>[] =
+    scope === "tag" ? [] : [form.resources, ...(kind === "access" ? form.additional : [])];
+  // A named level under an absent one: the server refuses it.
+  const gaps = resourceMaps.flatMap((m) => levelGaps(resDefs, m));
+  // Levels the server will save as `*`.
+  const fills = Array.from(new Set(resourceMaps.flatMap((m) => levelsToFill(resDefs, m))));
+  // Access types in force, for the "stops above column" warning.
+  const grantedAccessTypes: string[] | undefined =
+    kind === "access"
+      ? Array.from(
+          new Set(
+            form.items
+              .filter((it: AccessItem) => it.effect === "allow")
+              .flatMap((it: AccessItem) => it.accesses),
+          ),
+        )
+      : undefined;
+  // Saving an ALREADY-STORED policy that the server will widen: an unrelated
+  // edit must not silently turn a narrower row into a broader one.
+  const widensStored = !!id && fills.length > 0;
+  const widensColumnSelect =
+    fills.includes("column") && kind === "access" && grantsSelect(grantedAccessTypes);
+  const saveBlockedReason = !canSave
+    ? `Saving needs the ${savePermission} permission.`
+    : !form.name.trim()
+      ? "Enter a policy name"
+      : missingRequired
+        ? scope === "tag"
+          ? "Select a tag"
+          : "Name the required resource level (the first one) before saving"
+        : gaps.length > 0
+          ? `${gaps[0].level} is set but ${gaps[0].missing} is not: set ${gaps[0].missing} or clear ${gaps[0].level}`
+          : undefined;
 
   const kindTitle =
     kind === "masking" ? "Masking" : kind === "rowfilter" ? "Row filter" : "Permissions";
@@ -545,6 +606,20 @@ export default function PolicyEditorPage() {
     );
   }
 
+  if (saved) {
+    return (
+      <div className="space-y-5">
+        {backLink}
+        <SavedResult
+          result={saved}
+          service={service}
+          verb={id ? "updated" : "created"}
+          profileUrl={profileUrl}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-5">
       {backLink}
@@ -601,21 +676,14 @@ export default function PolicyEditorPage() {
           <Button
             type="button"
             size="sm"
-            onClick={() => save.mutate()}
-            title={
-              !canSave
-                ? `Saving needs the ${savePermission} permission.`
-                : !form.name.trim()
-                  ? "Enter a policy name"
-                  : missingRequired
-                    ? "Fill the required resource levels"
-                    : undefined
-            }
+            onClick={() => (widensStored ? setConfirmWiden(true) : save.mutate())}
+            title={saveBlockedReason}
             disabled={
               !canSave ||
               save.isPending ||
               !form.name.trim() ||
               missingRequired ||
+              gaps.length > 0 ||
               (!!id && !policyQuery.data) ||
               !def.data
             }
@@ -750,10 +818,11 @@ export default function PolicyEditorPage() {
                         value={form.resources}
                         onChange={(r) => setForm((f: any) => ({ ...f, resources: r }))}
                         onLeafChange={setLeaf}
+                        grantedAccessTypes={grantedAccessTypes}
                       />
                       {missingRequired && (
                         <p className="text-xs text-muted-foreground">
-                          Fill the required resource levels.
+                          Name the required resource level (the first one) before saving.
                         </p>
                       )}
                       {kind === "access" && (
@@ -773,6 +842,7 @@ export default function PolicyEditorPage() {
                                       ),
                                     }))
                                   }
+                                  grantedAccessTypes={grantedAccessTypes}
                                 />
                               </div>
                               <Button
@@ -985,6 +1055,41 @@ export default function PolicyEditorPage() {
           </div>
       </div>
 
+      <AlertDialog open={confirmWiden} onOpenChange={setConfirmWiden}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Saving will widen this stored policy</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2 text-sm">
+                <p>
+                  This policy is already stored without{" "}
+                  {fills.map((l, i) => (
+                    <span key={l}>
+                      {i > 0 && (i === fills.length - 1 ? " and " : ", ")}
+                      <code>{l}</code>
+                    </span>
+                  ))}{" "}
+                  set. Saving it, even with an unrelated change, stores{" "}
+                  {fills.length === 1 ? "that level" : "those levels"} as <code>*</code> (every value),
+                  so the policy will grant on more than it does today.
+                </p>
+                {widensColumnSelect && (
+                  <p>Column SELECT becomes granted: the stored row grants no column reads today.</p>
+                )}
+                <p>
+                  The broader policy may also be evaluated earlier than other policies in the same
+                  priority band. The result of the save lists any policy it now overtakes.
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep the policy as stored</AlertDialogCancel>
+            <AlertDialogAction onClick={() => save.mutate()}>Widen and save</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <ConfirmDeleteDialog
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
@@ -993,6 +1098,95 @@ export default function PolicyEditorPage() {
         confirmText="delete"
         onConfirm={() => del.mutate()}
       />
+    </div>
+  );
+}
+
+const WARNING_KIND_EDITOR: Record<string, string> = {
+  access: "access",
+  mask: "masking",
+  row_filter: "rowfilter",
+};
+
+/**
+ * What a save did when it did more than store the form (SP4d-4 B1): levels
+ * left empty were stored as `*`, and the policy may now be evaluated ahead of
+ * another one in its priority band. Shown in place of the form (the response
+ * is the point, so the page does not navigate away unread).
+ */
+function SavedResult({
+  result,
+  service,
+  verb,
+  profileUrl,
+}: {
+  result: CreatedPolicyId;
+  service: string;
+  verb: "created" | "updated";
+  profileUrl: string;
+}) {
+  const levels = result.filledLevels ?? [];
+  const warnings = result.warnings ?? [];
+  return (
+    <div className="space-y-4">
+      <Alert>
+        <TriangleAlert className="h-4 w-4" />
+        <div>
+          <AlertTitle>
+            Policy {verb}
+            {levels.length > 0 && (
+              <>
+                {" "}
+                with {levels.length === 1 ? "a level" : "levels"} stored as <code>*</code>
+              </>
+            )}
+          </AlertTitle>
+          <AlertDescription className="space-y-2">
+            {levels.length > 0 && (
+              <p>
+                Saved as <code>*</code> (every value): {levels.join(", ")}.
+              </p>
+            )}
+            {result.note && <p>{result.note}</p>}
+          </AlertDescription>
+        </div>
+      </Alert>
+      {warnings.length > 0 && (
+        <Alert>
+          <TriangleAlert className="h-4 w-4" />
+          <div>
+            <AlertTitle>
+              {warnings.length === 1
+                ? "This save changed the order of 1 other policy"
+                : `This save changed the order of ${warnings.length} other policies`}
+            </AlertTitle>
+            <AlertDescription>
+              <ul className="space-y-2">
+                {warnings.map((w) => (
+                  <li key={`${w.policyKind}-${w.policyId ?? w.policy}`}>
+                    {w.policyId != null ? (
+                      <Link
+                        className="font-medium text-primary hover:underline"
+                        to={`/governance/policies/${encodeURIComponent(service)}/${
+                          WARNING_KIND_EDITOR[w.policyKind] ?? "access"
+                        }/${w.policyId}`}
+                      >
+                        {w.policy}
+                      </Link>
+                    ) : (
+                      <span className="font-medium">{w.policy}</span>
+                    )}
+                    : {w.sentence}
+                  </li>
+                ))}
+              </ul>
+            </AlertDescription>
+          </div>
+        </Alert>
+      )}
+      <Button asChild size="sm">
+        <Link to={profileUrl}>Back to {service}</Link>
+      </Button>
     </div>
   );
 }

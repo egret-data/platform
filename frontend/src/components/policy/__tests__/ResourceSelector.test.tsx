@@ -132,3 +132,124 @@ describe("ResourceSelector", () => {
     expect(screen.queryByRole("option", { name: "— none —" })).not.toBeInTheDocument();
   });
 });
+
+describe("ResourceSelector — absent levels (SP4d-4 B1)", () => {
+  const star = { values: ["*"] };
+
+  it("says an EMPTY non-root level is saved as *, and says nothing for a * level", () => {
+    wrap(
+      <ResourceSelector
+        resourceDefs={RESOURCE_DEFS}
+        service="trino"
+        value={{ catalog: { values: ["iceberg"] }, schema: { values: [] }, table: star }}
+        onChange={vi.fn()}
+      />,
+    );
+    const hint = screen.getByText(/Empty means every schema — saved as \*\./);
+    expect(screen.getByLabelText("Schema value").getAttribute("aria-describedby")).toBe(hint.id);
+    // The control: the table level holds `*` and gets no hint.
+    expect(screen.queryByText(/Empty means every table/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Table value")).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("states that an empty column grants column SELECT when select is granted, not otherwise", () => {
+    const value = { catalog: { values: ["iceberg"] }, schema: star, table: star, column: { values: [] } };
+    const { unmount } = wrap(
+      <ResourceSelector resourceDefs={RESOURCE_DEFS} service="trino" value={value}
+        onChange={vi.fn()} grantedAccessTypes={["select"]} />,
+    );
+    expect(screen.getByText(/Column SELECT is then granted on every column/)).toBeInTheDocument();
+    unmount();
+    wrap(
+      <ResourceSelector resourceDefs={RESOURCE_DEFS} service="trino" value={value}
+        onChange={vi.fn()} grantedAccessTypes={["insert"]} />,
+    );
+    expect(screen.getByText(/Empty means every column — saved as \*/)).toBeInTheDocument();
+    expect(screen.queryByText(/Column SELECT is then granted/)).not.toBeInTheDocument();
+  });
+
+  it("an EMPTY root is invalid and says why, rather than being saved as *", () => {
+    wrap(
+      <ResourceSelector resourceDefs={RESOURCE_DEFS} service="trino"
+        value={{ catalog: { values: [] }, schema: star }} onChange={vi.fn()} />,
+    );
+    expect(
+      screen.getByText("Name a catalog. It is required: * here would cover every catalog this profile serves."),
+    ).toBeInTheDocument();
+    // The root never gets the "saved as *" hint.
+    expect(screen.queryByText(/Empty means every catalog/)).not.toBeInTheDocument();
+  });
+
+  it("a named catalog has no required message", () => {
+    wrap(
+      <ResourceSelector resourceDefs={RESOURCE_DEFS} service="trino"
+        value={{ catalog: { values: ["iceberg"] } }} onChange={vi.fn()} />,
+    );
+    expect(screen.queryByText(/Name a catalog/)).not.toBeInTheDocument();
+  });
+
+  it("explains a gap: a named level under an absent one", () => {
+    wrap(
+      <ResourceSelector resourceDefs={RESOURCE_DEFS} service="trino"
+        value={{ catalog: { values: ["iceberg"] }, table: { values: ["orders"] } }} onChange={vi.fn()} />,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Table is set but schema is not, so Ranger cannot match this policy",
+    );
+  });
+
+  it("shows no gap message for a complete chain", () => {
+    wrap(
+      <ResourceSelector resourceDefs={RESOURCE_DEFS} service="trino"
+        value={{ catalog: { values: ["iceberg"] }, schema: star, table: { values: ["orders"] } }} onChange={vi.fn()} />,
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  const AT_TABLE = { catalog: { values: ["iceberg"] }, schema: star, table: star };
+  const STOPS = /Stops above column: grants no column reads, only table-level checks such as/;
+
+  it("warns that a select chain stopping at table grants no column reads", () => {
+    wrap(
+      <ResourceSelector resourceDefs={RESOURCE_DEFS} service="trino" value={AT_TABLE}
+        onChange={vi.fn()} grantedAccessTypes={["select", "insert"]} />,
+    );
+    expect(screen.getByText(STOPS)).toBeInTheDocument();
+  });
+
+  it("warns for `all`, which implies select", () => {
+    wrap(
+      <ResourceSelector resourceDefs={RESOURCE_DEFS} service="trino" value={AT_TABLE}
+        onChange={vi.fn()} grantedAccessTypes={["all"]} />,
+    );
+    expect(screen.getByText(STOPS)).toBeInTheDocument();
+  });
+
+  it("does not warn for an insert-only chain stopping at table", () => {
+    wrap(
+      <ResourceSelector resourceDefs={RESOURCE_DEFS} service="trino" value={AT_TABLE}
+        onChange={vi.fn()} grantedAccessTypes={["insert"]} />,
+    );
+    expect(screen.queryByText(STOPS)).not.toBeInTheDocument();
+  });
+
+  it("does not warn when access types are not supplied (masking, row filter)", () => {
+    wrap(<ResourceSelector resourceDefs={RESOURCE_DEFS} service="trino" value={AT_TABLE} onChange={vi.fn()} />);
+    expect(screen.queryByText(STOPS)).not.toBeInTheDocument();
+  });
+
+  it("does not warn once the chain reaches column, or for a role chain", () => {
+    const { unmount } = wrap(
+      <ResourceSelector resourceDefs={RESOURCE_DEFS} service="trino"
+        value={{ ...AT_TABLE, column: star }} onChange={vi.fn()} grantedAccessTypes={["select"]} />,
+    );
+    expect(screen.queryByText(STOPS)).not.toBeInTheDocument();
+    unmount();
+    wrap(
+      <ResourceSelector resourceDefs={RESOURCE_DEFS} service="trino"
+        value={{ role: star }} onChange={vi.fn()} grantedAccessTypes={["select"]} />,
+    );
+    expect(screen.queryByText(STOPS)).not.toBeInTheDocument();
+  });
+});
+

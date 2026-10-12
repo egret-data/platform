@@ -4,6 +4,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 vi.mock("@/api/generated/perm/perm");
+// The profiles that resolve an overlap's service name to an editor route.
+let profiles: Array<{ id: number; name: string; type: string; tag_service?: string | null }> = [];
+vi.mock("@/api/policies", async (orig) => ({
+  ...(await orig<typeof import("@/api/policies")>()),
+  listProfiles: () => Promise.resolve(profiles),
+}));
 vi.mock("@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry");
 vi.mock("../RuleDialog", async () => {
   const actual = await vi.importActual<typeof import("../RuleDialog")>("../RuleDialog");
@@ -101,6 +107,10 @@ function renderPage(me: Me | null = ADMIN, url = "/governance/mask-filter-rules"
 
 beforeEach(() => {
   vi.clearAllMocks();
+  profiles = [
+    { id: 7, name: "trino-eu", type: "trino" },
+    { id: 8, name: "trino-us", type: "trino" },
+  ];
   vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue({
     data: { status: 200, data: [CATALOG] },
     isLoading: false,
@@ -217,7 +227,7 @@ describe("MaskFilterRules — the page asks for no lookup it does not need (revi
 });
 
 describe("MaskFilterRules — the overlap report", () => {
-  test("a banner names both rules of each pair and links to each rule", () => {
+  test("a banner names both rules of each pair and links to each rule", async () => {
     vi.mocked(permApi.usePermListRules).mockReturnValue(listResult([maskRule()]));
     vi.mocked(permApi.usePermListOverlaps).mockReturnValue(
       overlapsResult([
@@ -237,6 +247,7 @@ describe("MaskFilterRules — the overlap report", () => {
 
     const banner = screen.getByRole("alert");
     expect(within(banner).getByText("2 pairs of rules overlap")).toBeInTheDocument();
+    await within(banner).findByRole("link", { name: "trino-eu" });
     expect(within(banner).getByRole("link", { name: "rule mask emails" })).toHaveAttribute(
       "href",
       "/governance/mask-filter-rules?rule=r-a",
@@ -298,5 +309,139 @@ describe("MaskFilterRules — the overlap report", () => {
     );
     renderPage(reader, "/governance/mask-filter-rules?rule=r-a");
     expect(screen.queryByText(/^editing /)).not.toBeInTheDocument();
+  });
+});
+
+describe("MaskFilterRules — the overlap report reads as an operator action (SP4d-4 Task 12)", () => {
+  const handPair = (over: Partial<StoredOverlap> = {}) =>
+    overlap({
+      rules: [
+        { id: null, policyId: 31, name: "hand email" },
+        { id: "r-c", policyId: 32, name: "mask emails us" },
+      ],
+      servedToday: null,
+      howToFix:
+        "Delete one of the two. A hand-written member can also be switched off with PUT /api/control-plane/policies/{id}/enabled (use its policyId).",
+      ...over,
+    });
+
+  beforeEach(() => {
+    vi.mocked(permApi.usePermListRules).mockReturnValue(listResult([maskRule()]));
+  });
+
+  test("never shows the API route; offers a link to switch the hand-written policy off", async () => {
+    vi.mocked(permApi.usePermListOverlaps).mockReturnValue(overlapsResult([handPair()]));
+    renderPage();
+    const banner = screen.getByRole("alert");
+    const link = await within(banner).findByRole("link", { name: "Switch off policy hand email" });
+    expect(link).toHaveAttribute("href", "/governance/policies/trino-eu/masking/31");
+    expect(banner).toHaveTextContent("with the Enabled switch in its editor");
+    expect(banner).not.toHaveTextContent("PUT");
+    expect(banner).not.toHaveTextContent("/api/control-plane");
+    expect(banner).not.toHaveTextContent("policyId");
+    // A compiled rule has no such switch: no "switch off" link for it.
+    expect(within(banner).queryByRole("link", { name: /Switch off policy mask emails us/ })).toBeNull();
+  });
+
+  test("a pair that exists only in a tag service no profile names is plain text, not a dead link", async () => {
+    vi.mocked(permApi.usePermListOverlaps).mockReturnValue(
+      overlapsResult([handPair({ serviceName: "orphan_tag", serviceId: 99 })]),
+    );
+    renderPage();
+    const banner = screen.getByRole("alert");
+    // Let the profiles query settle, then check nothing links into the tag service.
+    await within(banner).findByRole("link", { name: "rule mask emails us" });
+    expect(within(banner).queryByRole("link", { name: "policy hand email" })).toBeNull();
+    expect(within(banner).queryByRole("link", { name: "orphan_tag" })).toBeNull();
+    expect(within(banner).getByText("policy hand email")).toBeInTheDocument();
+    expect(within(banner).queryByRole("link", { name: /Switch off policy/ })).toBeNull();
+    for (const a of within(banner).queryAllByRole("link")) {
+      expect(a.getAttribute("href")).not.toContain("orphan_tag");
+    }
+  });
+
+  test("a tag service a profile names opens its policies through that profile", async () => {
+    profiles = [
+      { id: 7, name: "trino-eu", type: "trino", tag_service: "eu_tag" },
+      { id: 70, name: "eu_tag", type: "tag" },
+    ];
+    vi.mocked(permApi.usePermListOverlaps).mockReturnValue(
+      overlapsResult([handPair({ serviceName: "eu_tag", serviceId: 70 })]),
+    );
+    renderPage();
+    const link = await screen.findByRole("link", { name: "policy hand email" });
+    expect(link).toHaveAttribute("href", "/governance/policies/trino-eu/masking/31");
+  });
+
+  test("a tag service shared by two profiles is ONE pair, naming both profiles", async () => {
+    vi.mocked(permApi.usePermListOverlaps).mockReturnValue(
+      overlapsResult([
+        handPair({ serviceName: "trino-eu", serviceId: 7 }),
+        handPair({ serviceName: "trino-us", serviceId: 8 }),
+      ]),
+    );
+    renderPage();
+    const banner = screen.getByRole("alert");
+    expect(within(banner).getByText("1 pair of rules overlaps")).toBeInTheDocument();
+    expect(await within(banner).findByRole("link", { name: "trino-eu" })).toBeInTheDocument();
+    expect(within(banner).getByRole("link", { name: "trino-us" })).toBeInTheDocument();
+    // A different pair is still counted separately.
+    expect(within(banner).getAllByText("policy hand email")).toHaveLength(1);
+  });
+
+  test("two different pairs are two pairs", async () => {
+    vi.mocked(permApi.usePermListOverlaps).mockReturnValue(
+      overlapsResult([
+        handPair(),
+        handPair({
+          serviceName: "trino-us",
+          rules: [
+            { id: null, policyId: 41, name: "other hand" },
+            { id: "r-d", policyId: 42, name: "other rule" },
+          ],
+        }),
+      ]),
+    );
+    renderPage();
+    expect(screen.getByText("2 pairs of rules overlap")).toBeInTheDocument();
+    await screen.findByRole("link", { name: "trino-eu" });
+  });
+
+  test("a user who may not read policies sees ONE alert, not a second from the overlap report", () => {
+    vi.mocked(permApi.usePermListRules).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: new ApiError(403, "forbidden"),
+    } as unknown as ReturnType<typeof permApi.usePermListRules>);
+    vi.mocked(permApi.usePermListOverlaps).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: new ApiError(403, "forbidden"),
+    } as unknown as ReturnType<typeof permApi.usePermListOverlaps>);
+    renderPage();
+    const alerts = screen.getAllByRole("alert");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toHaveTextContent("You need the policy:read permission");
+  });
+
+  test("a ?rule= link followed by an account that cannot edit says why the list is shown", () => {
+    const reader: Me = { user_id: "u2", email: "r@example.com", platform_roles: [], permissions: ["policy:read"] };
+    vi.mocked(permApi.usePermListRules).mockReturnValue(
+      listResult([maskRule({ id: "r-a", name: "mask emails" })]),
+    );
+    renderPage(reader, "/governance/mask-filter-rules?rule=r-a");
+    expect(screen.queryByText(/^editing /)).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "editing needs the policy:update permission, which this account does not have",
+    );
+  });
+
+  test("without a ?rule= link there is no such notice", () => {
+    const reader: Me = { user_id: "u2", email: "r@example.com", platform_roles: [], permissions: ["policy:read"] };
+    vi.mocked(permApi.usePermListRules).mockReturnValue(listResult([maskRule()]));
+    renderPage(reader);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
