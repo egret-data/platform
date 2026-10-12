@@ -433,6 +433,8 @@ export * from './statementSpec';
 export * from './statusBody';
 export * from './storageDto';
 export * from './storageInput';
+export * from './storedMember';
+export * from './storedOverlap';
 export * from './submitAck';
 export * from './submitQuery';
 export * from './tabularDto';

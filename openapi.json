@@ -6533,6 +6533,60 @@
         }
       }
     },
+    "/api/control-plane/perm/overlaps": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "Every mask / row-filter pair already stored in a profile's download. Writes\nrefuse only the pairs they create; this is where an operator sees the rest.",
+        "operationId": "list_overlaps",
+        "responses": {
+          "200": {
+            "description": "Every overlapping mask or row-filter pair stored in a profile's download, compiled or hand-written, with the profile that serves it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StoredOverlap"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/policies/services/{service_id}/classify": {
       "get": {
         "tags": [
@@ -43017,6 +43071,89 @@
                 "description": "Mint a new global named secret inline and use it as `secret_ref`."
               }
             ]
+          }
+        }
+      },
+      "StoredMember": {
+        "type": "object",
+        "description": "One member of a stored pair, as a steward finds it.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The rule's id; `null` for a hand-written policy."
+          },
+          "policyId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The `policy.authz_policies` id of the stored policy (the one\n`PUT /policies/{id}/enabled` takes), for compiled and hand-written alike."
+          },
+          "name": {
+            "type": "string",
+            "description": "The rule's name, or the hand-written policy's name."
+          }
+        }
+      },
+      "StoredOverlap": {
+        "type": "object",
+        "description": "One pair already stored in a profile's download.",
+        "required": [
+          "serviceId",
+          "serviceName",
+          "kind",
+          "coordinate",
+          "rules",
+          "sentence",
+          "howToFix"
+        ],
+        "properties": {
+          "serviceId": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The profile whose download serves the pair (a tag service on its own\nwhen no profile names it)."
+          },
+          "serviceName": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`\"mask\"` or `\"row_filter\"`."
+          },
+          "coordinate": {
+            "type": "string"
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StoredMember"
+            },
+            "description": "In the pair's order (policy names ascending)."
+          },
+          "servedToday": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StoredMember",
+                "description": "Which member Ranger serves today where both match, when that can be\ncomputed; `null` when the order falls to something this report does\nnot compute (or to the policy name)."
+              }
+            ]
+          },
+          "sentence": {
+            "type": "string"
+          },
+          "howToFix": {
+            "type": "string"
           }
         }
       },

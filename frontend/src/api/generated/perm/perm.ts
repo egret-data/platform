@@ -38,6 +38,7 @@ import type {
   PreviewRequest,
   PreviewResponse,
   RuleView,
+  StoredOverlap,
   UndoRequest,
   UndoResponse
 } from '../model';
@@ -788,7 +789,138 @@ export const usePermPatchGrant = <TError = ErrorBody,
       > => {
       return useMutation(getPermPatchGrantMutationOptions(options), queryClient);
     }
-    export type permClassifyServicePoliciesResponse200 = {
+    export type permListOverlapsResponse200 = {
+  data: StoredOverlap[]
+  status: 200
+}
+
+export type permListOverlapsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permListOverlapsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permListOverlapsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permListOverlapsResponseSuccess = (permListOverlapsResponse200) & {
+  headers: Headers;
+};
+export type permListOverlapsResponseError = (permListOverlapsResponse401 | permListOverlapsResponse403 | permListOverlapsResponse500) & {
+  headers: Headers;
+};
+
+export type permListOverlapsResponse = (permListOverlapsResponseSuccess | permListOverlapsResponseError)
+
+export const getPermListOverlapsUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/overlaps`
+}
+
+/**
+ * @summary Every mask / row-filter pair already stored in a profile's download. Writes
+refuse only the pairs they create; this is where an operator sees the rest.
+ */
+export const permListOverlaps = async ( options?: Parameters<typeof customInstance>[1]): Promise<permListOverlapsResponse> => {
+
+  return customInstance<permListOverlapsResponse>(getPermListOverlapsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermListOverlapsQueryKey = () => {
+    return [
+    `/api/control-plane/perm/overlaps`
+    ] as const;
+    }
+
+
+export const getPermListOverlapsQueryOptions = <TData = Awaited<ReturnType<typeof permListOverlaps>>, TError = ErrorBody>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListOverlaps>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermListOverlapsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permListOverlaps>>> = ({ signal }) => permListOverlaps({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permListOverlaps>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermListOverlapsQueryResult = NonNullable<Awaited<ReturnType<typeof permListOverlaps>>>
+export type PermListOverlapsQueryError = ErrorBody
+
+
+export function usePermListOverlaps<TData = Awaited<ReturnType<typeof permListOverlaps>>, TError = ErrorBody>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListOverlaps>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permListOverlaps>>,
+          TError,
+          Awaited<ReturnType<typeof permListOverlaps>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermListOverlaps<TData = Awaited<ReturnType<typeof permListOverlaps>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListOverlaps>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permListOverlaps>>,
+          TError,
+          Awaited<ReturnType<typeof permListOverlaps>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermListOverlaps<TData = Awaited<ReturnType<typeof permListOverlaps>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListOverlaps>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Every mask / row-filter pair already stored in a profile's download. Writes
+refuse only the pairs they create; this is where an operator sees the rest.
+ */
+
+export function usePermListOverlaps<TData = Awaited<ReturnType<typeof permListOverlaps>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListOverlaps>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermListOverlapsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permClassifyServicePoliciesResponse200 = {
   data: ClassifiedPolicy[]
   status: 200
 }

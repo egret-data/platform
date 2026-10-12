@@ -106,7 +106,8 @@ use std::collections::{BTreeSet, HashMap};
 use egret_perm::{CompileError, OverlapKind, OverlapRule};
 use egret_policy::{
     get_service_by_id_via, is_compiler_owned_policy_name, load_unit_via, unit_overlaps,
-    units_for_services_via, Arbitrated, AssignedTag, UnitIds, UnitOverlap, UnitPolicy,
+    units_for_services_via, Arbitrated, AssignedTag, OverlapShape, UnitIds, UnitOverlap,
+    UnitPolicy,
 };
 use serde_json::{json, Value};
 
@@ -421,6 +422,144 @@ pub async fn refuse_created_overlaps_via(
         return Err(into_compile_error(&profile, named(o, &rules)));
     }
     Ok(())
+}
+
+// ── the report: every pair that is STORED, in every profile's download ──
+
+/// One member of a stored pair, as a steward finds it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredMember {
+    /// The rule's id; `null` for a hand-written policy.
+    pub id: Option<uuid::Uuid>,
+    /// The `policy.authz_policies` id of the stored policy (the one
+    /// `PUT /policies/{id}/enabled` takes), for compiled and hand-written alike.
+    pub policy_id: Option<i64>,
+    /// The rule's name, or the hand-written policy's name.
+    pub name: String,
+}
+
+/// One pair already stored in a profile's download.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredOverlap {
+    /// The profile whose download serves the pair (a tag service on its own
+    /// when no profile names it).
+    pub service_id: i64,
+    pub service_name: String,
+    /// `"mask"` or `"row_filter"`.
+    pub kind: String,
+    pub coordinate: String,
+    /// In the pair's order (policy names ascending).
+    pub rules: Vec<StoredMember>,
+    /// Which member Ranger serves today where both match, when that can be
+    /// computed; `null` when the order falls to something this report does
+    /// not compute (or to the policy name).
+    pub served_today: Option<StoredMember>,
+    pub sentence: String,
+    pub how_to_fix: String,
+}
+
+fn how_to_fix(o: &UnitOverlap, hand_written: bool) -> String {
+    let tag = match o.shape {
+        OverlapShape::SameDownload(_) => "",
+        _ => " Or unassign the tag from the column where they meet.",
+    };
+    let disable = if hand_written {
+        " A hand-written member can also be switched off with PUT \
+         /api/control-plane/policies/{id}/enabled (use its policyId)."
+    } else {
+        ""
+    };
+    format!(
+        "Delete one of the two, or narrow one so they no longer select a common resource.{tag}{disable} \
+         An edit that narrows a member but still meets the other is refused as a new overlap. \
+         A hand-written member cannot be migrated to a rule until the pair is broken."
+    )
+}
+
+/// **Every pair stored in every profile's download**, read through
+/// `egret_policy::unit_overlaps` over the stored units (compiled AND
+/// hand-written, enabled, as each download holds them): each profile with its
+/// tag service, every tag service on its own when no profile names it. Reads
+/// only; the caller should hold a read-only transaction. Ordered by profile
+/// name, then the rule's order. A tag service several profiles share appears
+/// once per profile, because each profile's download serves the pair.
+///
+/// This does NOT go through [`refuse_created_by_compile_via`]: that refuses
+/// only a pair a write creates and returns nothing for one already stored.
+pub async fn stored_overlaps_via(
+    conn: &mut sqlx::PgConnection,
+) -> Result<Vec<StoredOverlap>, CompileError> {
+    let db = |e: egret_policy::PolicyStoreError| CompileError::Db(e.to_string());
+    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM policy.authz_services ORDER BY id")
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?;
+    let units: Vec<UnitIds> = units_for_services_via(conn, &ids).await.map_err(db)?;
+    let mut out = Vec::new();
+    for ids in units {
+        let unit = load_unit_via(conn, ids).await.map_err(db)?;
+        let found = unit.overlaps();
+        if found.is_empty() {
+            continue;
+        }
+        let names: BTreeSet<&str> = found
+            .iter()
+            .flat_map(|o| [o.first.as_str(), o.second.as_str()])
+            .collect();
+        let compiled = rules_for_names_via(conn, &names).await?;
+        let policy_ids: HashMap<&str, i64> = unit
+            .policies
+            .iter()
+            .filter_map(|(_, _, b)| Some((b.get("name")?.as_str()?, b.get("id")?.as_i64()?)))
+            .collect();
+        let member = |name: &str| StoredMember {
+            id: compiled.get(name).and_then(|r| r.id),
+            policy_id: policy_ids.get(name).copied(),
+            name: compiled
+                .get(name)
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| name.to_string()),
+        };
+        let service_id = ids.resource.or(ids.tag_service).unwrap_or_default();
+        let service_name = get_service_by_id_via(conn, service_id)
+            .await
+            .map_err(db)?
+            .name;
+        for o in found {
+            let served_today = match &o.shape {
+                OverlapShape::SameDownload(pair) => pair.served_today.clone(),
+                OverlapShape::TagAndPath {
+                    tag_policy,
+                    tag_priority,
+                    path_priority,
+                    ..
+                } => (tag_priority >= path_priority).then(|| tag_policy.clone()),
+                OverlapShape::TagAndTag { .. } => None,
+            };
+            let members = [member(&o.first), member(&o.second)];
+            let hand_written = members.iter().any(|m| m.id.is_none());
+            out.push(StoredOverlap {
+                service_id,
+                service_name: service_name.clone(),
+                kind: o.kind_wire_name().to_string(),
+                coordinate: o.coordinate.clone(),
+                served_today: served_today.as_deref().map(member),
+                sentence: o.sentence(
+                    &|n| match compiled.get(n) {
+                        Some(r) => format!("rule {:?}", r.name),
+                        None => format!("policy {n:?}"),
+                    },
+                    false,
+                ),
+                how_to_fix: how_to_fix(&o, hand_written),
+                rules: members.to_vec(),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.service_name.cmp(&b.service_name));
+    Ok(out)
 }
 
 #[cfg(test)]

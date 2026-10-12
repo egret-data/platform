@@ -123,6 +123,7 @@ pub fn perm_router() -> Router<PermState> {
             "/perm/rules/{id}",
             axum::routing::patch(patch_rule).delete(delete_rule),
         )
+        .route("/perm/overlaps", get(list_overlaps))
         .route("/perm/preview", post(preview))
         .route("/perm/explain", post(explain))
         .route("/perm/compile/{service_id}", post(compile))
@@ -159,6 +160,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         create_rule,
         patch_rule,
         delete_rule,
+        list_overlaps,
         preview,
         explain,
         compile,
@@ -167,6 +169,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         undo_service_policy_migration
     ),
     components(schemas(
+        crate::overlap::StoredOverlap,
+        crate::overlap::StoredMember,
         NewGrant,
         NewRule,
         PreviewRequest,
@@ -1371,6 +1375,35 @@ async fn delete_grant(
 // ---------------------------------------------------------------------------
 // rules
 // ---------------------------------------------------------------------------
+
+/// Every mask / row-filter pair already stored in a profile's download. Writes
+/// refuse only the pairs they create; this is where an operator sees the rest.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/overlaps",
+    tag = "perm",
+    responses(
+        (status = 200, description = "Every overlapping mask or row-filter pair stored in a profile's download, compiled or hand-written, with the profile that serves it", body = Vec<crate::overlap::StoredOverlap>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_overlaps(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+) -> Result<Json<Vec<crate::overlap::StoredOverlap>>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    // One read-only snapshot: the report cannot write, and sees one state.
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(PermHttpError::db)?;
+    let report = crate::overlap::stored_overlaps_via(&mut tx).await?;
+    tx.rollback().await.map_err(PermHttpError::db)?;
+    Ok(Json(report))
+}
 
 #[utoipa::path(
     get,

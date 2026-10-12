@@ -1163,3 +1163,287 @@ async fn policies_in(e: &Env, service: &str) -> Vec<(String, Value)> {
     .await
     .expect("policies")
 }
+
+// ── SP4d-4 Task 4: `GET /perm/overlaps` reports every STORED pair ───────────
+
+/// Deletes what a report test stored, on drop — a pair left behind would
+/// show in another test's report, and a panic must not leave one. Runs on its
+/// own thread and runtime with a fresh connection: a `Drop` cannot await.
+struct ReportCleanup {
+    services: Vec<i64>,
+}
+
+impl Drop for ReportCleanup {
+    fn drop(&mut self) {
+        let services = std::mem::take(&mut self.services);
+        let _ = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(async {
+                let Some(dsn) = egret_test_db::url().await else {
+                    return;
+                };
+                let db = Db::connect(&dsn, 1).await.expect("connect");
+                sqlx::query(
+                    "DELETE FROM perm.rules WHERE id::text IN \
+                       (SELECT substr(name, 11, 36) FROM policy.authz_policies \
+                         WHERE service_id = ANY($1) AND name LIKE 'perm-rule-%')",
+                )
+                .bind(&services)
+                .execute(&db.pool)
+                .await
+                .expect("cleanup rules");
+                sqlx::query("DELETE FROM policy.authz_policies WHERE service_id = ANY($1)")
+                    .bind(&services)
+                    .execute(&db.pool)
+                    .await
+                    .expect("cleanup policies");
+            });
+        })
+        .join();
+    }
+}
+
+/// Everything a read could be tempted to touch, as `Value`s (never strings).
+async fn write_surface(e: &Env) -> Vec<Value> {
+    let mut out = Vec::new();
+    for q in [
+        "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]'::jsonb) FROM policy.authz_policies t",
+        "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]'::jsonb) FROM policy.authz_services t",
+        "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]'::jsonb) FROM perm.rules t",
+        "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]'::jsonb) FROM perm.grants t",
+    ] {
+        out.push(
+            sqlx::query_scalar::<_, Value>(q)
+                .fetch_one(&e.db.pool)
+                .await
+                .expect("snapshot"),
+        );
+    }
+    out
+}
+
+async fn report_for(e: &Env, service_id: i64) -> Vec<Value> {
+    let (status, body) = send(e, "GET", "/perm/overlaps", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body.as_array()
+        .expect("an array")
+        .iter()
+        .filter(|o| o["serviceId"] == service_id)
+        .cloned()
+        .collect()
+}
+
+/// A compiled rule on `column`, moved onto `email` behind the routes' back —
+/// the state an older compile leaves behind.
+async fn stored_rule_on_email(e: &Env, p: &Profile, name: &str, own_column: &str, mask: &str) {
+    let (status, body) = send(
+        e,
+        "POST",
+        "/perm/rules",
+        Some(path_mask(name, p, "orders", own_column, mask)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    move_rule_column_unchecked(e, body["id"].as_str().expect("id"), "email").await;
+}
+
+/// Test 1 (Task 4). Pairs that are already STORED are listed, per profile, by
+/// `unit_overlaps` over the stored units — compiled × compiled (three rules on
+/// one column are three pairs, all listed), and compiled × hand-written — and
+/// the read writes nothing.
+#[tokio::test]
+async fn the_report_lists_every_pair_and_writes_nothing() {
+    let _serial = SERIAL.lock().await;
+    let Some(e) = env().await else { return };
+    let sr = profile(&e, "starrocks").await;
+    let trino = profile(&e, "trino").await;
+    let _cleanup = ReportCleanup {
+        services: vec![sr.service_id, trino.service_id],
+    };
+    let (a, b, c) = (unique("stored a"), unique("stored b"), unique("stored c"));
+    for (name, own, mask) in [
+        (&a, "email", "MASK"),
+        (&b, "phone", "MASK_NULL"),
+        (&c, "sku", "MASK_HASH"),
+    ] {
+        if own == "email" {
+            let (status, body) = send(
+                &e,
+                "POST",
+                "/perm/rules",
+                Some(path_mask(name, &sr, "orders", own, mask)),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+        } else {
+            stored_rule_on_email(&e, &sr, name, own, mask).await;
+        }
+    }
+    let compiled = unique("mask email");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/rules",
+        Some(path_mask(&compiled, &trino, "*", "email", "MASK")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let hand_name = unique("hand email");
+    let hand = hand_mask_unchecked(&e, &trino, &hand_name, "email", "MASK_NULL").await;
+
+    let before = write_surface(&e).await;
+    let sr_report = report_for(&e, sr.service_id).await;
+    let trino_report = report_for(&e, trino.service_id).await;
+    let after = write_surface(&e).await;
+
+    assert_eq!(before, after, "the report wrote nothing");
+
+    assert_eq!(
+        sr_report.len(),
+        3,
+        "three rules on one column: {sr_report:?}"
+    );
+    let sr_name = profile_name(&e, &sr).await;
+    for o in &sr_report {
+        assert_eq!(o["serviceName"], sr_name.as_str(), "{o}");
+        assert_eq!(o["kind"], "mask", "{o}");
+        assert!(o["coordinate"].as_str().unwrap().contains("email"), "{o}");
+        let rules = o["rules"].as_array().expect("rules");
+        assert_eq!(rules.len(), 2, "{o}");
+        assert!(rules.iter().all(|r| r["id"].is_string()), "compiled: {o}");
+        assert!(o["sentence"].as_str().unwrap().contains("rule \""), "{o}");
+        assert!(o["howToFix"].as_str().unwrap().contains("narrow"), "{o}");
+    }
+    let named: std::collections::BTreeSet<(String, String)> = sr_report
+        .iter()
+        .map(|o| {
+            let n = |i: usize| o["rules"][i]["name"].as_str().unwrap().to_string();
+            let (x, y) = (n(0), n(1));
+            if x < y {
+                (x, y)
+            } else {
+                (y, x)
+            }
+        })
+        .collect();
+    let expected: std::collections::BTreeSet<(String, String)> = [(&a, &b), (&a, &c), (&b, &c)]
+        .into_iter()
+        .map(|(x, y)| {
+            if x < y {
+                (x.clone(), y.clone())
+            } else {
+                (y.clone(), x.clone())
+            }
+        })
+        .collect();
+    assert_eq!(named, expected, "every pair, none twice");
+
+    assert_eq!(trino_report.len(), 1, "{trino_report:?}");
+    let o = &trino_report[0];
+    assert_eq!(o["serviceName"], profile_name(&e, &trino).await.as_str());
+    let rules = o["rules"].as_array().unwrap();
+    let h = rules
+        .iter()
+        .find(|r| r["name"] == hand_name.as_str())
+        .expect("the hand-written member is named");
+    assert!(
+        h["id"].is_null(),
+        "no rule id for a hand-written policy: {o}"
+    );
+    assert_eq!(h["policyId"], hand, "its policy id: {o}");
+    let r = rules
+        .iter()
+        .find(|r| r["name"] == compiled.as_str())
+        .expect("the compiled member is named by its rule");
+    assert!(r["id"].is_string(), "{o}");
+    assert!(
+        o["howToFix"].as_str().unwrap().contains("/enabled"),
+        "a hand-written member offers the switch-off: {o}"
+    );
+    assert_eq!(
+        o["servedToday"]["name"],
+        compiled.as_str(),
+        "the table-wide rule has more match-any levels, so Ranger serves it: {o}"
+    );
+}
+
+/// Test 2 (Task 4). A clean profile reports nothing — and the control: the same
+/// fixture with one pair stored reports it, so an always-empty report fails.
+#[tokio::test]
+async fn the_report_is_empty_on_a_clean_profile() {
+    let _serial = SERIAL.lock().await;
+    let Some(e) = env().await else { return };
+    let p = profile(&e, "starrocks").await;
+    let _cleanup = ReportCleanup {
+        services: vec![p.service_id],
+    };
+    let (a, b) = (unique("clean a"), unique("clean b"));
+    for (name, col, mask) in [(&a, "email", "MASK"), (&b, "phone", "MASK_NULL")] {
+        let (status, body) = send(
+            &e,
+            "POST",
+            "/perm/rules",
+            Some(path_mask(name, &p, "orders", col, mask)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let clean = report_for(&e, p.service_id).await;
+
+    let b_id: String = sqlx::query_scalar("SELECT id::text FROM perm.rules WHERE name = $1")
+        .bind(&b)
+        .fetch_one(&e.db.pool)
+        .await
+        .expect("rule b");
+    move_rule_column_unchecked(&e, &b_id, "email").await;
+    let paired = report_for(&e, p.service_id).await;
+
+    assert!(clean.is_empty(), "two rules on two columns: {clean:?}");
+    assert_eq!(paired.len(), 1, "the control: one pair stored: {paired:?}");
+}
+
+/// Test 3 (Task 4). `policy:read` gates it: a session without it is 403, and
+/// the same request from the admin is 200 (so the 403 is the gate's).
+#[tokio::test]
+async fn the_report_needs_policy_read() {
+    let _serial = SERIAL.lock().await;
+    let Some(e) = env().await else { return };
+    let uid = UserRepo::new(e.db.clone())
+        .insert_local(
+            &format!("nopolicy_{}@egret.local", Uuid::new_v4().simple()),
+            "Nobody",
+            "x",
+        )
+        .await
+        .expect("insert user")
+        .0;
+    let sessions = SessionService::new(
+        e.db.clone(),
+        chrono::Duration::hours(24),
+        chrono::Duration::minutes(60),
+    );
+    let token = sessions
+        .create(egret_core::UserId(uid), "test", "127.0.0.1")
+        .await
+        .expect("session")
+        .token;
+    let resp = e
+        .app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("GET")
+                .uri("/perm/overlaps")
+                .header("Cookie", format!("egret_session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let (status, _) = send(&e, "GET", "/perm/overlaps", None).await;
+    assert_eq!(status, StatusCode::OK, "the control: the admin may");
+}
