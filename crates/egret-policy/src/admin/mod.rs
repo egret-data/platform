@@ -1630,6 +1630,7 @@ async fn create_policy(
     Json(v): Json<Value>,
 ) -> Result<Json<Value>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:create").await?;
+    ranger_json::refuse_ranger_shaped_body(&v).map_err(PolicyHttpError::BadRequest)?;
 
     // Tag policies (Access P3.2) are authored against a trino profile but stored
     // under that profile's tag service. Resolve the tag service, build the

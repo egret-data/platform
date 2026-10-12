@@ -583,6 +583,42 @@ pub fn is_tag_kind(v: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// The Ranger policy-body keys that carry a policy's items. The editor form
+/// names them `items` (each with an `effect`), so a body that sends these is a
+/// Ranger body posted to the wrong endpoint, and without this refusal its
+/// items were dropped silently and a policy that grants nothing was stored.
+const RANGER_ITEM_KEYS: [&str; 4] = [
+    "policyItems",
+    "denyPolicyItems",
+    "dataMaskPolicyItems",
+    "rowFilterPolicyItems",
+];
+
+/// Refuse a Ranger-shaped body on the editor-form endpoint, naming the keys.
+///
+/// An explicit list, not `deny_unknown_fields`: the editor form carries other
+/// keys the server ignores on purpose (`kind`, `tag`, `additional`…), and the
+/// rest of the form is validated by its own serde types.
+pub fn refuse_ranger_shaped_body(v: &Value) -> Result<(), String> {
+    let found: Vec<&str> = RANGER_ITEM_KEYS
+        .into_iter()
+        .filter(|k| v.get(*k).is_some())
+        .collect();
+    if found.is_empty() {
+        return Ok(());
+    }
+    let names = found
+        .iter()
+        .map(|k| format!("`{k}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "unexpected key(s) {names}: this endpoint takes the editor form, not a Ranger policy \
+         body, and would have stored the policy with no items. Send the grants as `items` \
+         (each with `users`, `groups`, `roles`, `accesses` and an `effect`)."
+    ))
+}
+
 /// Dispatch a tag-policy editor form (`{kind:"tag-*", tag, ...}`) to the right
 /// serializer. `tag_service` is the resolved `<profile>_tag` service name the
 /// handler looked up; the body's `service` binds to it. The trino profile the

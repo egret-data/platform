@@ -3512,6 +3512,60 @@ async fn an_editor_body_with_a_level_gap_is_refused() {
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 
+/// A Ranger-shaped body (`policyItems`, `dataMaskPolicyItems`,
+/// `rowFilterPolicyItems`) on the editor-form endpoint used to answer 200 and
+/// store a policy with EMPTY items. It is now a 400 that names the keys.
+#[tokio::test]
+async fn a_ranger_shaped_body_is_refused_naming_the_keys_and_stores_nothing() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11ranger", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "ranger-shaped", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"])},
+            "policyItems": [{"users": ["alice"], "accesses": [{"type": "select", "isAllowed": true}]}],
+            "dataMaskPolicyItems": [], "rowFilterPolicyItems": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let msg = body["error"]
+        .as_str()
+        .or(body["message"].as_str())
+        .unwrap_or_default();
+    for key in ["policyItems", "dataMaskPolicyItems", "rowFilterPolicyItems"] {
+        assert!(msg.contains(key), "the refusal names `{key}`: {body}");
+    }
+    assert!(
+        msg.contains("items"),
+        "and points at the form's `items`: {body}"
+    );
+    assert_eq!(stored_policy_count(&f, svc_id).await, 0, "nothing stored");
+
+    // The editor form itself is untouched.
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "form-shaped", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"])},
+            "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(stored_policy_count(&f, svc_id).await, 1);
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
 #[tokio::test]
 async fn an_empty_catalog_is_refused() {
     let Some(f) = setup().await else {
