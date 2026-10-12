@@ -7901,6 +7901,120 @@ fn lv_pins(profile: &Profile, def_json: &Value, tag_def_json: &Value) -> Vec<LvP
     pins
 }
 
+/// SP4d-4 Task 11 (B1), confirmed on the real jars: the policy the EDITOR now
+/// saves for "table `orders`, all columns" — the column level left empty — is
+/// stored with `column: *` and grants `select` at column depth on both engines
+/// at both Ranger versions, where the body the editor used to save (the
+/// recorded `unfilled_body`, the column level dropped) is denied it. The body
+/// under test is whatever `editor_to_ranger_json` returns, not a hand-built
+/// copy of it.
+#[test]
+fn an_editor_saved_table_policy_grants_select_at_column_depth_on_the_real_jars() {
+    if std::env::var("EGRET_TEST_RANGER_E2E").ok().as_deref() != Some("1") {
+        eprintln!("EGRET_TEST_RANGER_E2E != 1 — skipping the editor-saved table policy check");
+        return;
+    }
+    let started = std::time::Instant::now();
+    let tag_def_json = load_tag_def();
+    let mut failures: Vec<String> = Vec::new();
+    let mut asked = 0usize;
+
+    for profile in [trino(), starrocks()] {
+        let service_type = profile.engine.service_def_name();
+        let (def_json, _def, _base) = load_engine(&profile);
+        let level = |v: &str| json!({"values": [v], "isExcludes": false, "isRecursive": false});
+        let mut resources = Map::new();
+        for (i, name) in profile.hierarchy.iter().enumerate().take(3) {
+            resources.insert((*name).to_string(), level(LV_VALUES[i]));
+        }
+        // The steward emptied the column level.
+        resources.insert(
+            profile.hierarchy[3].to_string(),
+            json!({"values": [], "isExcludes": false, "isRecursive": false}),
+        );
+        let saved = egret_policy::admin::editor_to_ranger_json(
+            &json!({
+                "name": "editor-table", "service": profile.service_name,
+                "resources": resources,
+                "items": [{"users": [LV_USER], "accesses": lv_access_types(&profile),
+                           "effect": "allow"}],
+            }),
+            service_type,
+        )
+        .expect("the editor accepts the form");
+        let filled = saved.filled.as_ref().expect("the empty level was filled");
+        assert_eq!(filled.names, [profile.hierarchy[3]]);
+        assert_eq!(
+            saved.body["resources"][profile.hierarchy[3]],
+            level("*"),
+            "stored as `*`"
+        );
+        let with_id = |mut body: Value, id: i64| {
+            body["id"] = json!(id);
+            body
+        };
+
+        for (version, label) in [("2.5.0", "ranger_2_5_0"), ("2.8.0", "ranger_2_8_0")] {
+            let mut cases: Vec<(&str, usize, &str, bool)> = Vec::new();
+            // (which body, depth, access, expected isAllowed)
+            for (which, expect_select) in [("saved", true), ("old", false)] {
+                cases.push((which, 4, "select", expect_select));
+                // Table depth: the control that the policy is live at all.
+                cases.push((which, 3, "insert", true));
+            }
+            let payload: Vec<Value> = cases
+                .iter()
+                .enumerate()
+                .map(|(i, (which, depth, access, _))| {
+                    let body = if *which == "saved" {
+                        saved.body.clone()
+                    } else {
+                        filled.unfilled_body.clone()
+                    };
+                    let set = mig_envelope(
+                        &profile,
+                        &def_json,
+                        &tag_def_json,
+                        vec![with_id(body, 1)],
+                        None,
+                    );
+                    lv_case(
+                        format!("t11-{which}-{depth}-{access}-{i}"),
+                        0,
+                        set,
+                        lv_request(&profile, *depth, access, None),
+                    )
+                    .to_json(service_type)
+                })
+                .collect();
+            let verdicts = ask_ranger_json(payload, version, &format!("t11-{service_type}"));
+            assert_eq!(verdicts.len(), cases.len(), "every case answered");
+            for ((which, depth, access, want), v) in cases.iter().zip(&verdicts) {
+                asked += 1;
+                if !v["error"].is_null() {
+                    failures.push(format!("[{service_type} @ {label}] threw: {}", v["error"]));
+                    continue;
+                }
+                let got = v["isAllowed"].as_bool().expect("isAllowed");
+                if got != *want {
+                    failures.push(format!(
+                        "[{service_type} @ {label}] {which} body, depth {depth}, {access}: \
+                         allowed={got}, wanted {want}"
+                    ));
+                }
+            }
+        }
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    eprintln!("editor-saved table policy on the real jars: {asked} cells in {elapsed:.2} s");
+    assert!(asked == 16, "all sixteen cells were asked: {asked}");
+    assert!(
+        elapsed > 1.0,
+        "a real-jar run takes seconds, not {elapsed:.2} s — vacuous"
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn editor_shaped_levels_on_the_real_ranger_jars() {
     if std::env::var("EGRET_TEST_RANGER_E2E").ok().as_deref() != Some("1") {
