@@ -1290,7 +1290,9 @@ pub struct TaskRunDto {
     pub not_before_ms: Option<i64>,
     /// The lease. `NULL` means unclaimed.
     pub claimed_at: Option<DateTime<Utc>>,
-    #[schema(value_type = Object)]
+    /// The run's outputs, `NULL` for a run that has none: a handler that
+    /// returned nothing (a `Log`, a `Sleep`) and any run not yet terminal.
+    #[schema(value_type = Option<Object>)]
     pub outputs: Option<serde_json::Value>,
     pub message: Option<String>,
     /// The executor round this run was created in — LOGICAL time. Two bars

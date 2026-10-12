@@ -94,7 +94,11 @@ function Where() {
   );
 }
 
-function renderTab(exec: ExecutionDto, url = "/gantt", slots?: Parameters<typeof ExecutionGanttTab>[0]["slots"]) {
+type Slots = Parameters<typeof ExecutionGanttTab>[0]["slots"];
+/** The slots are required; a test that is not about them renders nothing in them. Module-level, so stable. */
+const NO_SLOTS: Slots = { logs: () => null, outputs: () => null };
+
+function renderTab(exec: ExecutionDto, url = "/gantt", slots: Partial<Slots> = {}) {
   return render(
     <MemoryRouter initialEntries={[url]}>
       <Routes>
@@ -102,7 +106,7 @@ function renderTab(exec: ExecutionDto, url = "/gantt", slots?: Parameters<typeof
           path="/gantt"
           element={
             <>
-              <ExecutionGanttTab execution={exec} slots={slots} />
+              <ExecutionGanttTab execution={exec} slots={{ ...NO_SLOTS, ...slots }} />
               <Where />
             </>
           }
@@ -250,8 +254,8 @@ describe("ExecutionGanttTab: selection", () => {
     const attempts = within(panel).getByRole("list", { name: "Attempts" });
     expect(within(attempts).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Attempt 1Failed10 s", "Attempt 2Success10 s"]);
     expect(within(panel).getByText("retried once after a timeout")).toBeInTheDocument();
-    expect(within(panel).getByRole("region", { name: "Logs" })).toHaveTextContent("This run's logs arrive in a later release.");
-    expect(within(panel).getByRole("region", { name: "Outputs" })).toHaveTextContent("This run's outputs arrive in a later release.");
+    expect(within(panel).getByRole("region", { name: "Logs" })).toBeInTheDocument();
+    expect(within(panel).getByRole("region", { name: "Outputs" })).toBeInTheDocument();
     expect(rowFor(0)).toHaveAttribute("aria-selected", "true");
     expect(rowFor(0).tabIndex).toBe(0);
   });
@@ -410,7 +414,7 @@ describe("ExecutionGanttTab: live redraws", () => {
     render(
       <MemoryRouter initialEntries={["/gantt"]}>
         <Profiler id="gantt" onRender={() => renders++}>
-          <ExecutionGanttTab execution={live()} />
+          <ExecutionGanttTab execution={live()} slots={NO_SLOTS} />
         </Profiler>
       </MemoryRouter>,
     );
@@ -449,7 +453,7 @@ describe("ExecutionGanttTab: live redraws", () => {
     const logs = () => <Slot />;
     render(
       <MemoryRouter initialEntries={["/gantt?run=0"]}>
-        <ExecutionGanttTab execution={live()} slots={{ logs }} />
+        <ExecutionGanttTab execution={live()} slots={{ ...NO_SLOTS, logs }} />
       </MemoryRouter>,
     );
     const before = slotRenders;
@@ -468,7 +472,7 @@ describe("ExecutionGanttTab: live redraws", () => {
       render(
         <MemoryRouter initialEntries={["/gantt"]}>
           <Profiler id="gantt" onRender={() => renders++}>
-            <ExecutionGanttTab execution={live()} />
+            <ExecutionGanttTab execution={live()} slots={NO_SLOTS} />
           </Profiler>
         </MemoryRouter>,
       );
@@ -488,7 +492,7 @@ describe("ExecutionGanttTab: live redraws", () => {
     render(
       <MemoryRouter initialEntries={["/gantt"]}>
         <Profiler id="gantt" onRender={() => renders++}>
-          <ExecutionGanttTab execution={execution()} />
+          <ExecutionGanttTab execution={execution()} slots={NO_SLOTS} />
         </Profiler>
       </MemoryRouter>,
     );

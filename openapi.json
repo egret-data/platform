@@ -43257,7 +43257,6 @@
           "state",
           "history",
           "attempts",
-          "outputs",
           "created_at",
           "updated_at"
         ],
@@ -43350,7 +43349,11 @@
             "description": "The lease. `NULL` means unclaimed."
           },
           "outputs": {
-            "type": "object"
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The run's outputs, `NULL` for a run that has none: a handler that\nreturned nothing (a `Log`, a `Sleep`) and any run not yet terminal."
           },
           "message": {
             "type": [

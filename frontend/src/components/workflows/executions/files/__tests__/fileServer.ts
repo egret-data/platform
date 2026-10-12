@@ -23,6 +23,8 @@ export class FileServer {
   metas = new Map<string, Reply>();
   /** By file path; the reply may depend on `maxRows`. */
   previews = new Map<string, (maxRows: number | null) => Reply>();
+  /** While set, `file/metas` waits for it before answering. */
+  metasGate: Promise<void> | null = null;
   /** Other routes, `GET` by path (the execution page's own read). */
   others = new Map<string, Reply>();
 
@@ -41,6 +43,7 @@ export class FileServer {
         const [path, qs] = String(input).split("?");
         const query = new URLSearchParams(qs ?? "");
         this.calls.push({ path, query });
+        if (this.metasGate && path === `${EXEC_PATH}/file/metas`) await this.metasGate;
         const reply = this.route(path, query);
         return new Response(JSON.stringify(reply.body), { status: reply.status, headers: { "content-type": "application/json" } });
       }),

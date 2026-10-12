@@ -11,7 +11,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StateChip } from "@/components/workflows/StateChip";
 import { formatDuration, isTerminalState } from "@/components/workflows/executionState";
-import { FileRow } from "@/components/workflows/executions/files/FileRow";
+import { FileRow, FileRowList } from "@/components/workflows/executions/files/FileRow";
 import { findFileUris, isFileUri, pathSteps } from "@/components/workflows/executions/outputs/outputsModel";
 import { nextPollMs } from "@/components/workflows/executions/polling";
 import {
@@ -78,13 +78,14 @@ function plainValue(v: unknown): string {
  */
 function InputValue({ ws, executionId, value }: { ws: string; executionId: string; value: unknown }) {
   if (isFileUri(value)) return <FileRow ws={ws} executionId={executionId} uri={value} />;
-  const files = typeof value === "object" && value !== null ? findFileUris(value) : [];
+  const files =
+    typeof value === "object" && value !== null
+      ? findFileUris(value).map((f) => ({ key: JSON.stringify(f.path), uri: f.uri, label: pathSteps(f.path) }))
+      : [];
   return (
     <div className="grid gap-1.5">
       <span className="whitespace-pre-wrap break-all font-mono text-xs">{plainValue(value)}</span>
-      {files.map((f) => (
-        <FileRow key={JSON.stringify(f.path)} ws={ws} executionId={executionId} uri={f.uri} label={pathSteps(f.path)} />
-      ))}
+      {files.length > 0 ? <FileRowList ws={ws} executionId={executionId} files={files} /> : null}
     </div>
   );
 }

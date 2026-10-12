@@ -11,7 +11,7 @@ import { EXEC, EXEC_PATH, FileServer, uri, WS } from "../../files/__tests__/file
  * file rows, through the real execution page, its orval hooks and the routes
  * served from memory (FE-TEST-1).
  */
-function run(id: string, run_ix: number, task_id: string, outputs: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+function run(id: string, run_ix: number, task_id: string, outputs: Record<string, unknown> | null, extra: Record<string, unknown> = {}) {
   return {
     id,
     execution_id: EXEC,
@@ -57,7 +57,8 @@ function execution(extra: Record<string, unknown> = {}) {
     runs: [
       run("r-2", 2, "load", { rows: 12, file: uri("load.csv") }),
       run("r-0", 0, "extract", { uri: uri("extract.ion") }),
-      run("r-1", 1, "log", {}),
+      // `null`, the API's shape for a run with no outputs (a Log, a Sleep, a running task).
+      run("r-1", 1, "log", null),
     ],
     can_manage: false,
     ...extra,
@@ -126,8 +127,14 @@ describe("ExecutionOutputsTab", () => {
     expect(screen.queryByRole("tree")).toBeNull();
   });
 
+  it("shows the loop-iteration note in the tab too", async () => {
+    serve(execution({ loop_index: 0, loop_value: "eu-west", parent_execution_id: "5e5e5e5e-0000-4000-8000-0000000000ff" }));
+    renderAt("outputs");
+    expect(await screen.findByText(/resolve inside this iteration only/)).toHaveTextContent("eu-west");
+  });
+
   it("is empty when no run has outputs, and says why by the execution's state", async () => {
-    serve(execution({ runs: [run("r-1", 1, "log", {})] }));
+    serve(execution({ runs: [run("r-1", 1, "log", null), run("r-3", 3, "sleep", {})] }));
     renderAt("outputs");
     expect(await screen.findByText("No outputs")).toBeInTheDocument();
     expect(screen.getByText("No task run of this execution has outputs.")).toBeInTheDocument();
@@ -135,6 +142,21 @@ describe("ExecutionOutputsTab", () => {
 });
 
 describe("Outputs in the Gantt run panel", () => {
+  it("says a run with null outputs has none, instead of crashing the page", async () => {
+    serve(execution());
+    renderAt("gantt?run=1");
+    const panel = await screen.findByTestId("gantt-run-outputs");
+    expect(within(panel).getByText("This task run has no outputs.")).toBeInTheDocument();
+    expect(within(panel).queryByRole("tree")).toBeNull();
+  });
+
+  it("notes that a loop iteration's expressions resolve only inside it", async () => {
+    serve(execution({ loop_index: 0, loop_value: "eu-west", parent_execution_id: "5e5e5e5e-0000-4000-8000-0000000000ff" }));
+    renderAt("gantt?run=2");
+    const panel = await screen.findByTestId("gantt-run-outputs");
+    expect(within(panel).getByText(/resolve inside this iteration only/)).toHaveTextContent("The parent execution cannot reach these outputs.");
+  });
+
   it("shows the selected run's outputs tree in the panel", async () => {
     serve(execution());
     renderAt("gantt?run=2");

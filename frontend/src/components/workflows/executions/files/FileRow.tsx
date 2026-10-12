@@ -1,16 +1,10 @@
 import { useRef, useState, type ReactNode } from "react";
-import { Download, Eye, FileText, FileX } from "lucide-react";
+import { Eye, FileText, FileX } from "lucide-react";
 import { useWorkflowExecutionFileMetas } from "@/api/generated/workflow/workflow";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { FilePreviewDrawer } from "@/components/workflows/executions/files/FilePreviewDrawer";
-import {
-  downloadHref,
-  fileName,
-  formatBytes,
-  isNotFound,
-  NO_LONGER_AVAILABLE,
-} from "@/components/workflows/executions/files/fileModel";
+import { DownloadLink, FilePreviewDrawer } from "@/components/workflows/executions/files/FilePreviewDrawer";
+import { fileName, formatBytes, isNotFound, NO_LONGER_AVAILABLE } from "@/components/workflows/executions/files/fileModel";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
 /**
@@ -21,7 +15,8 @@ import { workflowsKeys } from "@/routes/workflows/queryKeys";
  * instead.
  *
  * A file's bytes never change once stored, so its size is read once
- * (`staleTime: Infinity`) however often the execution around it polls.
+ * (`staleTime: Infinity`) however often the execution around it polls. Each
+ * row reads its own size, so a list of rows is capped (`FileRowList`).
  */
 export function FileRow({
   ws,
@@ -36,6 +31,7 @@ export function FileRow({
   label?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const row = useRef<HTMLDivElement>(null);
   const previewButton = useRef<HTMLButtonElement>(null);
   const name = fileName(uri);
   const metas = useWorkflowExecutionFileMetas(
@@ -48,7 +44,9 @@ export function FileRow({
   const gone = metas.isError && isNotFound(metas.error);
 
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm" data-testid="file-row">
+    // `tabIndex={-1}`: focus lands on the row when the drawer closes after the
+    // size read turned into a 404 and took the Preview button away.
+    <div ref={row} tabIndex={-1} className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm outline-none" data-testid="file-row">
       {label ? <span className="min-w-0 break-all font-mono text-xs text-muted-foreground">{label}</span> : null}
       <span className="inline-flex min-w-0 items-center gap-1.5">
         {gone ? (
@@ -85,12 +83,7 @@ export function FileRow({
               <Eye aria-hidden />
               Preview
             </Button>
-            <Button asChild variant="outline" size="sm" className="h-7">
-              <a href={downloadHref(ws, executionId, uri)} download={name} aria-label={`Download ${name}`}>
-                <Download aria-hidden />
-                Download
-              </a>
-            </Button>
+            <DownloadLink ws={ws} executionId={executionId} uri={uri} className="h-7" />
           </span>
         </>
       )}
@@ -101,8 +94,44 @@ export function FileRow({
         size={size}
         open={open}
         onOpenChange={setOpen}
-        returnFocusTo={previewButton}
+        returnFocus={() => previewButton.current ?? row.current}
       />
+    </div>
+  );
+}
+
+/** How many file rows a list mounts at first, and adds per "Show more": each row reads its size. */
+export const FILE_ROWS_PAGE = 20;
+
+/**
+ * A list of file rows, capped: an output holding 1000 URIs mounts 20 rows
+ * (20 `file/metas` reads), and "Show more files" adds 20 at a time.
+ */
+export function FileRowList({
+  ws,
+  executionId,
+  files,
+}: {
+  ws: string;
+  executionId: string;
+  files: { key: string; uri: string; label?: ReactNode }[];
+}) {
+  const [limit, setLimit] = useState(FILE_ROWS_PAGE);
+  const rest = files.length - limit;
+  return (
+    <div className="grid gap-2">
+      <ul className="grid gap-2">
+        {files.slice(0, limit).map((f) => (
+          <li key={f.key}>
+            <FileRow ws={ws} executionId={executionId} uri={f.uri} label={f.label} />
+          </li>
+        ))}
+      </ul>
+      {rest > 0 ? (
+        <Button type="button" variant="outline" size="sm" className="justify-self-start" onClick={() => setLimit((n) => n + FILE_ROWS_PAGE)}>
+          <span className="tabular-nums">{`Show ${Math.min(FILE_ROWS_PAGE, rest)} more files of ${rest}`}</span>
+        </Button>
+      ) : null}
     </div>
   );
 }

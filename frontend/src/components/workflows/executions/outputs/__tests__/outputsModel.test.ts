@@ -21,26 +21,32 @@ describe("findFileUris", () => {
   it("treats a top-level string as a file and other schemes as not", () => {
     expect(findFileUris("kestra:///x.csv")).toEqual([{ path: [], uri: "kestra:///x.csv" }]);
     expect(findFileUris(["kestra://x.csv", "s3://bucket/x.csv", "KESTRA:///x.csv"])).toEqual([]);
-    expect(isFileUri("kestra:///")).toBe(true);
     expect(isFileUri(42)).toBe(false);
+  });
+
+  it("accepts only a well-formed URI: a non-empty path, no whitespace, no trailing slash", () => {
+    expect(isFileUri("kestra:///a/b/c.ion")).toBe(true);
+    expect(isFileUri("kestra:///x")).toBe(true);
+    // The bare prefix, a directory, and log-like text that starts with a URI.
+    expect(isFileUri("kestra:///")).toBe(false);
+    expect(isFileUri("kestra:///a/b/")).toBe(false);
+    expect(isFileUri("kestra:///a b c")).toBe(false);
+    expect(isFileUri("kestra:///x.csv\nwritten")).toBe(false);
+    expect(isFileUri("kestra:///x.csv\twritten")).toBe(false);
+    expect(isFileUri("kestra:///x.csv ")).toBe(false);
   });
 });
 
 describe("outputExpression", () => {
   it("writes a dotted path for plain keys and indexes", () => {
-    expect(outputExpression("t1", null, ["key"])).toBe("{{ outputs.t1.key }}");
-    expect(outputExpression("t1", undefined, ["rows", 0, "id"])).toBe("{{ outputs.t1.rows[0].id }}");
-    expect(outputExpression("t1", null, [])).toBe("{{ outputs.t1 }}");
+    expect(outputExpression("t1", ["key"])).toBe("{{ outputs.t1.key }}");
+    expect(outputExpression("t1", ["rows", 0, "id"])).toBe("{{ outputs.t1.rows[0].id }}");
+    expect(outputExpression("t1", [])).toBe("{{ outputs.t1 }}");
   });
 
   it("brackets a key Pebble cannot read after a dot, task ids included", () => {
-    expect(outputExpression("my-task", null, ["odd key", "2nd", "ok_1"])).toBe('{{ outputs["my-task"]["odd key"]["2nd"].ok_1 }}');
-  });
-
-  it("reaches a run with a value through it, in Kestra's outputs.<taskId>[value] form", () => {
-    expect(outputExpression("t1", "eu-west", ["key"])).toBe('{{ outputs.t1["eu-west"].key }}');
-    expect(outputExpression("t1", 'say "hi"', [])).toBe('{{ outputs.t1["say \\"hi\\""] }}');
-    // An empty value is still a value.
-    expect(outputExpression("t1", "", ["k"])).toBe('{{ outputs.t1[""].k }}');
+    expect(outputExpression("my-task", ["odd key", "2nd", "ok_1"])).toBe('{{ outputs["my-task"]["odd key"]["2nd"].ok_1 }}');
+    // An object key that looks like an index is still a key.
+    expect(outputExpression("t1", ["0", 0])).toBe('{{ outputs.t1["0"][0] }}');
   });
 });

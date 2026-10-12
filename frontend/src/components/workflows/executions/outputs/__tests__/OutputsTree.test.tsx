@@ -10,7 +10,7 @@ import { EXEC, FileServer, uri, WS } from "../../files/__tests__/fileServer";
  * The outputs tree of one task run, rendered for real (FE-TEST-1); the file
  * rows it carries read their size from the file routes served from memory.
  */
-function taskRun(outputs: Record<string, unknown>, extra: Partial<TaskRunDto> = {}): TaskRunDto {
+function taskRun(outputs: Record<string, unknown> | null, extra: Partial<TaskRunDto> = {}): TaskRunDto {
   return {
     id: "r-1",
     execution_id: EXEC,
@@ -46,13 +46,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderTree(run: TaskRunDto) {
+function renderTree(run: TaskRunDto, loopValue?: string | null) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const ui = (r: TaskRunDto) => (
     <QueryClientProvider client={client}>
-      <OutputsTree ws={WS} executionId={EXEC} run={run} />
-    </QueryClientProvider>,
+      <OutputsTree ws={WS} executionId={EXEC} run={r} loopValue={loopValue} />
+    </QueryClientProvider>
   );
+  const view = render(ui(run));
+  return { ...view, rerenderRun: (r: TaskRunDto) => view.rerender(ui(r)) };
 }
 
 const items = () => within(screen.getByRole("tree", { name: "Outputs of t1" })).getAllByRole("treeitem");
@@ -157,12 +159,21 @@ describe("OutputsTree", () => {
     expect(screen.queryByText(/reached through its value/)).toBeNull();
   });
 
-  it("writes a loop run's paths in Kestra's outputs.<taskId>[value] form, and says so", async () => {
+  it("writes paths flat by task id, even for a run that carries a value", async () => {
     renderTree(taskRun({ key: "v" }, { value: "eu-west" }));
     await userEvent.click(item("key"));
     await userEvent.click(screen.getByRole("button", { name: "Copy expression" }));
-    expect(writeText).toHaveBeenLastCalledWith('{{ outputs.t1["eu-west"].key }}');
-    expect(screen.getByText(/reached through its value/)).toHaveTextContent('outputs.t1["eu-west"]');
+    expect(writeText).toHaveBeenLastCalledWith("{{ outputs.t1.key }}");
+  });
+
+  it("says a loop iteration's expressions resolve only inside it, and nothing without one", () => {
+    const { unmount } = renderTree(taskRun({ key: "v" }), "eu-west");
+    const note = screen.getByText(/resolve inside this iteration only/);
+    expect(note).toHaveTextContent("eu-west");
+    expect(note).toHaveTextContent("The parent execution cannot reach these outputs.");
+    unmount();
+    renderTree(taskRun({ key: "v" }), null);
+    expect(screen.queryByText(/resolve inside this iteration only/)).toBeNull();
   });
 
   it("says when the clipboard refused, and keeps the expression on screen to copy by hand", async () => {
@@ -184,9 +195,58 @@ describe("OutputsTree", () => {
     expect(server.callsTo("metas").map((c) => c.query.get("path")).sort()).toEqual([uri("deep.ion"), uri("out.csv")].sort());
   });
 
-  it("says a run with no outputs has none", () => {
-    renderTree(taskRun({}));
+  it("says a run with no outputs has none, whether they are {} or null (the API's shape for a Log or a running task)", () => {
+    const { unmount } = renderTree(taskRun({}));
     expect(screen.getByText("This task run has no outputs.")).toBeInTheDocument();
     expect(screen.queryByRole("tree")).toBeNull();
+    unmount();
+    renderTree(taskRun(null));
+    expect(screen.getByText("This task run has no outputs.")).toBeInTheDocument();
+    expect(screen.queryByRole("tree")).toBeNull();
+  });
+
+  it("opens the top level when outputs arrive on a later poll", () => {
+    new FileServer().file(uri("out.csv"), 10).install();
+    const { rerenderRun } = renderTree(taskRun(null, { state: "RUNNING" }));
+    expect(screen.getByText("This task run has no outputs.")).toBeInTheDocument();
+    rerenderRun(taskRun(OUTPUTS));
+    expect(item("rows")).toHaveAttribute("aria-expanded", "true");
+    expect(labels()).toContain("[0], 1 key");
+  });
+
+  it("draws 200 children of an opened container, then shows more on request, from the keyboard too", async () => {
+    const big = Array.from({ length: 450 }, (_, i) => i);
+    renderTree(taskRun({ big }));
+    // 450 children start closed (over the 50 a container may have to open at first).
+    await userEvent.click(item("big"));
+    expect(items()).toHaveLength(1 + 200 + 1);
+    const more = within(screen.getByRole("tree")).getByRole("treeitem", { name: "Show 200 more of 250" });
+    expect(more).toHaveAttribute("aria-posinset", "201");
+    expect(more).toHaveAttribute("aria-setsize", "201");
+    await userEvent.click(more);
+    expect(items()).toHaveLength(1 + 400 + 1);
+    // Focus moves to the first child it revealed.
+    expect(item("[200]")).toHaveFocus();
+    await userEvent.keyboard("{End}");
+    expect(screen.getByRole("treeitem", { name: "Show 50 more of 50" })).toHaveFocus();
+    await userEvent.keyboard("{Enter}");
+    expect(items()).toHaveLength(1 + 450);
+    expect(item("[400]")).toHaveFocus();
+    await userEvent.keyboard("{End}{ArrowLeft}");
+    expect(item("big")).toHaveFocus();
+  });
+
+  it("mounts 20 file rows at first, each reading its size, and more on request", async () => {
+    const server = new FileServer().install();
+    const many = Array.from({ length: 45 }, (_, i) => uri(`f${i}.csv`));
+    for (const u of many) server.file(u, 10);
+    renderTree(taskRun({ many }));
+    const files = screen.getByRole("region", { name: "Files" });
+    expect(within(files).getAllByTestId("file-row")).toHaveLength(20);
+    await within(files).findAllByText("10 B");
+    expect(server.callsTo("metas")).toHaveLength(20);
+    await userEvent.click(within(files).getByRole("button", { name: "Show 20 more files of 25" }));
+    expect(within(files).getAllByTestId("file-row")).toHaveLength(40);
+    expect(within(files).getByRole("button", { name: "Show 5 more files of 5" })).toBeInTheDocument();
   });
 });

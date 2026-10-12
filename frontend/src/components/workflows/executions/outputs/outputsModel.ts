@@ -3,10 +3,15 @@
  * how a path in a task run's outputs is written as an expression.
  */
 
-/** A `kestra:///` URI names a file in the execution's internal storage (spec §8). */
-export const FILE_URI_PREFIX = "kestra:///";
+/**
+ * A well-formed `kestra:///` URI: the prefix, then a non-empty path with no
+ * whitespace that does not end in `/`. A log-like string that merely starts
+ * with a URI ("kestra:///x.csv written") or the bare prefix is not a file, so
+ * it is not offered as a file row that would read "no longer available".
+ */
+const FILE_URI = /^kestra:\/\/\/\S*[^\s/]$/;
 
-export const isFileUri = (v: unknown): v is string => typeof v === "string" && v.startsWith(FILE_URI_PREFIX);
+export const isFileUri = (v: unknown): v is string => typeof v === "string" && FILE_URI.test(v);
 
 /** A path into a value: object keys and array indexes, from the top. */
 export type OutputPath = readonly (string | number)[];
@@ -17,9 +22,8 @@ export interface FoundFile {
 }
 
 /**
- * Every `kestra:///` string in `value`, at any depth of objects and arrays,
- * with its path, in document order (object keys as given, array items by
- * index). A string that only contains the prefix past its start is not a file.
+ * Every `kestra:///` URI in `value`, at any depth of objects and arrays, with
+ * its path, in document order (object keys as given, array items by index).
  */
 export function findFileUris(value: unknown, path: OutputPath = []): FoundFile[] {
   if (isFileUri(value)) return [{ path, uri: value }];
@@ -39,34 +43,34 @@ function step(key: string | number): string {
   return DOTTED.test(key) ? `.${key}` : `[${JSON.stringify(key)}]`;
 }
 
-/**
- * The expression that reads `path` in a task run's outputs, braces included:
- * `{{ outputs.t1.key }}`. A run that carries a `value` (a run inside a
- * looping flowable) is reached through it, in Kestra's `outputs.<taskId>[value]`
- * form: `{{ outputs.t1["a"].key }}`.
- *
- * No egret run carries a `value` today (no `CreateRun` sets one; a `Loop`'s
- * iterations are child executions, W7b Task 4), so the loop form is written
- * only when the DTO has one.
- */
-export function outputExpression(taskId: string, value: string | null | undefined, path: OutputPath): string {
-  return `{{ ${outputPath(taskId, value, path)} }}`;
-}
-
-/** `outputExpression` without the braces: `outputs.t1.key`. */
-export function outputPath(taskId: string, value: string | null | undefined, path: OutputPath): string {
-  const loop = value === null || value === undefined ? "" : `[${JSON.stringify(value)}]`;
-  return `outputs${step(taskId)}${loop}${pathSteps(path)}`;
-}
-
 /** A path's steps alone, as Pebble writes them after a name: `.key[0]["odd key"]`. */
 export const pathSteps = (path: OutputPath) => path.map(step).join("");
 
 /**
- * The note shown above a loop run's outputs (spec §8: the loop form "is noted
- * as such"). Also this module's marker in `scripts/assert-workflows-lazy.mjs`.
+ * The expression that reads `path` in a task run's outputs, braces included:
+ * `{{ outputs.t1.key }}`.
+ *
+ * Always flat by task id: egret's renderer puts each run's outputs into the
+ * context under `outputs.<taskId>` (`worker/render.rs`), never keyed by a
+ * run's `value`, so Kestra's `outputs.<taskId>[value]` form would not resolve
+ * here (W7b Task 6 review; ruled 2026-10-12).
  */
-export const LOOP_EXPRESSION_NOTE = "A run inside a loop is reached through its value";
+export function outputExpression(taskId: string, path: OutputPath): string {
+  return `{{ ${outputPath(taskId, path)} }}`;
+}
+
+/** `outputExpression` without the braces: `outputs.t1.key`. */
+export function outputPath(taskId: string, path: OutputPath): string {
+  return `outputs${step(taskId)}${pathSteps(path)}`;
+}
+
+/**
+ * The end of the note shown on a loop iteration's outputs: a `Loop`'s
+ * iterations are child executions, whose context is the loop ancestors'
+ * outputs plus their own, so the expressions resolve inside the iteration and
+ * nowhere else. Also this module's marker in `scripts/assert-workflows-lazy.mjs`.
+ */
+export const LOOP_ITERATION_NOTE = "The parent execution cannot reach these outputs.";
 
 /** A value as the tree previews it on one line. */
 export function previewValue(value: unknown): string {

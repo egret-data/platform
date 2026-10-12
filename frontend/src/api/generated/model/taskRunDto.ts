@@ -88,7 +88,12 @@ export interface TaskRunDto {
      * @nullable
      */
   claimed_at?: string | null;
-  outputs: TaskRunDtoOutputs;
+  /**
+     * The run's outputs, `NULL` for a run that has none: a handler that
+     * returned nothing (a `Log`, a `Sleep`) and any run not yet terminal.
+     * @nullable
+     */
+  outputs?: TaskRunDtoOutputs;
   /** @nullable */
   message?: string | null;
   /**

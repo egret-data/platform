@@ -84,7 +84,7 @@ export default function ExecutionOutputsTab({ ws, execution }: { ws: string; exe
               ) : null}{" "}
               <span className="font-normal tabular-nums text-muted-foreground">#{selected.run_ix}</span>
             </h2>
-            <OutputsTree key={selected.id} ws={ws} executionId={execution.id} run={selected} />
+            <OutputsTree key={selected.id} ws={ws} executionId={execution.id} run={selected} loopValue={execution.loop_value} />
           </>
         ) : (
           // Also this module's marker in `scripts/assert-workflows-lazy.mjs`.

@@ -153,9 +153,9 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
     () => ({
       logs: (run: TaskRunDto) => <RunLogs ws={ws} executionId={execution.id} run={run} />,
       // The panel is keyed by run, so the tree's open items start afresh for each run.
-      outputs: (run: TaskRunDto) => <OutputsTree ws={ws} executionId={execution.id} run={run} />,
+      outputs: (run: TaskRunDto) => <OutputsTree ws={ws} executionId={execution.id} run={run} loopValue={execution.loop_value} />,
     }),
-    [ws, execution.id],
+    [ws, execution.id, execution.loop_value],
   );
 
   return (

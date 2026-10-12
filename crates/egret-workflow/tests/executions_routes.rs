@@ -1218,6 +1218,23 @@ async fn a_gantt_row_is_computable_from_the_execution_dto_alone(pool: sqlx::PgPo
     for entry in dto["history"].as_array().expect("execution history") {
         assert!(entry.is_string(), "{dto}");
     }
+    // `outputs` is `null`, present and not `{}`, on a run that has none yet:
+    // the in-flight `Pause`. The OpenAPI document says `["object", "null"]`
+    // (W7b Task 6 review): the UI's outputs tree crashed on this shape when
+    // the generated type claimed the field was never null.
+    let in_flight: Vec<&Value> = dto["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["ended_seq"].is_null())
+        .collect();
+    assert_eq!(in_flight.len(), 1, "{dto}");
+    assert!(
+        in_flight[0].as_object().unwrap().contains_key("outputs"),
+        "{dto}"
+    );
+    assert_eq!(in_flight[0]["outputs"], Value::Null, "{dto}");
+
     // The OpenAPI document types these as `Vec<String>` and `Vec<AttemptDto>`
     // while the DTO passes the stored `jsonb` through: the wire must decode
     // into the documented types, or the generated client lies.

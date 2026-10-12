@@ -1,38 +1,46 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Check, ChevronDown, ChevronRight, Copy, FileOutput, FileText, Info } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Copy, FileOutput, FileText, Info, MoreHorizontal } from "lucide-react";
 import type { TaskRunDto } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { Button } from "@/components/ui/button";
-import { FileRow } from "@/components/workflows/executions/files/FileRow";
+import { FileRowList } from "@/components/workflows/executions/files/FileRow";
 import { fileName } from "@/components/workflows/executions/files/fileModel";
 import {
   copyText,
   findFileUris,
   isFileUri,
-  LOOP_EXPRESSION_NOTE,
+  LOOP_ITERATION_NOTE,
   outputExpression,
-  outputPath,
   previewValue,
   type OutputPath,
 } from "@/components/workflows/executions/outputs/outputsModel";
 
 /** A container with at most this many children starts open at the top level; a bigger one starts closed. */
 const OPEN_AT_START_MAX = 50;
+/**
+ * How many children of one container are drawn, and how many more each "Show
+ * more" adds. An opened 100k-item array draws 200 items, not 100k.
+ */
+export const CHILDREN_PAGE = 200;
 
 interface TreeNode {
   id: string;
-  path: OutputPath;
   label: string;
-  value: unknown;
   depth: number;
-  /** Children, when the value is a non-empty object or array. */
-  childCount: number;
   parentId: string | null;
   posInSet: number;
   setSize: number;
+  /** A value's node; absent on a "Show more" node. */
+  path?: OutputPath;
+  value?: unknown;
+  /** Children, when the value is a non-empty object or array. */
+  childCount: number;
+  /** A "Show more" node: the container it extends, and the first child it reveals. */
+  more?: { containerId: string; nextId: string };
 }
 
 const nodeId = (path: OutputPath) => JSON.stringify(path);
+const ROOT_ID = nodeId([]);
 
 function children(value: unknown): [string | number, unknown][] {
   if (Array.isArray(value)) return value.map((v, i) => [i, v]);
@@ -40,30 +48,49 @@ function children(value: unknown): [string | number, unknown][] {
   return [];
 }
 
-/** The items a reader can see, in order: every node whose ancestors are all open. */
-function visibleNodes(outputs: Record<string, unknown>, expanded: ReadonlySet<string>): TreeNode[] {
+const childCount = (value: unknown) =>
+  Array.isArray(value) ? value.length : value !== null && typeof value === "object" ? Object.keys(value).length : 0;
+
+/**
+ * The items a reader can see, in order: every node whose ancestors are all
+ * open, at most `shown(container)` children per container, then a "Show
+ * more" node for the rest.
+ */
+function visibleNodes(
+  outputs: Record<string, unknown>,
+  expanded: ReadonlySet<string>,
+  shown: ReadonlyMap<string, number>,
+): TreeNode[] {
   const out: TreeNode[] = [];
-  const walk = (value: unknown, path: OutputPath, depth: number, parentId: string | null) => {
+  const walk = (value: unknown, path: OutputPath, depth: number, containerId: string) => {
     const kids = children(value);
-    kids.forEach(([key, v], i) => {
+    const limit = shown.get(containerId) ?? CHILDREN_PAGE;
+    const drawn = Math.min(kids.length, limit);
+    const setSize = drawn < kids.length ? drawn + 1 : drawn;
+    const parentId = containerId === ROOT_ID ? null : containerId;
+    for (let i = 0; i < drawn; i++) {
+      const [key, v] = kids[i];
       const p = [...path, key];
       const id = nodeId(p);
-      const childCount = children(v).length;
+      const n = childCount(v);
+      out.push({ id, path: p, label: typeof key === "number" ? `[${key}]` : key, value: v, depth, childCount: n, parentId, posInSet: i + 1, setSize });
+      if (n > 0 && expanded.has(id)) walk(v, p, depth + 1, id);
+    }
+    if (drawn < kids.length) {
+      const rest = kids.length - drawn;
       out.push({
-        id,
-        path: p,
-        label: typeof key === "number" ? `[${key}]` : key,
-        value: v,
+        id: `${containerId}#more`,
+        label: `Show ${Math.min(CHILDREN_PAGE, rest)} more of ${rest}`,
         depth,
-        childCount,
+        childCount: 0,
         parentId,
-        posInSet: i + 1,
-        setSize: kids.length,
+        posInSet: setSize,
+        setSize,
+        more: { containerId, nextId: nodeId([...path, kids[drawn][0]]) },
       });
-      if (childCount > 0 && expanded.has(id)) walk(v, p, depth + 1, id);
-    });
+    }
   };
-  walk(outputs, [], 1, null);
+  walk(outputs, [], 1, ROOT_ID);
   return out;
 }
 
@@ -72,7 +99,7 @@ function initiallyExpanded(outputs: Record<string, unknown>): Set<string> {
   return new Set(
     Object.entries(outputs)
       .filter(([, v]) => {
-        const n = children(v).length;
+        const n = childCount(v);
         return n > 0 && n <= OPEN_AT_START_MAX;
       })
       .map(([k]) => nodeId([k])),
@@ -84,6 +111,14 @@ const nodePreview = (value: unknown) => (isFileUri(value) ? `file ${fileName(val
 
 type CopyStatus = { tone: "ok" | "error"; text: string } | null;
 
+interface OutputsTreeProps {
+  ws: string;
+  executionId: string;
+  run: TaskRunDto;
+  /** The execution's `loop_value`: set on a `Loop` iteration's child execution. */
+  loopValue?: string | null;
+}
+
 /**
  * One task run's outputs as a collapsible tree (W7b spec §8), with the
  * selected value's expression and two copy actions under it, then every file
@@ -91,32 +126,53 @@ type CopyStatus = { tone: "ok" | "error"; text: string } | null;
  * tree of the run's outputs whose selection gives the `{{ outputs.… }}` path,
  * and a copy button; its expression debugger is left out (spec §2).
  *
- * The tree is the ARIA tree pattern (FE-A11Y-3): one tab stop (roving
+ * `run.outputs` is `null` for a run that has none (a `Log`, a `Sleep`, any run
+ * not yet terminal), which is the commonest shape of all, so it is read as
+ * empty here, where every consumer of the tree passes through.
+ */
+export function OutputsTree(props: OutputsTreeProps) {
+  const outputs = props.run.outputs ?? {};
+  if (Object.keys(outputs).length === 0) {
+    // Also this module's marker in `scripts/assert-workflows-lazy.mjs`.
+    return <EmptyState icon={FileOutput} title="No outputs" description="This task run has no outputs." />;
+  }
+  // Mounted when outputs first appear, so a run whose outputs arrive on a later
+  // poll opens its top level then, as one that had them from the start does.
+  return <TreeBody {...props} outputs={outputs} />;
+}
+
+/**
+ * The tree itself: the ARIA tree pattern (FE-A11Y-3). One tab stop (roving
  * `tabIndex`), the focused item is the selected one, Up/Down/Home/End move,
  * Right opens a container then enters it, Left closes it then goes to the
- * parent, and Enter or Space toggles. The copy buttons sit outside the tree,
- * so no item holds a control of its own.
+ * parent, and Enter or Space toggles, or shows more on a "Show more" item.
+ * Each key costs O(1) lookups (an index by id), not a scan of the items. The
+ * copy buttons sit outside the tree, so no item holds a control of its own.
  *
- * Mounted per run (the Gantt panel and the Outputs tab key it by `run.id`),
- * so what is open and selected starts afresh for another run, and survives a
- * poll that hands the same run back.
+ * Mounted per run (the Gantt panel and the Outputs tab key it by `run.id`), so
+ * what is open and selected starts afresh for another run, and survives a poll
+ * that hands the same run back.
  */
-export function OutputsTree({ ws, executionId, run }: { ws: string; executionId: string; run: TaskRunDto }) {
-  const outputs = run.outputs;
+function TreeBody({ ws, executionId, run, loopValue, outputs }: OutputsTreeProps & { outputs: Record<string, unknown> }) {
   const [expanded, setExpanded] = useState<Set<string>>(() => initiallyExpanded(outputs));
-  const nodes = useMemo(() => visibleNodes(outputs, expanded), [outputs, expanded]);
+  const [shown, setShown] = useState<Map<string, number>>(() => new Map());
+  const nodes = useMemo(() => visibleNodes(outputs, expanded, shown), [outputs, expanded, shown]);
+  const indexOf = useMemo(() => new Map(nodes.map((n, i) => [n.id, i])), [nodes]);
   const [activeId, setActiveId] = useState<string | null>(null);
   // Set by a keyboard move; the render that follows focuses the new active item.
   const focusPending = useRef(false);
   const [status, setStatus] = useState<CopyStatus>(null);
   const items = useRef(new Map<string, HTMLLIElement>());
   const statusTimer = useRef<number | undefined>(undefined);
-  const files = useMemo(() => findFileUris(outputs), [outputs]);
-  const value = run.value ?? null;
+  const files = useMemo(
+    () => findFileUris(outputs).map((f) => ({ key: nodeId(f.path), uri: f.uri, label: outputExpression(run.task_id, f.path) })),
+    [outputs, run.task_id],
+  );
   const filesId = useId();
 
   // The active item, or the first one when it has gone (closed under a parent, or a poll dropped it).
-  const active = nodes.find((n) => n.id === activeId) ?? nodes[0];
+  const activeIndex = activeId === null ? undefined : indexOf.get(activeId);
+  const active = nodes[activeIndex ?? 0];
 
   useEffect(() => {
     if (!focusPending.current || !active) return;
@@ -125,11 +181,6 @@ export function OutputsTree({ ws, executionId, run }: { ws: string; executionId:
   });
 
   useEffect(() => () => window.clearTimeout(statusTimer.current), []);
-
-  if (Object.keys(outputs).length === 0) {
-    // Also this module's marker in `scripts/assert-workflows-lazy.mjs`.
-    return <EmptyState icon={FileOutput} title="No outputs" description="This task run has no outputs." />;
-  }
 
   const moveTo = (node: TreeNode | undefined) => {
     // Already active: no render follows, so a pending focus would wait for an
@@ -142,15 +193,23 @@ export function OutputsTree({ ws, executionId, run }: { ws: string; executionId:
     if (node.childCount === 0) return;
     setExpanded((prev) => {
       const next = new Set(prev);
-      const isOpen = prev.has(node.id);
-      if (open ?? !isOpen) next.add(node.id);
+      if (open ?? !prev.has(node.id)) next.add(node.id);
       else next.delete(node.id);
       return next;
     });
   };
+  /** A "Show more" item: draw the next page, and move to its first child (the item itself goes away). */
+  const showMore = (node: TreeNode) => {
+    if (!node.more) return;
+    const { containerId, nextId } = node.more;
+    setShown((prev) => new Map(prev).set(containerId, (prev.get(containerId) ?? CHILDREN_PAGE) + CHILDREN_PAGE));
+    focusPending.current = true;
+    setActiveId(nextId);
+  };
+  const activate = (node: TreeNode) => (node.more ? showMore(node) : toggle(node));
 
   const onKeyDown = (e: KeyboardEvent<HTMLLIElement>, node: TreeNode) => {
-    const i = nodes.findIndex((n) => n.id === node.id);
+    const i = indexOf.get(node.id) ?? 0;
     const isOpen = expanded.has(node.id);
     let handled = true;
     switch (e.key) {
@@ -172,11 +231,11 @@ export function OutputsTree({ ws, executionId, run }: { ws: string; executionId:
         break;
       case "ArrowLeft":
         if (node.childCount > 0 && isOpen) toggle(node, false);
-        else moveTo(nodes.find((n) => n.id === node.parentId));
+        else if (node.parentId !== null) moveTo(nodes[indexOf.get(node.parentId) ?? -1]);
         break;
       case "Enter":
       case " ":
-        toggle(node);
+        activate(node);
         break;
       default:
         handled = false;
@@ -199,16 +258,17 @@ export function OutputsTree({ ws, executionId, run }: { ws: string; executionId:
     statusTimer.current = window.setTimeout(() => setStatus(null), 4000);
   };
 
-  const expression = active ? outputExpression(run.task_id, value, active.path) : "";
+  const selectedValue = active && !active.more && active.path ? active : undefined;
+  const expression = selectedValue?.path ? outputExpression(run.task_id, selectedValue.path) : "";
 
   return (
     <div className="grid min-w-0 gap-3">
-      {value !== null ? (
+      {loopValue != null ? (
         <p className="flex items-start gap-2 text-sm text-muted-foreground">
           <Info aria-hidden className="mt-0.5 size-4 shrink-0" />
           <span>
-            {`${LOOP_EXPRESSION_NOTE}, in Kestra's outputs.<taskId>[value] form: `}
-            <code className="font-mono text-xs">{outputPath(run.task_id, value, [])}</code>.
+            This execution is the loop iteration <span className="font-mono text-xs">{loopValue}</span>. These expressions
+            resolve inside this iteration only. {LOOP_ITERATION_NOTE}
           </span>
         </p>
       ) : null}
@@ -216,7 +276,7 @@ export function OutputsTree({ ws, executionId, run }: { ws: string; executionId:
         {nodes.map((node) => {
           const isOpen = expanded.has(node.id);
           const selected = node.id === active?.id;
-          const preview = nodePreview(node.value);
+          const preview = node.more ? "" : nodePreview(node.value);
           return (
             <li
               key={node.id}
@@ -225,7 +285,7 @@ export function OutputsTree({ ws, executionId, run }: { ws: string; executionId:
                 else items.current.delete(node.id);
               }}
               role="treeitem"
-              aria-label={`${node.label}, ${preview}`}
+              aria-label={node.more ? node.label : `${node.label}, ${preview}`}
               aria-level={node.depth}
               aria-posinset={node.posInSet}
               aria-setsize={node.setSize}
@@ -234,7 +294,7 @@ export function OutputsTree({ ws, executionId, run }: { ws: string; executionId:
               tabIndex={selected ? 0 : -1}
               onClick={() => {
                 setActiveId(node.id);
-                toggle(node);
+                activate(node);
               }}
               onKeyDown={(e) => onKeyDown(e, node)}
               onFocus={() => setActiveId(node.id)}
@@ -244,21 +304,35 @@ export function OutputsTree({ ws, executionId, run }: { ws: string; executionId:
               style={{ paddingLeft: `${(node.depth - 1) * 1 + 0.25}rem` }}
             >
               <span aria-hidden className="inline-flex size-4 shrink-0 items-center justify-center text-muted-foreground">
-                {node.childCount > 0 ? isOpen ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" /> : null}
+                {node.more ? (
+                  <MoreHorizontal className="size-3.5" />
+                ) : node.childCount > 0 ? (
+                  isOpen ? (
+                    <ChevronDown className="size-3.5" />
+                  ) : (
+                    <ChevronRight className="size-3.5" />
+                  )
+                ) : null}
               </span>
-              <span className="shrink-0 font-medium">{node.label}</span>
-              <span aria-hidden className="text-muted-foreground">
-                :
-              </span>
-              {isFileUri(node.value) ? <FileText aria-hidden className="size-3.5 shrink-0 text-muted-foreground" /> : null}
-              <span className="min-w-0 truncate text-muted-foreground" title={typeof node.value === "string" ? node.value : undefined}>
-                {preview}
-              </span>
+              {node.more ? (
+                <span className="text-muted-foreground tabular-nums">{node.label}</span>
+              ) : (
+                <>
+                  <span className="shrink-0 font-medium">{node.label}</span>
+                  <span aria-hidden className="text-muted-foreground">
+                    :
+                  </span>
+                  {isFileUri(node.value) ? <FileText aria-hidden className="size-3.5 shrink-0 text-muted-foreground" /> : null}
+                  <span className="min-w-0 truncate text-muted-foreground" title={typeof node.value === "string" ? node.value : undefined}>
+                    {preview}
+                  </span>
+                </>
+              )}
             </li>
           );
         })}
       </ul>
-      {active ? (
+      {selectedValue ? (
         <section aria-label="Selected output" className="grid gap-2">
           <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
             <span className="text-muted-foreground">Expression</span>
@@ -267,7 +341,7 @@ export function OutputsTree({ ws, executionId, run }: { ws: string; executionId:
             </code>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button type="button" variant="outline" size="sm" onClick={() => void copy(copyText(active.value), "value")}>
+            <Button type="button" variant="outline" size="sm" onClick={() => void copy(copyText(selectedValue.value), "value")}>
               <Copy aria-hidden />
               Copy value
             </Button>
@@ -291,13 +365,7 @@ export function OutputsTree({ ws, executionId, run }: { ws: string; executionId:
           <span id={filesId} className="text-sm font-medium">
             Files
           </span>
-          <ul className="grid gap-2">
-            {files.map((f) => (
-              <li key={nodeId(f.path)}>
-                <FileRow ws={ws} executionId={executionId} uri={f.uri} label={outputExpression(run.task_id, value, f.path)} />
-              </li>
-            ))}
-          </ul>
+          <FileRowList ws={ws} executionId={executionId} files={files} />
         </section>
       ) : null}
     </div>

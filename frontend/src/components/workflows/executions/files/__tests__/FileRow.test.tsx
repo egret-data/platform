@@ -168,6 +168,39 @@ describe("FilePreviewDrawer", () => {
     expect(await within(drawer).findByText("back")).toBeInTheDocument();
   });
 
+  it("keeps the header, Rows and Download out of the scrolling list", async () => {
+    const path = uri("big.txt");
+    new FileServer().file(path, 10, { previewable: true, truncated: false, rows: Array.from({ length: 300 }, (_, i) => `l${i}`) }).install();
+    renderRow(path);
+    const drawer = await openPreview("big.txt");
+    const scroll = await within(drawer).findByTestId("preview-scroll");
+    expect(scroll).toHaveClass("overflow-auto", "min-h-0", "flex-1");
+    for (const control of [
+      within(drawer).getByRole("combobox", { name: "Rows" }),
+      within(drawer).getByRole("link", { name: "Download big.txt" }),
+      within(drawer).getByRole("heading", { name: "Preview of big.txt" }),
+    ]) {
+      expect(scroll.contains(control)).toBe(false);
+    }
+  });
+
+  it("puts focus on the row, not the page, when the file went missing while the drawer was open", async () => {
+    const path = uri("going.txt");
+    const server = new FileServer().install();
+    let release!: () => void;
+    server.metasGate = new Promise((r) => (release = r));
+    renderRow(path);
+    // The size is still being read: Preview is offered.
+    const drawer = await openPreview("going.txt");
+    // The size read answers 404 now: the row drops Preview while the drawer is open.
+    release();
+    expect(await screen.findByText("This file is no longer available", { selector: "span" })).toBeInTheDocument();
+    expect(within(drawer).getByRole("heading", { name: "Preview of going.txt" })).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByTestId("file-row")).toHaveFocus();
+  });
+
   it("closes on Escape and gives focus back to the Preview button", async () => {
     const path = uri("log.txt");
     new FileServer().file(path, 100, { previewable: true, truncated: false, rows: ["x"] }).install();

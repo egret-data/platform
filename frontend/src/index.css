@@ -301,6 +301,25 @@ code {
   }
 }
 
+/* `ui/sheet.tsx`: the panel slides in from the right edge and back out. The
+   reduced-motion block above cuts both to 0.01ms. */
+@keyframes sheet-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes sheet-out-right {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
 /* Tabular figures for numeric/data contexts (right-aligned counts, ids, metrics,
    timers) so digits don't shift width and columns stay aligned. Apply `tabular`
    (or Tailwind's `tabular-nums`) on the number cell/value. */

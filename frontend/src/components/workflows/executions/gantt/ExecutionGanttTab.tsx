@@ -84,7 +84,7 @@ const parseRun = (raw: string | null): number | null => (raw !== null && /^\d+$/
  * (FE-PAGE-2), and its panel opens below the chart with slots for the run's
  * logs and outputs (Tasks 5 and 6 of W7b).
  */
-export default function ExecutionGanttTab({ execution, slots }: { execution: ExecutionDto; slots?: GanttRunSlots }) {
+export default function ExecutionGanttTab({ execution, slots }: { execution: ExecutionDto; slots: GanttRunSlots }) {
   const [params, setParams] = useSearchParams();
   const view = useRef<GanttViewHandle>(null);
   const reducedMotion = usePrefersReducedMotion();
@@ -123,10 +123,10 @@ export default function ExecutionGanttTab({ execution, slots }: { execution: Exe
 
   // The slots render once per run, not on every clock tick: the DTO keeps its
   // identity until the next poll, and an unchanged element is not re-rendered.
-  const logsSlot = slots?.logs;
-  const outputsSlot = slots?.outputs;
-  const logs = useMemo(() => (selectedRun && logsSlot ? logsSlot(selectedRun) : undefined), [selectedRun, logsSlot]);
-  const outputs = useMemo(() => (selectedRun && outputsSlot ? outputsSlot(selectedRun) : undefined), [selectedRun, outputsSlot]);
+  const logsSlot = slots.logs;
+  const outputsSlot = slots.outputs;
+  const logs = useMemo(() => (selectedRun ? logsSlot(selectedRun) : null), [selectedRun, logsSlot]);
+  const outputs = useMemo(() => (selectedRun ? outputsSlot(selectedRun) : null), [selectedRun, outputsSlot]);
 
   if (execution.runs.length === 0) {
     return (

@@ -1,14 +1,15 @@
-import { useId, useState, type RefObject } from "react";
+import { useId, useState } from "react";
 import { Download, FileQuestion, FileX, RotateCw } from "lucide-react";
 import { useWorkflowPreviewExecutionFile } from "@/api/generated/workflow/workflow";
 import type { FilePreviewDto } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
 import {
   downloadHref,
   fileName,
@@ -38,9 +39,11 @@ const errorMessage = (e: unknown) => (e instanceof Error && e.message ? e.messag
  * truncation notice and Download; egret has no encoding choice, because the
  * route reads text as UTF-8 only.
  *
- * A Radix dialog, so focus moves into it, stays there, and Escape closes it;
- * on close, focus goes back to `returnFocusTo` (the Preview button) rather
- * than wherever the browser last had it.
+ * A `ui/sheet` (a Radix dialog sliding in from the right), so focus moves into
+ * it, stays there, and Escape closes it; on close, focus goes to
+ * `returnFocus()` (the Preview button, or its row when the button has gone)
+ * rather than wherever the browser last had it. The header and the toolbar
+ * (Rows, Download) stay put; only the rows scroll.
  */
 export function FilePreviewDrawer({
   ws,
@@ -49,7 +52,7 @@ export function FilePreviewDrawer({
   size,
   open,
   onOpenChange,
-  returnFocusTo,
+  returnFocus,
 }: {
   ws: string;
   executionId: string;
@@ -58,37 +61,39 @@ export function FilePreviewDrawer({
   size?: number;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  returnFocusTo?: RefObject<HTMLElement | null>;
+  /** Where focus goes on close. */
+  returnFocus?: () => HTMLElement | null;
 }) {
   const name = fileName(uri);
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className="top-0 right-0 left-auto h-dvh max-h-dvh w-full max-w-2xl translate-x-0 translate-y-0 rounded-none border-y-0 border-r-0"
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent
         onCloseAutoFocus={(e) => {
-          if (!returnFocusTo?.current) return;
+          const target = returnFocus?.();
+          if (!target) return;
           e.preventDefault();
-          returnFocusTo.current.focus();
+          target.focus();
         }}
       >
-        <DialogHeader className="pr-8">
-          <DialogTitle className="break-all font-mono text-base">{`Preview of ${name}`}</DialogTitle>
-          <DialogDescription className="break-all font-mono text-xs">
+        <SheetHeader>
+          <SheetTitle className="break-all font-mono text-base">{`Preview of ${name}`}</SheetTitle>
+          <SheetDescription className="break-all font-mono text-xs">
             {uri}
             {size !== undefined ? <span className="tabular-nums">{` · ${formatBytes(size)}`}</span> : null}
-          </DialogDescription>
-        </DialogHeader>
+          </SheetDescription>
+        </SheetHeader>
         {/* Mounted only while open: Radix unmounts the content when closed, so nothing is read before. */}
         <PreviewBody ws={ws} executionId={executionId} uri={uri} />
-      </DialogContent>
-    </Dialog>
+      </SheetContent>
+    </Sheet>
   );
 }
 
-function DownloadLink({ ws, executionId, uri }: { ws: string; executionId: string; uri: string }) {
+/** Download, a plain link to the file route (`downloadHref`): shared by the row and the drawer. */
+export function DownloadLink({ ws, executionId, uri, className }: { ws: string; executionId: string; uri: string; className?: string }) {
   const name = fileName(uri);
   return (
-    <Button asChild variant="outline" size="sm">
+    <Button asChild variant="outline" size="sm" className={cn(className)}>
       <a href={downloadHref(ws, executionId, uri)} download={name} aria-label={`Download ${name}`}>
         <Download aria-hidden />
         Download
@@ -120,9 +125,11 @@ function PreviewBody({ ws, executionId, uri }: { ws: string; executionId: string
     );
   }
 
+  // A flex column filling the sheet: the toolbar and any notice stay put, and
+  // only the rows' list scrolls (`min-h-0 flex-1 overflow-auto`).
   return (
-    <div className="grid min-h-0 gap-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <Label htmlFor={rowsId}>Rows</Label>
           <Select value={String(maxRows)} onValueChange={(v) => setMaxRows(Number(v))}>
@@ -182,7 +189,7 @@ function PreviewRows({ uri, preview, maxRows }: { uri: string; preview: FilePrev
   return (
     <>
       {preview.truncated ? (
-        <p className="text-sm text-muted-foreground tabular-nums" role="note">
+        <p className="shrink-0 text-sm text-muted-foreground tabular-nums" role="note">
           {n < maxRows
             ? `Showing the first ${n} rows: the preview's size limit was reached before ${maxRows} rows. Download the file to read all of it.`
             : `Showing the first ${maxRows} rows; the file has more. Choose more rows, or download the file to read all of it.`}
@@ -190,7 +197,8 @@ function PreviewRows({ uri, preview, maxRows }: { uri: string; preview: FilePrev
       ) : null}
       <ol
         aria-label={ion ? "Values" : "Lines"}
-        className="min-h-0 overflow-auto rounded-md border bg-muted/40 font-mono text-xs"
+        data-testid="preview-scroll"
+        className="min-h-0 flex-1 overflow-auto rounded-md border bg-muted/40 font-mono text-xs"
       >
         {preview.rows.map((row, i) => (
           <li key={i} className="flex gap-3 border-b px-2 py-1 last:border-b-0">

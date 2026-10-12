@@ -382,8 +382,8 @@ export function GanttView({ ref, model, selectedRunIx, onSelect }: GanttViewProp
  * (a log cursor) never carries over to another run.
  */
 export interface GanttRunSlots {
-  logs?: (run: TaskRunDto) => ReactNode;
-  outputs?: (run: TaskRunDto) => ReactNode;
+  logs: (run: TaskRunDto) => ReactNode;
+  outputs: (run: TaskRunDto) => ReactNode;
 }
 
 function Fact({ term, children }: { term: string; children: ReactNode }) {
@@ -410,8 +410,8 @@ export function GanttRunPanel({
   row: GanttRow;
   onClose: () => void;
   /** The slots' content for this run, already rendered (see `GanttRunSlots`). */
-  logs?: ReactNode;
-  outputs?: ReactNode;
+  logs: ReactNode;
+  outputs: ReactNode;
 }) {
   const headingId = useId();
   const run = row.run;
@@ -492,17 +492,13 @@ export function GanttRunPanel({
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <section aria-label="Logs" data-testid="gantt-run-logs">
           <h3 className="text-sm font-medium">Logs</h3>
-          <div className="mt-1">{logs ?? <SlotPlaceholder what="This run's logs" />}</div>
+          <div className="mt-1">{logs}</div>
         </section>
         <section aria-label="Outputs" data-testid="gantt-run-outputs">
           <h3 className="text-sm font-medium">Outputs</h3>
-          <div className="mt-1">{outputs ?? <SlotPlaceholder what="This run's outputs" />}</div>
+          <div className="mt-1">{outputs}</div>
         </section>
       </div>
     </section>
   );
-}
-
-function SlotPlaceholder({ what }: { what: string }) {
-  return <p className="text-sm text-muted-foreground">{what} arrive in a later release.</p>;
 }
