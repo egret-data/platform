@@ -28115,7 +28115,7 @@
             }
           },
           "400": {
-            "description": "The execution is a **loop iteration** (replay its loop root instead); or the **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans",
+            "description": "The execution is a **loop iteration** (replay its loop root instead); or the **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans, or uses a task type this deployment does not serve",
             "content": {
               "application/json": {
                 "schema": {
@@ -28898,7 +28898,7 @@
             }
           },
           "400": {
-            "description": "`inputs` is not a JSON object; the flow's stored source does not parse or plan; a `FILE` input's value is not a readable `kestra://` URI or its extension is not allowed; a multipart part names no declared input, names one twice, carries a file for a non-`FILE` input, or has a file name no storage URI can hold; or egret has no internal storage (`[storage]`) for an upload. The message names the input.",
+            "description": "`inputs` is not a JSON object; the flow's stored source does not parse or plan, or uses a task type this deployment does not serve; a `FILE` input's value is not a readable `kestra://` URI or its extension is not allowed; a multipart part names no declared input, names one twice, carries a file for a non-`FILE` input, or has a file name no storage URI can hold; or egret has no internal storage (`[storage]`) for an upload. The message names the input.",
             "content": {
               "application/json": {
                 "schema": {
@@ -29047,7 +29047,7 @@
             }
           },
           "400": {
-            "description": "The draft does not parse or validate, a task names an unknown type, or a script task is refused by the container gate (workflow_containers off, no or empty allowed-images for its runner, image not allowed)",
+            "description": "The draft does not parse or validate, a task names an unknown type or a type this deployment does not serve (`task_type_not_served`), or a script task is refused by the container gate (workflow_containers off, no or empty allowed-images for its runner, image not allowed)",
             "content": {
               "application/json": {
                 "schema": {

@@ -12,5 +12,5 @@ mod unrunnable;
 pub(crate) mod validate;
 
 pub use parse::{parse, ParseError};
-pub use unrunnable::unrunnable;
+pub use unrunnable::{describe, unrunnable};
 pub use validate::{validate, validate_for_run, Finding, ValidationReport};

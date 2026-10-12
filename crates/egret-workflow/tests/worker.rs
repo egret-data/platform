@@ -1107,15 +1107,35 @@ async fn a_task_that_produced_no_output_renders_as_an_empty_map_not_an_absent_ke
 /// registered and `Handlers::with_core_tasks` has no handler for it, which is
 /// the case this test is about: a type that passes validation and that the
 /// worker cannot serve.
+///
+/// **Since no-silent-stall Task 3 no start creates such an execution**:
+/// `start_execution` refuses a type this deployment does not serve. So the
+/// execution is made the way one reaches the worker now -- started before
+/// that refusal existed: a `core.log` flow of the same shape is started, and
+/// its stored source and its run's `type_id` (what the claim hands the
+/// registry) are then swapped for the `egret.sql` ones.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_type_with_no_handler_aborts_the_tick(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
     let source = "id: unhandled\nnamespace: t\ntasks:\n\
          \x20 - id: o\n    type: egret.sql\n    sql: SELECT 1\n";
-    let ex = start_execution(&pool, ws, None, source, serde_json::json!({}))
+    let served = "id: unhandled\nnamespace: t\ntasks:\n\
+         \x20 - id: o\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+    let ex = start_execution(&pool, ws, None, served, serde_json::json!({}))
         .await
         .expect("start execution");
+    sqlx::query("UPDATE workflow.executions SET source = $2 WHERE id = $1")
+        .bind(ex)
+        .bind(source)
+        .execute(&pool)
+        .await
+        .expect("an execution started before the start gate");
+    sqlx::query("UPDATE workflow.task_runs SET type_id = 'egret.sql' WHERE execution_id = $1")
+        .bind(ex)
+        .execute(&pool)
+        .await
+        .expect("and its run, as that start planned it");
 
     let err = egret_workflow::worker::tick(
         &pool,

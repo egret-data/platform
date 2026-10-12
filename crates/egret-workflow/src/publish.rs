@@ -6,9 +6,11 @@
 //!    missing or foreign flow, the same status every refusal below answers
 //!    with);
 //! 2. `parse(source)` -- a parse failure is `InvalidInput`;
-//! 3. `validate(&flow)` -- any **error** is `InvalidInput`; warnings are
-//!    carried into the snapshot but never block publish (a flow declaring
-//!    `concurrency` must still publish -- it is simply not enforced yet);
+//! 3. `validate(&flow)`, plus `spec::unrunnable` against this deployment's
+//!    `runtime::served()` set (`task_type_not_served`) -- any **error** is
+//!    `InvalidInput`; warnings are carried into the snapshot but never block
+//!    publish (a flow declaring `concurrency` must still publish -- it is
+//!    simply not enforced yet);
 //!    3b. (W5a) every script task passes the ONE governance gate,
 //!    `scripts::gate::check` -- the workspace's `workflow_containers`
 //!    feature, the runner's `allowed-images` -- or publish is `InvalidInput`
@@ -289,16 +291,17 @@ pub async fn publish_gated(
     })?;
 
     // Step 3: errors block, warnings are carried through to the snapshot
-    // below untouched.
-    let report = validate(&parsed);
+    // below untouched. A task type this deployment does not serve is one of
+    // the errors (no-silent-stall §4.3 point 3), found here, before 3b/3c:
+    // with no runner, a script or plugin task is refused once, as
+    // `task_type_not_served`, and the gates' runner refusals stay for a
+    // deployment that has a runner.
+    let mut report = validate(&parsed);
+    report
+        .errors
+        .extend(crate::spec::unrunnable(&parsed, crate::runtime::served()));
     if !report.errors.is_empty() {
-        let msg = report
-            .errors
-            .iter()
-            .map(|f| format!("{} ({})", f.message, f.path))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(Error::InvalidInput(msg));
+        return Err(Error::InvalidInput(crate::spec::describe(&report.errors)));
     }
 
     // Step 3b (W5a).

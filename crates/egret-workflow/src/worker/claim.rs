@@ -2631,6 +2631,17 @@ async fn start_execution_in_on(
         .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
     let plan = build_plan(source)
         .map_err(|e| Error::InvalidInput(format!("the flow does not plan: {e}")))?;
+    // No-silent-stall §4.3 point 4: a task this deployment has no handler
+    // for would be claimed and never run. Every start passes here -- the
+    // API, the webhook, a schedule fire, a Flow trigger, replay -- and a
+    // refusal is the caller's, as a source that does not plan is.
+    let unserved = crate::spec::unrunnable(&flow, crate::runtime::served());
+    if !unserved.is_empty() {
+        return Err(Error::InvalidInput(format!(
+            "the flow cannot run on this deployment: {}",
+            crate::spec::describe(&unserved)
+        )));
+    }
 
     let inputs = if inputs.is_object() {
         inputs

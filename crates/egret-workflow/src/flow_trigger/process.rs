@@ -106,7 +106,8 @@ pub struct EventReport {
     /// its dependencies ([`NO_DEPENDENCY_MET`]), or one outside its window.
     pub refused: usize,
     /// Listeners that failed. Either deterministically -- the flow does not
-    /// parse, resolve or plan -- and the event is done with them, or possibly
+    /// parse, resolve or plan, or uses a task type this deployment does not
+    /// serve -- and the event is done with them, or possibly
     /// transiently, and the event is kept for them (spec §4.4 point 1).
     pub errored: usize,
     /// `dependsOn` listeners whose window took this event without being

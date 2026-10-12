@@ -468,8 +468,9 @@ pub struct PublishFlowRequest {
     pub note: String,
 }
 
-/// Parse `source`, run [`validate`], and build the wire DTO for a stored
-/// draft row. A parse failure here is a bug, not a caller error — `source`
+/// Parse `source`, run [`validate`] and [`crate::spec::unrunnable`] against
+/// this deployment's served set, and build the wire DTO for a stored draft
+/// row. A parse failure here is a bug, not a caller error — `source`
 /// only reaches storage after successfully parsing in [`create_flow`]/
 /// [`update_flow`] — so it is mapped to `Error::Internal` rather than
 /// `InvalidInput`, which would misattribute a storage-layer inconsistency to
@@ -484,7 +485,10 @@ fn draft_dto(row: FlowRow, can_manage: bool) -> EgretResult<FlowDto> {
             e.column
         ))
     })?;
-    let report = validate(&parsed);
+    let mut report = validate(&parsed);
+    report
+        .errors
+        .extend(crate::spec::unrunnable(&parsed, crate::runtime::served()));
     Ok(FlowDto {
         id: row.id,
         folder_id: row.folder_id,
@@ -863,7 +867,8 @@ async fn validate_flow(
 
 /// The report both validate routes answer for `source`: parse (a YAML that
 /// does not parse is a 400 whose message carries the line and column), then
-/// [`validate`]. Writes nothing.
+/// [`validate`], plus [`crate::spec::unrunnable`] against this deployment's
+/// served set. Writes nothing.
 fn validate_flow_source(source: &str) -> EgretResult<ValidationReportDto> {
     let flow = parse(source).map_err(|e| {
         Error::InvalidInput(match (e.line, e.column) {
@@ -871,7 +876,10 @@ fn validate_flow_source(source: &str) -> EgretResult<ValidationReportDto> {
             _ => e.message,
         })
     })?;
-    let report = validate(&flow);
+    let mut report = validate(&flow);
+    report
+        .errors
+        .extend(crate::spec::unrunnable(&flow, crate::runtime::served()));
     Ok(ValidationReportDto::from(&report))
 }
 
@@ -966,7 +974,7 @@ fn if_none_match(headers: &axum::http::HeaderMap, etag: &str) -> bool {
     request_body = PublishFlowRequest,
     responses(
         (status = 200, description = "A new immutable version was frozen and is now live", body = FlowVersionDto),
-        (status = 400, description = "The draft does not parse or validate, a task names an unknown type, or a script task is refused by the container gate (workflow_containers off, no or empty allowed-images for its runner, image not allowed)", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The draft does not parse or validate, a task names an unknown type or a type this deployment does not serve (`task_type_not_served`), or a script task is refused by the container gate (workflow_containers off, no or empty allowed-images for its runner, image not allowed)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace, or the flow calls secret() and the caller lacks workflow:use_secrets", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such flow in this workspace, or a task references an object that does not exist or belongs to another workspace", body = egret_core::http::ErrorBody),
@@ -2116,7 +2124,7 @@ fn core_refusal(e: Error) -> axum::response::Response {
     ),
     responses(
         (status = 201, description = "The execution was created and driven as far as it goes without a worker; the body is its detail, read back after the start committed. Its uploaded files and its row were committed in one transaction.", body = ExecutionDto),
-        (status = 400, description = "`inputs` is not a JSON object; the flow's stored source does not parse or plan; a `FILE` input's value is not a readable `kestra://` URI or its extension is not allowed; a multipart part names no declared input, names one twice, carries a file for a non-`FILE` input, or has a file name no storage URI can hold; or egret has no internal storage (`[storage]`) for an upload. The message names the input.", body = egret_core::http::ErrorBody),
+        (status = 400, description = "`inputs` is not a JSON object; the flow's stored source does not parse or plan, or uses a task type this deployment does not serve; a `FILE` input's value is not a readable `kestra://` URI or its extension is not allowed; a multipart part names no declared input, names one twice, carries a file for a non-`FILE` input, or has a file name no storage URI can hold; or egret has no internal storage (`[storage]`) for an upload. The message names the input.", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough** — starting an execution is a write.", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such flow in this workspace, or it is in the trash. **A flow belonging to another workspace answers exactly this**, indistinguishably from one that never existed.", body = egret_core::http::ErrorBody),
@@ -2548,7 +2556,7 @@ async fn resume_execution(
     ),
     responses(
         (status = 201, description = "A NEW execution, started from the replayed one's frozen source and inputs. The body is the new execution, not the old one — read its `id`.", body = ExecutionDto),
-        (status = 400, description = "The execution is a **loop iteration** (replay its loop root instead); or the **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The execution is a **loop iteration** (replay its loop root instead); or the **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans, or uses a task type this deployment does not serve", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed — **or its flow is in the trash, or no longer exists at all**. A replay is a run of the flow and answers to the flow's current state.", body = egret_core::http::ErrorBody),

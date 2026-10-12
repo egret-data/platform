@@ -34,6 +34,17 @@ pub fn unrunnable(flow: &Flow, served: &Served) -> Vec<Finding> {
         .collect()
 }
 
+/// `findings` as one line: each `message (path)`, joined by `; `. The shape
+/// `publish` answers its validation errors in, which the start refusal and
+/// the `Subflow` refusal reuse, so one reason reads the same at every door.
+pub fn describe(findings: &[Finding]) -> String {
+    findings
+        .iter()
+        .map(|f| format!("{} ({})", f.message, f.path))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// A type `validate_for_run` lets through, so one the plan makes runnable.
 fn is_known(type_id: &str) -> bool {
     crate::spec::registry::known_type(type_id).is_some()
