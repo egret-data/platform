@@ -1848,8 +1848,8 @@ fn corpus(pairs: usize) -> Vec<(ServicePolicySet, ServicePolicySet, Vec<TagAssig
                 .map(|_| {
                     assign(
                         "wh",
-                        *rng.pick(&["sales", "hr"]),
-                        *rng.pick(&["orders", "people"]),
+                        rng.pick(&["sales", "hr"]),
+                        rng.pick(&["orders", "people"]),
                         rng.pick(&["email", "ssn", ""]),
                         rng.pick(&["pii", "phi"]),
                     )
