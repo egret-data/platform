@@ -707,7 +707,6 @@ pub async fn handlers_for(
 ) -> egret_core::Result<(Handlers, Option<crate::scripts::RunnerKind>)> {
     use crate::scripts::RunnerKind;
     use crate::worker::commands::{DockerRunner, OrphanSweep, TaskRunner};
-    use crate::worker::handlers::script::{register, PgFeatureState, ScriptRuntime};
 
     // W5b: the boot check on `plugin_configurations`, first -- before
     // `container_runner = none` returns below, so a misplaced
@@ -768,10 +767,30 @@ pub async fn handlers_for(
             (RunnerKind::Kubernetes, r.clone(), r)
         }
     };
-    let features: Arc<dyn crate::worker::handlers::script::FeatureState> =
-        Arc::new(PgFeatureState::new(pool.clone()));
-    register(
-        &mut handlers,
+    register_runner_tasks(&mut handlers, cfg, kind, runner, pool, secrets);
+    Ok((handlers.with_orphan_sweep(sweep), Some(kind)))
+}
+
+/// The handlers a container runner adds, whichever runner it is: the four
+/// script types with their aliases and every `kestra.` catalog type, over
+/// ONE `runner`. Both runner arms of [`handlers_for`] end here, so the
+/// Kubernetes arm's keys are tested through this function without a
+/// cluster client (`served_for`'s drift test).
+fn register_runner_tasks(
+    handlers: &mut Handlers,
+    cfg: &egret_config::WorkflowConfig,
+    kind: crate::scripts::RunnerKind,
+    runner: Arc<dyn crate::worker::commands::TaskRunner>,
+    pool: PgPool,
+    secrets: Arc<dyn crate::runners::secrets::SecretSource>,
+) {
+    use crate::worker::handlers::script::ScriptRuntime;
+
+    let features: Arc<dyn crate::worker::handlers::script::FeatureState> = Arc::new(
+        crate::worker::handlers::script::PgFeatureState::new(pool.clone()),
+    );
+    crate::worker::handlers::script::register(
+        handlers,
         Arc::new(ScriptRuntime {
             runner_kind: kind,
             runner: runner.clone(),
@@ -783,7 +802,7 @@ pub async fn handlers_for(
         }),
     );
     crate::worker::handlers::kestra::register(
-        &mut handlers,
+        handlers,
         Arc::new(crate::worker::handlers::kestra::KestraRuntime {
             runner,
             runner_kind: kind,
@@ -798,7 +817,6 @@ pub async fn handlers_for(
             pool: Some(pool),
         }),
     );
-    Ok((handlers.with_orphan_sweep(sweep), Some(kind)))
 }
 
 /// `workflow.kubernetes.*` in the runner's own vocabulary.
@@ -823,5 +841,247 @@ pub fn pod_config(k: &egret_config::WorkflowKubernetesConfig) -> crate::worker::
         default_resources: both(&k.default_resources),
         max_resources: both(&k.max_resources),
         image_pull_secrets: k.image_pull_secrets.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Served: the task types this deployment runs (no-silent-stall spec §4.1)
+// ---------------------------------------------------------------------------
+
+/// The task type ids this process's worker would run: exact strings, matched
+/// as [`Handlers::get`] matches them, every alias and canonical spelling
+/// [`handlers_for`] registers included.
+///
+/// Built by [`served_for`] from the configuration alone, installed once at
+/// start-up ([`install_served`]) and read by [`served`]. `spec::unrunnable`
+/// judges a flow against it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Served(std::collections::BTreeSet<String>);
+
+impl Served {
+    /// Whether this deployment has a handler for `type_id`: an exact match,
+    /// as [`Handlers::get`] is.
+    pub fn serves(&self, type_id: &str) -> bool {
+        self.0.contains(type_id)
+    }
+
+    /// Every key `h` is registered under. For the drift test, which holds
+    /// [`served_for`] against [`handlers_for`].
+    pub fn from_handlers(h: &Handlers) -> Self {
+        Self(h.type_ids().into_iter().map(String::from).collect())
+    }
+
+    /// A set of exactly these types. For a test that needs a set no
+    /// configuration produces (a fake handler under a real type).
+    pub fn from_type_ids<S: Into<String>>(ids: impl IntoIterator<Item = S>) -> Self {
+        Self(ids.into_iter().map(Into::into).collect())
+    }
+
+    /// The type ids, sorted.
+    pub fn type_ids(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(String::as_str)
+    }
+}
+
+/// The [`Served`] set [`handlers_for`] would build for `cfg`. Pure: no I/O,
+/// no runner, no validation of `cfg` (`handlers_for` refuses a bad one at
+/// start-up, before this matters).
+///
+/// **Two lists of one thing, held together by a test.** `handlers_for`
+/// constructs handlers, which need a pool, a store and a runner; this names
+/// their keys, which need none of them. The unit tests below compare the two
+/// for `none`, `docker` and (through [`register_runner_tasks`]) `kubernetes`,
+/// so a handler added to one and not the other fails by name.
+pub fn served_for(cfg: &egret_config::WorkflowConfig) -> Served {
+    use crate::worker::handlers::{fail, kv, log, namespace, ret, sleep, storage};
+
+    // Every deployment: `Handlers::with_core_tasks`, then the storage,
+    // namespace and KV `register`s -- all through `add_publishable`.
+    let publishable: Vec<&str> = vec![
+        // `Handlers::with_core_tasks`.
+        log::TYPE_ID,
+        ret::TYPE_ID,
+        fail::TYPE_ID,
+        sleep::TYPE_ID,
+        storage::WRITE,
+        storage::SIZE,
+        storage::CONCAT,
+        storage::SPLIT,
+        storage::REVERSE,
+        storage::DEDUPLICATE_ITEMS,
+        storage::FILTER_ITEMS,
+        // `handlers::storage::register`.
+        storage::DELETE,
+        storage::PURGE_CURRENT_EXECUTION_FILES,
+        // `handlers::namespace::register`.
+        namespace::UPLOAD_FILES,
+        namespace::DOWNLOAD_FILES,
+        namespace::DELETE_FILES,
+        namespace::PURGE_FILES,
+        // `handlers::kv::register`.
+        kv::SET,
+        kv::GET,
+        kv::GET_KEYS,
+        kv::DELETE,
+        kv::PUT,
+        kv::PURGE_KV,
+    ];
+    let mut out = std::collections::BTreeSet::new();
+    let mut add_publishable = |type_id: &str| {
+        // `Handlers::add_publishable`'s keys: the handler's own id, and its
+        // `TASK_TYPES` row's canonical spelling and every alias.
+        out.insert(type_id.to_string());
+        if let Some(row) = crate::spec::registry::known_type(type_id) {
+            out.insert(row.r#type.to_string());
+            out.extend(row.aliases.iter().map(|a| a.to_string()));
+        }
+    };
+    publishable.into_iter().for_each(&mut add_publishable);
+    if cfg.container_runner == egret_config::ContainerRunner::None {
+        return Served(out);
+    }
+    // `register_runner_tasks`: the four script types (`add_publishable`),
+    // then every catalog class under `kestra.<FQCN>` (`register`, no alias).
+    crate::scripts::ScriptKind::ALL
+        .into_iter()
+        .for_each(|k| add_publishable(k.fqcn()));
+    out.extend(crate::plugins::prefixed_types().map(String::from));
+    Served(out)
+}
+
+static SERVED: std::sync::OnceLock<Served> = std::sync::OnceLock::new();
+
+/// Process-wide, set once by egret-bin before the router and the worker
+/// start, as [`crate::storage::install`] is. A second call returns the set it
+/// was given back, and the first stays.
+pub fn install_served(s: Served) -> std::result::Result<(), Served> {
+    SERVED.set(s)
+}
+
+/// The installed [`Served`].
+///
+/// # Panics
+///
+/// When none is installed. There is no default: a process that forgot to
+/// install one must not accept every type (the hole this set closes).
+pub fn served() -> &'static Served {
+    SERVED.get().expect(
+        "no Served is installed in this process: egret-bin installs the task types its \
+         worker runs with `runtime::install_served(runtime::served_for(&config.workflow))` \
+         at start-up, and a test installs one with `runtime::install_served` (or \
+         `install_served_for_tests`, feature `test-util`)",
+    )
+}
+
+/// For a test binary: install `s`, or check that the set already installed
+/// is `s`. Idempotent for one set, so every test of a binary may call it.
+///
+/// # Panics
+///
+/// When this process already holds a DIFFERENT set: the set is process-wide
+/// (a `OnceLock`), so a binary serves one set, and a test needing another
+/// lives in its own test binary.
+#[cfg(any(test, feature = "test-util"))]
+pub fn install_served_for_tests(s: Served) -> &'static Served {
+    let installed = SERVED.get_or_init(|| s.clone());
+    assert_eq!(
+        installed, &s,
+        "this test binary already installed a different Served: one set per binary \
+         (put the test that needs another set in its own `tests/*.rs`)"
+    );
+    installed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoSecrets;
+
+    #[async_trait::async_trait]
+    impl crate::runners::secrets::SecretSource for NoSecrets {
+        async fn get(
+            &self,
+            _workspace: uuid::Uuid,
+            name: &str,
+        ) -> std::result::Result<
+            std::collections::BTreeMap<String, String>,
+            crate::runners::secrets::SecretError,
+        > {
+            Err(crate::runners::secrets::SecretError::NotFound { name: name.into() })
+        }
+    }
+
+    /// Never connected: `handlers_for` only stores it.
+    fn unconnected_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+            .expect("a lazy pool parses")
+    }
+
+    fn cfg(runner: egret_config::ContainerRunner) -> egret_config::WorkflowConfig {
+        let mut cfg = egret_config::Config::default().workflow;
+        cfg.container_runner = runner;
+        // A runner needs the plugin host's image (a boot error without it).
+        cfg.plugin_host.image = Some("egret-plugin-host:dev".into());
+        cfg
+    }
+
+    async fn built(cfg: &egret_config::WorkflowConfig) -> Served {
+        let (h, _) = handlers_for(cfg, unconnected_pool(), Arc::new(NoSecrets))
+            .await
+            .expect("builds without a database or a docker daemon");
+        Served::from_handlers(&h)
+    }
+
+    /// The drift test (spec §4.1): a handler registered without `served_for`
+    /// knowing, or the reverse, fails here.
+    #[tokio::test]
+    async fn served_for_none_is_what_handlers_for_registers() {
+        let cfg = cfg(egret_config::ContainerRunner::None);
+        assert_eq!(served_for(&cfg), built(&cfg).await);
+    }
+
+    #[tokio::test]
+    async fn served_for_docker_is_what_handlers_for_registers() {
+        let cfg = cfg(egret_config::ContainerRunner::Docker);
+        let got = served_for(&cfg);
+        assert_eq!(got, built(&cfg).await);
+        // The control: a runner adds keys, so neither side is trivially equal.
+        assert!(got != served_for(&super::tests::cfg(egret_config::ContainerRunner::None)));
+    }
+
+    /// The Kubernetes arm cannot be built without a cluster. Its keys are the
+    /// shared `none` registration plus `register_runner_tasks` -- the same
+    /// function the arm ends in -- here over a stand-in runner tagged
+    /// `Kubernetes`. What this proves, and what it does not: see the report.
+    #[tokio::test]
+    async fn served_for_kubernetes_is_the_shared_registration_with_a_runner() {
+        let cfg = cfg(egret_config::ContainerRunner::Kubernetes);
+        let (mut h, _) = handlers_for(
+            &super::tests::cfg(egret_config::ContainerRunner::None),
+            unconnected_pool(),
+            Arc::new(NoSecrets),
+        )
+        .await
+        .expect("`none` builds");
+        register_runner_tasks(
+            &mut h,
+            &cfg,
+            crate::scripts::RunnerKind::Kubernetes,
+            Arc::new(crate::worker::commands::DockerRunner::new()),
+            unconnected_pool(),
+            Arc::new(NoSecrets),
+        );
+        assert_eq!(served_for(&cfg), Served::from_handlers(&h));
+    }
+
+    #[test]
+    fn serves_is_an_exact_match() {
+        let s = served_for(&cfg(egret_config::ContainerRunner::None));
+        assert!(s.serves("io.kestra.plugin.core.log.Log"));
+        assert!(s.serves("core.log"));
+        assert!(!s.serves("io.kestra.plugin.core.log.log"));
+        assert!(!s.serves("egret.sql"));
     }
 }

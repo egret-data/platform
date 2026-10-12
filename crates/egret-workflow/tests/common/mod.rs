@@ -21,6 +21,30 @@ pub async fn db() -> Option<Db> {
     Some(db)
 }
 
+/// Install, for this test binary, the task types a deployment WITH a
+/// container runner serves (`runtime::served_for` with `docker`): every type
+/// egret has a handler for in some configuration, and still none of the
+/// unwired ones (`egret.sql`, `core.http`, ...). Idempotent; panics if this
+/// binary already installed a different set (`install_served_for_tests`).
+///
+/// No-silent-stall spec §4.1: `runtime::served()` panics in a process that
+/// installed nothing, so every test binary whose tests start an execution
+/// calls this (or [`install_served_none`]) first.
+pub fn install_served_runner() -> &'static egret_workflow::runtime::Served {
+    let mut cfg = egret_config::Config::default().workflow;
+    cfg.container_runner = egret_config::ContainerRunner::Docker;
+    egret_workflow::runtime::install_served_for_tests(egret_workflow::runtime::served_for(&cfg))
+}
+
+/// As [`install_served_runner`], for a deployment with
+/// `container_runner = none` (the shipping default). A binary uses one or
+/// the other, never both.
+pub fn install_served_none() -> &'static egret_workflow::runtime::Served {
+    egret_workflow::runtime::install_served_for_tests(egret_workflow::runtime::served_for(
+        &egret_config::Config::default().workflow,
+    ))
+}
+
 /// Seed a fresh user + workspace, returning `(workspace_id, user_id)` --
 /// enough for every `FlowRepo` call in this crate's tests, which all take a
 /// workspace and a `by: UserId`.

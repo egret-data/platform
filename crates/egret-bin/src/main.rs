@@ -1594,6 +1594,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     {
         anyhow::bail!("the workflow file store was installed twice");
     }
+    // no-silent-stall §4.1: the task types this deployment's worker runs,
+    // from the same configuration `handlers_for` builds the worker's handlers
+    // from below (a unit test holds the two together). Installed process-wide
+    // BEFORE the router and the worker start: `spec::unrunnable` judges a flow
+    // against it, and `runtime::served()` panics rather than defaulting to
+    // "serve everything" in a process that never installed one.
+    if egret_workflow::runtime::install_served(egret_workflow::runtime::served_for(
+        &config.workflow,
+    ))
+    .is_err()
+    {
+        anyhow::bail!("the workflow's served task types were installed twice");
+    }
     // W9b: namespace-file lookups at render time (`fileURI`, `read` of a
     // namespace file) run on their own connection, made from this pool's
     // options, for the reason above: a render's entry points hold no pool.
@@ -1794,8 +1807,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `egret.sql` is not registered: it needs an `Arc<dyn QueryExecPort>`
     // that nothing here provides.
     //
-    // **A flow whose task type is unregistered HANGS.** `WorkerError::NoHandler`
-    // does not fail the run: it propagates out of `run_one`, the run keeps its
+    // **A flow whose task type is unregistered HANGS** -- in the worker, for
+    // what reaches it. Since no-silent-stall Task 2 the set this deployment
+    // serves is installed above (`runtime::served_for`, the same keys these
+    // handlers are registered under) and `spec::unrunnable` names each task
+    // it lacks (`task_type_not_served`); the refusal at validate, publish and
+    // start is wired by that package's Task 3, and the worker failing the run
+    // instead of hanging by its Task 4, which rewrites this paragraph.
+    // Until then: `WorkerError::NoHandler` does not fail the run: it propagates out of `run_one`, the run keeps its
     // lease, `reap` clears only `claimed_at` a `working_timeout` later, `claim`
     // re-selects it, and the cycle repeats for ever with one `warn` per cycle.
     // `oracle-exec/README.md` item 19 carries this. **Six of twenty-three
