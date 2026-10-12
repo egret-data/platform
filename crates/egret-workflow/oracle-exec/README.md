@@ -2210,6 +2210,14 @@ accepted. M8's danger was a rule that refused for a reason unrelated to the
 flow; this one refuses exactly what Kestra's own validator refuses, and the
 ratchet's regression arm is what says so.
 
+*(Annotation, 2026-10-12, no-silent-stall Task 1: true when written, and no
+longer. Since the ruling of 2026-10-11 and Task 1, `validate` reports errors on
+52 of the 266 `runs` entries — gapped `Pause`s, `AllowFailure`,
+`WorkingDirectory` and unregistered types, each a task egret could not run and
+whose execution stalled. All are deliberate and named in
+`executor::PUBLISHED_BUT_REFUSED`; see the section "no-silent-stall Task 1" at
+the end of this file.)*
+
 ## What Task 5 had to change, and what it banked
 
 Task 5 implements `if` and `switch`. It banks **8** of the 189 entries Task 4
@@ -3466,6 +3474,14 @@ in the builder.
 Running `validate` there costs nothing on the accepting side, measured rather
 than argued: over the golden's **266 `runs` entries** — every flow this pinned
 Kestra published *and ran* — `validate` reports **zero** errors.
+
+*(Annotation, 2026-10-12, no-silent-stall Task 1: true when written, and no
+longer. Since the ruling of 2026-10-11 and Task 1, `validate` reports errors on
+52 of the 266 `runs` entries — gapped `Pause`s, `AllowFailure`,
+`WorkingDirectory` and unregistered types, each a task egret could not run and
+whose execution stalled. All are deliberate and named in
+`executor::PUBLISHED_BUT_REFUSED`; see the section "no-silent-stall Task 1" at
+the end of this file.)*
 
 ### The gate order is measured, and the message assertion is what measured it
 

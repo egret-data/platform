@@ -4177,21 +4177,23 @@ mod tests {
         // egret does not register (`unknown_task_type`, an error since Task
         // 1). Measured, not argued: the corpus has no gapped `LoopUntil` and no
         // unported control-flow type among its published flows. Each would
-        // otherwise start and stall; every one is a deliberate refusal, as the
-        // three `Pause` rows above are.
+        // otherwise start and stall -- the 8 flowable rows as published
+        // versions, the 44 `unknown_task_type` rows only as started drafts,
+        // because publish already refused those -- and every one is a
+        // deliberate refusal, as the three `Pause` rows above are.
         PublishedButRefused {
             id: "valids/after-execution-error",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/after-execution-finally",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/after-execution",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
@@ -4206,27 +4208,27 @@ mod tests {
         },
         PublishedButRefused {
             id: "valids/assert",
-            cause: "a task of type `io.kestra.plugin.core.execution.Assert`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.Assert`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/exit-cancelled",
-            cause: "a task of type `io.kestra.plugin.core.execution.Exit`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.Exit`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/exit-killed",
-            cause: "a task of type `io.kestra.plugin.core.execution.Exit`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.Exit`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/exit-nested",
-            cause: "a task of type `io.kestra.plugin.core.execution.Exit`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.Exit`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/exit",
-            cause: "a task of type `io.kestra.plugin.core.execution.Exit`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.Exit`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
@@ -4236,102 +4238,102 @@ mod tests {
         },
         PublishedButRefused {
             id: "valids/flow-concurrency-queue-after-execution",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/flow-concurrency-queue-killed-after-execution",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/flow-with-array-outputs",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/if-in-parallel",
-            cause: "a task of type `io.kestra.plugin.core.execution.Assert`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.Assert`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/labels-update-nested-value-list",
-            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/labels-update-nested-value-map",
-            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/labels-update-task-deduplicate",
-            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/labels-update-task-empty",
-            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/labels-update-task",
-            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/npe-labels-update-task",
-            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/output-values",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/pause_on_resume",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/pause_on_resume_optional",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/primitive-labels-flow",
-            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.Labels`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/purge_logs_execution_only",
-            cause: "a task of type `io.kestra.plugin.core.log.PurgeLogs`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.log.PurgeLogs`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/purge_logs_full_arguments",
-            cause: "a task of type `io.kestra.plugin.core.log.PurgeLogs`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.log.PurgeLogs`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/purge_logs_no_arguments",
-            cause: "a task of type `io.kestra.plugin.core.log.PurgeLogs`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.log.PurgeLogs`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/purge_logs_trigger_only",
-            cause: "a task of type `io.kestra.plugin.core.log.PurgeLogs`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.log.PurgeLogs`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/purge_logs_with_batch_size",
-            cause: "a task of type `io.kestra.plugin.core.log.PurgeLogs`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.log.PurgeLogs`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/replay",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
@@ -4341,27 +4343,27 @@ mod tests {
         },
         PublishedButRefused {
             id: "valids/set-variables-duplicate",
-            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/set-variables",
-            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/sleep-long",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/task-runif-executionupdating",
-            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, `io.kestra.plugin.core.execution.UnsetVariables`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, `io.kestra.plugin.core.execution.UnsetVariables`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/task-runif-taskswithstate",
-            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
@@ -4371,57 +4373,57 @@ mod tests {
         },
         PublishedButRefused {
             id: "valids/task-runif",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/unset-variables",
-            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, `io.kestra.plugin.core.execution.UnsetVariables`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.execution.SetVariables`, `io.kestra.plugin.core.execution.UnsetVariables`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/waitfor-child-task-warning",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/waitfor-max-duration",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/waitfor-max-iterations",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/waitfor-multiple-tasks-failed",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/waitfor-multiple-tasks",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/waitfor-no-success",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/waitfor",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/webhook-outputs",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
             id: "valids/webhook-wait",
-            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 it drew the warning `unknown_task_type` and published, and in production every execution that reached it stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
+            cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {

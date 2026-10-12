@@ -888,14 +888,25 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
 /// `self_subflow`, `working_directory_tasks_required`. The gap was not a
 /// missing rule; it was a missing call.
 ///
-/// Measured before the change and re-measured after: over the golden's **266**
-/// `runs` entries — every flow this pinned Kestra published *and ran* —
-/// `validate` reports **zero** errors. So this gate refuses nothing Kestra
-/// accepted, which is the property that separates it from Task 3's M8 (a
-/// refusal that was right for a reason having nothing to do with the flow being
-/// invalid). `egret_refuses_every_flow_kestra_refuses` asserts on the message
-/// per cause so a refusal that becomes a *different* refusal is visible, and
-/// the ratchet fails in both directions so an over-refusal is a regression.
+/// **This gate DOES refuse flows Kestra accepted, on purpose, and every one is
+/// named.** At Task 8 it refused none: over the golden's **266** `runs`
+/// entries -- every flow this pinned Kestra published *and ran* -- `validate`
+/// reported zero errors, which is what separated it from Task 3's M8 (a
+/// refusal right for a reason having nothing to do with the flow). That stopped
+/// being true at the user's ruling of 2026-10-11 (three gapped `Pause`s) and
+/// at no-silent-stall Task 1, which refuses every task egret plans opaque and
+/// no handler can run. Measured at Task 1: `validate` reports errors on **52**
+/// of the 266 `runs` entries (3 `unsupported_pause_property`, 4
+/// `unsupported_allow_failure`, 4 `unsupported_working_directory`, 41
+/// `unknown_task_type`), and on **57** of the 295 flows this Kestra published
+/// with 200 (those 52, three more with no golden entry, and the two named
+/// over-refusals). Each is a row of `executor::PUBLISHED_BUT_REFUSED`, with its
+/// cause, and `every_flow_kestra_published_plans_except_the_named_refusals`
+/// fails on any refusal not in that table. These are deliberate: each flow
+/// stalled at run before. `egret_refuses_every_flow_kestra_refuses` asserts on
+/// the message per cause so a refusal that becomes a *different* refusal is
+/// visible, and the ratchet fails in both directions so an unnamed
+/// over-refusal is a regression.
 ///
 /// Only `report.errors` refuses. A warning — the flow-level `not_yet_enforced`
 /// — must not.
