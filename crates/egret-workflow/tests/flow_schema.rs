@@ -207,6 +207,37 @@ fn trigger_accepted(t: &str) -> bool {
     !matches!(flow.triggers[0].kind, TriggerKind::Leaf { .. })
 }
 
+/// The spellings of `ForEach`, which egret refuses as the validation error
+/// `unsupported_foreach` (the user's ruling of 2026-10-12).
+const FOREACH_SPELLINGS: [&str; 2] = ["io.kestra.plugin.core.flow.ForEach", "core.foreach"];
+
+/// The 2026-10-12 ruling: `ForEach` is refused (by validate, and by publish
+/// before that as an unknown type), so no feature combination offers it,
+/// while `Loop` -- what the refusal tells the author to use -- is offered
+/// under both spellings. Without the `Loop` half this passes under a schema
+/// that offers no flowable at all.
+#[test]
+fn foreach_is_never_offered_and_loop_is() {
+    for (name, d) in deployments() {
+        for f in ALL {
+            let s = served(&flow_schema(&f, &d));
+            for t in FOREACH_SPELLINGS {
+                assert!(!task_accepted(t, f, &d), "{name} {f:?}: {t} is accepted");
+                assert!(
+                    !s.task_spellings.contains_key(t),
+                    "{name} {f:?}: {t} is offered"
+                );
+            }
+            for t in ["io.kestra.plugin.core.flow.Loop", "core.loop"] {
+                assert!(
+                    s.task_spellings.contains_key(t),
+                    "{name} {f:?}: {t} is not offered"
+                );
+            }
+        }
+    }
+}
+
 /// Test 1: the schema offers exactly the type spellings parse and publish
 /// accept, for each combination of features.
 #[test]
@@ -229,6 +260,10 @@ fn the_served_type_set_is_the_accepted_type_set_for_every_feature_combination() 
                 candidates.extend(row.aliases.iter().map(|a| a.to_string()));
             }
             candidates.extend(plugins::prefixed_types().map(str::to_string));
+            // `ForEach` is in no export and no registry, so it would never be
+            // a candidate and this equality could say nothing about it. It
+            // is named so the equality covers it (the 2026-10-12 ruling).
+            candidates.extend(FOREACH_SPELLINGS.iter().map(|t| t.to_string()));
             let accepted: BTreeSet<String> = candidates
                 .into_iter()
                 .filter(|t| task_accepted(t, f, &d))

@@ -3921,7 +3921,8 @@ mod tests {
     ///
     /// *(2026-10-11, W7b Task 4b: the table holds five rows now. The three
     /// added are not over-refusals to close but the user's ruling that a
-    /// `Pause` egret cannot run is refused; the test keeps its name.)*
+    /// `Pause` egret cannot run is refused. Renamed at W7b Task 7b from
+    /// `…_except_two_named_over_refusals`, which had stopped being true.)*
     ///
     /// Over-refusal is the mirror of the divergence class the programme
     /// forbids shipping, and until the final review nothing in this package
@@ -3956,7 +3957,7 @@ mod tests {
     /// panicked at `valids/switch-impossible` by name, with the row's own cause
     /// in the message, before anything had been edited.
     #[test]
-    fn every_flow_kestra_published_plans_except_two_named_over_refusals() {
+    fn every_flow_kestra_published_plans_except_the_named_refusals() {
         let corpus: serde_json::Value =
             serde_json::from_str(include_str!("../../oracle-exec/corpus.json"))
                 .expect("corpus.json parses");

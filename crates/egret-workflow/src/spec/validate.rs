@@ -1689,7 +1689,28 @@ fn walk_task(
                 && !task.r#type.starts_with(crate::plugins::PREFIX)
                 && crate::plugins::bare_hint(&task.r#type).is_none() =>
         {
-            if canonical_flow_type(&task.r#type).is_some() {
+            if canonical_flow_type(&task.r#type).as_deref() == Some("foreach") {
+                // **`ForEach` is an ERROR, the user's ruling of 2026-10-12**
+                // (W7b Task 7b). It is not a class in the pinned checkout --
+                // Kestra's name for it is `Loop` (`models::task`'s
+                // `foreach_is_really_named_loop_in_this_checkout`) -- and Kestra
+                // 2.0 refuses it with a 422. Under the generic warning below it
+                // published as a draft and every start path ran it: planned an
+                // opaque runnable no handler serves, so its body never ran. As
+                // an error it is in `validate_for_run`, so `build_plan` refuses
+                // the flow and no start path can run it.
+                report.errors.push(Finding {
+                    code: "unsupported_foreach",
+                    message: format!(
+                        "task '{}' has type '{}', which egret does not run: ForEach is not a \
+                         Kestra 2.0 task type, so the flow cannot be published or started. Use \
+                         io.kestra.plugin.core.flow.Loop (alias core.loop), which takes the \
+                         same values and tasks",
+                        task.id, task.r#type
+                    ),
+                    path: path.clone(),
+                });
+            } else if canonical_flow_type(&task.r#type).is_some() {
                 // **No `KESTRA_FLOW_CONTROL` lookup, and the arm that did one
                 // is GONE.** W8 Task 3 fix round 1. It named the package that
                 // would port an `Unported` row, and since W8 Task 3 ported
@@ -2897,6 +2918,92 @@ mod tests {
                     "{spelling}/{property}: validate_for_run must refuse it"
                 );
             }
+        }
+    }
+
+    /// The user's ruling of 2026-10-12 (W7b Task 7b). `ForEach` is not a type
+    /// egret runs -- Kestra's own name for it in the pinned checkout is
+    /// `Loop`, and Kestra 2.0 refuses `ForEach` with a 422 -- and until the
+    /// ruling it drew only the generic `not_yet_enforced` warning, then ran
+    /// as an inert no-op: its body was skipped and the execution could end
+    /// SUCCESS. It is an ERROR now, at the top level and nested inside a
+    /// flowable, under every spelling `canonical_flow_type` folds to
+    /// `foreach`, and the message names `Loop` and its alias. `Loop` itself,
+    /// under both spellings, stays valid and silent: the control.
+    #[test]
+    fn foreach_is_an_error_that_names_loop_and_loop_stays_valid() {
+        let foreach = |spelling: &str, indent: &str| {
+            format!(
+                "{indent}- id: fan\n{indent}  type: {spelling}\n{indent}  values: [1, 2]\n\
+                 {indent}  tasks:\n{indent}    - id: body\n{indent}      type: core.log\n\
+                 {indent}      message: hi\n"
+            )
+        };
+        for spelling in [
+            "io.kestra.plugin.core.flow.ForEach",
+            "core.foreach",
+            "io.kestra.plugin.core.flow.Foreach",
+            "core.forEach",
+        ] {
+            for (label, yaml, path) in [
+                (
+                    "top-level",
+                    format!("id: f\nnamespace: a.b\ntasks:\n{}", foreach(spelling, "  ")),
+                    "tasks.fan",
+                ),
+                (
+                    "nested in a Sequential",
+                    format!(
+                        "id: f\nnamespace: a.b\ntasks:\n  - id: seq\n    type: core.sequential\n    tasks:\n{}",
+                        foreach(spelling, "      ")
+                    ),
+                    "tasks.seq.fan",
+                ),
+                (
+                    "nested in a Loop body",
+                    format!(
+                        "id: f\nnamespace: a.b\ntasks:\n  - id: lp\n    type: core.loop\n    values: [1]\n    tasks:\n{}",
+                        foreach(spelling, "      ")
+                    ),
+                    "tasks.lp.fan",
+                ),
+            ] {
+                let f = parse(&yaml).unwrap_or_else(|e| panic!("{spelling}/{label}: {e:?}\n{yaml}"));
+                let r = validate(&f);
+                let e = r
+                    .errors
+                    .iter()
+                    .find(|e| e.code == "unsupported_foreach")
+                    .unwrap_or_else(|| panic!("{spelling}/{label}: no error: {r:?}"));
+                assert_eq!(e.path, path, "{spelling}/{label}");
+                assert!(e.message.contains(spelling), "{spelling}/{label}: {}", e.message);
+                assert!(
+                    e.message.contains("io.kestra.plugin.core.flow.Loop")
+                        && e.message.contains("core.loop"),
+                    "{spelling}/{label}: the error must name Loop and its alias: {}",
+                    e.message
+                );
+                assert!(
+                    !r.warnings.iter().any(|w| w.path == path),
+                    "{spelling}/{label}: an error, not also a warning: {r:?}"
+                );
+                assert!(
+                    validate_for_run(&f)
+                        .errors
+                        .iter()
+                        .any(|e| e.code == "unsupported_foreach"),
+                    "{spelling}/{label}: validate_for_run must refuse it"
+                );
+            }
+        }
+        // The control: `Loop` under both spellings is valid and silent.
+        for spelling in ["io.kestra.plugin.core.flow.Loop", "core.loop"] {
+            let yaml = format!("id: f\nnamespace: a.b\ntasks:\n{}", foreach(spelling, "  "));
+            let r = validate(&parse(&yaml).unwrap());
+            assert!(
+                r.errors.is_empty() && r.warnings.is_empty(),
+                "{spelling}: {r:?}"
+            );
         }
     }
 

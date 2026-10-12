@@ -2969,7 +2969,13 @@ const RETIRED_POINTERS: &[(&str, &str)] = &[
     ),
     (
         "every_flow_kestra_published_plans_except_three_named_over_refusals",
+        "every_flow_kestra_published_plans_except_the_named_refusals",
+    ),
+    // Renamed at W7b Task 7b: its table holds deliberate refusals now (the
+    // 2026-10-11 Pause ruling), not only over-refusals, and more than two.
+    (
         "every_flow_kestra_published_plans_except_two_named_over_refusals",
+        "every_flow_kestra_published_plans_except_the_named_refusals",
     ),
     // Renamed by W3b Task 5, because the question each asks changed. Both say
     // so in their own doc comments.

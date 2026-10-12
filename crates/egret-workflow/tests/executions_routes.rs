@@ -3330,3 +3330,66 @@ async fn a_start_refuses_a_draft_whose_pause_egret_does_not_run() {
     assert_eq!(res.status(), 201);
     assert_eq!(common::execution_count(&db, ws).await, 1);
 }
+
+/// **The 2026-10-12 ruling, on the API start.** `ForEach` is the validation
+/// error `unsupported_foreach`: a saved draft holding one is refused at start
+/// with a 400 naming the finding, and no execution is created. Before the
+/// ruling it started, its body was skipped as an inert no-op, and the
+/// execution ended SUCCESS. The control is the same draft with `Loop`.
+#[tokio::test]
+async fn a_start_refuses_a_draft_with_a_foreach() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let app = common::app(&db).await;
+
+    let flow = common::seed_flow(
+        &db,
+        ws,
+        user,
+        "id: fe\nnamespace: a.write\ntasks:\n  - id: fan\n    type: io.kestra.plugin.core.flow.ForEach\n    values: [1, 2]\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+        "draft",
+    )
+    .await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    let body = common::body_text(res).await;
+    assert!(
+        body.contains("unsupported_foreach") && body.contains("tasks.fan"),
+        "{body}"
+    );
+    assert_eq!(common::execution_count(&db, ws).await, 0);
+
+    let ok = common::seed_flow(
+        &db,
+        ws,
+        user,
+        "id: lp\nnamespace: a.write\ntasks:\n  - id: fan\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1, 2]\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+        "draft",
+    )
+    .await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{ok}/executions"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 201);
+    // Roots only: the Loop's iterations are child executions.
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM workflow.executions \
+              WHERE workspace_id = $1 AND parent_execution_id IS NULL",
+        )
+        .bind(ws)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+}

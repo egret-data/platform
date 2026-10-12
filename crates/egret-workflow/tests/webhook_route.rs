@@ -1979,3 +1979,61 @@ tasks:
     assert_eq!(res.status(), StatusCode::OK, "a plain Pause fires");
     assert_eq!(common::execution_count(&db, ws).await, 1);
 }
+
+/// **The 2026-10-12 ruling, on the webhook.** A flow holding a `ForEach` is
+/// refused when its webhook fires, with a 400 naming `unsupported_foreach`,
+/// and no execution is created. The control is the same flow with `Loop`.
+#[tokio::test]
+async fn a_foreach_is_refused_and_starts_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let app = common::webhook_app(&db).await;
+    let flow = |ns: &str, task: &str| {
+        format!(
+            "id: fx-flow\nnamespace: {ns}\ntasks:\n{task}triggers:\n  - id: fx-trigger\n    \
+             type: io.kestra.plugin.core.trigger.Webhook\n    key: fx-key\n"
+        )
+    };
+
+    let ns = fresh_namespace();
+    common::seed_flow(&db, ws, user, &flow(&ns, "  - id: fan\n    type: io.kestra.plugin.core.flow.ForEach\n    values: [1, 2]\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n"), "draft").await;
+    let res = common::anon(
+        &app,
+        "POST",
+        &hook_url(ws, &ns, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = common::body_text(res).await;
+    assert!(
+        body.contains("unsupported_foreach") && body.contains("tasks.fan"),
+        "{body}"
+    );
+    assert_eq!(common::execution_count(&db, ws).await, 0);
+
+    let ns = fresh_namespace();
+    common::seed_flow(&db, ws, user, &flow(&ns, "  - id: fan\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1, 2]\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n"), "draft").await;
+    let res = common::anon(
+        &app,
+        "POST",
+        &hook_url(ws, &ns, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK, "a Loop fires");
+    // Roots only: the Loop's iterations are child executions.
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM workflow.executions \
+              WHERE workspace_id = $1 AND parent_execution_id IS NULL",
+        )
+        .bind(ws)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+}

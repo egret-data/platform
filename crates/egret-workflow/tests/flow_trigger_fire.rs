@@ -1618,3 +1618,44 @@ async fn a_draft_listener_fires() {
     assert_eq!(executions_of(&fx.db, draft).await, 1);
     assert_eq!(executions_of(&fx.db, live).await, 1);
 }
+
+/// **The 2026-10-12 ruling, on a Flow trigger.** A listener holding a
+/// `ForEach` no longer plans, so the event does not start it (counted
+/// `errored`), while its sibling listener, the same flow with `Loop`, fires.
+#[tokio::test]
+async fn a_foreach_listener_is_refused_and_its_loop_sibling_fires() {
+    let Some(fx) = fx().await else { return };
+    let producer_src = source_yaml("producer");
+    let producer = fx.flow(&producer_src).await;
+    let listener = |id: &str, task: &str| {
+        format!(
+            "id: {id}\nnamespace: w13\ntriggers:\n  - id: on_done\n    type: {FLOW}\ntasks:\n{task}"
+        )
+    };
+    let broken = fx.flow(&listener("a_foreach", "  - id: fan\n    type: io.kestra.plugin.core.flow.ForEach\n    values: [1, 2]\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n")).await;
+    let sibling = fx.flow(&listener("z_loop", "  - id: fan\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1, 2]\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n")).await;
+
+    fx.run(producer, &producer_src, serde_json::json!({})).await;
+    assert_eq!(
+        fx.pass().await,
+        EventReport {
+            events: 1,
+            fired: 1,
+            errored: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(executions_of(&fx.db, broken).await, 0);
+    // Roots only: the Loop's iterations are child executions.
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM workflow.executions \
+              WHERE flow_id = $1 AND parent_execution_id IS NULL",
+        )
+        .bind(sibling)
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+}
