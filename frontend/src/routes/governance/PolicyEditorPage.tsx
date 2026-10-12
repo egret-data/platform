@@ -50,7 +50,7 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { MaskItemTable } from "@/components/policy/MaskItemTable";
 import { PermissionTable } from "@/components/policy/PermissionTable";
 import { ResourceSelector } from "@/components/policy/ResourceSelector";
-import { grantsSelect, levelGaps, levelsToFill } from "@/components/policy/resourceLevels";
+import { grantsSelect, levelGaps, levelHasValue, levelsToFill } from "@/components/policy/resourceLevels";
 import { RowFilterItemTable } from "@/components/policy/RowFilterItemTable";
 import { ConfigSection } from "@/components/form/ConfigSection";
 import { FieldLabel } from "@/routes/control-plane/config/FieldLabel";
@@ -456,7 +456,7 @@ export default function PolicyEditorPage() {
     scope === "tag"
       ? !tag
       : Object.entries(form.resources as Record<string, ResourceLevel>).some(
-          ([name, lvl]) => resDefByName(name)?.mandatory && isRoot(name) && lvl.values.length === 0,
+          ([name, lvl]) => resDefByName(name)?.mandatory && isRoot(name) && !levelHasValue(lvl),
         );
 
   // Resource maps of the primary resource and every additional one.

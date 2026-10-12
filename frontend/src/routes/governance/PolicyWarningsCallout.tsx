@@ -56,7 +56,9 @@ export function PolicyWarningsCallout({
   const body = q.data?.status === 200 ? q.data.data : null;
   if (!body || body.warningCount === 0) return null;
 
-  const typeOf = (id: number) => all.data?.find((p) => p.id === id)?.policy_type ?? "access";
+  // The editor kind comes from the policy list; until it is known (loading or
+  // failed) the name is plain text rather than a link to a guessed kind.
+  const typeOf = (id: number) => all.data?.find((p) => p.id === id)?.policy_type;
   const kinds = new Set(body.policies.flatMap((p) => p.warnings.map((w) => w.kind)));
   const n = body.warningCount;
   const m = body.policies.length;
@@ -92,12 +94,16 @@ export function PolicyWarningsCallout({
           <ul className="space-y-2">
             {body.policies.map((p: WarnedPolicy) => (
               <li key={p.id}>
-                <Link
-                  className="font-medium text-primary hover:underline"
-                  to={`/governance/policies/${encodeURIComponent(service)}/${typeOf(p.id)}/${p.id}`}
-                >
-                  {p.name}
-                </Link>
+                {typeOf(p.id) ? (
+                  <Link
+                    className="font-medium text-primary hover:underline"
+                    to={`/governance/policies/${encodeURIComponent(service)}/${typeOf(p.id)}/${p.id}`}
+                  >
+                    {p.name}
+                  </Link>
+                ) : (
+                  <span className="font-medium">{p.name}</span>
+                )}
                 <ul>
                   {p.warnings.map((w: PolicyWarning) => (
                     <li key={`${w.kind}-${w.level ?? w.missing ?? ""}`}>{w.sentence}</li>

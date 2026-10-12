@@ -9,7 +9,14 @@ import type { ResourceLevel, ServiceDefResource } from "@/api/policies";
  * before the save instead of after it.
  */
 
-const hasValues = (lvl: ResourceLevel | undefined): boolean => (lvl?.values.length ?? 0) > 0;
+/**
+ * Whether a level names anything. Mirrors the server's `level_is_empty`: a
+ * level whose values are all blank or whitespace is EMPTY (`[""]`, `[" "]`),
+ * so it is filled or refused exactly like `[]`.
+ */
+export const levelHasValue = (lvl: ResourceLevel | undefined): boolean =>
+  (lvl?.values ?? []).some((v) => typeof v === "string" && v.trim() !== "");
+const hasValues = levelHasValue;
 
 const parentOf = (defs: ServiceDefResource[], name: string): string | undefined =>
   defs.find((d) => d.name === name)?.parent ?? undefined;

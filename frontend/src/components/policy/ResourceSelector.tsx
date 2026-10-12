@@ -3,7 +3,7 @@ import { TriangleAlert } from "lucide-react";
 import { type ResourceLevel, type ServiceDefResource } from "@/api/policies";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ResourceLevelEditor } from "@/components/policy/ResourceLevelEditor";
-import { grantsSelect, levelGaps, stopsAboveColumn } from "@/components/policy/resourceLevels";
+import { grantsSelect, levelGaps, levelHasValue, stopsAboveColumn } from "@/components/policy/resourceLevels";
 
 export interface ResourceSelectorProps {
   /** The applicable resources from the service-def: `def.resources`, `def.dataMaskDef.resources`, or `def.rowFilterDef.resources`. */
@@ -172,7 +172,7 @@ export function ResourceSelector({
         // Never offered at the root — a policy needs at least one resource.
         const showNone = index > 0 && parentDef?.isValidLeaf === true;
         const def = byName.get(name) ?? { name };
-        const empty = (value[name]?.values.length ?? 0) === 0;
+        const empty = !levelHasValue(value[name]);
         const levelName = labelFor(name).toLowerCase();
         // The root cannot be left empty (`*` would cover every one this
         // profile serves); any deeper level can, and is saved as `*`.

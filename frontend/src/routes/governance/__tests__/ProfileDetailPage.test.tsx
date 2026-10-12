@@ -36,6 +36,8 @@ let tagServiceOrigin: string = "manual";
 let profileType: string = "trino";
 /** What `GET /perm/overlaps` answers (every profile's pairs). */
 let overlapRows: StoredOverlap[] = [];
+/** Make the policy list fail, so a warning cannot learn its policy's kind. */
+let listPoliciesFails = false;
 /** What `GET /perm/policies/services/{id}/warnings` answers. */
 let warnings: ProfileWarnings = { warningCount: 0, policies: [] };
 /** The ids the warnings hook was asked about. */
@@ -77,7 +79,7 @@ vi.mock("@/api/policies", async (orig) => ({
       origin: tagServiceOrigin,
     },
   ]),
-  listPolicies: () => Promise.resolve([
+  listPolicies: () => listPoliciesFails ? Promise.reject(new Error("boom")) : Promise.resolve([
     {
       id: 42,
       name: "allow-analysts",
@@ -513,6 +515,7 @@ describe("ProfileDetailPage — stored policies Ranger reads differently (SP4d-4
     overlapRows = [];
     warnings = { warningCount: 0, policies: [] };
     warningsAskedFor.length = 0;
+    listPoliciesFails = false;
   });
 
   const SELECT_SENTENCE =
@@ -574,5 +577,19 @@ describe("ProfileDetailPage — stored policies Ranger reads differently (SP4d-4
     const callout = (await screen.findByText("1 warning on 1 stored policy")).closest('[role="alert"]') as HTMLElement;
     expect(callout).toHaveTextContent("A level is named below one that is not set");
     expect(callout).not.toHaveTextContent("column SELECT");
+  });
+
+  it("shows a policy's name as plain text, not a guessed link, while its kind is unknown", async () => {
+    listPoliciesFails = true;
+    warnings = {
+      warningCount: 1,
+      policies: [
+        { id: 42, name: "allow-analysts", warnings: [{ kind: "level_gap", missing: "schema", sentence: "gap." }] },
+      ],
+    };
+    wrap(<ProfileDetailPage />);
+    const callout = (await screen.findByText("1 warning on 1 stored policy")).closest('[role="alert"]') as HTMLElement;
+    expect(within(callout).getByText("allow-analysts")).toBeInTheDocument();
+    expect(within(callout).queryByRole("link", { name: "allow-analysts" })).toBeNull();
   });
 });

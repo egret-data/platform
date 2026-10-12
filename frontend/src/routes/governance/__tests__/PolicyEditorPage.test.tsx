@@ -533,6 +533,25 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
     expect(updatePolicy).not.toHaveBeenCalled();
   });
 
+  it("treats a stored blank value as empty: the widening prompt appears for values [\"\"]", async () => {
+    getPolicy.mockResolvedValueOnce(
+      stored({ catalog: { values: ["iceberg"] }, schema: { values: ["*"] }, table: { values: ["*"] }, column: { values: [" "] } }),
+    );
+    wrap(<PolicyEditorPage />);
+    await renameAndSave();
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Saving will widen this stored policy");
+    expect(updatePolicy).not.toHaveBeenCalled();
+  });
+
+  it("a blank root blocks Save with the reason, like an empty one", async () => {
+    getPolicy.mockResolvedValueOnce(stored({ catalog: { values: [""] }, schema: { values: ["*"] } }));
+    wrap(<PolicyEditorPage />);
+    await screen.findByDisplayValue("stored-row");
+    const save = screen.getByRole("button", { name: /^save$/i });
+    expect(save).toBeDisabled();
+    expect(save).toHaveAttribute("title", expect.stringContaining("Name the required resource level"));
+  });
+
   it("sends nothing when the operator keeps the policy as stored", async () => {
     getPolicy.mockResolvedValueOnce(
       stored({ catalog: { values: ["iceberg"] }, schema: { values: ["*"] }, table: { values: ["*"] }, column: { values: [] } }),
