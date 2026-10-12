@@ -7435,7 +7435,7 @@
             }
           },
           "409": {
-            "description": "A policy with this name already exists, the target profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or a mask/row-filter policy would be served at the same priority as another one that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the body names both and suggests Override)",
+            "description": "A policy with this name already exists, the target profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or a mask/row-filter policy would form a rule overlap with another policy or compiled rule that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the sentence names both and suggests Override where a priority can fix it). An overlap body adds `code: \"rule_overlap\"`, `rules` (both members: a compiled rule's `id` and name, `id` null for a hand-written policy), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -8179,7 +8179,7 @@
             }
           },
           "409": {
-            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the mask/row-filter body would be served at the same priority as another policy that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the body names both and suggests Override)",
+            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the mask/row-filter body would form a rule overlap with another policy or compiled rule that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the sentence names both and suggests Override where a priority can fix it). An overlap body adds `code: \"rule_overlap\"`, `rules` (both members: a compiled rule's `id` and name, `id` null for a hand-written policy), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {

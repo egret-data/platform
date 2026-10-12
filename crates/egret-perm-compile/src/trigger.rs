@@ -1630,17 +1630,12 @@ pub async fn lock_services_in_tx(
     let expanded = services_and_tag_services_via(tx, service_ids)
         .await
         .map_err(db_err)?;
-    // One statement per id rather than `WHERE id = ANY(...) ORDER BY id FOR
-    // UPDATE`: Postgres does not promise that a sort is applied before row
-    // locks are taken, and the ORDER is the entire point here.
-    for &service_id in &expanded {
-        sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
-            .bind(service_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(db_err)?;
-    }
-    Ok(())
+    // The one spelling of the row lock, shared with the policy editor's
+    // overlap check (SP4d-4 Task 3 fix round 1, review I1): one statement per
+    // id, ascending — see `egret_policy::lock_service_rows_via`.
+    egret_policy::lock_service_rows_via(tx, &expanded)
+        .await
+        .map_err(db_err)
 }
 
 /// Recompile every service in `service_ids` on the CALLER's open transaction.

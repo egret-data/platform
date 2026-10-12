@@ -78,10 +78,9 @@ use std::collections::{BTreeSet, HashMap};
 use egret_perm::{CompileError, OverlapKind, OverlapRule};
 use egret_policy::{
     get_service_by_id_via, load_unit_via, units_for_services_via, Arbitrated, AssignedTag, UnitIds,
-    UnitOverlap, UnitPolicy, COMPILER_RULE_PREFIX,
+    UnitOverlap, UnitPolicy,
 };
 use serde_json::{json, Value};
-use uuid::Uuid;
 
 /// One compiled policy, as the overlap check reads it.
 #[derive(Debug, Clone)]
@@ -290,38 +289,18 @@ pub async fn unit_snapshot_via(
 }
 
 /// The rule behind every compiled `perm-rule-<uuid>[-suffix]` name, read from
-/// `perm.rules`.
+/// `perm.rules` through the one loader the policy editor uses too
+/// (`egret_policy::compiled_rule_names_via`).
 async fn rules_for_names_via(
     conn: &mut sqlx::PgConnection,
     names: &BTreeSet<&str>,
 ) -> Result<HashMap<String, OverlapRule>, CompileError> {
-    let parse = |n: &str| -> Option<Uuid> {
-        let rest = n.strip_prefix(COMPILER_RULE_PREFIX)?;
-        Uuid::parse_str(rest.get(..36)?).ok()
-    };
-    let ids: Vec<Uuid> = names.iter().filter_map(|n| parse(n)).collect();
-    if ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let rows: Vec<(Uuid, String)> =
-        sqlx::query_as("SELECT id, name FROM perm.rules WHERE id = ANY($1)")
-            .bind(&ids)
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
-    let by_id: HashMap<Uuid, String> = rows.into_iter().collect();
-    Ok(names
-        .iter()
-        .filter_map(|n| {
-            let id = parse(n)?;
-            Some((
-                n.to_string(),
-                OverlapRule {
-                    id: Some(id),
-                    name: by_id.get(&id).cloned().unwrap_or_else(|| n.to_string()),
-                },
-            ))
-        })
+    let names: Vec<&str> = names.iter().copied().collect();
+    Ok(egret_policy::compiled_rule_names_via(conn, &names)
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?
+        .into_iter()
+        .map(|(policy, (id, name))| (policy, OverlapRule { id: Some(id), name }))
         .collect())
 }
 
@@ -360,6 +339,7 @@ pub async fn refuse_created_overlaps_via(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     fn mask(name: &str, table: &str, mask_type: &str) -> Value {
         json!({

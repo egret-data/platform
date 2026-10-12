@@ -245,6 +245,48 @@ impl UnitOverlap {
     pub fn refusal(&self, editor: bool) -> String {
         self.sentence(&quoted, editor)
     }
+
+    /// The `kind` of the structured 409 body: `"mask"` / `"row_filter"`.
+    pub fn kind_wire_name(&self) -> &'static str {
+        match self.arbitrated {
+            Arbitrated::Mask => "mask",
+            Arbitrated::RowFilter => "row_filter",
+        }
+    }
+}
+
+/// The RULE behind every compiled `perm-rule-<uuid>[-suffix]` policy name in
+/// `names`: policy name → (rule id, rule name), the name read from
+/// `perm.rules` (the policy name when the row is gone). Names that are not a
+/// compiled rule's are absent. Shared by the rule compiler's tag-assignment
+/// check and the policy editor, so a 409 names a compiled member by the rule a
+/// steward edits on every surface (SP4d-4 Task 3 fix round 1, M1).
+pub async fn compiled_rule_names_via(
+    conn: &mut sqlx::PgConnection,
+    names: &[&str],
+) -> Result<BTreeMap<String, (uuid::Uuid, String)>, PolicyStoreError> {
+    let parse = |n: &str| -> Option<uuid::Uuid> {
+        let rest = n.strip_prefix(crate::COMPILER_RULE_PREFIX)?;
+        uuid::Uuid::parse_str(rest.get(..36)?).ok()
+    };
+    let ids: Vec<uuid::Uuid> = names.iter().filter_map(|n| parse(n)).collect();
+    if ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let rows: Vec<(uuid::Uuid, String)> =
+        sqlx::query_as("SELECT id, name FROM perm.rules WHERE id = ANY($1)")
+            .bind(&ids)
+            .fetch_all(&mut *conn)
+            .await?;
+    let by_id: BTreeMap<uuid::Uuid, String> = rows.into_iter().collect();
+    Ok(names
+        .iter()
+        .filter_map(|n| {
+            let id = parse(n)?;
+            let name = by_id.get(&id).cloned().unwrap_or_else(|| n.to_string());
+            Some((n.to_string(), (id, name)))
+        })
+        .collect())
 }
 
 /// One mask/row-filter policy, read once.

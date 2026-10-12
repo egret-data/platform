@@ -718,7 +718,8 @@ async fn profile_name(e: &Env, p: &Profile) -> String {
 }
 
 /// Assert the structured 409 names hand-written `policy` (no rule id) and the
-/// compiled `rule` (with an id), each by the label the steward edits.
+/// compiled `rule` (with an id), each by the label the steward edits — the
+/// compiler writes `policy "H"`, the editor `"H"`; both write `rule "R"`.
 fn assert_mixed_overlap(status: StatusCode, body: &Value, policy: &str, rule: &str) {
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "rule_overlap", "{body}");
@@ -738,7 +739,7 @@ fn assert_mixed_overlap(status: StatusCode, body: &Value, policy: &str, rule: &s
     );
     let error = body["error"].as_str().expect("error");
     assert!(
-        error.contains(&format!("policy {policy:?}")) && error.contains(&format!("rule {rule:?}")),
+        error.contains(&format!("{policy:?}")) && error.contains(&format!("rule {rule:?}")),
         "{error}"
     );
     for banned in ["random", "undefined", "may change between queries"] {
@@ -774,6 +775,10 @@ async fn a_rule_completing_a_pair_with_a_hand_written_mask_is_409_naming_both() 
     )
     .await;
     assert_mixed_overlap(status, &body, &hand, &rule);
+    assert!(
+        body["error"].as_str().unwrap().contains(&format!("policy {hand:?}")),
+        "{body}"
+    );
     assert_eq!(body["kind"], "mask");
     assert!(path_rules(&e, &p).await.is_empty(), "no rule stored");
 }
@@ -915,6 +920,7 @@ async fn agreeing_or_disjoint_rules_beside_a_hand_written_mask_are_admitted() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    let hand_id = body["id"].as_i64().expect("id");
 
     let agreeing = unique("mask email too");
     let (status, body) = send(
@@ -935,7 +941,20 @@ async fn agreeing_or_disjoint_rules_beside_a_hand_written_mask_are_admitted() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "another column: {body}");
-    let mut want = vec![agreeing, disjoint];
+    let mut want = vec![agreeing, disjoint.clone()];
     want.sort();
     assert_eq!(path_rules(&e, &p).await, want);
+
+    // M1, the other direction: the EDITOR refusing an edit that moves H onto
+    // the disjoint rule's column (the profile is generated now, so an edit —
+    // policy-scoped — is what a steward can still do) names the rule by its
+    // rule name and id, in the same structured body.
+    let (status, body) = send(
+        &e,
+        "PUT",
+        &format!("/policies/{hand_id}"),
+        Some(hand_path_mask(&hand, &svc, &p, "sku", "MASK")),
+    )
+    .await;
+    assert_mixed_overlap(status, &body, &hand, &disjoint);
 }

@@ -3269,3 +3269,142 @@ async fn hand_written_tag_masks_meeting_on_a_tagged_column_are_409() {
     f.store.delete_service(trino_id).await.expect("cleanup");
     f.store.delete_service(tag_svc).await.expect("cleanup");
 }
+
+/// SP4d-4 Task 3 fix round 1, review I1: the editor's overlap check and its
+/// write are ONE transaction under the unit's service row locks. Two editor
+/// writes that would form a differing pair on one column, both started while a
+/// second connection holds the unit's rows (a profile and its tag service —
+/// what a recompile or a tag assignment holds), must not both commit: once the
+/// holder lets go, exactly one is stored and the other answers 409.
+///
+/// Before the fix each request checked on a pooled connection with no lock,
+/// then parked on the row at its INSERT, so both checks passed and both
+/// committed. Driven without a sleep for synchronisation: the holder's pid is
+/// polled in `pg_blocking_pids` until BOTH requests are parked behind it
+/// (directly or behind the other).
+#[tokio::test]
+async fn two_concurrent_editor_writes_forming_a_pair_store_exactly_one() {
+    use sqlx::Connection as _;
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let dsn = egret_test_db::url().await.expect("dsn");
+    let token = session_for(&f, "t3race", true).await;
+    egret_policy::seed_trino(&f.store)
+        .await
+        .expect("seed trino");
+    egret_policy::seed_tag(&f.store).await.expect("seed tag");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tag_name = format!("t3race-tag-{suffix}");
+    let tag_svc = f
+        .store
+        .create_service(&tag_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("tag service");
+    let trino_name = format!("t3race-trino-{suffix}");
+    let trino = f
+        .store
+        .create_service(
+            &trino_name,
+            "trino",
+            &serde_json::json!({ "tagService": tag_name }),
+        )
+        .await
+        .expect("trino profile");
+
+    let mut holder = sqlx::PgConnection::connect(&dsn).await.expect("holder");
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut holder)
+        .await
+        .expect("holder pid");
+    sqlx::query("BEGIN").execute(&mut holder).await.unwrap();
+    let mut held = [tag_svc.id, trino.id];
+    held.sort_unstable();
+    for id in held {
+        sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .execute(&mut holder)
+            .await
+            .expect("hold the unit's rows");
+    }
+
+    let write = |name: &str, mask: &str| {
+        let app = f.app_empty();
+        let token = token.clone();
+        let body = serde_json::json!({
+            "kind": "masking", "name": name, "service": trino_name, "isEnabled": true,
+            "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                          "table": {"values": ["t"]}, "column": {"values": ["email"]}},
+            "items": [{"groups": ["public"], "maskType": mask}]
+        });
+        tokio::spawn(async move {
+            into_json(
+                app.oneshot(req("POST", "/policies", &token, Some(body)))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        })
+    };
+    let a = write("race-a", "MASK");
+    let b = write("race-b", "MASK_NULL");
+
+    let mut parked = 0_i64;
+    for _ in 0..400 {
+        // Transitively: the second waiter on a row queues behind the FIRST
+        // waiter's tuple lock, so `pg_blocking_pids` names that waiter, not
+        // the holder.
+        parked = sqlx::query_scalar(
+            "WITH RECURSIVE w(pid) AS ( \
+                 SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) \
+                 UNION \
+                 SELECT a.pid FROM pg_stat_activity a JOIN w ON w.pid = ANY(pg_blocking_pids(a.pid)) \
+             ) SELECT count(*) FROM w",
+        )
+        .bind(holder_pid)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("read pg_blocking_pids");
+        if parked >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        parked >= 2,
+        "both writes must park on the held rows: {parked}"
+    );
+    sqlx::query("COMMIT").execute(&mut holder).await.unwrap();
+
+    let (sa, ba) = a.await.expect("a");
+    let (sb, bb) = b.await.expect("b");
+    let mut statuses = [sa, sb];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::CONFLICT],
+        "exactly one stored: a={sa} {ba}; b={sb} {bb}"
+    );
+    let stored: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM policy.authz_policies WHERE service_id = $1")
+            .bind(trino.id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("count");
+    assert_eq!(stored, 1, "one policy in the profile");
+    let refused = if sa == StatusCode::CONFLICT { &ba } else { &bb };
+    // M1: the editor's 409 carries the same structured fields as the perm
+    // routes; both members are hand-written, so neither has a rule id.
+    assert_eq!(refused["code"], "rule_overlap", "{refused}");
+    assert_eq!(refused["kind"], "mask", "{refused}");
+    assert!(refused["coordinate"].is_string(), "{refused}");
+    let members = refused["rules"].as_array().expect("rules");
+    let mut names: Vec<&str> = members.iter().filter_map(|m| m["name"].as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["race-a", "race-b"], "{refused}");
+    assert!(members.iter().all(|m| m["id"].is_null()), "{refused}");
+
+    f.store.delete_service(trino.id).await.expect("cleanup");
+    f.store.delete_service(tag_svc.id).await.expect("cleanup");
+}
