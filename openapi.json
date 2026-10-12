@@ -4095,7 +4095,7 @@
         ],
         "responses": {
           "204": {
-            "description": "Cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger profile is unbound, not deleted"
+            "description": "For an external engine: egret's rows only (the engine, its declared attachments and its profile binding) are removed and nothing is sent to any cluster or provisioner, and Kubernetes need not be configured. For a provisioned engine: cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger profile is unbound, not deleted"
           },
           "400": {
             "description": "Kubernetes not configured",
@@ -4138,7 +4138,7 @@
             }
           },
           "409": {
-            "description": "Nothing deleted: Data API endpoints (including trashed), schedules or datasets still use the engine's workspace connections (`code` = `engine_has_dependents`, with `dependents`), or a database constraint refused the delete (`code` = `constraint_violation`, with `constraint`); The engine is external (`code` = `engine_is_external`): egret does not provision or delete the cluster of; instead the external engine's rows are removed and nothing is sent to a cluster. The cluster delete and Kubernetes requirement below apply to provisioned engines only it",
+            "description": "Nothing deleted: Data API endpoints (including trashed), schedules or datasets still use the engine's workspace connections (`code` = `engine_has_dependents`, with `dependents`), or a database constraint refused the delete (`code` = `constraint_violation`, with `constraint`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4579,6 +4579,109 @@
           },
           "502": {
             "description": "Trino coordinator unreachable or returned a non-JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/engines/{id}/external": {
+      "patch": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "summary": "`PATCH /api/control-plane/engines/{id}/external`.",
+        "operationId": "update_external_engine",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateExternalEngine"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated. Egret's row only: nothing is sent to the engine, a provisioner or Kubernetes. The policy profile it was or is bound to were recompiled in the same transaction. `rangerPluginVersionModelled` is as at registration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The engine is not external; nothing to update; invalid host, port or plugin version; or `authzServiceId` naming no profile, one of the wrong type, or a Trino profile with no usable tag service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine changed concurrently (e.g. a delete); the profile is bound to another engine; or the change would create an order-ambiguous mask or row-filter pair (`code: rule_overlap`). Nothing was written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
             "content": {
               "application/json": {
                 "schema": {
@@ -44318,6 +44421,42 @@
           }
         },
         "additionalProperties": false
+      },
+      "UpdateExternalEngine": {
+        "type": "object",
+        "description": "`PATCH /api/control-plane/engines/{id}/external`: every field optional;\nan absent field is left as it is.",
+        "properties": {
+          "authzServiceId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The policy profile to bind: absent leaves the binding, `null` unbinds,\na number binds (same rules as at registration)."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New host (bare host: no scheme, port or path)."
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "rangerPluginVersion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Ranger plugin version installed on the engine, as at registration.\nThe response says whether egret's evaluator models the (type, version)\npair."
+          }
+        }
       },
       "UpdateFlowRequest": {
         "type": "object",

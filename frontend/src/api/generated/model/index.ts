@@ -470,6 +470,7 @@ export * from './updateColumnBodySemanticType';
 export * from './updateDashboard';
 export * from './updateDataset';
 export * from './updateEndpointInput';
+export * from './updateExternalEngine';
 export * from './updateFlowRequest';
 export * from './updateRegistryCatalogBody';
 export * from './updateRegistryCatalogBodyAdvanced';

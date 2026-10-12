@@ -42,6 +42,7 @@ import type {
   QueryDto,
   RegisterExternalEngine,
   SetWorkspacesBody,
+  UpdateExternalEngine,
   WorkspaceEngineDto
 } from '../model';
 
@@ -1385,7 +1386,122 @@ export function useControlPlaneEnginesGetCluster<TData = Awaited<ReturnType<type
 
 
 
-export type controlPlaneEnginesPodExecResponse101 = {
+export type controlPlaneEnginesUpdateExternalEngineResponse200 = {
+  data: EngineDto
+  status: 200
+}
+
+export type controlPlaneEnginesUpdateExternalEngineResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneEnginesUpdateExternalEngineResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesUpdateExternalEngineResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesUpdateExternalEngineResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesUpdateExternalEngineResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesUpdateExternalEngineResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesUpdateExternalEngineResponseSuccess = (controlPlaneEnginesUpdateExternalEngineResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesUpdateExternalEngineResponseError = (controlPlaneEnginesUpdateExternalEngineResponse400 | controlPlaneEnginesUpdateExternalEngineResponse401 | controlPlaneEnginesUpdateExternalEngineResponse403 | controlPlaneEnginesUpdateExternalEngineResponse404 | controlPlaneEnginesUpdateExternalEngineResponse409 | controlPlaneEnginesUpdateExternalEngineResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesUpdateExternalEngineResponse = (controlPlaneEnginesUpdateExternalEngineResponseSuccess | controlPlaneEnginesUpdateExternalEngineResponseError)
+
+export const getControlPlaneEnginesUpdateExternalEngineUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/external`
+}
+
+/**
+ * @summary `PATCH /api/control-plane/engines/{id}/external`.
+ */
+export const controlPlaneEnginesUpdateExternalEngine = async (id: string,
+    updateExternalEngine: UpdateExternalEngine, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesUpdateExternalEngineResponse> => {
+
+  return customInstance<controlPlaneEnginesUpdateExternalEngineResponse>(getControlPlaneEnginesUpdateExternalEngineUrl(id),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(updateExternalEngine)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesUpdateExternalEngineMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesUpdateExternalEngine>>, TError,{id: string;data: UpdateExternalEngine}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesUpdateExternalEngine>>, TError,{id: string;data: UpdateExternalEngine}, TContext> => {
+
+const mutationKey = ['controlPlaneEnginesUpdateExternalEngine'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesUpdateExternalEngine>>, {id: string;data: UpdateExternalEngine}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  controlPlaneEnginesUpdateExternalEngine(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneEnginesUpdateExternalEngineMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesUpdateExternalEngine>>>
+    export type ControlPlaneEnginesUpdateExternalEngineMutationBody = UpdateExternalEngine
+    export type ControlPlaneEnginesUpdateExternalEngineMutationError = ErrorBody
+
+    /**
+ * @summary `PATCH /api/control-plane/engines/{id}/external`.
+ */
+export const useControlPlaneEnginesUpdateExternalEngine = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesUpdateExternalEngine>>, TError,{id: string;data: UpdateExternalEngine}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneEnginesUpdateExternalEngine>>,
+        TError,
+        {id: string;data: UpdateExternalEngine},
+        TContext
+      > => {
+      return useMutation(getControlPlaneEnginesUpdateExternalEngineMutationOptions(options), queryClient);
+    }
+    export type controlPlaneEnginesPodExecResponse101 = {
   data: void
   status: 101
 }
