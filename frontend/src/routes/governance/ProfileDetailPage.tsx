@@ -221,7 +221,7 @@ export default function ProfileDetailPage() {
         </Alert>
       )}
 
-      <PolicyWarningsCallout service={service} serviceId={profile?.id} />
+      <PolicyWarningsCallout service={service} serviceId={profile?.id} serviceType={profile?.type} />
 
       <OverlapReport serviceName={service} />
 

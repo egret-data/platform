@@ -566,6 +566,27 @@ describe("ProfileDetailPage — stored policies Ranger reads differently (SP4d-4
     expect(callout).toHaveTextContent("Nothing was changed");
   });
 
+  it.each([
+    ["trino", "Trino still allows table-level checks such as count(*)", /StarRocks denies/],
+    ["starrocks", "StarRocks denies even count(*)", /Trino still allows/],
+  ])("words the count(*) consequence for a %s profile", async (type, said, unsaid) => {
+    profileType = type;
+    warnings = {
+      warningCount: 1,
+      policies: [
+        {
+          id: 42,
+          name: "allow-analysts",
+          warnings: [{ kind: "select_stops_above_column", level: "table", sentence: SELECT_SENTENCE }],
+        },
+      ],
+    };
+    wrap(<ProfileDetailPage />);
+    const callout = (await screen.findByText("1 warning on 1 stored policy")).closest('[role="alert"]') as HTMLElement;
+    expect(callout).toHaveTextContent(said);
+    expect(callout).not.toHaveTextContent(unsaid);
+  });
+
   it("explains only the kinds that are present", async () => {
     warnings = {
       warningCount: 1,

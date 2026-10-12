@@ -338,6 +338,8 @@ export default function PolicyEditorPage() {
     }
   }, [id, policyQuery.data, kind, service]);
 
+  const engineOf = (d: ServiceDef | undefined) => (typeof d?.name === "string" ? d.name : undefined);
+
   const def = useQuery<ServiceDef>({
     queryKey: ["service-def", service],
     queryFn: () => getServiceDef(service),
@@ -815,6 +817,7 @@ export default function PolicyEditorPage() {
                       <ResourceSelector
                         resourceDefs={resDefs}
                         service={service}
+                        engine={engineOf(def.data)}
                         value={form.resources}
                         onChange={(r) => setForm((f: any) => ({ ...f, resources: r }))}
                         onLeafChange={setLeaf}
@@ -833,6 +836,7 @@ export default function PolicyEditorPage() {
                                 <ResourceSelector
                                   resourceDefs={resDefs}
                                   service={service}
+                                  engine={engineOf(def.data)}
                                   value={res}
                                   onChange={(r) =>
                                     setForm((f: any) => ({

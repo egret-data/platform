@@ -10,6 +10,12 @@ export interface ResourceSelectorProps {
   resourceDefs: ServiceDefResource[];
   /** Service name, forwarded to `resourceLookup` for value autocomplete. */
   service: string;
+  /**
+   * The engine the profile serves (`trino` or `starrocks`, the service-def's
+   * name). It only words the "stops above column" note: Trino still allows
+   * table-level checks such as `count(*)`, StarRocks denies even those.
+   */
+  engine?: string;
   /** The generic resources map, e.g. `{ catalog: {...}, schema: {...} }` or `{ role: {...} }`. */
   value: Record<string, ResourceLevel>;
   onChange: (value: Record<string, ResourceLevel>) => void;
@@ -63,6 +69,7 @@ function labelFor(name: string): string {
 export function ResourceSelector({
   resourceDefs,
   service,
+  engine,
   value,
   onChange,
   onLeafChange,
@@ -245,8 +252,24 @@ export function ResourceSelector({
         <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
           <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
           <span>
-            Stops above column: grants no column reads, only table-level checks such as{" "}
-            <code>count(*)</code>. Add the column level (use * for every column) to grant SELECT.
+            Stops above column: grants no column reads.{" "}
+            {engine === "trino" && (
+              <>
+                Trino still allows table-level checks such as <code>count(*)</code>.
+              </>
+            )}
+            {engine === "starrocks" && (
+              <>
+                StarRocks denies even <code>count(*)</code>.
+              </>
+            )}
+            {engine !== "trino" && engine !== "starrocks" && (
+              <>
+                Trino still allows table-level checks such as <code>count(*)</code>; StarRocks denies
+                even those.
+              </>
+            )}{" "}
+            Add the column level (use * for every column) to grant SELECT.
           </span>
         </p>
       )}

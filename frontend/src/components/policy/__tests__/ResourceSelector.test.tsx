@@ -207,7 +207,7 @@ describe("ResourceSelector — absent levels (SP4d-4 B1)", () => {
   });
 
   const AT_TABLE = { catalog: { values: ["iceberg"] }, schema: star, table: star };
-  const STOPS = /Stops above column: grants no column reads, only table-level checks such as/;
+  const STOPS = /Stops above column: grants no column reads\./;
 
   it("warns that a select chain stopping at table grants no column reads", () => {
     wrap(
@@ -215,6 +215,34 @@ describe("ResourceSelector — absent levels (SP4d-4 B1)", () => {
         onChange={vi.fn()} grantedAccessTypes={["select", "insert"]} />,
     );
     expect(screen.getByText(STOPS)).toBeInTheDocument();
+  });
+
+  it("says Trino still allows count(*) on a Trino profile, and does not say StarRocks does", () => {
+    wrap(
+      <ResourceSelector resourceDefs={RESOURCE_DEFS} service="p" engine="trino" value={AT_TABLE}
+        onChange={vi.fn()} grantedAccessTypes={["select"]} />,
+    );
+    const note = screen.getByText(STOPS);
+    expect(note).toHaveTextContent("Trino still allows table-level checks such as count(*)");
+    expect(note).not.toHaveTextContent(/StarRocks/);
+  });
+
+  it("says StarRocks denies even count(*) on a StarRocks profile, and does not promise it", () => {
+    wrap(
+      <ResourceSelector resourceDefs={RESOURCE_DEFS} service="p" engine="starrocks" value={AT_TABLE}
+        onChange={vi.fn()} grantedAccessTypes={["select"]} />,
+    );
+    const note = screen.getByText(STOPS);
+    expect(note).toHaveTextContent("StarRocks denies even count(*)");
+    expect(note).not.toHaveTextContent(/still allows/);
+  });
+
+  it("names both engines when the engine is not known yet", () => {
+    wrap(
+      <ResourceSelector resourceDefs={RESOURCE_DEFS} service="p" value={AT_TABLE}
+        onChange={vi.fn()} grantedAccessTypes={["select"]} />,
+    );
+    expect(screen.getByText(STOPS)).toHaveTextContent(/Trino still allows.*StarRocks denies even those/);
   });
 
   it("warns for `all`, which implies select", () => {

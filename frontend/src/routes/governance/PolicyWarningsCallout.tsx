@@ -18,8 +18,11 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 export function PolicyWarningsCallout({
   service,
   serviceId,
+  serviceType,
 }: {
   service: string;
+  /** The profile's engine (`trino` or `starrocks`); words which engine allows `count(*)`. */
+  serviceType?: string;
   /** The profile's id; the route is keyed by it. Undefined while the profile loads. */
   serviceId: number | undefined;
 }) {
@@ -78,8 +81,20 @@ export function PolicyWarningsCallout({
           {kinds.has("select_stops_above_column") && (
             <p>
               A policy that stops at catalog, schema or table does not grant column SELECT on Trino
-              470 or StarRocks 4.1.4 (measured against the real Ranger plugins): it allows only
-              table-level checks such as <code>count(*)</code>. To grant column reads, open the
+              470 or StarRocks 4.1.4 (measured against the real Ranger plugins).{" "}
+              {serviceType === "trino" && (
+                <>Trino still allows table-level checks such as <code>count(*)</code>. </>
+              )}
+              {serviceType === "starrocks" && (
+                <>StarRocks denies even <code>count(*)</code>. </>
+              )}
+              {serviceType !== "trino" && serviceType !== "starrocks" && (
+                <>
+                  Trino still allows table-level checks such as <code>count(*)</code>; StarRocks
+                  denies even those.{" "}
+                </>
+              )}
+              To grant column reads, open the
               policy and set the column level (use * for every column). Saving it then stores the
               broader policy.
             </p>
