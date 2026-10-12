@@ -384,3 +384,56 @@ async fn an_assignment_that_pairs_a_rule_with_a_hand_written_tag_mask_is_409() {
     );
     assert_eq!(assignments_on(&e, &u, "email").await, 1);
 }
+
+/// SP4d-4 Task 3 fix round 3 (re-review M-2): a tag RENAME into the name a
+/// hand-written tag mask addresses completes a pair with the mask already
+/// deciding that column. The rename's recompile reads the new name on both of
+/// its sides and cannot see it; the rename's own before-snapshot refuses it,
+/// and nothing is renamed. Accept-control: renaming into an unaddressed name.
+#[tokio::test]
+async fn a_rename_into_a_hand_written_masks_tag_name_completing_a_pair_is_409() {
+    let _serial = SERIAL.lock().await;
+    let Some(e) = env().await else { return };
+    let u = trino_unit(&e).await;
+    let (pii, pii_name) = new_tag(&e, "rpii").await;
+    let (other, other_name) = new_tag(&e, "rother").await;
+    let target = format!("rgdpr-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let (a, b) = (unique("hand pii"), unique("hand target"));
+    hand_tag_mask(&e, &u, &a, &pii_name, "MASK").await;
+    hand_tag_mask(&e, &u, &b, &target, "MASK_NULL").await;
+    assign(&e, &u, pii, "email").await.expect("pii on email");
+    assign(&e, &u, other, "email")
+        .await
+        .expect("other on email");
+
+    let refused = match e.tags.update(other, Some(&target), None, None).await {
+        Ok(t) => panic!("the rename must be refused, got {t:?}"),
+        Err(err) => {
+            let resp = err.into_response();
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            )
+        }
+    };
+    let body = assert_overlap(
+        Err(refused),
+        &[format!("policy {a:?}"), format!("policy {b:?}")],
+        &format!("{}.sales.orders.email", u.catalog),
+    );
+    assert_eq!(body["kind"], "mask", "{body}");
+    let name: String = sqlx::query_scalar("SELECT name FROM tags WHERE id = $1")
+        .bind(other)
+        .fetch_one(&e.db.pool)
+        .await
+        .expect("name");
+    assert_eq!(name, other_name, "nothing renamed");
+
+    let free = format!("rfree-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    e.tags
+        .update(other, Some(&free), None, None)
+        .await
+        .expect("a rename into an unaddressed name passes");
+}

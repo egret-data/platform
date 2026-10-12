@@ -61,6 +61,21 @@
 //! absent from BEFORE and present AFTER, and the rename is refused. Fail-closed
 //! and narrow; break the pair first.
 //!
+//! **Inputs the comparison reads as stored** (re-review M-2): the tag
+//! assignments on the profile's catalogs and its `tagService`. A caller that
+//! changes one of those and then recompiles makes the pair that change
+//! completes read as already stored, so it needs its own before-snapshot
+//! ([`unit_snapshot_via`] + [`refuse_created_overlaps_via`]). The tag
+//! assignment and the tag rename (`egret-bi`) take one. Audited and NOT
+//! covered — named in the spec's "not sound against" list: an engine ↔
+//! catalog attachment (it commits on its own, before any recompile) and a
+//! profile bind (`set_engine_authz_service_in_tx`, then a recompile in the
+//! same transaction), both of which change which catalogs — and so which
+//! assignments — a unit resolves. `tagService` has no UPDATE path at all.
+//!
+//! **Cost:** with N profiles sharing one tag service, a tag-rule write
+//! recompiles all N and each compile loads all N units — about N² unit loads.
+//!
 //! # Do two recompiles of profiles sharing one tag service serialise?
 //!
 //! **Yes, read from the code (not run as a concurrency test).**
@@ -220,6 +235,11 @@ fn overlaps_where(
 /// Hand-written × hand-written pairs cannot be created here (both bodies and
 /// the assignments are the same on both sides); they stay the editor's and
 /// the tag assignment's.
+///
+/// Cost: a compile of a profile whose tag service N profiles share loads N
+/// units, and a tag-rule write recompiles all N, so it reads about N² units —
+/// fine for the handful of profiles a tag service is shared by today, and the
+/// first thing to revisit if that number grows.
 pub async fn refuse_created_by_compile_via(
     conn: &mut sqlx::PgConnection,
     profile: &str,
@@ -275,7 +295,14 @@ pub async fn refuse_created_by_compile_via(
             .filter(|n| !rules.contains_key(*n))
             .collect();
         rules.extend(rules_for_names_via(conn, &missing).await?);
-        return Err(into_compile_error(profile, named(o, &rules)));
+        // Name the profile whose download serves the pair (re-review M-1):
+        // for a pair found in ANOTHER profile's unit of a shared tag service,
+        // that is that profile, not the one being recompiled.
+        let holder = match ids.resource {
+            Some(r) if r != profile_id => get_service_by_id_via(conn, r).await.map_err(db)?.name,
+            _ => profile.to_string(),
+        };
+        return Err(into_compile_error(&holder, named(o, &rules)));
     }
     Ok(())
 }

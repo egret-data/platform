@@ -137,13 +137,14 @@ impl CatalogTagRepo {
         // **SP4d-4 Task 3 (user ruling): an assignment that makes two mask (or
         // row-filter) policies decide one column differently is refused** —
         // between hand-written tag policies, compiled rules, or one of each.
-        // Compiled pairs are refused by the recompile below (the compiler
-        // resolves tag rules through these same assignments); the snapshot
-        // taken HERE, before the row exists, is what lets the check after the
-        // recompile refuse exactly the pairs this write creates across the
-        // whole stored unit (a profile and its tag service), hand-written ones
-        // included, without refusing a pair that was already stored. One rule,
-        // `egret_policy::unit_overlaps`, for both.
+        // The recompile below cannot refuse the pair an assignment completes:
+        // it compares stored and compiled bodies under the SAME (already
+        // changed) assignments on both of its sides (SP4d-4 Task 3 fix round
+        // 2). The snapshot taken HERE, before the row exists, is what lets the
+        // check after the recompile refuse exactly the pairs this write creates
+        // across the whole stored unit (a profile and its tag service) —
+        // compiled, hand-written, or one of each — without refusing a pair
+        // that was already stored. One rule, `egret_policy::unit_overlaps`.
         let bound = egret_catalog_registry::services_bound_to_warehouse(&mut *tx, warehouse_id)
             .await
             .map_err(crate::error::BiError::from)?;

@@ -164,18 +164,28 @@ async fn env() -> Option<Env> {
     })
 }
 
-/// `engine` is `"trino"` (with a tag service) or `"starrocks"`.
+/// `engine` is `"trino"` (with a tag service of its own) or `"starrocks"`.
 async fn profile(e: &Env, engine: &str) -> Profile {
-    let pool = &e.db.pool;
-    let config = if engine == "trino" {
+    let tag = if engine == "trino" {
         let tag = unique("ovl_tag");
         e.policy
             .create_service(&tag, "tag", &json!({}))
             .await
             .expect("tag service");
-        json!({ "tagService": tag })
+        Some(tag)
     } else {
-        json!({})
+        None
+    };
+    profile_on(e, engine, tag.as_deref()).await
+}
+
+/// A profile naming `tag_service` (an existing tag service, possibly shared
+/// with other profiles), engine-bound, with one catalog of its own attached.
+async fn profile_on(e: &Env, engine: &str, tag_service: Option<&str>) -> Profile {
+    let pool = &e.db.pool;
+    let config = match tag_service {
+        Some(tag) => json!({ "tagService": tag }),
+        None => json!({}),
     };
     let svc = e
         .policy
@@ -1082,4 +1092,74 @@ async fn agreeing_or_disjoint_rules_beside_a_hand_written_mask_are_admitted() {
     )
     .await;
     assert_mixed_overlap(status, &body, &hand, &disjoint);
+}
+
+// ── fix round 3, re-review I-1: two profiles sharing ONE tag service ────────
+
+/// P1 and P2 name one tag service T. P2 holds a compiled path mask on a column
+/// carrying tag `pii`; a tag rule on `pii` that masks differently is written.
+/// The write recompiles P1 first (lower id), which writes the tag policy into
+/// T — so by the time P2 is compiled, P2's BEFORE already holds it. Only the
+/// check of P2's unit made at P1's compile sees the pair while it is new: 409,
+/// naming P2 (the profile whose download serves the pair), nothing written.
+#[tokio::test]
+async fn a_tag_rule_pairing_with_a_path_rule_of_another_profile_on_a_shared_tag_service_is_409() {
+    let _serial = SERIAL.lock().await;
+    let Some(e) = env().await else { return };
+    let tag_service = unique("ovl_shared_tag");
+    e.policy
+        .create_service(&tag_service, "tag", &json!({}))
+        .await
+        .expect("shared tag service");
+    let p1 = profile_on(&e, "trino", Some(&tag_service)).await;
+    let p2 = profile_on(&e, "trino", Some(&tag_service)).await;
+    assert!(p1.service_id < p2.service_id, "P1 recompiles first");
+    let pii = tag_on(&e, &p2, "pii", &["email"]).await;
+    let path = unique("null email on p2");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/rules",
+        Some(path_mask(&path, &p2, "orders", "email", "MASK_NULL")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let in_t_before = policies_in(&e, &tag_service).await;
+    let tag_rule = unique("mask pii shared");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/rules",
+        Some(tag_mask(&tag_rule, &pii, "MASK", &[])),
+    )
+    .await;
+    assert_overlap(status, &body, &[&tag_rule, &path]);
+    let p2_name = profile_name(&e, &p2).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("profile {p2_name:?}")),
+        "names the profile serving the pair (M-1): {body}"
+    );
+    assert_eq!(rule_named(&e, &tag_rule).await, 0, "nothing written");
+    assert_eq!(
+        policies_in(&e, &tag_service).await,
+        in_t_before,
+        "the shared tag service is untouched (other tests' tag rules compiled there earlier)"
+    );
+}
+
+/// Every stored policy body under the service named `service`, ordered by name.
+async fn policies_in(e: &Env, service: &str) -> Vec<(String, Value)> {
+    sqlx::query_as(
+        "SELECT p.name, p.policy_jsonb FROM policy.authz_policies p \
+           JOIN policy.authz_services s ON s.id = p.service_id \
+          WHERE s.name = $1 ORDER BY p.name",
+    )
+    .bind(service)
+    .fetch_all(&e.db.pool)
+    .await
+    .expect("policies")
 }

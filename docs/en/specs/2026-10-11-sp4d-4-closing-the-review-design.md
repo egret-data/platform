@@ -243,6 +243,16 @@ data either way". It is **not** sound against:
   next write reads its "before", so it is shown by the report below and refused by nothing;
 - any pair that is already stored (see "Pre-existing overlaps" below): every surface refuses only
   the pairs its write creates, so a stored pair is reported, not refused;
+- a write that changes which catalogs — and so which tag assignments — a profile's unit resolves,
+  with no before-snapshot of its own *(Task 3 fix round 3, re-review M-2)*: every overlap check
+  compares stored and compiled policies under the assignments as they are when it runs, so the pair
+  such a change completes reads as already stored. Audited: an engine ↔ catalog attachment (it
+  commits on its own, before any recompile) and a profile bind (`set_engine_authz_service_in_tx`,
+  then a recompile in the same transaction). Both are reported, not refused. Covered by their own
+  snapshot: the tag assignment and the tag rename (`egret-bi`). No input change at all: catalog
+  workspace assignment (grants only), catalog/warehouse delete and unassign (they can only remove
+  pairs), membership and role writes (they change compiled bodies, which the compiler compares).
+  `tagService` has no `UPDATE` path;
 - a recompile whose caller does not take the profile locks before compiling reads the model and
   the tag assignments before `apply_diff_in_tx` locks the rows, so its check runs on a snapshot a
   concurrent transaction may still change (the rule and grant routes, the migration and the tag
@@ -317,11 +327,16 @@ coordinates where the two meet. A write that changes a stored pair's items, or w
 including an edit that *narrows* one member but leaves the two still meeting on fewer columns — makes
 a different pair, and is refused. The ways out of a stored pair are therefore: narrow one member until
 the two no longer meet at all, delete one, make them agree, unassign the tag (unchecked: it can only
-remove pairs), or switch one off through `PUT /policies/{id}/enabled`.
+remove pairs), or switch one off through `PUT /policies/{id}/enabled`. A hand-written member of a
+stored pair cannot be *migrated* until the pair is broken: its compiled twin carries a new name, so
+the pair it forms with the other member is a new identity and the migration is refused
+*(Task 3 fix round 3, re-review M-3)*.
 
 A limit of comparing stored bodies: a tag RENAME re-reads the assignments under the new name while the
 stored compiled tag policy still carries the old one, so a stored pair that meets *through the
-renamed tag* reads as new and the rename is refused (fail-closed). A rename of any other tag passes.
+renamed tag* reads as new and the rename is refused (fail-closed). A rename of any other tag passes. A
+rename that *creates* a pair through hand-written tag policies (renaming a tag into the name a
+hand-written tag mask addresses) is refused by the rename's own before-snapshot.
 
 To make stored pairs visible:
 
