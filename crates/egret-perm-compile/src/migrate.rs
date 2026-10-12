@@ -65,7 +65,15 @@
 //!   `catalog_tag_assignments` row of every affected profile and every
 //!   resource value of every policy in either download is checked; one hit
 //!   refuses the migration, naming the value — the way `explain` declines.
-//! - **The probe budget** ([`MAX_PROBE_EVALUATIONS`]): hypothetical tagging
+//! - **Pruned probes** (SP4d-4): the dry run and the real migration build every
+//!   case with [`PruneMode::Pruned`] — only the probes where a changed policy
+//!   may be a candidate — and COUNT the pruned set before building it. Any
+//!   fallback the pruning takes (an envelope difference, a priority, a
+//!   content-free construct…) gives the full set, and the same cap then
+//!   applies to that bigger count: refused, never truncated. The response says
+//!   per profile how many probes the full set would have been
+//!   (`probes_full`) and why pruning fell back (`pruning_fallback`).
+//! - **The probe budget** ([`MAX_PROBE_WORK`]): hypothetical tagging
 //!   multiplies the probe set inside a transaction that holds profile locks.
 //!   Over the cap the migration is REFUSED with the measured count — never
 //!   truncated, because a truncated probe set is a smaller claim reported as
@@ -105,8 +113,8 @@ use uuid::Uuid;
 
 use crate::classify::{Candidates, ServiceInputs};
 use crate::equivalence::{
-    compare_profiles, derive_probes, probe_count, Check, Disagreement, GateRefusal, ProfileCase,
-    TagAssignment, Tagging,
+    compare_profiles, plan_probes, planned_probe_count, Check, Disagreement, GateRefusal,
+    ProfileCase, PruneMode, TagAssignment, Tagging,
 };
 use crate::explain_wire::WirePluginVersion;
 use crate::grammar::ServiceKind;
@@ -119,31 +127,62 @@ use crate::trigger::{
     merge_service_ids, recompile_services_in_tx, CompileSummary,
 };
 
-/// The most probe EVALUATIONS (probes × plugin versions, summed over every
-/// affected profile) one migration may run. Each evaluation asks the access,
-/// masking and row-filter questions of both downloads — six evaluator calls —
-/// inside a transaction holding every affected profile's lock.
+/// The most gate WORK one migration may run, in probe evaluations × policies
+/// (Σ over every affected profile of `probes × plugin versions × (policies the
+/// profile serves before + after)`, resource and tag policies both). Each
+/// evaluation asks the access, masking and row-filter questions of both
+/// downloads — six evaluator calls, each visiting every policy — inside a
+/// transaction holding every affected profile's lock.
 ///
-/// Measured 2026-10-11, `--release`, one Trino profile of N single-user
-/// policies on distinct tables, `compare` over one version:
+/// **Why the unit is not a probe count.** SP4d-3 capped the probe count
+/// (50 000), measured on the UNPRUNED set. With pruning (SP4d-4) the count a
+/// profile needs no longer tracks its time: the same ~5 000 probes take 0.12 s
+/// in a 5-policy profile and 1.06 s in an 80-policy one, because each probe
+/// visits every policy. Time does track probes × policies (about 1.1 µs per
+/// unit), so that is what is capped.
 ///
-/// | N | probes | Task 7 (`b2c032c54`) | prepared sets (fix round 1) |
-/// |---|---|---|---|
-/// | 5 | 3 870 | 0.20 s | 0.05 s |
-/// | 20 | 51 345 | 9.4 s | 2.3 s |
-/// | 40 | 198 645 | 70 s | 19.4 s |
-/// | 5 + a tag mask | 9 030 | — | 0.20 s |
-/// | 20 + a tag mask | 102 630 | — | 5.9 s |
+/// Measured 2026-10-13, `--release`, one Trino profile of N single-user
+/// policies on distinct tables, k = 1 changed policy, `compare` over the
+/// PRUNED set on one version (`tests/gate_timing.rs`, `-- --ignored`):
 ///
-/// The cost per evaluation still grows with the download's size (each probe
-/// visits every policy), and the probe count roughly with its square, so the
-/// whole is still about N³ — preparing each side once removed a constant
-/// factor, not a power. 50 000 admits a ~20-policy profile at about 2.3 s of
-/// locked transaction (a tagged one at ~14 policies, about 3 s); above it the
-/// migration is REFUSED with the counted total before any probe is built
-/// (see the module doc). Coordinate pruning (review Fix 2) is what would
-/// remove a power, and the user deferred it.
-pub const MAX_PROBE_EVALUATIONS: usize = 50_000;
+/// | N | tag mask | probes full | probes pruned | policies | work (pruned × policies) | compare | µs / unit |
+/// |---|---|---|---|---|---|---|---|
+/// | 5 | none | 4 515 | 525 | 10 | 5 250 | 0.01 s | — |
+/// | 20 | none | 53 790 | 1 650 | 40 | 66 000 | 0.08 s | 1.2 |
+/// | 40 | none | 203 490 | 3 150 | 80 | 252 000 | 0.27 s | 1.1 |
+/// | 80 | none | 790 890 | 6 150 | 160 | 984 000 | 1.06 s | 1.1 |
+/// | 160 | none | 3 117 690 | 12 150 | 320 | 3 888 000 | 4.16 s | 1.1 |
+/// | 5 | unchanged | 10 530 | 1 080 | 12 | 12 960 | 0.02 s | — |
+/// | 20 | unchanged | 109 080 | 2 880 | 42 | 120 960 | 0.15 s | 1.2 |
+/// | 40 | unchanged | 397 980 | 5 280 | 82 | 432 960 | 0.50 s | 1.2 |
+/// | 80 | unchanged | 1 515 780 | 10 080 | 162 | 1 632 960 | 1.86 s | 1.1 |
+/// | 160 | unchanged | 5 911 380 | 19 680 | 322 | 6 336 960 | 7.18 s | 1.1 |
+/// | 5 | changed | 9 360 | 4 200 | 12 | 50 400 | 0.12 s | — |
+/// | 20 | changed | 104 535 | 48 300 | 42 | 2 028 600 | 3.05 s | 1.5 |
+/// | 40 | changed | 388 935 | 180 600 | 82 | 14 809 200 | 19.9 s | 1.3 |
+/// | 80 | changed | 1 497 735 | 697 200 | 162 | 112 946 400 | 141 s | 1.2 |
+///
+/// "tag mask: unchanged" is one tag mask on both sides; "changed" is a run
+/// whose one changed policy IS the tag mask — pruning keeps every probe that
+/// carries its tag (~45% of the full set), the worst case, and it grows like the
+/// unpruned gate did. The SP4d-3 measurement of the UNPRUNED set (the same
+/// profile shape, probes = the full column above), kept for comparison: N=5
+/// 0.05 s, N=20 2.3 s, N=40 19.4 s, N=20 + a tag mask 5.9 s.
+///
+/// The cap is the largest measured work whose `compare` took at most 2.5 s —
+/// 1 632 960 (N=80, unchanged tag mask, 1.86 s) — rounded down to 1 600 000, so
+/// that even at the slowest measured rate (1.5 µs per unit) a refusal-free
+/// migration holds the locks for at most about 2.4 s. Above it the migration is
+/// REFUSED with the counted total before any probe is built (see the module
+/// doc).
+///
+/// In practice, for one profile of single-user policies and one changed policy
+/// (k = 1): about 100 policies without a tag mask (pruned work ≈ 154 N²; N=80 is
+/// admitted, N=160 refused), about 79 with an unchanged tag mask (≈ 252 N²; the
+/// measured N=80 row is 2% over the cap and IS refused). Migrating the tag mask
+/// itself, or several policies at once, lowers it sharply: with the mask
+/// changed, 20 policies are already 2.0 M and refused.
+pub const MAX_PROBE_WORK: usize = 1_600_000;
 
 /// The consequence the preview must state before the operator commits.
 pub const GENERATED_NOTICE: &str = "After this migration every listed profile is compiled by \
@@ -217,7 +256,13 @@ pub struct GatedProfile {
     pub service_id: i64,
     pub service_name: String,
     pub plugin_versions: Vec<WirePluginVersion>,
+    /// Probes evaluated (after pruning).
     pub probes: usize,
+    /// Probes the unpruned gate would have evaluated.
+    pub probes_full: usize,
+    /// Why pruning gave the full set, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pruning_fallback: Option<String>,
     pub disagreements: usize,
     /// Policy names (resource and tag) the download no longer serves.
     pub removed_policies: Vec<String>,
@@ -451,8 +496,9 @@ pub(crate) fn build_cases<'a>(
     after: &'a BTreeMap<i64, ServicePolicySet>,
     originals: &[String],
     carriers: &[i64],
-) -> Result<Vec<ProfileCase<'a>>, String> {
+) -> Result<(Vec<ProfileCase<'a>>, Vec<PlanNote>), String> {
     let mut cases = Vec::with_capacity(affected.len());
+    let mut notes = Vec::with_capacity(affected.len());
     for id in affected {
         let (Some((def, b)), Some(a)) = (before.get(id), after.get(id)) else {
             return Err(format!(
@@ -485,7 +531,12 @@ pub(crate) fn build_cases<'a>(
                 }
             }
         }
-        let probes = derive_probes(&b.download, a, def, &b.assignments);
+        let plan = plan_probes(&b.download, a, def, &b.assignments, PruneMode::Pruned);
+        notes.push(PlanNote {
+            probes_full: plan.full_count,
+            pruning_fallback: plan.fallback.map(|f| format!("{f:?}")),
+        });
+        let probes = plan.probes;
         cases.push(ProfileCase {
             service_id: *id,
             service_name: b.name.clone(),
@@ -505,7 +556,16 @@ pub(crate) fn build_cases<'a>(
         affected.len(),
         "one ProfileCase per affected profile"
     );
-    Ok(cases)
+    Ok((cases, notes))
+}
+
+/// What pruning did for one profile, kept beside its [`ProfileCase`].
+#[derive(Debug)]
+pub(crate) struct PlanNote {
+    /// The probes the unpruned gate would have run.
+    pub(crate) probes_full: usize,
+    /// The [`crate::equivalence::FallbackReason`] when pruning gave the full set.
+    pub(crate) pruning_fallback: Option<String>,
 }
 
 /// The per-profile inputs [`build_cases`] needs from before the write.
@@ -516,37 +576,45 @@ pub(crate) struct ProfileInputs {
     pub(crate) download: ServicePolicySet,
 }
 
-/// Probe evaluations the cases will run — `Σ probes × versions` over each
-/// profile's `(probes, versions, policies in its download)` — or the refusal
-/// sentence when over `cap` (ruling 3: refuse, never truncate).
+/// The gate's WORK for these profiles, checked against `cap`
+/// ([`MAX_PROBE_WORK`]): `Σ probes × versions × (policies before + policies
+/// after)` over each profile's `(probes, versions, policies before, policies
+/// after)`. Returns the probe EVALUATIONS (`Σ probes × versions`, what the
+/// response reports and the provenance records), or the refusal sentence when
+/// the work is over `cap` (ruling 3: refuse, never truncate).
 ///
-/// The count is driven by the SIZE of each affected profile's download (it
-/// grows roughly with the square of its policy count), not by how many
-/// policies the request migrates — so the sentence names the largest
-/// download, which is what an operator can act on (review M-5).
+/// Every probe visits every policy of both downloads, so the time is the
+/// product, not the probe count; the count itself is driven by the SIZE of
+/// each affected profile's download rather than by how many policies the
+/// request migrates — so the sentence names the largest download, which is
+/// what an operator can act on (review M-5).
 pub(crate) fn probe_budget(
-    counts: impl IntoIterator<Item = (usize, usize, usize)>,
+    counts: impl IntoIterator<Item = (usize, usize, usize, usize)>,
     cap: usize,
 ) -> Result<usize, String> {
-    let mut total = 0usize;
+    let mut evaluations = 0usize;
+    let mut work = 0usize;
     let mut profiles = 0usize;
     let mut largest = 0usize;
-    for (probes, versions, policies) in counts {
-        total = total.saturating_add(probes.saturating_mul(versions));
+    for (probes, versions, before, after) in counts {
+        let n = probes.saturating_mul(versions);
+        evaluations = evaluations.saturating_add(n);
+        work = work.saturating_add(n.saturating_mul(before.saturating_add(after)));
         profiles += 1;
-        largest = largest.max(policies);
+        largest = largest.max(before);
     }
-    if total > cap {
+    if work > cap {
         return Err(format!(
-            "proving this migration needs {total} probe evaluations across {profiles} \
-             profile(s), over the limit of {cap}. The count grows with the size of each \
-             affected profile's download (the largest serves {largest} policies), roughly with \
-             its square, not with how many policies this request migrates. The probe set is \
-             never cut short — a partial proof would be reported as a whole one — so this \
-             migration cannot be proved until those profiles are smaller."
+            "proving this migration needs {evaluations} probe evaluations across {profiles} \
+             profile(s), {work} units of work (probe evaluations x the policies each visits), \
+             over the limit of {cap}. The work grows with the size of each affected profile's \
+             download (the largest serves {largest} policies), roughly with its square, not \
+             with how many policies this request migrates. The probe set is never cut short \
+             — a partial proof would be reported as a whole one — so this migration cannot be \
+             proved until those profiles are smaller."
         ));
     }
-    Ok(total)
+    Ok(evaluations)
 }
 
 fn render_refusal(r: &GateRefusal) -> String {
@@ -1053,20 +1121,21 @@ pub(crate) async fn migrate_in_tx(
     for id in &affected {
         if let (Some((def, b)), Some(a)) = (before.get(id), after.get(id)) {
             counts.push((
-                probe_count(&b.download, a, def, &b.assignments),
+                planned_probe_count(&b.download, a, def, &b.assignments, PruneMode::Pruned),
                 b.versions.len(),
                 b.download.policies.len() + b.download.tag_policies.len(),
+                a.policies.len() + a.tag_policies.len(),
             ));
         }
     }
-    let evaluations = match probe_budget(counts, MAX_PROBE_EVALUATIONS) {
+    let evaluations = match probe_budget(counts, MAX_PROBE_WORK) {
         Ok(n) => n,
         Err(sentence) => {
             response.refusal = Some(sentence);
             return Ok(response);
         }
     };
-    let cases = match build_cases(&affected, &before, &after, &originals, &carriers) {
+    let (cases, notes) = match build_cases(&affected, &before, &after, &originals, &carriers) {
         Ok(c) => c,
         Err(sentence) => {
             response.refusal = Some(sentence);
@@ -1075,13 +1144,16 @@ pub(crate) async fn migrate_in_tx(
     };
     response.profiles = cases
         .iter()
-        .map(|c| {
+        .zip(&notes)
+        .map(|(c, note)| {
             let (bn, an) = (policy_names(c.before), policy_names(c.after));
             GatedProfile {
                 service_id: c.service_id,
                 service_name: c.service_name.clone(),
                 plugin_versions: c.versions.iter().copied().map(Into::into).collect(),
                 probes: c.probes.len(),
+                probes_full: note.probes_full,
+                pruning_fallback: note.pruning_fallback.clone(),
                 disagreements: 0,
                 removed_policies: bn.difference(&an).cloned().collect(),
                 added_policies: an.difference(&bn).cloned().collect(),
@@ -1403,12 +1475,17 @@ mod tests {
 
     #[test]
     fn the_probe_budget_counts_every_version_of_every_profile_and_refuses_over_the_cap() {
-        assert_eq!(probe_budget([(100, 1, 3), (50, 2, 9)], 200), Ok(200));
-        let refused = probe_budget([(100, 1, 3), (50, 2, 9)], 199).unwrap_err();
+        // Evaluations: 100 + 100 = 200. Work: 100 x 4 + 100 x 20 = 2 400.
+        assert_eq!(
+            probe_budget([(100, 1, 2, 2), (50, 2, 9, 11)], 2_400),
+            Ok(200)
+        );
+        let refused = probe_budget([(100, 1, 2, 2), (50, 2, 9, 11)], 2_399).unwrap_err();
         assert!(refused.contains("200 probe evaluations"), "{refused}");
+        assert!(refused.contains("2400 units of work"), "{refused}");
         assert!(refused.contains("2 profile(s)"), "{refused}");
         assert!(refused.contains("never cut short"), "{refused}");
-        assert!(refused.contains("limit of 199"), "{refused}");
+        assert!(refused.contains("limit of 2399"), "{refused}");
         assert!(
             refused.contains("the largest serves 9 policies"),
             "{refused}"
@@ -1495,7 +1572,7 @@ mod tests {
     fn one_case_per_affected_profile() {
         let before = inputs(envelope(&["orig"]));
         let after = BTreeMap::from([(1, envelope(&["perm-grant-x"]))]);
-        let cases = build_cases(&[1], &before, &after, &["orig".into()], &[1]).expect("cases");
+        let (cases, _) = build_cases(&[1], &before, &after, &["orig".into()], &[1]).expect("cases");
         assert_eq!(cases.len(), 1);
         assert!(!cases[0].probes.is_empty());
         assert!(!std::ptr::eq(cases[0].before, cases[0].after));

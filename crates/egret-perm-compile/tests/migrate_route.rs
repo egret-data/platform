@@ -841,6 +841,10 @@ async fn a_migrated_policy_is_classified_as_migrated_not_as_switched_off() {
 #[tokio::test]
 async fn a_profile_too_large_to_prove_is_refused_by_count_with_nothing_written() {
     let Some(f) = setup().await else { return };
+    // Changed by pruning (SP4d-4 Task 6): one migrated policy among 40 siblings
+    // now prunes to a few thousand probes and fits the cap, so the fixture has
+    // to exceed the cap UNDER pruning: 20 migrated policies (each one's grant
+    // is a changed policy whose coordinates stay) among 60 in the profile.
     for i in 0..40 {
         insert(
             &f,
@@ -851,25 +855,34 @@ async fn a_profile_too_large_to_prove_is_refused_by_count_with_nothing_written()
         )
         .await;
     }
-    let name = unique("alice reads orders");
-    let id = insert(
-        &f,
-        f.p,
-        &name,
-        "operator",
-        access_policy(&f.catalog, "sales", "alice"),
-    )
-    .await;
+    let mut names = Vec::new();
+    let mut first = 0;
+    for i in 0..20 {
+        let name = unique(&format!("migrated {i}"));
+        let id = insert(
+            &f,
+            f.p,
+            &name,
+            "operator",
+            access_policy(&f.catalog, &format!("m{i}"), &format!("migrant{i}")),
+        )
+        .await;
+        if i == 0 {
+            first = id;
+        }
+        names.push(name);
+    }
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
 
     let started = std::time::Instant::now();
-    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    let (status, body) = migrate(&f, f.p, &refs, false).await;
     let elapsed = started.elapsed();
     eprintln!("MEASURE cap refusal elapsed={elapsed:?}");
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     let refusal = body["refusal"].as_str().expect("refusal");
     assert!(refusal.contains("probe evaluations"), "{refusal}");
     assert!(
-        refusal.contains("the largest serves 41 policies"),
+        refusal.contains("the largest serves 60 policies"),
         "{refusal}"
     );
     assert!(refusal.contains("never cut short"), "{refusal}");
@@ -879,7 +892,58 @@ async fn a_profile_too_large_to_prove_is_refused_by_count_with_nothing_written()
     );
     assert_eq!(grants_on_catalog(&f).await, 0);
     assert!(provenance(&f, f.p).await.is_empty());
-    assert!(enabled(&f, id).await);
+    assert!(enabled(&f, first).await);
+}
+
+/// SP4d-4 Task 6: the dry run and the real migration prove on the PRUNED set,
+/// and say how much smaller it is than the full one.
+#[tokio::test]
+async fn the_dry_run_and_the_real_migration_prove_on_the_same_pruned_set() {
+    let Some(f) = setup().await else { return };
+    for i in 0..10 {
+        insert(
+            &f,
+            f.p,
+            &unique(&format!("sibling {i}")),
+            "operator",
+            access_policy(&f.catalog, &format!("s{i}"), &format!("user{i}")),
+        )
+        .await;
+    }
+    let name = unique("alice reads orders");
+    insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let (status, dry) = migrate(&f, f.p, &[&name], true).await;
+    assert_eq!(status, StatusCode::OK, "{dry}");
+    let profile = &dry["profiles"][0];
+    let (pruned, full) = (
+        profile["probes"].as_u64().unwrap(),
+        profile["probes_full"].as_u64().unwrap(),
+    );
+    assert!(
+        pruned > 0 && pruned < full,
+        "pruning removed probes: {pruned} of {full}"
+    );
+    assert!(
+        profile.get("pruning_fallback").is_none(),
+        "no fallback was needed: {profile}"
+    );
+
+    let (status, real) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::OK, "{real}");
+    assert_eq!(real["profiles"][0]["probes"], dry["profiles"][0]["probes"]);
+    assert_eq!(
+        real["profiles"][0]["probes_full"],
+        dry["profiles"][0]["probes_full"]
+    );
+    assert_eq!(real["probe_evaluations"], dry["probe_evaluations"]);
 }
 
 async fn edit_original(f: &Fixture, id: i64, name: &str, body: Value) {
