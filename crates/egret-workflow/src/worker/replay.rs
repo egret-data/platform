@@ -233,6 +233,11 @@ pub(super) async fn spawn_due(
 
     // In a savepoint, for `subflow::spawn_one`'s reason: the FILE-input check
     // below needs the row and may refuse it.
+    //
+    // **This INSERT deliberately skips the start gate** (`build_plan`'s
+    // validation, `spec::unrunnable`): the parent's frozen source already
+    // passed it when the original started, and the replay is planned below
+    // with `executor::plan_stored` per the user's ruling of 2026-10-12.
     let mut sp = sqlx::Connection::begin(&mut *conn).await.map_err(db_err)?;
     let child: Uuid = sqlx::query_scalar(concat!(
         "INSERT INTO workflow.executions \

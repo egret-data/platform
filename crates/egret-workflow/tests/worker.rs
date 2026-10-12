@@ -1579,6 +1579,90 @@ async fn a_stored_loop_whose_body_is_refused_spawns_and_its_run_fails(pool: sqlx
     );
 }
 
+/// **A stored execution's `CREATE_NEW_EXECUTION` retry replays the frozen
+/// source by the rules it started under, and each attempt fails with the
+/// line.**
+///
+/// The replay (`worker::replay`) inserts a new execution of the parent's
+/// frozen source and plans it with `executor::plan_stored` (user ruling
+/// 2026-10-12): that source passed the start gate when the original started,
+/// and an `OutputValues` in it is `unknown_task_type` only since
+/// no-silent-stall Task 1. Planned with `build_plan` instead, the replay's
+/// settle errs `Unplannable` and the chain never moves.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_stored_execution_replays_by_the_rules_it_started_under(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let retry = "    retry:\n      type: constant\n      behavior: CREATE_NEW_EXECUTION\n\
+                 \x20     maxAttempts: 2\n      interval: PT0S\n";
+    let stored = format!(
+        "id: stored-replay\nnamespace: t\ntasks:\n  - id: o\n    type: {OUTPUT_VALUES}\n    \
+         values:\n      k: v\n{retry}"
+    );
+    let served = format!(
+        "id: stored-replay\nnamespace: t\ntasks:\n  - id: o\n    \
+         type: io.kestra.plugin.core.log.Log\n    message: hi\n{retry}"
+    );
+    let root = started_before_the_gate(&pool, ws, &served, &stored, "o", OUTPUT_VALUES).await;
+    let lines = std::sync::Arc::new(Lines::default());
+    let reg = core_handlers_logging_to(&lines);
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let second = loop {
+        egret_workflow::worker::tick(&pool, 8, &reg)
+            .await
+            .expect("the root's failure schedules its replay; nothing errs");
+        if let Some(second) = replay_of(&pool, root).await {
+            break second;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no replay of the root was created: {}",
+            stuck(&pool, root, "o").await
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    drain(&pool, &reg).await;
+
+    let line = (LogLevel::Error, no_handler_line(OUTPUT_VALUES));
+    assert_eq!(
+        run_state(&pool, root, "o").await.as_deref(),
+        Some("RETRIED")
+    );
+    assert_eq!(
+        lines.of(root),
+        vec![line.clone()],
+        "the root's attempt logged the line"
+    );
+    assert_eq!(
+        run_state(&pool, second, "o").await.as_deref(),
+        Some("FAILED"),
+        "the replay's run reached the worker and failed"
+    );
+    assert_eq!(lines.of(second), vec![line], "and logged the line");
+    assert_eq!(
+        metadata_of(&pool, second).await.0,
+        2,
+        "the replay is attempt 2"
+    );
+    assert_eq!(
+        replay_of(&pool, second).await,
+        None,
+        "the chain stops at maxAttempts: 2"
+    );
+    for ex in [root, second] {
+        let history = execution_history(&pool, ex).await;
+        let last = history.as_array().and_then(|h| h.last()).cloned();
+        assert!(
+            !matches!(
+                last.as_ref().and_then(|v| v.as_str()),
+                Some("CREATED" | "RUNNING") | None
+            ),
+            "execution {ex} is terminal: {history}"
+        );
+    }
+}
+
 /// **A NEW start of each of those flows is still refused**: validation gates
 /// starts (no-silent-stall Tasks 1 and 3); only stored executions skip it.
 #[sqlx::test(migrations = "../../migrations")]
