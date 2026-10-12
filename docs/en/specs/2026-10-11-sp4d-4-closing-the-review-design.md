@@ -244,14 +244,21 @@ data either way". It is **not** sound against:
 - any pair that is already stored (see "Pre-existing overlaps" below): every surface refuses only
   the pairs its write creates, so a stored pair is reported, not refused;
 - a write that changes which catalogs — and so which tag assignments — a profile's unit resolves,
-  with no before-snapshot of its own *(Task 3 fix round 3, re-review M-2)*: every overlap check
-  compares stored and compiled policies under the assignments as they are when it runs, so the pair
-  such a change completes reads as already stored. Audited: an engine ↔ catalog attachment (it
-  commits on its own, before any recompile) and a profile bind (`set_engine_authz_service_in_tx`,
-  then a recompile in the same transaction). Both are reported, not refused. Covered by their own
-  snapshot: the tag assignment and the tag rename (`egret-bi`). No input change at all: catalog
-  workspace assignment (grants only), catalog/warehouse delete and unassign (they can only remove
-  pairs), membership and role writes (they change compiled bodies, which the compiler compares).
+  with no before-snapshot of its own *(Task 3 fix round 3, re-review M-2; closed in Task 7)*: every
+  overlap check compares stored and compiled policies under the assignments as they are when it
+  runs, so the pair such a change completes would read as already stored. **Every such write now
+  takes its own snapshot and refuses the pairs it creates:** the tag assignment and the tag rename
+  (`egret-bi`); a profile bind — `PUT /engines/{id}` and external-engine registration — which takes
+  `ProfileCompilerPort::overlap_snapshot_in_tx` before `set_engine_authz_service_in_tx` and
+  `refuse_created_overlaps_in_tx` after the recompile in the same transaction; and an engine ↔
+  catalog attachment — an external engine's declared attachment in one transaction the same way, a
+  provisioned engine's through a **dry run** on a rolled-back transaction before anything is
+  applied (a Trino attach applies to the cluster first, so it cannot share a transaction with its
+  recompile; the dry run's own limit is the usual one for a check made ahead of a write — another
+  transaction may change the unit before the real recompile, and a dry run that fails for a reason
+  other than an overlap is logged and does not refuse). No input change at all: catalog workspace
+  assignment (grants only), catalog/warehouse delete and unassign (they can only remove pairs),
+  membership and role writes (they change compiled bodies, which the compiler compares).
   `tagService` has no `UPDATE` path;
 - a recompile whose caller does not take the profile locks before compiling reads the model and
   the tag assignments before `apply_diff_in_tx` locks the rows, so its check runs on a snapshot a
@@ -412,14 +419,16 @@ or deletes the cluster of. It exists so that:
    had to `INSERT` by hand;
 3. an operator can read the exact Ranger plugin configuration to install on it.
 
-### Schema (one migration, number checked against `origin/main` at creation — 0183 today)
+### Schema (one migration, number checked against `origin/main` at creation — 0184 today)
 
 - `engines.origin text NOT NULL DEFAULT 'provisioned' CHECK (origin IN ('provisioned','external'))`.
 - `engines.external_host text`, `engines.external_port integer`, `engines.ranger_plugin_version
   text`, with one `CHECK` making the shape unrepresentable otherwise: `origin = 'external'` ⇔
   (`external_host` and `external_port` and `ranger_plugin_version` are NOT NULL, `namespace = ''`,
-  `spec = '{}'::jsonb`, and every `*_secret_id`/`tls_*`/`coordinator_cert` is NULL);
-  `ranger_plugin_version ~ '^[0-9]+\.[0-9]+\.[0-9]+$'`.
+  `spec = '{}'::jsonb`, and every `*_secret_id`/`tls_*`/`coordinator_cert` is NULL, and `type` is
+  `trino` or `starrocks`); `ranger_plugin_version ~ '^[0-9]+\.[0-9]+\.[0-9]+$'`. Each NOT NULL is
+  spelled `IS NOT NULL` in the CHECK: a CHECK passes on NULL, so `external_port BETWEEN 1 AND 65535`
+  alone admitted a row with no port (found by the constraint test, not by reading the SQL).
 - `engine_catalog_attachments.apply_status` admits `'declared'`. A declared attachment carries no
   client and no credential (`minted_client = false`, `catalog_client_id IS NULL`). That "declared ⇔
   the engine is external" is a cross-table fact a `CHECK` cannot express; it is enforced in the one
@@ -437,8 +446,15 @@ or deletes the cluster of. It exists so that:
   `apply_authz_service_update` (`engines.rs:4990-5150`): profile type must equal engine type (409),
   one profile per engine (409), a Trino profile needs a usable `tagService` (refused, with the
   existing reasons). Catalog ids must exist in `registry.catalogs`; each becomes a `declared`
-  attachment. One transaction; then the bound profile is recompiled through the existing
-  `ProfileCompilerPort` so its download carries the catalogs' grants immediately.
+  attachment. **One transaction holds the row, the bind, the declared attachments, the recompile of
+  the bound profile through the existing `ProfileCompilerPort` (so its download carries the catalogs'
+  grants immediately) and the refusal of any mask / row-filter pair the registration creates**
+  (the before-snapshot is taken after the row exists and before the bind and the attachments); a
+  failure anywhere rolls the whole registration back, so no engine claims a profile the compiler
+  never filled. `rangerPluginVersion` is one of the Ranger 2.x releases egret knows (a typo is a
+  400); only `2.5.0` and `2.8.0` are *modelled* by the evaluator, and the response says so
+  (`rangerPluginVersionModelled`): any other is stored as declared and migrations to its profile are
+  refused, never evaluated at a guessed version.
 - `GET /engines`, `GET /engines/{id}` carry `origin`, `host`, `port`, `rangerPluginVersion`, and for
   an external engine never call the provisioner.
 - `PUT /engines/{id}` for an external engine accepts only `authzServiceId`, `host`, `port`,

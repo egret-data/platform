@@ -287,6 +287,10 @@ mod tests {
             internal_secret_id: None,
             monitor_secret_id: None,
             created_at: chrono::Utc::now(),
+            origin: "provisioned".into(),
+            external_host: None,
+            external_port: None,
+            ranger_plugin_version: None,
         }
     }
 
@@ -333,6 +337,10 @@ mod tests {
             internal_secret_id: None,
             monitor_secret_id: None,
             created_at: chrono::Utc::now(),
+            origin: "provisioned".into(),
+            external_host: None,
+            external_port: None,
+            ranger_plugin_version: None,
         };
         let (opts, secret) = delegated_conn_options(&e);
         assert_eq!(opts["http_scheme"], "https");
@@ -360,6 +368,10 @@ mod tests {
             internal_secret_id: None,
             monitor_secret_id: None,
             created_at: chrono::Utc::now(),
+            origin: "provisioned".into(),
+            external_host: None,
+            external_port: None,
+            ranger_plugin_version: None,
         };
         let (opts, secret) = delegated_conn_options(&e);
         assert_eq!(opts["http_scheme"], "https");
@@ -394,6 +406,10 @@ mod tests {
             internal_secret_id: None,
             monitor_secret_id: None,
             created_at: chrono::Utc::now(),
+            origin: "provisioned".into(),
+            external_host: None,
+            external_port: None,
+            ranger_plugin_version: None,
         }
     }
 

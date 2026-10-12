@@ -295,6 +295,31 @@ impl egret_engine_mgmt::ProfileCompilerPort for ProfileCompilerImpl {
     ) -> Result<(), egret_perm::CompileError> {
         recompile_one_profile(tx, service_id).await
     }
+
+    async fn overlap_snapshot_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<egret_engine_mgmt::OverlapSnapshot, egret_perm::CompileError> {
+        Ok(egret_engine_mgmt::OverlapSnapshot::new(
+            egret_perm_compile::overlap::unit_snapshot_via(tx, service_ids).await?,
+        ))
+    }
+
+    async fn refuse_created_overlaps_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        snapshot: &egret_engine_mgmt::OverlapSnapshot,
+    ) -> Result<(), egret_perm::CompileError> {
+        let snapshot = snapshot
+            .get::<egret_perm_compile::overlap::UnitSnapshot>()
+            .ok_or_else(|| {
+                egret_perm::CompileError::Db(
+                    "an overlap snapshot of a type this compiler did not produce".into(),
+                )
+            })?;
+        egret_perm_compile::overlap::refuse_created_overlaps_via(tx, snapshot).await
+    }
 }
 
 /// `egret-catalog-registry`'s narrower port (SP4a Task 16, D3 defects 2 and

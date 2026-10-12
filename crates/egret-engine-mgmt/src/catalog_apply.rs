@@ -861,14 +861,24 @@ pub(crate) fn check_engine_supports(
     catalog_name: &str,
     def: &CatalogDef,
 ) -> Result<(), CatalogOpError> {
-    let engine_type = EngineType::parse(&engine.r#type)
-        .ok_or_else(|| CpError::BadRequest(format!("unknown engine type {}", engine.r#type)))?;
+    check_engine_supports_type(&engine.r#type, catalog_name, def).map_err(CatalogOpError::Http)
+}
+
+/// [`check_engine_supports`] for an engine that does not exist yet (a
+/// registration validates its catalogs before it writes the row).
+pub(crate) fn check_engine_supports_type(
+    engine_type: &str,
+    catalog_name: &str,
+    def: &CatalogDef,
+) -> Result<(), CpError> {
+    let engine_type = EngineType::parse(engine_type)
+        .ok_or_else(|| CpError::BadRequest(format!("unknown engine type {engine_type}")))?;
     if !def.can_read(engine_type) {
-        return Err(CatalogOpError::Http(CpError::BadRequest(format!(
+        return Err(CpError::BadRequest(format!(
             "a {} engine cannot read catalog {}",
             engine_type.as_str(),
             catalog_name
-        ))));
+        )));
     }
     // The FE would reject these itself, but only after egret had minted a
     // Catalog Client for the attachment and written a row for it — and the
@@ -879,9 +889,9 @@ pub(crate) fn check_engine_supports(
     if engine_type == EngineType::StarRocks
         && egret_catalog_registry::is_reserved_starrocks_name(catalog_name)
     {
-        return Err(CatalogOpError::Http(CpError::BadRequest(format!(
+        return Err(CpError::BadRequest(format!(
             "StarRocks reserves the catalog name {catalog_name}"
-        ))));
+        )));
     }
     Ok(())
 }
@@ -898,6 +908,19 @@ pub(crate) async fn attach_to_engine(
     catalog: &CatalogRow,
     role_from_client: Option<Uuid>,
 ) -> Result<(), CatalogOpError> {
+    // **An external engine is declared, not applied** (SP4d-4 Part C): there is
+    // no cluster egret runs, so no DDL, no render and no minted client. The
+    // row, the recompile of the profile it binds and the refusal of any pair
+    // the attachment creates share one transaction.
+    if crate::external::is_external(engine) {
+        if engine.status == crate::engine_status::DELETING {
+            return Err(CatalogOpError::Http(apply_conflict()));
+        }
+        return crate::external::declare_attached_and_recompile(st, engine, catalog)
+            .await
+            .map_err(CatalogOpError::Http);
+    }
+    refuse_attach_that_creates_overlap(st, engine, catalog).await?;
     let out = attach_to_engine_inner(st, engine, catalog, role_from_client).await;
     if out.is_ok() {
         // **An attachment change is a recompile trigger** (whole-branch
@@ -916,6 +939,85 @@ pub(crate) async fn attach_to_engine(
         crate::profile_compiler::recompile_bound_profile(st, engine.id, &engine.name).await;
     }
     out
+}
+
+/// **A dry run of the attachment's recompile, refusing the pairs it would
+/// create** (SP4d-4 Task 3 re-review M-2, closed in Task 7).
+///
+/// An attachment changes which catalogs — so which tag assignments — the bound
+/// profile's unit resolves, and every overlap check reads those as stored: a
+/// pair the attachment completes would read as already there. The real attach
+/// cannot sit in one transaction with its recompile (a Trino attach applies to
+/// the cluster FIRST, a StarRocks attach converges after it), so the pair is
+/// looked for before anything is applied: on a transaction that is rolled back,
+/// take the before-snapshot, write a stand-in attachment row, recompile the
+/// profile, and refuse what the recompile creates. Nothing it writes survives.
+///
+/// **Its limit is the usual one for a check made ahead of a write:** another
+/// transaction may change the unit between this and the real recompile. A
+/// failure of the dry run that is NOT an overlap is logged and does not refuse —
+/// the real recompile reports it, exactly as before.
+async fn refuse_attach_that_creates_overlap(
+    st: &CpState,
+    engine: &Engine,
+    catalog: &CatalogRow,
+) -> Result<(), CatalogOpError> {
+    let (Some(sid), Some(_)) = (engine.authz_service_id, st.perm_compiler.as_ref()) else {
+        return Ok(());
+    };
+    let mut tx = st
+        .engine_mgmt
+        .pool()
+        .begin()
+        .await
+        .map_err(crate::http_error::db_error)?;
+    let outcome: Result<(), egret_perm::CompileError> = async {
+        let before = crate::profile_compiler::snapshot_overlaps(st, &mut tx, Some(sid)).await?;
+        if let Err(e) = st
+            .engine_mgmt
+            .registry()
+            .insert_attachment_in_tx(
+                &mut tx,
+                &NewAttachment {
+                    engine_id: engine.id,
+                    catalog_id: catalog.id,
+                    catalog_client_id: None,
+                    credential_secret_id: None,
+                    minted_client: false,
+                    applied_now: false,
+                    is_primary: false,
+                    created_at: None,
+                    apply_status: egret_catalog_registry::store::apply_status::PENDING,
+                },
+            )
+            .await
+        {
+            // Already attached (the real attach answers that 409) or a row the
+            // stand-in cannot be: nothing to look for here.
+            tracing::debug!(engine = %engine.name, error = %e,
+                "overlap dry run for an attachment skipped: stand-in row not written");
+            return Ok(());
+        }
+        crate::profile_compiler::recompile_refusing_created_overlaps(
+            st,
+            &mut tx,
+            sid,
+            before.as_ref(),
+        )
+        .await
+    }
+    .await;
+    // Dropped, never committed: the stand-in row and the recompile go with it.
+    drop(tx);
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(e) if e.rule_overlap_body().is_some() => Err(CatalogOpError::Http(e.into())),
+        Err(e) => {
+            tracing::warn!(engine = %engine.name, catalog = %catalog.name, error = %e,
+                "overlap dry run for an attachment could not complete; attaching without it");
+            Ok(())
+        }
+    }
 }
 
 async fn attach_to_engine_inner(

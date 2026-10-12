@@ -338,6 +338,7 @@ export * from './rateLimitSpec';
 export * from './recipientDto';
 export * from './recipientInput';
 export * from './recipientKind';
+export * from './registerExternalEngine';
 export * from './registryCatalogDto';
 export * from './registryCatalogDtoAdvanced';
 export * from './registryCatalogDtoConfig';

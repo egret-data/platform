@@ -8,6 +8,7 @@ pub mod delegator_policy;
 pub mod dependents;
 pub mod engines;
 pub mod error;
+pub mod external;
 pub mod http_error;
 pub mod monitor;
 pub mod probe;
@@ -28,7 +29,7 @@ pub use http_error::EngineHttpError;
 // `fe_target` stays `pub(crate)` (used by Task 4/5 apply/bootstrap code within
 // this crate via `crate::starrocks_ddl::fe_target`) and is not re-exported here.
 pub use probe::{tcp_probe, ProbeOutcome, PROBE_TIMEOUT};
-pub use profile_compiler::ProfileCompilerPort;
+pub use profile_compiler::{OverlapSnapshot, ProfileCompilerPort};
 pub use starrocks_ddl::{
     compare_to_fe, parse_show_create_properties, show_catalogs, show_create_catalog, Drift,
     FakeStarRocksDdl, FeError, FeTarget, MysqlDdlRunner, StarRocksDdl, FE_ERROR_EXCERPT_MAX,
@@ -48,5 +49,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     let mut doc = engines::EngineMgmtApi::openapi();
     doc.merge(monitor::MonitorApi::openapi());
     doc.merge(catalogs::CatalogRegistryApi::openapi());
+    doc.merge(external::ExternalEngineApi::openapi());
     doc
 }

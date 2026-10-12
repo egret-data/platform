@@ -84,6 +84,46 @@ pub trait ProfileCompilerPort: Send + Sync {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         service_id: i64,
     ) -> Result<(), egret_perm::CompileError>;
+
+    /// The mask and row-filter pairs stored in every unit the profiles in
+    /// `service_ids` belong to, read on the caller's transaction **before** a
+    /// write that changes which catalogs — and so which tag assignments — a
+    /// profile's unit resolves (a profile bind, an engine ↔ catalog
+    /// attachment). Pair it with
+    /// [`refuse_created_overlaps_in_tx`](Self::refuse_created_overlaps_in_tx)
+    /// after the recompile (SP4d-4 Task 3 re-review M-2; the tag assignment and
+    /// tag rename in `egret-bi` do the same through
+    /// `egret_perm_compile::overlap`).
+    async fn overlap_snapshot_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<OverlapSnapshot, egret_perm::CompileError>;
+
+    /// Refuse, with `CompileError::AmbiguousMaskOrFilterArbitration`, any pair
+    /// the units hold now that `snapshot` did not — only the pairs the write
+    /// CREATED; a pair already stored is reported elsewhere and blocks nothing.
+    async fn refuse_created_overlaps_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        snapshot: &OverlapSnapshot,
+    ) -> Result<(), egret_perm::CompileError>;
+}
+
+/// What [`ProfileCompilerPort::overlap_snapshot_in_tx`] hands back. Opaque to
+/// this crate: the pairs are `egret-policy` types, which this crate keeps out of
+/// its production graph (see the module doc), so the composition root puts its
+/// own snapshot type in and takes it out again.
+pub struct OverlapSnapshot(Box<dyn std::any::Any + Send + Sync>);
+
+impl OverlapSnapshot {
+    pub fn new<T: std::any::Any + Send + Sync>(snapshot: T) -> Self {
+        Self(Box::new(snapshot))
+    }
+
+    pub fn get<T: std::any::Any>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
 }
 
 /// Recompile whatever profile `engine_id` is currently bound to, if any and if
@@ -131,4 +171,37 @@ pub(crate) async fn recompile_bound_profile(
              /api/control-plane/perm/compile/{service_id} succeeds"
         ),
     }
+}
+
+/// The overlap snapshot of the profile `service_id`, or `None` when no compiler
+/// is wired or the engine binds nothing.
+pub(crate) async fn snapshot_overlaps(
+    st: &crate::EngineMgmtState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    service_id: Option<i64>,
+) -> Result<Option<OverlapSnapshot>, egret_perm::CompileError> {
+    let (Some(compiler), Some(service_id)) = (st.perm_compiler.clone(), service_id) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        compiler.overlap_snapshot_in_tx(tx, &[service_id]).await?,
+    ))
+}
+
+/// Recompile `service_id` on the caller's transaction and refuse the pairs the
+/// write made since `before`. A no-op when no compiler is wired.
+pub(crate) async fn recompile_refusing_created_overlaps(
+    st: &crate::EngineMgmtState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    service_id: i64,
+    before: Option<&OverlapSnapshot>,
+) -> Result<(), egret_perm::CompileError> {
+    let Some(compiler) = st.perm_compiler.clone() else {
+        return Ok(());
+    };
+    compiler.recompile_profile_in_tx(tx, service_id).await?;
+    if let Some(before) = before {
+        compiler.refuse_created_overlaps_in_tx(tx, before).await?;
+    }
+    Ok(())
 }

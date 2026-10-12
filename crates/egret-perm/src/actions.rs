@@ -67,6 +67,14 @@ pub struct OverlapRule {
     pub name: String,
 }
 
+/// The Ranger plugin versions `egret-ranger-eval` has been read against
+/// (`PluginVersion::Ranger2_5_0` / `Ranger2_8_0`). Spelled here, in the crate
+/// both `egret-engine-mgmt` (registering an external engine) and
+/// `egret-perm-compile` (`engine_plugin_version`) already depend on, so the
+/// list an operator may declare as MODELLED and the list the gate can prove on
+/// are one list; `egret-perm-compile` pins that every entry maps.
+pub const MODELLED_RANGER_PLUGIN_VERSIONS: [&str; 2] = ["2.5.0", "2.8.0"];
+
 /// A grant the compiler cannot express against the target engine, or cannot
 /// express *correctly* — every variant here exists because a silent
 /// alternative would compile a policy that grants something other than what
@@ -407,6 +415,35 @@ pub enum CompileError {
     /// the parse error itself.
     #[error("database error: {0}")]
     Db(String),
+}
+
+impl CompileError {
+    /// The structured 409 body of an order-ambiguous pair —
+    /// `{error, code: "rule_overlap", rules, coordinate, kind}` — or `None` for
+    /// any other error. Spelled HERE, once, so the perm routes
+    /// (`egret_perm_compile::overlap::refusal_body`) and the engine bind and
+    /// attach routes (`egret-engine-mgmt`) answer one body.
+    pub fn rule_overlap_body(&self) -> Option<serde_json::Value> {
+        let CompileError::AmbiguousMaskOrFilterArbitration {
+            kind,
+            coordinate,
+            rules,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some(serde_json::json!({
+            "error": self.to_string(),
+            "code": "rule_overlap",
+            "rules": rules
+                .iter()
+                .map(|r| serde_json::json!({ "id": r.id, "name": r.name }))
+                .collect::<Vec<_>>(),
+            "coordinate": coordinate,
+            "kind": kind.as_str(),
+        }))
+    }
 }
 
 /// The Ranger access types `a` compiles to on `e`. Every engine declares

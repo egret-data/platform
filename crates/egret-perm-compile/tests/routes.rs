@@ -2738,6 +2738,59 @@ async fn explain_names_the_reason_class_not_just_a_verdict() {
     );
 }
 
+/// An external engine declares the Ranger plugin version it runs. A version the
+/// evaluator has not been read against is a refusal that NAMES it — never an
+/// evaluation at a guessed one (SP4d-4 Task 7).
+#[tokio::test]
+async fn explain_refuses_an_external_engine_declaring_an_unmeasured_plugin_version() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let ask = || explain_body(f.catalog_id, "nobody");
+    let declare = |version: &'static str| {
+        let (pool, service) = (f.db.pool.clone(), f.service_id);
+        async move {
+            sqlx::query(
+                "UPDATE engine_mgmt.engines \
+                    SET origin = 'external', external_host = 'sr.example.com', \
+                        external_port = 9030, ranger_plugin_version = $2, namespace = '', \
+                        spec = '{}'::jsonb \
+                  WHERE authz_service_id = $1",
+            )
+            .bind(service)
+            .bind(version)
+            .execute(&pool)
+            .await
+            .expect("declare the bound engine external")
+            .rows_affected()
+        }
+    };
+
+    assert_eq!(declare("2.6.0").await, 1);
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", &token, Some(ask())))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("2.6.0"),
+        "the refusal must name the declared version: {body}"
+    );
+
+    // Accept cell: the same engine declaring the version StarRocks ships.
+    assert_eq!(declare("2.8.0").await, 1);
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", &token, Some(ask())))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+}
+
 /// A policy that DENIED and nothing matching at all are different facts, and
 /// must stay different on the wire. A response that collapsed both into a
 /// boolean would pass the test above and still be useless.

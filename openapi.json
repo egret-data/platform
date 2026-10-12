@@ -3795,6 +3795,96 @@
         }
       }
     },
+    "/api/control-plane/engines/external": {
+      "post": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "operationId": "register_external_engine",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterExternalEngine"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to a policy profile, with the given catalogs declared attached (`applyStatus: declared`). The bound profile was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the declared version: a migration to that profile is then refused, never evaluated at a guessed version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid name, type, host, port or plugin version; a catalog the engine cannot read; `authzServiceId` naming no policy profile or a Trino profile with no usable tag service; or Kubernetes-free registration was malformed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:create permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "A catalog id in `catalogs` names no registry catalog (the message names it); nothing was written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The name is taken, the profile has another type or is bound to another engine, or binding it would create an order-ambiguous mask or row-filter pair (`code: rule_overlap`); nothing was written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/engines/{id}": {
       "get": {
         "tags": [
@@ -37002,7 +37092,8 @@
           "type",
           "namespace",
           "status",
-          "spec"
+          "spec",
+          "origin"
         ],
         "properties": {
           "id": {
@@ -37019,10 +37110,44 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "For an external engine this is the row's placeholder `running`, which\nmeans nothing: read `origin` instead (egret does not monitor it)."
           },
           "spec": {
             "$ref": "#/components/schemas/EngineSpecDto"
+          },
+          "origin": {
+            "type": "string",
+            "description": "`provisioned` (egret runs the cluster) or `external` (egret holds a row\nfor a cluster it never provisions, updates, restarts, scales or deletes)."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "External only: the host the engine answers on."
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "External only: the port the engine answers on."
+          },
+          "rangerPluginVersion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "External only: the Ranger plugin version the operator declared installed."
+          },
+          "rangerPluginVersionModelled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "External only: whether egret's Ranger evaluator has been read against the\ndeclared version. When `false`, a migration to the profile bound to this\nengine is refused (never evaluated at a guessed version) and `explain`\nanswers that it cannot."
           }
         }
       },
@@ -40721,6 +40846,57 @@
           "webhook",
           "slack"
         ]
+      },
+      "RegisterExternalEngine": {
+        "type": "object",
+        "description": "`POST /api/control-plane/engines/external`.",
+        "required": [
+          "name",
+          "type",
+          "host",
+          "port",
+          "rangerPluginVersion"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Unique across engines. Lower-case letters, digits and `-`, 1 to 63\ncharacters, starting and ending alphanumeric."
+          },
+          "type": {
+            "type": "string",
+            "description": "`trino` or `starrocks`."
+          },
+          "host": {
+            "type": "string",
+            "description": "Host or IP the engine answers on: no scheme, no port, no path."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Trino's HTTP port or StarRocks' FE query port.",
+            "minimum": 0
+          },
+          "rangerPluginVersion": {
+            "type": "string",
+            "description": "The Ranger plugin version installed on the engine, `x.y.z`, one of the\nRanger 2.x releases. **Only 2.5.0 and 2.8.0 are modelled by egret's\nevaluator**: any other is stored as declared, and a migration to a\nprofile bound to this engine is then refused rather than evaluated at a\nguessed version."
+          },
+          "authzServiceId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "A policy profile to bind. Its type must equal `type`, no other engine may\nbind it, and a Trino profile needs a usable `tagService`."
+          },
+          "catalogs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Registry catalogs to declare attached. Nothing is applied to the engine."
+          }
+        }
       },
       "RegistryCatalogDto": {
         "type": "object",

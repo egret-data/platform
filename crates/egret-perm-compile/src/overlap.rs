@@ -65,13 +65,18 @@
 //! assignments on the profile's catalogs and its `tagService`. A caller that
 //! changes one of those and then recompiles makes the pair that change
 //! completes read as already stored, so it needs its own before-snapshot
-//! ([`unit_snapshot_via`] + [`refuse_created_overlaps_via`]). The tag
-//! assignment and the tag rename (`egret-bi`) take one. Audited and NOT
-//! covered — named in the spec's "not sound against" list: an engine ↔
-//! catalog attachment (it commits on its own, before any recompile) and a
-//! profile bind (`set_engine_authz_service_in_tx`, then a recompile in the
-//! same transaction), both of which change which catalogs — and so which
-//! assignments — a unit resolves. `tagService` has no UPDATE path at all.
+//! ([`unit_snapshot_via`] + [`refuse_created_overlaps_via`]). Every such
+//! caller takes one: the tag assignment and the tag rename (`egret-bi`), and
+//! (SP4d-4 Task 7) the two writes that change which catalogs — and so which
+//! assignments — a unit resolves, through `egret-engine-mgmt`'s
+//! `ProfileCompilerPort::{overlap_snapshot_in_tx, refuse_created_overlaps_in_tx}`:
+//! a profile bind (`PUT /engines/{id}` and external-engine registration,
+//! snapshot before `set_engine_authz_service_in_tx`, check after the recompile,
+//! one transaction) and an engine ↔ catalog attachment (an external engine's
+//! declared attachment the same way; a provisioned engine's, which applies to
+//! the cluster before it can recompile, through a dry run on a rolled-back
+//! transaction before anything is applied). `tagService` has no UPDATE path at
+//! all.
 //!
 //! **Cost:** with N profiles sharing one tag service, a tag-rule write
 //! recompiles all N and each compile loads all N units — about N² unit loads.
@@ -109,7 +114,7 @@ use egret_policy::{
     units_for_services_via, Arbitrated, AssignedTag, OverlapShape, UnitIds, UnitOverlap,
     UnitPolicy,
 };
-use serde_json::{json, Value};
+use serde_json::Value;
 
 /// One compiled policy, as the overlap check reads it.
 #[derive(Debug, Clone)]
@@ -324,25 +329,7 @@ pub(crate) fn into_compile_error(profile: &str, o: Overlap) -> CompileError {
 /// "coordinate": "...", "kind": "mask" | "row_filter" }`. `None` for every
 /// other `CompileError`.
 pub fn refusal_body(e: &CompileError) -> Option<Value> {
-    let CompileError::AmbiguousMaskOrFilterArbitration {
-        kind,
-        coordinate,
-        rules,
-        ..
-    } = e
-    else {
-        return None;
-    };
-    Some(json!({
-        "error": e.to_string(),
-        "code": "rule_overlap",
-        "rules": rules
-            .iter()
-            .map(|r| json!({ "id": r.id, "name": r.name }))
-            .collect::<Vec<_>>(),
-        "coordinate": coordinate,
-        "kind": kind.as_str(),
-    }))
+    e.rule_overlap_body()
 }
 
 // ── a tag assignment: refuse what it creates, across the whole stored unit ──
@@ -565,6 +552,7 @@ pub async fn stored_overlaps_via(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use uuid::Uuid;
 
     fn mask(name: &str, table: &str, mask_type: &str) -> Value {

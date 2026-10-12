@@ -21,7 +21,10 @@ pub mod eval;
 pub mod model;
 pub mod store;
 
-pub use actions::{engine_accesses, CompileError, EngineType, OverlapKind, OverlapRule};
+pub use actions::{
+    engine_accesses, CompileError, EngineType, OverlapKind, OverlapRule,
+    MODELLED_RANGER_PLUGIN_VERSIONS,
+};
 pub use assignment::{sync_assignment_grants, sync_assignment_grants_in_tx};
 pub use error::PermError;
 // **`evaluate` is deliberately NOT re-exported here (SP4d-2a Task 5).** It was

@@ -188,6 +188,10 @@ fn coordinator_host_and_jwt_check() {
         internal_secret_id: None,
         monitor_secret_id: None,
         created_at: chrono::Utc::now(),
+        origin: "provisioned".into(),
+        external_host: None,
+        external_port: None,
+        ranger_plugin_version: None,
     };
     assert_eq!(e.coordinator_host(), "trino-prod-trino.engines.svc");
     assert_eq!(e.coordinator_port(), 8080);

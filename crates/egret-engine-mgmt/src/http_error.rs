@@ -19,6 +19,10 @@ pub enum EngineHttpError {
     Forbidden,
     #[error("not found")]
     NotFound,
+    /// A 404 that says WHAT was not found, where the id in the message is the
+    /// only way the caller can tell which of several it was.
+    #[error("not found: {0}")]
+    NotFoundNamed(String),
     #[error("already exists: {0}")]
     AlreadyExists(String),
     #[error("bad request: {0}")]
@@ -64,6 +68,16 @@ pub enum EngineHttpError {
     /// detach/unassign it would be pointless — it stays refused either way).
     #[error("catalog is an egret warehouse")]
     WarehouseCatalog(String),
+    /// The engine is external: egret holds a row for it and never provisions,
+    /// updates, restarts, scales, execs into or deletes the cluster of it, so a
+    /// lifecycle route refuses (SP4d-4 Part C). 409, `code: "engine_is_external"`.
+    #[error("engine is external: {0}")]
+    EngineIsExternal(String),
+    /// The write would create an order-ambiguous mask or row-filter pair
+    /// (`CompileError::AmbiguousMaskOrFilterArbitration`). 409 with the body
+    /// the perm routes answer (`code: "rule_overlap"`).
+    #[error("rule overlap: {0}")]
+    RuleOverlap(serde_json::Value),
     #[error("internal error")]
     Internal,
 }
@@ -178,6 +192,10 @@ impl From<egret_perm::PermError> for EngineHttpError {
 /// write.
 impl From<egret_perm::CompileError> for EngineHttpError {
     fn from(e: egret_perm::CompileError) -> Self {
+        // A pair the write CREATED is the caller's to fix, not a server fault.
+        if let Some(body) = e.rule_overlap_body() {
+            return EngineHttpError::RuleOverlap(body);
+        }
         tracing::error!(
             error = %e,
             "perm-model recompile failed inside a catalog-workspace assignment write"
@@ -297,8 +315,18 @@ impl IntoResponse for EngineHttpError {
                 };
                 (StatusCode::CONFLICT, Json(body)).into_response()
             }
+            EngineHttpError::EngineIsExternal(reason) => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": reason, "code": "engine_is_external" })),
+            )
+                .into_response(),
+            EngineHttpError::RuleOverlap(body) => {
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
             EngineHttpError::Forbidden => error_json(StatusCode::FORBIDDEN, msg),
-            EngineHttpError::NotFound => error_json(StatusCode::NOT_FOUND, msg),
+            EngineHttpError::NotFound | EngineHttpError::NotFoundNamed(_) => {
+                error_json(StatusCode::NOT_FOUND, msg)
+            }
             EngineHttpError::AlreadyExists(_)
             | EngineHttpError::Conflict(_)
             | EngineHttpError::InUse(_) => error_json(StatusCode::CONFLICT, msg),

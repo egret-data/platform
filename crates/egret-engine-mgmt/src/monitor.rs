@@ -436,6 +436,10 @@ mod tests {
             internal_secret_id: None,
             monitor_secret_id: None,
             created_at: chrono::Utc::now(),
+            origin: "provisioned".into(),
+            external_host: None,
+            external_port: None,
+            ranger_plugin_version: None,
         }
     }
 

@@ -12,6 +12,38 @@ export interface EngineDto {
   name: string;
   type: string;
   namespace: string;
+  /**
+     * For an external engine this is the row's placeholder `running`, which
+     * means nothing: read `origin` instead (egret does not monitor it).
+     */
   status: string;
   spec: EngineSpecDto;
+  /**
+     * `provisioned` (egret runs the cluster) or `external` (egret holds a row
+     * for a cluster it never provisions, updates, restarts, scales or deletes).
+     */
+  origin: string;
+  /**
+     * External only: the host the engine answers on.
+     * @nullable
+     */
+  host?: string | null;
+  /**
+     * External only: the port the engine answers on.
+     * @nullable
+     */
+  port?: number | null;
+  /**
+     * External only: the Ranger plugin version the operator declared installed.
+     * @nullable
+     */
+  rangerPluginVersion?: string | null;
+  /**
+     * External only: whether egret's Ranger evaluator has been read against the
+     * declared version. When `false`, a migration to the profile bound to this
+     * engine is refused (never evaluated at a guessed version) and `explain`
+     * answers that it cannot.
+     * @nullable
+     */
+  rangerPluginVersionModelled?: boolean | null;
 }

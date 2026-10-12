@@ -1302,3 +1302,70 @@ async fn a_profile_recompiled_outside_the_gated_set_is_refused_and_nothing_is_wr
         "the trigger's attachment rolled back with the migration"
     );
 }
+
+// ── an external engine declares the plugin version it runs ───────────────
+
+/// Turn the engine bound to `f.p` into an external one declaring `version` —
+/// the shape migration 0184's `engines_external_shape` allows.
+async fn make_bound_engine_external(f: &Fixture, version: &str) {
+    let res = sqlx::query(
+        "UPDATE engine_mgmt.engines \
+            SET origin = 'external', external_host = 'trino.example.com', external_port = 8080, \
+                ranger_plugin_version = $2, namespace = '', spec = '{}'::jsonb \
+          WHERE authz_service_id = $1",
+    )
+    .bind(f.p)
+    .bind(version)
+    .execute(&f.db.pool)
+    .await
+    .expect("make the bound engine external");
+    assert_eq!(res.rows_affected(), 1);
+}
+
+#[tokio::test]
+async fn an_external_engine_declaring_an_unmeasured_plugin_version_refuses_the_migration() {
+    let Some(f) = setup().await else { return };
+    make_bound_engine_external(&f, "2.6.0").await;
+    let name = unique("alice reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let refusal = body["refusal"].as_str().expect("refusal");
+    assert!(
+        refusal.contains("2.6.0") && refusal.contains("not been verified"),
+        "the sentence must name the declared version: {refusal}"
+    );
+    assert_eq!(grants_on_catalog(&f).await, 0, "nothing is written");
+    assert!(enabled(&f, id).await, "the original stays on");
+}
+
+#[tokio::test]
+async fn an_external_trino_declaring_2_8_0_is_proved_on_2_8_0() {
+    let Some(f) = setup().await else { return };
+    make_bound_engine_external(&f, "2.8.0").await;
+    let name = unique("alice reads orders");
+    insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["profiles"][0]["plugin_versions"],
+        json!(["ranger_2_8_0"]),
+        "the declared version decides, not the engine's type: {body}"
+    );
+}

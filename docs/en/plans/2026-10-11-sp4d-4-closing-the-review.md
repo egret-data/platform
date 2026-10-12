@@ -48,7 +48,7 @@ Last known, from the #660 merge (2026-10-11, not re-measured for this plan): `ca
 | `crates/egret-perm-compile/src/overlap.rs` | 3 | the compiler-only overlap cases (tag ↔ tag, tag ↔ path) and the rule-naming of a refusal |
 | `crates/egret-perm-compile/tests/overlap.rs` | 3, 4 | DB tests for rule writes, tag assignment writes, and the report route |
 | `crates/egret-perm-compile/tests/gate_timing.rs` | 6 | the `#[ignore]`d timing harness behind `MAX_PROBE_EVALUATIONS` |
-| `migrations/0183_engine_external.sql` | 7 | `origin`, the external columns, the shape `CHECK`, `'declared'` attachments (number re-checked at creation) |
+| `migrations/0184_engine_external.sql` | 7 | `origin`, the external columns, the shape `CHECK`, `'declared'` attachments (number re-checked at creation) |
 | `crates/egret-engine-mgmt/src/external.rs` | 7, 8 | registration, the `origin` guard every handler calls, declared attachments |
 | `crates/egret-provisioner/src/ranger_config.rs` | 9 | the ONE renderer of the Ranger plugin files, used by provisioning and by the new route |
 | `frontend/src/routes/control-plane/EngineRegister.tsx` | 10 | the register page |
@@ -637,7 +637,7 @@ Report: the `a_migration_the_grammar_accepts…` gate's disagreement count (must
 ## Task 7: an external engine is a row egret can hold, register and bind
 
 **Files:**
-- Create: `migrations/0183_engine_external.sql` (**re-check the number first**)
+- Create: `migrations/0184_engine_external.sql` (**re-check the number first**)
 - Create: `crates/egret-engine-mgmt/src/external.rs`; declare in `crates/egret-engine-mgmt/src/lib.rs`
 - Modify: `crates/egret-engine-mgmt/src/store.rs` (`Engine` `:27-47` gains fields; `get_engine`/`list_engines` select them; `coordinator_host`/`coordinator_port` `:64-81` answer the external address for an external row)
 - Modify: `crates/egret-engine-mgmt/src/engines.rs` (router `:94-125`; `get_engine`/`list_engines` DTOs; reuse `apply_authz_service_update` `:4990`)
@@ -649,7 +649,7 @@ Report: the `a_migration_the_grammar_accepts…` gate's disagreement count (must
 - Produces (SQL):
 
 ```sql
--- 0183_engine_external.sql  (number re-checked against origin/main at creation)
+-- 0184_engine_external.sql  (number re-checked against origin/main at creation)
 --
 -- SP4d-4 Part C: an engine egret did not provision and never touches, held so
 -- a profile can be bound to it and catalogs declared attached to it. Before
@@ -776,7 +776,7 @@ DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test cargo test -p egre
 cargo run --bin egret -- openapi > /tmp/sp4d4-openapi.json && cat /tmp/sp4d4-openapi.json > openapi.json
 (cd frontend && npm run gen:api)
 df -h / | tail -1
-git add migrations/0183_engine_external.sql crates/egret-engine-mgmt crates/egret-perm-compile openapi.json \
+git add migrations/0184_engine_external.sql crates/egret-engine-mgmt crates/egret-perm-compile openapi.json \
         frontend/src/api/generated frontend/src/api/generated.digest.json
 git commit -m "feat(engine-mgmt): register an external engine, bind it to a profile, declare its catalogs"
 ```
@@ -1107,6 +1107,6 @@ git commit -m "docs(plans): SP4d-4 live check"
 
 **Placeholders.** None that a task cannot resolve by reading a named file. Where a fact could not be measured while writing (the exact `EngineHttpError` mechanism for a coded 409, whether `lock_services_in_tx` serialises two profiles sharing a tag service, the editor-side function that turns a form into a body, the constraint name of `apply_status`), the step names the file to read and what to do with each answer. Branch-dependent steps are written out for both branches.
 
-**Type consistency.** `ambiguous_arbitrations_in` / `ambiguous_arbitration_in` / `resources_may_intersect` (Task 2) are consumed unchanged by Task 3's `overlap::overlaps` and Task 4's report. `CompileError::AmbiguousMaskOrFilterArbitration { profile, refusal, kind, coordinate, rules }` is defined in Task 3 and read by Task 4. `may_be_candidate` (Task 5, `egret-ranger-eval`) is consumed by `plan_probes`; `PruneMode`, `ProbePlan`, `FallbackReason`, `planned_probe_count` are defined in Task 5 and consumed by Task 6. `external::refuse_if_external` and `RegisterExternalEngine` are defined in Task 7 and consumed by Tasks 8–10; `engine_plugin_version` is defined in Task 7 and is the only place an engine's `PluginVersion` is derived. `ranger_plugin_files` (Task 9) is the only renderer of the plugin files. The migration number `0183` is the expected value only; Task 7 Step 1 re-checks it.
+**Type consistency.** `ambiguous_arbitrations_in` / `ambiguous_arbitration_in` / `resources_may_intersect` (Task 2) are consumed unchanged by Task 3's `overlap::overlaps` and Task 4's report. `CompileError::AmbiguousMaskOrFilterArbitration { profile, refusal, kind, coordinate, rules }` is defined in Task 3 and read by Task 4. `may_be_candidate` (Task 5, `egret-ranger-eval`) is consumed by `plan_probes`; `PruneMode`, `ProbePlan`, `FallbackReason`, `planned_probe_count` are defined in Task 5 and consumed by Task 6. `external::refuse_if_external` and `RegisterExternalEngine` are defined in Task 7 and consumed by Tasks 8–10; `engine_plugin_version` is defined in Task 7 and is the only place an engine's `PluginVersion` is derived. `ranger_plugin_files` (Task 9) is the only renderer of the plugin files. The migration number `0184` is the expected value only; Task 7 Step 1 re-checks it.
 
 **Risk of order.** Tasks 3, 4, 6 and 7 all touch `egret-perm-compile`; the plan forbids running two at once. Task 6's release build is the one large disk consumer; it checks free space first and cleans up after itself.

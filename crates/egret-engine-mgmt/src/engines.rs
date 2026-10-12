@@ -94,6 +94,8 @@ pub use egret_engine_mgmt_api::{
 pub fn router() -> Router<CpState> {
     Router::new()
         .route("/engines", get(list_engines).post(create_engine))
+        // Register an engine egret did not provision (SP4d-4 Part C).
+        .merge(crate::external::routes())
         .route(
             "/engines/{id}",
             get(get_engine).put(update_engine).delete(delete_engine),
@@ -292,19 +294,43 @@ struct EngineSpecDto {
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct EngineDto {
+pub(crate) struct EngineDto {
     id: Uuid,
     name: String,
     #[serde(rename = "type")]
     r#type: String,
     namespace: String,
+    /// For an external engine this is the row's placeholder `running`, which
+    /// means nothing: read `origin` instead (egret does not monitor it).
     status: String,
     spec: EngineSpecDto,
+    /// `provisioned` (egret runs the cluster) or `external` (egret holds a row
+    /// for a cluster it never provisions, updates, restarts, scales or deletes).
+    origin: String,
+    /// External only: the host the engine answers on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
+    /// External only: the port the engine answers on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port: Option<i32>,
+    /// External only: the Ranger plugin version the operator declared installed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ranger_plugin_version: Option<String>,
+    /// External only: whether egret's Ranger evaluator has been read against the
+    /// declared version. When `false`, a migration to the profile bound to this
+    /// engine is refused (never evaluated at a guessed version) and `explain`
+    /// answers that it cannot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ranger_plugin_version_modelled: Option<bool>,
 }
 
 impl From<Engine> for EngineDto {
     fn from(e: Engine) -> Self {
         let spec = serde_json::from_value(e.spec).unwrap_or_default();
+        let modelled = e
+            .ranger_plugin_version
+            .as_deref()
+            .map(crate::external::plugin_version_is_modelled);
         EngineDto {
             id: e.id,
             name: e.name,
@@ -312,6 +338,11 @@ impl From<Engine> for EngineDto {
             namespace: e.namespace,
             status: e.status,
             spec,
+            origin: e.origin,
+            host: e.external_host,
+            port: e.external_port,
+            ranger_plugin_version: e.ranger_plugin_version,
+            ranger_plugin_version_modelled: modelled,
         }
     }
 }
@@ -2248,7 +2279,14 @@ async fn list_engines(
             engine.namespace.clone(),
             engine.name.clone(),
         );
+        // An external engine has no cluster egret can ask: its row's `running`
+        // is a placeholder and `origin` is what a reader shows.
+        let external = crate::external::is_external(&engine);
         let mut dto: EngineDto = engine.into();
+        if external {
+            out.push(dto);
+            continue;
+        }
         if let Some(prov) = prov {
             if let Ok(s) = prov.status(&kind, &ns, &name).await {
                 dto.status = s.phase;
@@ -4765,7 +4803,15 @@ async fn get_engine(
         .ok_or(CpError::NotFound)?;
     // A `deleting` row is the retry state of an unfinished delete; the live
     // status of a half-deleted cluster would hide it, so it wins.
-    let status = if engine.status == crate::engine_status::DELETING {
+    let status = if crate::external::is_external(&engine) {
+        // Never ask the provisioner: there is no cluster of ours to ask about,
+        // and a `not found` from it would read as an outage.
+        EngineStatusDto {
+            phase: crate::external::ORIGIN_EXTERNAL.into(),
+            message: Some("External: egret does not provision or monitor this engine".into()),
+            pods: vec![],
+        }
+    } else if engine.status == crate::engine_status::DELETING {
         EngineStatusDto {
             phase: engine.status.clone(),
             message: Some("a previous delete did not finish; retry the delete".into()),
@@ -4953,51 +4999,19 @@ async fn restore_engine_authz_service(st: &CpState, engine_id: Uuid, previous: O
     }
 }
 
-/// Apply an update body's `authz_service_id` to `engine`, binding it to that
-/// policy profile and compiling the profile in the SAME transaction.
-///
-/// **Why honoured and not refused.** `CreateEngineBody` is shared with create,
-/// and `update_engine` refuses its `catalogs` field outright because accepting
-/// and dropping it would tell the caller their catalogs were attached when
-/// they were not — and because `POST /engines/{id}/catalogs/{cid}` is a real
-/// route to send them to instead. `authz_service_id` had the same silence with
-/// no such route behind it: the field was declared, accepted and dropped, so
-/// the only way to bind an engine to an existing profile after create was a
-/// direct SQL `UPDATE`. This is that route.
-///
-/// **`None` means "unchanged", never "unbind".** The wire shape cannot tell an
-/// absent field from an explicit `null` (`#[serde(default)]` on an
-/// `Option<i64>`), and the update wizard sends the whole body — so treating
-/// `None` as a detach would silently unbind every engine on every unrelated
-/// spec edit. That is a worse silence than the one being fixed. Changing the
-/// binding from profile A to profile B is a plain re-point: A's row is
-/// untouched, because unbinding must never delete a profile.
-///
-/// **An unknown id is a 400 naming it.** Not a warning-and-carry-on the way
-/// create's `plan_trino_profile` treats a bad id (there, a fresh profile is
-/// created instead, so the engine still ends up governed). Here there is no
-/// fallback, and a silent no-op is precisely the defect.
-///
-/// **Bind and compile commit together.** A profile an engine newly binds is
-/// stale: the compiler's affected-service sets are all derived from the
-/// MUTATED model row, and a binding mutates no grant and no rule. SP4a fixed
-/// this at engine create (`680adea9`); this is the same fix on update, through
-/// the same seam — `ProfileCompilerPort::recompile_profile_in_tx`, which locks
-/// through `lock_services_in_tx` (expanded with each profile's tag service,
-/// ascending). Unlike create — where a cluster is already provisioned by the
-/// time the recompile runs, so a failure only logs — nothing has been applied
-/// here yet, so a compile failure rolls the binding back and refuses.
-async fn apply_authz_service_update(
+/// Every refusal a profile bind makes BEFORE it writes anything, shared by
+/// `PUT /engines/{id}` ([`apply_authz_service_update`]) and external-engine
+/// registration so the two cannot drift: the profile must exist (400), its
+/// type must equal the engine's (409), no other engine may bind it (409), and
+/// a Trino profile needs a usable `tagService` (400). `engine_type` and
+/// `engine_name` describe the engine the profile is for, which for a
+/// registration does not exist yet.
+pub(crate) async fn check_profile_bindable(
     st: &CpState,
-    engine: &mut Engine,
-    requested: Option<i64>,
+    sid: i64,
+    engine_type: &str,
+    engine_name: &str,
 ) -> Result<(), CpError> {
-    let Some(sid) = requested else {
-        return Ok(());
-    };
-    if engine.authz_service_id == Some(sid) {
-        return Ok(()); // already bound there; no write, nothing to recompile
-    }
     let services = st
         .authz
         .list_services()
@@ -5016,11 +5030,11 @@ async fn apply_authz_service_update(
     // `trino` profile evaluates trino-shaped policy definitions against
     // starrocks-shaped compiled policies — and resource names that no longer
     // match are not denials, they are absent rules, which is an unmasked read.
-    if svc.r#type != engine.r#type {
+    if svc.r#type != engine_type {
         return Err(CpError::Conflict(format!(
             "policy profile {sid} ({}) has type {}, but engine {} is a {} engine; \
              bind a profile of the same type",
-            svc.name, svc.r#type, engine.name, engine.r#type
+            svc.name, svc.r#type, engine_name, engine_type
         )));
     }
     // I2: refuse a profile another engine already binds — again mirroring
@@ -5088,6 +5102,55 @@ async fn apply_authz_service_update(
             svc.name
         )));
     }
+    Ok(())
+}
+
+/// Apply an update body's `authz_service_id` to `engine`, binding it to that
+/// policy profile and compiling the profile in the SAME transaction.
+///
+/// **Why honoured and not refused.** `CreateEngineBody` is shared with create,
+/// and `update_engine` refuses its `catalogs` field outright because accepting
+/// and dropping it would tell the caller their catalogs were attached when
+/// they were not — and because `POST /engines/{id}/catalogs/{cid}` is a real
+/// route to send them to instead. `authz_service_id` had the same silence with
+/// no such route behind it: the field was declared, accepted and dropped, so
+/// the only way to bind an engine to an existing profile after create was a
+/// direct SQL `UPDATE`. This is that route.
+///
+/// **`None` means "unchanged", never "unbind".** The wire shape cannot tell an
+/// absent field from an explicit `null` (`#[serde(default)]` on an
+/// `Option<i64>`), and the update wizard sends the whole body — so treating
+/// `None` as a detach would silently unbind every engine on every unrelated
+/// spec edit. That is a worse silence than the one being fixed. Changing the
+/// binding from profile A to profile B is a plain re-point: A's row is
+/// untouched, because unbinding must never delete a profile.
+///
+/// **An unknown id is a 400 naming it.** Not a warning-and-carry-on the way
+/// create's `plan_trino_profile` treats a bad id (there, a fresh profile is
+/// created instead, so the engine still ends up governed). Here there is no
+/// fallback, and a silent no-op is precisely the defect.
+///
+/// **Bind and compile commit together.** A profile an engine newly binds is
+/// stale: the compiler's affected-service sets are all derived from the
+/// MUTATED model row, and a binding mutates no grant and no rule. SP4a fixed
+/// this at engine create (`680adea9`); this is the same fix on update, through
+/// the same seam — `ProfileCompilerPort::recompile_profile_in_tx`, which locks
+/// through `lock_services_in_tx` (expanded with each profile's tag service,
+/// ascending). Unlike create — where a cluster is already provisioned by the
+/// time the recompile runs, so a failure only logs — nothing has been applied
+/// here yet, so a compile failure rolls the binding back and refuses.
+async fn apply_authz_service_update(
+    st: &CpState,
+    engine: &mut Engine,
+    requested: Option<i64>,
+) -> Result<(), CpError> {
+    let Some(sid) = requested else {
+        return Ok(());
+    };
+    if engine.authz_service_id == Some(sid) {
+        return Ok(()); // already bound there; no write, nothing to recompile
+    }
+    check_profile_bindable(st, sid, &engine.r#type, &engine.name).await?;
     // The binding write and the compile of the profile it names share ONE
     // transaction, the same shape `catalogs::set_catalog_workspaces` keeps —
     // and, like it, `sqlx::Error` from `.begin()`/`.commit()` is mapped
@@ -5099,6 +5162,13 @@ async fn apply_authz_service_update(
         .begin()
         .await
         .map_err(crate::http_error::db_error)?;
+    // **The pairs this bind creates are refused** (SP4d-4 Task 3 re-review M-2).
+    // Binding changes which catalogs — and so which tag assignments — the
+    // profile's unit resolves, and every overlap check reads those as stored, so
+    // the snapshot of the unit's pairs is taken BEFORE the bind and compared
+    // after the recompile. A pair already stored is reported, not refused.
+    let overlaps_before =
+        crate::profile_compiler::snapshot_overlaps(st, &mut tx, Some(sid)).await?;
     if !st
         .engine_mgmt
         .set_engine_authz_service_in_tx(&mut tx, engine.id, Some(sid), &engine.status)
@@ -5112,17 +5182,26 @@ async fn apply_authz_service_update(
             "engine changed while the policy-profile binding was being applied; retry".into(),
         ));
     }
-    if let Some(compiler) = st.perm_compiler.clone() {
-        if let Err(e) = compiler.recompile_profile_in_tx(&mut tx, sid).await {
-            tracing::error!(
-                engine = %engine.name,
-                service_id = sid,
-                error = %e,
-                "compiling the policy profile this engine was being bound to failed; \
-                 the binding was rolled back rather than committed uncompiled"
-            );
-            return Err(CpError::Internal);
-        }
+    if let Err(e) = crate::profile_compiler::recompile_refusing_created_overlaps(
+        st,
+        &mut tx,
+        sid,
+        overlaps_before.as_ref(),
+    )
+    .await
+    {
+        tracing::error!(
+            engine = %engine.name,
+            service_id = sid,
+            error = %e,
+            "compiling the policy profile this engine was being bound to failed; \
+             the binding was rolled back rather than committed uncompiled"
+        );
+        // An overlap this bind created is the caller's 409; anything else is ours.
+        return Err(match e.rule_overlap_body() {
+            Some(body) => CpError::RuleOverlap(body),
+            None => CpError::Internal,
+        });
     }
     tx.commit().await.map_err(crate::http_error::db_error)?;
     tracing::info!(
@@ -7438,6 +7517,10 @@ mod tests {
             internal_secret_id: None,
             monitor_secret_id: None,
             created_at: chrono::Utc::now(),
+            origin: "provisioned".into(),
+            external_host: None,
+            external_port: None,
+            ranger_plugin_version: None,
         }
     }
 

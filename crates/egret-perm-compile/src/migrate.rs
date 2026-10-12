@@ -111,11 +111,11 @@ use crate::equivalence::{
 use crate::explain_wire::WirePluginVersion;
 use crate::grammar::ServiceKind;
 use crate::routes::{
-    artifact_via, fold_divergent, ranger_engine, stored_coordinate_is_fold_divergent, write_grant,
-    write_rule, CompileResponse, NewGrant, NewRule, PermHttpError,
+    artifact_via, fold_divergent, stored_coordinate_is_fold_divergent, write_grant, write_rule,
+    CompileResponse, NewGrant, NewRule, PermHttpError,
 };
 use crate::trigger::{
-    affected_services_for_grant, affected_services_for_rule, engine_type_for, lock_services_in_tx,
+    affected_services_for_grant, affected_services_for_rule, lock_services_in_tx,
     merge_service_ids, recompile_services_in_tx, CompileSummary,
 };
 
@@ -382,14 +382,8 @@ async fn bound_plugin_versions(
     conn: &mut sqlx::PgConnection,
     svc: &ServiceRow,
 ) -> Result<Result<Vec<PluginVersion>, String>, PermHttpError> {
-    let types: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT type FROM engine_mgmt.engines WHERE authz_service_id = $1 ORDER BY 1",
-    )
-    .bind(svc.id)
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(PermHttpError::db)?;
-    if types.is_empty() {
+    let engines = crate::routes::bound_engines(conn, svc.id).await?;
+    if engines.is_empty() {
         return Ok(Err(format!(
             "profile \"{}\" (#{}) is affected by this migration but no engine is bound to it, so \
              there is no plugin version to prove the migration on. Bind its engine, or remove \
@@ -398,15 +392,18 @@ async fn bound_plugin_versions(
         )));
     }
     let mut versions: Vec<PluginVersion> = Vec::new();
-    for t in types {
-        let Some(engine) = engine_type_for(&t) else {
-            return Ok(Err(format!(
-                "profile \"{}\" (#{}) is bound to an engine of type `{t}`, for which egret has \
-                 no measured Ranger plugin version, so the migration cannot be proved on it.",
-                svc.name, svc.id
-            )));
+    for e in engines {
+        // An external engine's version is the one its operator declared; one the
+        // evaluator was not read against refuses the migration on this profile.
+        let v = match e.plugin_version() {
+            Ok(v) => v,
+            Err(sentence) => {
+                return Ok(Err(format!(
+                    "profile \"{}\" (#{}): {sentence}, so the migration cannot be proved on it.",
+                    svc.name, svc.id
+                )));
+            }
         };
-        let v = ranger_engine(engine).plugin_version();
         if !versions.contains(&v) {
             versions.push(v);
         }

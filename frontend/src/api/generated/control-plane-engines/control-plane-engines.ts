@@ -40,6 +40,7 @@ import type {
   PodLogsDto,
   QueryDetailDto,
   QueryDto,
+  RegisterExternalEngine,
   SetWorkspacesBody,
   WorkspaceEngineDto
 } from '../model';
@@ -623,6 +624,114 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getControlPlaneEnginesCreateEngineMutationOptions(options), queryClient);
+    }
+    export type controlPlaneEnginesRegisterExternalEngineResponse201 = {
+  data: EngineDto
+  status: 201
+}
+
+export type controlPlaneEnginesRegisterExternalEngineResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneEnginesRegisterExternalEngineResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesRegisterExternalEngineResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesRegisterExternalEngineResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesRegisterExternalEngineResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesRegisterExternalEngineResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesRegisterExternalEngineResponseSuccess = (controlPlaneEnginesRegisterExternalEngineResponse201) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesRegisterExternalEngineResponseError = (controlPlaneEnginesRegisterExternalEngineResponse400 | controlPlaneEnginesRegisterExternalEngineResponse401 | controlPlaneEnginesRegisterExternalEngineResponse403 | controlPlaneEnginesRegisterExternalEngineResponse404 | controlPlaneEnginesRegisterExternalEngineResponse409 | controlPlaneEnginesRegisterExternalEngineResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesRegisterExternalEngineResponse = (controlPlaneEnginesRegisterExternalEngineResponseSuccess | controlPlaneEnginesRegisterExternalEngineResponseError)
+
+export const getControlPlaneEnginesRegisterExternalEngineUrl = () => {
+
+
+
+
+  return `/api/control-plane/engines/external`
+}
+
+export const controlPlaneEnginesRegisterExternalEngine = async (registerExternalEngine: RegisterExternalEngine, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesRegisterExternalEngineResponse> => {
+
+  return customInstance<controlPlaneEnginesRegisterExternalEngineResponse>(getControlPlaneEnginesRegisterExternalEngineUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(registerExternalEngine)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesRegisterExternalEngineMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRegisterExternalEngine>>, TError,{data: RegisterExternalEngine}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRegisterExternalEngine>>, TError,{data: RegisterExternalEngine}, TContext> => {
+
+const mutationKey = ['controlPlaneEnginesRegisterExternalEngine'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesRegisterExternalEngine>>, {data: RegisterExternalEngine}> = (props) => {
+          const {data} = props ?? {};
+
+          return  controlPlaneEnginesRegisterExternalEngine(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneEnginesRegisterExternalEngineMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesRegisterExternalEngine>>>
+    export type ControlPlaneEnginesRegisterExternalEngineMutationBody = RegisterExternalEngine
+    export type ControlPlaneEnginesRegisterExternalEngineMutationError = ErrorBody
+
+    export const useControlPlaneEnginesRegisterExternalEngine = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRegisterExternalEngine>>, TError,{data: RegisterExternalEngine}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneEnginesRegisterExternalEngine>>,
+        TError,
+        {data: RegisterExternalEngine},
+        TContext
+      > => {
+      return useMutation(getControlPlaneEnginesRegisterExternalEngineMutationOptions(options), queryClient);
     }
     export type controlPlaneEnginesGetEngineResponse200 = {
   data: EngineDetailDto
