@@ -347,6 +347,13 @@ fn bi_err(e: egret_bi::BiError) -> AutomationError {
         egret_bi::BiError::NotFound(s) => AutomationError::NotFound(s),
         egret_bi::BiError::BadRequest(s) => AutomationError::BadRequest(s),
         egret_bi::BiError::Conflict(s) => AutomationError::Conflict(s),
+        // SP4d-4 Task 3: only a tag write answers this; a render never does.
+        egret_bi::BiError::Overlap { body } => AutomationError::Conflict(
+            body["error"]
+                .as_str()
+                .unwrap_or("two mask or row-filter rules overlap")
+                .to_string(),
+        ),
         egret_bi::BiError::Forbidden => {
             AutomationError::Internal("bi repo unexpectedly refused a render read".into())
         }

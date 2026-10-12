@@ -102,6 +102,13 @@ impl From<egret_bi::BiError> for CpError {
             E::Forbidden => CpError::Forbidden,
             E::BadRequest(s) => CpError::BadRequest(s),
             E::Conflict(s) => CpError::Conflict(s),
+            // SP4d-4 Task 3: a rule overlap is a 409 whose sentence is `error`.
+            E::Overlap { body } => CpError::Conflict(
+                body["error"]
+                    .as_str()
+                    .unwrap_or("two mask or row-filter rules overlap")
+                    .to_string(),
+            ),
             E::Engine(_) | E::Db(_) => CpError::Internal,
         }
     }

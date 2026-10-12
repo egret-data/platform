@@ -89,6 +89,11 @@ export type permCompileResponse404 = {
   status: 404
 }
 
+export type permCompileResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type permCompileResponse500 = {
   data: ErrorBody
   status: 500
@@ -97,7 +102,7 @@ export type permCompileResponse500 = {
 export type permCompileResponseSuccess = (permCompileResponse200) & {
   headers: Headers;
 };
-export type permCompileResponseError = (permCompileResponse400 | permCompileResponse401 | permCompileResponse403 | permCompileResponse404 | permCompileResponse500) & {
+export type permCompileResponseError = (permCompileResponse400 | permCompileResponse401 | permCompileResponse403 | permCompileResponse404 | permCompileResponse409 | permCompileResponse500) & {
   headers: Headers;
 };
 
@@ -469,6 +474,11 @@ export type permCreateGrantResponse403 = {
   status: 403
 }
 
+export type permCreateGrantResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type permCreateGrantResponse500 = {
   data: ErrorBody
   status: 500
@@ -477,7 +487,7 @@ export type permCreateGrantResponse500 = {
 export type permCreateGrantResponseSuccess = (permCreateGrantResponse201) & {
   headers: Headers;
 };
-export type permCreateGrantResponseError = (permCreateGrantResponse400 | permCreateGrantResponse401 | permCreateGrantResponse403 | permCreateGrantResponse500) & {
+export type permCreateGrantResponseError = (permCreateGrantResponse400 | permCreateGrantResponse401 | permCreateGrantResponse403 | permCreateGrantResponse409 | permCreateGrantResponse500) & {
   headers: Headers;
 };
 
@@ -567,6 +577,11 @@ export type permDeleteGrantResponse404 = {
   status: 404
 }
 
+export type permDeleteGrantResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type permDeleteGrantResponse500 = {
   data: ErrorBody
   status: 500
@@ -575,7 +590,7 @@ export type permDeleteGrantResponse500 = {
 export type permDeleteGrantResponseSuccess = (permDeleteGrantResponse200) & {
   headers: Headers;
 };
-export type permDeleteGrantResponseError = (permDeleteGrantResponse401 | permDeleteGrantResponse403 | permDeleteGrantResponse404 | permDeleteGrantResponse500) & {
+export type permDeleteGrantResponseError = (permDeleteGrantResponse401 | permDeleteGrantResponse403 | permDeleteGrantResponse404 | permDeleteGrantResponse409 | permDeleteGrantResponse500) & {
   headers: Headers;
 };
 
@@ -1426,6 +1441,11 @@ export type permCreateRuleResponse403 = {
   status: 403
 }
 
+export type permCreateRuleResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type permCreateRuleResponse500 = {
   data: ErrorBody
   status: 500
@@ -1434,7 +1454,7 @@ export type permCreateRuleResponse500 = {
 export type permCreateRuleResponseSuccess = (permCreateRuleResponse201) & {
   headers: Headers;
 };
-export type permCreateRuleResponseError = (permCreateRuleResponse400 | permCreateRuleResponse401 | permCreateRuleResponse403 | permCreateRuleResponse500) & {
+export type permCreateRuleResponseError = (permCreateRuleResponse400 | permCreateRuleResponse401 | permCreateRuleResponse403 | permCreateRuleResponse409 | permCreateRuleResponse500) & {
   headers: Headers;
 };
 
@@ -1527,6 +1547,11 @@ export type permDeleteRuleResponse404 = {
   status: 404
 }
 
+export type permDeleteRuleResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type permDeleteRuleResponse500 = {
   data: ErrorBody
   status: 500
@@ -1535,7 +1560,7 @@ export type permDeleteRuleResponse500 = {
 export type permDeleteRuleResponseSuccess = (permDeleteRuleResponse200) & {
   headers: Headers;
 };
-export type permDeleteRuleResponseError = (permDeleteRuleResponse401 | permDeleteRuleResponse403 | permDeleteRuleResponse404 | permDeleteRuleResponse500) & {
+export type permDeleteRuleResponseError = (permDeleteRuleResponse401 | permDeleteRuleResponse403 | permDeleteRuleResponse404 | permDeleteRuleResponse409 | permDeleteRuleResponse500) & {
   headers: Headers;
 };
 

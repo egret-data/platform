@@ -194,12 +194,15 @@
 //!   rolled-back transaction, so the steward is refused BEFORE Save), the
 //!   grant/role/clearance writes, and the tag, role-membership and
 //!   workspace-membership writes that recompile on their own triggers. Since
-//!   SP4d-4 Task 3 it checks the profile's whole unit — the desired set plus
-//!   the stored hand-written policies of the services it sweeps, through the
-//!   tag assignments — and refuses every pair with a compiled member, stored
-//!   or new (the wedge Part A accepts). A tag assignment additionally refuses
-//!   any pair it CREATES among hand-written policies (`egret-bi`'s
-//!   `catalog_tags`, through `egret_perm_compile::overlap`).
+//!   SP4d-4 Task 3 it checks the desired set as one unit — the profile's
+//!   download and its tag service's, through the profile's tag assignments —
+//!   and refuses every compiled pair, stored or new (the wedge Part A
+//!   accepts). It does NOT read hand-written policies: a migration recompiles
+//!   while the policy it migrates is still enabled, so pairing the two would
+//!   refuse the migration on its own original. A tag assignment additionally
+//!   refuses any pair it CREATES across the whole stored unit — hand-written,
+//!   compiled, or one of each (`egret-bi`'s `catalog_tags`, through
+//!   `egret_perm_compile::overlap`).
 //! * **The policy editor.** `POST /api/control-plane/policies` with `kind:
 //!   "masking"`/`"rowfilter"`/`"tag-masking"`/`"tag-rowfilter"`, and `PUT
 //!   /policies/{id}` with the same four kinds (SP4d debt Task 16 gave the PUT
@@ -220,8 +223,8 @@
 //!   that gets completed by re-enabling is therefore reachable and is NOT
 //!   refused by any later write: the editor refuses only a pair its own write
 //!   creates (and re-enabling through `PUT /policies/{id}` with `isEnabled:
-//!   true` IS such a write, and is refused), and the rule compiler refuses only
-//!   pairs with a compiled member, which a hand-written pair has none of. It is
+//!   true` IS such a write, and is refused), and the rule compiler checks only
+//!   its compiled set, which a hand-written policy is not in. It is
 //!   never silent: `explain` answers `EvalOrderAmbiguous` over the served
 //!   artifact the moment it exists, and SP4d-4 Task 4's read-only
 //!   `GET /perm/overlaps` is to report every stored pair.

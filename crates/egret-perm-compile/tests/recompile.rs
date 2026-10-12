@@ -1414,19 +1414,26 @@ async fn two_rules_masking_one_column_differently_refuse_the_whole_recompile() {
         .await
         .expect_err("a recompile that would emit the ambiguous pair must refuse");
     let msg = err.to_string();
+    let egret_perm::CompileError::AmbiguousMaskOrFilterArbitration { rules, kind, .. } = &err
+    else {
+        panic!("the refusal must be the dedicated variant, not a generic Db error: {msg}");
+    };
+    // The refusal has to point at something the steward can edit: both RULES
+    // (SP4d-4 Task 3: by id and by name, not by `perm-rule-<uuid>`) and the
+    // resource that collided.
+    assert_eq!(rules.len(), 2, "exactly two rules: {rules:?}");
+    let ids: Vec<_> = rules.iter().filter_map(|r| r.id).collect();
     assert!(
-        matches!(
-            err,
-            egret_perm::CompileError::AmbiguousMaskOrFilterArbitration { .. }
-        ),
-        "the refusal must be the dedicated variant, not a generic Db error: {msg}"
+        ids.contains(&f.rule_id) && ids.contains(&second_rule),
+        "the refusal must name BOTH rules: {rules:?}"
     );
-    // The message has to point at something the steward can edit: both policy
-    // names (each carrying its rule's uuid) and the resource that collided.
     assert!(
-        msg.contains(&f.rule_id.to_string()) && msg.contains(&second_rule.to_string()),
-        "the refusal must name BOTH rules' compiled policies: {msg}"
+        rules
+            .iter()
+            .all(|r| msg.contains(&format!("rule {:?}", r.name))),
+        "the sentence names both rules by name: {msg}"
     );
+    assert_eq!(*kind, egret_perm::OverlapKind::Mask);
     assert!(
         msg.contains("column=[email]"),
         "the refusal must name the resource that collided: {msg}"

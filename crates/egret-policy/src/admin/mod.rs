@@ -1265,8 +1265,8 @@ async fn refuse_ambiguous_arbitration(
         // A was refused on (C,D) and narrowing C on (A,B), so the editor could
         // never fix either. A pair of hand-written policies that is already
         // stored is therefore left alone by this guard; the rule compiler never
-        // sees such a pair either (it refuses only pairs with a compiled
-        // member), so it is reported, not refused — by `explain`
+        // sees such a pair either (it checks only its compiled set), so it is
+        // reported, not refused — by `explain`
         // (`EvalOrderAmbiguous`) and by the read-only overlap report SP4d-4
         // Task 4 adds (`GET /perm/overlaps`). A pair the write creates or
         // completes — a new overlapping policy, an edit that widens into

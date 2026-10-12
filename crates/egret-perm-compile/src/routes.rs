@@ -1254,6 +1254,7 @@ async fn list_grants(
     responses(
         (status = 201, description = "Grant created AND the profiles it affects recompiled, in one transaction"),
         (status = 400, description = "The grant names a scope level as \"\" (Ranger's \"every value at that level\", not a resource name — it would be enforced across the whole catalog), names a level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), or cannot be compiled for a profile it affects", body = ErrorBody),
+        (status = 409, description = "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1307,7 +1308,7 @@ async fn create_grant(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such grant", body = ErrorBody),
-        (status = 409, description = "The grant changed concurrently and now affects a profile this request did not lock; retry", body = ErrorBody),
+        (status = 409, description = "The grant changed concurrently and now affects a profile this request did not lock; retry; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1333,6 +1334,7 @@ async fn patch_grant(
     params(("id" = Uuid, Path, description = "Grant id")),
     responses(
         (status = 200, description = "Grant deleted AND its compiled policies reaped, in one transaction"),
+        (status = 409, description = "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such grant", body = ErrorBody),
@@ -1437,6 +1439,7 @@ async fn list_rules(
     responses(
         (status = 201, description = "Rule created AND the profiles it affects recompiled, in one transaction"),
         (status = 400, description = "The rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked), or cannot be compiled for a profile it affects", body = ErrorBody),
+        (status = 409, description = "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1483,7 +1486,7 @@ async fn create_rule(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such rule", body = ErrorBody),
-        (status = 409, description = "The rule changed concurrently and now affects a profile this request did not lock; retry", body = ErrorBody),
+        (status = 409, description = "The rule changed concurrently and now affects a profile this request did not lock; retry; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1509,6 +1512,7 @@ async fn patch_rule(
     params(("id" = Uuid, Path, description = "Rule id")),
     responses(
         (status = 200, description = "Rule deleted AND its compiled policies reaped, in one transaction"),
+        (status = 409, description = "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such rule", body = ErrorBody),
@@ -1599,7 +1603,7 @@ async fn name_profiles(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "Previewing a patch of an id that does not exist", body = ErrorBody),
-        (status = 409, description = "The previewed row changed concurrently — the same refusal the write would have given", body = ErrorBody),
+        (status = 409, description = "The previewed row changed concurrently — the same refusal the write would have given; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -3070,6 +3074,7 @@ fn clearing_roles(tag: Option<&str>, gates: &[(String, Vec<String>)]) -> Option<
     responses(
         (status = 200, description = "What the recompile wrote", body = CompileResponse),
         (status = 400, description = "The model cannot be compiled for this profile", body = ErrorBody),
+        (status = 409, description = "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
@@ -3147,7 +3152,7 @@ async fn classify_service_policies(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such profile, or no policy of that name in it", body = ErrorBody),
-        (status = 409, description = "Already migrated, not hand-written (compiler or infra owned), or a rule name it would create is taken", body = ErrorBody),
+        (status = 409, description = "Already migrated, not hand-written (compiler or infra owned), or a rule name it would create is taken; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 422, description = "Not proved: the disagreements on any affected profile, or why the gate could not answer. Nothing was written", body = crate::migrate::MigrateResponse),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -3198,7 +3203,7 @@ async fn migrate_service_policies(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such profile, or no migration on record for a named policy", body = ErrorBody),
-        (status = 409, description = "Nothing was changed: an object the migration created was edited or deleted since, or the original was edited or switched on (each change is named); or a profile became reachable from the migrated objects while undo waited for its locks (retry)", body = ErrorBody),
+        (status = 409, description = "Nothing was changed: an object the migration created was edited or deleted since, or the original was edited or switched on (each change is named); or a profile became reachable from the migrated objects while undo waited for its locks (retry); or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

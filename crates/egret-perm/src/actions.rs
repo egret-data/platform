@@ -39,6 +39,34 @@ pub enum EngineType {
     StarRocks,
 }
 
+/// Which decision an overlapping pair arbitrates — the `kind` of a
+/// `rule_overlap` refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlapKind {
+    Mask,
+    RowFilter,
+}
+
+impl OverlapKind {
+    /// The wire spelling: `"mask"` / `"row_filter"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OverlapKind::Mask => "mask",
+            OverlapKind::RowFilter => "row_filter",
+        }
+    }
+}
+
+/// One member of an overlapping pair, as a steward finds it: a compiled
+/// policy names its `perm.rules` row (`id` and the rule's own name); a
+/// hand-written policy has no rule (`id: None`) and is named by its policy
+/// name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlapRule {
+    pub id: Option<uuid::Uuid>,
+    pub name: String,
+}
+
 /// A grant the compiler cannot express against the target engine, or cannot
 /// express *correctly* — every variant here exists because a silent
 /// alternative would compile a policy that grants something other than what
@@ -115,14 +143,25 @@ pub enum CompileError {
     /// well: the trigger may be a workspace-membership write on a page that
     /// mentions neither rule.
     ///
-    /// `refusal` is `egret_policy::AmbiguousArbitration::refusal()` — the SAME
-    /// sentence the policy editor's 400 carries, so the two surfaces cannot
-    /// describe one state differently. The rule itself is
-    /// `egret_policy::ambiguous_arbitration_in`, spelled once; read that
-    /// module for why an AGREEING tie is admitted, and for why the guard is
-    /// deliberately narrower than the evaluator's own refusal.
+    /// `refusal` is `egret_policy::UnitOverlap::sentence` with each compiled
+    /// policy labelled by its RULE's name (SP4d-4 Task 3) — the same sentence
+    /// the editor's 409 carries for the same shape, with the editor's own
+    /// labels. The rule itself is `egret_policy::unit_overlaps` (which takes
+    /// every within-download pair from `ambiguous_arbitrations_in`), spelled
+    /// once; read `egret_policy::ambiguous_arbitration` for why an AGREEING
+    /// tie is admitted.
+    ///
+    /// `kind`, `coordinate` and `rules` (exactly two; a hand-written policy has
+    /// `id: None`) are what a route renders as the structured 409 body
+    /// (`code: "rule_overlap"`); the Display stays one sentence.
     #[error("recompiling profile {profile:?} would emit an order-ambiguous pair: {refusal}")]
-    AmbiguousMaskOrFilterArbitration { profile: String, refusal: String },
+    AmbiguousMaskOrFilterArbitration {
+        profile: String,
+        refusal: String,
+        kind: OverlapKind,
+        coordinate: String,
+        rules: Vec<OverlapRule>,
+    },
     /// A `User` principal's `r#ref` is not the bare username the store is
     /// supposed to hold (`model::Principal`'s doc comment: "a username,
     /// never an email … written through unchanged"). The compiler does no

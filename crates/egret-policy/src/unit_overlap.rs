@@ -29,10 +29,9 @@
 //! # One function for every author (user ruling, SP4d-4 Task 3)
 //!
 //! [`unit_overlaps`] is called with whatever policies a caller has: the rule
-//! compiler with its desired set plus the stored hand-written policies of the
-//! services it sweeps (`egret_perm_compile::overlap`), the policy editor with
-//! the stored set and the body it is writing, and a tag assignment with the
-//! stored set after its recompile. Compiled and hand-written policies are not
+//! compiler with its desired (compiled) set (`egret_perm_compile::overlap`),
+//! the policy editor with the stored set and the body it is writing, and a tag
+//! assignment with the stored set before and after its write and recompile. Compiled and hand-written policies are not
 //! told apart here — only the caller's LABEL for a name differs.
 //!
 //! # Where a tag policy applies, and how coordinates meet
@@ -70,7 +69,9 @@
 //!   that name one tag service share that tag service's policies; a pair
 //!   between one profile's path policy and the shared tag policy is in THAT
 //!   profile's unit and is checked by whatever write reaches that unit. The
-//!   rule compiler checks only the unit of the profile it compiles.
+//!   rule compiler checks only the compiled set of the profile it compiles,
+//!   so a rule write that completes a pair with a HAND-WRITTEN policy is not
+//!   refused (the editor and the tag-assignment write are what check those).
 //! * Writes that bypass the routes, and `PUT /policies/{id}/enabled` (see
 //!   [`crate::ambiguous_arbitration`]'s module doc for both).
 

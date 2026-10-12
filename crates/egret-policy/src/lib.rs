@@ -30,8 +30,9 @@ pub use service_def::{
     trino_service_def, STARROCKS_DEF_NAME, TAG_DEF_NAME, TRINO_DEF_NAME,
 };
 pub use unit_overlap::{
-    created_overlaps, load_unit_via, unit_overlaps, units_for_service_via, units_for_services_via,
-    AssignedTag, OverlapIdentity, OverlapShape, StoredUnit, UnitIds, UnitOverlap, UnitPolicy,
+    created_overlaps, load_unit_via, unit_assignments_via, unit_overlaps, units_for_service_via,
+    units_for_services_via, AssignedTag, OverlapIdentity, OverlapShape, StoredUnit, UnitIds,
+    UnitOverlap, UnitPolicy,
 };
 pub use unreadable_table_mask::{
     unreadable_table_mask_for, MaskOrigin, TagRef, TagWrite, UnreadableTableMask,

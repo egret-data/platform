@@ -6137,6 +6137,16 @@
               }
             }
           },
+          "409": {
+            "description": "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -6323,6 +6333,16 @@
               }
             }
           },
+          "409": {
+            "description": "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -6380,6 +6400,16 @@
           },
           "404": {
             "description": "No such grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6481,7 +6511,7 @@
             }
           },
           "409": {
-            "description": "The grant changed concurrently and now affects a profile this request did not lock; retry",
+            "description": "The grant changed concurrently and now affects a profile this request did not lock; retry; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6661,7 +6691,7 @@
             }
           },
           "409": {
-            "description": "Already migrated, not hand-written (compiler or infra owned), or a rule name it would create is taken",
+            "description": "Already migrated, not hand-written (compiler or infra owned), or a rule name it would create is taken; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6774,7 +6804,7 @@
             }
           },
           "409": {
-            "description": "Nothing was changed: an object the migration created was edited or deleted since, or the original was edited or switched on (each change is named); or a profile became reachable from the migrated objects while undo waited for its locks (retry)",
+            "description": "Nothing was changed: an object the migration created was edited or deleted since, or the original was edited or switched on (each change is named); or a profile became reachable from the migrated objects while undo waited for its locks (retry); or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6866,7 +6896,7 @@
             }
           },
           "409": {
-            "description": "The previewed row changed concurrently — the same refusal the write would have given",
+            "description": "The previewed row changed concurrently — the same refusal the write would have given; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6990,6 +7020,16 @@
               }
             }
           },
+          "409": {
+            "description": "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -7047,6 +7087,16 @@
           },
           "404": {
             "description": "No such rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7148,7 +7198,7 @@
             }
           },
           "409": {
-            "description": "The rule changed concurrently and now affects a profile this request did not lock; retry",
+            "description": "The rule changed concurrently and now affects a profile this request did not lock; retry; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -12347,6 +12397,16 @@
               }
             }
           },
+          "409": {
+            "description": "A rule overlap: the assignment would make two mask (or two row-filter) policies decide one column differently (compiled rules, hand-written tag policies, or one of each), or a profile it recompiles already holds such a pair. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -12409,6 +12469,16 @@
           },
           "403": {
             "description": "Missing catalog_registry:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A rule overlap that the unassignment does not remove: a profile it recompiles already holds two mask (or two row-filter) rules that decide one request differently. Same body as the assignment's 409",
             "content": {
               "application/json": {
                 "schema": {

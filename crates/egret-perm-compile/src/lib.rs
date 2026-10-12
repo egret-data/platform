@@ -71,6 +71,9 @@ pub mod grammar;
 pub mod grants;
 pub(crate) mod members;
 pub mod migrate;
+// SP4d-4 Task 3: overlapping mask/row-filter rules across the tag/resource
+// boundary, named by rule, answered 409 — see that module's own doc comment.
+pub mod overlap;
 pub mod role_membership;
 pub mod routes;
 pub mod rules;
