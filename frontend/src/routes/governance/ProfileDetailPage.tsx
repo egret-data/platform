@@ -23,6 +23,7 @@ import { FilterableTable, type Column } from "@/components/explore/FilterableTab
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TrinoConfigDialog } from "@/components/policy/TrinoConfigDialog";
+import { OverlapReport } from "./OverlapReport";
 import { refusalMessage, usePolicyPermissions } from "./policyWrites";
 
 /** Why an infra row offers no edit, toggle or delete — the server refuses all
@@ -218,6 +219,8 @@ export default function ProfileDetailPage() {
           </AlertDescription>
         </Alert>
       )}
+
+      <OverlapReport serviceName={service} />
 
       <Tabs value={tab} onValueChange={setTab} className="space-y-5">
         <TabsList>

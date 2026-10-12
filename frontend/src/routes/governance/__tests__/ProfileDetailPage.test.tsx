@@ -8,6 +8,7 @@ import { AuthContext } from "@/auth/useAuth";
 import type { Me } from "@/api/hooks";
 import { setPolicyEnabled, seedDefaultPolicies } from "@/api/policies";
 import { ApiError } from "@/api/client";
+import type { StoredOverlap } from "@/api/generated/model";
 import ProfileDetailPage from "../ProfileDetailPage";
 
 const navigate = vi.fn();
@@ -33,6 +34,16 @@ let tagServiceOrigin: string = "manual";
 /** The main profile's type (default "trino"). Seed and the Trino config are
  *  offered only on a Trino profile (SP4d-3 final review I-1). */
 let profileType: string = "trino";
+/** What `GET /perm/overlaps` answers (every profile's pairs). */
+let overlapRows: StoredOverlap[] = [];
+
+vi.mock("@/api/generated/perm/perm", () => ({
+  usePermListOverlaps: () => ({
+    data: { status: 200, data: overlapRows },
+    isLoading: false,
+    isError: false,
+  }),
+}));
 
 vi.mock("@/api/policies", async (orig) => ({
   ...(await orig<typeof import("@/api/policies")>()),
@@ -141,6 +152,7 @@ describe("ProfileDetailPage", () => {
     profileOrigin = "manual";
     tagServiceOrigin = "manual";
     profileType = "trino";
+    overlapRows = [];
   });
 
   it("renders the profile name and a policy row", async () => {
@@ -436,5 +448,50 @@ describe("ProfileDetailPage — SP4d-3 final review I-1", () => {
     expect(screen.getByRole("link", { name: "allow-analysts" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: /toggle allow-analysts/i })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Delete allow-analysts" })).not.toBeDisabled();
+  });
+});
+
+describe("ProfileDetailPage — the overlap report for this profile", () => {
+  beforeEach(() => {
+    profileOrigin = "manual";
+    tagServiceOrigin = "manual";
+    profileType = "trino";
+    overlapRows = [];
+  });
+
+  const pair = (serviceName: string, hand: string, rule: string): StoredOverlap => ({
+    serviceId: 1,
+    serviceName,
+    kind: "mask",
+    coordinate: "catalog=[wh] column=[email] schema=[sales] table=[orders]",
+    rules: [
+      { id: null, policyId: 51, name: hand },
+      { id: "r-9", policyId: 52, name: rule },
+    ],
+    servedToday: null,
+    sentence: "two mask policies ...",
+    howToFix: "Delete one of the two, or narrow one so they no longer select a common resource.",
+  });
+
+  it("shows this profile's pair, with the hand-written member linking to its editor", async () => {
+    overlapRows = [pair("trino-prod", "hand email", "mask emails")];
+    wrap(<ProfileDetailPage />);
+    await screen.findByText("allow-analysts");
+    expect(screen.getByRole("alert")).toHaveTextContent("1 pair of rules overlaps");
+    expect(screen.getByRole("link", { name: "policy hand email" })).toHaveAttribute(
+      "href",
+      "/governance/policies/trino-prod/masking/51",
+    );
+    expect(screen.getByRole("link", { name: "rule mask emails" })).toHaveAttribute(
+      "href",
+      "/governance/mask-filter-rules?rule=r-9",
+    );
+  });
+
+  it("does not show another profile's pair", async () => {
+    overlapRows = [pair("trino-other", "hand email", "mask emails")];
+    wrap(<ProfileDetailPage />);
+    await screen.findByText("allow-analysts");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

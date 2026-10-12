@@ -1,4 +1,5 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -6,13 +7,18 @@ vi.mock("@/api/generated/perm/perm");
 vi.mock("@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry");
 vi.mock("../RuleDialog", async () => {
   const actual = await vi.importActual<typeof import("../RuleDialog")>("../RuleDialog");
-  return { ...actual, RuleDialog: () => null };
+  // A stand-in that shows which rule the page opened for editing.
+  return {
+    ...actual,
+    RuleDialog: ({ open, existing }: { open: boolean; existing: { name: string } | null }) =>
+      open ? <div>{`editing ${existing?.name ?? "nothing"}`}</div> : null,
+  };
 });
 
 import * as permApi from "@/api/generated/perm/perm";
 import * as registry from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import type { Me } from "@/api/hooks";
-import type { RegistryCatalogDto, RuleView } from "@/api/generated/model";
+import type { RegistryCatalogDto, RuleView, StoredOverlap } from "@/api/generated/model";
 import { ApiError } from "@/api/client";
 import { AuthContext } from "@/auth/useAuth";
 import MaskFilterRules from "@/routes/governance/MaskFilterRules";
@@ -57,14 +63,39 @@ function listResult(rows: RuleView[]) {
   >;
 }
 
-function renderPage(me: Me | null = ADMIN) {
+function overlap(over: Partial<StoredOverlap> = {}): StoredOverlap {
+  return {
+    serviceId: 7,
+    serviceName: "trino-eu",
+    kind: "mask",
+    coordinate: "catalog=[wh] column=[email] schema=[sales] table=[orders]",
+    rules: [
+      { id: "r-a", policyId: 11, name: "mask emails" },
+      { id: "r-b", policyId: 12, name: "null orders email" },
+    ],
+    servedToday: { id: "r-a", policyId: 11, name: "mask emails" },
+    sentence: 'two mask policies would be served at policyPriority 0 ...',
+    howToFix: "Delete one of the two, or narrow one so they no longer select a common resource.",
+    ...over,
+  };
+}
+
+function overlapsResult(rows: StoredOverlap[]) {
+  return { data: { status: 200, data: rows }, isLoading: false, isError: false, error: null } as unknown as ReturnType<
+    typeof permApi.usePermListOverlaps
+  >;
+}
+
+function renderPage(me: Me | null = ADMIN, url = "/governance/mask-filter-rules") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <AuthContext.Provider value={{ me, isLoading: false }}>
-      <QueryClientProvider client={qc}>
-        <MaskFilterRules />
-      </QueryClientProvider>
-    </AuthContext.Provider>,
+    <MemoryRouter initialEntries={[url]}>
+      <AuthContext.Provider value={{ me, isLoading: false }}>
+        <QueryClientProvider client={qc}>
+          <MaskFilterRules />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    </MemoryRouter>,
   );
 }
 
@@ -75,6 +106,7 @@ beforeEach(() => {
     isLoading: false,
     isError: false,
   } as unknown as ReturnType<typeof registry.useControlPlaneCatalogRegistryListRegistryCatalogs>);
+  vi.mocked(permApi.usePermListOverlaps).mockReturnValue(overlapsResult([]));
   vi.mocked(permApi.usePermDeleteRule).mockReturnValue({
     mutate: vi.fn(),
   } as unknown as ReturnType<typeof permApi.usePermDeleteRule>);
@@ -181,5 +213,90 @@ describe("MaskFilterRules — the page asks for no lookup it does not need (revi
     expect(
       registry.useControlPlaneCatalogRegistryListRegistryCatalogs,
     ).not.toHaveBeenCalled();
+  });
+});
+
+describe("MaskFilterRules — the overlap report", () => {
+  test("a banner names both rules of each pair and links to each rule", () => {
+    vi.mocked(permApi.usePermListRules).mockReturnValue(listResult([maskRule()]));
+    vi.mocked(permApi.usePermListOverlaps).mockReturnValue(
+      overlapsResult([
+        overlap(),
+        overlap({
+          serviceId: 8,
+          serviceName: "trino-us",
+          rules: [
+            { id: null, policyId: 31, name: "hand email" },
+            { id: "r-c", policyId: 32, name: "mask emails us" },
+          ],
+          servedToday: null,
+        }),
+      ]),
+    );
+    renderPage();
+
+    const banner = screen.getByRole("alert");
+    expect(within(banner).getByText("2 pairs of rules overlap")).toBeInTheDocument();
+    expect(within(banner).getByRole("link", { name: "rule mask emails" })).toHaveAttribute(
+      "href",
+      "/governance/mask-filter-rules?rule=r-a",
+    );
+    expect(within(banner).getByRole("link", { name: "rule null orders email" })).toHaveAttribute(
+      "href",
+      "/governance/mask-filter-rules?rule=r-b",
+    );
+    // A hand-written member opens its policy in that profile's editor.
+    expect(within(banner).getByRole("link", { name: "policy hand email" })).toHaveAttribute(
+      "href",
+      "/governance/policies/trino-us/masking/31",
+    );
+    expect(within(banner).getByRole("link", { name: "trino-eu" })).toHaveAttribute(
+      "href",
+      "/governance/policies/trino-eu",
+    );
+    expect(within(banner).getByText(/today the engine serves mask emails\./)).toBeInTheDocument();
+  });
+
+  test("one pair reads in the singular", () => {
+    vi.mocked(permApi.usePermListRules).mockReturnValue(listResult([maskRule()]));
+    vi.mocked(permApi.usePermListOverlaps).mockReturnValue(overlapsResult([overlap()]));
+    renderPage();
+    expect(screen.getByText("1 pair of rules overlaps")).toBeInTheDocument();
+  });
+
+  test("an empty report shows no banner", () => {
+    vi.mocked(permApi.usePermListRules).mockReturnValue(listResult([maskRule()]));
+    renderPage();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText("mask-ssn")).toBeInTheDocument();
+  });
+
+  test("a report that fails to load says so rather than showing nothing", () => {
+    vi.mocked(permApi.usePermListRules).mockReturnValue(listResult([maskRule()]));
+    vi.mocked(permApi.usePermListOverlaps).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: new ApiError(500, "boom"),
+    } as unknown as ReturnType<typeof permApi.usePermListOverlaps>);
+    renderPage();
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not check for overlapping rules");
+  });
+
+  test("following a rule link opens that rule for editing", () => {
+    vi.mocked(permApi.usePermListRules).mockReturnValue(
+      listResult([maskRule({ id: "r-a", name: "mask emails" })]),
+    );
+    renderPage(ADMIN, "/governance/mask-filter-rules?rule=r-a");
+    expect(screen.getByText("editing mask emails")).toBeInTheDocument();
+  });
+
+  test("a reader who cannot edit is not sent into the editor", () => {
+    const reader: Me = { user_id: "u2", email: "r@example.com", platform_roles: [], permissions: ["policy:read"] };
+    vi.mocked(permApi.usePermListRules).mockReturnValue(
+      listResult([maskRule({ id: "r-a", name: "mask emails" })]),
+    );
+    renderPage(reader, "/governance/mask-filter-rules?rule=r-a");
+    expect(screen.queryByText(/^editing /)).not.toBeInTheDocument();
   });
 });
