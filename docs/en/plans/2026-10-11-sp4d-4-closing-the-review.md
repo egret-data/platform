@@ -47,7 +47,7 @@ Last known, from the #660 merge (2026-10-11, not re-measured for this plan): `ca
 | `docs/en/plans/2026-10-11-sp4d-4-task1-levels-result.md` | 1 | the measured matrix and the B1/B2 recommendation |
 | `crates/egret-perm-compile/src/overlap.rs` | 3 | the compiler-only overlap cases (tag ↔ tag, tag ↔ path) and the rule-naming of a refusal |
 | `crates/egret-perm-compile/tests/overlap.rs` | 3, 4 | DB tests for rule writes, tag assignment writes, and the report route |
-| `crates/egret-perm-compile/tests/gate_timing.rs` | 6 | the `#[ignore]`d timing harness behind `MAX_PROBE_EVALUATIONS` |
+| `crates/egret-perm-compile/tests/gate_timing.rs` | 6 | the `#[ignore]`d timing harness behind `MAX_PROBE_WORK` (named `MAX_PROBE_EVALUATIONS` when this plan was written) |
 | `migrations/0184_engine_external.sql` | 7 | `origin`, the external columns, the shape `CHECK`, `'declared'` attachments (number re-checked at creation) |
 | `crates/egret-engine-mgmt/src/external.rs` | 7, 8 | registration, the `origin` guard every handler calls, declared attachments |
 | `crates/egret-provisioner/src/ranger_config.rs` | 9 | the ONE renderer of the Ranger plugin files, used by provisioning and by the new route |
@@ -573,7 +573,7 @@ git commit -m "feat(perm-compile): probe only where a changed policy may be a ca
 ## Task 6: the migration uses pruning; the real engine confirms what was dropped; the budget is re-measured
 
 **Files:**
-- Modify: `crates/egret-perm-compile/src/migrate.rs` (the case builder and the cap check — `probe_count` call sites; `MAX_PROBE_EVALUATIONS` `:118-142`)
+- Modify: `crates/egret-perm-compile/src/migrate.rs` (the case builder and the cap check — `probe_count` call sites; the cap, now `MAX_PROBE_WORK`, was `MAX_PROBE_EVALUATIONS` at `:118-142`)
 - Create: `crates/egret-perm-compile/tests/gate_timing.rs`
 - Modify: `crates/egret-ranger-eval/tests/differential.rs` (new test beside `a_migration_the_grammar_accepts_decides_identically_on_the_real_engine`, `:7470`)
 - Modify: `justfile` (`test-ranger-gates`)

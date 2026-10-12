@@ -946,6 +946,79 @@ async fn the_dry_run_and_the_real_migration_prove_on_the_same_pruned_set() {
     assert_eq!(real["probe_evaluations"], dry["probe_evaluations"]);
 }
 
+/// SP4d-4 final review I-1: the route-level counterpart of `gate_timing.rs`.
+/// The migration holds the profile lock across the recompile, the two
+/// `artifact_via` reads, the cap count, the case build and `compare`; this
+/// times a whole dry run of the request (which does all of it and rolls back)
+/// on one profile of N single-user policies, growing N until the cap refuses.
+/// Release only; the largest admitted request must stay within the 2.5 s the
+/// cap's doc promises.
+///
+/// ```bash
+/// DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test \
+///   cargo test -p egret-perm-compile --release --test migrate_route \
+///   a_dry_run_at_the_cap_holds_the_lock_no_longer_than_promised -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "timing harness; run with --release -- --ignored --nocapture"]
+async fn a_dry_run_at_the_cap_holds_the_lock_no_longer_than_promised() {
+    let Some(f) = setup().await else { return };
+    let mut inserted = 0usize;
+    let mut slowest_admitted = 0.0f64;
+    for target in (60..=140).step_by(10) {
+        while inserted < target {
+            insert(
+                &f,
+                f.p,
+                &unique(&format!("sibling {inserted}")),
+                "operator",
+                access_policy(
+                    &f.catalog,
+                    &format!("s{inserted}"),
+                    &format!("user{inserted}"),
+                ),
+            )
+            .await;
+            inserted += 1;
+        }
+        let name = unique("migrated");
+        insert(
+            &f,
+            f.p,
+            &name,
+            "operator",
+            access_policy(&f.catalog, "sales", "alice"),
+        )
+        .await;
+        let started = std::time::Instant::now();
+        let (status, body) = migrate(&f, f.p, &[&name], true).await;
+        let secs = started.elapsed().as_secs_f64();
+        eprintln!(
+            "MEASURE route dry run policies={} status={status} probes={} full={} elapsed={secs:.2}s",
+            inserted + 1,
+            body["profiles"][0]["probes"],
+            body["profiles"][0]["probes_full"],
+        );
+        if status == StatusCode::OK {
+            slowest_admitted = slowest_admitted.max(secs);
+        } else {
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            break;
+        }
+        sqlx::query("DELETE FROM policy.authz_policies WHERE service_id = $1 AND name = $2")
+            .bind(f.p)
+            .bind(&name)
+            .execute(&f.db.pool)
+            .await
+            .expect("remove the migrated candidate");
+    }
+    eprintln!("MEASURE route slowest admitted dry run = {slowest_admitted:.2}s");
+    assert!(
+        slowest_admitted <= 2.5,
+        "the largest admitted request held the lock for {slowest_admitted:.2}s"
+    );
+}
+
 async fn edit_original(f: &Fixture, id: i64, name: &str, body: Value) {
     let mut body = body;
     body["name"] = json!(name);

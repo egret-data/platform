@@ -138,51 +138,65 @@ use crate::trigger::{
 /// (50 000), measured on the UNPRUNED set. With pruning (SP4d-4) the count a
 /// profile needs no longer tracks its time: the same ~5 000 probes take 0.12 s
 /// in a 5-policy profile and 1.06 s in an 80-policy one, because each probe
-/// visits every policy. Time does track probes × policies (about 1.1 µs per
-/// unit), so that is what is capped.
+/// visits every policy. Time does track probes × policies, so that is what is
+/// capped.
 ///
-/// Measured 2026-10-13, `--release`, one Trino profile of N single-user
-/// policies on distinct tables, k = 1 changed policy, `compare` over the
-/// PRUNED set on one version (`tests/gate_timing.rs`, `-- --ignored`):
+/// **What was timed.** Measured 2026-10-13, `--release`, one Trino profile of N
+/// single-user policies, k = 1 changed policy, END TO END over everything the
+/// request runs under the lock after the recompile: `planned_probe_count` (this
+/// cap's own check) + `plan_probes` (enumerates the factor set again and
+/// builds the probes) + the case build + `compare`
+/// (`tests/gate_timing.rs`, `-- --ignored`). Plugin version 2.5.0, 2.8.0 and
+/// both; three policy shapes (`base`: allow policies on distinct tables;
+/// `deny`: the base plus one deny policy for a group on a wildcard table;
+/// `wild`: every policy names a wildcard schema and a table prefix); three tag
+/// states (`none`; `unchanged`: one tag mask on both sides; `changed`: the one
+/// changed policy IS the tag mask, so pruning keeps every probe that carries
+/// its tag). The recompile's DB writes and the two download reads are not in
+/// that harness; `tests/migrate_route.rs` times a whole dry run of the request
+/// (`a_dry_run_at_the_cap_holds_the_lock_no_longer_than_promised`): 101
+/// single-user policies, 7 650 probes, 1.92 s, and the 111-policy profile is
+/// refused in 0.07 s.
 ///
-/// | N | tag mask | probes full | probes pruned | policies | work (pruned × policies) | compare | µs / unit |
-/// |---|---|---|---|---|---|---|---|
-/// | 5 | none | 4 515 | 525 | 10 | 5 250 | 0.01 s | — |
-/// | 20 | none | 53 790 | 1 650 | 40 | 66 000 | 0.08 s | 1.2 |
-/// | 40 | none | 203 490 | 3 150 | 80 | 252 000 | 0.27 s | 1.1 |
-/// | 80 | none | 790 890 | 6 150 | 160 | 984 000 | 1.06 s | 1.1 |
-/// | 160 | none | 3 117 690 | 12 150 | 320 | 3 888 000 | 4.16 s | 1.1 |
-/// | 5 | unchanged | 10 530 | 1 080 | 12 | 12 960 | 0.02 s | — |
-/// | 20 | unchanged | 109 080 | 2 880 | 42 | 120 960 | 0.15 s | 1.2 |
-/// | 40 | unchanged | 397 980 | 5 280 | 82 | 432 960 | 0.50 s | 1.2 |
-/// | 80 | unchanged | 1 515 780 | 10 080 | 162 | 1 632 960 | 1.86 s | 1.1 |
-/// | 160 | unchanged | 5 911 380 | 19 680 | 322 | 6 336 960 | 7.18 s | 1.1 |
-/// | 5 | changed | 9 360 | 4 200 | 12 | 50 400 | 0.12 s | — |
-/// | 20 | changed | 104 535 | 48 300 | 42 | 2 028 600 | 3.05 s | 1.5 |
-/// | 40 | changed | 388 935 | 180 600 | 82 | 14 809 200 | 19.9 s | 1.3 |
-/// | 80 | changed | 1 497 735 | 697 200 | 162 | 112 946 400 | 141 s | 1.2 |
+/// | shape | N | tag mask | versions | probes pruned | work | count + plan | compare | total | µs / unit |
+/// |---|---|---|---|---|---|---|---|---|---|
+/// | base | 80 | none | 2.8.0 | 6 150 | 984 000 | 0.03 s | 1.06 s | 1.09 s | 1.11 |
+/// | base | 60 | none | both | 4 650 | 1 116 000 | 0.02 s | 1.20 s | 1.22 s | 1.09 |
+/// | base | 60 | unchanged | 2.5.0 | 7 680 | 936 960 | 0.04 s | 1.08 s | 1.12 s | 1.20 |
+/// | base | 80 | unchanged | 2.8.0 | 10 080 | 1 632 960 | 0.05 s | 1.86 s | 1.92 s | 1.17 |
+/// | base | 18 | changed | 2.5.0 | 39 690 | 1 508 220 | 0.04 s | 2.35 s | 2.39 s | 1.59 |
+/// | base | 15 | changed | both | 28 350 | 1 814 400 | 0.03 s | 2.94 s | 2.97 s | 1.63 |
+/// | deny | 80 | unchanged | 2.5.0 | 10 200 | 1 672 800 | 0.05 s | 1.93 s | 1.98 s | 1.18 |
+/// | deny | 17 | changed | 2.5.0 | 39 690 | 1 508 220 | 0.04 s | 2.41 s | 2.45 s | 1.63 |
+/// | deny | 15 | changed | both | 31 920 | 2 170 560 | 0.03 s | 3.45 s | 3.49 s | 1.61 |
+/// | wild | 80 | none | 2.5.0 | 8 610 | 1 377 600 | 0.02 s | 1.54 s | 1.57 s | 1.14 |
+/// | wild | 60 | unchanged | 2.5.0 | 10 560 | 1 288 320 | 0.03 s | 1.57 s | 1.60 s | 1.24 |
+/// | wild | 80 | unchanged | 2.5.0 | 13 860 | 2 245 320 | 0.04 s | 2.71 s | 2.75 s | 1.22 |
+/// | wild | 15 | changed | both | 20 790 | 1 330 560 | 0.02 s | 2.32 s | 2.34 s | 1.76 |
+/// | wild | 16 | changed | both | 23 370 | 1 589 160 | 0.02 s | 2.65 s | 2.67 s | 1.68 |
 ///
-/// "tag mask: unchanged" is one tag mask on both sides; "changed" is a run
-/// whose one changed policy IS the tag mask — pruning keeps every probe that
-/// carries its tag (~45% of the full set), the worst case, and it grows like the
-/// unpruned gate did. The SP4d-3 measurement of the UNPRUNED set (the same
-/// profile shape, probes = the full column above), kept for comparison: N=5
-/// 0.05 s, N=20 2.3 s, N=40 19.4 s, N=20 + a tag mask 5.9 s.
+/// The versions are independent and equal (2.5.0 and 2.8.0 rows agree to within
+/// 0.05 s at the same size; `both` is twice one), so the time is a function of
+/// the work alone. The enumeration and probe build (`count + plan`) are at most
+/// 0.05 s at the cap; `compare` is the cost. The rate is 1.1–1.25 µs per unit
+/// with no or an unchanged tag mask and **1.5–1.8 µs per unit** when the
+/// migration changes the tag mask itself.
 ///
-/// The cap is the largest measured work whose `compare` took at most 2.5 s —
-/// 1 632 960 (N=80, unchanged tag mask, 1.86 s) — rounded down to 1 600 000, so
-/// that even at the slowest measured rate (1.5 µs per unit) a refusal-free
-/// migration holds the locks for at most about 2.4 s. Above it the migration is
-/// REFUSED with the counted total before any probe is built (see the module
-/// doc).
+/// **The cap.** At the former 1 600 000 the worst shape (`wild`, tag mask
+/// changed, both versions: 1 589 160 units) took 2.67 s end to end, over the
+/// 2.5 s the migration is meant to hold the profile locks for. The largest
+/// measured work of that worst shape at or under 2.5 s is 1 330 560 (2.34 s);
+/// the cap is that rounded down to 1 300 000. At the worst rate (1.78 µs per
+/// unit) 1 300 000 units is 2.3 s. Above it the migration is REFUSED with the
+/// counted total before any probe is built (see the module doc). Measured on
+/// one machine in release; a slower host holds the locks longer in proportion.
 ///
 /// In practice, for one profile of single-user policies and one changed policy
-/// (k = 1): about 100 policies without a tag mask (pruned work ≈ 154 N²; N=80 is
-/// admitted, N=160 refused), about 79 with an unchanged tag mask (≈ 252 N²; the
-/// measured N=80 row is 2% over the cap and IS refused). Migrating the tag mask
-/// itself, or several policies at once, lowers it sharply: with the mask
-/// changed, 20 policies are already 2.0 M and refused.
-pub const MAX_PROBE_WORK: usize = 1_600_000;
+/// (k = 1): about 91 policies without a tag mask (pruned work ≈ 154 N²), about
+/// 71 with an unchanged tag mask (≈ 252 N²). Migrating the tag mask itself, or
+/// several policies at once, lowers it sharply: with the mask changed, 17
+/// policies are already at the cap.
+pub const MAX_PROBE_WORK: usize = 1_300_000;
 
 /// The consequence the preview must state before the operator commits.
 pub const GENERATED_NOTICE: &str = "After this migration every listed profile is compiled by \

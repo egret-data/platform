@@ -37,7 +37,7 @@ const GENERATED_NOTICE =
 const UNDO_NOTICE =
   "Every profile this migration recompiled stays compiled by egret's permission model after the undo: its hand-written policies can be edited and deleted, but a NEW hand-written policy still cannot be created in it.";
 const BUDGET_REFUSAL =
-  "proving this migration needs 412000 probe evaluations across 2 profile(s), over the limit of 200000. The count grows with the size of each affected profile's download (the largest serves 340 policies), roughly with its square, not with how many policies this request migrates. The probe set is never cut short — a partial proof would be reported as a whole one — so this migration cannot be proved until those profiles are smaller.";
+  "proving this migration needs 15000 probe evaluations across 2 profile(s), 3100000 units of work (probe evaluations x the policies each visits), over the limit of 1300000. The work grows with the size of each affected profile's download (the largest serves 340 policies), roughly with its square, not with how many policies this request migrates. The probe set is never cut short — a partial proof would be reported as a whole one — so this migration cannot be proved until those profiles are smaller.";
 
 const ROWS: ClassifiedPolicy[] = [
   {
