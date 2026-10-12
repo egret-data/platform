@@ -587,15 +587,46 @@ async fn compile_desired(
     // sees it.
     let tag_service_id = sweep.iter().copied().find(|&id| id != service_id);
     let in_tag_service = |sid: i64| Some(sid) == tag_service_id;
-    // The assignments are read only when a tag mask or row filter is desired —
-    // without one, no pair can need them (and StarRocks never has one).
-    let needs_assignments = desired.iter().any(|((sid, _), dp)| {
-        in_tag_service(*sid)
-            && matches!(
-                dp.body.get("policyType").and_then(Value::as_i64),
-                Some(1) | Some(2)
-            )
-    });
+    let is_mask_or_filter = |body: &Value| {
+        matches!(
+            body.get("policyType").and_then(Value::as_i64),
+            Some(1) | Some(2)
+        )
+    };
+    // **SP4d-4 Task 3 fix round 1 (review C1): the HAND-WRITTEN policies this
+    // recompile sweeps past.** Every enabled, non-compiler-owned mask or row
+    // filter stored under a service in `sweep` (the profile and its tag
+    // service) is served beside the compiled set, so a pair between one of
+    // them and a compiled policy is one this recompile creates or keeps — the
+    // rule write, the migration and the membership-driven recompile all reach
+    // it here and nowhere else. Only pairs with a compiled member are refused
+    // (`overlap::overlaps_with_hand_written`); a hand × hand pair stays the
+    // editor's. A migration's ORIGINALS are switched off before its rule
+    // writes (`migrate.rs`, step 1), so they are not read here and the
+    // compiled twin is never paired with the policy it replaces.
+    let mut hand_written: Vec<crate::overlap::HandWritten> = Vec::new();
+    for &sid in &sweep {
+        for body in egret_policy::enabled_policies_for_service_via(conn, sid)
+            .await
+            .map_err(db_err)?
+        {
+            let name = body.get("name").and_then(Value::as_str).unwrap_or_default();
+            if egret_policy::is_compiler_owned_policy_name(name) || !is_mask_or_filter(&body) {
+                continue;
+            }
+            hand_written.push(crate::overlap::HandWritten {
+                service: sid,
+                is_tag_service: in_tag_service(sid),
+                body,
+            });
+        }
+    }
+    // The assignments are read only when a tag mask or row filter is in the
+    // unit — without one, no pair can need them (and StarRocks never has one).
+    let needs_assignments = desired
+        .iter()
+        .any(|((sid, _), dp)| in_tag_service(*sid) && is_mask_or_filter(&dp.body))
+        || hand_written.iter().any(|h| h.is_tag_service);
     let assignments = match tag_service_id {
         Some(tag_service) if needs_assignments => egret_policy::unit_assignments_via(
             conn,
@@ -625,9 +656,10 @@ async fn compile_desired(
             }),
         })
         .collect();
-    if let Some(first) = crate::overlap::overlaps(&for_overlap, &assignments)
-        .into_iter()
-        .next()
+    if let Some(first) =
+        crate::overlap::overlaps_with_hand_written(&for_overlap, &hand_written, &assignments)
+            .into_iter()
+            .next()
     {
         return Err(crate::overlap::into_compile_error(&svc.name, first));
     }

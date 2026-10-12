@@ -220,12 +220,13 @@
 //!   and update paths already refuse the pair whether or not the body is
 //!   enabled would be a different rule from the one above — this guard reads
 //!   `isEnabled`, so a DISABLED policy is simply not part of any band. A pair
-//!   that gets completed by re-enabling is therefore reachable and is NOT
-//!   refused by any later write: the editor refuses only a pair its own write
-//!   creates (and re-enabling through `PUT /policies/{id}` with `isEnabled:
-//!   true` IS such a write, and is refused), and the rule compiler checks only
-//!   its compiled set, which a hand-written policy is not in. It is
-//!   never silent: `explain` answers `EvalOrderAmbiguous` over the served
+//!   that gets completed by re-enabling is therefore reachable. Between two
+//!   hand-written policies it is NOT refused by any later write: the editor
+//!   refuses only a pair its own write creates (and re-enabling through
+//!   `PUT /policies/{id}` with `isEnabled: true` IS such a write, and is
+//!   refused), and the rule compiler refuses only pairs with a compiled
+//!   member. Re-enabled beside a COMPILED policy, it wedges that profile's next
+//!   recompile (SP4d-4 Task 3 fix round 1). It is never silent: `explain` answers `EvalOrderAmbiguous` over the served
 //!   artifact the moment it exists, and SP4d-4 Task 4's read-only
 //!   `GET /perm/overlaps` is to report every stored pair.
 //! * **Everything that is not a route** — `psql`, an import, a route added

@@ -14,15 +14,19 @@
 //!    trusted), refuse in the order below, compute the AFFECTED profiles with
 //!    the compiler's own `affected_services_for_grant` / `_rule`, lock them,
 //!    and read each one's download as it is served NOW.
-//! 1. Insert the grants / rules the grammar produced — through
+//! 1. Switch the original off — the `enabled` COLUMN, through
+//!    `egret_policy::set_policy_enabled_via`, the store's guarded flip. First
+//!    (SP4d-4 Task 3 fix round 1), so the recompile's overlap check, which
+//!    reads every enabled hand-written mask/row filter of the profile, does
+//!    not pair the original with its own compiled twin — while every OTHER
+//!    hand-written policy still on is checked against the new rule.
+//! 2. Insert the grants / rules the grammar produced — through
 //!    [`crate::routes::write_grant`] / [`crate::routes::write_rule`], the one
 //!    implementation of a model write, so every authoring guard those carry
 //!    (`validate_grant_shape`, the unreadable-table-mask refusal, …) applies to
 //!    a migration exactly as it does to a hand-authored grant.
-//! 2. Recompile — the same calls recompile every profile each object affects
+//! 3. Recompile — the same calls recompile every profile each object affects
 //!    (`recompile_services_in_tx`), stamping them `generated`.
-//! 3. Switch the original off — the `enabled` COLUMN, through
-//!    `egret_policy::set_policy_enabled_via`, the store's guarded flip.
 //! 4. Insert provenance (`perm.migrated_from`); its `UNIQUE` is what makes a
 //!    racing second migration a 409.
 //! 5. **Re-read every affected profile's download and run the equivalence gate
@@ -914,7 +918,23 @@ pub(crate) async fn migrate_in_tx(
         );
     }
 
-    // ── step 1 + 2: insert through the one write implementation ───────────
+    // ── step 1: switch every original off (the column) ────────────────────
+    // BEFORE the model writes (SP4d-4 Task 3 fix round 1, review C1): each
+    // `write_grant`/`write_rule` recompiles, and the recompile's overlap check
+    // reads every ENABLED hand-written mask/row filter of the profiles it
+    // sweeps. Left on, an original would pair with its own compiled twin and
+    // refuse the migration on itself; switched off, it is out of that read
+    // while every OTHER hand-written policy still on is in it. The gate's two
+    // readings are untouched by the move: BEFORE was read above (step 0) and
+    // AFTER is read in step 5, both outside this window, and everything here
+    // is one transaction.
+    for (policy_id, _, _) in &plan {
+        set_policy_enabled_via(tx, *policy_id, false)
+            .await
+            .map_err(store_refusal)?;
+    }
+
+    // ── step 2 + 3: insert through the one write implementation ───────────
     let mut summaries: Vec<CompileSummary> = Vec::new();
     let mut recompiled: Vec<i64> = Vec::new();
     for (policy_id, policy_name, cands) in &plan {
@@ -952,13 +972,6 @@ pub(crate) async fn migrate_in_tx(
     if let Some(sentence) = ungated_recompile(&recompiled, &affected) {
         response.refusal = Some(sentence);
         return Ok(response);
-    }
-
-    // ── step 3: switch every original off (the column) ────────────────────
-    for m in &response.policies {
-        set_policy_enabled_via(tx, m.policy_id, false)
-            .await
-            .map_err(store_refusal)?;
     }
 
     // ── step 4: provenance (the count lands in step 6) ────────────────────

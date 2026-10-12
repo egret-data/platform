@@ -69,9 +69,11 @@
 //!   that name one tag service share that tag service's policies; a pair
 //!   between one profile's path policy and the shared tag policy is in THAT
 //!   profile's unit and is checked by whatever write reaches that unit. The
-//!   rule compiler checks only the compiled set of the profile it compiles,
-//!   so a rule write that completes a pair with a HAND-WRITTEN policy is not
-//!   refused (the editor and the tag-assignment write are what check those).
+//!   rule compiler checks the profile it compiles: its compiled set plus the
+//!   enabled hand-written masks and row filters of that profile and its tag
+//!   service, refusing every pair with a compiled member (SP4d-4 Task 3 fix
+//!   round 1); a hand-written × hand-written pair is the editor's and the tag
+//!   assignment's to refuse.
 //! * Writes that bypass the routes, and `PUT /policies/{id}/enabled` (see
 //!   [`crate::ambiguous_arbitration`]'s module doc for both).
 

@@ -35,6 +35,45 @@ use uuid::Uuid;
 
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// The editor's engine-binding seam; the mask/row-filter authoring paths do not
+/// read it (they touch only `policy.authz_*`), so an empty reader is honest.
+struct NoEngines;
+#[async_trait::async_trait]
+impl egret_policy::EngineBindingReader for NoEngines {
+    async fn list_engine_bindings(
+        &self,
+    ) -> Result<Vec<egret_policy::EngineBinding>, egret_policy::EngineReadError> {
+        Ok(vec![])
+    }
+    async fn engine_catalog_names(
+        &self,
+        _e: Uuid,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        Ok(vec![])
+    }
+    async fn warehouse_schemas(
+        &self,
+        _w: Uuid,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        Ok(vec![])
+    }
+    async fn warehouse_tables(
+        &self,
+        _w: Uuid,
+        _s: &str,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        Ok(vec![])
+    }
+    async fn warehouse_columns(
+        &self,
+        _w: Uuid,
+        _s: &str,
+        _t: &str,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        Ok(vec![])
+    }
+}
+
 fn unique(prefix: &str) -> String {
     format!("{prefix}_{}", &Uuid::new_v4().simple().to_string()[..12])
 }
@@ -99,12 +138,25 @@ async fn env() -> Option<Env> {
         .await
         .expect("session")
         .token;
-    let app = perm_router().with_state(PermState {
-        perm: perm.clone(),
-        policy: policy.clone(),
-        sessions,
-        pdp,
+    // The policy editor too (fix round 1, review C1): the hand-written half of
+    // a compiled × hand-written pair is authored through `POST /policies`.
+    let admin = egret_policy::policy_admin_router().with_state(egret_policy::PolicyAdminState {
+        store: policy.clone(),
+        engines: Arc::new(NoEngines),
+        users: UserRepo::new(db.clone()),
+        groups: egret_auth::groups::GroupRepo::new(db.clone()),
+        sessions: sessions.clone(),
+        engine_egret_url: "http://egret:8080".into(),
+        pdp: pdp.clone(),
     });
+    let app = perm_router()
+        .with_state(PermState {
+            perm: perm.clone(),
+            policy: policy.clone(),
+            sessions,
+            pdp,
+        })
+        .merge(admin);
     Some(Env {
         db,
         perm,
@@ -610,6 +662,10 @@ async fn migration_of_a_policy_that_would_overlap_is_refused() {
             .await
             .unwrap();
     assert!(enabled, "the original is still on");
+    // The original beside `existing` is a stored compiled × hand-written pair,
+    // which (fix round 1, C1) wedges every recompile of this profile — and a
+    // tag rule in another test recompiles every Trino profile. Remove it.
+    e.policy.delete_policy(id).await.expect("cleanup");
 }
 
 /// Test 9: tag ↔ path with the SAME mask but different exemptions — different
@@ -639,4 +695,247 @@ async fn different_exemptions_on_one_tagged_column_are_409() {
     )
     .await;
     assert_overlap(status, &body, &[&tag_name, &path_name]);
+}
+
+// ── fix round 1, review C1: compiled × hand-written ─────────────────────────
+
+/// A hand-written path mask, as the policy editor's `POST /policies` takes it.
+fn hand_path_mask(name: &str, profile: &str, p: &Profile, column: &str, mask: &str) -> Value {
+    json!({
+        "kind": "masking", "name": name, "service": profile, "isEnabled": true,
+        "resources": {"catalog": {"values": [p.catalog]}, "schema": {"values": ["sales"]},
+                      "table": {"values": ["orders"]}, "column": {"values": [column]}},
+        "items": [{"groups": ["public"], "maskType": mask}]
+    })
+}
+
+async fn profile_name(e: &Env, p: &Profile) -> String {
+    sqlx::query_scalar("SELECT name FROM policy.authz_services WHERE id = $1")
+        .bind(p.service_id)
+        .fetch_one(&e.db.pool)
+        .await
+        .expect("profile name")
+}
+
+/// Assert the structured 409 names hand-written `policy` (no rule id) and the
+/// compiled `rule` (with an id), each by the label the steward edits.
+fn assert_mixed_overlap(status: StatusCode, body: &Value, policy: &str, rule: &str) {
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "rule_overlap", "{body}");
+    let rules = body["rules"].as_array().expect("rules");
+    assert_eq!(rules.len(), 2, "{body}");
+    assert!(
+        rules
+            .iter()
+            .any(|r| r["name"] == policy && r["id"].is_null()),
+        "the hand-written member, with no rule id: {body}"
+    );
+    assert!(
+        rules
+            .iter()
+            .any(|r| r["name"] == rule && r["id"].is_string()),
+        "the compiled member, with its rule id: {body}"
+    );
+    let error = body["error"].as_str().expect("error");
+    assert!(
+        error.contains(&format!("policy {policy:?}")) && error.contains(&format!("rule {rule:?}")),
+        "{error}"
+    );
+    for banned in ["random", "undefined", "may change between queries"] {
+        assert!(!error.contains(banned), "{banned}: {error}");
+    }
+}
+
+/// C1, path: a hand-written mask stored through the editor, then a path rule
+/// on the same column that masks differently. The rule write completes a
+/// compiled × hand-written pair, so its recompile refuses it, naming both.
+#[tokio::test]
+async fn a_rule_completing_a_pair_with_a_hand_written_mask_is_409_naming_both() {
+    let _serial = SERIAL.lock().await;
+    let Some(e) = env().await else { return };
+    let p = profile(&e, "trino").await;
+    let svc = profile_name(&e, &p).await;
+    let hand = unique("hand email mask");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/policies",
+        Some(hand_path_mask(&hand, &svc, &p, "email", "MASK")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the editor stores H: {body}");
+
+    let rule = unique("null email");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/rules",
+        Some(path_mask(&rule, &p, "orders", "email", "MASK_NULL")),
+    )
+    .await;
+    assert_mixed_overlap(status, &body, &hand, &rule);
+    assert_eq!(body["kind"], "mask");
+    assert!(path_rules(&e, &p).await.is_empty(), "no rule stored");
+}
+
+/// C1, tag: a hand-written tag mask in a manual profile's tag service, the
+/// column carrying the tag, then a compiled tag rule on that tag that masks
+/// differently. Tag rules compile into every engine-bound Trino profile's tag
+/// service, so the rule lands beside H — refused.
+#[tokio::test]
+async fn a_tag_rule_completing_a_pair_with_a_hand_written_tag_mask_is_409() {
+    let _serial = SERIAL.lock().await;
+    let Some(e) = env().await else { return };
+    let p = profile(&e, "trino").await;
+    let svc = profile_name(&e, &p).await;
+    let pii = tag_on(&e, &p, "pii", &["email"]).await;
+    let hand = unique("hand pii mask");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/policies",
+        Some(json!({
+            "kind": "tag-masking", "name": hand, "service": svc, "tag": pii,
+            "isEnabled": true,
+            "items": [{"groups": ["public"], "maskType": "MASK"}]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the editor stores H: {body}");
+    let hand_id = body["id"].as_i64().expect("id");
+
+    let rule = unique("null pii");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/rules",
+        Some(tag_mask(&rule, &pii, "MASK_NULL", &[])),
+    )
+    .await;
+    assert_mixed_overlap(status, &body, &hand, &rule);
+    assert_eq!(
+        rule_named(&e, &rule).await,
+        0,
+        "the tag rule was not stored"
+    );
+    // Leave no hand-written tag mask behind for this binary's other tag rules.
+    e.policy.delete_policy(hand_id).await.expect("cleanup");
+}
+
+/// C1, migration: migrating X while ANOTHER hand-written mask Y, still on,
+/// masks the same column differently. X's compiled twin pairs with Y — refused,
+/// and nothing is written (no rule, no provenance, X still on). X itself is
+/// switched off before the rule write, so the refusal names Y, not X.
+#[tokio::test]
+async fn a_migration_overlapping_another_hand_written_policy_is_refused() {
+    let _serial = SERIAL.lock().await;
+    let Some(e) = env().await else { return };
+    let p = profile(&e, "trino").await;
+    let lvl = |v: &str| json!({"values": [v], "isExcludes": false, "isRecursive": false});
+    let raw = |name: &str, mask: &str| {
+        json!({
+            "name": name, "policyType": 1, "isEnabled": true,
+            "resources": {"catalog": lvl(&p.catalog), "schema": lvl("sales"),
+                          "table": lvl("orders"), "column": lvl("ssn")},
+            "dataMaskPolicyItems": [{
+                "users": [], "groups": ["public"], "roles": [],
+                "accesses": [{"type": "select", "isAllowed": true}],
+                "dataMaskInfo": {"dataMaskType": mask}
+            }],
+            "policyItems": [], "denyPolicyItems": []
+        })
+    };
+    // A stored hand × hand pair (the editor would refuse it), so by raw SQL.
+    let (x, y) = (unique("hand ssn x"), unique("hand ssn y"));
+    let mut ids = Vec::new();
+    for (name, mask) in [(&x, "MASK_NULL"), (&y, "MASK")] {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+             VALUES ($1, $2, $3, true, 'operator') RETURNING id",
+        )
+        .bind(p.service_id)
+        .bind(name)
+        .bind(raw(name, mask))
+        .fetch_one(&e.db.pool)
+        .await
+        .expect("insert hand-written");
+        ids.push(id);
+    }
+
+    let (status, body) = send(
+        &e,
+        "POST",
+        &format!("/perm/policies/services/{}/migrate", p.service_id),
+        Some(json!({"policy_names": [x], "dry_run": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "rule_overlap", "{body}");
+    let error = body["error"].as_str().unwrap();
+    assert!(error.contains(&format!("policy {y:?}")), "names Y: {error}");
+    assert!(
+        !error.contains(&format!("policy {x:?}")),
+        "the original is off, so it is not a member: {error}"
+    );
+    assert!(path_rules(&e, &p).await.is_empty(), "no rule written");
+    let migrated: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM perm.migrated_from WHERE policy_id = $1")
+            .bind(ids[0])
+            .fetch_one(&e.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(migrated, 0, "no provenance written");
+    let enabled: bool =
+        sqlx::query_scalar("SELECT enabled FROM policy.authz_policies WHERE id = $1")
+            .bind(ids[0])
+            .fetch_one(&e.db.pool)
+            .await
+            .unwrap();
+    assert!(enabled, "the original is still on");
+    for id in ids {
+        e.policy.delete_policy(id).await.expect("cleanup");
+    }
+}
+
+/// C1's two allow cells: a rule that decides a hand-written mask's column with
+/// IDENTICAL items (an agreeing tie, admitted as everywhere), and a differing
+/// rule on a column the hand-written mask does not reach.
+#[tokio::test]
+async fn agreeing_or_disjoint_rules_beside_a_hand_written_mask_are_admitted() {
+    let _serial = SERIAL.lock().await;
+    let Some(e) = env().await else { return };
+    let p = profile(&e, "trino").await;
+    let svc = profile_name(&e, &p).await;
+    let hand = unique("hand email mask");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/policies",
+        Some(hand_path_mask(&hand, &svc, &p, "email", "MASK")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let agreeing = unique("mask email too");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/rules",
+        Some(path_mask(&agreeing, &p, "orders", "email", "MASK")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "identical items: {body}");
+
+    let disjoint = unique("null sku");
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/rules",
+        Some(path_mask(&disjoint, &p, "orders", "sku", "MASK_NULL")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "another column: {body}");
+    let mut want = vec![agreeing, disjoint];
+    want.sort();
+    assert_eq!(path_rules(&e, &p).await, want);
 }

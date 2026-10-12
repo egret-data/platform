@@ -41,16 +41,19 @@
 //!   (`recompile_catalog_assignment`, `recompile_one_profile`, and the
 //!   `recompile_services_in_tx` port method).
 //!
-//! **What the compiler does not read: hand-written policies.** A migration
-//! recompiles while the policy it migrates is still enabled (it is switched
-//! off in a later step), so pairing the compiled twin with its original would
-//! refuse the migration on itself. A pair with a hand-written member is
-//! therefore checked where it can be created by a hand: the policy editor
-//! (`egret_policy::admin`) and a tag assignment ([`refuse_created_overlaps_via`],
-//! over the whole stored unit). A RULE write that completes a pair with a
-//! hand-written policy is not refused — reachable only on a profile that
-//! holds both, i.e. a hand-written policy left in a profile the compiler later
-//! claimed, or a tag service shared with a manual profile.
+//! **The compiler reads the hand-written policies it sweeps past** (fix round
+//! 1, review C1). Every recompile loads the enabled, non-compiler-owned mask
+//! and row-filter policies of the profile and its tag service and refuses
+//! every pair with at least one COMPILED member
+//! ([`overlaps_with_hand_written`]) — so a rule write, a migration and a
+//! membership-driven recompile that complete a pair with a hand-written policy
+//! are refused, and a pre-existing compiled × hand-written pair wedges the
+//! profile's recompiles like a compiled × compiled one (the accepted wedge). A
+//! hand-written × hand-written pair is not the compiler's output and is left to
+//! the policy editor and the tag assignment ([`refuse_created_overlaps_via`]),
+//! which refuse it where it is created. A migration switches its originals off
+//! BEFORE its rule writes (`migrate.rs`, step 1), so the compiled twin is never
+//! paired with the policy it replaces.
 //!
 //! # Do two recompiles of profiles sharing one tag service serialise?
 //!
@@ -146,6 +149,15 @@ fn named(o: UnitOverlap, rules: &HashMap<String, OverlapRule>) -> Overlap {
 /// the same may-intersect comparison the within-download rule uses (see
 /// `egret_policy::unit_overlap`'s module doc for why), so no def is needed.
 pub fn overlaps(desired: &[CompiledForOverlap<'_>], assignments: &[AssignedTag]) -> Vec<Overlap> {
+    overlaps_where(desired, assignments, |_| true)
+}
+
+/// [`overlaps`], keeping only the pairs `keep` accepts (before naming).
+fn overlaps_where(
+    desired: &[CompiledForOverlap<'_>],
+    assignments: &[AssignedTag],
+    keep: impl Fn(&UnitOverlap) -> bool,
+) -> Vec<Overlap> {
     let rules: HashMap<String, OverlapRule> = desired
         .iter()
         .filter_map(|d| Some((d.policy_name.to_string(), d.rule.clone()?)))
@@ -161,8 +173,54 @@ pub fn overlaps(desired: &[CompiledForOverlap<'_>], assignments: &[AssignedTag])
         .collect();
     egret_policy::unit_overlaps(&policies, assignments)
         .into_iter()
+        .filter(|o| keep(o))
         .map(|o| named(o, &rules))
         .collect()
+}
+
+/// One stored, enabled, HAND-WRITTEN mask or row-filter policy of a service the
+/// compile sweeps, as [`overlaps_with_hand_written`] reads it.
+#[derive(Debug, Clone)]
+pub struct HandWritten {
+    pub service: i64,
+    pub is_tag_service: bool,
+    /// The stored body (`name` inside it is the policy name).
+    pub body: Value,
+}
+
+/// **The compiler's check, completed with the hand-written policies it sweeps
+/// past** (SP4d-4 Task 3 fix round 1, review C1). [`overlaps`] over the desired
+/// set PLUS `hand_written`, keeping only pairs with at least one COMPILED
+/// member: a compiled × hand-written pair is created (or kept) by this
+/// recompile, so it is this recompile's to refuse; a hand-written × hand-written
+/// pair is not the compiler's output, and stays the policy editor's and the tag
+/// assignment's (refused where created, reported by `GET /perm/overlaps`), so a
+/// stored hand-written pair does not wedge the compiler.
+///
+/// The hand-written members are named `policy "<name>"` with no rule id.
+pub fn overlaps_with_hand_written(
+    desired: &[CompiledForOverlap<'_>],
+    hand_written: &[HandWritten],
+    assignments: &[AssignedTag],
+) -> Vec<Overlap> {
+    let compiled: BTreeSet<&str> = desired.iter().map(|d| d.policy_name).collect();
+    let mut all: Vec<CompiledForOverlap<'_>> = desired.to_vec();
+    all.extend(hand_written.iter().map(|h| {
+        CompiledForOverlap {
+            service: h.service,
+            is_tag_service: h.is_tag_service,
+            policy_name: h
+                .body
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            body: &h.body,
+            rule: None,
+        }
+    }));
+    overlaps_where(&all, assignments, |o| {
+        compiled.contains(o.first.as_str()) || compiled.contains(o.second.as_str())
+    })
 }
 
 /// The refusal for `profile`.
