@@ -626,20 +626,30 @@ struct PluginConfigFacts<'a> {
     version: Option<&'a str>,
 }
 
-/// Whether `raw` parses as a URL whose host is `localhost`, an address in
-/// `127.0.0.0/8` or `::1`. Parsed, never substring-matched: `localhost.example.com`
-/// is an ordinary name.
-fn is_loopback_url(raw: &str) -> bool {
+/// Why `raw` cannot be a download URL an external engine reaches, if it cannot:
+/// its host is loopback or unspecified (`localhost`, `localhost.`, `127.0.0.0/8`,
+/// `0.0.0.0`, `::`, `::1`, an IPv4-mapped form of those), or it is not an
+/// http(s) URL with a host (`localhost:8080` parses as scheme `localhost`).
+/// Parsed, never substring-matched: `localhost.example.com` is an ordinary name.
+fn download_url_problem(raw: &str) -> Option<&'static str> {
+    use std::net::Ipv6Addr;
     use url::Host;
-    match url::Url::parse(raw)
-        .ok()
-        .and_then(|u| u.host().map(|h| h.to_owned()))
-    {
-        Some(Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
-        Some(Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
-    }
+    let unusable = |v4: std::net::Ipv4Addr| v4.is_loopback() || v4.is_unspecified();
+    let url = url::Url::parse(raw).ok();
+    let Some(url) = url.filter(|u| matches!(u.scheme(), "http" | "https")) else {
+        return Some("is not an http(s) URL with a host");
+    };
+    let loopback = match url.host() {
+        None => return Some("is not an http(s) URL with a host"),
+        Some(Host::Domain(d)) => d.trim_end_matches('.').eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(ip)) => unusable(ip),
+        Some(Host::Ipv6(ip)) => {
+            ip == Ipv6Addr::UNSPECIFIED
+                || ip.is_loopback()
+                || ip.to_ipv4_mapped().is_some_and(unusable)
+        }
+    };
+    loopback.then_some("is a loopback or unspecified address")
 }
 
 fn plugin_config_judgements(
@@ -657,11 +667,11 @@ fn plugin_config_judgements(
              cluster cannot reach it. Set `[catalog] public_url` to an address the engine can reach."
         ));
     }
-    if is_loopback_url(host_part) {
+    if let Some(problem) = download_url_problem(host_part) {
         warnings.push(format!(
-            "The download URL ({host_part}) is a loopback address: no external engine can reach \
-             it. It comes from `[catalog] public_url`, which defaults to localhost on a fresh \
-             install; set it to an address the engine can reach."
+            "The download URL ({host_part}) {problem}: no external engine can reach it. It \
+             comes from `[catalog] public_url`, which defaults to localhost on a fresh install; \
+             set it to an address the engine can reach."
         ));
     }
     let auth_mode = if f.bearer_configured {
@@ -834,6 +844,10 @@ mod plugin_config_tests {
             "http://127.0.0.1:8080",
             "http://127.1.2.3",
             "http://[::1]:8080",
+            "http://localhost.:8080",
+            "http://0.0.0.0:8080",
+            "http://[::]:8080",
+            "http://[::ffff:127.0.0.1]:8080",
         ] {
             let (_, w, _, _) = plugin_config_judgements(&facts(url, false, true, Some("2.8.0")));
             assert!(
@@ -852,9 +866,26 @@ mod plugin_config_tests {
             "https://128.0.0.1",
             "https://egret.example.com/127.0.0.1",
             "https://[::2]:8080",
-            "not a url",
         ] {
             let (_, w, _, _) = plugin_config_judgements(&facts(url, false, true, Some("2.8.0")));
+            assert!(!w.iter().any(|m| m.contains("loopback")), "{url}: {w:?}");
+        }
+    }
+
+    #[test]
+    fn a_url_with_no_host_or_a_non_http_scheme_warns_without_calling_it_loopback() {
+        for url in [
+            "localhost:8080",
+            "not a url",
+            "ftp://egret.example.com",
+            "http://",
+        ] {
+            let (_, w, _, _) = plugin_config_judgements(&facts(url, false, true, Some("2.8.0")));
+            assert!(
+                w.iter()
+                    .any(|m| m.contains("not an http(s) URL") && m.contains("[catalog] public_url")),
+                "{url}: {w:?}"
+            );
             assert!(!w.iter().any(|m| m.contains("loopback")), "{url}: {w:?}");
         }
     }
