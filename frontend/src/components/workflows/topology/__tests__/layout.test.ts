@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { layout, type Positioned } from "@/components/workflows/topology/layout";
-import { EMPTY_FLOW, FLOW, LINE, NESTED } from "./fixtures";
+import { CLUSTER_HEADER, layout, type Positioned } from "@/components/workflows/topology/layout";
+import { EMPTY_FLOW, EXPANDED, FLOW, LINE, NESTED, NESTED_FAILED, siblings } from "./fixtures";
 
 const NONE: ReadonlySet<string> = new Set();
 const byId = (nodes: Positioned[], id: string) => {
@@ -122,4 +122,92 @@ describe("layout", () => {
     const broken = { ...LINE, edges: [...LINE.edges, { source: "tasks.one", target: "tasks.ghost", relation: "sequential" as const }] };
     expect(layout(broken, { orientation: "LR", collapsed: NONE }).edges.some((e) => e.target === "tasks.ghost")).toBe(false);
   });
+
+  describe("geometry: clusters reserve their room", () => {
+    const intersects = (a: Positioned, b: Positioned) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+    const ancestors = (nodes: Positioned[], p: Positioned): string[] => {
+      const out: string[] = [];
+      for (let c = p.parent; c !== null; c = nodes.find((n) => n.id === c)?.parent ?? null) out.push(c);
+      return out;
+    };
+    function assertGeometry(nodes: Positioned[]) {
+      const problems: string[] = [];
+      const boxes = nodes.filter((n) => n.kind === "cluster");
+      const cards = nodes.filter((n) => n.kind !== "cluster");
+      // Every member lies inside its cluster's box, below the header.
+      for (const n of nodes) {
+        if (n.parent === null) continue;
+        const box = byId(nodes, n.parent);
+        if (n.x < box.x || n.x + n.width > box.x + box.width || n.y < box.y + CLUSTER_HEADER || n.y + n.height > box.y + box.height) {
+          problems.push(`${n.id} outside ${box.id}`);
+        }
+      }
+      // Two boxes intersect only when one contains the other.
+      for (let i = 0; i < boxes.length; i++)
+        for (let j = i + 1; j < boxes.length; j++) {
+          const [a, b] = [boxes[i], boxes[j]];
+          const nested = ancestors(nodes, a).includes(b.id) || ancestors(nodes, b).includes(a.id);
+          if (!nested && intersects(a, b)) problems.push(`box ${a.id} x ${b.id}`);
+        }
+      // No card or marker overlaps another, nor a box it is not inside.
+      for (let i = 0; i < cards.length; i++) {
+        for (let j = i + 1; j < cards.length; j++) if (intersects(cards[i], cards[j])) problems.push(`card ${cards[i].id} x ${cards[j].id}`);
+        const mine = ancestors(nodes, cards[i]);
+        for (const b of boxes) if (!mine.includes(b.id) && intersects(cards[i], b)) problems.push(`card ${cards[i].id} x box ${b.id}`);
+      }
+      expect(problems).toEqual([]);
+    }
+
+    it.each([
+      ["three sibling Sequentials", siblings(3)],
+      ["sibling Sequentials each holding an If", siblings(3, true)],
+      ["the mixed flow", FLOW],
+      ["a Sequential holding a Parallel", NESTED],
+      ["an expanded Subflow", EXPANDED],
+    ])("%s, in both orientations", (_name, graph) => {
+      for (const orientation of ["LR", "TB"] as const) {
+        const { nodes } = layout(graph, { orientation, collapsed: NONE });
+        expect(nodes.filter((n) => n.kind === "cluster").length).toBeGreaterThan(0);
+        assertGeometry(nodes);
+      }
+    });
+
+    it("keeps the geometry with one sibling collapsed", () => {
+      for (const orientation of ["LR", "TB"] as const) {
+        assertGeometry(layout(siblings(3, true), { orientation, collapsed: new Set(["cluster:tasks.p.s2"]) }).nodes);
+      }
+    });
+  });
+
+  it("lays an expanded Subflow's child out inside the Subflow's cluster and routes its edges", () => {
+    const { nodes, edges } = layout(EXPANDED, { orientation: "LR", collapsed: NONE });
+    expect(byId(nodes, "tasks.call").parent).toBe("cluster:tasks.call");
+    expect(byId(nodes, "cluster:tasks.call/tasks.p").parent).toBe("cluster:tasks.call");
+    expect(byId(nodes, "tasks.call/tasks.p.x").parent).toBe("cluster:tasks.call/tasks.p");
+    expect(byId(nodes, "tasks.call/triggers.hook").parent).toBe("cluster:tasks.call/triggers");
+    const pairs = edges.map((e) => `${e.source} -> ${e.target}`);
+    expect(pairs).toEqual(
+      expect.arrayContaining(["tasks.call -> start:tasks.call/tasks.p", "tasks.call/tasks.p -> tasks.call/tasks.p.x", "end:tasks.call/tasks.p -> end:tasks.call"]),
+    );
+    for (const e of edges) expect(e.points.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("dashes the trigger chain of an expanded Subflow's child too", () => {
+    const { edges } = layout(EXPANDED, { orientation: "LR", collapsed: NONE });
+    expect(edges.filter((e) => e.trigger).map((e) => `${e.source} -> ${e.target}`).sort()).toEqual([
+      "end:tasks.call/triggers -> tasks.call",
+      "start:tasks.call/triggers -> tasks.call/triggers.hook",
+      "tasks.call/triggers.hook -> end:tasks.call/triggers",
+    ]);
+  });
+
+  it("keeps a failed Subflow nested in a cluster inside that cluster, carrying the reason", () => {
+    const { nodes } = layout(NESTED_FAILED, { orientation: "TB", collapsed: NONE });
+    const call = byId(nodes, "tasks.s.call");
+    expect(call.kind).toBe("task");
+    expect(call.parent).toBe("cluster:tasks.s");
+    expect(call.expansion).toBe("depth");
+    expect(nodes.some((n) => n.id === "cluster:tasks.s.call")).toBe(false);
+  });
 });
+

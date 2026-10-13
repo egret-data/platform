@@ -10,7 +10,7 @@ import { IconButton } from "@/components/ui/icon-button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { layout, type Orientation, type Positioned } from "@/components/workflows/topology/layout";
 import { NODE_TYPES, TopologyContext, type TopologyContextValue, type TopologyFlowNode } from "@/components/workflows/topology/TopologyNodes";
-import { TopologyEdges } from "@/components/workflows/topology/TopologyEdges";
+import { CARD_Z, TopologyEdges } from "@/components/workflows/topology/TopologyEdges";
 import { TopologyListView } from "@/components/workflows/topology/TopologyListView";
 import { cn } from "@/lib/utils";
 
@@ -191,6 +191,11 @@ function Topology({ graph, states, selectedUid = null, onSelect, onExpandSubflow
   const flowNodes = useMemo<TopologyFlowNode[]>(() => {
     if (!placed) return [];
     const at = new Map(placed.nodes.map((n) => [n.id, n]));
+    const depthOf = (item: Positioned) => {
+      let d = 0;
+      for (let p = item.parent; p !== null; p = at.get(p)?.parent ?? null) d++;
+      return d;
+    };
     return placed.nodes.map((item): TopologyFlowNode => {
       const parent = item.parent ? at.get(item.parent) : undefined;
       const type = item.kind === "start" || item.kind === "end" ? "marker" : item.kind === "trigger" ? "task" : item.kind;
@@ -206,6 +211,8 @@ function Topology({ graph, states, selectedUid = null, onSelect, onExpandSubflow
         selectable: false,
         focusable: false,
         deletable: false,
+        // Boxes by depth beneath the edge layer, cards above it (`TopologyEdges.tsx`, paint order).
+        zIndex: item.kind === "cluster" ? depthOf(item) : CARD_Z,
       };
       if (parent) node.parentId = parent.id;
       return node;

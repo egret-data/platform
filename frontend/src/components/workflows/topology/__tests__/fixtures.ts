@@ -173,3 +173,111 @@ export const STATES: Record<string, NodeState> = {
     iterations: { total: 3, by_state: { SUCCESS: 2, FAILED: 1 } },
   }),
 };
+
+const SEQUENTIAL = "io.kestra.plugin.core.flow.Sequential";
+
+/** A `Sequential` at `owner` inside `parent`, holding `body` (which may hold clusters of its own). */
+function sequential(owner: string, parent: string | null, children: string[]): { nodes: Node[]; edges: Edge[]; cluster: Cluster } {
+  const nodes = [start(owner), task(owner, SEQUENTIAL, { kind: "flowable" }), end(owner)];
+  const chain = [`start:${owner}`, owner, ...children, `end:${owner}`];
+  const edges = chain.slice(1).map((t, i) => edge(chain[i], t));
+  return { nodes, edges, cluster: cluster(owner, "sequential", [`start:${owner}`, owner, `end:${owner}`], { parent }) };
+}
+
+/**
+ * A `Parallel` holding sibling `Sequential`s, each holding two tasks; with `withIf`, each
+ * Sequential holds an `If` (then/else) instead, so clusters nest three deep side by side.
+ * Edges to a nested cluster enter at its `start:` marker and leave at its `end:`, as the server draws them.
+ */
+export function siblings(count: number, withIf = false): FlowGraph {
+  const nodes: Node[] = [start("flow"), end("flow"), start("tasks.p"), task("tasks.p", PARALLEL, { kind: "flowable" }), end("tasks.p")];
+  const edges: Edge[] = [edge("start:flow", "start:tasks.p"), edge("start:tasks.p", "tasks.p"), edge("end:tasks.p", "end:flow")];
+  const clusters: Cluster[] = [cluster("tasks.p", "parallel", ["start:tasks.p", "tasks.p", "end:tasks.p"])];
+  for (let i = 1; i <= count; i++) {
+    const s = `tasks.p.s${i}`;
+    if (withIf) {
+      const f = `${s}.check`;
+      nodes.push(start(f), task(f, IF, { kind: "flowable" }), task(`${f}.yes`, LOG), task(`${f}.no`, LOG), end(f));
+      edges.push(
+        edge(`start:${f}`, f),
+        edge(f, `${f}.yes`, "choice", "then"),
+        edge(f, `${f}.no`, "choice", "else"),
+        edge(`${f}.yes`, `end:${f}`, "sequential", "then"),
+        edge(`${f}.no`, `end:${f}`, "sequential", "else"),
+      );
+      clusters.push(cluster(f, "if", [`start:${f}`, f, `${f}.yes`, `${f}.no`, `end:${f}`], { parent: `cluster:${s}` }));
+      const seq = sequential(s, "cluster:tasks.p", []);
+      nodes.push(...seq.nodes);
+      // start:S -> S -> start:If ... end:If -> end:S
+      edges.push(edge(`start:${s}`, s), edge(s, `start:${f}`), edge(`end:${f}`, `end:${s}`));
+      clusters.push(seq.cluster);
+    } else {
+      const body = [`${s}.a`, `${s}.b`];
+      const seq = sequential(s, "cluster:tasks.p", body);
+      nodes.push(...seq.nodes, task(`${s}.a`, LOG), task(`${s}.b`, LOG));
+      edges.push(...seq.edges);
+      seq.cluster.nodes.splice(2, 0, ...body);
+      clusters.push(seq.cluster);
+    }
+    edges.push(edge("tasks.p", `start:${s}`, "parallel"), edge(`end:${s}`, "end:tasks.p", "parallel"));
+  }
+  return { nodes, edges, clusters };
+}
+
+/**
+ * An expanded `Subflow` (`tasks.call`) whose child flow has a trigger and a `Parallel`: the
+ * child's uids are `{subflow}/{child}`, its triggers cluster is `cluster:tasks.call/triggers`
+ * (expand.rs), the Subflow node sits inside its own cluster after `start:tasks.call`.
+ */
+export const EXPANDED: FlowGraph = {
+  nodes: [
+    start("flow"),
+    task("tasks.call", SUBFLOW, { kind: "executable" }),
+    end("flow"),
+    task("tasks.call/tasks.p", PARALLEL, { kind: "flowable" }),
+    start("tasks.call/tasks.p"),
+    end("tasks.call/tasks.p"),
+    task("tasks.call/tasks.p.x", LOG),
+    task("tasks.call/tasks.p.y", LOG),
+    end("tasks.call"),
+    start("tasks.call/triggers"),
+    trigger("tasks.call/triggers.hook", "io.kestra.plugin.core.trigger.Webhook"),
+    end("tasks.call/triggers"),
+    start("tasks.call"),
+  ],
+  edges: [
+    edge("start:flow", "start:tasks.call"),
+    edge("start:tasks.call", "tasks.call"),
+    edge("tasks.call", "start:tasks.call/tasks.p"),
+    edge("start:tasks.call/tasks.p", "tasks.call/tasks.p"),
+    edge("tasks.call/tasks.p", "tasks.call/tasks.p.x", "parallel"),
+    edge("tasks.call/tasks.p", "tasks.call/tasks.p.y", "parallel"),
+    edge("tasks.call/tasks.p.x", "end:tasks.call/tasks.p", "parallel"),
+    edge("tasks.call/tasks.p.y", "end:tasks.call/tasks.p", "parallel"),
+    edge("end:tasks.call/tasks.p", "end:tasks.call"),
+    edge("start:tasks.call/triggers", "tasks.call/triggers.hook"),
+    edge("tasks.call/triggers.hook", "end:tasks.call/triggers"),
+    edge("end:tasks.call/triggers", "tasks.call"),
+    edge("end:tasks.call", "end:flow"),
+  ],
+  clusters: [
+    cluster("tasks.call", "subflow", ["start:tasks.call", "tasks.call", "end:tasks.call"]),
+    cluster("tasks.call/tasks.p", "parallel", ["start:tasks.call/tasks.p", "tasks.call/tasks.p", "tasks.call/tasks.p.x", "tasks.call/tasks.p.y", "end:tasks.call/tasks.p"], {
+      parent: "cluster:tasks.call",
+    }),
+    cluster("tasks.call/triggers", "triggers", ["start:tasks.call/triggers", "tasks.call/triggers.hook", "end:tasks.call/triggers"], {
+      task_id: null,
+      parent: "cluster:tasks.call",
+    }),
+  ],
+};
+
+/** A `Sequential` holding a `Subflow` whose expansion failed (`depth`): the task stays in the Sequential. */
+export const NESTED_FAILED: FlowGraph = {
+  nodes: [start("flow"), start("tasks.s"), task("tasks.s", SEQUENTIAL, { kind: "flowable" }), task("tasks.s.call", SUBFLOW, { kind: "executable" }), end("tasks.s"), end("flow")],
+  edges: [edge("start:flow", "start:tasks.s"), edge("start:tasks.s", "tasks.s"), edge("tasks.s", "tasks.s.call"), edge("tasks.s.call", "end:tasks.s"), edge("end:tasks.s", "end:flow")],
+  clusters: [
+    cluster("tasks.s", "sequential", ["start:tasks.s", "tasks.s", "tasks.s.call", "end:tasks.s"]),
+    cluster("tasks.s.call", "subflow", [], { parent: "cluster:tasks.s", start: "tasks.s.call", end: "tasks.s.call", reason: "depth" }),
+  ],
+};

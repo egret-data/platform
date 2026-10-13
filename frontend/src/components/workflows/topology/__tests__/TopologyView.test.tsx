@@ -2,7 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TopologyView, type TopologyViewProps } from "@/components/workflows/topology/TopologyView";
-import { EMPTY_FLOW, FLOW, LINE, NESTED, STATES } from "./fixtures";
+import { EMPTY_FLOW, EXPANDED, FLOW, LINE, NESTED, NESTED_FAILED, STATES } from "./fixtures";
 
 const ORIENTATION_KEY = "egret.workflows.topology.orientation";
 
@@ -134,6 +134,14 @@ describe("TopologyView nodes", () => {
     expect(within(card("tasks.call")).queryByRole("button", { name: /^Expand subflow/ })).toBeNull();
   });
 
+  it("says why a Subflow nested in a cluster did not expand, with no box of its own", () => {
+    renderView({ graph: NESTED_FAILED });
+    expect(within(card("tasks.s.call")).getByText("Not expanded: Subflows expand two levels deep")).toBeInTheDocument();
+    expect(within(card("tasks.s.call")).queryByRole("button", { name: /^Expand subflow/ })).toBeNull();
+    // Drawn as a child of the Sequential's box (xyflow's `parentId`), not of a box of its own.
+    expect(document.querySelector('[data-cluster="cluster:tasks.s.call"]')).toBeNull();
+  });
+
   it("names a node's branch in words, not only in colour", () => {
     renderView();
     expect(within(card("errors.alert")).getByText("On error")).toBeInTheDocument();
@@ -168,6 +176,26 @@ describe("TopologyView edges and colours", () => {
       expect(literal.test(el.getAttribute("fill") ?? "")).toBe(false);
       expect(literal.test(el.getAttribute("stroke") ?? "")).toBe(false);
     }
+  });
+
+  it("paints routes above cluster boxes and beneath every card", () => {
+    const { container } = renderView({ graph: NESTED });
+    const z = (el: Element | null) => Number((el as HTMLElement).style.zIndex);
+    const edgeZ = z(container.querySelector("[data-edge-layer]"));
+    expect(z(container.querySelector("[data-edge-labels]"))).toBe(edgeZ);
+    const wrappers = [...container.querySelectorAll(".react-flow__node")] as HTMLElement[];
+    const boxes = wrappers.filter((w) => w.querySelector("[data-cluster]"));
+    const cards = wrappers.filter((w) => !w.querySelector("[data-cluster]"));
+    expect(boxes).toHaveLength(2);
+    expect(cards.length).toBeGreaterThan(4);
+    for (const b of boxes) expect(z(b)).toBeLessThan(edgeZ);
+    for (const c of cards) expect(z(c)).toBeGreaterThan(edgeZ);
+  });
+
+  it("dashes the trigger chain inside an expanded Subflow", () => {
+    const { container } = renderView({ graph: EXPANDED });
+    expect(path(container, "tasks.call/triggers.hook", "end:tasks.call/triggers").style.strokeDasharray).not.toBe("");
+    expect(path(container, "tasks.call", "start:tasks.call/tasks.p").style.strokeDasharray).toBe("");
   });
 
   it("labels choice edges and dashes trigger edges", () => {

@@ -16,6 +16,15 @@ import { relationStroke } from "@/components/workflows/topology/topologyModel";
  * Trigger edges are dashed (spec §6.1); a branch's colour is repeated in words
  * on its nodes (FE-A11Y-4).
  */
+/**
+ * THE PAINT ORDER, in the canvas's one stacking context (xyflow's viewport): cluster boxes at
+ * their nesting depth (0, 1, …), then this layer at `EDGE_Z`, then every card and marker at
+ * `CARD_Z`. So a route crosses a cluster's tint but passes beneath a card. The labels share this
+ * layer; dagre reserves each label a box of its own, so no card sits over one.
+ */
+export const EDGE_Z = 500;
+export const CARD_Z = 1000;
+
 const STROKES = ["var(--muted-foreground)", "var(--destructive)", "var(--highlight)"] as const;
 
 function pathOf(points: RoutedEdge["points"]): string {
@@ -28,7 +37,7 @@ export function TopologyEdges({ edges }: { edges: RoutedEdge[] }) {
   const labelled = edges.filter((e) => e.labelAt && e.label);
   return (
     <>
-      <svg aria-hidden className="pointer-events-none absolute top-0 left-0 z-10 overflow-visible" width={1} height={1}>
+      <svg aria-hidden data-edge-layer className="pointer-events-none absolute top-0 left-0 overflow-visible" style={{ zIndex: EDGE_Z }} width={1} height={1}>
         <defs>
           {STROKES.map((stroke) => (
             <marker key={stroke} id={markerId(stroke)} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -56,7 +65,7 @@ export function TopologyEdges({ edges }: { edges: RoutedEdge[] }) {
           );
         })}
       </svg>
-      <div data-edge-labels aria-hidden className="pointer-events-none absolute top-0 left-0 z-10">
+      <div data-edge-labels aria-hidden className="pointer-events-none absolute top-0 left-0" style={{ zIndex: EDGE_Z }}>
         {labelled.map((e) => (
           <span
             key={e.id}

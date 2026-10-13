@@ -96,6 +96,10 @@ const MARKER_SIZE = 14;
 /** Room inside a cluster's box: the header with its title and collapse button, then a margin. */
 export const CLUSTER_HEADER = 32;
 const CLUSTER_PAD = 14;
+/** A cluster's box is at least this wide inside, so its header (word, id, button) fits. */
+const CLUSTER_MIN_WIDTH = 160;
+/** Room around the whole graph. */
+const MARGIN = 16;
 /** A label's box on a `choice` edge; dagre keeps it clear of nodes. */
 const LABEL_WIDTH = 64;
 const LABEL_HEIGHT = 20;
@@ -132,51 +136,56 @@ export function layout(graph: FlowGraph, opts: LayoutOptions): { nodes: Position
   };
   const nodeRep = (uid: string): string => standIn(clusterOf.get(uid) ?? null) ?? uid;
 
-  const g = new graphlib.Graph({ compound: true, multigraph: true });
-  g.setGraph({
-    rankdir: opts.orientation,
-    nodesep: 28,
-    ranksep: 44,
-    edgesep: 14,
-    marginx: 16,
-    marginy: 16,
-  });
-  g.setDefaultEdgeLabel(() => ({}));
-
   const cardHeight = (n: Node): number => {
     if (n.node !== "task" && n.node !== "trigger") return MARKER_SIZE;
     const facts = nodeFacts(n, opts.states, expansion.get(n.uid));
     return CARD_BASE + LINE * factLines(facts) + (facts.state ? STATE_EXTRA : 0);
   };
   const collapsedHeight = CARD_BASE + (opts.states ? LINE + STATE_EXTRA : 0);
-  const items = new Map<string, Omit<Positioned, "x" | "y" | "width" | "height">>();
+  type Item = Omit<Positioned, "x" | "y" | "width" | "height">;
+  const items = new Map<string, Item>();
+  /** Leaf sizes; an expanded cluster's size comes from laying out its members. */
+  const leafSize = new Map<string, { width: number; height: number }>();
 
-  // Clusters: an expanded one is a compound node; a collapsed one is a plain node.
   for (const c of drawn.values()) {
-    const outer = standIn(parentOf(c.uid));
-    if (outer !== null) continue;
+    if (standIn(parentOf(c.uid)) !== null) continue;
     const parent = parentOf(c.uid);
     if (opts.collapsed.has(c.uid)) {
-      g.setNode(c.uid, { width: TASK_WIDTH, height: collapsedHeight });
+      leafSize.set(c.uid, { width: TASK_WIDTH, height: collapsedHeight });
       items.set(c.uid, { id: c.uid, kind: "collapsed", parent, cluster: c });
     } else {
-      g.setNode(c.uid, {});
       items.set(c.uid, { id: c.uid, kind: "cluster", parent, cluster: c });
     }
   }
-  for (const [uid, item] of items) if (item.parent !== null) g.setParent(uid, item.parent);
-
   for (const n of graph.nodes) {
     if (nodeRep(n.uid) !== n.uid || items.has(n.uid)) continue;
     const marker = n.node === "start" || n.node === "end";
-    g.setNode(n.uid, { width: marker ? MARKER_SIZE : TASK_WIDTH, height: cardHeight(n) });
-    const parent = clusterOf.get(n.uid) ?? null;
-    if (parent !== null) g.setParent(n.uid, parent);
-    items.set(n.uid, { id: n.uid, kind: n.node, parent, node: n, expansion: expansion.get(n.uid) });
+    leafSize.set(n.uid, { width: marker ? MARKER_SIZE : TASK_WIDTH, height: cardHeight(n) });
+    items.set(n.uid, { id: n.uid, kind: n.node, parent: clusterOf.get(n.uid) ?? null, node: n, expansion: expansion.get(n.uid) });
   }
 
-  const triggerNodes = new Set(drawn.get("cluster:triggers")?.nodes ?? []);
-  const kept: Omit<RoutedEdge, "points" | "labelAt">[] = [];
+  // The chain of containers around an item, innermost first, ending with the flow (`null`).
+  const chain = (id: string): (string | null)[] => {
+    const out: (string | null)[] = [];
+    for (let c = items.get(id)?.parent ?? null; ; c = items.get(c)?.parent ?? null) {
+      out.push(c);
+      if (c === null) return out;
+    }
+  };
+  // The item that stands for `id` among the direct members of `container`.
+  const memberOf = (id: string, container: string | null): string => {
+    let m = id;
+    while ((items.get(m)?.parent ?? null) !== container) m = items.get(m)?.parent as string;
+    return m;
+  };
+
+  // Every trigger cluster: the flow's, and an expanded Subflow child's (`cluster:{subflow}/triggers`).
+  const triggerNodes = new Set([...drawn.values()].filter((c) => c.kind === "triggers").flatMap((c) => c.nodes));
+  interface Kept extends Omit<RoutedEdge, "points" | "labelAt"> {
+    /** The container whose own layout routes this edge: the innermost one holding both ends. */
+    level: string | null;
+  }
+  const kept: Kept[] = [];
   const seen = new Set<string>();
   for (const e of graph.edges) {
     if (!items.has(e.source) && !clusterOf.has(e.source)) continue;
@@ -188,44 +197,115 @@ export function layout(graph: FlowGraph, opts: LayoutOptions): { nodes: Position
     const id = `${source} -> ${target} ${e.relation} ${label ?? ""}`;
     if (seen.has(id)) continue;
     seen.add(id);
+    const around = chain(target);
+    const level = chain(source).find((c) => around.includes(c)) ?? null;
     const trigger = triggerNodes.has(e.source) || triggerNodes.has(e.target);
-    kept.push({ id, source, target, relation: e.relation, label, trigger });
-    // Only a `choice` edge shows its label; later edges of a branch repeat it for the record.
-    const shown = e.relation === "choice" && label !== null;
-    g.setEdge(source, target, shown ? { width: LABEL_WIDTH, height: LABEL_HEIGHT, labelpos: "c" } : {}, id);
+    kept.push({ id, source, target, relation: e.relation, label, trigger, level });
   }
 
-  dagreLayout(g);
+  /*
+   * ONE DAGRE LAYOUT PER CONTAINER, innermost first. A cluster is laid out on its own, then sized
+   * as its content plus a header and padding, and placed as a plain node in its parent's layout.
+   * So the header's room is reserved before anything is placed around it, in either orientation.
+   * (dagre's own compound nodes do not: its border nodes are zero-sized dummies, so in LR, where a
+   * header lies across the ranks, siblings sat `edgesep` apart and a grown box overlapped the next.)
+   * An edge is routed in the innermost container holding both ends, between the members that hold
+   * them; the server enters a cluster at its `start:` marker and leaves at its `end:`, so the route
+   * is then extended from the box's border to that marker.
+   */
+  const members = new Map<string | null, string[]>();
+  for (const i of items.values()) members.set(i.parent, [...(members.get(i.parent) ?? []), i.id]);
+  /** Positions relative to the container's content origin, and each level's routes. */
+  const rel = new Map<string, Box>();
+  const routes = new Map<string, { points: Point[]; labelAt?: Point }>();
+  const contentSize = new Map<string | null, { width: number; height: number }>();
 
-  const boxes = new Map<string, Box>();
-  for (const id of items.keys()) {
-    const d = g.node(id);
-    boxes.set(id, { x: d.x - d.width / 2, y: d.y - d.height / 2, width: d.width, height: d.height });
-  }
-  // A cluster's box holds its members with room for its header, innermost first.
-  const depth = (id: string) => {
-    let n = 0;
-    for (let p = items.get(id)?.parent ?? null; p !== null; p = items.get(p)?.parent ?? null) n++;
-    return n;
+  const place = (container: string | null): { width: number; height: number } => {
+    const g = new graphlib.Graph({ multigraph: true });
+    g.setGraph({ rankdir: opts.orientation, nodesep: 28, ranksep: 44, edgesep: 14, marginx: 0, marginy: 0 });
+    g.setDefaultEdgeLabel(() => ({}));
+    for (const id of members.get(container) ?? []) {
+      g.setNode(id, items.get(id)?.kind === "cluster" ? boxSize(id) : (leafSize.get(id) as { width: number; height: number }));
+    }
+    const here = kept.filter((e) => e.level === container);
+    for (const e of here) {
+      // Only a `choice` edge shows its label; later edges of a branch repeat it for the record.
+      const shown = e.relation === "choice" && e.label !== null;
+      g.setEdge(memberOf(e.source, container), memberOf(e.target, container), shown ? { width: LABEL_WIDTH, height: LABEL_HEIGHT, labelpos: "c" } : {}, e.id);
+    }
+    dagreLayout(g);
+    // Shift so the content starts at 0,0: nodes, routes and labels together.
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    const grow = (x0: number, y0: number, x1: number, y1: number) => {
+      minX = Math.min(minX, x0);
+      minY = Math.min(minY, y0);
+      maxX = Math.max(maxX, x1);
+      maxY = Math.max(maxY, y1);
+    };
+    for (const id of g.nodes()) {
+      const d = g.node(id);
+      grow(d.x - d.width / 2, d.y - d.height / 2, d.x + d.width / 2, d.y + d.height / 2);
+    }
+    if (minX === Infinity) return { width: 0, height: 0 };
+    for (const id of g.nodes()) {
+      const d = g.node(id);
+      rel.set(id, { x: d.x - d.width / 2 - minX, y: d.y - d.height / 2 - minY, width: d.width, height: d.height });
+    }
+    for (const e of here) {
+      const d = g.edge({ v: memberOf(e.source, container), w: memberOf(e.target, container), name: e.id });
+      const route: { points: Point[]; labelAt?: Point } = {
+        points: ((d.points ?? []) as Point[]).map(({ x, y }) => ({ x: x - minX, y: y - minY })),
+      };
+      if (e.relation === "choice" && e.label !== null && typeof d.x === "number" && typeof d.y === "number") {
+        route.labelAt = { x: d.x - minX, y: d.y - minY };
+      }
+      routes.set(e.id, route);
+    }
+    const size = { width: maxX - minX, height: maxY - minY };
+    contentSize.set(container, size);
+    return size;
   };
-  const expanded = [...items.values()].filter((i) => i.kind === "cluster").sort((a, b) => depth(b.id) - depth(a.id));
-  for (const c of expanded) {
-    const members = [...items.values()].filter((i) => i.parent === c.id).map((i) => boxes.get(i.id) as Box);
-    if (members.length === 0) continue;
-    const left = Math.min(...members.map((m) => m.x)) - CLUSTER_PAD;
-    const top = Math.min(...members.map((m) => m.y)) - CLUSTER_PAD - CLUSTER_HEADER;
-    const right = Math.max(...members.map((m) => m.x + m.width)) + CLUSTER_PAD;
-    const bottom = Math.max(...members.map((m) => m.y + m.height)) + CLUSTER_PAD;
-    const own = boxes.get(c.id) as Box;
-    const x = Math.min(left, own.x);
-    const y = Math.min(top, own.y);
-    boxes.set(c.id, {
-      x,
-      y,
-      width: Math.max(right, own.x + own.width) - x,
-      height: Math.max(bottom, own.y + own.height) - y,
-    });
+  const sized = new Map<string, { width: number; height: number }>();
+  function boxSize(cluster: string): { width: number; height: number } {
+    let s = sized.get(cluster);
+    if (!s) {
+      const c = place(cluster);
+      s = { width: Math.max(c.width, CLUSTER_MIN_WIDTH) + 2 * CLUSTER_PAD, height: c.height + CLUSTER_HEADER + 2 * CLUSTER_PAD };
+      sized.set(cluster, s);
+    }
+    return s;
   }
+  place(null);
+
+  // Absolute boxes, outermost first: a member sits at its container's content origin plus its offset.
+  const boxes = new Map<string, Box>();
+  const origin = (container: string | null): Point => {
+    if (container === null) return { x: MARGIN, y: MARGIN };
+    const b = absolute(container);
+    const inner = (contentSize.get(container) ?? { width: 0 }).width;
+    // A content narrower than the header's minimum is centred in the box.
+    const extra = Math.max(0, CLUSTER_MIN_WIDTH - inner) / 2;
+    return { x: b.x + CLUSTER_PAD + extra, y: b.y + CLUSTER_HEADER + CLUSTER_PAD };
+  };
+  function absolute(id: string): Box {
+    let b = boxes.get(id);
+    if (!b) {
+      const r = rel.get(id) as Box;
+      const o = origin(items.get(id)?.parent ?? null);
+      b = { x: r.x + o.x, y: r.y + o.y, width: r.width, height: r.height };
+      boxes.set(id, b);
+    }
+    return b;
+  }
+  for (const id of items.keys()) absolute(id);
+  const depth = (id: string) => chain(id).length - 1;
+  const centre = (id: string): Point => {
+    const b = boxes.get(id) as Box;
+    return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+  };
 
   const main = opts.orientation === "LR" ? "x" : "y";
   const cross = opts.orientation === "LR" ? "y" : "x";
@@ -237,12 +317,15 @@ export function layout(graph: FlowGraph, opts: LayoutOptions): { nodes: Position
   });
   nodes.sort((a, b) => a[main] - b[main] || a[cross] - b[cross] || depth(a.id) - depth(b.id));
 
-  const edges: RoutedEdge[] = kept.map((e) => {
-    const d = g.edge({ v: e.source, w: e.target, name: e.id });
-    const routed: RoutedEdge = { ...e, points: ((d.points ?? []) as Point[]).map(({ x, y }) => ({ x, y })) };
-    if (e.relation === "choice" && e.label !== null && typeof d.x === "number" && typeof d.y === "number") {
-      routed.labelAt = { x: d.x, y: d.y };
-    }
+  const edges: RoutedEdge[] = kept.map(({ level, ...e }) => {
+    const o = origin(level);
+    const route = routes.get(e.id) ?? { points: [] };
+    const points = route.points.map((p) => ({ x: p.x + o.x, y: p.y + o.y }));
+    // Into and out of a cluster: from the box's border to the marker inside it.
+    if (memberOf(e.source, level) !== e.source) points.unshift(centre(e.source));
+    if (memberOf(e.target, level) !== e.target) points.push(centre(e.target));
+    const routed: RoutedEdge = { ...e, points };
+    if (route.labelAt) routed.labelAt = { x: route.labelAt.x + o.x, y: route.labelAt.y + o.y };
     return routed;
   });
 
