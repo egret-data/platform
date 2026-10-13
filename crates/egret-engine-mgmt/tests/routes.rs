@@ -11106,13 +11106,14 @@ async fn registration_validates_its_input_and_states_an_unmodelled_version() {
     assert_eq!(j["rangerPluginVersionModelled"], false, "{j}");
 
     // "Modelled" is a (type, version) PAIR (user ruling 2026-10-12): 2.8.0 is
-    // modelled for both engines and 2.5.0 for Trino only. (2.9.0 is not yet a
-    // registrable version at all: `validate_plugin_version` stops at 2.8.0.)
+    // modelled for both engines, 2.5.0 for Trino only and 2.9.0 for StarRocks only.
     for (kind, version, modelled) in [
         ("trino", "2.5.0", true),
         ("trino", "2.8.0", true),
+        ("trino", "2.9.0", false),
         ("starrocks", "2.5.0", false),
         ("starrocks", "2.8.0", true),
+        ("starrocks", "2.9.0", true),
     ] {
         let n = external_name("ext-pair");
         let (status, j) = call(

@@ -7728,7 +7728,11 @@ fn prune_dropped(pair: &PrunePair, def: &ServiceDef) -> PruneDropped {
         after: &after,
         service_def: def,
         engine: EngineConfig::without_super_users(),
-        versions: vec![PluginVersion::Ranger2_5_0, PluginVersion::Ranger2_8_0],
+        versions: vec![
+            PluginVersion::Ranger2_5_0,
+            PluginVersion::Ranger2_8_0,
+            PluginVersion::Ranger2_9_0,
+        ],
         probes,
     };
     let mut undecidable = Vec::new();

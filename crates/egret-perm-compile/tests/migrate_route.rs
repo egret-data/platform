@@ -1623,7 +1623,10 @@ async fn a_provisioned_trino_on_an_unknown_image_refuses_the_migration() {
     let (status, body) = migrate(&f, f.p, &[&name], false).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     let refusal = body["refusal"].as_str().expect("refusal");
-    assert!(refusal.contains("999"), "{refusal}");
+    assert!(
+        refusal.contains("999") && refusal.contains("pin"),
+        "names the image and the fix: {refusal}"
+    );
     assert_eq!(grants_on_catalog(&f).await, 0, "nothing is written");
     assert!(enabled(&f, id).await, "the original stays on");
 }

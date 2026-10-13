@@ -4669,7 +4669,10 @@ mod engine_plugin_version_tests {
     fn an_image_the_table_does_not_know_is_refused_not_guessed() {
         let unknown = serde_json::json!({"imageVersion": "999"});
         let err = engine_plugin_version("t", "provisioned", "trino", None, &unknown).unwrap_err();
-        assert!(err.contains("999"), "{err}");
+        assert!(
+            err.contains("999") && err.contains("pin"),
+            "names the image and the fix: {err}"
+        );
     }
 
     #[test]

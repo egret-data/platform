@@ -51,8 +51,8 @@ pub const ORIGIN_PROVISIONED: &str = "provisioned";
 /// engine. A closed list so a typo (`2.55.0`) is a 400 rather than a profile
 /// that is quietly never provable. A release absent here is a deliberate edit,
 /// not a guess.
-pub const KNOWN_RANGER_PLUGIN_VERSIONS: [&str; 9] = [
-    "2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0",
+pub const KNOWN_RANGER_PLUGIN_VERSIONS: [&str; 10] = [
+    "2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0", "2.9.0",
 ];
 
 /// Whether egret's Ranger evaluator has been read against `engine_type` at
@@ -782,6 +782,17 @@ mod plugin_config_tests {
             bearer_configured: bearer,
             ranger_enabled: enabled,
             version: v,
+        }
+    }
+
+    #[test]
+    fn every_modelled_pair_is_a_registrable_version() {
+        for (engine_type, version) in egret_perm::MODELLED_RANGER_PLUGINS {
+            assert!(
+                KNOWN_RANGER_PLUGIN_VERSIONS.contains(&version),
+                "{engine_type}@{version} is modelled but an external engine cannot declare it"
+            );
+            assert!(validate_plugin_version(version).is_ok(), "{version}");
         }
     }
 
