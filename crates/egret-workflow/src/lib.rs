@@ -105,8 +105,8 @@ pub use publish::{publish, publish_gated, ScriptGate};
 pub use refs::WorkflowRefs;
 pub use repo::{
     CreateFlowInput, ExecutionDetail, ExecutionFilter, ExecutionLogStatus, ExecutionPage,
-    ExecutionRepo, ExecutionRow, FlowRepo, FlowRow, FlowVersionRow, ListFilter, Page, TaskRunRow,
-    UpdateFlowInput,
+    ExecutionRepo, ExecutionRow, FlowRepo, FlowRow, FlowVersionRow, ListFilter, NamespaceRow, Page,
+    TaskRunRow, UpdateFlowInput,
 };
 pub use routes::{management_router, openapi, WorkflowState};
 pub use runners::{render_str, render_typed, rewrite, RenderContext, RenderError, RewriteError};

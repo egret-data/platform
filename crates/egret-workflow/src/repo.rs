@@ -256,6 +256,116 @@ pub struct ListFilter {
     pub trashed: bool,
 }
 
+/// One namespace of a workspace (W7d spec §3.1). egret has no namespace
+/// table: a namespace is derived from what lives in it, see
+/// [`NAMESPACES_SQL`].
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct NamespaceRow {
+    pub namespace: String,
+    /// This namespace's OWN counts -- never rolled up from its children.
+    pub flows: i64,
+    pub files: i64,
+    pub kv_keys: i64,
+    /// False when the namespace is present only as a parent by dots of one
+    /// that is (its three counts are then all zero).
+    pub own: bool,
+}
+
+/// The namespaces of workspace `$1`, in one statement (W7d spec §3.1).
+///
+/// Three sources, each scoped to the workspace:
+/// - flows not deleted (`deleted_at IS NULL`);
+/// - live namespace FILES: a path's state is its HIGHEST revision's row
+///   (taken first, then judged: filtering `deleted` first would resurrect an
+///   older revision), live when not `deleted`; a directory row is not a file;
+/// - live KV keys: the highest revision's row, live when not `deleted` and
+///   not expired (`expires_at <= now()`, the database's clock), as
+///   `storage::kv::store`'s `list_live` judges it.
+///
+/// A namespace with a non-zero count is `own`; every parent by dots of one
+/// is added with `own = false` unless it is a source itself.
+///
+/// `$2` is the dot-anchored prefix (`a.b` matches `a.b` and `a.b.c`, never
+/// `a.bc`; `starts_with`, not `LIKE`, as W7b's `namespace_prefix`), or NULL.
+/// It is applied to the sources too: a namespace is in `$2`'s subtree only
+/// if some source beneath it is, so the narrowing loses nothing. `$3` keeps
+/// only the row named `$2` exactly (the detail route).
+pub const NAMESPACES_SQL: &str = "\
+WITH flows AS ( \
+  SELECT namespace, count(*) AS flows, 0::bigint AS files, 0::bigint AS kv_keys \
+    FROM workflow.flows \
+   WHERE workspace_id = $1 AND deleted_at IS NULL \
+     AND ($2::text IS NULL OR namespace = $2 OR starts_with(namespace, $2 || '.')) \
+   GROUP BY namespace), \
+files AS ( \
+  SELECT namespace, 0::bigint AS flows, count(*) AS files, 0::bigint AS kv_keys \
+    FROM (SELECT DISTINCT ON (namespace, path) namespace, is_directory, deleted \
+            FROM workflow.namespace_files \
+           WHERE workspace_id = $1 \
+             AND ($2::text IS NULL OR namespace = $2 OR starts_with(namespace, $2 || '.')) \
+           ORDER BY namespace, path, revision DESC) latest \
+   WHERE NOT deleted AND NOT is_directory \
+   GROUP BY namespace), \
+keys AS ( \
+  SELECT namespace, 0::bigint AS flows, 0::bigint AS files, count(*) AS kv_keys \
+    FROM (SELECT DISTINCT ON (namespace, key) namespace, deleted, \
+                 (expires_at IS NOT NULL AND expires_at <= now()) AS expired \
+            FROM workflow.kv_entries \
+           WHERE workspace_id = $1 \
+             AND ($2::text IS NULL OR namespace = $2 OR starts_with(namespace, $2 || '.')) \
+           ORDER BY namespace, key, revision DESC) latest \
+   WHERE NOT deleted AND NOT expired \
+   GROUP BY namespace), \
+own AS ( \
+  SELECT namespace, sum(flows)::bigint AS flows, sum(files)::bigint AS files, \
+         sum(kv_keys)::bigint AS kv_keys \
+    FROM (SELECT * FROM flows UNION ALL SELECT * FROM files UNION ALL SELECT * FROM keys) s \
+   GROUP BY namespace), \
+every AS ( \
+  SELECT DISTINCT array_to_string(parts[1:n], '.') AS namespace \
+    FROM own, string_to_array(own.namespace, '.') AS parts, \
+         generate_series(1, cardinality(parts)) AS n) \
+SELECT e.namespace, coalesce(o.flows, 0) AS flows, coalesce(o.files, 0) AS files, \
+       coalesce(o.kv_keys, 0) AS kv_keys, o.namespace IS NOT NULL AS own \
+  FROM every e LEFT JOIN own o ON o.namespace = e.namespace \
+ WHERE ($2::text IS NULL OR e.namespace = $2 OR starts_with(e.namespace, $2 || '.')) \
+   AND (NOT $3 OR e.namespace = $2) \
+ ORDER BY e.namespace COLLATE \"C\"";
+
+impl FlowRepo {
+    /// Every namespace of `workspace` (under `prefix`, dot-anchored), by
+    /// namespace in byte order. See [`NAMESPACES_SQL`].
+    pub async fn namespaces(
+        &self,
+        workspace: Uuid,
+        prefix: Option<&str>,
+    ) -> Result<Vec<NamespaceRow>> {
+        sqlx::query_as(NAMESPACES_SQL)
+            .bind(workspace)
+            .bind(prefix)
+            .bind(false)
+            .fetch_all(&self.db.pool)
+            .await
+            .map_err(db_err)
+    }
+
+    /// One namespace of `workspace`: a source or a parent by dots of one,
+    /// or `None`.
+    pub async fn namespace(
+        &self,
+        workspace: Uuid,
+        namespace: &str,
+    ) -> Result<Option<NamespaceRow>> {
+        sqlx::query_as(NAMESPACES_SQL)
+            .bind(workspace)
+            .bind(namespace)
+            .bind(true)
+            .fetch_optional(&self.db.pool)
+            .await
+            .map_err(db_err)
+    }
+}
+
 /// Persistence for flow drafts and their published versions.
 #[derive(Clone)]
 pub struct FlowRepo {

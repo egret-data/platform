@@ -2956,6 +2956,114 @@ async fn replay_execution(
     Ok((StatusCode::CREATED, Json(ExecutionDto::new(detail, true))))
 }
 
+/// One namespace of the workspace (W7d spec §3.1). egret has no namespace
+/// table: a namespace exists while a flow that is not deleted, a live
+/// namespace file or a live KV key is in it, or while it is a parent by dots
+/// of one that is.
+///
+/// **The counts are this namespace's OWN**, never rolled up from its
+/// children: `company` with one flow in `company.team` answers `flows: 0`.
+///
+/// Named `Workflow…` because the aggregated OpenAPI document already has a
+/// `NamespaceDto` (the catalog's), and a second one of that name is dropped.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct WorkflowNamespaceDto {
+    pub namespace: String,
+    /// Flows in exactly this namespace that are not deleted.
+    pub flows: i64,
+    /// Live namespace files (a path whose latest revision is not deleted;
+    /// several revisions of one path are one file; directories are not counted).
+    pub files: i64,
+    /// Live KV keys (the latest revision neither deleted nor expired).
+    pub kv_keys: i64,
+    /// False when the namespace is present only as a parent by dots of
+    /// another (its counts are then all zero).
+    pub own: bool,
+}
+
+impl From<crate::repo::NamespaceRow> for WorkflowNamespaceDto {
+    fn from(r: crate::repo::NamespaceRow) -> Self {
+        Self {
+            namespace: r.namespace,
+            flows: r.flows,
+            files: r.files,
+            kv_keys: r.kv_keys,
+            own: r.own,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListNamespacesQuery {
+    pub prefix: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/namespaces",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("prefix" = Option<String>, Query, description = "Only this namespace and the ones beneath it, dot-anchored: `company` matches `company` and `company.team`, never `companyx`. Empty means no filter."),
+    ),
+    responses(
+        (status = 200, description = "The workspace's namespaces, from flows that are not deleted, live namespace files and live KV keys, plus every parent by dots (`own: false`); sorted by namespace (byte order). Counts are each namespace's own, never its children's.", body = Vec<WorkflowNamespaceDto>),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn list_namespaces(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ListNamespacesQuery>,
+) -> EgretResult<Json<Vec<WorkflowNamespaceDto>>> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    let prefix = q.prefix.as_deref().filter(|p| !p.is_empty());
+    let rows = st.repo.namespaces(ctx.workspace_id.0, prefix).await?;
+    Ok(Json(
+        rows.into_iter().map(WorkflowNamespaceDto::from).collect(),
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/namespaces/{namespace}",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("namespace" = String, Path, description = "The namespace"),
+    ),
+    responses(
+        (status = 200, description = "The namespace's own counts; `own: false` when it is only a parent by dots of another", body = WorkflowNamespaceDto),
+        (status = 400, description = "Not a valid namespace name (`^[a-z0-9][a-z0-9._-]*`, 1-150 characters)", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "Nothing lives in this namespace or beneath it in this workspace", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn get_namespace(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, namespace)): Path<(String, String)>,
+) -> EgretResult<Json<WorkflowNamespaceDto>> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    // The flow grammar, not W9b's `check_namespace`: every namespace a flow
+    // can have (an empty segment or a `_files` one included) must be
+    // addressable here, since the listing shows it.
+    if !crate::spec::validate::is_valid_namespace(&namespace) {
+        return Err(Error::InvalidInput(format!(
+            "namespace '{namespace}' must match ^[a-z0-9][a-z0-9._-]* and be 1-150 characters long"
+        )));
+    }
+    st.repo
+        .namespace(ctx.workspace_id.0, &namespace)
+        .await?
+        .map(|r| Json(WorkflowNamespaceDto::from(r)))
+        .ok_or_else(|| Error::NotFound(format!("namespace '{namespace}'")))
+}
+
 /// The Workflow management router. Mount under `/api` so the live paths are
 /// `/api/ws/{workspace}/workflows/...` — see this module's doc comment for
 /// the feature-gate convention that depends on it.
@@ -3029,6 +3137,11 @@ pub fn management_router() -> Router<WorkflowState> {
         .route(
             "/ws/{workspace}/workflows/executions/{id}/file/preview",
             get(crate::storage::routes::preview_execution_file),
+        )
+        .route("/ws/{workspace}/workflows/namespaces", get(list_namespaces))
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}",
+            get(get_namespace),
         )
         .route(
             "/ws/{workspace}/workflows/namespaces/{namespace}/files",
@@ -3133,6 +3246,8 @@ pub fn management_router() -> Router<WorkflowState> {
         start_flow_execution,
         resume_execution,
         replay_execution,
+        list_namespaces,
+        get_namespace,
         crate::storage::nsfiles::routes::download_namespace_file,
         crate::storage::nsfiles::routes::namespace_file_stats,
         crate::storage::nsfiles::routes::namespace_file_revisions,
@@ -3173,6 +3288,7 @@ pub fn management_router() -> Router<WorkflowState> {
         LogLevel,
         LogLineDto,
         LogPageDto,
+        WorkflowNamespaceDto,
         crate::storage::routes::FileMetasDto,
         crate::storage::routes::FilePreviewDto,
         crate::storage::nsfiles::routes::NsFileStatsDto,
