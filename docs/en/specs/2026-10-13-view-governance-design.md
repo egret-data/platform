@@ -45,13 +45,14 @@ A base-column **mask** applies through every view kind, for every reader. It als
 
 `MASK_HASH` is not used: it leaks equality, cardinality and, with a guess, content (round 2 A). The type is always `MASK_NULL`.
 
-Ranger stops at the **first matching item** of the first applicable data-mask policy, and a data-mask policy has no exceptions. So the clearance mask cannot sit beside a rule mask on the same column: the item for cleared users would decide the outcome and shadow the rule mask. The compiler therefore **folds** every rule mask on that column into the single clearance mask policy. The items, in this order:
+Ranger stops at the **first matching item** of the first applicable data-mask policy, and a data-mask policy has no exceptions. So the clearance mask decides for **everyone** who reaches it, cleared users included, and it must reproduce for a cleared user exactly what the rule masks would have given that user.
 
-1. Each rule mask item, restricted to the principals who are also cleared. The item keeps its own mask type and condition. A rule item that names a group or `{public}` is restricted by enumeration: its users ∩ the cleared users, as bare usernames. An item whose intersection is empty is dropped.
-2. The remaining cleared users: `MASK_NONE`.
-3. `{public}`: `MASK_NULL`.
-
-The separate rule mask policy for that column is then not emitted. The compiler never creates a pair of overlapping masks, so SP4d-4's overlap rule (409 on a write that creates an overlap) is not triggered by its own output. The `GET /perm/overlaps` report must not list a folded pair.
+- **Priority.** The clearance mask policy has `policyPriority 1` (override). Rule masks are compiled at priority 0, so the clearance mask always comes first. A pair at different priorities is ordered, not ambiguous (`egret_policy::ambiguous_arbitration`), so SP4d-4's overlap rule does not refuse it. Rule mask policies are emitted unchanged, including those whose column resource is a wildcard.
+- **Items, in this order:**
+  1. For each cleared user, the outcome `egret-ranger-eval` computes from the profile's **other** data-mask policies (the desired set without the clearance masks) for that user on that column: a mask type, with its value expression for `CUSTOM`, or no mask. Users with the same outcome share one item. A user whose outcome is `MASK_NONE` or "no mask" gets `MASK_NONE`.
+  2. `{public}`: `MASK_NULL`.
+- **Refuse, never guess.** If the evaluator is `Undecidable` for any cleared user on that column (for example a same-priority tie between two rule masks), the compile is refused with the column and the user named. Nothing is folded by guesswork.
+- **Recompile triggers.** These are SP4c's three triggers plus any rule mask write. The rule-mask trigger exists already, because the whole profile recompiles on a rule write.
 
 **Why "users", not principals.** The cleared set is enumerated as bare usernames (SP4c D0/D0b), because a role in a policy item matches nobody. The same enumeration feeds items 1 and 2. SP4c's membership recompile trigger already covers a change to that set.
 
@@ -191,7 +192,7 @@ These limits are stated in the guide and on the classification page:
 
 | What | How |
 |---|---|
-| A2 fold order | Unit: a column with two rule masks and a clearance gives one policy with items in order 1, 2, 3; no second mask policy is emitted; `GET /perm/overlaps` is empty. |
+| A2 fold | Unit: a column with a rule mask (exact and wildcard) and a clearance gives a priority-1 clearance mask whose cleared items equal the evaluator's per-user outcome, then `{public}` `MASK_NULL`. Rule policies are unchanged, and `GET /perm/overlaps` is empty. An undecidable cleared user refuses the compile. |
 | A3 exceptions | Unit: a database with columns of classifications X and Y excepts exactly users cleared for both. |
 | A4 unreachable engine | The page shows "could not list" when the engine is unreachable, never an empty list. |
 | B1 no parsing | Mutation: replacing the EXPLAIN result with an empty input set must fail a test. The view is then committed untagged, so a test must see it. |
