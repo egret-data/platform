@@ -30402,7 +30402,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The workspace's namespaces, from flows that are not deleted, live namespace files and live KV keys, plus every parent by dots (`own: false`); sorted by namespace (byte order). Counts are each namespace's own, never its children's.",
+            "description": "The workspace's namespaces, from flows that are not deleted, live namespace files and live KV keys, plus every parent by dots (`own: false`); a namespace holding only a live directory is listed (`own: true`, `files: 0`); sorted by namespace (byte order). Counts are each namespace's own, never its children's.",
             "content": {
               "application/json": {
                 "schema": {
@@ -48123,7 +48123,7 @@
       },
       "WorkflowNamespaceDto": {
         "type": "object",
-        "description": "One namespace of the workspace (W7d spec §3.1). egret has no namespace\ntable: a namespace exists while a flow that is not deleted, a live\nnamespace file or a live KV key is in it, or while it is a parent by dots\nof one that is.\n\n**The counts are this namespace's OWN**, never rolled up from its\nchildren: `company` with one flow in `company.team` answers `flows: 0`.\n\nNamed `Workflow…` because the aggregated OpenAPI document already has a\n`NamespaceDto` (the catalog's), and a second one of that name is dropped.",
+        "description": "One namespace of the workspace (W7d spec §3.1). egret has no namespace\ntable: a namespace exists while a flow that is not deleted, a live\nnamespace file or directory (even an empty one) or a live KV key is in\nit, or while it is a parent by dots of one that is.\n\n**The counts are this namespace's OWN**, never rolled up from its\nchildren: `company` with one flow in `company.team` answers `flows: 0`.\n\nNamed `Workflow…` because the aggregated OpenAPI document already has a\n`NamespaceDto` (the catalog's), and a second one of that name is dropped.",
         "required": [
           "namespace",
           "flows",
@@ -48152,7 +48152,7 @@
           },
           "own": {
             "type": "boolean",
-            "description": "False when the namespace is present only as a parent by dots of\nanother (its counts are then all zero)."
+            "description": "False when the namespace is present only as a parent by dots of\nanother (its counts are then all zero). True for a source, whose\ncounts can all be zero when it holds only a live empty directory."
           }
         }
       },

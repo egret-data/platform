@@ -2958,8 +2958,8 @@ async fn replay_execution(
 
 /// One namespace of the workspace (W7d spec §3.1). egret has no namespace
 /// table: a namespace exists while a flow that is not deleted, a live
-/// namespace file or a live KV key is in it, or while it is a parent by dots
-/// of one that is.
+/// namespace file or directory (even an empty one) or a live KV key is in
+/// it, or while it is a parent by dots of one that is.
 ///
 /// **The counts are this namespace's OWN**, never rolled up from its
 /// children: `company` with one flow in `company.team` answers `flows: 0`.
@@ -2977,7 +2977,8 @@ pub struct WorkflowNamespaceDto {
     /// Live KV keys (the latest revision neither deleted nor expired).
     pub kv_keys: i64,
     /// False when the namespace is present only as a parent by dots of
-    /// another (its counts are then all zero).
+    /// another (its counts are then all zero). True for a source, whose
+    /// counts can all be zero when it holds only a live empty directory.
     pub own: bool,
 }
 
@@ -3007,7 +3008,7 @@ pub struct ListNamespacesQuery {
         ("prefix" = Option<String>, Query, description = "Only this namespace and the ones beneath it, dot-anchored: `company` matches `company` and `company.team`, never `companyx`. Empty means no filter."),
     ),
     responses(
-        (status = 200, description = "The workspace's namespaces, from flows that are not deleted, live namespace files and live KV keys, plus every parent by dots (`own: false`); sorted by namespace (byte order). Counts are each namespace's own, never its children's.", body = Vec<WorkflowNamespaceDto>),
+        (status = 200, description = "The workspace's namespaces, from flows that are not deleted, live namespace files and live KV keys, plus every parent by dots (`own: false`); a namespace holding only a live directory is listed (`own: true`, `files: 0`); sorted by namespace (byte order). Counts are each namespace's own, never its children's.", body = Vec<WorkflowNamespaceDto>),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),

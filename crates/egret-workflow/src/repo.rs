@@ -267,7 +267,8 @@ pub struct NamespaceRow {
     pub files: i64,
     pub kv_keys: i64,
     /// False when the namespace is present only as a parent by dots of one
-    /// that is (its three counts are then all zero).
+    /// that is (its three counts are then all zero). True for a source, whose
+    /// counts can still all be zero (a live empty directory).
     pub own: bool,
 }
 
@@ -275,15 +276,22 @@ pub struct NamespaceRow {
 ///
 /// Three sources, each scoped to the workspace:
 /// - flows not deleted (`deleted_at IS NULL`);
-/// - live namespace FILES: a path's state is its HIGHEST revision's row
+/// - live namespace entries: a path's state is its HIGHEST revision's row
 ///   (taken first, then judged: filtering `deleted` first would resurrect an
-///   older revision), live when not `deleted`; a directory row is not a file;
+///   older revision), live when not `deleted`. A live DIRECTORY, even an
+///   empty one, makes its namespace a source (a folder created in a new
+///   namespace must not vanish from the list), but `files` counts files only;
 /// - live KV keys: the highest revision's row, live when not `deleted` and
 ///   not expired (`expires_at <= now()`, the database's clock), as
 ///   `storage::kv::store`'s `list_live` judges it.
 ///
-/// A namespace with a non-zero count is `own`; every parent by dots of one
-/// is added with `own = false` unless it is a source itself.
+/// A source is `own` (its counts may all be zero: a live empty directory);
+/// every parent by dots of one is added with `own = false` unless it is a
+/// source itself.
+///
+/// Cost: linear in the workspace's revision rows of the three tables (or,
+/// with `$2`, those of the prefix subtree) -- every revision of every path
+/// and key is read to find the latest; there is no namespace index.
 ///
 /// `$2` is the dot-anchored prefix (`a.b` matches `a.b` and `a.b.c`, never
 /// `a.bc`; `starts_with`, not `LIKE`, as W7b's `namespace_prefix`), or NULL.
@@ -298,13 +306,14 @@ WITH flows AS ( \
      AND ($2::text IS NULL OR namespace = $2 OR starts_with(namespace, $2 || '.')) \
    GROUP BY namespace), \
 files AS ( \
-  SELECT namespace, 0::bigint AS flows, count(*) AS files, 0::bigint AS kv_keys \
+  SELECT namespace, 0::bigint AS flows, count(*) FILTER (WHERE NOT is_directory) AS files, \
+         0::bigint AS kv_keys \
     FROM (SELECT DISTINCT ON (namespace, path) namespace, is_directory, deleted \
             FROM workflow.namespace_files \
            WHERE workspace_id = $1 \
              AND ($2::text IS NULL OR namespace = $2 OR starts_with(namespace, $2 || '.')) \
            ORDER BY namespace, path, revision DESC) latest \
-   WHERE NOT deleted AND NOT is_directory \
+   WHERE NOT deleted \
    GROUP BY namespace), \
 keys AS ( \
   SELECT namespace, 0::bigint AS flows, 0::bigint AS files, count(*) AS kv_keys \

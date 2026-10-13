@@ -393,3 +393,38 @@ async fn the_detail_route_does_not_clash_with_files_and_kv() {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(common::json(res).await, row("a", 0, 0, 1, true));
 }
+
+/// A live directory, even an empty one, makes its namespace a source
+/// (`own: true`) while `files` counts files only; a namespace whose only
+/// directory is deleted is not listed (controller ruling, Task 1 fix round).
+#[tokio::test]
+async fn a_live_folder_alone_makes_a_namespace() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = reader(&db).await;
+    file_row(&db, ws, "folder.only", "/empty/", 1, false).await;
+    file_row(&db, ws, "folder.gone", "/empty/", 1, true).await;
+    let app = common::app(&db).await;
+
+    assert_eq!(
+        list(&app, ws, user, "").await,
+        vec![
+            row("folder", 0, 0, 0, false),
+            row("folder.only", 0, 0, 0, true),
+        ]
+    );
+    let res = common::get(
+        &app,
+        &format!("/api/ws/{ws}/workflows/namespaces/folder.only"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(common::json(res).await, row("folder.only", 0, 0, 0, true));
+    let res = common::get(
+        &app,
+        &format!("/api/ws/{ws}/workflows/namespaces/folder.gone"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}

@@ -9,8 +9,8 @@
 /**
  * One namespace of the workspace (W7d spec §3.1). egret has no namespace
  * table: a namespace exists while a flow that is not deleted, a live
- * namespace file or a live KV key is in it, or while it is a parent by dots
- * of one that is.
+ * namespace file or directory (even an empty one) or a live KV key is in
+ * it, or while it is a parent by dots of one that is.
  *
  * **The counts are this namespace's OWN**, never rolled up from its
  * children: `company` with one flow in `company.team` answers `flows: 0`.
@@ -31,7 +31,8 @@ export interface WorkflowNamespaceDto {
   kv_keys: number;
   /**
      * False when the namespace is present only as a parent by dots of
-     * another (its counts are then all zero).
+     * another (its counts are then all zero). True for a source, whose
+     * counts can all be zero when it holds only a live empty directory.
      */
   own: boolean;
 }
