@@ -5,11 +5,17 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { IterationRun } from './iterationRun';
 import type { IterationsByState } from './iterationsByState';
 
 export interface Iterations {
-  /** How many iterations this node ran in. */
+  /** How many iterations this node ran in: `runs.len()`. */
   total: number;
-  /** Iterations by their folded state's wire name. */
+  /** Iterations by their folded state's wire name: `runs` counted by `state`. */
   by_state: IterationsByState;
+  /**
+     * The node's own run in each iteration it ran in, by `loop_index`. An
+     * iteration where the node never ran has no entry.
+     */
+  runs: IterationRun[];
 }

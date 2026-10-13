@@ -137,7 +137,7 @@ export const REFUSAL_NOTE = "egret does not run this task";
  * state other than `FAILED` and `KILLED`); failed and killed ones are counted
  * apart, and a running one is neither.
  */
-export function iterationsText(it: NonNullable<NodeState["iterations"]>): string {
+export function iterationsText(it: Pick<NonNullable<NodeState["iterations"]>, "total" | "by_state">): string {
   let done = 0;
   for (const [s, n] of Object.entries(it.by_state)) if (isTerminalState(s) && s !== "FAILED" && s !== "KILLED") done += n;
   const failed = it.by_state.FAILED ?? 0;

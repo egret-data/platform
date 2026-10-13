@@ -25,4 +25,10 @@ export interface NodeState {
   /** @nullable */
   ended_at?: string | null;
   iterations?: null | Iterations;
+  /**
+     * For a `Subflow` node's single run: the newest child execution it
+     * started. Absent for any other node, and for a fold.
+     * @nullable
+     */
+  child_execution_id?: string | null;
 }

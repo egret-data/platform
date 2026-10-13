@@ -170,7 +170,7 @@ export const STATES: Record<string, NodeState> = {
   "tasks.p.y": state("FAILED", {
     attempts: 3,
     run_id: null,
-    iterations: { total: 3, by_state: { SUCCESS: 2, FAILED: 1 } },
+    iterations: { total: 3, by_state: { SUCCESS: 2, FAILED: 1 }, runs: [] },
   }),
 };
 

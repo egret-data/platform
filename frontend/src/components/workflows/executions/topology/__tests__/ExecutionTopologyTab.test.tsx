@@ -20,13 +20,19 @@ const LOG = "io.kestra.plugin.core.log.Log";
 const LOOP = "io.kestra.plugin.core.flow.ForEach";
 const SUBFLOW = "io.kestra.plugin.core.flow.Subflow";
 
-/** first -> loop(body) -> call -> later. The nodes are not in drawing order (FE-TEST-1). */
+/**
+ * first -> loop(body, big; errors: h) -> call -> later. The nodes are not in drawing order
+ * (FE-TEST-1). `h` is the Loop's own `errors:` handler: it sits in the loop's cluster with a body
+ * task's uid shape (`tasks.loop.h`), but runs in the execution itself, never in an iteration.
+ */
 const GRAPH: FlowGraph = {
   nodes: [
     task("tasks.later", LOG),
     task("tasks.call", SUBFLOW, { kind: "executable" }),
     end("tasks.loop"),
     task("tasks.loop.body", LOG),
+    task("tasks.loop.h", LOG, { branch: "errors" }),
+    task("tasks.loop.big", LOG),
     task("tasks.loop", LOOP, { kind: "flowable" }),
     start("tasks.loop"),
     task("tasks.first", LOG),
@@ -38,12 +44,15 @@ const GRAPH: FlowGraph = {
     edge("tasks.first", "start:tasks.loop"),
     edge("start:tasks.loop", "tasks.loop"),
     edge("tasks.loop", "tasks.loop.body", "dynamic"),
-    edge("tasks.loop.body", "end:tasks.loop", "dynamic"),
+    edge("tasks.loop.body", "tasks.loop.big", "dynamic"),
+    edge("tasks.loop.big", "end:tasks.loop", "dynamic"),
+    edge("tasks.loop", "tasks.loop.h", "error"),
+    edge("tasks.loop.h", "end:tasks.loop", "error"),
     edge("end:tasks.loop", "tasks.call"),
     edge("tasks.call", "tasks.later"),
     edge("tasks.later", "end:flow"),
   ],
-  clusters: [cluster("tasks.loop", "loop", ["start:tasks.loop", "tasks.loop", "tasks.loop.body", "end:tasks.loop"])],
+  clusters: [cluster("tasks.loop", "loop", ["start:tasks.loop", "tasks.loop", "tasks.loop.body", "tasks.loop.big", "tasks.loop.h", "end:tasks.loop"])],
 };
 
 /** `GRAPH` with `tasks.call` expanded to its child flow's one task, `tasks.x`. */
@@ -71,12 +80,24 @@ const st = (state: string, over: Partial<NodeState> = {}): NodeState => ({
   ...over,
 });
 
+const iterationId = (i: number) => `5e5e5e5e-0000-4000-8000-${String(100 + i).padStart(12, "0")}`;
+const iterRun = (loop_index: number, state: string) => ({ loop_index, state, child_execution_id: iterationId(loop_index), run_id: `it-${loop_index}` });
+
+/**
+ * `body`'s own runs: it SUCCEEDED in iteration #1, which failed on a later body task (the server's
+ * [A,B,C] case, graph/states.rs), and failed in #2. Out of order is the server's job, so it comes
+ * in order. `big` ran in 201 iterations, more than any list page holds.
+ */
+const BODY_RUNS = [iterRun(0, "SUCCESS"), iterRun(1, "SUCCESS"), iterRun(2, "FAILED")];
+const BIG_RUNS = Array.from({ length: 201 }, (_, i) => iterRun(i, "SUCCESS"));
+
 const STATES: Record<string, NodeState> = {
   "tasks.first": st("SUCCESS", { run_id: "r-0" }),
   "tasks.loop": st("RUNNING", { run_id: "r-1", ended_at: null }),
-  // A folded body: no run of its own.
-  "tasks.loop.body": st("FAILED", { iterations: { total: 3, by_state: { SUCCESS: 2, FAILED: 1 } } }),
-  "tasks.call": st("RUNNING", { run_id: "r-2", ended_at: null }),
+  // Folded bodies: no run of their own.
+  "tasks.loop.body": st("FAILED", { iterations: { total: 3, by_state: { SUCCESS: 2, FAILED: 1 }, runs: BODY_RUNS } }),
+  "tasks.loop.big": st("SUCCESS", { iterations: { total: 201, by_state: { SUCCESS: 201 }, runs: BIG_RUNS } }),
+  "tasks.call": st("RUNNING", { run_id: "r-2", ended_at: null, child_execution_id: CHILD }),
 };
 const EXPANDED_STATES: Record<string, NodeState> = {
   ...STATES,
@@ -124,43 +145,6 @@ function execution(state: string): ExecutionDto {
   } as unknown as ExecutionDto;
 }
 
-function child(id: string, state: string, over: Record<string, unknown>) {
-  return {
-    id,
-    flow_id: null,
-    namespace: "company.team",
-    flow_key: "hello",
-    state,
-    history: ["CREATED", state],
-    inputs: {},
-    seq: 2,
-    attempt_number: 1,
-    origin_offset_ms: 0,
-    parent_execution_id: null,
-    parent_run_ix: null,
-    trigger_execution_id: null,
-    trigger_run_ix: null,
-    loop_index: null,
-    loop_value: null,
-    created_at: T0,
-    updated_at: T3,
-    ...over,
-  };
-}
-
-const iter = (n: number, state: string, loop_index: number, loop_value: string) =>
-  child(`5e5e5e5e-0000-4000-8000-00000000010${n}`, state, { parent_execution_id: EXEC, parent_run_ix: 1, loop_index, loop_value });
-
-/** Out of order; a retry of `first`, the Subflow's child and another Loop run's iteration are not this loop's iterations. */
-const CHILDREN = [
-  iter(2, "SUCCESS", 2, "c"),
-  child("5e5e5e5e-0000-4000-8000-0000000000f1", "RUNNING", { parent_execution_id: EXEC, parent_run_ix: 7, loop_index: 0, loop_value: "z" }),
-  child("5e5e5e5e-0000-4000-8000-0000000000e1", "SUCCESS", { parent_execution_id: EXEC, parent_run_ix: 0 }),
-  iter(0, "FAILED", 0, "a"),
-  child(CHILD, "KILLED", { trigger_execution_id: EXEC, trigger_run_ix: 2 }),
-  iter(1, "SUCCESS", 1, "b"),
-];
-
 type Reply = { status: number; body: unknown };
 type Call = { path: string; query: URLSearchParams };
 
@@ -168,8 +152,10 @@ type Call = { path: string; query: URLSearchParams };
 class Server {
   calls: Call[] = [];
   graphs: Reply[];
-  children: unknown[] = CHILDREN;
+  /** The expanded reads, in turn; the last one for good. */
+  expandedGraphs: Reply[] = [ok(EXPANDED, EXPANDED_STATES)];
   private served = 0;
+  private servedExpanded = 0;
 
   constructor(...graphs: Reply[]) {
     this.graphs = graphs;
@@ -187,10 +173,11 @@ class Server {
 
   private route(path: string, query: URLSearchParams): Reply {
     if (path === GRAPH_PATH) {
-      if (query.get("subflows")) return ok(EXPANDED, EXPANDED_STATES);
+      if (query.get("subflows")) return this.expandedGraphs[Math.min(this.servedExpanded++, this.expandedGraphs.length - 1)];
       return this.graphs[Math.min(this.served++, this.graphs.length - 1)];
     }
-    if (path === LIST_PATH) return { status: 200, body: { rows: this.children, total: this.children.length, limit: 200, offset: 0 } };
+    // The tab must not need the children list (fix round 1): any read of it is a defect.
+    if (path === LIST_PATH) return { status: 500, body: { error: "the tab read the children list" } };
     return { status: 404, body: { error: `no route ${path}` } };
   }
 
@@ -336,25 +323,51 @@ describe("ExecutionTopologyTab: selection (spec §6.3)", () => {
     expect(within(await screen.findByTestId("gantt-run-panel")).getByText("logs of r-2")).toBeInTheDocument();
   });
 
-  it("lists a Loop body node's iterations, in order, each with its state and a link to its child execution", async () => {
+  it("lists a Loop body node's own state in each iteration, under a header naming the task, linking each child execution", async () => {
     const server = new Server(ok(GRAPH));
     renderTab(execution("FAILED"));
     await userEvent.click(await findNode("tasks.loop.body"));
-    const panel = await screen.findByRole("region", { name: /body/ });
+    const panel = await screen.findByTestId("loop-iterations");
+    expect(within(panel).getByRole("heading", { level: 2 })).toHaveTextContent("body");
     expect(within(panel).getByText("2 of 3 iterations done, 1 failed")).toBeInTheDocument();
-    const rows = await within(panel).findAllByRole("row");
-    // A header, then the three iterations of `tasks.loop`'s run (#1); not the retry, not the Subflow's child.
-    expect(rows).toHaveLength(4);
-    expect(rows.slice(1).map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["#0a", "#1b", "#2c"]);
-    expect(within(rows[1]).getByText("Failed")).toBeInTheDocument();
-    expect(within(rows[2]).getByText("Success")).toBeInTheDocument();
+    // The column is the task's, so it is not read as the iteration's own state.
+    expect(within(panel).getByRole("columnheader", { name: "State of body" })).toBeInTheDocument();
+    const rows = within(panel).getAllByRole("row").slice(1);
+    expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["#0", "#1", "#2"]);
+    // #1: the iteration failed elsewhere; `body` itself succeeded there, and that is what is shown.
+    expect(within(rows[1]).getByText("Success")).toBeInTheDocument();
+    expect(within(rows[2]).getByText("Failed")).toBeInTheDocument();
     expect(within(rows[1]).getByRole("link")).toHaveAttribute(
       "href",
-      `/explore/${WS}/workflows/executions/5e5e5e5e-0000-4000-8000-000000000100/topology?node=tasks.body`,
+      `/explore/${WS}/workflows/executions/${iterationId(1)}/topology?node=tasks.body`,
     );
-    expect(server.listReads()[0].query.get("parent")).toBe(EXEC);
     expect(screen.queryByTestId("gantt-run-panel")).toBeNull();
     expect(where()).toContain("?node=tasks.loop.body");
+    expect(server.listReads()).toHaveLength(0);
+
+    await userEvent.click(within(panel).getByRole("button", { name: "Close the iterations" }));
+    expect(screen.queryByTestId("loop-iterations")).toBeNull();
+    expect(document.activeElement).toBe(nodeButton("tasks.loop.body"));
+  });
+
+  it("lists every iteration, past any page size", async () => {
+    new Server(ok(GRAPH));
+    renderTab(execution("FAILED"));
+    await userEvent.click(await findNode("tasks.loop.big"));
+    const panel = await screen.findByTestId("loop-iterations");
+    const rows = within(panel).getAllByRole("row").slice(1);
+    expect(rows).toHaveLength(201);
+    expect(within(rows[0]).getAllByRole("cell")[0]).toHaveTextContent("#0");
+    expect(within(rows[200]).getAllByRole("cell")[0]).toHaveTextContent("#200");
+    expect(within(panel).queryByText(/not listed/)).toBeNull();
+  });
+
+  it("does not list iterations for a Loop's own errors handler that has not run", async () => {
+    new Server(ok(GRAPH));
+    renderTab(execution("SUCCESS"));
+    await userEvent.click(await findNode("tasks.loop.h"));
+    expect(await screen.findByText("h has not run in this execution.")).toBeInTheDocument();
+    expect(screen.queryByTestId("loop-iterations")).toBeNull();
   });
 
   it("says when a node has not run", async () => {
@@ -367,7 +380,7 @@ describe("ExecutionTopologyTab: selection (spec §6.3)", () => {
 });
 
 describe("ExecutionTopologyTab: Subflow expansion", () => {
-  it("draws the child execution's states, and links a child node to it", async () => {
+  it("draws the child execution's states, and links a child node to the child the graph names", async () => {
     const server = new Server(ok(GRAPH));
     renderTab(execution("FAILED"));
     await userEvent.click(await screen.findByRole("button", { name: "Expand subflow call" }));
@@ -379,5 +392,30 @@ describe("ExecutionTopologyTab: Subflow expansion", () => {
     await userEvent.click(x);
     const link = await screen.findByRole("link", { name: /Open the child execution/ });
     expect(link).toHaveAttribute("href", `/explore/${WS}/workflows/executions/${CHILD}/topology?node=tasks.x`);
+    expect(server.listReads()).toHaveLength(0);
+
+    // Escape from inside the panel closes it and gives focus back to the node.
+    link.focus();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("link", { name: /Open the child execution/ })).toBeNull();
+    expect(where()).not.toContain("node=");
+    expect(document.activeElement).toBe(nodeButton("tasks.call/tasks.x"));
+  });
+
+  it("says the child has not started yet, then links it once a poll names it", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const server = new Server(ok(GRAPH));
+    const notYet = { ...EXPANDED_STATES, "tasks.call": st("RUNNING", { run_id: "r-2", ended_at: null }) };
+    server.expandedGraphs = [ok(EXPANDED, notYet), ok(EXPANDED, EXPANDED_STATES)];
+    renderTab(execution("RUNNING"), "?expand=tasks.call&node=tasks.call%2Ftasks.x");
+    expect(await screen.findByText("The Subflow call has not started its child execution yet.")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Open the child execution/ })).toBeNull();
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+    expect(await screen.findByRole("link", { name: /Open the child execution/ })).toHaveAttribute(
+      "href",
+      `/explore/${WS}/workflows/executions/${CHILD}/topology?node=tasks.x`,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Close the child task" }));
+    expect(screen.queryByRole("link", { name: /Open the child execution/ })).toBeNull();
   });
 });

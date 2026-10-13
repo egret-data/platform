@@ -154,10 +154,10 @@ const MARKERS = [
   // The editor's Topology tab (W7c Task 5): its note for a node no longer in the YAML.
   ["src/components/workflows/topology/TopologyTab.tsx", "is not in the YAML as it is now.", "topology"],
   // The execution's Topology tab (W7c Task 6), reached from `ExecutionDetail.tsx` through `lazy()`
-  // only: its note for a `?node=` the graph does not have, and the iteration list's truncation
-  // note. `selection.ts` has no literal worth a marker and is reached only through these two.
+  // only: its note for a `?node=` the graph does not have, and the iteration list's empty
+  // sentence. `selection.ts` has no literal worth a marker and is reached only through these two.
   ["src/components/workflows/executions/topology/ExecutionTopologyTab.tsx", "is not a node of this execution's graph.", "topology"],
-  ["src/components/workflows/executions/topology/LoopIterations.tsx", "so later iterations are not listed.", "topology"],
+  ["src/components/workflows/executions/topology/LoopIterations.tsx", "has not run in any iteration yet.", "topology"],
   ["node_modules/@xyflow/react (via TopologyView.tsx)", "react-flow__viewport-portal", "topology"],
   ["node_modules/@dagrejs/dagre (via layout.ts)", "network-simplex", "topology"],
 ];

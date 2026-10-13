@@ -18,7 +18,6 @@ describe("workflowsKeys", () => {
       workflowsKeys.schema("eng"),
       workflowsKeys.execution("e"),
       workflowsKeys.executionChildren("e"),
-      workflowsKeys.executionChildrenPage("e", 200),
       workflowsKeys.executionGraph("e", []),
       workflowsKeys.executions("eng"),
       workflowsKeys.executions("eng", { page: 2 }),
@@ -46,14 +45,11 @@ describe("workflowsKeys", () => {
     expect(reaches(workflowsKeys.executions("eng"), workflowsKeys.executionChildren("e"))).toBe(false);
   });
 
-  it("refreshes an execution's graph and its larger children page with the execution, apart from the Overview's page", () => {
+  it("refreshes an execution's graph with the execution, one entry per set of expanded Subflows", () => {
     const graph = workflowsKeys.executionGraph("e", ["tasks.call"]);
-    const page = workflowsKeys.executionChildrenPage("e", 200);
     expect(reaches(workflowsKeys.execution("e"), graph)).toBe(true);
     expect(reaches(workflowsKeys.execution("f"), graph)).toBe(false);
     expect(graph).not.toEqual(workflowsKeys.executionGraph("e", []));
-    expect(reaches(workflowsKeys.executionChildren("e"), page)).toBe(true);
-    expect(page).not.toEqual(workflowsKeys.executionChildren("e"));
   });
 
   it("reaches a file's reads from the file and the execution, and no other file's", () => {

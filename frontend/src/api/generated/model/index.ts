@@ -237,6 +237,7 @@ export * from './groupDto';
 export * from './groupMemberDto';
 export * from './impersonationDto';
 export * from './issueClientInput';
+export * from './iterationRun';
 export * from './iterations';
 export * from './iterationsByState';
 export * from './joinableWorkspaceDto';

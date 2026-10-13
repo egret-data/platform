@@ -7,6 +7,6 @@
  */
 
 /**
- * Iterations by their folded state's wire name.
+ * Iterations by their folded state's wire name: `runs` counted by `state`.
  */
 export type IterationsByState = {[key: string]: number};

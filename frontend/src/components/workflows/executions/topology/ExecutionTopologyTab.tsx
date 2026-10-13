@@ -1,15 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { keepPreviousData } from "@tanstack/react-query";
-import { RotateCw } from "lucide-react";
-import { useWorkflowGetExecutionGraph, useWorkflowListExecutions } from "@/api/generated/workflow/workflow";
+import { RotateCw, X } from "lucide-react";
+import { useWorkflowGetExecutionGraph } from "@/api/generated/workflow/workflow";
 import type { ExecutionDto, FlowGraph, NodeState } from "@/api/generated/model";
 import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
 import { isTerminalState } from "@/components/workflows/executionState";
 import { buildGantt } from "@/components/workflows/executions/gantt/ganttModel";
 import { GanttRunPanel, type GanttRunSlots } from "@/components/workflows/executions/gantt/GanttView";
 import { nextPollMs } from "@/components/workflows/executions/polling";
-import { ITERATIONS_LIMIT, LoopIterations } from "@/components/workflows/executions/topology/LoopIterations";
+import { LoopIterations, useEscapeCloses } from "@/components/workflows/executions/topology/LoopIterations";
 import { nodeSearch, selectionOf } from "@/components/workflows/executions/topology/selection";
 import { TopologyView } from "@/components/workflows/topology/TopologyView";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
@@ -137,11 +138,6 @@ export default function ExecutionTopologyTab({
   const logs = useMemo(() => (selectedRun ? logsSlot(selectedRun) : null), [selectedRun, logsSlot]);
   const outputs = useMemo(() => (selectedRun ? outputsSlot(selectedRun) : null), [selectedRun, outputsSlot]);
 
-  const runIxOf = (uid: string): number | null => {
-    const id = states[uid]?.run_id;
-    return execution.runs.find((r) => r.id === id)?.run_ix ?? null;
-  };
-
   let panel = null;
   let note: string | null = null;
   if (selected !== null && graph && selection) {
@@ -156,30 +152,25 @@ export default function ExecutionTopologyTab({
         note = `The run of ${name} is not in this execution's task runs yet.`;
       }
     } else if (selection.kind === "iterations") {
-      panel = (
-        <LoopIterations
-          key={selected}
-          ws={ws}
-          execution={execution}
-          taskId={name}
-          state={states[selected]}
-          loopRunIx={runIxOf(selection.loop)}
-          childUid={selection.childUid}
-          onClose={close}
-        />
-      );
+      // `selectionOf` answers `iterations` only when the state has them.
+      const state = states[selected];
+      if (state) panel = <LoopIterations key={selected} ws={ws} taskId={name} state={state} childUid={selection.childUid} onClose={close} />;
     } else if (selection.kind === "child") {
       panel = (
         <SubflowChild
+          key={selected}
           ws={ws}
-          execution={execution}
           name={name}
           subflowName={nameOf(graph, selection.subflow)}
-          subflowRunIx={runIxOf(selection.subflow)}
+          subflow={states[selection.subflow]}
           rest={selection.rest}
+          terminal={terminal}
+          onClose={close}
         />
       );
     } else {
+      // No run and no iterations: not run yet, a body task no iteration has reached, or a Loop's
+      // own `errors:` handler that has not run (it runs in this execution, not in an iteration).
       note = `${name} has not run in this execution.`;
     }
   }
@@ -218,48 +209,60 @@ export default function ExecutionTopologyTab({
 }
 
 /**
- * A node of an expanded `Subflow`: its run is in the child execution, found
- * among this execution's children by the Subflow's run (`trigger_run_ix`).
+ * A node of an expanded `Subflow`: its runs are in the child execution the
+ * Subflow's run started, which the graph names (`child_execution_id` on the
+ * Subflow node's state). The graph is polled while the execution runs, so a
+ * child started later gets its link on the next read.
  */
 function SubflowChild({
   ws,
-  execution,
   name,
   subflowName,
-  subflowRunIx,
+  subflow,
   rest,
+  terminal,
+  onClose,
 }: {
   ws: string;
-  execution: ExecutionDto;
   name: string;
   subflowName: string;
-  subflowRunIx: number | null;
+  /** The Subflow node's state in this execution, if it has run. */
+  subflow: NodeState | undefined;
   rest: string;
+  terminal: boolean;
+  onClose: () => void;
 }) {
-  const query = useWorkflowListExecutions(
-    ws,
-    { parent: execution.id, limit: ITERATIONS_LIMIT },
-    {
-      query: {
-        queryKey: workflowsKeys.executionChildrenPage(execution.id, ITERATIONS_LIMIT),
-        enabled: subflowRunIx !== null,
-      },
-    },
-  );
-  const rows = query.data?.status === 200 ? query.data.data.rows : [];
-  const child = rows.find((r) => r.trigger_execution_id === execution.id && r.trigger_run_ix === subflowRunIx);
+  const headingId = useId();
+  const panel = useRef<HTMLElement>(null);
+  useEscapeCloses(panel, onClose);
+  const child = subflow?.child_execution_id ?? null;
+  let detail: string | null = null;
+  if (!child) {
+    if (!subflow) detail = `The Subflow ${subflowName} has not run in this execution, so it has no child execution.`;
+    else if (subflow.iterations) detail = `The Subflow ${subflowName} ran in Loop iterations, each with a child execution of its own. Select ${subflowName} to list the iterations.`;
+    else if (terminal) detail = `The Subflow ${subflowName} did not start a child execution.`;
+    else detail = `The Subflow ${subflowName} has not started its child execution yet.`;
+  }
   return (
-    <div className="flex flex-wrap items-center gap-3 rounded-md border p-4 text-sm">
-      <span>{`${name} is a task of the flow the Subflow ${subflowName} called; its runs are in that child execution.`}</span>
+    <section ref={panel} aria-labelledby={headingId} className="rounded-md border p-4 text-sm">
+      <div className="flex items-start justify-between gap-3">
+        <h2 id={headingId} className="truncate font-mono text-base font-semibold">
+          {name}
+        </h2>
+        <IconButton aria-label="Close the child task" onClick={onClose} className="size-8">
+          <X aria-hidden className="size-4" />
+        </IconButton>
+      </div>
+      <p className="mt-2">{`${name} is a task of the flow the Subflow ${subflowName} called; its runs are in that child execution.`}</p>
       {child ? (
-        <Button asChild variant="outline" size="sm">
-          <Link to={`/explore/${ws}/workflows/executions/${encodeURIComponent(child.id)}/topology${nodeSearch(rest)}`}>
+        <Button asChild variant="outline" size="sm" className="mt-3">
+          <Link to={`/explore/${ws}/workflows/executions/${encodeURIComponent(child)}/topology${nodeSearch(rest)}`}>
             Open the child execution
           </Link>
         </Button>
-      ) : query.isError ? (
-        <span className="text-muted-foreground">{`The child execution could not be found: ${errorMessage(query.error)}.`}</span>
-      ) : null}
-    </div>
+      ) : (
+        <p className="mt-2 text-muted-foreground">{detail}</p>
+      )}
+    </section>
   );
 }

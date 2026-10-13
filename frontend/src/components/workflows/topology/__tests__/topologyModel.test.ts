@@ -15,7 +15,7 @@ describe("topologyModel", () => {
   });
 
   it("says a fold's attempts are a maximum, a single run's a count, and nothing for one attempt", () => {
-    expect(attemptsText(state("FAILED", { attempts: 3, run_id: null, iterations: { total: 2, by_state: { FAILED: 2 } } }))).toBe("up to 3 attempts");
+    expect(attemptsText(state("FAILED", { attempts: 3, run_id: null, iterations: { total: 2, by_state: { FAILED: 2 }, runs: [] } }))).toBe("up to 3 attempts");
     expect(attemptsText(state("FAILED", { attempts: 2 }))).toBe("2 attempts");
     expect(attemptsText(state("SUCCESS", { attempts: 1 }))).toBeNull();
   });

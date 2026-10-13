@@ -33,12 +33,6 @@ export const workflowsKeys = {
    */
   executionChildren: (id: string) => ["workflows", "execution", id, "children"] as const,
   /**
-   * A larger page of the same children (`limit`), for the Topology tab's `Loop`
-   * iterations (W7c spec §6.3): beneath `executionChildren(id)`, but its own
-   * entry, since the Overview asks for fewer rows.
-   */
-  executionChildrenPage: (id: string, limit: number) => ["workflows", "execution", id, "children", limit] as const,
-  /**
    * The execution's graph with its states (`GET …/executions/{id}/graph`,
    * W7c spec §4), per set of expanded `Subflow`s, under `execution(id)`.
    */
