@@ -13,21 +13,35 @@
 -- (`engines.rs`, the FE/CN image reads); no other field picks it.
 -- External engines are untouched: egret never ran their image.
 
+-- A spec, or a `starrocksConfig`, that is not a JSON object (JSON `null`, an
+-- array, a scalar) is read by Rust as carrying nothing (`spec["x"]` is Null),
+-- so such an engine runs the default too. Each is replaced by an object: never
+-- `jsonb_set` into a non-object (it raises and aborts startup), and never
+-- `'null'::jsonb || {...}` (that yields an array).
+
 UPDATE engine_mgmt.engines
-   SET spec = jsonb_set(spec, '{imageVersion}', '"470"')
+   SET spec = jsonb_set(
+                CASE WHEN jsonb_typeof(spec) = 'object' THEN spec ELSE '{}'::jsonb END,
+                '{imageVersion}', '"470"')
  WHERE type = 'trino' AND origin = 'provisioned'
    AND coalesce(btrim(spec ->> 'imageVersion'), '') = '';
 
 UPDATE engine_mgmt.engines
-   SET spec = jsonb_set(spec, '{starrocksConfig}',
-                coalesce(spec -> 'starrocksConfig', '{}'::jsonb)
+   SET spec = jsonb_set(
+                CASE WHEN jsonb_typeof(spec) = 'object' THEN spec ELSE '{}'::jsonb END,
+                '{starrocksConfig}',
+                CASE WHEN jsonb_typeof(spec -> 'starrocksConfig') = 'object'
+                     THEN spec -> 'starrocksConfig' ELSE '{}'::jsonb END
                 || jsonb_build_object('feImage', 'starrocks/fe-ubuntu:4.1-latest'))
  WHERE type = 'starrocks' AND origin = 'provisioned'
    AND coalesce(btrim(spec #>> '{starrocksConfig,feImage}'), '') = '';
 
 UPDATE engine_mgmt.engines
-   SET spec = jsonb_set(spec, '{starrocksConfig}',
-                coalesce(spec -> 'starrocksConfig', '{}'::jsonb)
+   SET spec = jsonb_set(
+                CASE WHEN jsonb_typeof(spec) = 'object' THEN spec ELSE '{}'::jsonb END,
+                '{starrocksConfig}',
+                CASE WHEN jsonb_typeof(spec -> 'starrocksConfig') = 'object'
+                     THEN spec -> 'starrocksConfig' ELSE '{}'::jsonb END
                 || jsonb_build_object('cnImage', 'starrocks/cn-ubuntu:4.1-latest'))
  WHERE type = 'starrocks' AND origin = 'provisioned'
    AND coalesce(btrim(spec #>> '{starrocksConfig,cnImage}'), '') = '';

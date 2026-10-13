@@ -913,7 +913,28 @@ async fn migration_0185_writes_todays_implicit_images_and_touches_nothing_explic
         "provisioned",
     )
     .await;
-    let ids = vec![
+    // Non-object shapes: `'null'::jsonb || {...}` is an ARRAY and `jsonb_set`
+    // on a non-object spec raises, aborting startup. Rust reads every one of
+    // these as "no image" (`spec["x"]` on a non-object is Null), so each runs
+    // the default today and must come out an object carrying it.
+    let mut odd = Vec::new();
+    for (i, (ty, spec)) in [
+        ("starrocks", serde_json::json!({"starrocksConfig": null})),
+        ("starrocks", serde_json::json!({"starrocksConfig": []})),
+        ("starrocks", serde_json::json!({"starrocksConfig": "x"})),
+        ("starrocks", serde_json::Value::Null),
+        ("starrocks", serde_json::json!([1])),
+        ("trino", serde_json::Value::Null),
+        ("trino", serde_json::json!([])),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        odd.push(
+            insert_engine_spec(&db, &format!("img-odd-{i}-{tag}"), ty, spec, "provisioned").await,
+        );
+    }
+    let mut ids = vec![
         trino_empty,
         trino_explicit,
         sr_implicit,
@@ -921,6 +942,7 @@ async fn migration_0185_writes_todays_implicit_images_and_touches_nothing_explic
         trino_number,
         sr_number,
     ];
+    ids.extend(&odd);
 
     let mut run_error = None;
     for statement in migration_0185_scoped_statements() {
@@ -969,4 +991,22 @@ async fn migration_0185_writes_todays_implicit_images_and_touches_nothing_explic
         specs[5]["starrocksConfig"]["cnImage"],
         serde_json::json!("42")
     );
+    let sr_default = serde_json::json!({
+        "feImage": "starrocks/fe-ubuntu:4.1-latest",
+        "cnImage": "starrocks/cn-ubuntu:4.1-latest",
+    });
+    for (i, spec) in specs[6..11].iter().enumerate() {
+        assert_eq!(
+            spec,
+            &serde_json::json!({ "starrocksConfig": sr_default }),
+            "odd starrocks spec {i}"
+        );
+    }
+    for (i, spec) in specs[11..].iter().enumerate() {
+        assert_eq!(
+            spec,
+            &serde_json::json!({ "imageVersion": "470" }),
+            "odd trino spec {i}"
+        );
+    }
 }
