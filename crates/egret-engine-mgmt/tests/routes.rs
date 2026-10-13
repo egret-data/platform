@@ -11849,7 +11849,7 @@ async fn a_pair_committed_between_the_dry_run_and_the_real_recompile_refuses_the
     let second_tag = unit.second_tag;
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1, 'trino', 'egret', '{}'::jsonb, $2) RETURNING id",
+         VALUES ($1, 'trino', 'egret', '{\"imageVersion\":\"470\"}'::jsonb, $2) RETURNING id",
     )
     .bind(external_name("prov-race"))
     .bind(unit.profile)

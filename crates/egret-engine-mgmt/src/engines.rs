@@ -3197,8 +3197,8 @@ async fn build_starrocks_provision_req(
 
     // Desired FE/CN shape read back from the persisted spec (create wrote these).
     let cfg = engine.spec.get("starrocksConfig");
-    let fe_image = stored_image(&engine, &["starrocksConfig", "feImage"])?;
-    let cn_image = stored_image(&engine, &["starrocksConfig", "cnImage"])?;
+    let fe_image = stored_image(engine, &["starrocksConfig", "feImage"])?;
+    let cn_image = stored_image(engine, &["starrocksConfig", "cnImage"])?;
     let fe_replicas = cfg
         .and_then(|c| c.get("feReplicas"))
         .and_then(|v| v.as_u64())
