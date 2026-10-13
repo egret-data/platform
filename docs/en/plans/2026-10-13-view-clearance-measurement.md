@@ -972,3 +972,1099 @@ StarRocks plugin class.
 | B5 | Base MASK through a plain view still applies for the reader in 4.1.6. |
 | B6 | `ranger-plugins-common` in 4.1.6 is `2.8.0` (same as 4.1.4); about 70%. |
 | B7 | The first released version with the fix is 4.1.6 (4.1.5 was never published as an image, so I cannot test it; its inclusion is unproven here). |
+
+---
+
+# ROUND 2 OBSERVATIONS (second commit)
+
+## R2.3 Setup, with versions proven by output
+
+| piece | what ran |
+|---|---|
+| egret | worktree `egret-sp4a` binary built in round 1, `target/debug/egret serve` on **:8095**, DB `egret_viewclr_live`, `EGRET_RANGER__ENABLED=true`, `EGRET_CATALOG__PUBLIC_URL=http://host.docker.internal:8095`. It would not boot without `EGRET_STORAGE__BUCKET/ACCESS_KEY/SECRET_KEY` (dummy values; the apps API demands them). PID recorded at start, stopped by the PID that `lsof -i :8095` showed. |
+| 4.1.4 | container `viewclr2-sr` from the local `starrocks/allin1-ubuntu:latest`; `select current_version()` = `4.1.4-4a9848e`; `fe/lib/ranger-plugins-common-2.8.0.jar`; `fe-core-4.1.4.jar` has NO `ColumnPrivilege.checkViewPrivilege` (`javap`) |
+| 4.1.6 | container `viewclr2-sr416` from `starrocks/allin1-ubuntu:4.1.6` (pulled; pushed to Docker Hub 2026-10-01); `current_version()` = `4.1.6-6862092`; **`fe/lib/ranger-plugins-common-2.9.0.jar`**; `fe-core-4.1.jar` HAS `public static void checkViewPrivilege(ConnectContext, TableName, View)` (`javap`) |
+| FE debug | `sys_log_verbose_modules = org.apache.ranger.plugin.policyengine,com.starrocks.authorization.ranger`; each `REQ` line below is an `evaluatePolicies` entry for the acting user |
+| policies | all through `POST /api/control-plane/policies` and `PUT /policies/{id}/enabled`. Mask policy 34 = `MASK_NULL`, 35 = `MASK_HASH` (items: cleared users `MASK_NONE`, group `public` the mask), on `default_catalog.vcdb.base.secret`. The round 1 deny (22) and base.plain mask (23) were DISABLED for Question A and re-enabled only for the Question B deny phase. Final state of the DB: 22 off, 23 off, 34 on, 35 off. |
+
+### Deviations and harness incidents, all labelled
+
+- **DEV-R2-1 (config).** SR `pollIntervalMs` 5000 instead of 30000 (same as DEV-3 in round 1).
+- **DEV-R2-2 (read-only probe).** One `BEGIN; UPDATE policy.authz_services SET config_jsonb = ... {"tagService":"vctrino_tag"} WHERE name='vcsr'; ROLLBACK;` to show that the schema refuses a tag service on the StarRocks profile. It failed with `violates check constraint "authz_services_tag_service_needs_schema_level"`, nothing was written. No SQL deviation was used to push any policy.
+- **Not a deviation but a limit.** The tag mask (T) was NOT measured on an engine, see T below.
+- **Incident 1.** My first reset command ran `drop database if exists vcdb force` as `vc_admin`; the drop succeeded and the `create database` was refused. I recreated `vcdb` as `root` before any measurement.
+- **Incident 2.** A chained command ran `mv` which is aliased to `mv -i`; it hung on a prompt, I killed that one PID, and the rest of the chain then ran concurrently with my retry. The first `414-MASK` block was therefore run with the policy toggles not yet applied and the second wrote interleaved output. I cut `results2.md` back to the last clean line, discarded both and reran the phase alone. Nothing in the tables below comes from the discarded blocks.
+- **Incident 3 (disk).** Free space was 47 GiB at the start and 43 GiB after the 4.1.6 pull, but fell to **26 GiB** by the time both containers had run, below the 30 GiB floor you set; I noticed it only afterwards because I did not re-check between container starts. I then removed everything (section R2.6). I did not stop earlier, so the floor was breached.
+- **Harness typo.** The first 4.1.4 deny/mask phases queried `upper(secret)` on `v_expr` (its columns are `u,c,s`); the query errored identically for all users and was fixed. The error lines are in the appendix and are not a finding.
+
+## R2.4 Results, Question A (StarRocks 4.1.4, scope P = path mask)
+
+Legend: `N` = MASK_NULL, `H` = MASK_HASH, OK = prediction held, WRONG = prediction wrong (a finding). `H1`/`H2` are two different 128-character hash strings (rows 1 and 3 both hold `H1`).
+
+| # | cell | observed N | observed H | verdict |
+|---|---|---|---|---|
+| 1 | direct `select id, secret from base` | uncleared `NULL` x3; cleared real; nobody `ERROR 5204 ... SELECT ... COLUMN id` | uncleared `H1,H2,H1`; cleared real; nobody 5204 | OK (but the hash is **128** hex chars, not 64: the transformer is `hex(sha2(...))` and `sha2` already returns hex) |
+| 2 | `v_plain` | uncleared `NULL`; cleared real; **nobody reads it, gets `NULL`** | uncleared hashes; nobody reads it, gets hashes | OK |
+| 3 | `v_expr` | `NULL` in `u,c,s` for uncleared and nobody; cleared `CLASSIFIED-1 / classified-1x / class` | `u`=`H1`, `c`=`H1`+`x`, `s`=`35653` (first 5 chars of the hash); no plaintext | OK |
+| 4 | `v_nest` | as 2 | as 2 | OK |
+| 5 | INVOKER `vi_inv` | as 2; **nobody reads it** | as 2 | OK |
+| 6a | `mv_c` (cleared owner) read by uncleared | **LEAK: `classified-1,2,1`** | **LEAK real** | OK (predicted) |
+| 6b | `mv_u` created and read by the UNCLEARED `vc_plain` | **LEAK: `classified-1,2,1`** | n/a (MV built once; same object) | **WRONG** (predicted `NULL`) |
+| 6c | uncleared `select id, secret from base`, MV rewrite on | `NULL`; `explain` shows the plan scans **`mv_u`** with `<slot 5> : NULL` projected on top | hashes; plan scans `mv_c` with `hex(sha2(...))` projected on top | result OK, mechanism **WRONG** (rewrite DOES happen; the mask is re-applied above the MV scan) |
+| 7 | `count(distinct)`, `min`, `max(length)` on base and `v_plain` | `0, NULL, NULL` | `2, H1, 128` | OK for N; H `max(length)` is 128 not 64 (detail WRONG) |
+| 8 | `= 'classified-1'`, `LIKE 'class%'`, `ORDER BY secret`, `GROUP BY secret`, direct and via `v_plain` | `=`, `LIKE`: 0 rows; `ORDER BY`: all `NULL`; `GROUP BY`: one `NULL` group of 3 | `=`, `LIKE`: 0 rows; `ORDER BY`/`GROUP BY` on the hash: groups of 2 (`H1`) and 1 (`H2`) | OK |
+| 8h | `where secret = hex(sha2('classified-1',256))` | 0 rows | **rows 1 and 3** | OK (dictionary attack on a deterministic mask works) |
+| 9 | `join mine m on m.k = b.secret`, direct and via view | 0 rows | 0 rows; and **`on hex(sha2(m.k,256)) = b.secret` returns ids 1,2,3** | OK |
+| 10 | CTAS and `INSERT..SELECT` from base/`v_plain` as uncleared, read back | copy holds `NULL` | **both statements FAILED** `Insert has filtered data` (the 128-char hash does not fit the `varchar(64)` target) | N OK; H **WRONG** (no copy made; a defect of the mask, not a leak) |
+| 10b | cleared CTAS into `copy_c`, uncleared reads it | **LEAK real** | **LEAK real** | OK (predicted) |
+| nobody, CTAS | `vc_nobody` `CREATE TABLE ... AS` | `ERROR 5204 ... CREATE TABLE ... DATABASE vcdb` | same | n/a |
+
+Ranger requests (FE log, 4.1.4): for an uncleared direct read the engine asks `policyType=1` on `[table=base column=secret]` and gets `allowed=true policy=34` (the MASK match), and `policyType=0 select` only for `column=id`: **with `MASK_NULL` the masked column is replaced by a constant and never scanned, so no `select` request is made for `secret` at all.** For a view read the engine asks `policyType=1/2` lookups on the VIEW's columns (`[table=v_plain column=secret]`, no policy matches) and the same base-column mask lookup (`policy=34`), and **no `policyType=0` request on the view** (the F-1 mechanism). For the MV refresh, the task-run thread asks `policyType=0 select` on `base.id` and `base.secret` as the MV owner and **asks no mask lookup**, which is why the MV holds real values.
+
+Side observations, not predicted:
+
+- `vc_nobody` `select id from base where secret = 'classified-1'` under `N` returned an empty set instead of `ERROR 5204`: the predicate folds to a constant `NULL`, the plan has no scan, and no column is checked. Under `H` the same query is refused. No data leaks; it is a place where the denial and the result differ by the mask type.
+- `MASK_HASH` is `cast(hex(sha2(...)) as {type})` and returned 128 characters in a `varchar(64)` column: the cast does not truncate, any write of the masked value into a same-width column fails.
+- The mask is evaluated per TABLE relation as the connected user; the same `H1` appears through the view and directly, so the mask is stable across the expansion.
+
+### T. Tag mask
+
+Not measured on an engine. In egret as built: the StarRocks service-def served for `vcsr` has `contextEnrichers: []` and the policy download has no `tagPolicies` key; `UPDATE ... tagService` on a StarRocks profile is refused by `authz_services_tag_service_needs_schema_level` (DEV-R2-2). Migration 0176 states why: `ServiceTags::from_assignments` hard-codes the resource key `schema`, which StarRocks does not have (`database`), so a StarRocks tag attachment would be dropped by `RangerTagEnricher` anyway. A SQL-only deviation cannot fix a hard-coded key in Rust; I did not edit the service-def to fake it, because that would test my edit and not the product. Prediction on T ("cannot reach the engine without a deviation") OK; my "about 60% it evaluates like the path mask" is untested. A mask expressed as a tag on StarRocks therefore needs product code (an engine-aware key map, a StarRocks tag enricher in the def, and a registry catalog for `default_catalog`).
+
+### Verdict, Question A
+
+**Clearance as a MASK holds through plain, nested, expression and INVOKER views, and for a user with no grant at all, on 4.1.4**, because the mask lookup runs per base-table scan as the reader and no view or its owner can change that. It does NOT close the problem. Leaking cells:
+
+1. **6b (the worst).** Any uncleared user who may `CREATE MATERIALIZED VIEW` gets the real values: the refresh runs `select` checks as the owner and no mask lookup. Neither mask type helps. Prevention needs `create materialized view` denied to everyone but the cleared.
+2. **6a.** A cleared owner's MV is readable by the uncleared (the MV column carries no policy).
+3. **10b.** Any copy a cleared user writes (CTAS, INSERT..SELECT) carries real values. This is expected (clearance does not follow data) but it is the same hole as 6a.
+4. **H only: 7, 8, 8h, 9.** `MASK_HASH` leaks cardinality, equality structure and, with a guessed value, content (`8h`, and a join against a table of guesses, `9`). `MASK_NULL` leaks nothing through predicates, aggregates or joins.
+5. **Not tested, by reading only:** the pattern mask `MASK` keeps length and punctuation (`xxxxxxxxxx-0`), so its length leaks; `max(length(secret))` on it would show 12.
+
+## R2.5 Results, Question B (F-1, F-2, F-3-deny, F-3-mask on 4.1.4 versus 4.1.6)
+
+Source evidence (no engine): commit **`e0d97ad2659`** "[BugFix] Ranger view/MV authorization for external tables (#56316)" (main, 2026-08-05). Backport to `branch-4.1`: **`2a36c2d0715`** (2026-08-06, #77288), branch-4.0: `4532ce4938e` (2026-08-19). Neither is an ancestor of the `4.1.4` tag (`git merge-base --is-ancestor` fails; the `4.1.4` head is `4a9848edf03`, 2026-08-05 12:26 +0800). Local tags stop at 4.1.4 and GitHub was unreachable (timeouts), so I could not read the 4.1.5 or 4.1.6 tags; 4.1.6 is proven by the live run below. There is no `4.1.5` and no `4.2` image tag on Docker Hub. The change moves a view (and an MV) in the external-controller branch of `ColumnPrivilege.check` to `checkViewPrivilege`: `Authorizer.checkViewAction(SELECT)` on the view object, and for `SECURITY INVOKER` a full re-check of the view's query at column granularity.
+
+Live, same objects and same users on both versions (rows are `select id, secret from vcdb.<object>`):
+
+| setting | object | user | 4.1.4 | 4.1.6 |
+|---|---|---|---|---|
+| base deny (22) | `v_plain` (SECURITY NONE) | `vc_nobody` (zero grant) | **reads real rows (F-1)** | `ERROR 5204 ... SELECT ... VIEW v_plain` |
+| base deny | `v_nest` | `vc_nobody` | reads | `ERROR 5204 ... VIEW v_nest` |
+| base deny | `v_expr` | `vc_nobody` | not observed (my typo, see harness typo) | `ERROR 5204 ... VIEW v_expr` |
+| base deny | `vi_inv` (INVOKER) | `vc_nobody` | **reads (F-2)** | `ERROR 5204 ... COLUMN id` (base check as the reader) |
+| base deny | `vi_inv` | `vc_plain` (uncleared, view select granted) | **reads real rows (F-2)** | `ERROR 5204 ... COLUMN secret`; `vc_cleared` reads |
+| base deny | `v_plain`, `v_nest` | `vc_plain` | reads real rows | **still reads real rows** (plain view = access boundary, F-3-deny not changed) |
+| base deny | `v_expr` (`upper(secret)`) | `vc_plain` | not observed on 4.1.4 under the deny (my typo) | reads `CLASSIFIED-1,2,1` (still reads) |
+| base mask N (34) | `v_plain`, `v_nest`, `vi_inv`, `v_expr` | `vc_plain` | `NULL` | `NULL` (unchanged, F-3-mask holds) |
+| base mask N | same four | `vc_nobody` | `NULL` (reads) | `ERROR 5204 ... VIEW` / `COLUMN id` for INVOKER |
+| base mask N | `mv_c`, `mv_u` | `vc_nobody` | `ERROR 5204 ... COLUMN id` | `ERROR 5204 ... MATERIALIZED VIEW mv_c / mv_u` |
+| base mask N | `mv_u` (built by `vc_plain`) | `vc_plain` | real rows | **real rows (6b is NOT fixed)** |
+
+A full rerun of the Question A battery (N, all three users, all cells) on 4.1.6 differs from 4.1.4 in exactly these cells: `vc_nobody` on `v_plain`, `v_expr`, `v_nest`, `vi_inv` and on every predicate/aggregate/join through them (now refused), and the error text for `vc_nobody` on the MVs. Every `vc_plain` and `vc_cleared` result is identical. `SHOW CREATE VIEW vi_inv` on 4.1.6 prints `SECURITY INVOKER`. Request shape on 4.1.6 for `vc_nobody` `select id from vcdb.v_plain`: `policyType=0 select [view=v_plain] allowed=false` (absent on 4.1.4).
+
+| id | prediction | observed |
+|---|---|---|
+| B1 | 4.1.6 has `checkViewPrivilege`, 4.1.4 does not | OK (`javap` above) |
+| B2 | F-1 fixed in 4.1.6 | OK |
+| B3 | F-2 fixed in 4.1.6 | OK |
+| B4 | plain view still does not carry a base deny | OK |
+| B5 | base mask through a plain view unchanged | OK |
+| B6 | 4.1.6 ships `ranger-plugins-common` 2.8.0 | **WRONG**: it ships **2.9.0** (4.1.4: 2.8.0). egret's engine registration still says 2.8.0; the 2.9.0 plugin downloaded and applied egret's policies without error in this run. |
+| B7 | first release with the fix is 4.1.6 | UNPROVEN as "first": 4.1.5 has no image and no readable tag. The fix is in 4.1.6 (live) and not in 4.1.4 (live and source). |
+
+### Verdict, Question B
+
+**F-1 and F-2 are fixed in StarRocks 4.1.6 (`ranger-plugins-common` 2.9.0), by upstream commit `e0d97ad2659` / backport `2a36c2d0715`, absent from 4.1.4. The first release is 4.1.5 or 4.1.6; I could verify only 4.1.6.** F-3-deny is not "fixed" and by design will not be: a plain view is an access boundary and the base deny is not consulted (only INVOKER re-checks the base). The MV laundering (6b) is unchanged.
+
+## R2.6 What this means
+
+| for clearance on StarRocks | consequence |
+|---|---|
+| deny on the base column | works only for INVOKER views, and only from 4.1.6; on 4.1.4 a view is readable by anyone. A plain view still bypasses it. |
+| mask on the base column (`MASK_NULL`) | holds through every view kind on both versions and ignores the view owner. Needs no `select` grant on the column (it is never scanned). The one mask without a leak through predicates, joins or aggregates. |
+| both | do not stop an MV built by the reader (6b) or a copy written by a cleared user (6a, 10b). `create materialized view` has its own access type and can be denied (round 1, 1.S3); that deny is required for a mask-shaped clearance to mean anything. |
+| egret | cannot express the mask as a tag for StarRocks (T), and its compiled StarRocks clearance is a path DENY, which a plain view bypasses. A mask-shaped clearance needs product work; this document changes none. |
+
+## R2.7 Cleanup record
+
+Stopped and removed: containers `viewclr2-sr`, `viewclr2-sr416`. Removed the image I pulled, `starrocks/allin1-ubuntu:4.1.6` (5.21 GB on disk, about 2.0 GB to download). egret (:8095) stopped by the PID `lsof` showed (99404, equal to my start record); no name-based kill was used. Left behind: DB `egret_viewclr_live` (policies 34 on, 22/23/35 off, tables of this round), image `starrocks/allin1-ubuntu:latest` (4.1.4, 5.22 GB, it existed before this round) and `trinodb/trino:470` (2.8 GB, round 1), scratch in `/private/tmp/claude-501/vc`, the `target/` build. Disk after cleanup: 28 GiB free (macOS reports the Docker disk image lazily).
+
+---
+
+# Appendix R2. Raw outputs, trimmed
+
+Trimmed from the harness log: lookups that returned `policy=-1` for mask or row filter are removed, `REQ` lines for the cleared control user and for the aggregate, predicate and join cells are omitted (their results are kept). Every query and result is kept. Order is chronological. Hash aliases: `H1` is the hash of `classified-1`, `H2` of `classified-2`, both 128 hex characters.
+
+```text
+# Round 2 raw log
+## variant N = MASK_NULL, scope P (path), StarRocks 4.1.4, policy 34 (items: cleared MASK_NONE; public MASK_NULL)
+[sr vc_plain] create materialized view vcdb.mv_u distributed by hash(id) refresh manual properties('replication_num'='1') as select id, secret from vcdb.base
+  ->
+     REQ resource=[database=vcdb catalog=default_catalog] access=create materialized view policyType=0 allowed=true policy=17
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=0 allowed=true policy=18
+[sr vc_plain] refresh materialized view vcdb.mv_u with sync mode
+  -> QUERY_ID | 01a13310-f36b-77e6-905b-6a533cc1a3c5
+[sr vc_plain] select id, secret from vcdb.base order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+### BATTERY N-P 4.1.4
+#### user vc_plain (N-P 4.1.4)
+--- cell 1 direct
+[sr vc_plain] select id, secret from vcdb.base order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+--- cell 2 plain view
+[sr vc_plain] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+--- cell 3 expressions
+[sr vc_plain] select id, u, c, s from vcdb.v_expr order by id
+  -> id	u	c	s | 1	NULL	NULL	NULL | 2	NULL	NULL	NULL | 3	NULL	NULL	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+--- cell 4 nested
+[sr vc_plain] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+--- cell 5 INVOKER
+[sr vc_plain] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+--- cell 6a MV by cleared owner
+[sr vc_plain] select id, secret from vcdb.mv_c order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=mv_c] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=mv_c] access=select policyType=0 allowed=true policy=18
+--- cell 6b MV by uncleared
+[sr vc_plain] select id, secret from vcdb.mv_u order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=mv_u] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=mv_u] access=select policyType=0 allowed=true policy=18
+--- cell 7 aggregates
+[sr vc_plain] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.base
+  -> cd	mn	ml | 0	NULL	NULL
+[sr vc_plain] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.v_plain
+  -> cd	mn	ml | 0	NULL	NULL
+--- cell 8 predicates
+[sr vc_plain] select id from vcdb.base where secret = 'classified-1' order by id
+  ->
+[sr vc_plain] select id from vcdb.base where secret like 'class%' order by id
+  ->
+[sr vc_plain] select id, secret from vcdb.base order by secret, id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+[sr vc_plain] select secret, count(*) as n from vcdb.base group by secret order by n, secret
+  -> secret	n | NULL	3
+[sr vc_plain] select id from vcdb.v_plain where secret = 'classified-1' order by id
+  ->
+[sr vc_plain] select id from vcdb.v_plain where secret like 'class%' order by id
+  ->
+[sr vc_plain] select id, secret from vcdb.v_plain order by secret, id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+[sr vc_plain] select secret, count(*) as n from vcdb.v_plain group by secret order by n, secret
+  -> secret	n | NULL	3
+--- cell 9 joins
+[sr vc_plain] select b.id from vcdb.base b join vcdb.mine m on m.k = b.secret order by b.id
+  ->
+[sr vc_plain] select b.id from vcdb.base b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  ->
+[sr vc_plain] select b.id from vcdb.v_plain b join vcdb.mine m on m.k = b.secret order by b.id
+  ->
+[sr vc_plain] select b.id from vcdb.v_plain b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  ->
+[sr vc_plain] select id from vcdb.base where secret = hex(sha2('classified-1',256)) order by id
+  ->
+#### user vc_cleared (N-P 4.1.4)
+--- cell 1 direct
+[sr vc_cleared] select id, secret from vcdb.base order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 2 plain view
+[sr vc_cleared] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 3 expressions
+[sr vc_cleared] select id, u, c, s from vcdb.v_expr order by id
+  -> id	u	c	s | 1	CLASSIFIED-1	classified-1x	class | 2	CLASSIFIED-2	classified-2x	class | 3	CLASSIFIED-1	classified-1x	class
+--- cell 4 nested
+[sr vc_cleared] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 5 INVOKER
+[sr vc_cleared] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 6a MV by cleared owner
+[sr vc_cleared] select id, secret from vcdb.mv_c order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 6b MV by uncleared
+[sr vc_cleared] select id, secret from vcdb.mv_u order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 7 aggregates
+[sr vc_cleared] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.base
+  -> cd	mn	ml | 2	classified-1	12
+[sr vc_cleared] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.v_plain
+  -> cd	mn	ml | 2	classified-1	12
+--- cell 8 predicates
+[sr vc_cleared] select id from vcdb.base where secret = 'classified-1' order by id
+  -> id | 1 | 3
+[sr vc_cleared] select id from vcdb.base where secret like 'class%' order by id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select id, secret from vcdb.base order by secret, id
+  -> id	secret | 1	classified-1 | 3	classified-1 | 2	classified-2
+[sr vc_cleared] select secret, count(*) as n from vcdb.base group by secret order by n, secret
+  -> secret	n | classified-2	1 | classified-1	2
+[sr vc_cleared] select id from vcdb.v_plain where secret = 'classified-1' order by id
+  -> id | 1 | 3
+[sr vc_cleared] select id from vcdb.v_plain where secret like 'class%' order by id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select id, secret from vcdb.v_plain order by secret, id
+  -> id	secret | 1	classified-1 | 3	classified-1 | 2	classified-2
+[sr vc_cleared] select secret, count(*) as n from vcdb.v_plain group by secret order by n, secret
+  -> secret	n | classified-2	1 | classified-1	2
+--- cell 9 joins
+[sr vc_cleared] select b.id from vcdb.base b join vcdb.mine m on m.k = b.secret order by b.id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select b.id from vcdb.base b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  ->
+[sr vc_cleared] select b.id from vcdb.v_plain b join vcdb.mine m on m.k = b.secret order by b.id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select b.id from vcdb.v_plain b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  ->
+[sr vc_cleared] select id from vcdb.base where secret = hex(sha2('classified-1',256)) order by id
+  ->
+#### user vc_nobody (N-P 4.1.4)
+--- cell 1 direct
+[sr vc_nobody] select id, secret from vcdb.base order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=false policy=-1
+--- cell 2 plain view
+[sr vc_nobody] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+--- cell 3 expressions
+[sr vc_nobody] select id, u, c, s from vcdb.v_expr order by id
+  -> id	u	c	s | 1	NULL	NULL	NULL | 2	NULL	NULL	NULL | 3	NULL	NULL	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+--- cell 4 nested
+[sr vc_nobody] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+--- cell 5 INVOKER
+[sr vc_nobody] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+--- cell 6a MV by cleared owner
+[sr vc_nobody] select id, secret from vcdb.mv_c order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=mv_c] access=select policyType=0 allowed=false policy=-1
+--- cell 6b MV by uncleared
+[sr vc_nobody] select id, secret from vcdb.mv_u order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=mv_u] access=select policyType=0 allowed=false policy=-1
+--- cell 7 aggregates
+[sr vc_nobody] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.base
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+[sr vc_nobody] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.v_plain
+  -> cd	mn	ml | 0	NULL	NULL
+--- cell 8 predicates
+[sr vc_nobody] select id from vcdb.base where secret = 'classified-1' order by id
+  ->
+[sr vc_nobody] select id from vcdb.base where secret like 'class%' order by id
+  ->
+[sr vc_nobody] select id, secret from vcdb.base order by secret, id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+[sr vc_nobody] select secret, count(*) as n from vcdb.base group by secret order by n, secret
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+[sr vc_nobody] select id from vcdb.v_plain where secret = 'classified-1' order by id
+  ->
+[sr vc_nobody] select id from vcdb.v_plain where secret like 'class%' order by id
+  ->
+[sr vc_nobody] select id, secret from vcdb.v_plain order by secret, id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+[sr vc_nobody] select secret, count(*) as n from vcdb.v_plain group by secret order by n, secret
+  -> secret	n | NULL	3
+--- cell 9 joins
+[sr vc_nobody] select b.id from vcdb.base b join vcdb.mine m on m.k = b.secret order by b.id
+  ->
+[sr vc_nobody] select b.id from vcdb.base b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  ->
+[sr vc_nobody] select b.id from vcdb.v_plain b join vcdb.mine m on m.k = b.secret order by b.id
+  ->
+[sr vc_nobody] select b.id from vcdb.v_plain b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  ->
+[sr vc_nobody] select id from vcdb.base where secret = hex(sha2('classified-1',256)) order by id
+  ->
+### EXTRA CELLS n
+--- cell 6c MV rewrite: explain, uncleared and cleared (control)
+[sr vc_plain] explain select id, secret from vcdb.base
+  -> Explain String | PLAN FRAGMENT 0 |  OUTPUT EXPRS:1: id | 5: secret |   PARTITION: UNPARTITIONED |  |   RESULT SINK |  |   2:EXCHANGE |  | PLAN FRAGMENT 1 |  OUTPUT EXPRS: |   PARTITION: RANDOM |  |   STREAM DATA SINK |     EXCHANGE ID: 02 |     UNPARTITIONED |  |   1:Project |   |  <slot 1> : 6: id |   |  <slot 5> : NULL |   |   |   0:OlapScanNode |      TABLE: mv_u |     
+[sr vc_plain] select id, secret from vcdb.base order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+[sr vc_cleared] explain select id, secret from vcdb.base
+  -> Explain String | PLAN FRAGMENT 0 |  OUTPUT EXPRS:1: id | 2: secret |   PARTITION: UNPARTITIONED |  |   RESULT SINK |  |   2:EXCHANGE |  | PLAN FRAGMENT 1 |  OUTPUT EXPRS: |   PARTITION: RANDOM |  |   STREAM DATA SINK |     EXCHANGE ID: 02 |     UNPARTITIONED |  |   1:Project |   |  <slot 1> : 8: id |   |  <slot 2> : 9: secret |   |   |   0:OlapScanNode |      TABLE: mv_u |
+[sr vc_cleared] select id, secret from vcdb.base order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 10 CTAS / INSERT..SELECT as uncleared into an owned table
+[sr vc_plain] drop table if exists vcdb.copy_p_n
+  ->
+[sr vc_plain] create table vcdb.copy_p_n as select id, secret from vcdb.base
+  ->
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog] access=create table policyType=0 allowed=true policy=17
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+[sr vc_plain] select id, secret from vcdb.copy_p_n order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=copy_p_n] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=copy_p_n] access=select policyType=0 allowed=true policy=18
+[sr vc_plain] drop table if exists vcdb.ins_p_n
+  ->
+[sr vc_plain] create table vcdb.ins_p_n (id int, secret varchar(64)) duplicate key(id) distributed by hash(id) buckets 1 properties('replication_num'='1')
+  ->
+[sr vc_plain] insert into vcdb.ins_p_n select id, secret from vcdb.v_plain
+  ->
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog table=ins_p_n] access=insert policyType=0 allowed=true policy=18
+[sr vc_plain] select id, secret from vcdb.ins_p_n order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=ins_p_n] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=ins_p_n] access=select policyType=0 allowed=true policy=18
+--- cell 10 (nobody) CTAS through a view
+[sr vc_nobody] create table vcdb.copy_n_n as select id, secret from vcdb.v_plain
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the CREATE TABLE privilege(s) on DATABASE vcdb for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog] access=create table policyType=0 allowed=false policy=-1
+--- cell 10b cleared CTAS, then uncleared and nobody read the copy
+[sr vc_cleared] drop table if exists vcdb.copy_c_n
+  ->
+[sr vc_cleared] create table vcdb.copy_c_n as select id, secret from vcdb.base
+  ->
+[sr vc_plain] select id, secret from vcdb.copy_c_n order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=copy_c_n] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=copy_c_n] access=select policyType=0 allowed=true policy=18
+[sr vc_nobody] select id, secret from vcdb.copy_c_n order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=copy_c_n] access=select policyType=0 allowed=false policy=-1
+## variant H = MASK_HASH, scope P, 4.1.4, policy 35 (policy 34 disabled)
+### BATTERY H-P 4.1.4
+#### user vc_plain (H-P 4.1.4)
+--- cell 1 direct
+[sr vc_plain] select id, secret from vcdb.base order by id
+  -> id	secret | 1	H1 | 2	H2 | 3	H1
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=35
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=0 allowed=true policy=18
+--- cell 2 plain view
+[sr vc_plain] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	H1 | 2	H2 | 3	H1
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=35
+--- cell 3 expressions
+[sr vc_plain] select id, u, c, s from vcdb.v_expr order by id
+  -> id	u	c	s | 1	H1	H1x	35653 | 2	H2	66303133313866626164353631616530336263613737343434393032306234623636636461363532663635396
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=35
+--- cell 4 nested
+[sr vc_plain] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	H1 | 2	H2 | 3	H1
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=35
+--- cell 5 INVOKER
+[sr vc_plain] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	H1 | 2	H2 | 3	H1
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=35
+--- cell 6a MV by cleared owner
+[sr vc_plain] select id, secret from vcdb.mv_c order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=mv_c] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=mv_c] access=select policyType=0 allowed=true policy=18
+--- cell 6b MV by uncleared
+[sr vc_plain] select id, secret from vcdb.mv_u order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=mv_u] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=mv_u] access=select policyType=0 allowed=true policy=18
+--- cell 7 aggregates
+[sr vc_plain] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.base
+  -> cd	mn	ml | 2	H1	128
+[sr vc_plain] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.v_plain
+  -> cd	mn	ml | 2	H1	128
+--- cell 8 predicates
+[sr vc_plain] select id from vcdb.base where secret = 'classified-1' order by id
+  ->
+[sr vc_plain] select id from vcdb.base where secret like 'class%' order by id
+  ->
+[sr vc_plain] select id, secret from vcdb.base order by secret, id
+  -> id	secret | 1	H1 | 3	H1 | 2	H2
+[sr vc_plain] select secret, count(*) as n from vcdb.base group by secret order by n, secret
+  -> secret	n | H2	1 | H1	2
+[sr vc_plain] select id from vcdb.v_plain where secret = 'classified-1' order by id
+  ->
+[sr vc_plain] select id from vcdb.v_plain where secret like 'class%' order by id
+  ->
+[sr vc_plain] select id, secret from vcdb.v_plain order by secret, id
+  -> id	secret | 1	H1 | 3	H1 | 2	H2
+[sr vc_plain] select secret, count(*) as n from vcdb.v_plain group by secret order by n, secret
+  -> secret	n | H2	1 | H1	2
+--- cell 9 joins
+[sr vc_plain] select b.id from vcdb.base b join vcdb.mine m on m.k = b.secret order by b.id
+  ->
+[sr vc_plain] select b.id from vcdb.base b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  -> id | 1 | 2 | 3
+[sr vc_plain] select b.id from vcdb.v_plain b join vcdb.mine m on m.k = b.secret order by b.id
+  ->
+[sr vc_plain] select b.id from vcdb.v_plain b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  -> id | 1 | 2 | 3
+[sr vc_plain] select id from vcdb.base where secret = hex(sha2('classified-1',256)) order by id
+  -> id | 1 | 3
+#### user vc_cleared (H-P 4.1.4)
+--- cell 1 direct
+[sr vc_cleared] select id, secret from vcdb.base order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 2 plain view
+[sr vc_cleared] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 3 expressions
+[sr vc_cleared] select id, u, c, s from vcdb.v_expr order by id
+  -> id	u	c	s | 1	CLASSIFIED-1	classified-1x	class | 2	CLASSIFIED-2	classified-2x	class | 3	CLASSIFIED-1	classified-1x	class
+--- cell 4 nested
+[sr vc_cleared] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 5 INVOKER
+[sr vc_cleared] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 6a MV by cleared owner
+[sr vc_cleared] select id, secret from vcdb.mv_c order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 6b MV by uncleared
+[sr vc_cleared] select id, secret from vcdb.mv_u order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 7 aggregates
+[sr vc_cleared] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.base
+  -> cd	mn	ml | 2	classified-1	12
+[sr vc_cleared] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.v_plain
+  -> cd	mn	ml | 2	classified-1	12
+--- cell 8 predicates
+[sr vc_cleared] select id from vcdb.base where secret = 'classified-1' order by id
+  -> id | 1 | 3
+[sr vc_cleared] select id from vcdb.base where secret like 'class%' order by id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select id, secret from vcdb.base order by secret, id
+  -> id	secret | 1	classified-1 | 3	classified-1 | 2	classified-2
+[sr vc_cleared] select secret, count(*) as n from vcdb.base group by secret order by n, secret
+  -> secret	n | classified-2	1 | classified-1	2
+[sr vc_cleared] select id from vcdb.v_plain where secret = 'classified-1' order by id
+  -> id | 1 | 3
+[sr vc_cleared] select id from vcdb.v_plain where secret like 'class%' order by id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select id, secret from vcdb.v_plain order by secret, id
+  -> id	secret | 1	classified-1 | 3	classified-1 | 2	classified-2
+[sr vc_cleared] select secret, count(*) as n from vcdb.v_plain group by secret order by n, secret
+  -> secret	n | classified-2	1 | classified-1	2
+--- cell 9 joins
+[sr vc_cleared] select b.id from vcdb.base b join vcdb.mine m on m.k = b.secret order by b.id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select b.id from vcdb.base b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  ->
+[sr vc_cleared] select b.id from vcdb.v_plain b join vcdb.mine m on m.k = b.secret order by b.id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select b.id from vcdb.v_plain b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  ->
+[sr vc_cleared] select id from vcdb.base where secret = hex(sha2('classified-1',256)) order by id
+  ->
+#### user vc_nobody (H-P 4.1.4)
+--- cell 1 direct
+[sr vc_nobody] select id, secret from vcdb.base order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=35
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=false policy=-1
+--- cell 2 plain view
+[sr vc_nobody] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	H1 | 2	H2 | 3	H1
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=35
+--- cell 3 expressions
+[sr vc_nobody] select id, u, c, s from vcdb.v_expr order by id
+  -> id	u	c	s | 1	H1	H1x	35653 | 2	H2	66303133313866626164353631616530336263613737343434393032306234623636636461363532663635396
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=35
+--- cell 4 nested
+[sr vc_nobody] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	H1 | 2	H2 | 3	H1
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=35
+--- cell 5 INVOKER
+[sr vc_nobody] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	H1 | 2	H2 | 3	H1
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=35
+--- cell 6a MV by cleared owner
+[sr vc_nobody] select id, secret from vcdb.mv_c order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=mv_c] access=select policyType=0 allowed=false policy=-1
+--- cell 6b MV by uncleared
+[sr vc_nobody] select id, secret from vcdb.mv_u order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=mv_u] access=select policyType=0 allowed=false policy=-1
+--- cell 7 aggregates
+[sr vc_nobody] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.base
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN secret for this operation.
+[sr vc_nobody] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.v_plain
+  -> cd	mn	ml | 2	H1	128
+--- cell 8 predicates
+[sr vc_nobody] select id from vcdb.base where secret = 'classified-1' order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+[sr vc_nobody] select id from vcdb.base where secret like 'class%' order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+[sr vc_nobody] select id, secret from vcdb.base order by secret, id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+[sr vc_nobody] select secret, count(*) as n from vcdb.base group by secret order by n, secret
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN secret for this operation.
+[sr vc_nobody] select id from vcdb.v_plain where secret = 'classified-1' order by id
+  ->
+[sr vc_nobody] select id from vcdb.v_plain where secret like 'class%' order by id
+  ->
+[sr vc_nobody] select id, secret from vcdb.v_plain order by secret, id
+  -> id	secret | 1	H1 | 3	H1 | 2	H2
+[sr vc_nobody] select secret, count(*) as n from vcdb.v_plain group by secret order by n, secret
+  -> secret	n | H2	1 | H1	2
+--- cell 9 joins
+[sr vc_nobody] select b.id from vcdb.base b join vcdb.mine m on m.k = b.secret order by b.id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+[sr vc_nobody] select b.id from vcdb.base b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+[sr vc_nobody] select b.id from vcdb.v_plain b join vcdb.mine m on m.k = b.secret order by b.id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN k for this operation.
+[sr vc_nobody] select b.id from vcdb.v_plain b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN k for this operation.
+[sr vc_nobody] select id from vcdb.base where secret = hex(sha2('classified-1',256)) order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+### EXTRA CELLS h
+--- cell 6c MV rewrite: explain, uncleared and cleared (control)
+[sr vc_plain] explain select id, secret from vcdb.base
+  -> Explain String | PLAN FRAGMENT 0 |  OUTPUT EXPRS:1: id | 4: cast |   PARTITION: UNPARTITIONED |  |   RESULT SINK |  |   2:EXCHANGE |  | PLAN FRAGMENT 1 |  OUTPUT EXPRS: |   PARTITION: RANDOM |  |   STREAM DATA SINK |     EXCHANGE ID: 02 |     UNPARTITIONED |  |   1:Project |   |  <slot 1> : 5: id |   |  <slot 4> : hex(sha2(from_binary(to_binary(6: secret, 'utf8'), 'utf8'),
+[sr vc_plain] select id, secret from vcdb.base order by id
+  -> id	secret | 1	H1 | 2	H2 | 3	H1
+[sr vc_cleared] explain select id, secret from vcdb.base
+  -> Explain String | PLAN FRAGMENT 0 |  OUTPUT EXPRS:1: id | 2: secret |   PARTITION: UNPARTITIONED |  |   RESULT SINK |  |   2:EXCHANGE |  | PLAN FRAGMENT 1 |  OUTPUT EXPRS: |   PARTITION: RANDOM |  |   STREAM DATA SINK |     EXCHANGE ID: 02 |     UNPARTITIONED |  |   1:Project |   |  <slot 1> : 8: id |   |  <slot 2> : 9: secret |   |   |   0:OlapScanNode |      TABLE: mv_u |
+[sr vc_cleared] select id, secret from vcdb.base order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 10 CTAS / INSERT..SELECT as uncleared into an owned table
+[sr vc_plain] drop table if exists vcdb.copy_p_h
+  ->
+[sr vc_plain] create table vcdb.copy_p_h as select id, secret from vcdb.base
+  -> ERROR 1064 (HY000) at line 1: Insert has filtered data, txn_id = 50, tracking sql = select tracking_log from information_schema.load_tracking_logs where job_id=10562
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=35
+     REQ resource=[database=vcdb catalog=default_catalog] access=create table policyType=0 allowed=true policy=17
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=0 allowed=true policy=18
+[sr vc_plain] select id, secret from vcdb.copy_p_h order by id
+  -> ERROR 5502 (42602) at line 1: Getting analyzing error. Detail message: Unknown table 'vcdb.copy_p_h'.
+[sr vc_plain] drop table if exists vcdb.ins_p_h
+  ->
+[sr vc_plain] create table vcdb.ins_p_h (id int, secret varchar(64)) duplicate key(id) distributed by hash(id) buckets 1 properties('replication_num'='1')
+  ->
+[sr vc_plain] insert into vcdb.ins_p_h select id, secret from vcdb.v_plain
+  -> ERROR 1064 (HY000) at line 1: Insert has filtered data, txn_id = 51, tracking sql = select tracking_log from information_schema.load_tracking_logs where job_id=10569
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=35
+     REQ resource=[database=vcdb catalog=default_catalog table=ins_p_h] access=insert policyType=0 allowed=true policy=18
+[sr vc_plain] select id, secret from vcdb.ins_p_h order by id
+  ->
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=ins_p_h] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=ins_p_h] access=select policyType=0 allowed=true policy=18
+--- cell 10 (nobody) CTAS through a view
+[sr vc_nobody] create table vcdb.copy_n_h as select id, secret from vcdb.v_plain
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the CREATE TABLE privilege(s) on DATABASE vcdb for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=35
+     REQ resource=[database=vcdb catalog=default_catalog] access=create table policyType=0 allowed=false policy=-1
+--- cell 10b cleared CTAS, then uncleared and nobody read the copy
+[sr vc_cleared] drop table if exists vcdb.copy_c_h
+  ->
+[sr vc_cleared] create table vcdb.copy_c_h as select id, secret from vcdb.base
+  ->
+[sr vc_plain] select id, secret from vcdb.copy_c_h order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=copy_c_h] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=copy_c_h] access=select policyType=0 allowed=true policy=18
+[sr vc_nobody] select id, secret from vcdb.copy_c_h order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=copy_c_h] access=select policyType=0 allowed=false policy=-1
+## QUESTION B on 4.1.4 (control, same protocol): policy 22 deny only (34,35 disabled)
+### B-PHASE 414-DENY
+#### user vc_nobody (414-DENY)
+[sr vc_nobody] select id, secret from vcdb.base order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=false policy=-1
+[sr vc_nobody] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_nobody] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_nobody] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_nobody] select id from vcdb.v_plain order by id
+  -> id | 1 | 2 | 3
+[sr vc_nobody] select id, upper(secret) as u from vcdb.v_expr order by id
+  -> ERROR 1064 (HY000) at line 1: Getting analyzing error. Detail message: Column 'secret' cannot be resolved.
+#### user vc_plain (414-DENY)
+[sr vc_plain] select id, secret from vcdb.base order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN secret for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=0 allowed=false policy=22
+[sr vc_plain] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_plain] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_plain] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_plain] select id from vcdb.v_plain order by id
+  -> id | 1 | 2 | 3
+[sr vc_plain] select id, upper(secret) as u from vcdb.v_expr order by id
+  -> ERROR 1064 (HY000) at line 1: Getting analyzing error. Detail message: Column 'secret' cannot be resolved.
+#### user vc_cleared (414-DENY)
+[sr vc_cleared] select id, secret from vcdb.base order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id from vcdb.v_plain order by id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select id, upper(secret) as u from vcdb.v_expr order by id
+  -> ERROR 1064 (HY000) at line 1: Getting analyzing error. Detail message: Column 'secret' cannot be resolved.
+## 4.1.4 control: policy 34 MASK_NULL only (22,35 disabled)
+### B-PHASE 414-MASK
+#### user vc_nobody (414-MASK)
+[sr vc_nobody] select id, secret from vcdb.base order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=false policy=-1
+[sr vc_nobody] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+[sr vc_nobody] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+[sr vc_nobody] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+[sr vc_nobody] select id from vcdb.v_plain order by id
+  -> id | 1 | 2 | 3
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+[sr vc_nobody] select id, u from vcdb.v_expr order by id
+  -> id	u | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+#### user vc_plain (414-MASK)
+[sr vc_plain] select id, secret from vcdb.base order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+[sr vc_plain] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+[sr vc_plain] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+[sr vc_plain] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+[sr vc_plain] select id from vcdb.v_plain order by id
+  -> id | 1 | 2 | 3
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+[sr vc_plain] select id, u from vcdb.v_expr order by id
+  -> id	u | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+#### user vc_cleared (414-MASK)
+[sr vc_cleared] select id, secret from vcdb.base order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id from vcdb.v_plain order by id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select id, u from vcdb.v_expr order by id
+  -> id	u | 1	CLASSIFIED-1 | 2	CLASSIFIED-2 | 3	CLASSIFIED-1
+## 4.1.6 (viewclr2-sr416): policy 34 MASK_NULL only (22,35 disabled)
+### B-PHASE 416-MASK
+#### user vc_nobody (416-MASK)
+[sr vc_nobody] select id, secret from vcdb.base order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=false policy=-1
+[sr vc_nobody] select id, secret from vcdb.v_plain order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_plain for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb view=v_plain catalog=default_catalog] access=select policyType=0 allowed=false policy=-1
+[sr vc_nobody] select id, secret from vcdb.v_nest order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_nest for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb view=v_nest catalog=default_catalog] access=select policyType=0 allowed=false policy=-1
+[sr vc_nobody] select id, secret from vcdb.vi_inv order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=false policy=-1
+[sr vc_nobody] select id from vcdb.v_plain order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_plain for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb view=v_plain catalog=default_catalog] access=select policyType=0 allowed=false policy=-1
+[sr vc_nobody] select id, u from vcdb.v_expr order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_expr for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb view=v_expr catalog=default_catalog] access=select policyType=0 allowed=false policy=-1
+#### user vc_plain (416-MASK)
+[sr vc_plain] select id, secret from vcdb.base order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+[sr vc_plain] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb view=v_plain catalog=default_catalog] access=select policyType=0 allowed=true policy=19
+[sr vc_plain] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb view=v_nest catalog=default_catalog] access=select policyType=0 allowed=true policy=19
+[sr vc_plain] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb view=vi_inv catalog=default_catalog] access=select policyType=0 allowed=true policy=19
+[sr vc_plain] select id from vcdb.v_plain order by id
+  -> id | 1 | 2 | 3
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb view=v_plain catalog=default_catalog] access=select policyType=0 allowed=true policy=19
+[sr vc_plain] select id, u from vcdb.v_expr order by id
+  -> id	u | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb view=v_expr catalog=default_catalog] access=select policyType=0 allowed=true policy=19
+#### user vc_cleared (416-MASK)
+[sr vc_cleared] select id, secret from vcdb.base order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id from vcdb.v_plain order by id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select id, u from vcdb.v_expr order by id
+  -> id	u | 1	CLASSIFIED-1 | 2	CLASSIFIED-2 | 3	CLASSIFIED-1
+## 4.1.6: policy 22 deny only (34,35 disabled)
+### B-PHASE 416-DENY
+#### user vc_nobody (416-DENY)
+[sr vc_nobody] select id, secret from vcdb.base order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=false policy=-1
+[sr vc_nobody] select id, secret from vcdb.v_plain order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_plain for this operation.
+     REQ resource=[database=vcdb view=v_plain catalog=default_catalog] access=select policyType=0 allowed=false policy=-1
+[sr vc_nobody] select id, secret from vcdb.v_nest order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_nest for this operation.
+     REQ resource=[database=vcdb view=v_nest catalog=default_catalog] access=select policyType=0 allowed=false policy=-1
+[sr vc_nobody] select id, secret from vcdb.vi_inv order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=false policy=-1
+[sr vc_nobody] select id from vcdb.v_plain order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_plain for this operation.
+     REQ resource=[database=vcdb view=v_plain catalog=default_catalog] access=select policyType=0 allowed=false policy=-1
+[sr vc_nobody] select id, u from vcdb.v_expr order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_expr for this operation.
+     REQ resource=[database=vcdb view=v_expr catalog=default_catalog] access=select policyType=0 allowed=false policy=-1
+#### user vc_plain (416-DENY)
+[sr vc_plain] select id, secret from vcdb.base order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN secret for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=0 allowed=false policy=22
+[sr vc_plain] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+     REQ resource=[database=vcdb view=v_plain catalog=default_catalog] access=select policyType=0 allowed=true policy=19
+[sr vc_plain] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+     REQ resource=[database=vcdb view=v_nest catalog=default_catalog] access=select policyType=0 allowed=true policy=19
+[sr vc_plain] select id, secret from vcdb.vi_inv order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN secret for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=0 allowed=false policy=22
+[sr vc_plain] select id from vcdb.v_plain order by id
+  -> id | 1 | 2 | 3
+     REQ resource=[database=vcdb view=v_plain catalog=default_catalog] access=select policyType=0 allowed=true policy=19
+[sr vc_plain] select id, u from vcdb.v_expr order by id
+  -> id	u | 1	CLASSIFIED-1 | 2	CLASSIFIED-2 | 3	CLASSIFIED-1
+     REQ resource=[database=vcdb view=v_expr catalog=default_catalog] access=select policyType=0 allowed=true policy=19
+#### user vc_cleared (416-DENY)
+[sr vc_cleared] select id, secret from vcdb.base order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+[sr vc_cleared] select id from vcdb.v_plain order by id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select id, u from vcdb.v_expr order by id
+  -> id	u | 1	CLASSIFIED-1 | 2	CLASSIFIED-2 | 3	CLASSIFIED-1
+## 4.1.6: Question A re-run, variant N (policy 34 only)
+[sr vc_plain] create materialized view vcdb.mv_u distributed by hash(id) refresh manual properties('replication_num'='1') as select id, secret from vcdb.base
+  ->
+     REQ resource=[database=vcdb catalog=default_catalog] access=create materialized view policyType=0 allowed=true policy=17
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=0 allowed=true policy=18
+[sr vc_plain] refresh materialized view vcdb.mv_u with sync mode
+  -> QUERY_ID | 01a13325-1c51-7476-81e2-438b6334caab
+### BATTERY N-P 4.1.6
+#### user vc_plain (N-P 4.1.6)
+--- cell 1 direct
+[sr vc_plain] select id, secret from vcdb.base order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+--- cell 2 plain view
+[sr vc_plain] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb view=v_plain catalog=default_catalog] access=select policyType=0 allowed=true policy=19
+--- cell 3 expressions
+[sr vc_plain] select id, u, c, s from vcdb.v_expr order by id
+  -> id	u	c	s | 1	NULL	NULL	NULL | 2	NULL	NULL	NULL | 3	NULL	NULL	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb view=v_expr catalog=default_catalog] access=select policyType=0 allowed=true policy=19
+--- cell 4 nested
+[sr vc_plain] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb view=v_nest catalog=default_catalog] access=select policyType=0 allowed=true policy=19
+--- cell 5 INVOKER
+[sr vc_plain] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb view=vi_inv catalog=default_catalog] access=select policyType=0 allowed=true policy=19
+--- cell 6a MV by cleared owner
+[sr vc_plain] select id, secret from vcdb.mv_c order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+     REQ resource=[database=vcdb catalog=default_catalog materialized_view=mv_c] access=select policyType=0 allowed=true policy=20
+--- cell 6b MV by uncleared
+[sr vc_plain] select id, secret from vcdb.mv_u order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+     REQ resource=[database=vcdb catalog=default_catalog materialized_view=mv_u] access=select policyType=0 allowed=true policy=20
+--- cell 7 aggregates
+[sr vc_plain] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.base
+  -> cd	mn	ml | 0	NULL	NULL
+[sr vc_plain] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.v_plain
+  -> cd	mn	ml | 0	NULL	NULL
+--- cell 8 predicates
+[sr vc_plain] select id from vcdb.base where secret = 'classified-1' order by id
+  ->
+[sr vc_plain] select id from vcdb.base where secret like 'class%' order by id
+  ->
+[sr vc_plain] select id, secret from vcdb.base order by secret, id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+[sr vc_plain] select secret, count(*) as n from vcdb.base group by secret order by n, secret
+  -> secret	n | NULL	3
+[sr vc_plain] select id from vcdb.v_plain where secret = 'classified-1' order by id
+  ->
+[sr vc_plain] select id from vcdb.v_plain where secret like 'class%' order by id
+  ->
+[sr vc_plain] select id, secret from vcdb.v_plain order by secret, id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+[sr vc_plain] select secret, count(*) as n from vcdb.v_plain group by secret order by n, secret
+  -> secret	n | NULL	3
+--- cell 9 joins
+[sr vc_plain] select b.id from vcdb.base b join vcdb.mine m on m.k = b.secret order by b.id
+  ->
+[sr vc_plain] select b.id from vcdb.base b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  ->
+[sr vc_plain] select b.id from vcdb.v_plain b join vcdb.mine m on m.k = b.secret order by b.id
+  ->
+[sr vc_plain] select b.id from vcdb.v_plain b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  ->
+[sr vc_plain] select id from vcdb.base where secret = hex(sha2('classified-1',256)) order by id
+  ->
+#### user vc_cleared (N-P 4.1.6)
+--- cell 1 direct
+[sr vc_cleared] select id, secret from vcdb.base order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 2 plain view
+[sr vc_cleared] select id, secret from vcdb.v_plain order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 3 expressions
+[sr vc_cleared] select id, u, c, s from vcdb.v_expr order by id
+  -> id	u	c	s | 1	CLASSIFIED-1	classified-1x	class | 2	CLASSIFIED-2	classified-2x	class | 3	CLASSIFIED-1	classified-1x	class
+--- cell 4 nested
+[sr vc_cleared] select id, secret from vcdb.v_nest order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 5 INVOKER
+[sr vc_cleared] select id, secret from vcdb.vi_inv order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 6a MV by cleared owner
+[sr vc_cleared] select id, secret from vcdb.mv_c order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 6b MV by uncleared
+[sr vc_cleared] select id, secret from vcdb.mv_u order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 7 aggregates
+[sr vc_cleared] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.base
+  -> cd	mn	ml | 2	classified-1	12
+[sr vc_cleared] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.v_plain
+  -> cd	mn	ml | 2	classified-1	12
+--- cell 8 predicates
+[sr vc_cleared] select id from vcdb.base where secret = 'classified-1' order by id
+  -> id | 1 | 3
+[sr vc_cleared] select id from vcdb.base where secret like 'class%' order by id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select id, secret from vcdb.base order by secret, id
+  -> id	secret | 1	classified-1 | 3	classified-1 | 2	classified-2
+[sr vc_cleared] select secret, count(*) as n from vcdb.base group by secret order by n, secret
+  -> secret	n | classified-2	1 | classified-1	2
+[sr vc_cleared] select id from vcdb.v_plain where secret = 'classified-1' order by id
+  -> id | 1 | 3
+[sr vc_cleared] select id from vcdb.v_plain where secret like 'class%' order by id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select id, secret from vcdb.v_plain order by secret, id
+  -> id	secret | 1	classified-1 | 3	classified-1 | 2	classified-2
+[sr vc_cleared] select secret, count(*) as n from vcdb.v_plain group by secret order by n, secret
+  -> secret	n | classified-2	1 | classified-1	2
+--- cell 9 joins
+[sr vc_cleared] select b.id from vcdb.base b join vcdb.mine m on m.k = b.secret order by b.id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select b.id from vcdb.base b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  ->
+[sr vc_cleared] select b.id from vcdb.v_plain b join vcdb.mine m on m.k = b.secret order by b.id
+  -> id | 1 | 2 | 3
+[sr vc_cleared] select b.id from vcdb.v_plain b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  ->
+[sr vc_cleared] select id from vcdb.base where secret = hex(sha2('classified-1',256)) order by id
+  ->
+#### user vc_nobody (N-P 4.1.6)
+--- cell 1 direct
+[sr vc_nobody] select id, secret from vcdb.base order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=false policy=-1
+--- cell 2 plain view
+[sr vc_nobody] select id, secret from vcdb.v_plain order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_plain for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb view=v_plain catalog=default_catalog] access=select policyType=0 allowed=false policy=-1
+--- cell 3 expressions
+[sr vc_nobody] select id, u, c, s from vcdb.v_expr order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_expr for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb view=v_expr catalog=default_catalog] access=select policyType=0 allowed=false policy=-1
+--- cell 4 nested
+[sr vc_nobody] select id, secret from vcdb.v_nest order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_nest for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb view=v_nest catalog=default_catalog] access=select policyType=0 allowed=false policy=-1
+--- cell 5 INVOKER
+[sr vc_nobody] select id, secret from vcdb.vi_inv order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=false policy=-1
+--- cell 6a MV by cleared owner
+[sr vc_nobody] select id, secret from vcdb.mv_c order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on MATERIALIZED VIEW mv_c for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog materialized_view=mv_c] access=select policyType=0 allowed=false policy=-1
+--- cell 6b MV by uncleared
+[sr vc_nobody] select id, secret from vcdb.mv_u order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on MATERIALIZED VIEW mv_u for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog materialized_view=mv_u] access=select policyType=0 allowed=false policy=-1
+--- cell 7 aggregates
+[sr vc_nobody] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.base
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+[sr vc_nobody] select count(distinct secret) as cd, min(secret) as mn, max(length(secret)) as ml from vcdb.v_plain
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_plain for this operation.
+--- cell 8 predicates
+[sr vc_nobody] select id from vcdb.base where secret = 'classified-1' order by id
+  ->
+[sr vc_nobody] select id from vcdb.base where secret like 'class%' order by id
+  ->
+[sr vc_nobody] select id, secret from vcdb.base order by secret, id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+[sr vc_nobody] select secret, count(*) as n from vcdb.base group by secret order by n, secret
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+[sr vc_nobody] select id from vcdb.v_plain where secret = 'classified-1' order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_plain for this operation.
+[sr vc_nobody] select id from vcdb.v_plain where secret like 'class%' order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_plain for this operation.
+[sr vc_nobody] select id, secret from vcdb.v_plain order by secret, id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_plain for this operation.
+[sr vc_nobody] select secret, count(*) as n from vcdb.v_plain group by secret order by n, secret
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_plain for this operation.
+--- cell 9 joins
+[sr vc_nobody] select b.id from vcdb.base b join vcdb.mine m on m.k = b.secret order by b.id
+  ->
+[sr vc_nobody] select b.id from vcdb.base b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  ->
+[sr vc_nobody] select b.id from vcdb.v_plain b join vcdb.mine m on m.k = b.secret order by b.id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_plain for this operation.
+[sr vc_nobody] select b.id from vcdb.v_plain b join vcdb.mine m on hex(sha2(m.k,256)) = b.secret order by b.id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_plain for this operation.
+[sr vc_nobody] select id from vcdb.base where secret = hex(sha2('classified-1',256)) order by id
+  ->
+### EXTRA CELLS n416
+--- cell 6c MV rewrite: explain, uncleared and cleared (control)
+[sr vc_plain] explain select id, secret from vcdb.base
+  -> Explain String | PLAN FRAGMENT 0 |  OUTPUT EXPRS:1: id | 5: secret |   PARTITION: UNPARTITIONED |  |   RESULT SINK |  |   2:EXCHANGE |  | PLAN FRAGMENT 1 |  OUTPUT EXPRS: |   PARTITION: RANDOM |  |   STREAM DATA SINK |     EXCHANGE ID: 02 |     UNPARTITIONED |  |   1:Project |   |  <slot 1> : 6: id |   |  <slot 5> : NULL |   |   |   0:OlapScanNode |      TABLE: mv_u |     
+[sr vc_plain] select id, secret from vcdb.base order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+[sr vc_cleared] explain select id, secret from vcdb.base
+  -> Explain String | PLAN FRAGMENT 0 |  OUTPUT EXPRS:1: id | 2: secret |   PARTITION: UNPARTITIONED |  |   RESULT SINK |  |   2:EXCHANGE |  | PLAN FRAGMENT 1 |  OUTPUT EXPRS: |   PARTITION: RANDOM |  |   STREAM DATA SINK |     EXCHANGE ID: 02 |     UNPARTITIONED |  |   1:Project |   |  <slot 1> : 8: id |   |  <slot 2> : 9: secret |   |   |   0:OlapScanNode |      TABLE: mv_c |
+[sr vc_cleared] select id, secret from vcdb.base order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+--- cell 10 CTAS / INSERT..SELECT as uncleared into an owned table
+[sr vc_plain] drop table if exists vcdb.copy_p_n416
+  ->
+[sr vc_plain] create table vcdb.copy_p_n416 as select id, secret from vcdb.base
+  ->
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog] access=create table policyType=0 allowed=true policy=17
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=true policy=18
+[sr vc_plain] select id, secret from vcdb.copy_p_n416 order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=copy_p_n416] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=copy_p_n416] access=select policyType=0 allowed=true policy=18
+[sr vc_plain] drop table if exists vcdb.ins_p_n416
+  ->
+[sr vc_plain] create table vcdb.ins_p_n416 (id int, secret varchar(64)) duplicate key(id) distributed by hash(id) buckets 1 properties('replication_num'='1')
+  ->
+[sr vc_plain] insert into vcdb.ins_p_n416 select id, secret from vcdb.v_plain
+  ->
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog table=ins_p_n416] access=insert policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb view=v_plain catalog=default_catalog] access=select policyType=0 allowed=true policy=19
+[sr vc_plain] select id, secret from vcdb.ins_p_n416 order by id
+  -> id	secret | 1	NULL | 2	NULL | 3	NULL
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=ins_p_n416] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=ins_p_n416] access=select policyType=0 allowed=true policy=18
+--- cell 10 (nobody) CTAS through a view
+[sr vc_nobody] create table vcdb.copy_n_n416 as select id, secret from vcdb.v_plain
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the CREATE TABLE privilege(s) on DATABASE vcdb for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog] access=create table policyType=0 allowed=false policy=-1
+--- cell 10b cleared CTAS, then uncleared and nobody read the copy
+[sr vc_cleared] drop table if exists vcdb.copy_c_n416
+  ->
+[sr vc_cleared] create table vcdb.copy_c_n416 as select id, secret from vcdb.base
+  ->
+[sr vc_plain] select id, secret from vcdb.copy_c_n416 order by id
+  -> id	secret | 1	classified-1 | 2	classified-2 | 3	classified-1
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=copy_c_n416] access=select policyType=0 allowed=true policy=18
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=copy_c_n416] access=select policyType=0 allowed=true policy=18
+[sr vc_nobody] select id, secret from vcdb.copy_c_n416 order by id
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=copy_c_n416] access=select policyType=0 allowed=false policy=-1
+## 4.1.6 extra: request shape for the zero-grant user on a plain and an INVOKER view, and SHOW CREATE VIEW
+[sr vc_nobody] select id from vcdb.v_plain
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on VIEW v_plain for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb view=v_plain catalog=default_catalog] access=select policyType=0 allowed=false policy=-1
+[sr vc_nobody] select id from vcdb.vi_inv
+  -> ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.
+     REQ resource=[database=vcdb catalog=default_catalog column=secret table=base] access=select policyType=1 allowed=true policy=34
+     REQ resource=[database=vcdb catalog=default_catalog column=id table=base] access=select policyType=0 allowed=false policy=-1
+[sr vc_admin] show create view vcdb.vi_inv
+  -> View	Create View	character_set_client	collation_connection | vi_inv	CREATE VIEW `vi_inv` (`id`, `secret`) SECURITY INVOKER AS select id, secret from vcdb.base;	utf8	utf8_general_ci
+[sr vc_nobody] select current_version()
+  -> current_version() | 4.1.6-6862092
+```
