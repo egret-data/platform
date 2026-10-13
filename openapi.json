@@ -30828,6 +30828,17 @@
             }
           },
           {
+            "name": "if_revision",
+            "in": "query",
+            "description": "Write only if the path's current revision is this one, else 409 with\n`code: \"file_changed\"` and nothing written. The current revision is\nthe latest LIVE one: `0` means \"the path must not exist\" (a path that\nnever existed, or one soft-deleted, is at `0`). Absent: no check, the\nnext revision is written whatever it is.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
             "name": "workspace",
             "in": "path",
             "required": true,
@@ -30852,7 +30863,7 @@
             "description": "Stored, as the path's next revision. No content and no content type (Kestra's answer)."
           },
           "400": {
-            "description": "A path rule (named), a refused namespace, `/_flows`, no `fileContent` part or another part before it (named), a malformed multipart body, or headers over the budget",
+            "description": "A path rule (named), a refused namespace, `/_flows`, no `fileContent` part or another part before it (named), a malformed multipart body, headers over the budget, or an `if_revision` that is not a whole number from 0",
             "content": {
               "application/json": {
                 "schema": {
@@ -30892,7 +30903,7 @@
             }
           },
           "409": {
-            "description": "A directory is at `path`, a file is where one of its parent directories goes, or a soft-deleted entry of the other kind still holds history there (named; only a flow's `PurgeFiles` task removes history -- the API has no purge route). Also 409 when the path is busy: a move or another write holds its lock for longer than the API waits (5 s); nothing was written, try again.",
+            "description": "A directory is at `path`, a file is where one of its parent directories goes, or a soft-deleted entry of the other kind still holds history there (named; only a flow's `PurgeFiles` task removes history -- the API has no purge route). Also 409 when the path is busy: a move or another write holds its lock for longer than the API waits (5 s); nothing was written, try again. With `if_revision`: when the path's current revision (its latest live one; `0` when it never existed or is soft-deleted) is not `if_revision`, 409 with `code: \"file_changed\"` and nothing written -- the check and the write are one step under the path's lock, so of two writes carrying the same revision exactly one commits; the other 409s carry no code.",
             "content": {
               "application/json": {
                 "schema": {

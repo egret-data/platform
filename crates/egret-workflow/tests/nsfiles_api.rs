@@ -236,6 +236,58 @@ impl Fx {
         self.upload_as(self.user, ns, path, bytes).await
     }
 
+    /// An upload carrying `if_revision` (W7d §3.2).
+    async fn upload_if(
+        &self,
+        ns: &str,
+        path: &str,
+        if_revision: &str,
+        bytes: &[u8],
+    ) -> axum::response::Response {
+        let uri = format!(
+            "{}?path={}&if_revision={if_revision}",
+            self.base(ns),
+            enc(path)
+        );
+        common::send_raw(
+            &self.app,
+            "POST",
+            &uri,
+            self.user,
+            &ct(),
+            multipart_file("fileContent", "upload.bin", bytes),
+        )
+        .await
+    }
+
+    /// Every object this workspace has in the store, staging objects included.
+    async fn objects(&self) -> Vec<String> {
+        installed()
+            .store
+            .list(&format!("workflow/{}/", self.ws), None)
+            .await
+            .expect("list")
+            .objects
+            .into_iter()
+            .map(|o| o.key)
+            .collect()
+    }
+
+    /// The revision numbers `/revisions` lists for `path`.
+    async fn revision_numbers(&self, ns: &str, path: &str) -> Vec<u64> {
+        let res = self
+            .get(ns, &format!("/revisions?path={}", enc(path)))
+            .await;
+        assert_eq!(res.status(), 200, "revisions of {path}");
+        common::json(res)
+            .await
+            .as_array()
+            .expect("an array")
+            .iter()
+            .map(|r| r["revision"].as_u64().expect("a revision"))
+            .collect()
+    }
+
     async fn ok_upload(&self, ns: &str, path: &str, bytes: &[u8]) {
         let res = self.upload(ns, path, bytes).await;
         assert_eq!(res.status(), 200, "upload {path}: {}", text(res).await);
@@ -2050,4 +2102,120 @@ async fn a_write_behind_a_held_lock_is_409_busy_after_the_api_wait() {
         .unwrap();
     assert!(released);
     fx.ok_upload(NS, "/busy/f.txt", b"new").await;
+}
+
+// ─── W7d §3.2: `if_revision` ───────────────────────────────────────────────
+
+/// A 409 `file_changed`: its status, its code, and its message.
+async fn file_changed(res: axum::response::Response) -> String {
+    let got = res.status().as_u16();
+    let body = text(res).await;
+    assert_eq!(got, 409, "{body}");
+    let v: Value = serde_json::from_str(&body).expect("an ErrorBody");
+    assert_eq!(v["code"], "file_changed", "{body}");
+    v["error"].as_str().expect("a message").to_string()
+}
+
+#[tokio::test]
+async fn an_upload_at_the_current_revision_commits_the_next_one() {
+    let Some(fx) = fx().await else { return };
+    fx.ok_upload(NS, "/ir/match.txt", b"one").await;
+    let res = fx.upload_if(NS, "/ir/match.txt", "1", b"two").await;
+    assert_eq!(res.status(), 200, "{}", text(res).await);
+    assert_eq!(fx.revision_numbers(NS, "/ir/match.txt").await, vec![1, 2]);
+    let res = fx.upload_if(NS, "/ir/match.txt", "2", b"three").await;
+    assert_eq!(res.status(), 200, "{}", text(res).await);
+    assert_eq!(text(fx.download(NS, "/ir/match.txt").await).await, "three");
+}
+
+#[tokio::test]
+async fn an_upload_at_a_stale_revision_is_409_file_changed_and_leaves_nothing() {
+    let Some(fx) = fx().await else { return };
+    fx.ok_upload(NS, "/ir/stale.txt", b"one").await;
+    fx.ok_upload(NS, "/ir/stale.txt", b"two").await;
+    let (rows, objects) = (fx.rows().await, fx.objects().await);
+
+    let msg = file_changed(fx.upload_if(NS, "/ir/stale.txt", "1", b"mine").await).await;
+    assert!(
+        msg.contains("'/ir/stale.txt'") && msg.contains("revision 2"),
+        "{msg}"
+    );
+    // A revision ahead of the path is as stale as one behind it.
+    file_changed(fx.upload_if(NS, "/ir/stale.txt", "7", b"mine").await).await;
+
+    assert_eq!(fx.rows().await, rows, "a row was written");
+    assert_eq!(fx.objects().await, objects, "an object was left");
+    assert_eq!(staging_rows(&fx).await, 0, "a staging row was left");
+    assert_eq!(fx.revision_numbers(NS, "/ir/stale.txt").await, vec![1, 2]);
+    assert_eq!(text(fx.download(NS, "/ir/stale.txt").await).await, "two");
+}
+
+#[tokio::test]
+async fn if_revision_zero_requires_the_path_not_to_exist() {
+    let Some(fx) = fx().await else { return };
+    fx.ok_upload(NS, "/ir/zero.txt", b"one").await;
+    let msg = file_changed(fx.upload_if(NS, "/ir/zero.txt", "0", b"mine").await).await;
+    assert!(msg.contains("already exists"), "{msg}");
+    assert_eq!(fx.revision_numbers(NS, "/ir/zero.txt").await, vec![1]);
+
+    let res = fx.upload_if(NS, "/ir/new.txt", "0", b"new").await;
+    assert_eq!(res.status(), 200, "{}", text(res).await);
+    assert_eq!(fx.revision_numbers(NS, "/ir/new.txt").await, vec![1]);
+    // Once it exists, a second "must not exist" write is refused.
+    file_changed(fx.upload_if(NS, "/ir/new.txt", "0", b"again").await).await;
+}
+
+/// A soft-deleted path does not exist (its GET is 404): an editor that read
+/// revision 1 before someone deleted it gets 409, and `if_revision=0`
+/// writes it again as its next revision.
+#[tokio::test]
+async fn a_soft_deleted_path_counts_as_not_existing() {
+    let Some(fx) = fx().await else { return };
+    fx.ok_upload(NS, "/ir/gone.txt", b"one").await;
+    assert_eq!(fx.rm(NS, "/ir/gone.txt").await.status(), 200);
+
+    let msg = file_changed(fx.upload_if(NS, "/ir/gone.txt", "1", b"mine").await).await;
+    assert!(msg.contains("deleted"), "{msg}");
+    assert_eq!(staging_rows(&fx).await, 0, "a staging row was left");
+
+    let res = fx.upload_if(NS, "/ir/gone.txt", "0", b"again").await;
+    assert_eq!(res.status(), 200, "{}", text(res).await);
+    assert_eq!(fx.revision_numbers(NS, "/ir/gone.txt").await, vec![1, 2]);
+    assert_eq!(text(fx.download(NS, "/ir/gone.txt").await).await, "again");
+}
+
+#[tokio::test]
+async fn a_malformed_if_revision_is_400() {
+    let Some(fx) = fx().await else { return };
+    for bad in ["-1", "x", "1.5"] {
+        let msg = refusal(fx.upload_if(NS, "/ir/bad.txt", bad, b"x").await, 400).await;
+        assert!(msg.contains("if_revision"), "{bad}: {msg}");
+    }
+    assert_eq!(fx.rows().await, 0, "nothing written");
+}
+
+/// Two saves of the same revision race: the check and the write are one
+/// step under the path's lock, so exactly one commits and the other is told.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_concurrent_uploads_at_the_same_revision_commit_exactly_one() {
+    let Some(fx) = fx().await else { return };
+    for round in 0..4 {
+        let path = format!("/ir/race{round}.txt");
+        fx.ok_upload(NS, &path, b"base").await;
+        let (a, b) = tokio::join!(
+            fx.upload_if(NS, &path, "1", b"a"),
+            fx.upload_if(NS, &path, "1", b"b"),
+        );
+        let mut statuses = [a.status().as_u16(), b.status().as_u16()];
+        statuses.sort();
+        assert_eq!(statuses, [200, 409], "round {round}");
+        let loser = if a.status() == 409 { a } else { b };
+        file_changed(loser).await;
+        assert_eq!(
+            fx.revision_numbers(NS, &path).await,
+            vec![1, 2],
+            "round {round}"
+        );
+    }
+    assert_eq!(staging_rows(&fx).await, 0, "a staging row was left");
 }

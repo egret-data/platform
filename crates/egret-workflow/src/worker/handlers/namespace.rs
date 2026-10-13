@@ -887,6 +887,13 @@ impl TaskHandler for UploadFiles {
                         )
                         .await;
                 }
+                // Only `Conflict::IfRevision` answers this, which no task uses.
+                Ok(Written::Changed { .. }) => {
+                    return Err(Error::Internal(anyhow::anyhow!(
+                        "{T}: namespace file '{path}' was refused as changed under a \
+                         conflict mode that does not compare revisions"
+                    )))
+                }
                 Err(e) => return split(T, e).map(Outcome::failed_with),
             }
         }
