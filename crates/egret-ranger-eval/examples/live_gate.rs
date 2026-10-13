@@ -42,7 +42,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use egret_ranger_eval::eval::{
     evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, EngineConfig, EngineType,
-    ResolvedTag, TagServiceResource, UnenrichedTags,
+    PluginVersion, ResolvedTag, TagServiceResource, UnenrichedTags,
 };
 use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::{MatchType, RequestResource};
@@ -228,6 +228,19 @@ fn main() {
              uses the wrong service-def and the wrong resource hierarchy"
         ),
     };
+    // The plugin version of the engine under test. `LIVE_GATE_PLUGIN_VERSION`
+    // names it; unset means the engine type's first modelled version. A version
+    // the evaluator does not model is not defaulted around: the run then
+    // reports `PluginVersionMismatch`, which is the point.
+    let plugin_version = match std::env::var("LIVE_GATE_PLUGIN_VERSION").as_deref() {
+        Ok("2.5.0") => PluginVersion::Ranger2_5_0,
+        Ok("2.8.0") => PluginVersion::Ranger2_8_0,
+        Ok("2.9.0") => PluginVersion::Ranger2_9_0,
+        Ok(other) => {
+            panic!("LIVE_GATE_PLUGIN_VERSION must be 2.5.0, 2.8.0 or 2.9.0, got {other:?}")
+        }
+        Err(_) => engine.modelled_versions()[0],
+    };
     let user = args.next().unwrap_or_else(|| "admin".to_string());
     let catalog = args.next().unwrap_or_else(|| "sp4a10_wh".to_string());
     let specs: Vec<String> = args.collect();
@@ -253,7 +266,7 @@ fn main() {
     let def = ServiceDef::parse(&policies.service_def);
     let cfg = EngineConfig {
         engine: Some(engine),
-        plugin_version: Some(engine.plugin_version()),
+        plugin_version: Some(plugin_version),
         ..EngineConfig::without_super_users()
     };
     // Trino's middle level is `schema`; StarRocks' is `database`.
@@ -265,7 +278,7 @@ fn main() {
     println!("download   : {path}");
     println!("service    : {}", policies.service_name);
     println!("policyVer  : {:?}", policies.policy_version);
-    println!("engine     : {engine:?} / {:?}", engine.plugin_version());
+    println!("engine     : {engine:?} / {plugin_version:?}");
     println!("user       : {user}  (groups {{}}, roles {{}})");
     println!("unmodelled : {:?}", policies.all_unmodelled());
     println!("defIssues  : {:?}", def.issues());

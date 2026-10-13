@@ -24,7 +24,7 @@
 //! operator may DECLARE.** Registration accepts any Ranger release in
 //! [`KNOWN_RANGER_PLUGIN_VERSIONS`] and says, on the response, whether egret's
 //! evaluator models the (type, version) PAIR (`rangerPluginVersionModelled`; only
-//! Trino@2.5.0 and StarRocks@2.8.0 are). A pair the evaluator
+//! the pairs in `egret_perm::MODELLED_RANGER_PLUGINS` are). A pair the evaluator
 //! does not model is stored as declared — recording a different one would be
 //! wrong — and `egret_perm_compile::engine_plugin_version` then makes the SP4d-3
 //! migration gate refuse on that profile, naming the version. It is never
@@ -51,12 +51,12 @@ pub const ORIGIN_PROVISIONED: &str = "provisioned";
 /// engine. A closed list so a typo (`2.55.0`) is a 400 rather than a profile
 /// that is quietly never provable. A release absent here is a deliberate edit,
 /// not a guess.
-pub const KNOWN_RANGER_PLUGIN_VERSIONS: [&str; 9] = [
-    "2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0",
+pub const KNOWN_RANGER_PLUGIN_VERSIONS: [&str; 10] = [
+    "2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0", "2.9.0",
 ];
 
 /// Whether egret's Ranger evaluator has been read against `engine_type` at
-/// `version` (a PAIR: Trino@2.5.0 and StarRocks@2.8.0 only). The same predicate
+/// `version` (a PAIR; the list is `egret_perm::MODELLED_RANGER_PLUGINS`). The same predicate
 /// the migration gate and `explain` use.
 pub fn plugin_version_is_modelled(engine_type: &str, version: &str) -> bool {
     egret_perm::ranger_plugin_is_modelled(engine_type, version)
@@ -94,8 +94,9 @@ pub struct RegisterExternalEngine {
     /// Trino's HTTP port or StarRocks' FE query port.
     pub port: u16,
     /// The Ranger plugin version installed on the engine, `x.y.z`, one of the
-    /// Ranger 2.x releases. **Only Trino@2.5.0 and StarRocks@2.8.0 are
-    /// modelled by egret's evaluator** (a type and version PAIR): any other is
+    /// Ranger 2.x releases. **Only the pairs in
+    /// `egret_perm::MODELLED_RANGER_PLUGINS` are modelled by egret's evaluator**
+    /// (a type and version PAIR; the refusal sentence names them): any other is
     /// stored as declared, and a migration to a profile bound to this engine is
     /// then refused rather than evaluated with the wrong semantics.
     pub ranger_plugin_version: String,
@@ -447,7 +448,7 @@ async fn update_external_engine(
     tag = "control-plane-engines",
     request_body = RegisterExternalEngine,
     responses(
-        (status = 201, description = "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to a policy profile, with the given catalogs declared attached (`applyStatus: declared`). The bound profile was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the (type, declared version) pair (only Trino@2.5.0 and StarRocks@2.8.0 are): a migration to that profile is then refused, never evaluated at a guessed version", body = EngineDto),
+        (status = 201, description = "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to a policy profile, with the given catalogs declared attached (`applyStatus: declared`). The bound profile was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the (type, declared version) pair (only the pairs in `egret_perm::MODELLED_RANGER_PLUGINS` are): a migration to that profile is then refused, never evaluated at a guessed version", body = EngineDto),
         (status = 400, description = "Invalid name, type, host, port or plugin version; a catalog the engine cannot read; `authzServiceId` naming no policy profile or a Trino profile with no usable tag service; or Kubernetes-free registration was malformed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:create permission", body = ErrorBody),
@@ -814,6 +815,17 @@ mod plugin_config_tests {
             bearer_configured: bearer,
             ranger_enabled: enabled,
             version: v,
+        }
+    }
+
+    #[test]
+    fn every_modelled_pair_is_a_registrable_version() {
+        for (engine_type, version) in egret_perm::MODELLED_RANGER_PLUGINS {
+            assert!(
+                KNOWN_RANGER_PLUGIN_VERSIONS.contains(&version),
+                "{engine_type}@{version} is modelled but an external engine cannot declare it"
+            );
+            assert!(validate_plugin_version(version).is_ok(), "{version}");
         }
     }
 

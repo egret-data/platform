@@ -70,6 +70,7 @@ const ENGINE_LABEL: Record<WireEngineType, string> = {
 const PLUGIN_LABEL: Record<WirePluginVersion, string> = {
   ranger_2_5_0: "Ranger 2.5.0",
   ranger_2_8_0: "Ranger 2.8.0",
+  ranger_2_9_0: "Ranger 2.9.0",
 };
 
 /** Ranger's five item buckets, named the way an operator reading the policy would. */
@@ -406,7 +407,10 @@ function causeSentence(c: WireUndecidableCause, declined?: ExplainTagDecline): s
     case "engine_mismatch":
       return `This profile declares ${ENGINE_LABEL[c.declared]} but carries the service definition “${c.service_def_name}”, whose resource levels are a different vocabulary.`;
     case "plugin_version_mismatch":
-      return `This profile declares ${PLUGIN_LABEL[c.declared]} but ${ENGINE_LABEL[c.engine]} is running ${PLUGIN_LABEL[c.measured]}, and the two evaluate differently.`;
+      // `declared` is the version egret reads the bound engine at: for an
+      // external engine, the one its operator declared; for a provisioned one,
+      // the one its exact image ships. The profile itself declares nothing.
+      return `The ${ENGINE_LABEL[c.engine]} engine bound to this profile runs ${PLUGIN_LABEL[c.declared]} (the version its image ships, or for an external engine the version its operator declared), and egret's evaluator has not been verified against that version, so no verdict here could be relied on.`;
     case "tags_unresolved": {
       // ⚠ Rewritten TWICE. Task 7 changed the cause's meaning (it used to be
       // unconditional, because `explain` never resolved tags); fix round 3 moved

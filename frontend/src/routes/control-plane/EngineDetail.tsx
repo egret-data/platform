@@ -111,7 +111,7 @@ import EngineMonitor from "./EngineMonitor";
 import PodLogsDialog from "./PodLogsDialog";
 import PodTerminalDialog from "./PodTerminalDialog";
 import ExternalEngineDetail from "./ExternalEngineDetail";
-import { isExternal } from "./externalEngine";
+import { WarningCallout, isExternal } from "./externalEngine";
 
 type EngineWithStatus = Omit<Engine, "status"> & { status: EngineStatus };
 
@@ -176,6 +176,7 @@ function engineEndpoint(engine: EngineWithStatus): string {
 
 /** Container image the engine runs (falls back to the raw `imageVersion`). */
 function engineImage(engine: EngineWithStatus): string {
+  if (engine.image) return engine.image;
   if (isStarRocksType(engine.type)) {
     return engine.spec.starrocksConfig?.feImage ?? engine.spec.imageVersion;
   }
@@ -219,6 +220,14 @@ function EngineHeaderMeta({ engine }: { engine: EngineWithStatus }) {
         ·
       </span>
       <span className="truncate">{engineAuthLabel(engine)}</span>
+      {engine.rangerPluginVersion && (
+        <>
+          <span aria-hidden className="text-muted-foreground/50">
+            ·
+          </span>
+          <span className="truncate tabular-nums">Ranger plugin {engine.rangerPluginVersion}</span>
+        </>
+      )}
     </div>
   );
 }
@@ -457,7 +466,12 @@ export default function EngineDetail() {
       ) : !data ? (
         <ListSkeleton rows={6} cols={3} />
       ) : (
-        <EngineTabs engine={data} engineId={id} />
+        <>
+          {data.rangerPluginVersionModelled === false && data.rangerPluginVersionNote && (
+            <WarningCallout testId="plugin-version-note">{data.rangerPluginVersionNote}</WarningCallout>
+          )}
+          <EngineTabs engine={data} engineId={id} />
+        </>
       )}
     </div>
   );

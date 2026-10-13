@@ -9,7 +9,8 @@
 //! Uses a `jdbc` catalog against the dev-compose's own Postgres (reachable
 //! from the FE container as `postgres:5432`), NOT `tpch`/`benchmark` as the
 //! SP3b plan's illustrative brief has it. Measured live: the deployed dev FE
-//! (`starrocks/allin1-ubuntu:latest`, `@@version_comment` = `4.1.4-4a9848e`)
+//! (then `starrocks/allin1-ubuntu:latest`, `@@version_comment` = `4.1.4-4a9848e`;
+//! the compose now pins `4.1.6`)
 //! answers `CREATE EXTERNAL CATALOG ... "type"="benchmark"` with `ERROR 1064
 //! (HY000): Getting analyzing error. Detail message: [type : benchmark] is
 //! not supported.'`. The vendored FE source this branch's property names were
@@ -21,7 +22,7 @@
 //! branch build (`can_read` now refuses `tpch`/`tpcds` on StarRocks; see
 //! `render/starrocks.rs`'s `tpch_and_tpcds_are_refused_on_starrocks_…` test).
 //! `jdbc` is the next-best infra-free target: no extra service beyond what
-//! `docker-compose.dev.yml` already runs, and it is fully supported by 4.1.4.
+//! `docker-compose.dev.yml` already runs, and it is fully supported by 4.1.x.
 //!
 //! Fix round 1 (review F-13): the whole body runs behind `run()`, which never
 //! panics (every assertion is a returned `Err(String)`), so the `#[tokio::test]`

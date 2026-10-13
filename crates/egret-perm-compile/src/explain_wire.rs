@@ -139,6 +139,8 @@ pub enum WirePluginVersion {
     Ranger2_5_0,
     #[serde(rename = "ranger_2_8_0")]
     Ranger2_8_0,
+    #[serde(rename = "ranger_2_9_0")]
+    Ranger2_9_0,
 }
 
 impl From<PluginVersion> for WirePluginVersion {
@@ -146,6 +148,7 @@ impl From<PluginVersion> for WirePluginVersion {
         match version {
             PluginVersion::Ranger2_5_0 => WirePluginVersion::Ranger2_5_0,
             PluginVersion::Ranger2_8_0 => WirePluginVersion::Ranger2_8_0,
+            PluginVersion::Ranger2_9_0 => WirePluginVersion::Ranger2_9_0,
         }
     }
 }
@@ -756,7 +759,6 @@ pub enum WireUndecidableCause {
     PluginVersionMismatch {
         engine: WireEngineType,
         declared: WirePluginVersion,
-        measured: WirePluginVersion,
     },
 }
 
@@ -946,15 +948,12 @@ impl From<&UndecidableCause> for WireUndecidableCause {
                 declared: WireEngineType::from(*declared),
                 service_def_name: service_def_name.clone(),
             },
-            UndecidableCause::PluginVersionMismatch {
-                engine,
-                declared,
-                measured,
-            } => WireUndecidableCause::PluginVersionMismatch {
-                engine: WireEngineType::from(*engine),
-                declared: WirePluginVersion::from(*declared),
-                measured: WirePluginVersion::from(*measured),
-            },
+            UndecidableCause::PluginVersionMismatch { engine, declared } => {
+                WireUndecidableCause::PluginVersionMismatch {
+                    engine: WireEngineType::from(*engine),
+                    declared: WirePluginVersion::from(*declared),
+                }
+            }
         }
     }
 }

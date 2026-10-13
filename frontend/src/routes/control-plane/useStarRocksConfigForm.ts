@@ -248,17 +248,17 @@ const EMPTY_BODY: SrBody = { feImage: "", cnImage: "" };
  * The config the backend would END UP with after PUTting `body` over `stored`,
  * canonicalised to a stable string. Mirrors `build_starrocks_spec`'s per-field
  * merge EXACTLY: a non-blank body value wins, else the stored value, else the
- * create-time default (image defaults / replicas 1 / resources null / delegation
- * null). Because `dirty` compares the resolved result of the ACTUAL body against
+ * default (no image / replicas 1 / resources null / delegation null). Because `dirty` compares the resolved result of the ACTUAL body against
  * the resolved result of an empty body, blanking a field that was set resolves to
  * "no change" (the PUT omits it → the server preserves it) instead of a phantom
  * diff.
  */
 function resolveConfig(body: SrBody, stored: StarRocksSpecConfig | undefined): string {
-  const feImage =
-    body.feImage.trim() || stored?.feImage?.trim() || DEFAULT_SR_FE_IMAGE;
-  const cnImage =
-    body.cnImage.trim() || stored?.cnImage?.trim() || DEFAULT_SR_CN_IMAGE;
+  // No image default here: the UPDATE route never defaults an image (neither
+  // body nor stored → 400), so typing the server's create-time default onto an
+  // engine that stores none is a real change, not "no change".
+  const feImage = body.feImage.trim() || stored?.feImage?.trim() || "";
+  const cnImage = body.cnImage.trim() || stored?.cnImage?.trim() || "";
   const feReplicas = body.feReplicas ?? stored?.feReplicas ?? 1;
   const cnReplicas = body.cnReplicas ?? stored?.cnReplicas ?? 1;
   const feResources = normResources(body.feResources ?? stored?.feResources);

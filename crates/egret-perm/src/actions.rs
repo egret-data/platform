@@ -68,17 +68,24 @@ pub struct OverlapRule {
 }
 
 /// The (engine type, Ranger plugin version) pairs `egret-ranger-eval` has been
-/// read against: Trino at 2.5.0 and StarRocks at 2.8.0, and nothing else (user
-/// ruling 2026-10-12). "Modelled" is a PAIR, never a version alone: the
-/// evaluator's `PluginVersion` and `EngineType` are measured together, so a
-/// Trino engine declaring 2.8.0 is not covered by the StarRocks measurement.
+/// read against AND proved on the real jar, and nothing else (user ruling
+/// 2026-10-12). "Modelled" is a PAIR, never a version alone: the evaluator's
+/// `PluginVersion` and `EngineType` are measured together, so a Trino engine
+/// declaring 2.8.0 is not covered by a StarRocks measurement. It must equal the
+/// union of `EngineType::models`; a test in `egret-perm-compile` pins both
+/// directions.
 ///
 /// Spelled here, in the crate both `egret-engine-mgmt` (registering an external
 /// engine) and `egret-perm-compile` (`engine_plugin_version`) already depend
 /// on, so the answer the API reports (`rangerPluginVersionModelled`), the one
 /// the migration gate proves on and the one `explain` evaluates at are ONE
 /// predicate, [`ranger_plugin_is_modelled`].
-pub const MODELLED_RANGER_PLUGINS: [(&str, &str); 2] = [("trino", "2.5.0"), ("starrocks", "2.8.0")];
+pub const MODELLED_RANGER_PLUGINS: [(&str, &str); 4] = [
+    ("trino", "2.5.0"),
+    ("trino", "2.8.0"),
+    ("starrocks", "2.8.0"),
+    ("starrocks", "2.9.0"),
+];
 
 /// Whether `engine_type` (`trino` / `starrocks`) at Ranger plugin `version` is a
 /// modelled pair.
@@ -97,13 +104,18 @@ pub const EXTERNAL_PLUGIN_ASSUMPTIONS: [&str; 3] = [
     "Plugin audit is off, so egret's policy evaluation is the only decision record.",
 ];
 
-/// `Trino@2.5.0 and StarRocks@2.8.0`, for sentences.
+/// The modelled pairs spelled `Trino@2.5.0, StarRocks@2.8.0 and StarRocks@2.9.0`,
+/// for sentences.
 pub fn modelled_ranger_plugins_sentence() -> String {
-    MODELLED_RANGER_PLUGINS
+    let pairs: Vec<String> = MODELLED_RANGER_PLUGINS
         .iter()
         .map(|(t, v)| format!("{}@{v}", if *t == "trino" { "Trino" } else { "StarRocks" }))
-        .collect::<Vec<_>>()
-        .join(" and ")
+        .collect();
+    match pairs.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    }
 }
 
 /// A grant the compiler cannot express against the target engine, or cannot

@@ -42,13 +42,18 @@ const ENGINE_TYPES: EngineType[] = [
 // Trino and StarRocks provisioning are wired up; RisingWave is not yet.
 const PROVISIONABLE = new Set(["trino", "starrocks"]);
 
-// StarRocks image defaults (shared-data FE/CN), same versions the backend
-// falls back to when the body omits them. Pinned to 4.1.x: it has BOTH the FE
-// MySQL-protocol TLS listener (delegation "Enable TLS", open-source >= 3.4.1)
-// AND JWT authentication (open-source >= 3.5) that per-user delegation needs —
-// 3.4 lacks the authentication_jwt plugin, so JWT logins can't authenticate.
-export const DEFAULT_SR_FE_IMAGE = "starrocks/fe-ubuntu:4.1-latest";
-export const DEFAULT_SR_CN_IMAGE = "starrocks/cn-ubuntu:4.1-latest";
+// The images the server pins for a new engine whose create body OMITS them
+// (`egret_perm::DEFAULT_ENGINE_IMAGES`). DISPLAY ONLY — placeholders and
+// "Default:" hints. The create form never sends them: an untouched image field
+// is omitted so the server's own pin applies, and the UI cannot drift it onto a
+// floating or stale tag. `crates/egret-engine-mgmt/tests/no_floating_images.rs`
+// fails when these stop matching the server's pins.
+export const DEFAULT_TRINO_IMAGE_VERSION =
+  "483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534";
+export const DEFAULT_SR_FE_IMAGE =
+  "starrocks/fe-ubuntu:4.1.6@sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31";
+export const DEFAULT_SR_CN_IMAGE =
+  "starrocks/cn-ubuntu:4.1.6@sha256:bf0f5ca7fd9fc4e568d4d0e593e362f229b376976b513a5a549b1b922d9ec23b";
 
 // Harmless defaults for the still-required Trino-only body fields
 // (coordinatorReplicas/workerReplicas/cpuMin/cpuMax/memory) when creating a

@@ -7,7 +7,11 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import type { Engine } from "@/api/controlPlane";
 import * as api from "@/api/controlPlane";
 import { StarRocksConfigTab } from "@/routes/control-plane/StarRocksConfigTab";
-import { useStarRocksConfigForm } from "@/routes/control-plane/useStarRocksConfigForm";
+import {
+  DEFAULT_SR_CN_IMAGE,
+  DEFAULT_SR_FE_IMAGE,
+  useStarRocksConfigForm,
+} from "@/routes/control-plane/useStarRocksConfigForm";
 
 vi.mock("@/api/controlPlane");
 
@@ -263,6 +267,28 @@ describe("StarRocksConfigTab", () => {
     await user.clear(memReq);
 
     expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+  });
+
+  test("typing the default images onto an engine that stores none is a change to save", async () => {
+    // The update route never defaults an image (no stored, no body → 400), so
+    // the dirty check must not either: pinning an unpinned engine to exactly
+    // the server's default is a real change.
+    const user = userEvent.setup();
+    const { feImage: _fe, cnImage: _cn, ...rest } = ENGINE.spec.starrocksConfig!;
+    renderTab({ ...ENGINE, spec: { ...ENGINE.spec, starrocksConfig: rest } });
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+
+    const fe = screen.getByLabelText("FE image");
+    expect(fe).toHaveAttribute("placeholder", DEFAULT_SR_FE_IMAGE);
+    await user.type(fe, DEFAULT_SR_FE_IMAGE);
+    await user.type(screen.getByLabelText("CN image"), DEFAULT_SR_CN_IMAGE);
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(api.updateEngine).toHaveBeenCalledTimes(1));
+    const [, body] = vi.mocked(api.updateEngine).mock.calls[0];
+    expect(body.starrocks).toEqual(
+      expect.objectContaining({ feImage: DEFAULT_SR_FE_IMAGE, cnImage: DEFAULT_SR_CN_IMAGE }),
+    );
   });
 
   test("a config-only save keeps the stored delegation in the PUT body", async () => {

@@ -21,7 +21,7 @@
  "engines": {
   "postgres": "postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280 (service pgtarget, not the artifact's own postgres)",
   "trino": "trinodb/trino:483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534",
-  "starrocks": "starrocks/allin1-ubuntu:4.1.4@sha256:faf7ce9c24d9c29c9431b4e8cbd4bb7a74cd169907c63f0c5ebaacc7f9df276b (current_version() 4.1.4-4a9848e)"
+  "starrocks": "starrocks/allin1-ubuntu:4.1.6@sha256:5cbf09c4c788d2ca41a8e38599b650f04dbc6af0de51ebda0952770fb8333e5d (current_version() 4.1.6-6862092)"
  },
  "captured_at": {
   "up": "2026-09-29T01:54:22Z",
@@ -9012,7 +9012,7 @@
    "kestra kestra/kestra@sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd",
    "pgtarget postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280 sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280",
    "trino trinodb/trino:483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534 sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534",
-   "starrocks starrocks/allin1-ubuntu:4.1.4@sha256:faf7ce9c24d9c29c9431b4e8cbd4bb7a74cd169907c63f0c5ebaacc7f9df276b sha256:faf7ce9c24d9c29c9431b4e8cbd4bb7a74cd169907c63f0c5ebaacc7f9df276b",
+   "starrocks starrocks/allin1-ubuntu:4.1.6@sha256:5cbf09c4c788d2ca41a8e38599b650f04dbc6af0de51ebda0952770fb8333e5d sha256:faf7ce9c24d9c29c9431b4e8cbd4bb7a74cd169907c63f0c5ebaacc7f9df276b",
    "postgres postgres:18 sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280"
   ],
   "kestra_image_labels": {

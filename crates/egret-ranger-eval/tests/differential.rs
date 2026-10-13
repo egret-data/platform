@@ -448,6 +448,30 @@ fn trino() -> Profile {
     }
 }
 
+/// Trino as it runs once Trino 483 ships Ranger 2.8.0 (engine-upgrade Task 5):
+/// the same service-def, hierarchy and vocabulary as [`trino`], a different
+/// `ranger-plugins-common`. Its own profile so every test that iterates profiles
+/// reports it on its own line.
+fn trino_2_8_0() -> Profile {
+    Profile {
+        plugin_version: PluginVersion::Ranger2_8_0,
+        ranger_version: "2.8.0",
+        ..trino()
+    }
+}
+
+/// StarRocks as it runs once fe-ubuntu 4.1.6 ships Ranger 2.9.0 (engine-upgrade
+/// Task 4): the same service-def, hierarchy and vocabulary as [`starrocks`], a
+/// different `ranger-plugins-common`. A separate profile rather than a loop
+/// variable so every test that iterates profiles reports it on its own line.
+fn starrocks_2_9_0() -> Profile {
+    Profile {
+        plugin_version: PluginVersion::Ranger2_9_0,
+        ranger_version: "2.9.0",
+        ..starrocks()
+    }
+}
+
 fn starrocks() -> Profile {
     Profile {
         engine: EngineType::StarRocks,
@@ -4137,19 +4161,23 @@ fn check_version_split_is_asymmetric(profile: &Profile, tally: &Tally) {
         profile.ranger_version,
         tally.cases,
     );
-    if profile.ranger_version == "2.8.0" {
+    if matches!(
+        profile.plugin_version,
+        PluginVersion::Ranger2_8_0 | PluginVersion::Ranger2_9_0
+    ) {
         assert_eq!(
             declined, 0,
-            "ranger 2.8.0: {declined} of {generated} version-split duels REFUSED. 2.8.0 is the \
-             version this crate reproduces, so this shape must be ANSWERED and compared against \
-             the real engine — a refusal here means the version read has been widened past what \
-             was measured"
+            "ranger {}: {declined} of {generated} version-split duels REFUSED. 2.8.0 and \
+             2.9.0 are the versions this crate reproduces, so this shape must be ANSWERED and \
+             compared against the real engine — a refusal here means the version read has been \
+             widened past what was measured",
+            profile.ranger_version,
         );
     } else {
         assert!(
             declined * 10 >= generated * 9 && declined > 0,
             "ranger {}: only {declined} of {generated} version-split duels refused. At a plugin \
-             version other than 2.8.0 this crate's model is MEASURED WRONG (it would reopen a \
+             version other than 2.8.0 or 2.9.0 this crate's model is MEASURED WRONG (it would reopen a \
              deny 2.5.0 keeps), so a run that answers them is a run that has stopped reading \
              EngineConfig::plugin_version",
             profile.ranger_version,
@@ -4159,8 +4187,8 @@ fn check_version_split_is_asymmetric(profile: &Profile, tally: &Tally) {
         "differential: ranger {} — {declined} of {generated} version-split duels refused \
          (expected {})",
         profile.ranger_version,
-        if profile.ranger_version == "2.8.0" {
-            "NONE: 2.8.0 is the arm this crate reproduces"
+        if profile.ranger_version != "2.5.0" {
+            "NONE: 2.8.0 and 2.9.0 are the arm this crate reproduces"
         } else {
             "essentially all: 2.5.0's arm is unmodelled"
         },
@@ -4678,7 +4706,7 @@ fn check_measured_priority_composite(
         }
     }
 
-    for version in ["2.5.0", "2.8.0"] {
+    for version in ["2.5.0", "2.8.0", "2.9.0"] {
         let verdicts = ask_ranger(&cases, "trino", version, "t7pin");
         for (verdict, case) in verdicts.iter().zip(&cases) {
             assert_eq!(
@@ -4787,7 +4815,7 @@ fn check_measured_tag_crash(
          allowed to generate a shape the real plugin cannot answer at all"
     );
 
-    for version in ["2.5.0", "2.8.0"] {
+    for version in ["2.5.0", "2.8.0", "2.9.0"] {
         let verdicts = ask_ranger(std::slice::from_ref(&case), "trino", version, "tagcrash");
         let error = verdicts[0]
             .get("error")
@@ -5251,7 +5279,7 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
     check_measured_priority_composite(&pin_def_json, &load_tag_def(), &pin_def, &pin_engine);
 
     let mut total = Tally::default();
-    for profile in [trino(), starrocks()] {
+    for profile in [trino(), trino_2_8_0(), starrocks(), starrocks_2_9_0()] {
         let tally = run_profile(&profile, seed, count);
         eprintln!(
             "differential: ranger {} — {} cases ({} with a tag phase), {} compared and \
@@ -5520,7 +5548,7 @@ fn the_prepared_path_decides_every_corpus_case_exactly_as_the_unprepared_one() {
     };
     const REUSE: usize = 4;
     let mut compared = 0usize;
-    for profile in [trino(), starrocks()] {
+    for profile in [trino(), trino_2_8_0(), starrocks(), starrocks_2_9_0()] {
         let (def_json, def, engine) = load_engine(&profile);
         let tag_def_json = load_tag_def();
         let mut rng =
@@ -7552,7 +7580,7 @@ fn a_migration_the_grammar_accepts_decides_identically_on_the_real_engine() {
         total_refused += tally.refused;
         total_accepted += tally.accepted;
 
-        for version in ["2.5.0", "2.8.0"] {
+        for version in ["2.5.0", "2.8.0", "2.9.0"] {
             let t = std::time::Instant::now();
             let run = mig_run(&profile, &pairs, version);
             eprintln!(
@@ -7700,7 +7728,11 @@ fn prune_dropped(pair: &PrunePair, def: &ServiceDef) -> PruneDropped {
         after: &after,
         service_def: def,
         engine: EngineConfig::without_super_users(),
-        versions: vec![PluginVersion::Ranger2_5_0, PluginVersion::Ranger2_8_0],
+        versions: vec![
+            PluginVersion::Ranger2_5_0,
+            PluginVersion::Ranger2_8_0,
+            PluginVersion::Ranger2_9_0,
+        ],
         probes,
     };
     let mut undecidable = Vec::new();
@@ -7989,7 +8021,7 @@ fn probes_the_gate_prunes_decide_identically_on_the_real_engine() {
         grand_sent += sample.len();
         grand_undecidable += undecidable;
 
-        for version in ["2.5.0", "2.8.0"] {
+        for version in ["2.5.0", "2.8.0", "2.9.0"] {
             let t = std::time::Instant::now();
             let items: Vec<(&PrunePair, &egret_perm_compile::equivalence::Probe)> = sample
                 .iter()
@@ -8039,7 +8071,7 @@ fn probes_the_gate_prunes_decide_identically_on_the_real_engine() {
         // The trie pair: ask the KEPT probes too, so the retention is shown to matter.
         if name == "trie false positive" {
             for (pi, pair) in pairs.iter().enumerate() {
-                for version in ["2.5.0", "2.8.0"] {
+                for version in ["2.5.0", "2.8.0", "2.9.0"] {
                     let kept: Vec<&_> = per_pair[pi].kept.iter().collect();
                     let items: Vec<(&PrunePair, &_)> = kept.iter().map(|p| (pair, *p)).collect();
                     let results = prune_ask(profile, &items, version);
@@ -8424,7 +8456,11 @@ fn an_editor_saved_table_policy_grants_select_at_column_depth_on_the_real_jars()
             body
         };
 
-        for (version, label) in [("2.5.0", "ranger_2_5_0"), ("2.8.0", "ranger_2_8_0")] {
+        for (version, label) in [
+            ("2.5.0", "ranger_2_5_0"),
+            ("2.8.0", "ranger_2_8_0"),
+            ("2.9.0", "ranger_2_9_0"),
+        ] {
             let mut cases: Vec<(&str, usize, &str, bool)> = Vec::new();
             // (which body, depth, access, expected isAllowed)
             for (which, expect_select) in [("saved", true), ("old", false)] {
@@ -8477,7 +8513,7 @@ fn an_editor_saved_table_policy_grants_select_at_column_depth_on_the_real_jars()
     }
     let elapsed = started.elapsed().as_secs_f64();
     eprintln!("editor-saved table policy on the real jars: {asked} cells in {elapsed:.2} s");
-    assert!(asked == 16, "all sixteen cells were asked: {asked}");
+    assert!(asked == 24, "all twenty-four cells were asked: {asked}");
     assert!(
         elapsed > 1.0,
         "a real-jar run takes seconds, not {elapsed:.2} s — vacuous"
@@ -8544,14 +8580,14 @@ fn editor_shaped_levels_on_the_real_ranger_jars() {
         for (version, plugin_version) in [
             ("2.5.0", PluginVersion::Ranger2_5_0),
             ("2.8.0", PluginVersion::Ranger2_8_0),
+            ("2.9.0", PluginVersion::Ranger2_9_0),
         ] {
             let engine = EngineConfig {
                 plugin_version: Some(plugin_version),
                 ..base_engine.clone()
             };
-            // The crate answers only for the pairing it was measured against
-            // (`EngineType::plugin_version`: Trino → 2.5.0, StarRocks → 2.8.0).
-            let on_pairing = base_engine.plugin_version == Some(plugin_version);
+            // The crate answers only for a pairing `EngineType::models` lists.
+            let on_pairing = profile.engine.models(plugin_version);
             let mut payload: Vec<Value> = cells
                 .iter()
                 .map(|c| {

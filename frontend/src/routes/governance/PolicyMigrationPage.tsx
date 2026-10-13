@@ -576,6 +576,7 @@ function RowDetails({ row }: { row: ClassifiedPolicy }) {
 const PLUGIN_VERSION_LABEL: Record<string, string> = {
   ranger_2_5_0: "Ranger 2.5.0",
   ranger_2_8_0: "Ranger 2.8.0",
+  ranger_2_9_0: "Ranger 2.9.0",
 };
 const CHECK_LABEL: Record<string, string> = {
   access: "Access",

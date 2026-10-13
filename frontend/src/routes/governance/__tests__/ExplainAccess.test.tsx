@@ -288,6 +288,45 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     expect(causes[2]).toHaveTextContent(/validity schedule/i);
   });
 
+  test("a plugin-version cause names where the version came from for either kind of engine", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            tags: [],
+            tag_policies_in_download: 0,
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "undecidable",
+                  why: [{ kind: "plugin_version_mismatch", engine: "trino", declared: "ranger_2_9_0" }],
+                },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const cause = (await screen.findAllByTestId("undecidable-cause"))[0];
+    expect(cause).toHaveTextContent("Ranger 2.9.0");
+    // A provisioned engine's version comes from its image, not from a
+    // declaration on the profile; an external one's from its operator.
+    expect(cause).not.toHaveTextContent(/This profile declares/);
+    expect(cause).toHaveTextContent(/image/);
+    expect(cause).toHaveTextContent(/declared/);
+  });
+
   /**
    * Item 4. A policy egret's compiler does not own still decides real
    * requests — operator-written raw JSON, the delegator plumbing, Ranger's own

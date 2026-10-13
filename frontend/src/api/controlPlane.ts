@@ -556,8 +556,13 @@ export interface Engine {
   origin?: string;
   host?: string | null;
   port?: number | null;
+  /** Provisioned only: the full image ref the stored spec pins. */
+  image?: string | null;
+  /** External: the declared version. Provisioned: what the image ships (absent if unmeasured). */
   rangerPluginVersion?: string | null;
   rangerPluginVersionModelled?: boolean | null;
+  /** Why the engine is not modelled, and how to fix it (pin the image). */
+  rangerPluginVersionNote?: string | null;
 }
 
 /** Live status read back from the operator + pods. */

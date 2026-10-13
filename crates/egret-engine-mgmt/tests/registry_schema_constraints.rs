@@ -809,3 +809,204 @@ async fn a_declared_attachment_holds_nothing_and_the_check_names_itself() {
     );
     ok.expect("a well-formed declared attachment is accepted");
 }
+
+// -- migration 0185: every provisioned engine's image becomes explicit --------
+
+/// Migration 0185's UPDATEs, comments dropped, each `WHERE` narrowed to the ids
+/// this test inserted so a concurrent test's engines are never touched. The
+/// count of narrowed statements is asserted: a rewrite that matched nothing
+/// would otherwise run nothing and pass.
+fn migration_0185_scoped_statements() -> Vec<String> {
+    let sql: String = include_str!("../../../migrations/0185_engine_images_explicit.sql")
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let statements: Vec<String> = sql
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.replacen("WHERE ", "WHERE id = ANY($1) AND ", 1))
+        .collect();
+    assert_eq!(statements.len(), 6, "six UPDATEs: {statements:?}");
+    for s in &statements {
+        assert!(s.contains("id = ANY($1)"), "scoped: {s}");
+    }
+    statements
+}
+
+async fn insert_engine_spec(
+    db: &Db,
+    name: &str,
+    ty: &str,
+    spec: serde_json::Value,
+    origin: &str,
+) -> Uuid {
+    let external = origin == "external";
+    let sql = "INSERT INTO engine_mgmt.engines \
+         (name, type, namespace, spec, status, origin, external_host, external_port, \
+          ranger_plugin_version) \
+       VALUES ($1, $2, $3, $4, 'running', $5, $6, $7, $8) RETURNING id";
+    sqlx::query_scalar(sql)
+        .bind(name)
+        .bind(ty)
+        .bind(if external { "" } else { "egret-engines" })
+        .bind(spec)
+        .bind(origin)
+        .bind(external.then_some("sr.example.com"))
+        .bind(external.then_some(9030_i32))
+        .bind(external.then_some("2.8.0"))
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert engine")
+}
+
+#[tokio::test]
+async fn migration_0185_writes_todays_implicit_images_and_touches_nothing_explicit() {
+    let db = harness_or_skip!();
+    let tag = Uuid::new_v4().simple().to_string();
+    let trino_empty = insert_engine_spec(
+        &db,
+        &format!("img-trino-empty-{tag}"),
+        "trino",
+        serde_json::json!({}),
+        "provisioned",
+    )
+    .await;
+    let trino_explicit = insert_engine_spec(
+        &db,
+        &format!("img-trino-explicit-{tag}"),
+        "trino",
+        serde_json::json!({"imageVersion": "483"}),
+        "provisioned",
+    )
+    .await;
+    let sr_implicit = insert_engine_spec(
+        &db,
+        &format!("img-sr-implicit-{tag}"),
+        "starrocks",
+        serde_json::json!({"starrocksConfig": {"feReplicas": 1}}),
+        "provisioned",
+    )
+    .await;
+    let sr_external = insert_engine_spec(
+        &db,
+        &format!("img-sr-external-{tag}"),
+        "starrocks",
+        serde_json::json!({}),
+        "external",
+    )
+    .await;
+    let trino_number = insert_engine_spec(
+        &db,
+        &format!("img-trino-number-{tag}"),
+        "trino",
+        serde_json::json!({"imageVersion": 470}),
+        "provisioned",
+    )
+    .await;
+    let sr_number = insert_engine_spec(
+        &db,
+        &format!("img-sr-number-{tag}"),
+        "starrocks",
+        serde_json::json!({"starrocksConfig": {"feImage": 41, "cnImage": 42}}),
+        "provisioned",
+    )
+    .await;
+    // Non-object shapes: `'null'::jsonb || {...}` is an ARRAY and `jsonb_set`
+    // on a non-object spec raises, aborting startup. Rust reads every one of
+    // these as "no image" (`spec["x"]` on a non-object is Null), so each runs
+    // the default today and must come out an object carrying it.
+    let mut odd = Vec::new();
+    for (i, (ty, spec)) in [
+        ("starrocks", serde_json::json!({"starrocksConfig": null})),
+        ("starrocks", serde_json::json!({"starrocksConfig": []})),
+        ("starrocks", serde_json::json!({"starrocksConfig": "x"})),
+        ("starrocks", serde_json::Value::Null),
+        ("starrocks", serde_json::json!([1])),
+        ("trino", serde_json::Value::Null),
+        ("trino", serde_json::json!([])),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        odd.push(
+            insert_engine_spec(&db, &format!("img-odd-{i}-{tag}"), ty, spec, "provisioned").await,
+        );
+    }
+    let mut ids = vec![
+        trino_empty,
+        trino_explicit,
+        sr_implicit,
+        sr_external,
+        trino_number,
+        sr_number,
+    ];
+    ids.extend(&odd);
+
+    let mut run_error = None;
+    for statement in migration_0185_scoped_statements() {
+        // `AssertSqlSafe`: the text is the checked-in migration file, narrowed by a
+        // fixed literal replacement; nothing user-supplied is interpolated.
+        if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(statement))
+            .bind(&ids)
+            .execute(&db.pool)
+            .await
+        {
+            run_error = Some(e.to_string());
+            break;
+        }
+    }
+    let mut specs = Vec::new();
+    for id in &ids {
+        let spec: serde_json::Value =
+            sqlx::query_scalar("SELECT spec FROM engine_mgmt.engines WHERE id = $1")
+                .bind(id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("read spec");
+        specs.push(spec);
+    }
+    sqlx::query("DELETE FROM engine_mgmt.engines WHERE id = ANY($1)")
+        .bind(&ids)
+        .execute(&db.pool)
+        .await
+        .expect("cleanup");
+
+    assert_eq!(run_error, None);
+    assert_eq!(specs[0]["imageVersion"], "470", "empty Trino spec");
+    assert_eq!(specs[1], serde_json::json!({"imageVersion": "483"}));
+    let sr = &specs[2]["starrocksConfig"];
+    assert_eq!(sr["feImage"], "starrocks/fe-ubuntu:4.1-latest");
+    assert_eq!(sr["cnImage"], "starrocks/cn-ubuntu:4.1-latest");
+    assert_eq!(sr["feReplicas"], 1, "other config kept");
+    assert_eq!(specs[3], serde_json::json!({}), "external untouched");
+    // A non-string image becomes the string it spells, so Rust's `as_str()` sees it.
+    assert_eq!(specs[4]["imageVersion"], serde_json::json!("470"));
+    assert_eq!(
+        specs[5]["starrocksConfig"]["feImage"],
+        serde_json::json!("41")
+    );
+    assert_eq!(
+        specs[5]["starrocksConfig"]["cnImage"],
+        serde_json::json!("42")
+    );
+    let sr_default = serde_json::json!({
+        "feImage": "starrocks/fe-ubuntu:4.1-latest",
+        "cnImage": "starrocks/cn-ubuntu:4.1-latest",
+    });
+    for (i, spec) in specs[6..11].iter().enumerate() {
+        assert_eq!(
+            spec,
+            &serde_json::json!({ "starrocksConfig": sr_default }),
+            "odd starrocks spec {i}"
+        );
+    }
+    for (i, spec) in specs[11..].iter().enumerate() {
+        assert_eq!(
+            spec,
+            &serde_json::json!({ "imageVersion": "470" }),
+            "odd trino spec {i}"
+        );
+    }
+}

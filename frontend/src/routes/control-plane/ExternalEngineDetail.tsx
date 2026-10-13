@@ -58,14 +58,14 @@ import { EnginePluginConfig } from "./EnginePluginConfig";
 import {
   ENGINE_TYPE_LABEL,
   ExternalChip,
-  OFFERED_PLUGIN_VERSIONS,
   PLUGIN_VERSION_RE,
   PolicyProfileLink,
-  isModelledPair,
   ServerRefusal,
   UnmodelledVersionNote,
   profilesQueryKey,
   useCan,
+  ModelledPluginsUnavailable,
+  useModelledPlugins,
 } from "./externalEngine";
 import { catalogKey, catalogsQueryKey } from "./queryKeys";
 
@@ -460,6 +460,7 @@ function ExternalSettings({
   bound: Profile | undefined;
 }) {
   const canUpdate = useCan("engine:update");
+  const modelled = useModelledPlugins();
   if (!canUpdate)
     return (
       <Alert data-testid="settings-readonly">
@@ -469,7 +470,8 @@ function ExternalSettings({
         </AlertDescription>
       </Alert>
     );
-  if (profilesQ.isLoading) return <ListSkeleton rows={4} cols={2} />;
+  // The form seeds its version choice from the modelled list too, so wait for that as well.
+  if (profilesQ.isLoading || modelled.loading) return <ListSkeleton rows={4} cols={2} />;
   // The form seeds from the loaded profile list, so it mounts after it settled.
   return <SettingsForm engine={engine} profiles={profilesQ.isError ? null : (profilesQ.data ?? [])} bound={bound} />;
 }
@@ -485,7 +487,9 @@ function SettingsForm({
 }) {
   const queryClient = useQueryClient();
   const currentVersion = engine.rangerPluginVersion ?? "";
-  const offered = (OFFERED_PLUGIN_VERSIONS as readonly string[]).includes(currentVersion);
+  const modelled = useModelledPlugins();
+  const offeredVersions = modelled.versionsFor(engine.type);
+  const offered = offeredVersions.includes(currentVersion);
 
   const [host, setHost] = useState(engine.host ?? "");
   const [port, setPort] = useState(String(engine.port ?? ""));
@@ -581,7 +585,7 @@ function SettingsForm({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {OFFERED_PLUGIN_VERSIONS.map((v) => (
+                {offeredVersions.map((v) => (
                   <SelectItem key={v} value={v}>
                     {v}
                   </SelectItem>
@@ -606,7 +610,8 @@ function SettingsForm({
             </div>
           )}
         </div>
-        {versionOk && !isModelledPair(engine.type, version) && <UnmodelledVersionNote />}
+        {modelled.failed && <ModelledPluginsUnavailable />}
+        {versionOk && modelled.ready && !modelled.isModelled(engine.type, version) && <UnmodelledVersionNote />}
       </section>
 
       <section className="space-y-3 rounded-lg border p-4" aria-labelledby="es-profile-h">

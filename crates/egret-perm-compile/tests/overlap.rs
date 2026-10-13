@@ -219,7 +219,7 @@ async fn profile_on(e: &Env, engine: &str, tag_service: Option<&str>) -> Profile
     .expect("warehouse");
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,$2,'egret','{}'::jsonb,$3) RETURNING id",
+         VALUES ($1,$2,'egret',CASE WHEN $2 = 'trino' THEN '{\"imageVersion\":\"470\"}'::jsonb ELSE '{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1.4\"}}'::jsonb END,$3) RETURNING id",
     )
     .bind(unique("ovl-eng"))
     .bind(engine)

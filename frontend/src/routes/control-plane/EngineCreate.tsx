@@ -36,6 +36,7 @@ import { Switch } from "@/components/ui/switch";
 import {
   DEFAULT_SR_CN_IMAGE,
   DEFAULT_SR_FE_IMAGE,
+  DEFAULT_TRINO_IMAGE_VERSION,
   TRINO_FIELD_DEFAULTS,
   enginesQueryKey,
 } from "./ControlPlaneEngines";
@@ -43,10 +44,6 @@ import { TrinoConfigEditor } from "./EngineDetail";
 import { warehousesQueryKey } from "./queryKeys";
 import { useEngineConfigForm } from "./useEngineConfigForm";
 import type { StarRocksDelegationOption } from "./useStarRocksConfigForm";
-
-// Placeholder image tag shown as the ImageSection default; the backend uses its
-// own default when the image field is left blank.
-const DEFAULT_TRINO_IMAGE_VERSION = "470";
 
 /**
  * A registry catalog can be ATTACHED here whatever its kind, but only an egret
@@ -135,8 +132,10 @@ export default function EngineCreate() {
   const [created, setCreated] = useState<CreateEngineResponse | null>(null);
 
   // StarRocks-only compact fields.
-  const [feImage, setFeImage] = useState(DEFAULT_SR_FE_IMAGE);
-  const [cnImage, setCnImage] = useState(DEFAULT_SR_CN_IMAGE);
+  // Blank = omitted from the body = the server's pinned default (shown as the
+  // placeholder). Only an image the operator types is sent.
+  const [feImage, setFeImage] = useState("");
+  const [cnImage, setCnImage] = useState("");
   const [feReplicas, setFeReplicas] = useState(1);
   const [cnReplicas, setCnReplicas] = useState(1);
   const [delegationMode, setDelegationMode] =
@@ -269,8 +268,8 @@ export default function EngineCreate() {
           catalogs,
           kind: "starrocks",
           starrocks: {
-            feImage: feImage.trim(),
-            cnImage: cnImage.trim(),
+            ...(feImage.trim() ? { feImage: feImage.trim() } : {}),
+            ...(cnImage.trim() ? { cnImage: cnImage.trim() } : {}),
             feReplicas,
             cnReplicas,
             ...(delegationMode !== "" ? { delegationMode, tlsEnabled } : {}),

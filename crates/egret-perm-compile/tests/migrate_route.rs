@@ -62,7 +62,7 @@ async fn trino_profile_with_engine_and_config(
         .expect("create trino service");
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'trino','egret','{\"imageVersion\":\"470\"}'::jsonb,$2) RETURNING id",
     )
     .bind(unique("mig-eng"))
     .bind(svc.id)
@@ -1485,13 +1485,14 @@ async fn an_external_engine_declaring_an_unmeasured_plugin_version_refuses_the_m
 }
 
 /// User ruling 2026-10-12: "modelled" is a (type, version) PAIR. A Trino engine
-/// declaring 2.8.0 is a real Ranger release but not one the evaluator was read
-/// against for Trino, so the gate refuses rather than evaluating it with the
-/// wrong semantics. (The StarRocks half is in `tests/routes.rs`' explain test.)
+/// declaring 2.9.0 is a real Ranger release but not one the evaluator was proved
+/// against for Trino (only StarRocks has it), so the gate refuses rather than
+/// evaluating it with the wrong semantics. (The StarRocks half is in
+/// `tests/routes.rs`' explain test.)
 #[tokio::test]
-async fn an_external_trino_declaring_2_8_0_refuses_the_migration_naming_the_pair() {
+async fn an_external_trino_declaring_2_9_0_refuses_the_migration_naming_the_pair() {
     let Some(f) = setup().await else { return };
-    make_bound_engine_external(&f, "2.8.0").await;
+    make_bound_engine_external(&f, "2.9.0").await;
     let name = unique("alice reads orders");
     let id = insert(
         &f,
@@ -1506,11 +1507,38 @@ async fn an_external_trino_declaring_2_8_0_refuses_the_migration_naming_the_pair
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     let refusal = body["refusal"].as_str().expect("refusal");
     assert!(
-        refusal.contains("2.8.0") && refusal.contains("trino") && refusal.contains("Trino@2.5.0"),
+        refusal.contains("2.9.0")
+            && refusal.contains("trino")
+            && refusal.contains("Trino@2.5.0")
+            && refusal.contains("Trino@2.8.0"),
         "the sentence must name the pair and what is modelled: {refusal}"
     );
     assert_eq!(grants_on_catalog(&f).await, 0, "nothing is written");
     assert!(enabled(&f, id).await, "the original stays on");
+}
+
+/// The accept cell Trino 483 adds: Trino declaring 2.8.0 is proved on 2.8.0
+/// (engine-upgrade Task 5).
+#[tokio::test]
+async fn an_external_trino_declaring_2_8_0_is_proved_on_2_8_0() {
+    let Some(f) = setup().await else { return };
+    make_bound_engine_external(&f, "2.8.0").await;
+    let name = unique("alice reads orders");
+    insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["profiles"][0]["plugin_versions"],
+        json!(["ranger_2_8_0"])
+    );
 }
 
 /// The accept cell of the pair: Trino declaring 2.5.0 is proved on 2.5.0.
@@ -1534,4 +1562,170 @@ async fn an_external_trino_declaring_2_5_0_is_proved_on_2_5_0() {
         body["profiles"][0]["plugin_versions"],
         json!(["ranger_2_5_0"])
     );
+}
+
+/// Point the provisioned engine bound to `f.p` at a Trino `imageVersion`.
+async fn pin_bound_trino_image(f: &Fixture, image_version: &str) {
+    let res = sqlx::query(
+        "UPDATE engine_mgmt.engines SET spec = jsonb_build_object('imageVersion', $2::text) \
+          WHERE authz_service_id = $1",
+    )
+    .bind(f.p)
+    .bind(image_version)
+    .execute(&f.db.pool)
+    .await
+    .expect("pin the bound engine's image");
+    assert_eq!(res.rows_affected(), 1);
+}
+
+/// A provisioned engine's plugin comes from its exact image. Trino 483 ships
+/// 2.8.0, which the evaluator is now proved against for Trino, so the gate proves
+/// the migration on 2.8.0.
+#[tokio::test]
+async fn a_provisioned_trino_483_is_proved_on_2_8_0() {
+    let Some(f) = setup().await else { return };
+    pin_bound_trino_image(&f, "483").await;
+    let name = unique("alice reads orders");
+    insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["profiles"][0]["plugin_versions"],
+        json!(["ranger_2_8_0"])
+    );
+}
+
+/// An image the table does not know cannot say which plugin it ships, so the
+/// gate refuses instead of guessing. (Every KNOWN image is modelled since Trino
+/// 483 was proved, so the unmodelled cover uses an unknown tag.)
+#[tokio::test]
+async fn a_provisioned_trino_on_an_unknown_image_refuses_the_migration() {
+    let Some(f) = setup().await else { return };
+    pin_bound_trino_image(&f, "999").await;
+    let name = unique("alice reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let refusal = body["refusal"].as_str().expect("refusal");
+    assert!(
+        refusal.contains("999") && refusal.contains("pin"),
+        "names the image and the fix: {refusal}"
+    );
+    assert_eq!(grants_on_catalog(&f).await, 0, "nothing is written");
+    assert!(enabled(&f, id).await, "the original stays on");
+}
+
+/// One profile bound to a Trino 470 engine (Ranger 2.5.0) and a second on 483
+/// (2.8.0): the migration is proved at BOTH versions (the order is the engines', not asserted).
+#[tokio::test]
+async fn a_profile_with_trino_470_and_483_engines_is_proved_on_both_versions() {
+    let Some(f) = setup().await else { return };
+    sqlx::query(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{\"imageVersion\":\"483\"}'::jsonb,$2)",
+    )
+    .bind(unique("mig-eng483"))
+    .bind(f.p)
+    .execute(&f.db.pool)
+    .await
+    .expect("second engine on 483");
+    let name = unique("alice reads orders");
+    insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut versions: Vec<String> = body["profiles"][0]["plugin_versions"]
+        .as_array()
+        .expect("plugin_versions")
+        .iter()
+        .map(|v| v.as_str().expect("version").to_string())
+        .collect();
+    versions.sort();
+    assert_eq!(versions, ["ranger_2_5_0", "ranger_2_8_0"], "{body}");
+}
+
+/// The same profile (470 + 483) cannot be EXPLAINED: a verdict is for one plugin
+/// version, and the two bound engines run 2.5.0 and 2.8.0. Both are modelled, so
+/// the refusal is the disagreement itself. (Migrate, above, proves at both.)
+#[tokio::test]
+async fn a_profile_with_trino_470_and_483_engines_is_refused_for_explain() {
+    let Some(f) = setup().await else { return };
+    sqlx::query(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{\"imageVersion\":\"483\"}'::jsonb,$2)",
+    )
+    .bind(unique("mig-eng483"))
+    .bind(f.p)
+    .execute(&f.db.pool)
+    .await
+    .expect("second engine on 483");
+    let (status, body) = post(
+        &f,
+        "/perm/explain".to_string(),
+        json!({
+            "subject": { "user": "nobody" },
+            "action": "read",
+            "target": { "catalog_id": f.catalog_id, "schema": "sales",
+                        "table": "orders", "column": null }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("different Ranger plugin versions"),
+        "body: {body}"
+    );
+}
+
+/// A floating tag cannot say which plugin it ships, so the gate refuses with
+/// the fix (pin the image) instead of assuming the type's plugin.
+#[tokio::test]
+async fn a_provisioned_trino_on_a_floating_image_refuses_the_migration_with_the_fix() {
+    let Some(f) = setup().await else { return };
+    pin_bound_trino_image(&f, "latest").await;
+    let name = unique("alice reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], true).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let refusal = body["refusal"].as_str().expect("refusal");
+    assert!(
+        refusal.contains("trinodb/trino:latest") && refusal.contains("pin"),
+        "{refusal}"
+    );
+    assert_eq!(grants_on_catalog(&f).await, 0, "nothing is written");
+    assert!(enabled(&f, id).await, "the original stays on");
 }

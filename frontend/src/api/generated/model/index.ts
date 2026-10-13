@@ -254,6 +254,7 @@ export * from './migratedPolicy';
 export * from './migrateRequest';
 export * from './migrateResponse';
 export * from './migrationRecord';
+export * from './modelledRangerPluginDto';
 export * from './namespaceDto';
 export * from './newEngineCatalog';
 export * from './newGrant';
