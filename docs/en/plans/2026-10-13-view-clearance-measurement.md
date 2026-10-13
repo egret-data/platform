@@ -873,3 +873,102 @@ direct base reads (control)
 [trino vc_plain] select id, secret from ice.s.vi_c order by id
   -> FAILED: Access Denied: Cannot select from columns [plain, id, secret] in table or view base
 ```
+
+---
+
+# ROUND 2: clearance as a MASK on StarRocks, and is F-1 fixed upstream?
+
+> **Status:** section R2.1 (predictions) is committed FIRST; observations are a second commit. A wrong
+> prediction is a finding; nothing is retuned. Measurement only, no product code changed. Written
+> 2026-10-13 (UTC) on branch `docs/view-clearance-measure`.
+
+## R2.0 Facts read BEFORE predicting (source and registry, no engine run yet)
+
+- `fe-core-4.1.4` bytecode (round 1): for an engine on an EXTERNAL access controller the per-table loop in
+  `ColumnPrivilege.check` only runs `checkColumnAction(SELECT)` over the scan columns of the table names
+  written in the AST. A view has no scan columns of its own (the optimizer expands it), so nothing is asked
+  about the view. That is the mechanism behind F-1 (a hypothesis until R2.3 runs).
+- Local StarRocks tree `/Users/1pro-l4r8/Documents/github/data-portal/starrocks` (HEAD `148a7fdc4`, 2026-09-08,
+  tags only up to `4.1.4`; `git fetch` and the GitHub API both time out, so 4.1.5 and 4.1.6 are not in it).
+  Commit **`e0d97ad2659`** "[BugFix] Ranger view/MV authorization for external tables (#56316)" (main,
+  2026-08-05) introduces `ColumnPrivilege.checkViewPrivilege` and routes views and MVs of the external-controller
+  branch through it: `Authorizer.checkViewAction(SELECT)` on the view object, and for a `SECURITY INVOKER` view a
+  re-check of the view's whole query statement at column granularity. Backports: `2a36c2d0715` to
+  `origin/branch-4.1` (2026-08-06, #77288) and `4532ce4938e` to `origin/branch-4.0` (2026-08-19, #77289). **It is NOT an ancestor of `4.1.4`**
+  (`git merge-base --is-ancestor e0d97ad2659 4.1.4` fails; also not of `branch-4.1.0..4.1.4`). The 4.1.4 head
+  commit is `4a9848edf03` (2026-08-05 12:26 +0800), hours before the backport.
+- Docker Hub `starrocks/allin1-ubuntu` tags (queried today): `4.1.6` and `latest` pushed 2026-10-01, `4.1.4` 2026-08-06,
+  `4.0.16` 2026-09-30, `3.5.21` 2026-08-28. **There is no 4.1.5 and no 4.2 tag.** The local `latest` image is
+  `4.1.4`.
+- StarRocks mask types in egret's service-def: `MASK`, `MASK_HASH`, `MASK_NULL`, `MASK_NONE`, `MASK_DATE_SHOW_YEAR`,
+  `CUSTOM`. `MASK` = regexp replace (letters to x/X, digits to 0, other characters kept: keeps length and
+  punctuation). `MASK_HASH` = `hex(sha2(col,256))`, deterministic. The StarRocks service-def has
+  `contextEnrichers: []` (no tag enricher), and the store's CHECK from migration 0176 refuses a `tagService` on a
+  StarRocks profile. So a tag mask for StarRocks has no route to the engine in egret as built.
+- Disk: 43 GiB free now (the brief said about 62). Floor is 30 GiB; a 2 GB image is the only large write.
+
+## R2.1 Setup I will use (so the predictions are about something definite)
+
+Container `viewclr2-sr` from the LOCAL `starrocks/allin1-ubuntu:latest` (4.1.4, same as round 1) for Question A;
+`viewclr2-sr416` from `4.1.6` for Question B. egret on :8095 on DB `egret_viewclr_live`, profile `vcsr`.
+`vcdb.base(id, secret, plain)` rows `(1,'classified-1','open-1')`, `(2,'classified-2','open-2')`,
+`(3,'classified-1','open-3')` (value repeats on purpose). Users: `vc_cleared` and `vc_owner_c` (cleared),
+`vc_plain` (uncleared reader, owns table `mine(k)` = `classified-1`, `classified-2`, `zzz`), `vc_nobody` (zero
+grant). Everyone but `vc_nobody` has table/view/MV `select` through the round 1 allow policies; the base deny
+(policy 22) is DISABLED for Question A because here `select` on `secret` is granted and the MASK is the only
+clearance control. Mask policy on `default_catalog.vcdb.base.secret`: item 1 `vc_cleared, vc_owner_c, vc_admin`
+= `MASK_NONE`; item 2 group `public` = the mask under test. Objects (all created by `vc_owner_c` before the mask
+is switched on): `v_plain`, `v_expr` (`upper(secret)`, `concat(secret,'x')`, `substr(secret,1,5)`), `v_nest`
+(over `v_plain`), `vi_inv` (`SECURITY INVOKER`), `mv_c` (MV by cleared owner); `mv_u` created by `vc_plain`.
+Mask variants: **N** = `MASK_NULL`, **H** = `MASK_HASH`. Scope **P** = path (resource) mask.
+
+## R2.2 Predictions, Question A (uncleared = `vc_plain`; nobody = `vc_nobody`)
+
+General model behind all of them: StarRocks resolves a column mask during analysis of each TABLE relation, as the
+connected user, so the mask is a projection under the table scan and everything above it (filters, group by,
+joins, views expanded over it) sees the MASKED value. Cleared users get `MASK_NONE` and see real values.
+
+| # | cell | prediction (N) | prediction (H) |
+|---|---|---|---|
+| 1 | direct `select id, secret from base` | uncleared: `NULL` x3; cleared: real; nobody: `ERROR 5204` (no grant) | uncleared: 64-char upper hex, rows 1 and 3 EQUAL; cleared: real; nobody denied |
+| 2 | plain view `v_plain` | uncleared `NULL`; cleared real; **nobody reads the view (F-1) and gets `NULL`** | uncleared hashes; nobody reads the view and gets hashes |
+| 3 | `v_expr` | `NULL` in all three expression columns | `upper(hash)` = the hash, `concat` = hash+'x', `substr(...,5)` = first 5 hex chars; no real text |
+| 4 | nested `v_nest` | as 2 | as 2 |
+| 5 | INVOKER `vi_inv` | as 2 (mask follows the reader); nobody still reads it (F-2 is the same hole) | as 2 |
+| 6a | `mv_c` (cleared owner) read by uncleared | **LEAK: real `classified-*`** (data was stored unmasked; the MV column is not covered by any mask) | **LEAK real** |
+| 6b | `mv_u` (created by uncleared `vc_plain`) read by `vc_plain` | `NULL`s (refresh runs as the creator so the mask applies); confidence about 55% | hashes; same confidence |
+| 6c | uncleared `select id, secret from base` with MV rewrite enabled and `mv_c` present | masked (mask projection defeats the rewrite); about 65% | same |
+| 7 | `count(distinct secret)`, `min(secret)`, `max(length(secret))` on base and via `v_plain` | `0`, `NULL`, `NULL` | `2`, a hash, `64`: **cardinality leaks, length does not** (leaks nothing about real length) |
+| 8 | `WHERE secret='classified-1'`, `LIKE 'class%'`, `ORDER BY secret`, `GROUP BY secret` (direct and via `v_plain`) | the predicate sees the MASKED value: `=` and `LIKE` return 0 rows; `ORDER BY` has no usable order; `GROUP BY` = one NULL group of 3 | `=` and `LIKE` 0 rows; `GROUP BY` = 2 groups (2 and 1): **equality structure leaks**, content does not |
+| 8h | (H only) `WHERE secret = upper(sha2('classified-1',256))` | n/a | **returns rows 1 and 3: a dictionary attack against a deterministic mask works** |
+| 9 | `JOIN mine ON mine.k = base.secret`, direct and via view | 0 rows | 0 rows; and **`ON upper(sha2(mine.k,256)) = base.secret` matches** (confirms guesses) |
+| 10 | CTAS and `INSERT ... SELECT` from base as `vc_plain` into an owned table, read back | copy holds `NULL` (the mask is baked into the copy) | copy holds hashes |
+| 10b | cleared `vc_cleared` CTAS into `copy_c`, read by `vc_plain` | **LEAK real** (clearance does not follow the data; expected, listed so it is not mistaken for a mask defect) | **LEAK real** |
+
+Ranger requests expected in the FE log for a masked read: a `policyType=1` lookup on `[table=base column=secret]`
+for the reader; for direct reads also `policyType=0 select` on the columns; for a plain view read NO `policyType=0`
+request on the view (F-1) but the mask lookup on the base column.
+
+Verdict I expect: "clearance as mask" closes the base-column-through-view hole for N and H on plain, nested,
+expression and INVOKER views, and for the direct read, **but leaks through (a) a materialized view built by a
+cleared owner, (b) any copy a cleared user writes, and, for H only, (c) equality, cardinality and a dictionary
+attack**. MASK_NULL leaks nothing through predicates.
+
+**Tag mask (T).** Prediction: it cannot reach the engine in egret as built (no `tagService` allowed on a StarRocks
+profile, no tag enricher in the StarRocks service-def, `default_catalog` cannot be a registry catalog). A deviation
+(SQL: add the enricher to the def, set `tagService`, drop the CHECK, stub a `default_catalog` registry row, tag
+`vcdb.base.secret`) might get it there; if it does, I predict it evaluates exactly like the path mask (same
+engine code path), about 60% confidence, because I do not know that the plugin's tag enricher is wired for the
+StarRocks plugin class.
+
+## R2.2b Predictions, Question B
+
+| id | prediction |
+|---|---|
+| B1 | `4.1.6` contains `e0d97ad2659`'s backport. `javap` on `fe-core-4.1.6.jar` shows `ColumnPrivilege.checkViewPrivilege`; `4.1.4` has no such method. |
+| B2 | **F-1 fixed in 4.1.6**: `vc_nobody` is DENIED on `v_plain` (`ERROR 5204 ... SELECT privilege(s) on VIEW v_plain`), with a `policyType=0 select [view=v_plain]` request in the log. |
+| B3 | **F-2 fixed in 4.1.6**: INVOKER view is re-checked at column level as the reader: with the base deny (policy 22) re-enabled, `vc_plain` is DENIED on `vi_inv`, `vc_cleared` is allowed, `vc_nobody` denied. |
+| B4 | **F-3-deny is NOT changed for a plain (SECURITY NONE) view**: `vc_plain` (view select granted, base `secret` denied) still reads `v_plain`; only the INVOKER view carries the base deny. The upstream design treats a plain view as an access boundary. |
+| B5 | Base MASK through a plain view still applies for the reader in 4.1.6. |
+| B6 | `ranger-plugins-common` in 4.1.6 is `2.8.0` (same as 4.1.4); about 70%. |
+| B7 | The first released version with the fix is 4.1.6 (4.1.5 was never published as an image, so I cannot test it; its inclusion is unproven here). |
