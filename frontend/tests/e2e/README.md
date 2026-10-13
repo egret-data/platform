@@ -328,3 +328,34 @@ cd frontend && EGRET_E2E_VITE_PORT=5207 EGRET_E2E_API=http://localhost:8197 \
 cd frontend && EGRET_E2E_WORKFLOWS=1 EGRET_E2E_BASE_URL=http://localhost:5207 \
   npx playwright test workflows-executions
 ```
+
+## Workflow topology (`workflows-topology.spec.ts`)
+
+Opt-in (`EGRET_E2E_WORKFLOWS=1`). W7c's money path in the browser. The spec creates, through the API, a child flow and a
+flow with a disabled trigger, a `Sequential` holding an 8-second `Sleep` and an `If`, a `Parallel`, a `Subflow` to the
+child, a `Loop` over three values whose middle one fails, and an `errors:` branch. It then asserts:
+
+- the editor's Topology tab (reopened in panel 2) draws every construct, follows an edit only after the 1 s debounce,
+  and keeps the last graph under the "out of date" banner while the YAML does not parse;
+- selecting a node moves the Code cursor to its task, and the editor expands the `Subflow` from the child's draft;
+- the execution's Topology tab shows the `Sleep` RUNNING and then SUCCESS while it polls, then the final states, and
+  stops polling once the execution is over;
+- the `Loop` body node lists three iterations, one FAILED, each linking to its child execution;
+- the `Subflow` expands on the execution with the child's states;
+- measured in the DOM, in light and dark mode, in the editor's panel at 600 px (both orientations) and on the
+  execution: every card, cluster and marker inside the canvas, no task id or cluster header cut, and a keyboard focus
+  ring at 3:1 or more against its card that no ancestor clips. Each measurement is printed; `EGRET_E2E_SHOTS=<dir>`
+  also saves a screenshot of each.
+
+The stack is private, as for the other workflow specs: a database of its own on the branch's Postgres, a private
+RustFS, `serve` on :8207 with the worker on, and Vite on :5217 through `tests/e2e/vite.e2e.config.mts`. Every command,
+setup and teardown, is in the spec file's header. A run takes under a minute. The first run after Vite starts can fail
+with a blank editor: Vite optimises a dependency on first use and reloads the page mid-test (its log says "optimized
+dependencies changed. reloading"); run it again.
+
+```bash
+cd frontend && EGRET_E2E_VITE_PORT=5217 EGRET_E2E_API=http://localhost:8207 \
+  npx vite --config tests/e2e/vite.e2e.config.mts                       # in one shell
+cd frontend && EGRET_E2E_WORKFLOWS=1 EGRET_E2E_BASE_URL=http://localhost:5217 \
+  npx playwright test workflows-topology
+```

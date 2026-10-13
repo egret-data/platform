@@ -2,7 +2,7 @@
 
 > Bản tham khảo tiếng Việt. Bản chính là `docs/en/specs/2026-10-13-workflow-w7c-topology-design.md`; khi hai bản khác nhau, bản tiếng Anh thắng.
 
-**Trạng thái:** thiết kế, 2026-10-13.
+**Trạng thái:** đã triển khai, 2026-10-13. Bài end to end (`frontend/tests/e2e/workflows-topology.spec.ts`) chạy xanh trên một stack riêng: đồ thị của editor đi theo một lần sửa 1 s sau đó và giữ đồ thị cuối dưới banner khi YAML hỏng; chọn một node chuyển con trỏ Code; đồ thị của execution hiện `Sleep` ở RUNNING rồi SUCCESS trong lúc polling, và các trạng thái cuối; thân `Loop` liệt kê ba iteration, một cái FAILED; `Subflow` mở rộng kèm trạng thái của flow con. Mọi card, cluster và marker nằm trong canvas, không nhãn nào bị cắt, và vòng focus bàn phím đo được 3,5:1 (sáng) và 3,6:1 (tối) so với card của nó, trong một panel 600 px và trên execution. Phần so sánh với Kestra 2.0 nightly ở §2.
 
 **Phụ thuộc:**
 - W7a (#659): khu vực Workflows, editor nhiều panel và sổ đăng ký tab của nó (`registerTab`), phép ánh xạ từ path sang YAML của tab Problems.
@@ -39,6 +39,23 @@ W7a cho người dùng viết một flow và W7b cho họ theo dõi các lần c
 
 Phần so sánh ở §9 bổ sung những khác biệt đo được khi đối chiếu với một Kestra đang chạy.
 
+**Đo trên một Kestra đang chạy, 2026-10-13 (Task 7, §9).** Image cục bộ `kestra/kestra` `28f59bf175e1` (Kestra 2.0 nightly, `server local`, trong một container dùng một lần) chạy flow của bài end to end (§8), chỉ đổi id: một trigger `Schedule` bị disable, một `Sequential` chứa một `Sleep` và một `If`, một `Parallel`, một `Subflow`, một `Loop` ba giá trị có giá trị giữa fail, và một nhánh `errors:`. Hai server dựng cùng một hình: 26 node, 28 cạnh và 5 cluster, và 29, 31 và 6 khi mở rộng `Subflow`; mọi node và mọi cạnh đều ghép đôi được. Đã đo được những khác biệt sau:
+
+| Kestra 2.0 nightly | egret | Vì sao |
+|---|---|---|
+| Không có tab Topology trên execution: đồ thị nằm trong tab Overview, dưới phần tóm tắt (`executionTabs.ts`: Overview, Gantt, Logs, Input/Output, Metrics, Dependencies, …) | Một tab Topology, theo thứ tự của Kestra 1.x (§6.3) | Phán quyết của người dùng: một tab riêng, có URL chia sẻ được |
+| Một iteration của `Loop` là một sub-execution kiểu `LOOP`, và node thân trên đồ thị của execution cha không có trạng thái nào: `item` được vẽ không trạng thái, không thời lượng và không có hành động xem lịch sử trạng thái, trong khi node Loop ghi FAILED | Node thân gộp các lần chạy của nó: FAILED, "2 of 3 iterations done, 1 failed", và danh sách iteration | Phán quyết của người dùng (§4). Dòng ở trên về một node cho mỗi iteration mô tả `ForEach` cũ của Kestra, không phải image này |
+| Uid: `root.prepare.check`, marker `root.prepare.root-{random}` và `root.prepare.end-{random}`, cluster `cluster_root.prepare`; phần ngẫu nhiên đổi ở mỗi request | `tasks.prepare.check`, `start:tasks.prepare`, `end:tasks.prepare`, `cluster:tasks.prepare`, giống nhau ở mọi request | Uid là path validation (§3.1), và một uid ổn định có thể làm `?node=` của URL |
+| Các cạnh đi vào và đi ra khỏi marker, và chuỗi trigger, không mang relation (`relationType` null); cạnh của một nhánh tới end của `If` không có nhãn | Mọi cạnh có relation: của chính danh sách (`sequential`, `parallel`, `dynamic`, `error`), và một nhánh giữ nhãn của nó tới cuối (§3.2) | Client tô màu và gắn nhãn một cạnh từ chính các trường của nó, không cần nhìn hàng xóm |
+| Mọi cạnh được vẽ chấm (`stroke-dasharray: 1.5px 3px`); cạnh `errors` màu đỏ | Cạnh liền; chỉ chuỗi trigger là nét đứt; `errors` bằng token danger, `finally` và `afterExecution` bằng token warning, mỗi cái kèm chữ của nó | §6.1: nét đứt nghĩa là "một trigger", và màu không bao giờ là tín hiệu duy nhất (FE-A11Y-4) |
+| Card gọn, 137 × 28 px: icon, id, thời lượng, một menu | Card rộng 240 px: icon, id, loại rút gọn, state chip, thời lượng, số iteration, số lần thử | Các thông tin của execution được đọc trên card; canvas fit và zoom được |
+| Mỗi node là một điểm dừng tab riêng (`tabindex=0`, `role=group`, không có tên truy cập được); không có list view | Một điểm dừng tab di chuyển bằng phím mũi tên, node là button có tên, và một treegrid List view mang cùng các node và trạng thái | FE-A11Y; list view là bản tương đương truy cập được của canvas |
+| Click một node trong editor mở form no-code của task; trên execution, log và output lấy từ menu của node | Chọn một node chuyển con trỏ Code (§6.2); trên execution nó mở run panel của Gantt hoặc danh sách iteration (§6.3) | Chỉ đọc (phán quyết của W7a) |
+| Một lần mở rộng không thực hiện được làm hỏng cả request đồ thị: một id động ném "Can't expand subflow task", một flow không tồn tại ném "Unable to find subflow" (`GraphService.java`) | Đồ thị vẫn được vẽ, và cluster của `Subflow` mang một `reason` (`not_found`, `dynamic`, `depth`) | Một lần mở rộng hỏng không nên làm mất phần còn lại của đồ thị |
+| `?subflows=` nhận uid của Kestra (`root.call`) | `?subflows=` nhận uid của egret (`tasks.call`) | Theo cách đặt uid |
+| Hướng lưu trong `localStorage` `topology-orientation`, một boolean; dọc khi chưa lưu gì, như panel của editor đã hiện | `egret.workflows.topology.orientation`, `LR` hoặc `TB`; ngang khi chưa lưu gì | Mặc định của chính Kestra khác nhau giữa editor và overview của execution; egret giữ một mặc định |
+| Canvas có zoom in, zoom out, fit, nút đổi hướng và nút tải ảnh | Zoom in, zoom out, fit, hướng, Expand all, Collapse all và List view; không có tải ảnh | Xuất ảnh không được xây (dòng ở trên) |
+
 ## 3. Mô hình đồ thị (backend)
 
 Một module mới `crates/egret-workflow/src/graph/` chứa một hàm thuần:
@@ -53,33 +70,47 @@ Nó đi qua model đã parse (`models::Flow`, `models::TaskKind`). Nó không đ
 
 Mỗi node có một `uid`: path của task theo cùng dạng mà các finding của validation dùng (`tasks.seq.child`, `errors.alert`), để một node và một finding về nó chỉ cùng một chỗ. Bên trong một `Subflow` đã mở rộng (§3.4), các uid của flow con được đặt tiền tố là uid của node `Subflow`.
 
+**Uid, theo phán quyết 2026-10-13 (Task 1, Q6 và Q7):**
+- Một task là path validation của nó; một trigger là `triggers.{id}`.
+- Marker là `start:{owner}` và `end:{owner}`, còn một cluster là `cluster:{owner}`. Owner là `flow`, `triggers`, hoặc uid của chính flowable. Không có cluster cho flow, chỉ có cặp `start:flow`/`end:flow`. Không uid task hay trigger nào bắt đầu bằng `start:`, `end:` hay `cluster:` được, vì mọi uid đều bắt đầu bằng `tasks.`, `errors.`, `finally.`, `afterExecution.` hoặc `triggers.`.
+- Một id lặp lại giữ path trơn ở lần đầu; lần sau lấy hậu tố còn trống đầu tiên trong `~2`, `~3`, …, theo thứ tự duyệt, và các con của nó được dựng dưới uid có hậu tố. `refusal` của nó được tra theo path trơn.
+- Bên trong một lần mở rộng, uid của một task con là `{subflow}/{child}`, ví dụ `tasks.call/tasks.child_log`.
+
 | Loại node | Trường | Khi nào |
 |---|---|---|
 | `task` | `uid`, `task_id`, `type` (như đã viết), `canonical_type`, `kind` (`leaf`, `executable`, `flowable`), `branch` (`tasks`, `errors`, `finally`, `after_execution`), `disabled`, `refusal` (một mã lỗi validation, hoặc null) | mọi task, kể cả flowable, vốn cũng là cluster |
 | `trigger` | `uid` (`triggers.{id}`), `trigger_id`, `type`, `disabled` | mọi trigger |
 | `start` / `end` | `uid` | một cặp cho flow, một cặp cho mỗi cluster |
 
-`refusal` là mã của lỗi `validate_for_run` đầu tiên có path trùng với path của task. Nó bao các cấu trúc mà no-silent-stall từ chối, để đồ thị có thể đánh dấu một task egret sẽ không chạy.
+`refusal` bao các cấu trúc mà no-silent-stall từ chối, để đồ thị có thể đánh dấu một task egret sẽ không chạy. **Phán quyết 2026-10-13 (Task 1):**
+- Một lỗi của `validate_for_run` thuộc về node task có uid là tiền tố dài nhất của path lỗi: chính path đó, hoặc một phần của nó mà theo sau là `.`. Vì vậy một lỗi ở path của thuộc tính (`tasks.p.tasks` với một `Pause`, `tasks.l.checkFrequency.maxIterations` với một `LoopUntil`) thuộc về task của nó.
+- `refusal` của một node là mã của lỗi đầu tiên như vậy, theo thứ tự validation.
+- Chỉ node task sở hữu lỗi. Một lỗi mà không path task nào là tiền tố (`namespace`, `inputs.x`) không thuộc về node nào.
+- Chấp nhận một chỗ còn nhập nhằng: một task con có id đúng bằng tên một thuộc tính của cha (một con tên `tasks` dưới một flowable) nhận lỗi ở path thuộc tính của cha.
 
 ### 3.2 Cạnh
 
 `{source, target, relation, label}`, trong đó `relation` là một trong bảy loại của Kestra: `sequential`, `choice`, `parallel`, `dynamic`, `error`, `finally`, `after_execution`.
 
+**Phán quyết 2026-10-13 (Task 1, Q1 tới Q5), như Kestra làm:** node của chính một flowable `X` nằm bên trong cluster của nó. `start:X → X` là `sequential`, các cạnh của cấu trúc đi ra từ `X`, và `errors:` của flowable đi ra từ `start:X`. Một flowable được đi vào ở `start:X` và đi ra ở `end:X`.
+
 | Cấu trúc | Cạnh |
 |---|---|
-| Một danh sách task (`tasks`, `Sequential`, `AllowFailure`, `WorkingDirectory`, `LoopUntil`, một `Pause` có `tasks:`) | `sequential`, theo thứ tự, từ `start` của cluster tới `end` của nó |
-| `Parallel` | `parallel` từ `start` tới từng con và từ từng con tới `end` |
-| `If` | `choice`, gắn nhãn `then` và `else` |
-| `Switch` | `choice`, gắn nhãn bằng khoá của case, và `defaults` cho danh sách mặc định |
-| `Dag` | `dynamic` từ `start` tới mỗi node không có `dependsOn`, một cạnh cho mỗi mục `dependsOn`, và từ mỗi node mà không ai phụ thuộc tới `end` |
-| `Loop` | `dynamic` từ `start` qua thân tới `end` |
-| `errors:` của flow hoặc của một flowable | `error`, từ `start` của chủ sở hữu tới danh sách lỗi |
-| `finally:` và `afterExecution:` của flow | `finally` và `after_execution`, sau danh sách chính |
-| Trigger | `sequential` từ mỗi trigger tới `start` của flow, được client vẽ nét đứt |
+| Một danh sách task (`Sequential`, `AllowFailure`, `WorkingDirectory`, `LoopUntil`, một `Pause` có `tasks:`) | `sequential`: `X` → đầu → … → cuối → `end:X` |
+| `Parallel` | `parallel` từ `X` tới từng con và từ từng con tới `end:X` |
+| `If` | cạnh đầu của một nhánh là `choice`, gắn nhãn `then` hoặc `else`; các cạnh sau của nhánh, và cạnh của nó tới `end:X`, là `sequential` với cùng nhãn. Một nhánh rỗng không vẽ cạnh nào |
+| `Switch` | như `If`, gắn nhãn bằng khoá của case (các case theo thứ tự khoá), rồi `defaults` |
+| `Dag` | `dynamic` từ `X` tới mỗi node không có `dependsOn`, một cạnh cho mỗi mục `dependsOn` gọi tên một node được vẽ, và từ mỗi node mà không node được vẽ nào phụ thuộc tới `end:X` |
+| `Loop` | `dynamic` trên mọi cạnh từ `X` qua thân tới `end:X` |
+| `errors:` của một flowable | `error` trên mọi cạnh, từ `start:X`; lỗi cuối đi tới `end:X` |
+| Flow | `start:flow` → tasks → `finally` → `afterExecution` → `end:flow`. `errors:` của flow đi ra từ `start:flow`, và lỗi cuối đi tới task `finally` đầu tiên, nếu không có thì task `afterExecution` đầu tiên, nếu không có thì `end:flow`. Cạnh đi vào task `finally` hoặc `afterExecution` đầu tiên mang relation của danh sách đó; mọi cạnh khác mang relation của danh sách nó rời đi; một chuỗi lỗi luôn là `error` |
+| Trigger | chuỗi của Kestra: `start:triggers` → mỗi trigger → `end:triggers` → `start:flow`, tất cả là `sequential`. Client vẽ một cạnh nét đứt khi một đầu của nó nằm trong `cluster:triggers` |
+
+Một danh sách rỗng không vẽ cạnh nào, ở mọi cấp.
 
 ### 3.3 Cluster
 
-Mỗi flowable là một cluster: `{uid, task_id, kind, nodes, parent, start, end}`. `kind` là tên flowable canonical: `sequential`, `parallel`, `if`, `switch`, `dag`, `loop`, `loop_until`, `allow_failure`, `working_directory`, hoặc `pause` khi một `Pause` có `tasks:`. Các trigger tạo thành một cluster, `triggers`, như ở Kestra.
+Mỗi flowable là một cluster: `{uid, task_id, kind, nodes, parent, start, end}`, với `nodes` chứa node của chính flowable (§3.2) và các marker của nó. `kind` là tên flowable canonical: `sequential`, `parallel`, `if`, `switch`, `dag`, `loop`, `loop_until`, `allow_failure`, `working_directory`, hoặc `pause` khi một `Pause` có `tasks:`. Các trigger tạo thành một cluster, `triggers`, như ở Kestra.
 
 `AllowFailure` và `WorkingDirectory` được vẽ như cluster, như Kestra vẽ, và mang `refusal` của chúng.
 
@@ -87,11 +118,13 @@ Mỗi flowable là một cluster: `{uid, task_id, kind, nodes, parent, start, en
 
 `GraphOptions.subflows` là một tập uid của các node `Subflow` cần mở rộng.
 
-- Với mỗi cái, server nạp bản draft hiện tại của flow con theo `namespace` và `flowId` trong cùng workspace, dựng đồ thị của nó với cùng các option, sâu hơn một cấp, và ghép vào như một cluster kiểu `subflow` dưới node `Subflow`.
+- Với mỗi cái, server nạp bản draft hiện tại của flow con theo `namespace` và `flowId` trong cùng workspace, dựng đồ thị của nó với cùng các option, sâu hơn một cấp, và ghép vào như một cluster kiểu `subflow` dưới node `Subflow`: `cluster:S` chứa `start:S`, node `Subflow` `S`, các node cấp cao nhất của flow con (uid `{S}/{child}`) và `end:S`, và cha của nó là cluster từng chứa `S`. Một task con nằm dưới `errors` hoặc `finally` của flow cha nhận nhánh đó, như ở Kestra.
 - Một lần mở rộng không thể thực hiện sẽ thành một cluster không có node và có một `reason`:
   - `not_found`: không có flow như vậy trong workspace này;
   - `dynamic`: `namespace` hoặc `flowId` là một expression;
   - `depth`: việc mở rộng bị giới hạn ở hai cấp.
+
+  Một cluster như vậy không vẽ marker: `start` và `end` của nó là uid của chính node `Subflow`, và node đó ở nguyên chỗ cũ.
 - Không có reason `forbidden`. Một `Subflow` chỉ phân giải trong chính workspace của nó, và `workflow:read` là quyền ở mức workspace, nên người xem đọc được flow cha thì đọc được flow con.
 
 Trên đồ thị execution (§4), một node `Subflow` mà lần chạy của nó đã khởi tạo một execution con sẽ mở rộng từ source đã đóng băng của execution con đó và mang các trạng thái của nó.
@@ -111,16 +144,26 @@ Một đồ thị trên 5.000 node, đếm sau khi mở rộng, bị từ chối
   "run_id": "…",
   "started_at": "…",
   "ended_at": null,
-  "iterations": { "total": 3, "by_state": { "SUCCESS": 2, "FAILED": 1 } }
+  "iterations": {
+    "total": 3,
+    "by_state": { "SUCCESS": 2, "FAILED": 1 },
+    "runs": [{ "loop_index": 0, "state": "SUCCESS", "child_execution_id": "…", "run_id": "…" }]
+  }
 }
 ```
 
 - **Một task có một lần chạy** lấy trạng thái, số lần thử và mốc thời gian của lần chạy đó.
-- **Một task trong thân `Loop`** có các lần chạy ở nhiều execution con, là những execution có `parent_execution_id` là execution này và có `loop_index`. `state` của nó là phép gộp các lần chạy đó theo thứ tự ưu tiên của Kestra, và `iterations` đếm chúng theo trạng thái. `run_id` là null; danh sách iteration lấy từ §6.3.
+- **Một task trong thân `Loop`** có các lần chạy ở nhiều execution con, là những execution có `parent_execution_id` là execution này và có `loop_index`. `state` của nó là phép gộp các lần chạy đó theo thứ tự ưu tiên của Kestra, và `iterations` đếm chúng theo trạng thái. `run_id` là null.
+  - **`iterations.runs`** (phán quyết 2026-10-13, Task 6) liệt kê trạng thái CỦA CHÍNH node trong mỗi iteration, một dòng cho mỗi `loop_index` mà nó đã chạy: các lần chạy của nó ở đó được gộp lại, execution con của iteration và lần chạy. Đó không phải trạng thái của iteration, thứ mà một task khác trong thân có thể quyết định. Một iteration mà node chưa từng chạy thì không có dòng, và `run_id` của một dòng là null khi một `Loop` lồng nhau chạy node nhiều lần trong đó. Danh sách iteration của §6.3 được vẽ từ đây, không giới hạn số dòng.
+  - **`attempts`** của một phép gộp là số lần thử nhiều nhất mà một lần chạy cần, không phải tổng, nên client ghi "up to n attempts".
+  - **`Loop` lồng nhau** đếm các iteration của loop ngoài: một iteration chạy thân ngoài cùng như `tasks:` của chính nó.
+- **Một `Subflow` có một lần chạy** nêu execution con mà nó khởi tạo trong `child_execution_id` (cái mới nhất, khi một lần retry khởi tạo nhiều cái), để panel liên kết tới đó. Trường này vắng mặt ở mọi node khác và ở một phép gộp.
 - **Một task không có lần chạy nào** không có mục. Client vẽ nó mờ đi.
 - **Một cluster flowable** lấy trạng thái của chính lần chạy của nó khi có.
 
 Trạng thái theo từ vựng của W7b và `StateChip`.
+
+**Thứ tự của phép gộp, theo phán quyết 2026-10-13 (Task 3).** `SORT_STATUS` của Kestra trong `ui/packages/topology/src/nodes/TaskNode.vue` là FAILED, KILLED, WARNING, SKIPPED, KILLING, RUNNING, SUCCESS, RESTARTED, CREATED, nhưng code của nó không áp dụng thứ tự này: nó lấy ký tự thứ hai của chuỗi trạng thái làm chỉ số (`TaskNode.vue:262-268`), nên mọi chỉ số là -1 và phép sắp xếp rốt cuộc theo bảng chữ cái. egret theo thứ tự ưu tiên đã nêu và đặt các trạng thái riêng của nó theo nghĩa: FAILED, KILLED, CANCELLED (trạng thái kết thúc đã dừng lần chạy, cạnh KILLED), WARNING, SKIPPED, RETRIED (trạng thái kết thúc do `CREATE_NEW_EXECUTION` để lại), PAUSED (còn sống và chờ một người, ở chỗ của KILLING, thứ egret không có), RETRYING, RUNNING, SUBMITTED, SUCCESS, RESTARTED, CREATED.
 
 ## 5. Route
 
@@ -148,6 +191,7 @@ Một component dưới `frontend/src/components/workflows/topology/`, dùng chu
 **Vẽ và bố cục:**
 - Nó được vẽ bằng `@xyflow/react` và bố cục bằng `@dagrejs/dagre`. Cả hai được pin chính xác và chỉ nạp trong chunk Topology; `test:bundle:workflows` được thêm một marker để không cái nào lọt vào chunk của danh sách flow.
 - Một hàm thuần `layout(graph, { orientation, collapsed })` trả về vị trí và kích thước node và được unit test riêng.
+- **Phán quyết 2026-10-13 (Task 4):** mỗi container một lần bố cục dagre, trong cùng trước, để một cluster giữ chỗ của nó trong bố cục của cha. Trên 300 thành viên trong một container, hoặc khi dagre ném lỗi (một chuỗi 2.000 task làm tràn stack của nó), container đó lùi về một bố cục phân lớp không đệ quy. Một bố cục vẫn thất bại thì hiện một alert, và list view vẫn dùng được mà không cần bố cục.
 - Node không kéo được và không nối được.
 
 **Một node task** hiện icon của loại, `task_id` và loại rút gọn. Trên đồ thị execution nó còn hiện `StateChip`, thời lượng và, với thân `Loop`, số iteration.
@@ -175,14 +219,15 @@ Một component dưới `frontend/src/components/workflows/topology/`, dùng chu
 
 ### 6.2 Tab trong editor
 
-- **Đăng ký.** `registerTab({ id: "topology", … })` đăng ký tab trong chunk Topology. Khung editor không đổi (W7a §5.1).
+- **Đăng ký** (sửa đổi 2026-10-13, Task 5). `registerTab({ id: "topology", … })` đăng ký tab cùng các tab khác của editor, như một stub có phần thân được nạp lazy trong chunk Topology. Một layout đã lưu có gọi tên `topology` luôn tìm thấy nó đã được đăng ký, và xyflow không bị nạp mỗi lần mở editor. Khung editor không đổi (W7a §5.1).
+- **Người xem chỉ đọc.** Một người xem không có `workflow:manage` không dùng được `POST flows/graph` và không sửa được, nên tab của họ vẽ draft đã lưu qua `GET flows/{id}/graph`.
 - **Cập nhật.** Tab gửi `POST flows/graph` với YAML hiện tại của editor, 1 s sau lần sửa cuối.
 - **Lỗi.** Khi YAML không parse được, nó giữ đồ thị cuối cùng và hiện một banner, "The graph is out of date: the YAML has an error".
 - **Chọn.** Chọn một node sẽ chuyển con trỏ của tab Code tới task đó, qua cùng phép ánh xạ path sang range mà tab Problems dùng.
 
 ### 6.3 Tab trên execution
 
-- **Tab.** Nó được thêm vào các tab theo URL của W7b theo thứ tự của Kestra: Overview, Topology, Gantt, Logs, Outputs.
+- **Tab.** Nó được thêm vào các tab theo URL của W7b theo thứ tự của Kestra: Overview, Topology, Gantt, Logs, Outputs. Nó là một đoạn path, `…/executions/{id}/topology`, như các tab của W7b (sửa đổi 2026-10-13, Task 6); lựa chọn là `?node=` và các Subflow đã mở rộng là `?expand=`.
 - **Cập nhật.** Nó fetch lại đồ thị execution theo backoff polling của W7b và dừng khi execution đã ở trạng thái kết thúc.
 - **Chọn.** Chọn một node task mở cùng run panel mà Gantt mở, kèm log và output của lần chạy. Chọn một node thân `Loop` mở panel với danh sách các iteration, mỗi cái kèm trạng thái và một liên kết tới execution con của nó.
 
@@ -225,6 +270,8 @@ Các phép đo DOM bao gồm chế độ sáng và tối và một panel hẹp.
 
 Cùng một flow chạy trên image Kestra cục bộ. Topology của nó, trong editor và trên execution, được so với của egret, và mọi khác biệt có chủ đích đều được ghi ở §2.
 
+**Đã làm, 2026-10-13 (Task 7).** Phép so sánh chạy trên image cục bộ `28f59bf175e1` (Kestra 2.0 nightly) trong một container dùng một lần `w7c-kestra` với storage nhúng của riêng nó, đã xoá sau đó. Phía Kestra được đọc qua API của nó (`GET /api/v1/main/flows/{ns}/{id}/graph`, có và không có `subflows`, và đồ thị của execution) và UI của nó, điều khiển bằng một script Playwright. Mọi khác biệt tìm được nằm ở §2.
+
 ## 10. Rule gói này phải đáp ứng
 
 - Rulebook frontend, mọi rule; đặc biệt FE-ROUTE-2 (một khu vực lazy có bundle test), FE-STATE-2 (skeleton), FE-A11Y (node focus được, list view) và FE-DATA-2 (client được sinh).
@@ -233,4 +280,7 @@ Cùng một flow chạy trên image Kestra cục bộ. Topology của nó, trong
 ## 11. Giới hạn đã biết
 
 - Một `Subflow` mở rộng thành draft hiện tại của flow con trong editor, không phải version sẽ chạy. Mỗi execution chạy draft đã lưu, nên hai thứ này giống nhau khi flow con đã được lưu.
-- Đồ thị execution đọc lại mọi lần chạy ở mỗi lần poll. Một flow có hàng nghìn iteration của loop làm lần đọc đó nặng hơn; giới hạn 5.000 node không chặn số iteration, vì các iteration được gộp vào một node.
+- Đồ thị execution đọc lại mọi lần chạy ở mỗi lần poll, và payload của nó là O(số lần chạy trong thân): `iterations.runs` liệt kê mọi iteration của mọi node trong thân và được gửi lại ở mỗi lần poll. Một flow có hàng nghìn iteration của loop làm lần đọc đó và câu trả lời đó nặng hơn; giới hạn 5.000 node không chặn số iteration, vì các iteration được gộp vào một node.
+- Một `Subflow` bên trong thân `Loop` được mở rộng, trên đồ thị execution, từ draft hiện tại của flow con và không có trạng thái: các lần chạy của nó nằm trong execution con riêng của từng iteration.
+- Fit hiện toàn bộ đồ thị, bất kể kích thước, xuống tới zoom tối thiểu 0.1 của canvas. Đo trên flow 15 task của bài end to end (Task 7): zoom sau fit là 0.20 trên tab execution và 0.12 tới 0.15 trong một panel editor 600 px, nên chữ trên card chỉ cao khoảng 2 px cho tới khi người dùng zoom vào. Overview execution của Kestra 2.0 không fit khi tải mà cắt đồ thị. Một mức zoom đọc được tối thiểu cho lần fit đầu là việc tiếp theo.
+- Các bậc (rank) không được căn thẳng giữa các cluster anh em: mỗi container được bố cục riêng (§6.1), nên hai cluster song song có thể đặt thành viên của chúng ở độ sâu khác nhau.
