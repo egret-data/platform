@@ -139,6 +139,25 @@ impl UserRepo {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    /// Human users whose email or name contains `q` (case-insensitive; `%`, `_`
+    /// and `\` in `q` are literal), newest first, at most `limit`. The same rows
+    /// [`list`](Self::list) returns, filtered in SQL — `list` pages by recency, so
+    /// filtering its page in the caller can never find an older user.
+    pub async fn search(&self, q: &str, limit: i64) -> Result<Vec<User>> {
+        let rows = sqlx::query_as::<_, UserRow>(
+            "SELECT id, provider, email, name, password_hash, status FROM users \
+             WHERE provider <> 'service' \
+               AND (email ILIKE $1 ESCAPE '\\' OR name ILIKE $1 ESCAPE '\\') \
+             ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(crate::contains_pattern(q))
+        .bind(limit)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
     pub async fn touch_last_login(&self, id: UserId) -> Result<()> {
         sqlx::query("UPDATE users SET last_login_at = now() WHERE id = $1")
             .bind(id.0)

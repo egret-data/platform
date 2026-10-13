@@ -516,7 +516,7 @@ async fn resource_lookup(
         out.retain(|v| v.to_lowercase().contains(&q));
     }
     out.sort();
-    out.truncate(50);
+    out.truncate(PRINCIPAL_LIMIT as usize);
     Ok(Json(out))
 }
 
@@ -955,6 +955,9 @@ pub struct Principal {
     pub username: Option<String>,
 }
 
+/// The picker's cap, applied to each search and to the merged answer.
+const PRINCIPAL_LIMIT: i64 = 50;
+
 /// GET /principals?q=&kind= — egret users + groups for the policy picker.
 ///
 /// Correctness note: `name` is the user's `email`, kept for the raw-JSON
@@ -983,14 +986,14 @@ async fn list_principals(
     Query(qp): Query<PrincipalQuery>,
 ) -> Result<Json<Vec<Principal>>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
-    let q = qp.q.unwrap_or_default().to_lowercase();
+    let q = qp.q.unwrap_or_default();
     let want_users = qp.kind.as_deref() != Some("group");
     let want_groups = qp.kind.as_deref() != Some("user");
     let mut out: Vec<Principal> = Vec::new();
     if want_users {
         let users = st
             .users
-            .list(200, 0)
+            .search(&q, PRINCIPAL_LIMIT)
             .await
             .map_err(|_| PolicyHttpError::Internal)?;
         let ids: Vec<uuid::Uuid> = users.iter().map(|u| u.id.0).collect();
@@ -1000,38 +1003,32 @@ async fn list_principals(
             .await
             .map_err(|_| PolicyHttpError::Internal)?;
         for u in users {
-            let name = u.email.clone();
             let label = if u.name.is_empty() {
                 u.email.clone()
             } else {
                 u.name.clone()
             };
-            if q.is_empty() || name.to_lowercase().contains(&q) || label.to_lowercase().contains(&q)
-            {
-                out.push(Principal {
-                    kind: "user",
-                    username: usernames.get(&u.id.0).cloned(),
-                    name,
-                    label,
-                });
-            }
+            out.push(Principal {
+                kind: "user",
+                username: usernames.get(&u.id.0).cloned(),
+                name: u.email,
+                label,
+            });
         }
     }
     if want_groups {
         for g in st
             .groups
-            .list(200)
+            .search(&q, PRINCIPAL_LIMIT)
             .await
             .map_err(|_| PolicyHttpError::Internal)?
         {
-            if q.is_empty() || g.name.to_lowercase().contains(&q) {
-                out.push(Principal {
-                    kind: "group",
-                    name: g.name.clone(),
-                    label: g.name,
-                    username: None,
-                });
-            }
+            out.push(Principal {
+                kind: "group",
+                name: g.name.clone(),
+                label: g.name,
+                username: None,
+            });
         }
     }
     out.truncate(50);

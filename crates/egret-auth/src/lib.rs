@@ -21,6 +21,33 @@ pub mod session;
 pub mod token;
 pub mod users;
 
+/// A `LIKE`/`ILIKE` pattern matching `needle` anywhere, with `%`, `_` and `\`
+/// in it taken literally. Use with `ESCAPE '\'` and bind it as a parameter.
+pub(crate) fn contains_pattern(needle: &str) -> String {
+    let mut out = String::with_capacity(needle.len() + 2);
+    out.push('%');
+    for c in needle.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('%');
+    out
+}
+
+#[cfg(test)]
+mod contains_pattern_tests {
+    use super::contains_pattern;
+
+    #[test]
+    fn like_metacharacters_are_escaped_and_the_rest_is_untouched() {
+        assert_eq!(contains_pattern("abc"), "%abc%");
+        assert_eq!(contains_pattern(""), "%%");
+        assert_eq!(contains_pattern("50%_\\x"), "%50\\%\\_\\\\x%");
+    }
+}
+
 /// The Auth seam's OpenAPI document (E0·P4b-1): the local-auth router
 /// (`/api/auth`) and the OIDC router (`/api/auth/oidc`) merged into one
 /// `OpenApi`. `egret-server` merges this into the top-level API doc. This is the
