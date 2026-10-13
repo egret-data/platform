@@ -3662,6 +3662,92 @@ async fn an_empty_catalog_is_refused() {
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 
+/// `PUT /policies/{id}` shares its normaliser with `POST`, but nothing pinned the
+/// PUT route: an emptied catalog and a level gap are refused there too, and the
+/// stored policy is untouched.
+#[tokio::test]
+async fn a_put_with_an_empty_catalog_or_a_level_gap_is_refused_and_changes_nothing() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11put", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "put-levels", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"]), "schema": level(&["s"])},
+            "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = body["id"].as_i64().expect("id");
+    let stored = || async {
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT policy_jsonb FROM policy.authz_policies WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("read the stored body")
+    };
+    let before = stored().await;
+
+    let put = |resources: serde_json::Value| {
+        let app = f.app_empty();
+        let (token, svc_name) = (token.clone(), svc_name.clone());
+        async move {
+            into_json(
+                app.oneshot(req(
+                    "PUT",
+                    &format!("/policies/{id}"),
+                    &token,
+                    Some(serde_json::json!({
+                        "name": "put-levels", "service": svc_name, "isEnabled": true,
+                        "resources": resources,
+                        "items": [{"users": ["bob"], "accesses": ["select"], "effect": "allow"}]
+                    })),
+                ))
+                .await
+                .unwrap(),
+            )
+            .await
+        }
+    };
+    let message = |body: &serde_json::Value| {
+        body["error"]
+            .as_str()
+            .or(body["message"].as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    let (status, body) =
+        put(serde_json::json!({"catalog": level(&[]), "schema": level(&["s"])})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let msg = message(&body);
+    assert!(
+        msg.contains("name a catalog") && msg.contains("every catalog"),
+        "{body}"
+    );
+    assert_eq!(stored().await, before, "an empty catalog changes nothing");
+
+    let (status, body) =
+        put(serde_json::json!({"catalog": level(&["c"]), "column": level(&["email"])})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let msg = message(&body);
+    assert!(
+        msg.contains("`column`") && msg.contains("`schema`"),
+        "{body}"
+    );
+    assert_eq!(stored().await, before, "a level gap changes nothing");
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
 #[tokio::test]
 async fn an_empty_non_root_level_is_stored_as_star() {
     let Some(f) = setup().await else {
