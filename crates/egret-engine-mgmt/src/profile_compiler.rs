@@ -230,7 +230,7 @@ pub(crate) async fn recompile_refusing_created_overlaps(
 /// One transaction: snapshot the profile's unit, write the binding, recompile,
 /// compare. An overlap the bind creates is `Err(RuleOverlap)` and NOTHING is
 /// bound (the transaction is dropped); the create path undoes the rest with
-/// `compensate_failed_create`, and the late-bind skips the bind and logs.
+/// `compensate_failed_create`, and the late-bind fails the apply with the same 409.
 ///
 /// A guarded path that cannot complete for any OTHER reason (a snapshot, compile
 /// or database failure) REFUSES too (SP4d-4 M-3): binding without the check is

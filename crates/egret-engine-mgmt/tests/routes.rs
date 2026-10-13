@@ -11745,11 +11745,11 @@ async fn a_starrocks_create_with_authz_service_id_that_creates_an_overlap_is_409
 }
 
 /// C1, the late-bind inside an apply: Ranger turned on after an unbound create
-/// adopts the profile named after the engine. A bind that would create a pair is
-/// SKIPPED (the apply still succeeds, the engine stays unbound); one that does
-/// not is made.
+/// adopts the profile named after the engine. A bind that would create a pair
+/// FAILS the apply with the structured 409 (the engine stays unbound, nothing is
+/// provisioned or minted); one that does not is made.
 #[tokio::test]
-async fn a_late_bind_that_would_create_an_overlap_is_skipped_and_one_that_would_not_is_made() {
+async fn a_late_bind_that_would_create_an_overlap_fails_the_apply_and_one_that_would_not_is_made() {
     let port = FakeEnginePort::default();
     let Some(mut f) = setup_with_ranger(
         Some(Arc::new(port.clone())),
@@ -11791,29 +11791,43 @@ async fn a_late_bind_that_would_create_an_overlap_is_skipped_and_one_that_would_
 
     f.app = rebuild(&f, true);
     f.ranger_enabled = true;
-    for (id, ..) in &ids {
-        let resp = f
-            .app
-            .clone()
-            .oneshot(req(
-                "POST",
-                &format!("/engines/{id}/rotate-secrets"),
-                &token,
-                None,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::NO_CONTENT,
-            "the apply itself succeeds"
+    let secrets = |f: &Fixture| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM workspace_secrets")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    for (n, (id, ..)) in ids.iter().enumerate() {
+        let (provisioned, updated, minted) = (
+            port.provisioned.lock().unwrap().len(),
+            port.updated.lock().unwrap().len(),
+            secrets(&f).await,
         );
+        let (status, body) = call(
+            &f,
+            "POST",
+            &format!("/engines/{id}/rotate-secrets"),
+            &token,
+            None,
+        )
+        .await;
+        if n == 0 {
+            assert_rule_overlap(status, &body);
+            assert_eq!(port.provisioned.lock().unwrap().len(), provisioned);
+            assert_eq!(port.updated.lock().unwrap().len(), updated);
+            assert_eq!(secrets(&f).await, minted, "no secret minted");
+        } else {
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body:?}");
+        }
     }
     let (_, ovl_name, _) = &ids[0];
     assert_eq!(
         authz_service_of(&f, ovl_name).await,
         None,
-        "a bind that creates a pair is skipped"
+        "a bind that creates a pair is refused"
     );
     let (_, ok_name, ok_profile) = &ids[1];
     assert_eq!(
