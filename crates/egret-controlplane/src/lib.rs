@@ -82,6 +82,8 @@ pub struct CpState {
     /// The real one dials the engine's FE and is wired in `egret-bin`; tests
     /// pass a fake.
     pub mv_lister: std::sync::Arc<dyn MaterializedViewLister>,
+    /// Deadline for ALL of one report's listings together; tests shorten it.
+    pub mv_list_timeout: std::time::Duration,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.

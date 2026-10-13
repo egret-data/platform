@@ -2195,6 +2195,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // The classification page's materialized-view report dials the same
         // engines, through the same admin connection, as the catalog apply path
         // — hence built from the engine-mgmt state, and placed after it.
+        mv_list_timeout: std::time::Duration::from_secs(15),
         mv_lister: std::sync::Arc::new(EngineMaterializedViewLister {
             engine_mgmt: engine_mgmt
                 .clone()

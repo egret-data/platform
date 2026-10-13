@@ -90,6 +90,7 @@ fn build_app(
         ),
         db: db.clone(),
         mv_lister: std::sync::Arc::new(NoListing),
+        mv_list_timeout: std::time::Duration::from_secs(15),
     })
 }
 
@@ -693,6 +694,7 @@ async fn setup_isolated_schema(iso_db: &str) -> Option<Fixture> {
         ),
         db: db.clone(),
         mv_lister: std::sync::Arc::new(NoListing),
+        mv_list_timeout: std::time::Duration::from_secs(15),
     });
 
     Some(Fixture {

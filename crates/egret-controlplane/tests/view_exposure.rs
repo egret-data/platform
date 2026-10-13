@@ -42,6 +42,9 @@ type Listing = Result<Vec<String>, String>;
 struct FakeLister {
     answers: Mutex<BTreeMap<(String, String), Listing>>,
     asked: Mutex<Vec<(String, String)>>,
+    /// Keys that never answer, like an FE that accepts the connection and goes
+    /// silent.
+    hangs: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeLister {
@@ -64,6 +67,9 @@ impl MaterializedViewLister for FakeLister {
     ) -> Result<Vec<String>, String> {
         let key = (engine.name.clone(), format!("{catalog}.{database}"));
         self.asked.lock().unwrap().push(key.clone());
+        if self.hangs.lock().unwrap().contains(&key) {
+            std::future::pending::<()>().await;
+        }
         self.answers
             .lock()
             .unwrap()
@@ -101,6 +107,15 @@ fn app(
     pdp: Arc<dyn egret_core::authz::Pdp>,
     lister: Arc<dyn MaterializedViewLister>,
 ) -> axum::Router {
+    app_with_timeout(f, pdp, lister, std::time::Duration::from_secs(15))
+}
+
+fn app_with_timeout(
+    f: &Fixture,
+    pdp: Arc<dyn egret_core::authz::Pdp>,
+    lister: Arc<dyn MaterializedViewLister>,
+    mv_list_timeout: std::time::Duration,
+) -> axum::Router {
     let crypto = egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").unwrap();
     let secrets = egret_secrets::WorkspaceSecretStore::new(
         f.db.clone(),
@@ -126,6 +141,7 @@ fn app(
         ),
         db: f.db.clone(),
         mv_lister: lister,
+        mv_list_timeout,
     })
 }
 
@@ -416,4 +432,125 @@ async fn an_unknown_classification_is_a_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Tag a column in a second database of the same warehouse, so the one engine is
+/// asked about two databases.
+async fn tag_second_database(f: &Fixture, tag_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) SELECT $1, warehouse_id, 'hr', 'staff', 'salary' \
+         FROM catalog_tag_assignments WHERE tag_id = $1 LIMIT 1",
+    )
+    .bind(tag_id)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn one_listing_ok_and_one_failed_is_null_and_names_only_the_failure() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: no test database");
+        return;
+    };
+    let s = seed(&f).await;
+    tag_second_database(&f, s.tag_id).await;
+    let lister = Arc::new(FakeLister::default());
+    lister.answer(
+        &s.engine_name,
+        &format!("{}.hr", s.catalog),
+        Ok(vec!["mv_hr"]),
+    );
+    lister.answer(
+        &s.engine_name,
+        &format!("{}.sales", s.catalog),
+        Err("connect refused"),
+    );
+    let token = session(&f).await;
+    let router = app(&f, Arc::new(AllowOnly(&["tag:read"])), lister.clone());
+
+    let (status, j) = get(
+        router,
+        &format!("/classifications/{}/view-exposure", s.tag_id),
+        &token,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    assert_eq!(
+        j["starrocksMaterializedViews"],
+        serde_json::Value::Null,
+        "one listing succeeded, but a partial list must never be returned; body={j}"
+    );
+    let err = j["starrocksListError"].as_str().expect("an error line");
+    assert!(
+        err.contains("sales") && err.contains("connect refused"),
+        "names the failed listing; got {err}"
+    );
+    assert!(
+        !err.contains(".hr"),
+        "must not name the listing that worked; got {err}"
+    );
+    assert_eq!(
+        lister.asked.lock().unwrap().len(),
+        2,
+        "both listings were attempted"
+    );
+}
+
+#[tokio::test]
+async fn a_listing_that_never_answers_ends_at_the_deadline_as_a_named_failure() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: no test database");
+        return;
+    };
+    let s = seed(&f).await;
+    tag_second_database(&f, s.tag_id).await;
+    let lister = Arc::new(FakeLister::default());
+    lister.answer(
+        &s.engine_name,
+        &format!("{}.hr", s.catalog),
+        Ok(vec!["mv_hr"]),
+    );
+    lister
+        .hangs
+        .lock()
+        .unwrap()
+        .push((s.engine_name.clone(), format!("{}.sales", s.catalog)));
+    let token = session(&f).await;
+    let router = app_with_timeout(
+        &f,
+        Arc::new(AllowOnly(&["tag:read"])),
+        lister.clone(),
+        std::time::Duration::from_millis(100),
+    );
+
+    let started = std::time::Instant::now();
+    let (status, j) = get(
+        router,
+        &format!("/classifications/{}/view-exposure", s.tag_id),
+        &token,
+    )
+    .await;
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the route must answer at its deadline, not wait for the hung listing"
+    );
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    assert_eq!(
+        j["starrocksMaterializedViews"],
+        serde_json::Value::Null,
+        "body={j}"
+    );
+    let err = j["starrocksListError"].as_str().expect("an error line");
+    assert!(
+        err.contains(&s.engine_name) && err.contains("sales") && err.contains("no answer"),
+        "names what did not answer; got {err}"
+    );
+    assert!(
+        !err.contains(".hr"),
+        "the listing that answered is not named; got {err}"
+    );
 }

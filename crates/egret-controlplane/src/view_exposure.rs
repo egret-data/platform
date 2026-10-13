@@ -108,7 +108,7 @@ async fn get_view_exposure(
             })?
     };
 
-    let (views, failures) = list_all(&*st.mv_lister, &databases).await;
+    let (views, failures) = list_all(&*st.mv_lister, &databases, st.mv_list_timeout).await;
     Ok(Json(ViewExposureDto {
         starrocks_materialized_views: failures.is_empty().then_some(views),
         starrocks_list_error: (!failures.is_empty()).then(|| failures.join("; ")),
@@ -116,20 +116,37 @@ async fn get_view_exposure(
     }))
 }
 
-/// Ask every database; collect what listed and what failed. The caller decides
-/// that ANY failure withholds the whole list.
+/// Ask every database concurrently, all under one shared deadline; collect what
+/// listed and what failed. The caller decides that ANY failure withholds the
+/// whole list.
+///
+/// Each real listing opens its own FE connection (10 s connect, 30 s statement),
+/// so asking in turn would cost an unreachable engine that long PER database.
+/// Concurrent asking bounds the request at `timeout`; a listing still pending
+/// when it passes is a failure that names its engine and database.
 async fn list_all(
     lister: &dyn MaterializedViewLister,
     databases: &[egret_perm_compile::view_exposure::ClassifiedDatabase],
+    timeout: std::time::Duration,
 ) -> (Vec<ViewExposureItem>, Vec<String>) {
-    let mut views = Vec::new();
-    let mut failures = Vec::new();
-    for d in databases {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let results = futures_util::future::join_all(databases.iter().map(|d| async move {
         let engine = ExposureEngine {
             id: d.engine_id,
             name: d.engine_name.clone(),
         };
-        match lister.list(&engine, &d.catalog, &d.database).await {
+        let listed =
+            tokio::time::timeout_at(deadline, lister.list(&engine, &d.catalog, &d.database))
+                .await
+                .unwrap_or_else(|_| Err(format!("no answer within {}s", timeout.as_secs_f32())));
+        (d, listed)
+    }))
+    .await;
+
+    let mut views = Vec::new();
+    let mut failures = Vec::new();
+    for (d, listed) in results {
+        match listed {
             Ok(names) => views.extend(names.into_iter().map(|name| ViewExposureItem {
                 engine: d.engine_name.clone(),
                 catalog: d.catalog.clone(),

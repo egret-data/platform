@@ -78,6 +78,7 @@ async fn setup() -> Option<Fixture> {
         ),
         db: db.clone(),
         mv_lister: std::sync::Arc::new(NoListing),
+        mv_list_timeout: std::time::Duration::from_secs(15),
     });
 
     Some(Fixture {
