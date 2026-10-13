@@ -50,7 +50,8 @@
 //! - `Dag`: `dynamic` from `X` to each node with no `dependsOn`, one edge per
 //!   `dependsOn` entry naming a node of this dag, and from each node nothing
 //!   depends on to `end:X`. A node with `task: null` or a `dependsOn` naming
-//!   no node draws nothing.
+//!   no node draws nothing; so a node whose `dependsOn` entries ALL dangle has
+//!   no incoming edge and sits as an orphan inside the cluster.
 //! - `Loop`: `dynamic` on every edge from `X` through the body to `end:X`.
 //! - `errors:` (of the flow or of a flowable): `error` on every edge, from
 //!   the owner's start to the list and on to what follows it.
@@ -86,13 +87,25 @@
 //!
 //! # Refusals
 //!
-//! `refusal` is the code of the first [`validate_for_run`] error whose path
-//! IS the task's path, from one run of it indexed by path -- the rules are
-//! not re-derived here. A refusal validation reports at a PROPERTY path is
-//! therefore not a node's: `unsupported_pause_property` is at
-//! `tasks.p.tasks` (and `unsupported_loop_until_property` at
-//! `tasks.l.{field}`), so those nodes carry `refusal: null` today
-//! (`a_refusal_at_a_property_path_is_not_the_tasks_refusal`).
+//! `validate_for_run` runs once; its rules are not re-derived here. An error
+//! **belongs to the task node whose validation path is the LONGEST prefix of
+//! the error's path**, where a prefix is the path itself or one followed by
+//! `.` (controller ruling, Task 1 fix round 1). A node's `refusal` is the code
+//! of the FIRST error, in validation order, that belongs to it. So an error at
+//! the task's own path lands on it, and so does one at a property path:
+//! `unsupported_pause_property` at `tasks.p.tasks` and
+//! `unsupported_loop_until_property` at `tasks.l.{field}` land on `tasks.p`
+//! and `tasks.l`, and `working_directory_child_not_runnable` at
+//! `tasks.wd.tasks.c` lands on the `WorkingDirectory` `tasks.wd` (itself
+//! refused). Only task nodes own errors; the flow is not a node, so an error
+//! no task path prefixes (`namespace`, `inputs.x`, `triggers...`) belongs to
+//! nothing. A de-duplicated node (`~2`) is matched by its plain validation
+//! path, like its first occurrence.
+//!
+//! **Residual ambiguity, accepted rather than engineered around:** a child
+//! whose id is literally a property name -- a task with id `tasks` under a
+//! flowable -- has the path `tasks.x.tasks`, so it captures its parent's
+//! error at the property path `tasks.x.tasks`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -263,10 +276,6 @@ pub enum GraphError {
 /// rule. `opts` is not read yet (Task 2 adds `Subflow` expansion).
 pub fn flow_graph(flow: &Flow, opts: &GraphOptions) -> Result<FlowGraph, GraphError> {
     let _ = opts;
-    let mut refusals: HashMap<String, &'static str> = HashMap::new();
-    for finding in validate_for_run(flow).errors {
-        refusals.entry(finding.path).or_insert(finding.code);
-    }
     let mut b = Builder {
         graph: FlowGraph {
             nodes: Vec::new(),
@@ -274,9 +283,10 @@ pub fn flow_graph(flow: &Flow, opts: &GraphOptions) -> Result<FlowGraph, GraphEr
             clusters: Vec::new(),
         },
         used: HashSet::new(),
-        refusals,
+        task_paths: Vec::new(),
     };
     b.flow(flow);
+    b.attribute_refusals(flow);
     let nodes = b.graph.nodes.len();
     if nodes > MAX_NODES {
         return Err(GraphError::TooLarge { nodes });
@@ -317,10 +327,40 @@ impl Ctx {
 struct Builder {
     graph: FlowGraph,
     used: HashSet<String>,
-    refusals: HashMap<String, &'static str>,
+    /// Every task node, as (index into `graph.nodes`, validation path).
+    task_paths: Vec<(usize, String)>,
+}
+
+/// The longest prefix of `path` -- `path` itself, or a part of it ending
+/// just before a `.` -- that is in `paths`.
+fn owner_of<'p>(path: &'p str, paths: &HashSet<&str>) -> Option<&'p str> {
+    let mut candidate = path;
+    loop {
+        if paths.contains(candidate) {
+            return Some(candidate);
+        }
+        candidate = &candidate[..candidate.rfind('.')?];
+    }
 }
 
 impl Builder {
+    /// Set every task node's `refusal` (module doc, "Refusals").
+    fn attribute_refusals(&mut self, flow: &Flow) {
+        let paths: HashSet<&str> = self.task_paths.iter().map(|(_, p)| p.as_str()).collect();
+        let mut owned: HashMap<&str, &'static str> = HashMap::new();
+        let errors = validate_for_run(flow).errors;
+        for finding in &errors {
+            if let Some(owner) = owner_of(&finding.path, &paths) {
+                owned.entry(owner).or_insert(finding.code);
+            }
+        }
+        for (ix, path) in &self.task_paths {
+            if let NodeKind::Task { refusal, .. } = &mut self.graph.nodes[*ix].kind {
+                *refusal = owned.get(path.as_str()).map(|c| c.to_string());
+            }
+        }
+    }
+
     fn flow(&mut self, flow: &Flow) {
         let start = start_uid(FLOW_OWNER);
         let end = end_uid(FLOW_OWNER);
@@ -473,7 +513,6 @@ impl Builder {
     fn task(&mut self, task: &Task, ctx: &Ctx) -> Span {
         let path = task_path(&ctx.path, &task.id);
         let uid = self.unique(task_path(&ctx.uid, &task.id));
-        let refusal = self.refusals.get(&path).map(|c| c.to_string());
         let cluster_kind = cluster_kind(task);
         let node_kind = match (&task.kind, cluster_kind) {
             (_, Some(_)) => TaskNodeKind::Flowable,
@@ -487,10 +526,13 @@ impl Builder {
             kind: node_kind,
             branch: ctx.branch,
             disabled: task.disabled,
-            refusal,
+            // Set by `attribute_refusals` once every task path is known.
+            refusal: None,
         };
+
         let Some(kind) = cluster_kind else {
             self.add_node(uid.clone(), node, ctx.cluster);
+            self.task_paths.push((self.graph.nodes.len() - 1, path));
             return Span {
                 entry: uid.clone(),
                 exit: uid,
@@ -513,6 +555,8 @@ impl Builder {
         });
         self.add_node(start.clone(), NodeKind::Start, Some(ix));
         self.add_node(uid.clone(), node, Some(ix));
+        self.task_paths
+            .push((self.graph.nodes.len() - 1, path.clone()));
         self.edge(&start, &uid, Relation::Sequential, None);
 
         let inner = Ctx {

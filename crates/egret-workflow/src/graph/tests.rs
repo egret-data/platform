@@ -818,27 +818,120 @@ fn refusal_is_the_validation_error_at_the_tasks_own_path() {
     assert_eq!(task(&g, "tasks.af.inner").refusal, None);
 }
 
-/// A `Pause` with `tasks:` is refused at `tasks.p.tasks` -- a PROPERTY path,
-/// not the task's own -- so under the binding rule (the error AT the task's
-/// path) its node carries no refusal. Pinned so a change to either side is
-/// seen; see the Task 1 report's concerns.
+/// `validate_for_run`'s errors for `body`, as `(code, path)` in order.
+fn errors_of(yaml: &str) -> Vec<(&'static str, String)> {
+    validate_for_run(&parse(yaml).unwrap())
+        .errors
+        .into_iter()
+        .map(|f| (f.code, f.path))
+        .collect()
+}
+
+/// A `Pause` with `tasks:` is refused at `tasks.p.tasks`, a PROPERTY path;
+/// the error belongs to the node whose path is its longest prefix.
 #[test]
-fn a_refusal_at_a_property_path_is_not_the_tasks_refusal() {
-    let yaml = format!(
-        "id: f\nnamespace: company.team\ntasks:\n  - {{id: p, type: {FLOW}.Pause, tasks: [{}]}}\n",
+fn a_pause_with_tasks_carries_its_property_path_refusal() {
+    let body = format!(
+        "tasks:\n  - {{id: p, type: {FLOW}.Pause, tasks: [{}]}}\n",
         leaf("a")
     );
-    let flow = parse(&yaml).unwrap();
-    let report = validate_for_run(&flow);
+    let yaml = format!("id: f\nnamespace: company.team\n{body}");
     assert!(
-        report
-            .errors
-            .iter()
-            .any(|f| f.code == "unsupported_pause_property" && f.path == "tasks.p.tasks"),
-        "{report:?}"
+        errors_of(&yaml).contains(&("unsupported_pause_property", "tasks.p.tasks".to_string())),
+        "{:?}",
+        errors_of(&yaml)
     );
-    let g = flow_graph(&flow, &GraphOptions::default()).unwrap();
-    assert_eq!(task(&g, "tasks.p").refusal, None);
+    let g = graph(&body);
+    assert_eq!(
+        task(&g, "tasks.p").refusal,
+        Some("unsupported_pause_property")
+    );
+    assert_eq!(task(&g, "tasks.p.a").refusal, None);
+}
+
+/// A `LoopUntil` bound written as an expression is refused at
+/// `tasks.l.checkFrequency.maxIterations` -- two segments below the task.
+#[test]
+fn a_loop_until_with_an_expression_bound_carries_its_refusal() {
+    let body = format!(
+        "tasks:\n  - {{id: l, type: {FLOW}.LoopUntil, condition: \"{{{{ true }}}}\", checkFrequency: {{maxIterations: \"{{{{ inputs.n }}}}\"}}, tasks: [{}]}}\n",
+        leaf("a")
+    );
+    let yaml = format!("id: f\nnamespace: company.team\n{body}");
+    assert!(
+        errors_of(&yaml).contains(&(
+            "unsupported_loop_until_property",
+            "tasks.l.checkFrequency.maxIterations".to_string()
+        )),
+        "{:?}",
+        errors_of(&yaml)
+    );
+    let g = graph(&body);
+    assert_eq!(
+        task(&g, "tasks.l").refusal,
+        Some("unsupported_loop_until_property")
+    );
+    assert_eq!(task(&g, "tasks.l.a").refusal, None);
+}
+
+/// An `AllowFailure` with no tasks has TWO errors of its own: validation
+/// reports `allow_failure_tasks_required` at the property path
+/// `tasks.af.tasks` FIRST, then `unsupported_allow_failure` at the task's own
+/// path. The first in validation order wins, whichever path it is at -- the
+/// tie-break between an own-path and a property-path error.
+#[test]
+fn the_first_error_in_validation_order_is_the_refusal() {
+    let body = format!("tasks:\n  - {{id: af, type: {FLOW}.AllowFailure, tasks: []}}\n");
+    let yaml = format!("id: f\nnamespace: company.team\n{body}");
+    let mine: Vec<_> = errors_of(&yaml)
+        .into_iter()
+        .filter(|(_, p)| p == "tasks.af" || p.starts_with("tasks.af."))
+        .collect();
+    assert_eq!(
+        mine,
+        [
+            ("allow_failure_tasks_required", "tasks.af.tasks".to_string()),
+            ("unsupported_allow_failure", "tasks.af".to_string()),
+        ]
+    );
+    let g = graph(&body);
+    assert_eq!(
+        task(&g, "tasks.af").refusal,
+        Some("allow_failure_tasks_required")
+    );
+}
+
+/// The flow is not a node: an error no task path prefixes belongs to nothing.
+#[test]
+fn a_flow_level_error_attaches_to_no_node() {
+    let yaml = format!(
+        "id: f\nnamespace: \"Not A Namespace!\"\ntasks: [{}]\n",
+        leaf("a")
+    );
+    assert!(
+        errors_of(&yaml)
+            .iter()
+            .any(|(c, p)| *c == "invalid_namespace" && p == "namespace"),
+        "{:?}",
+        errors_of(&yaml)
+    );
+    let g = flow_graph(&parse(&yaml).unwrap(), &GraphOptions::default()).unwrap();
+    for node in &g.nodes {
+        if let NodeKind::Task { refusal, .. } = &node.kind {
+            assert_eq!(refusal, &None, "{}", node.uid);
+        }
+    }
+}
+
+/// `owner_of` matches whole segments: `tasks.ab` is not under `tasks.a`.
+#[test]
+fn the_owner_is_the_longest_whole_segment_prefix() {
+    let paths: HashSet<&str> = ["tasks.a", "tasks.a.b"].into_iter().collect();
+    assert_eq!(owner_of("tasks.a.b.tasks", &paths), Some("tasks.a.b"));
+    assert_eq!(owner_of("tasks.a.tasks", &paths), Some("tasks.a"));
+    assert_eq!(owner_of("tasks.a", &paths), Some("tasks.a"));
+    assert_eq!(owner_of("tasks.ab", &paths), None);
+    assert_eq!(owner_of("namespace", &paths), None);
 }
 
 // ---- uids ---------------------------------------------------------------
