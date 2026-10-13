@@ -148,7 +148,7 @@ impl UserRepo {
             "SELECT id, provider, email, name, password_hash, status FROM users \
              WHERE provider <> 'service' \
                AND (email ILIKE $1 ESCAPE '\\' OR name ILIKE $1 ESCAPE '\\') \
-             ORDER BY created_at DESC LIMIT $2",
+             ORDER BY created_at DESC, id DESC LIMIT $2",
         )
         .bind(crate::contains_pattern(q))
         .bind(limit)
