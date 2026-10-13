@@ -281,3 +281,18 @@ export const NESTED_FAILED: FlowGraph = {
     cluster("tasks.s.call", "subflow", [], { parent: "cluster:tasks.s", start: "tasks.s.call", end: "tasks.s.call", reason: "depth" }),
   ],
 };
+
+/** A flat chain of `count` tasks: the shape that overflows dagre's recursion (layout.ts, DAGRE_LIMIT). */
+export function chain(count: number): FlowGraph {
+  const nodes: Node[] = [start("flow"), end("flow")];
+  const edges: Edge[] = [];
+  let prev = "start:flow";
+  for (let i = 0; i < count; i++) {
+    const uid = `tasks.t${i}`;
+    nodes.push(task(uid, LOG));
+    edges.push(edge(prev, uid));
+    prev = uid;
+  }
+  edges.push(edge(prev, "end:flow"));
+  return { nodes, edges, clusters: [] };
+}

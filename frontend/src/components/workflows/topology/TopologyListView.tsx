@@ -53,7 +53,10 @@ const COLUMNS_WITH_STATES = "grid grid-cols-[minmax(12rem,1.4fr)_7.5rem_6.5rem_m
 const COLUMNS = "grid grid-cols-[minmax(12rem,1fr)_minmax(12rem,1.4fr)] items-center";
 
 function buildTree(graph: FlowGraph, order: readonly Positioned[]): Row[] {
-  const rank = new Map(order.map((p, i) => [p.id, i]));
+  // Rows follow the layout's order; with none (the layout failed), the graph's own walk order,
+  // a cluster standing where its `start` marker does.
+  const rank = new Map(order.length > 0 ? order.map((p, i) => [p.id, i]) : graph.nodes.map((n, i) => [n.uid, i]));
+  if (order.length === 0) for (const c of graph.clusters) rank.set(c.uid, rank.get(c.start) ?? Number.MAX_SAFE_INTEGER);
   const nodes = new Map(graph.nodes.map((n) => [n.uid, n]));
   const drawn = graph.clusters.filter((c) => !c.reason);
   const clusterOf = new Map<string, string>();
@@ -109,7 +112,7 @@ function flatten(rows: Row[], collapsed: ReadonlySet<string>, out: Row[] = []): 
 
 export interface TopologyListViewProps {
   graph: FlowGraph;
-  /** The layout of the whole graph (nothing collapsed): rows follow its order. */
+  /** The layout of the whole graph (nothing collapsed): rows follow its order. Empty when it failed. */
   order: readonly Positioned[];
   states?: Readonly<Record<string, NodeState>>;
   collapsed: ReadonlySet<string>;
@@ -127,11 +130,15 @@ export function TopologyListView({ graph, order, states, collapsed, onToggle, se
   const tabStop = rows.some((r) => r.uid === focusUid) ? focusUid : (rows[0]?.uid ?? null);
   const columns = states ? COLUMNS_WITH_STATES : COLUMNS;
 
-  const siblingsOf = (r: Row): Row[] => {
-    if (r.parent === null) return tree;
-    const parent = rows.find((p) => p.uid === r.parent) ?? flatten(tree, new Set()).find((p) => p.uid === r.parent);
-    return parent?.children ?? [];
-  };
+  // Each row's place among its siblings, and failed expansions by task: read once, not per row.
+  const place = new Map<Row, { pos: number; size: number }>();
+  const index = (list: Row[]) =>
+    list.forEach((r, i) => {
+      place.set(r, { pos: i + 1, size: list.length });
+      index(r.children);
+    });
+  index(tree);
+  const failed = new Map(graph.clusters.filter((c) => c.reason).map((c) => [c.start, c.reason ?? undefined]));
   const focusRow = (uid: string) => {
     setFocusUid(uid);
     rowEls.current.get(uid)?.focus();
@@ -197,12 +204,12 @@ export function TopologyListView({ graph, order, states, collapsed, onToggle, se
           </div>
         </div>
         {rows.map((r, i) => {
-          const siblings = siblingsOf(r);
+          const { pos, size } = place.get(r) ?? { pos: 1, size: 1 };
           const isCollapsed = r.cluster !== null && collapsed.has(r.cluster.uid);
           const hasChildren = r.children.length > 0 && r.cluster !== null;
           const selected = r.uid === selectedUid;
           const node = r.node;
-          const expansion = node ? graph.clusters.find((c) => c.reason && c.start === node.uid)?.reason : undefined;
+          const expansion = node ? failed.get(node.uid) : undefined;
           const facts = node ? nodeFacts(node, states, expansion ?? undefined) : null;
           const icon = node
             ? typeIcon(node, node.node === "task" ? clusterKindOf(node.uid, graph.clusters) : undefined)
@@ -224,8 +231,8 @@ export function TopologyListView({ graph, order, states, collapsed, onToggle, se
               data-uid={r.uid}
               aria-rowindex={i + 2}
               aria-level={r.depth + 1}
-              aria-posinset={siblings.indexOf(r) + 1}
-              aria-setsize={siblings.length}
+              aria-posinset={pos}
+              aria-setsize={size}
               aria-expanded={hasChildren ? !isCollapsed : undefined}
               aria-selected={selected}
               tabIndex={r.uid === tabStop ? 0 : -1}

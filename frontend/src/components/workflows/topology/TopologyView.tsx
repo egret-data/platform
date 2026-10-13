@@ -8,7 +8,7 @@ import { isTerminalState } from "@/components/workflows/executionState";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { layout, type Orientation, type Positioned } from "@/components/workflows/topology/layout";
+import { layout, type LayoutOptions, type Orientation, type Positioned } from "@/components/workflows/topology/layout";
 import { NODE_TYPES, TopologyContext, type TopologyContextValue, type TopologyFlowNode } from "@/components/workflows/topology/TopologyNodes";
 import { CARD_Z, TopologyEdges } from "@/components/workflows/topology/TopologyEdges";
 import { TopologyListView } from "@/components/workflows/topology/TopologyListView";
@@ -29,6 +29,23 @@ import { cn } from "@/lib/utils";
 
 /** Where the orientation is remembered (a per-viewer preference, FE-DATA-3). Also this module's bundle marker. */
 export const ORIENTATION_KEY = "egret.workflows.topology.orientation";
+
+/** What the canvas says when the graph cannot be laid out (FE-STATE-1: an error, never a blank canvas). */
+export const LAYOUT_FAILED = "This graph could not be drawn.";
+
+const FAILED = Symbol("layout failed");
+
+/**
+ * `layout()`, never throwing. dagre's limits are handled inside it (`DAGRE_LIMIT`); this is the
+ * net for anything else, so a graph the browser cannot lay out costs the canvas, not the tab.
+ */
+function tryLayout(graph: FlowGraph, opts: LayoutOptions): ReturnType<typeof layout> | typeof FAILED {
+  try {
+    return layout(graph, opts);
+  } catch {
+    return FAILED;
+  }
+}
 
 /** §6.2's banner while the editor's YAML does not parse. */
 export const STALE_BANNER = "The graph is out of date: the YAML has an error";
@@ -106,12 +123,16 @@ function Topology({ graph, states, selectedUid = null, onSelect, onExpandSubflow
   const store = useStoreApi();
   const now = useClock(!!states && Object.values(states).some((s) => !!s.started_at && !s.ended_at && !isTerminalState(s.state)));
 
-  const placed = useMemo(() => (graph ? layout(graph, { orientation, collapsed, states }) : null), [graph, orientation, collapsed, states]);
-  // The list's order is the whole graph's, whatever is collapsed on the canvas.
-  const fullOrder = useMemo(
-    () => (graph && listView ? layout(graph, { orientation, collapsed: new Set(), states }).nodes : []),
-    [graph, listView, orientation, states],
-  );
+  const drawn = useMemo(() => (graph ? tryLayout(graph, { orientation, collapsed, states }) : null), [graph, orientation, collapsed, states]);
+  const placed = drawn && drawn !== FAILED ? drawn : null;
+  const layoutFailed = drawn === FAILED;
+  // The list's order is the whole graph's, whatever is collapsed on the canvas. Without a layout
+  // the list keeps the graph's own order: it never needs one.
+  const fullOrder = useMemo(() => {
+    if (!graph || !listView) return [];
+    const whole = tryLayout(graph, { orientation, collapsed: new Set(), states });
+    return whole === FAILED ? [] : whole.nodes;
+  }, [graph, listView, orientation, states]);
 
   const focusable = useMemo(() => (placed ? placed.nodes.filter((n) => FOCUSABLE.has(n.kind)) : []), [placed]);
   const tabStop = focusable.some((n) => n.id === focusId) ? focusId : (focusable[0]?.id ?? null);
@@ -251,6 +272,17 @@ function Topology({ graph, states, selectedUid = null, onSelect, onExpandSubflow
         now={now}
       />
     );
+  } else if (layoutFailed) {
+    body = (
+      <div role="alert" className="flex flex-col items-start gap-2 rounded-md border border-destructive bg-destructive/15 px-3 py-3 text-sm text-foreground">
+        <p className="font-medium">{LAYOUT_FAILED}</p>
+        <p>Use the list view to read its tasks and their states.</p>
+        <Button variant="outline" size="sm" onClick={() => setListView(true)}>
+          <List aria-hidden className="size-4" />
+          Show the list view
+        </Button>
+      </div>
+    );
   } else {
     body = (
       <div className="h-full min-h-64 w-full rounded-md border bg-background" style={XY_THEME}>
@@ -284,7 +316,8 @@ function Topology({ graph, states, selectedUid = null, onSelect, onExpandSubflow
     );
   }
 
-  const canvasControls = !!graph && hasTasks && !listView;
+  // Zoom, fit and orientation act on a drawing; without one they are not offered.
+  const canvasControls = !!graph && hasTasks && !listView && !layoutFailed;
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
       {graph && hasTasks ? (

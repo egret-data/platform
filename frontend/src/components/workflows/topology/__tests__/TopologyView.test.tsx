@@ -2,7 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TopologyView, type TopologyViewProps } from "@/components/workflows/topology/TopologyView";
-import { EMPTY_FLOW, EXPANDED, FLOW, LINE, NESTED, NESTED_FAILED, STATES } from "./fixtures";
+import { EMPTY_FLOW, EXPANDED, FLOW, LINE, NESTED, NESTED_FAILED, STATES, chain } from "./fixtures";
 
 const ORIENTATION_KEY = "egret.workflows.topology.orientation";
 
@@ -44,11 +44,18 @@ beforeAll(() => {
   Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, get: () => 600 });
   // xyflow measures nodes when a ResizeObserver reports them, and fits only measured nodes; the
   // setup file's observer never reports, so this one reports every element once, as a browser does.
+  // Batched per observer and microtask, as a browser delivers them: one entry per callback would
+  // make xyflow update its store once per node (5,000 renders of 5,000 nodes for the large graph).
   globalThis.ResizeObserver = class {
+    private pending: Element[] = [];
     constructor(private readonly cb: ResizeObserverCallback) {}
     observe(target: Element) {
-      const entry = { target, contentRect: { width: 800, height: 600 }, borderBoxSize: [{ inlineSize: 800, blockSize: 600 }] };
-      queueMicrotask(() => this.cb([entry as unknown as ResizeObserverEntry], this as unknown as ResizeObserver));
+      if (this.pending.push(target) > 1) return;
+      queueMicrotask(() => {
+        const entries = this.pending.map((t) => ({ target: t, contentRect: { width: 800, height: 600 }, borderBoxSize: [{ inlineSize: 800, blockSize: 600 }] }));
+        this.pending = [];
+        this.cb(entries as unknown as ResizeObserverEntry[], this as unknown as ResizeObserver);
+      });
     }
     unobserve() {}
     disconnect() {}
@@ -399,6 +406,28 @@ describe("TopologyView list view", () => {
     await user.click(screen.getByRole("button", { name: "List view" }));
     expect(screen.queryByRole("treegrid")).toBeNull();
     expect(hasNode("tasks.a")).toBe(true);
+  });
+});
+
+describe("TopologyView with the largest graph the server returns", () => {
+  // Role queries walk the accessibility tree of every one of 5,000 cards, which jsdom makes take
+  // minutes; this test reaches the elements by selector and keeps role queries inside the toolbar.
+  it("draws a chain of 5,000 tasks, and lists it", { timeout: 120_000 }, async () => {
+    const user = userEvent.setup();
+    const { container } = renderView({ graph: chain(5000) });
+    const uids = () => [...container.querySelectorAll("[data-uid]")].map((el) => el.getAttribute("data-uid"));
+    expect(container.querySelector("[role='alert']")).toBeNull();
+    const drawn = uids();
+    expect(drawn).toContain("tasks.t0");
+    expect(drawn).toContain("tasks.t4999");
+    const toolbar = container.querySelector("[role='toolbar']") as HTMLElement;
+    await user.click(within(toolbar).getByRole("button", { name: "List view" }));
+    const grid = container.querySelector("[role='treegrid']") as HTMLElement;
+    expect(grid).toHaveAttribute("aria-label", "Tasks of the flow");
+    const rows = [...grid.querySelectorAll("[role='row'][data-uid]")];
+    expect(rows).toHaveLength(5000);
+    expect(rows[0]).toHaveAttribute("data-uid", "tasks.t0");
+    expect(rows[4999]).toHaveAttribute("data-uid", "tasks.t4999");
   });
 });
 

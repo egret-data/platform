@@ -73,6 +73,11 @@ export interface RoutedEdge {
 
 export interface LayoutOptions {
   orientation: Orientation;
+  /**
+   * The most members one container hands to dagre; a larger one is laid out by `layered`.
+   * Defaults to `DAGRE_LIMIT`; tests lower it to run the fallback on small graphs.
+   */
+  dagreLimit?: number;
   /** Cluster uids (`cluster:{owner}`) drawn collapsed. */
   collapsed: ReadonlySet<string>;
   /**
@@ -103,6 +108,97 @@ const MARGIN = 16;
 /** A label's box on a `choice` edge; dagre keeps it clear of nodes. */
 const LABEL_WIDTH = 64;
 const LABEL_HEIGHT = 20;
+
+/**
+ * DAGRE'S LIMIT. dagre ranks, orders and makes a graph acyclic with RECURSIVE depth-first
+ * searches (`dfsFAS`, `longestPath`, `tightTree`, …), one stack frame chain per node along a
+ * path, whatever the `ranker`. Measured on 3.1.1 in node 24: a chain of 2,000 nodes overflows the
+ * default stack with every ranker, and with half the stack (`--stack-size=500`) 1,200 already
+ * does while 800 does not. The server allows 5,000 nodes, all of which can sit in one container
+ * (a flat flow, one long `Sequential`). It is slow before it is fatal, too: a 300-node chain
+ * takes ~250 ms, a 1,200-node one ~0.9 s, on the main thread.
+ *
+ * So a container with more than `DAGRE_LIMIT` members skips dagre for `layered` below, as does
+ * one dagre throws on. 300 keeps dagre's cost near a quarter second and its depth well inside
+ * even a halved stack.
+ */
+export const DAGRE_LIMIT = 300;
+const NODESEP = 28;
+const RANKSEP = 44;
+/** `layered` reserves no box for an edge label, so its ranks sit far enough apart for one. */
+const LAYERED_RANKSEP = 88;
+
+/**
+ * A plain layered layout with no recursion, for what dagre cannot take: ranks by longest path
+ * (Kahn's order, iterative), each rank ordered once by the mean position of its predecessors,
+ * nodes stacked across the rank `NODESEP` apart, ranks `LAYERED_RANKSEP` apart, and every edge a
+ * straight segment from border to border. It writes the same fields dagre does (`x`, `y` on
+ * nodes; `points`, `x`, `y` on edges), so the caller reads either the same way. Nodes on a cycle
+ * (the server draws none) are ranked after the rest rather than dropped.
+ */
+function layered(g: graphlib.Graph, orientation: Orientation): void {
+  const lr = orientation === "LR";
+  const along = (v: string): number => (lr ? g.node(v).width : g.node(v).height);
+  const across = (v: string): number => (lr ? g.node(v).height : g.node(v).width);
+  const nodes = g.nodes();
+  const edges = g.edges().filter((e) => e.v !== e.w);
+  const indegree = new Map<string, number>(nodes.map((v) => [v, 0]));
+  const out = new Map<string, string[]>(nodes.map((v) => [v, []]));
+  const into = new Map<string, string[]>(nodes.map((v) => [v, []]));
+  for (const e of edges) {
+    indegree.set(e.w, (indegree.get(e.w) ?? 0) + 1);
+    out.get(e.v)?.push(e.w);
+    into.get(e.w)?.push(e.v);
+  }
+  const rank = new Map<string, number>();
+  const queue = nodes.filter((v) => indegree.get(v) === 0);
+  for (const v of queue) rank.set(v, 0);
+  for (let i = 0; i < queue.length; i++) {
+    const v = queue[i];
+    for (const w of out.get(v) ?? []) {
+      rank.set(w, Math.max(rank.get(w) ?? 0, (rank.get(v) ?? 0) + 1));
+      const left = (indegree.get(w) ?? 0) - 1;
+      indegree.set(w, left);
+      if (left === 0) queue.push(w);
+    }
+  }
+  let last = -1;
+  for (const r of rank.values()) last = Math.max(last, r);
+  const ordered = new Set(queue);
+  for (const v of nodes) if (!ordered.has(v)) rank.set(v, last + 1);
+
+  const layers: string[][] = [];
+  for (const v of nodes) (layers[rank.get(v) ?? 0] ??= []).push(v);
+  const position = new Map<string, number>();
+  let mainAt = 0;
+  for (const layer of layers) {
+    if (!layer) continue;
+    const mean = (v: string) => {
+      const known = (into.get(v) ?? []).map((u) => position.get(u)).filter((p): p is number => p !== undefined);
+      return known.length ? known.reduce((a, b) => a + b, 0) / known.length : Number.POSITIVE_INFINITY;
+    };
+    const order = layer.map((v, i) => ({ v, i, m: mean(v) })).sort((a, b) => a.m - b.m || a.i - b.i);
+    order.forEach(({ v }, i) => position.set(v, i));
+    const thickness = Math.max(...layer.map(along));
+    let crossAt = -(order.reduce((sum, { v }) => sum + across(v), 0) + NODESEP * (order.length - 1)) / 2;
+    for (const { v } of order) {
+      const main = mainAt + thickness / 2;
+      const cross = crossAt + across(v) / 2;
+      Object.assign(g.node(v), lr ? { x: main, y: cross } : { x: cross, y: main });
+      crossAt += across(v) + NODESEP;
+    }
+    mainAt += thickness + LAYERED_RANKSEP;
+  }
+
+  for (const e of g.edges()) {
+    const a = g.node(e.v);
+    const b = g.node(e.w);
+    const forward = (rank.get(e.w) ?? 0) >= (rank.get(e.v) ?? 0) ? 1 : -1;
+    const from = lr ? { x: a.x + (forward * a.width) / 2, y: a.y } : { x: a.x, y: a.y + (forward * a.height) / 2 };
+    const to = lr ? { x: b.x - (forward * b.width) / 2, y: b.y } : { x: b.x, y: b.y - (forward * b.height) / 2 };
+    Object.assign(g.edge(e), { points: [from, to], x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 });
+  }
+}
 
 interface Box {
   x: number;
@@ -214,7 +310,11 @@ export function layout(graph: FlowGraph, opts: LayoutOptions): { nodes: Position
    * is then extended from the box's border to that marker.
    */
   const members = new Map<string | null, string[]>();
-  for (const i of items.values()) members.set(i.parent, [...(members.get(i.parent) ?? []), i.id]);
+  for (const i of items.values()) {
+    const list = members.get(i.parent);
+    if (list) list.push(i.id);
+    else members.set(i.parent, [i.id]);
+  }
   /** Positions relative to the container's content origin, and each level's routes. */
   const rel = new Map<string, Box>();
   const routes = new Map<string, { points: Point[]; labelAt?: Point }>();
@@ -222,7 +322,7 @@ export function layout(graph: FlowGraph, opts: LayoutOptions): { nodes: Position
 
   const place = (container: string | null): { width: number; height: number } => {
     const g = new graphlib.Graph({ multigraph: true });
-    g.setGraph({ rankdir: opts.orientation, nodesep: 28, ranksep: 44, edgesep: 14, marginx: 0, marginy: 0 });
+    g.setGraph({ rankdir: opts.orientation, nodesep: NODESEP, ranksep: RANKSEP, edgesep: 14, marginx: 0, marginy: 0 });
     g.setDefaultEdgeLabel(() => ({}));
     for (const id of members.get(container) ?? []) {
       g.setNode(id, items.get(id)?.kind === "cluster" ? boxSize(id) : (leafSize.get(id) as { width: number; height: number }));
@@ -233,7 +333,15 @@ export function layout(graph: FlowGraph, opts: LayoutOptions): { nodes: Position
       const shown = e.relation === "choice" && e.label !== null;
       g.setEdge(memberOf(e.source, container), memberOf(e.target, container), shown ? { width: LABEL_WIDTH, height: LABEL_HEIGHT, labelpos: "c" } : {}, e.id);
     }
-    dagreLayout(g);
+    if (g.nodeCount() > (opts.dagreLimit ?? DAGRE_LIMIT)) layered(g, opts.orientation);
+    else {
+      try {
+        dagreLayout(g);
+      } catch {
+        // dagre lays out a copy and writes back only at the end, so `g` is untouched here.
+        layered(g, opts.orientation);
+      }
+    }
     // Shift so the content starts at 0,0: nodes, routes and labels together.
     let minX = Infinity;
     let minY = Infinity;

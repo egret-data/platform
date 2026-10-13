@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CLUSTER_HEADER, layout, type Positioned } from "@/components/workflows/topology/layout";
-import { EMPTY_FLOW, EXPANDED, FLOW, LINE, NESTED, NESTED_FAILED, siblings } from "./fixtures";
+import { EMPTY_FLOW, EXPANDED, FLOW, LINE, NESTED, NESTED_FAILED, chain, siblings } from "./fixtures";
 
 const NONE: ReadonlySet<string> = new Set();
 const byId = (nodes: Positioned[], id: string) => {
@@ -172,6 +172,18 @@ describe("layout", () => {
       }
     });
 
+    it.each([
+      ["three sibling Sequentials", siblings(3)],
+      ["sibling Sequentials each holding an If", siblings(3, true)],
+      ["the mixed flow", FLOW],
+    ])("%s, laid out without dagre (the fallback), in both orientations", (_name, graph) => {
+      for (const orientation of ["LR", "TB"] as const) {
+        const { nodes, edges } = layout(graph, { orientation, collapsed: NONE, dagreLimit: 0 });
+        assertGeometry(nodes);
+        for (const e of edges) expect(e.points.length).toBeGreaterThanOrEqual(2);
+      }
+    });
+
     it("keeps the geometry with one sibling collapsed", () => {
       for (const orientation of ["LR", "TB"] as const) {
         assertGeometry(layout(siblings(3, true), { orientation, collapsed: new Set(["cluster:tasks.p.s2"]) }).nodes);
@@ -208,6 +220,30 @@ describe("layout", () => {
     expect(call.parent).toBe("cluster:tasks.s");
     expect(call.expansion).toBe("depth");
     expect(nodes.some((n) => n.id === "cluster:tasks.s.call")).toBe(false);
+  });
+
+  describe("graphs dagre cannot take", () => {
+    it.each(["LR", "TB"] as const)("lays out a chain of 5,000 tasks in %s, in order, without overlap", (orientation) => {
+      const axis = orientation === "LR" ? "x" : "y";
+      const size = orientation === "LR" ? "width" : "height";
+      const { nodes, edges } = layout(chain(5000), { orientation, collapsed: NONE });
+      expect(nodes).toHaveLength(5002);
+      expect(edges).toHaveLength(5001);
+      const ids = ["start:flow", ...Array.from({ length: 5000 }, (_, i) => `tasks.t${i}`), "end:flow"];
+      const placed = ids.map((id) => byId(nodes, id));
+      // Each one ends before the next begins along the main axis: in order, and no two overlap.
+      for (let i = 1; i < placed.length; i++) expect(placed[i][axis]).toBeGreaterThan(placed[i - 1][axis] + placed[i - 1][size]);
+      // The returned order is still the layout's.
+      expect(nodes.filter((n) => n.kind === "task").map((n) => n.id)).toEqual(ids.slice(1, -1));
+    });
+
+    it("the fallback places the same nodes in the same order, with straight routes", () => {
+      // Below the limit, a graph dagre can lay out is laid out by dagre: a different route shape.
+      const byDagre = layout(LINE, { orientation: "LR", collapsed: NONE });
+      const byFallback = layout(LINE, { orientation: "LR", collapsed: NONE, dagreLimit: 0 });
+      expect(byFallback.nodes.map((n) => n.id)).toEqual(byDagre.nodes.map((n) => n.id));
+      for (const e of byFallback.edges) expect(e.points).toHaveLength(2);
+    });
   });
 });
 
