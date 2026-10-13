@@ -20,7 +20,9 @@
 //! Read from Apache Ranger at tags `release-ranger-2.5.0` (what Trino 470
 //! enforces) and `release-ranger-2.8.0` (what StarRocks fe-ubuntu:4.1
 //! enforces), and cross-checked with `javap -c` against the real
-//! `ranger-plugins-common-{2.5.0,2.8.0}.jar`.
+//! `ranger-plugins-common-{2.5.0,2.8.0,2.9.0}.jar`. 2.9.0 (StarRocks
+//! fe-ubuntu:4.1.6) was read as a bytecode comparison against 2.8.0 rather than
+//! from source: `docs/en/plans/2026-10-13-ranger-2-9-0-reading.md`.
 //!
 //! # The contract
 //!
@@ -661,7 +663,7 @@ impl EngineType {
     pub fn modelled_versions(self) -> &'static [PluginVersion] {
         match self {
             EngineType::Trino => &[PluginVersion::Ranger2_5_0],
-            EngineType::StarRocks => &[PluginVersion::Ranger2_8_0],
+            EngineType::StarRocks => &[PluginVersion::Ranger2_8_0, PluginVersion::Ranger2_9_0],
         }
     }
 
@@ -674,7 +676,7 @@ impl EngineType {
 /// The `ranger-plugins-common` version whose behaviour a decision is
 /// reproducing.
 ///
-/// Only the two versions this crate has actually been read against exist as
+/// Only the versions this crate has actually been read against exist as
 /// variants, so a version it has NOT been verified against cannot be
 /// expressed — an unrepresentable state needs no runtime guard.
 ///
@@ -690,10 +692,18 @@ impl EngineType {
 /// and `JavaScriptEdits` are byte-identical apart from the
 /// `commons-lang` → `commons-lang3` move in `StringUtils`, which changes no
 /// behaviour here.
+///
+/// **2.9.0** was read against 2.8.0 for every class on those paths and is
+/// byte-identical to it on all of them; the full table, with the few classes that
+/// do differ and why none is on a modelled path, is
+/// `docs/en/plans/2026-10-13-ranger-2-9-0-reading.md`. A variant existing says the
+/// jar was READ; [`EngineType::models`] says it was also PROVED on the real engine
+/// type, and the two are separate on purpose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginVersion {
     Ranger2_5_0,
     Ranger2_8_0,
+    Ranger2_9_0,
 }
 
 /// The PLUGIN-side half of the configuration the engine consults.
@@ -734,7 +744,7 @@ pub struct EngineConfig {
     pub engine: Option<EngineType>,
     /// Which `ranger-plugins-common` it loads. `None` leaves the
     /// cross-check off; `Some` must agree with
-    /// [`EngineType::plugin_version`] when [`EngineConfig::engine`] is also
+    /// [`EngineType::models`] when [`EngineConfig::engine`] is also
     /// set.
     pub plugin_version: Option<PluginVersion>,
 }
@@ -1151,8 +1161,9 @@ pub enum UndecidableCause {
     /// guess**, and in the allow/deny path a guess is a security defect, so this
     /// refuses instead — but only where the crate is measured WRONG:
     ///
-    /// * `Some(Ranger2_8_0)` — the crate's model is the measured 2.8.0 answer, so
-    ///   nothing refuses;
+    /// * `Some(Ranger2_8_0)` or `Some(Ranger2_9_0)` — the crate's model is the
+    ///   measured 2.8.0 answer (2.9.0 is byte-identical on this path), so nothing
+    ///   refuses;
     /// * `Some(Ranger2_5_0)` — the crate would reopen a deny 2.5.0 keeps, so it
     ///   refuses;
     /// * `None` — the caller did not say which plugin is running, and the two
@@ -1175,8 +1186,9 @@ pub enum UndecidableCause {
         /// thing in both cases, which is unactionable advice in the only case
         /// `explain` can now produce (it always declares the version).
         ///
-        /// `Some(Ranger2_8_0)` is unrepresentable here by construction: that is
-        /// the version this crate reproduces, so the refusal is not raised for it.
+        /// `Some(Ranger2_8_0)` and `Some(Ranger2_9_0)` are unrepresentable here by
+        /// construction: those are the versions this crate reproduces, so the
+        /// refusal is not raised for them.
         plugin_version: Option<PluginVersion>,
         /// The tag policy that denied.
         tag_policy_id: Option<i64>,
@@ -2480,10 +2492,18 @@ fn evaluate_in(ctx: &Ctx<'_, '_>, request: &AccessRequest, engine: &EngineConfig
     //   MINOR 7: raised eagerly it refused shapes that the restore would have
     //   brought back to a Denied both versions agree on. Row 1 is exactly that
     //   shape, and it now answers instead of refusing.
-    if is_denied_by_tags
-        && outcome.as_ref().is_some_and(|o| o.allowed)
-        && engine.plugin_version != Some(PluginVersion::Ranger2_8_0)
-    {
+    //
+    // An exhaustive `match`, so a version added later cannot inherit an arm by
+    // default. `None` takes the refusing branch, as it always did: the caller did not
+    // say which plugin runs and the two answers differ. 2.9.0 takes the 2.8.0 arm
+    // because every class on this path is byte-identical in the two jars
+    // (`docs/en/plans/2026-10-13-ranger-2-9-0-reading.md`), and the differential
+    // proves it on the real 2.9.0 jar rather than resting on the reading alone.
+    let reopen_is_unmodelled = match engine.plugin_version {
+        Some(PluginVersion::Ranger2_8_0 | PluginVersion::Ranger2_9_0) => false,
+        Some(PluginVersion::Ranger2_5_0) | None => true,
+    };
+    if is_denied_by_tags && outcome.as_ref().is_some_and(|o| o.allowed) && reopen_is_unmodelled {
         let (tag_policy_id, tag_policy_name) = tag_verdict
             .as_ref()
             .map(|o| (o.policy_id, o.policy_name.clone()))

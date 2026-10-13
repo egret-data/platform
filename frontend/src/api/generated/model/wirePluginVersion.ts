@@ -18,4 +18,5 @@ export type WirePluginVersion = typeof WirePluginVersion[keyof typeof WirePlugin
 export const WirePluginVersion = {
   ranger_2_5_0: 'ranger_2_5_0',
   ranger_2_8_0: 'ranger_2_8_0',
+  ranger_2_9_0: 'ranger_2_9_0',
 } as const;

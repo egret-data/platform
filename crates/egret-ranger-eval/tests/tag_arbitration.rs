@@ -405,12 +405,20 @@ fn a_tag_deny_is_reopened_by_a_strictly_higher_priority_resource_allow_on_2_8_0(
         )]),
     );
 
-    let d = evaluate(&set, &request(), &trino_def(), &plugin_2_8_0());
-    assert!(
-        matches!(&d, Decision::Allowed { policy_name, .. } if policy_name == "res-allow"),
-        "on 2.8.0 a strictly higher-priority resource allow must reopen a tag deny: {}",
-        named(&d)
-    );
+    // 2.9.0 is byte-identical to 2.8.0 on every class of this path
+    // (`docs/en/plans/2026-10-13-ranger-2-9-0-reading.md`), so it takes the 2.8.0 arm.
+    for version in [PluginVersion::Ranger2_8_0, PluginVersion::Ranger2_9_0] {
+        let engine = EngineConfig {
+            plugin_version: Some(version),
+            ..plugin_2_8_0()
+        };
+        let d = evaluate(&set, &request(), &trino_def(), &engine);
+        assert!(
+            matches!(&d, Decision::Allowed { policy_name, .. } if policy_name == "res-allow"),
+            "on {version:?} a strictly higher-priority resource allow must reopen a tag deny: {}",
+            named(&d)
+        );
+    }
 
     // …and on 2.5.0, and on an unstated version, the two engines disagree so the
     // crate must REFUSE rather than pick one. Both halves here, because a refusal

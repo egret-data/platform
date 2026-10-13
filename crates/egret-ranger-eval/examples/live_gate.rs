@@ -235,7 +235,10 @@ fn main() {
     let plugin_version = match std::env::var("LIVE_GATE_PLUGIN_VERSION").as_deref() {
         Ok("2.5.0") => PluginVersion::Ranger2_5_0,
         Ok("2.8.0") => PluginVersion::Ranger2_8_0,
-        Ok(other) => panic!("LIVE_GATE_PLUGIN_VERSION must be 2.5.0 or 2.8.0, got {other:?}"),
+        Ok("2.9.0") => PluginVersion::Ranger2_9_0,
+        Ok(other) => {
+            panic!("LIVE_GATE_PLUGIN_VERSION must be 2.5.0, 2.8.0 or 2.9.0, got {other:?}")
+        }
         Err(_) => engine.modelled_versions()[0],
     };
     let user = args.next().unwrap_or_else(|| "admin".to_string());

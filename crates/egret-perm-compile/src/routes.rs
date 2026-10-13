@@ -1813,8 +1813,8 @@ async fn explain(
             continue;
         };
         // The version this profile's plugin runs at: the bound engine's when
-        // exactly one is bound (an external engine declares its own), the type's
-        // measured one when none is. Several bound engines of one profile are
+        // exactly one is bound (an external engine declares its own), the plugin
+        // version of egret's default image for the type when none is. Several bound engines of one profile are
         // refused to disagree — a profile is evaluated at ONE version here, and
         // a guess between two would be an evaluation nobody measured.
         let plugin_version = profile_plugin_version(&mut conn, service_id, engine).await?;
@@ -2276,7 +2276,7 @@ pub async fn confine_rule_selector(
 /// (`egret_perm::engine_images`): the same type can run different plugins as
 /// its image changes, so the type alone says nothing. An external engine maps
 /// the version its operator DECLARED. Either way the (type, version) pair must
-/// be one `egret-ranger-eval` has been read against
+/// be one `egret-ranger-eval` has been read against AND proved on
 /// (`egret_perm::ranger_plugin_is_modelled`), else this returns a sentence: a
 /// guess would be an evaluation nobody measured.
 pub(crate) fn engine_plugin_version(
@@ -2326,6 +2326,7 @@ pub(crate) fn engine_plugin_version(
     match version {
         "2.5.0" => Ok(PluginVersion::Ranger2_5_0),
         "2.8.0" => Ok(PluginVersion::Ranger2_8_0),
+        "2.9.0" => Ok(PluginVersion::Ranger2_9_0),
         other => Err(format!(
             "engine \"{name}\": plugin {other} is listed as modelled but the evaluator has no \
              variant for it"
@@ -4566,6 +4567,34 @@ mod engine_plugin_version_tests {
 
     const NO_SPEC: serde_json::Value = serde_json::Value::Null;
 
+    /// The other direction of the test above: every version the EVALUATOR lists
+    /// for an engine type is in `MODELLED_RANGER_PLUGINS`, so the two lists
+    /// (`egret_perm`'s, which the API reports, and `egret-ranger-eval`'s, which
+    /// decides) cannot drift apart in either direction.
+    #[test]
+    fn the_evaluators_modelled_versions_are_exactly_the_listed_pairs() {
+        use egret_ranger_eval::eval::EngineType;
+        let version_str = |v: PluginVersion| match v {
+            PluginVersion::Ranger2_5_0 => "2.5.0",
+            PluginVersion::Ranger2_8_0 => "2.8.0",
+            PluginVersion::Ranger2_9_0 => "2.9.0",
+        };
+        let mut from_evaluator: Vec<(&str, &str)> = Vec::new();
+        for engine in [EngineType::Trino, EngineType::StarRocks] {
+            for v in engine.modelled_versions() {
+                assert!(engine.models(*v));
+                from_evaluator.push((engine.service_def_name(), version_str(*v)));
+            }
+        }
+        let mut listed: Vec<(&str, &str)> = egret_perm::MODELLED_RANGER_PLUGINS.to_vec();
+        from_evaluator.sort_unstable();
+        listed.sort_unstable();
+        assert_eq!(
+            from_evaluator, listed,
+            "`EngineType::models` and `MODELLED_RANGER_PLUGINS` must list the same pairs"
+        );
+    }
+
     #[test]
     fn an_external_engine_maps_its_declared_version() {
         assert_eq!(
@@ -4608,47 +4637,56 @@ mod engine_plugin_version_tests {
         assert!(err.contains("t1") && err.contains("no image"), "{err}");
     }
 
-    // TEMPORARY. Until Task 5 (Trino 483) and Task 4 (StarRocks 4.1.6) prove
-    // their pairs, `MODELLED_RANGER_PLUGINS` stays Trino@2.5.0 + StarRocks@2.8.0
-    // and an image resolving to anything else is refused, not guessed. Task 5
-    // inverts the Trino half to assert Trino@2.8.0 resolves; Task 4 adds the
-    // StarRocks half.
+    // TEMPORARY for the Trino half. Until Task 5 (Trino 483) proves its pair, an
+    // image resolving to Trino@2.8.0 is refused, not guessed; Task 5 inverts it.
+    // The StarRocks half was inverted by Task 4: 4.1.6 runs Ranger 2.9.0, proved.
     #[test]
     fn an_unbound_profile_is_evaluated_at_the_default_image_and_refused_naming_it() {
         use egret_ranger_eval::eval::EngineType;
-        // TEMPORARY like the test below: the defaults are Trino 483 and
-        // StarRocks 4.1.6, unmodelled until Tasks 5 and 4.
+        // TEMPORARY like the test below: the default Trino image is 483,
+        // unmodelled until Task 5.
         let err = super::default_image_plugin_version(EngineType::Trino).unwrap_err();
         assert!(
             err.contains("trinodb/trino:483") && err.contains("2.8.0"),
             "{err}"
         );
-        let err = super::default_image_plugin_version(EngineType::StarRocks).unwrap_err();
-        assert!(
-            err.contains("fe-ubuntu:4.1.6") && err.contains("2.9.0"),
-            "{err}"
+        assert_eq!(
+            super::default_image_plugin_version(EngineType::StarRocks),
+            Ok(PluginVersion::Ranger2_9_0),
+            "egret's default StarRocks image is fe-ubuntu:4.1.6, which runs Ranger 2.9.0"
         );
     }
 
+    // TEMPORARY until Task 5 inverts it: the Trino 483 half still pins a refusal.
+    // Task 4 already inverted the StarRocks 4.1.6 half below.
     #[test]
     fn an_image_whose_pair_is_not_yet_modelled_is_refused_not_guessed() {
         let trino483 = serde_json::json!({"imageVersion": "483"});
         let err = engine_plugin_version("t", "provisioned", "trino", None, &trino483).unwrap_err();
         assert!(err.contains("2.8.0"), "{err}");
-        let sr416 =
-            serde_json::json!({"starrocksConfig": {"feImage": "starrocks/fe-ubuntu:4.1.6"}});
-        let err = engine_plugin_version("s", "provisioned", "starrocks", None, &sr416).unwrap_err();
-        assert!(err.contains("2.9.0"), "{err}");
     }
 
-    /// The four (type, version) pairings: only the diagonal is modelled.
     #[test]
-    fn only_trino_2_5_0_and_starrocks_2_8_0_are_modelled() {
+    fn a_provisioned_starrocks_4_1_6_resolves_to_ranger_2_9_0() {
+        let sr416 =
+            serde_json::json!({"starrocksConfig": {"feImage": "starrocks/fe-ubuntu:4.1.6"}});
+        assert_eq!(
+            engine_plugin_version("s", "provisioned", "starrocks", None, &sr416),
+            Ok(PluginVersion::Ranger2_9_0)
+        );
+    }
+
+    /// Every (type, version) pairing of the three known versions: only the
+    /// proved ones are modelled.
+    #[test]
+    fn only_the_proved_pairs_are_modelled() {
         for (t, v, modelled) in [
             ("trino", "2.5.0", true),
             ("trino", "2.8.0", false),
+            ("trino", "2.9.0", false),
             ("starrocks", "2.5.0", false),
             ("starrocks", "2.8.0", true),
+            ("starrocks", "2.9.0", true),
         ] {
             assert_eq!(
                 engine_plugin_version("e", "external", t, Some(v), &NO_SPEC).is_ok(),

@@ -145,11 +145,12 @@ pub struct Disagreement {
     pub after: String,
 }
 
-/// `Ranger 2.5.0` / `Ranger 2.8.0` — how a version reads on the page.
+/// `Ranger 2.5.0` / `Ranger 2.8.0` / `Ranger 2.9.0` — how a version reads on the page.
 pub fn plugin_version_label(v: PluginVersion) -> &'static str {
     match v {
         PluginVersion::Ranger2_5_0 => "Ranger 2.5.0",
         PluginVersion::Ranger2_8_0 => "Ranger 2.8.0",
+        PluginVersion::Ranger2_9_0 => "Ranger 2.9.0",
     }
 }
 

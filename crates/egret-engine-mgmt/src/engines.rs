@@ -307,8 +307,8 @@ pub(crate) struct EngineDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     ranger_plugin_version: Option<String>,
     /// External only: whether egret's Ranger evaluator has been read against this
-    /// engine's (type, declared version) PAIR: only Trino@2.5.0 and
-    /// StarRocks@2.8.0 are. When `false`, a migration to the profile bound to this
+    /// engine's (type, declared version) PAIR: only the pairs in
+    /// `egret_perm::MODELLED_RANGER_PLUGINS` are. When `false`, a migration to the profile bound to this
     /// engine is refused (never evaluated at a guessed version) and `explain`
     /// answers that it cannot.
     #[serde(skip_serializing_if = "Option::is_none")]

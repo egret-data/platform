@@ -121,7 +121,7 @@ fn engine_type_serialises_the_same_spelling_the_rest_of_the_api_uses() {
 }
 
 #[test]
-fn plugin_version_both_variants() {
+fn plugin_version_every_variant() {
     assert_eq!(
         WirePluginVersion::from(PluginVersion::Ranger2_5_0),
         WirePluginVersion::Ranger2_5_0
@@ -129,6 +129,14 @@ fn plugin_version_both_variants() {
     assert_eq!(
         WirePluginVersion::from(PluginVersion::Ranger2_8_0),
         WirePluginVersion::Ranger2_8_0
+    );
+    assert_eq!(
+        WirePluginVersion::from(PluginVersion::Ranger2_9_0),
+        WirePluginVersion::Ranger2_9_0
+    );
+    assert_eq!(
+        serde_json::to_value(WirePluginVersion::Ranger2_9_0).unwrap(),
+        serde_json::json!("ranger_2_9_0")
     );
     assert_eq!(
         serde_json::to_value(WirePluginVersion::Ranger2_5_0).unwrap(),

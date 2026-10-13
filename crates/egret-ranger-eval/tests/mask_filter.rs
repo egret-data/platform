@@ -1111,6 +1111,10 @@ fn a_declared_plugin_version_must_match_the_measured_one_for_the_engine() {
     assert!(!EngineType::Trino.models(PluginVersion::Ranger2_8_0));
     assert!(EngineType::StarRocks.models(PluginVersion::Ranger2_8_0));
     assert!(!EngineType::StarRocks.models(PluginVersion::Ranger2_5_0));
+    // 2.9.0: read (`docs/en/plans/2026-10-13-ranger-2-9-0-reading.md`) and proved on
+    // the real jar for StarRocks only; Trino 470 does not run it.
+    assert!(EngineType::StarRocks.models(PluginVersion::Ranger2_9_0));
+    assert!(!EngineType::Trino.models(PluginVersion::Ranger2_9_0));
 }
 
 /// Declaring the engine that DOES match changes nothing — the guard is a

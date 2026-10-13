@@ -139,6 +139,8 @@ pub enum WirePluginVersion {
     Ranger2_5_0,
     #[serde(rename = "ranger_2_8_0")]
     Ranger2_8_0,
+    #[serde(rename = "ranger_2_9_0")]
+    Ranger2_9_0,
 }
 
 impl From<PluginVersion> for WirePluginVersion {
@@ -146,6 +148,7 @@ impl From<PluginVersion> for WirePluginVersion {
         match version {
             PluginVersion::Ranger2_5_0 => WirePluginVersion::Ranger2_5_0,
             PluginVersion::Ranger2_8_0 => WirePluginVersion::Ranger2_8_0,
+            PluginVersion::Ranger2_9_0 => WirePluginVersion::Ranger2_9_0,
         }
     }
 }

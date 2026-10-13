@@ -70,6 +70,7 @@ const ENGINE_LABEL: Record<WireEngineType, string> = {
 const PLUGIN_LABEL: Record<WirePluginVersion, string> = {
   ranger_2_5_0: "Ranger 2.5.0",
   ranger_2_8_0: "Ranger 2.8.0",
+  ranger_2_9_0: "Ranger 2.9.0",
 };
 
 /** Ranger's five item buckets, named the way an operator reading the policy would. */

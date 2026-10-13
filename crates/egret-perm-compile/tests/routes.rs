@@ -2842,9 +2842,9 @@ async fn explain_status(f: &Fixture, token: &str) -> (StatusCode, Value) {
 }
 
 /// A provisioned engine's plugin comes from its EXACT image, not its type: the
-/// same StarRocks type on a floating tag is refused with the fix, on 4.1.6
-/// (plugin 2.9.0, not yet modelled) is refused naming 2.9.0, and on 4.1.4 is
-/// explained. TEMPORARY half: Task 4 proves 4.1.6 and inverts that cell.
+/// same StarRocks type on a floating tag is refused with the fix, and on 4.1.4
+/// (plugin 2.8.0) and on 4.1.6 (plugin 2.9.0, proved against the real jar in
+/// engine-upgrade Task 4) is explained.
 #[tokio::test]
 async fn explain_resolves_a_provisioned_engines_plugin_through_its_exact_image() {
     let Some(f) = setup().await else { return };
@@ -2861,12 +2861,7 @@ async fn explain_resolves_a_provisioned_engines_plugin_through_its_exact_image()
 
     pin_bound_starrocks_image(&f, "starrocks/fe-ubuntu:4.1.6").await;
     let (status, body) = explain_status(&f, &token).await;
-    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
-    let error = body["error"].as_str().unwrap_or_default();
-    assert!(
-        error.contains("2.9.0") && error.contains("StarRocks@2.8.0"),
-        "the refusal must name the plugin and what is modelled: {body}"
-    );
+    assert_eq!(status, StatusCode::OK, "4.1.6 runs Ranger 2.9.0: {body}");
 
     pin_bound_starrocks_image(&f, "starrocks/fe-ubuntu:4.1.4").await;
     let (status, body) = explain_status(&f, &token).await;
@@ -2874,11 +2869,10 @@ async fn explain_resolves_a_provisioned_engines_plugin_through_its_exact_image()
 }
 
 /// Two engines on one profile that resolve to different plugins cannot share
-/// one verdict. 4.1.6 is refused on its own account first (unmodelled), so the
-/// disagreement shows once both images are modelled; until then the profile is
-/// refused on the unmodelled engine, which is what this pins.
+/// one verdict. The fixture's bound engine runs 2.8.0; a second one on 4.1.6
+/// runs 2.9.0. Both are modelled, so the refusal is the disagreement itself.
 #[tokio::test]
-async fn a_profile_with_a_second_engine_on_an_unmodelled_image_is_refused() {
+async fn a_profile_whose_engines_run_different_plugins_is_refused() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
     sqlx::query(
@@ -2894,7 +2888,10 @@ async fn a_profile_with_a_second_engine_on_an_unmodelled_image_is_refused() {
     let (status, body) = explain_status(&f, &token).await;
     assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
     assert!(
-        body["error"].as_str().unwrap_or_default().contains("2.9.0"),
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("different Ranger plugin versions"),
         "body: {body}"
     );
 }

@@ -3823,7 +3823,7 @@
         },
         "responses": {
           "201": {
-            "description": "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to a policy profile, with the given catalogs declared attached (`applyStatus: declared`). The bound profile was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the (type, declared version) pair (only Trino@2.5.0 and StarRocks@2.8.0 are): a migration to that profile is then refused, never evaluated at a guessed version",
+            "description": "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to a policy profile, with the given catalogs declared attached (`applyStatus: declared`). The bound profile was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the (type, declared version) pair (only the pairs in `egret_perm::MODELLED_RANGER_PLUGINS` are): a migration to that profile is then refused, never evaluated at a guessed version",
             "content": {
               "application/json": {
                 "schema": {
@@ -37610,7 +37610,7 @@
               "boolean",
               "null"
             ],
-            "description": "External only: whether egret's Ranger evaluator has been read against this\nengine's (type, declared version) PAIR: only Trino@2.5.0 and\nStarRocks@2.8.0 are. When `false`, a migration to the profile bound to this\nengine is refused (never evaluated at a guessed version) and `explain`\nanswers that it cannot."
+            "description": "External only: whether egret's Ranger evaluator has been read against this\nengine's (type, declared version) PAIR: only the pairs in\n`egret_perm::MODELLED_RANGER_PLUGINS` are. When `false`, a migration to the profile bound to this\nengine is refused (never evaluated at a guessed version) and `explain`\nanswers that it cannot."
           }
         }
       },
@@ -41555,7 +41555,7 @@
           },
           "rangerPluginVersion": {
             "type": "string",
-            "description": "The Ranger plugin version installed on the engine, `x.y.z`, one of the\nRanger 2.x releases. **Only Trino@2.5.0 and StarRocks@2.8.0 are\nmodelled by egret's evaluator** (a type and version PAIR): any other is\nstored as declared, and a migration to a profile bound to this engine is\nthen refused rather than evaluated with the wrong semantics."
+            "description": "The Ranger plugin version installed on the engine, `x.y.z`, one of the\nRanger 2.x releases. **Only the pairs in\n`egret_perm::MODELLED_RANGER_PLUGINS` are modelled by egret's evaluator**\n(a type and version PAIR; the refusal sentence names them): any other is\nstored as declared, and a migration to a profile bound to this engine is\nthen refused rather than evaluated with the wrong semantics."
           },
           "authzServiceId": {
             "type": [
@@ -45748,7 +45748,8 @@
         "description": "Wire mirror of [`PluginVersion`]. Renamed explicitly rather than through\n`rename_all`: the source identifiers (`Ranger2_5_0`) already embed\ndigits and underscores, and `rename_all`'s case-boundary heuristic has no\ngood answer for that shape.",
         "enum": [
           "ranger_2_5_0",
-          "ranger_2_8_0"
+          "ranger_2_8_0",
+          "ranger_2_9_0"
         ]
       },
       "WirePolicyType": {
