@@ -170,7 +170,14 @@ impl CatalogTagRepo {
         Self::recompile_bound_services_in_tx(&mut tx, warehouse_id).await?;
         egret_perm_compile::overlap::refuse_created_overlaps_via(&mut tx, &overlaps_before)
             .await
-            .map_err(crate::error::BiError::from)?;
+            .map_err(|e| {
+                let at = if column.is_empty() {
+                    format!("{schema}.{table}")
+                } else {
+                    format!("{schema}.{table}.{column}")
+                };
+                crate::error::BiError::from_assignment_check(e, &format!("this tag to {at}"))
+            })?;
         tx.commit().await.map_err(crate::error::BiError::from)?;
         Ok(())
     }

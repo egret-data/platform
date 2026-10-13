@@ -62,6 +62,31 @@ impl From<egret_perm::CompileError> for BiError {
     }
 }
 
+impl BiError {
+    /// The refusal of a TAG ASSIGNMENT whose overlap check found a pair the
+    /// assignment creates. The 409 body is the compiler's, but its `error` is
+    /// rewritten: the compiler's own sentence leads with "recompiling profile X
+    /// would emit", which describes a recompile the steward did not ask for,
+    /// where this write is an assignment. Any other failure is mapped as ever.
+    pub(crate) fn from_assignment_check(e: egret_perm::CompileError, assignment: &str) -> Self {
+        let refusal = match &e {
+            egret_perm::CompileError::AmbiguousMaskOrFilterArbitration { refusal, .. } => {
+                refusal.clone()
+            }
+            _ => return e.into(),
+        };
+        match egret_perm_compile::overlap::refusal_body(&e) {
+            Some(mut body) => {
+                body["error"] = serde_json::Value::String(format!(
+                    "assigning {assignment} would create an order-ambiguous pair: {refusal}"
+                ));
+                BiError::Overlap { body }
+            }
+            None => e.into(),
+        }
+    }
+}
+
 /// Domain arm only — the shared `Auth` arm is in `egret_core::ApiError`.
 impl IntoResponse for BiError {
     fn into_response(self) -> Response {
@@ -88,5 +113,72 @@ pub type BiApiError = ApiError<BiError>;
 impl From<BiError> for BiApiError {
     fn from(e: BiError) -> Self {
         ApiError::Domain(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egret_perm::{CompileError, OverlapKind, OverlapRule};
+
+    fn overlap() -> CompileError {
+        CompileError::AmbiguousMaskOrFilterArbitration {
+            profile: "trino-main".into(),
+            refusal: "two mask policies would be served".into(),
+            kind: OverlapKind::Mask,
+            coordinate: "wh.sales.orders.email".into(),
+            rules: vec![
+                OverlapRule {
+                    id: None,
+                    name: "a".into(),
+                },
+                OverlapRule {
+                    id: None,
+                    name: "b".into(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn an_assignment_refusal_describes_the_assignment_and_keeps_the_structured_body() {
+        let BiError::Overlap { body } =
+            BiError::from_assignment_check(overlap(), "this tag to wh.sales.orders.email")
+        else {
+            panic!("expected an overlap");
+        };
+        let error = body["error"].as_str().unwrap();
+        assert!(
+            error.starts_with("assigning this tag to wh.sales.orders.email would create"),
+            "{error}"
+        );
+        assert!(
+            error.ends_with("two mask policies would be served"),
+            "{error}"
+        );
+        assert!(!error.contains("recompiling profile"), "{error}");
+        assert_eq!(body["code"], "rule_overlap");
+        assert_eq!(body["coordinate"], "wh.sales.orders.email");
+        assert_eq!(body["kind"], "mask");
+        assert_eq!(body["rules"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_recompile_refusal_keeps_the_compilers_own_sentence() {
+        let BiError::Overlap { body } = BiError::from(overlap()) else {
+            panic!("expected an overlap");
+        };
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("recompiling profile"));
+    }
+
+    #[test]
+    fn a_non_overlap_failure_is_not_an_overlap() {
+        assert!(matches!(
+            BiError::from_assignment_check(CompileError::Db("x".into()), "a tag"),
+            BiError::Engine(_)
+        ));
     }
 }
