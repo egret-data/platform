@@ -496,6 +496,8 @@ pub(crate) async fn build_provision_req_with(
             catalogs_read_at: None,
         });
     }
+    // Resolved before anything is minted, so a spec with no image leaks nothing.
+    let image_version = stored_image(engine, &["imageVersion"])?;
     // Catalogs come from the registry (SP3).
     let registry = st.engine_mgmt.registry();
     let catalogs_read_at = registry.db_now().await?;
@@ -686,10 +688,7 @@ pub(crate) async fn build_provision_req_with(
         req: EngineProvisionReq {
             name: engine.name.clone(),
             namespace: engine.namespace.clone(),
-            image_version: engine.spec["imageVersion"]
-                .as_str()
-                .unwrap_or(DEFAULT_ENGINE_IMAGES.trino_image_version)
-                .into(),
+            image_version,
             catalogs,
             config,
             ranger,
@@ -1196,6 +1195,29 @@ fn parse_deployment_strategy(v: &serde_json::Value) -> Option<DeploymentStrategy
 /// `coordinator` block (Phase 1.5.1 shape), parse it directly; otherwise
 /// synthesise the per-role config from the old flat Phase-1.5 spec fields
 /// (back-compat for engines provisioned before this reshape).
+/// The image a stored engine spec pins, at `path`. An engine with none is an
+/// error naming it, never the current default: since migration 0185 every
+/// provisioned engine carries its image, so a missing one is an unforeseen row,
+/// and defaulting it would upgrade it silently.
+fn stored_image(engine: &Engine, path: &[&str]) -> Result<String, CpError> {
+    let mut v = Some(&engine.spec);
+    for k in path {
+        v = v.and_then(|v| v.get(*k));
+    }
+    v.and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            CpError::BadRequest(format!(
+                "engine \"{}\" has no `{}` in its spec; set the image explicitly \
+                 (egret will not default it to the current release)",
+                engine.name,
+                path.join(".")
+            ))
+        })
+}
+
 fn build_trino_config(spec: &serde_json::Value) -> TrinoConfigReq {
     let tc = &spec["trinoConfig"];
     if tc["coordinator"].is_object() {
@@ -3175,18 +3197,8 @@ async fn build_starrocks_provision_req(
 
     // Desired FE/CN shape read back from the persisted spec (create wrote these).
     let cfg = engine.spec.get("starrocksConfig");
-    let fe_image = cfg
-        .and_then(|c| c.get("feImage"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_ENGINE_IMAGES.starrocks_fe_image.into());
-    let cn_image = cfg
-        .and_then(|c| c.get("cnImage"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_ENGINE_IMAGES.starrocks_cn_image.into());
+    let fe_image = stored_image(&engine, &["starrocksConfig", "feImage"])?;
+    let cn_image = stored_image(&engine, &["starrocksConfig", "cnImage"])?;
     let fe_replicas = cfg
         .and_then(|c| c.get("feReplicas"))
         .and_then(|v| v.as_u64())
@@ -5354,11 +5366,12 @@ async fn update_trino_engine(
     // Rebuild the spec from the body + config. The primary Catalog Client is NOT
     // re-minted (its credential lives on the primary catalog row), so nothing is
     // revoked here. Trino has no hot-reload; the provisioner rolls the pods.
-    let image_version = b
-        .image_version
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_ENGINE_IMAGES.trino_image_version.into());
+    // Body value, else the image this engine already runs: an update that omits
+    // the image (a resize) must not move the engine to the current default.
+    let image_version = match b.image_version.clone().filter(|s| !s.trim().is_empty()) {
+        Some(v) => v,
+        None => stored_image(&engine, &["imageVersion"])?,
+    };
     let mut spec = serde_json::json!({
         "coordinatorReplicas": b.coordinator_replicas,
         "workerReplicas": b.worker_replicas,
@@ -5501,6 +5514,16 @@ async fn update_starrocks_engine(
 
     // Merge the body over the CURRENT spec so a PUT that omits image/replicas/
     // resources (or delegation) preserves what's already stored.
+    // An image the body omits is kept from the stored spec; with neither, refuse
+    // rather than default to the current release.
+    for (field, body_value) in [
+        ("feImage", &sr_body.fe_image),
+        ("cnImage", &sr_body.cn_image),
+    ] {
+        if body_value.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            stored_image(&engine, &["starrocksConfig", field])?;
+        }
+    }
     let mut spec = build_starrocks_spec(&sr_body, Some(&engine.spec));
     // Preserve the top-level FE ingress across the merge (mirrors how
     // `build_starrocks_spec` falls back to `existing` for omitted fields): a PUT
@@ -8024,9 +8047,11 @@ mod tests {
         assert_eq!(sr.delegation.as_ref().unwrap().audience, "engine");
         assert_eq!(boot.as_ref().unwrap().audience, "engine");
 
-        // (b) A NO-DELEGATION engine row: images default, delegation absent.
+        // (b) A NO-DELEGATION engine row: images stored, delegation absent.
         let spec2 = serde_json::json!({
             "starrocksConfig": {
+                "feImage": DEFAULT_ENGINE_IMAGES.starrocks_fe_image,
+                "cnImage": DEFAULT_ENGINE_IMAGES.starrocks_cn_image,
                 "feReplicas": 2,
             },
         });
@@ -8099,7 +8124,7 @@ mod tests {
                 &engine_name,
                 "starrocks",
                 "egret-engines",
-                &serde_json::json!({ "starrocksConfig": { "feReplicas": 1 } }),
+                &serde_json::json!({ "starrocksConfig": { "feImage": "starrocks/fe-ubuntu:4.1.6", "cnImage": "starrocks/cn-ubuntu:4.1.6", "feReplicas": 1 } }),
                 None,
             )
             .await
@@ -8159,7 +8184,7 @@ mod tests {
                 &engine_name,
                 "trino",
                 "egret-engines",
-                &serde_json::json!({ "trinoConfig": {} }),
+                &serde_json::json!({ "imageVersion": "470", "trinoConfig": {} }),
                 None,
             )
             .await
@@ -8254,7 +8279,7 @@ mod tests {
                 &format!("sr-{}", Uuid::new_v4().simple()),
                 "starrocks",
                 "egret-engines",
-                &serde_json::json!({ "starrocksConfig": { "feReplicas": 1 } }),
+                &serde_json::json!({ "starrocksConfig": { "feImage": "starrocks/fe-ubuntu:4.1.6", "cnImage": "starrocks/cn-ubuntu:4.1.6", "feReplicas": 1 } }),
                 None,
             )
             .await
@@ -8453,7 +8478,7 @@ mod tests {
                 &format!("sr-{}", Uuid::new_v4().simple()),
                 "starrocks",
                 "egret-engines",
-                &serde_json::json!({ "starrocksConfig": {} }),
+                &serde_json::json!({ "starrocksConfig": { "feImage": "starrocks/fe-ubuntu:4.1.6", "cnImage": "starrocks/cn-ubuntu:4.1.6" } }),
                 None,
             )
             .await
@@ -8621,7 +8646,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 "egret-engines",
-                &serde_json::json!({ "trinoConfig": {} }),
+                &serde_json::json!({ "imageVersion": "470", "trinoConfig": {} }),
                 Some(cert_ref),
             )
             .await
@@ -9237,7 +9262,7 @@ mod tests {
                 &format!("sr-{}", Uuid::new_v4().simple()),
                 "starrocks",
                 "egret-engines",
-                &serde_json::json!({ "starrocksConfig": {} }),
+                &serde_json::json!({ "starrocksConfig": { "feImage": "starrocks/fe-ubuntu:4.1.6", "cnImage": "starrocks/cn-ubuntu:4.1.6" } }),
                 None,
             )
             .await
@@ -11092,7 +11117,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 DEFAULT_NAMESPACE,
-                &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
+                &serde_json::json!({ "imageVersion": "470", "trinoConfig": { "delegationMode": "jwt" } }),
                 None,
             )
             .await
@@ -11172,7 +11197,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 DEFAULT_NAMESPACE,
-                &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
+                &serde_json::json!({ "imageVersion": "470", "trinoConfig": { "delegationMode": "jwt" } }),
                 None,
             )
             .await
@@ -11207,6 +11232,64 @@ mod tests {
         );
     }
 
+    /// An engine whose spec names no image is an unforeseen row (0185 wrote one
+    /// into every provisioned engine). The build must say which engine and
+    /// field, and must NOT fall back to the current default, which would upgrade
+    /// it behind its operator's back.
+    #[tokio::test]
+    async fn building_an_engine_with_no_stored_image_is_an_error_not_the_default() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let trino = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-noimg-{}", Uuid::new_v4().simple()),
+                "trino",
+                DEFAULT_NAMESPACE,
+                &serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("create engine row");
+        let err = build_provision_req(&st, &trino)
+            .await
+            .err()
+            .expect("refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&trino.name) && msg.contains("imageVersion"),
+            "{msg}"
+        );
+
+        let sr = st
+            .engine_mgmt
+            .create_engine(
+                &format!("sr-noimg-{}", Uuid::new_v4().simple()),
+                "starrocks",
+                "egret-engines",
+                &serde_json::json!({ "starrocksConfig": { "feImage": "starrocks/fe-ubuntu:4.1.6" } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+        let err = build_starrocks_provision_req(&st, &sr, &wh)
+            .await
+            .err()
+            .expect("refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&sr.name) && msg.contains("starrocksConfig.cnImage"),
+            "{msg}"
+        );
+    }
+
     /// N1 (round-2 review, from the C1 fix): the opposite direction of the
     /// test above. `apply_built`'s guard must NOT demand the row still be at
     /// the exact status the caller observed — only that it isn't gone or
@@ -11237,7 +11320,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 DEFAULT_NAMESPACE,
-                &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
+                &serde_json::json!({ "imageVersion": "470", "trinoConfig": { "delegationMode": "jwt" } }),
                 None,
             )
             .await
@@ -11294,7 +11377,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 DEFAULT_NAMESPACE,
-                &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
+                &serde_json::json!({ "imageVersion": "470", "trinoConfig": { "delegationMode": "jwt" } }),
                 None,
             )
             .await
@@ -11373,7 +11456,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 DEFAULT_NAMESPACE,
-                &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
+                &serde_json::json!({ "imageVersion": "470", "trinoConfig": { "delegationMode": "jwt" } }),
                 None,
             )
             .await
@@ -11591,7 +11674,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 "egret-engines",
-                &serde_json::json!({ "trinoConfig": {} }),
+                &serde_json::json!({ "imageVersion": "470", "trinoConfig": {} }),
                 None,
             )
             .await
@@ -11702,7 +11785,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 "egret-engines",
-                &serde_json::json!({ "trinoConfig": {} }),
+                &serde_json::json!({ "imageVersion": "470", "trinoConfig": {} }),
                 None,
             )
             .await
@@ -11812,7 +11895,7 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 "egret-engines",
-                &serde_json::json!({ "trinoConfig": {} }),
+                &serde_json::json!({ "imageVersion": "470", "trinoConfig": {} }),
                 None,
             )
             .await

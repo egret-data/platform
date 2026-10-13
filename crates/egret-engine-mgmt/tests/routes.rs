@@ -4253,6 +4253,120 @@ async fn trino_update_failure_restores_the_spec_and_keeps_delegation_mode() {
     );
 }
 
+/// A PUT that omits the image (a resize) keeps the image the engine already
+/// runs: it must not move to the current default, which would roll the pods onto
+/// a new release nobody asked for. Checked on the stored spec AND on what the
+/// provisioner was asked to apply.
+#[tokio::test]
+async fn trino_update_without_an_image_keeps_the_stored_image() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_keep_image_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "warehouseId": wh_id, "imageVersion": "470",
+            "coordinatorReplicas": 1, "workerReplicas": 1,
+            "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = j["id"].as_str().unwrap().to_string();
+    assert_eq!(stored_spec(&f, &id).await["imageVersion"], "470");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{id}"),
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 3,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "update; body={j}");
+    let spec = stored_spec(&f, &id).await;
+    assert_eq!(spec["imageVersion"], "470", "stored image kept");
+    assert_eq!(spec["workerReplicas"], 3, "the resize itself applied");
+    assert_eq!(port.last_updated().image_version, "470", "applied image");
+}
+
+/// The StarRocks twin: an update that omits `feImage`/`cnImage` keeps both.
+#[tokio::test]
+async fn starrocks_update_without_images_keeps_the_stored_images() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_keep_sr_image_admin", true).await;
+    let wh_id = seed_provisioned_warehouse_with_secret(&f).await;
+    let name = format!("sr-{}", Uuid::new_v4().simple());
+    let (fe, cn) = ("starrocks/fe-ubuntu:4.1.4", "starrocks/cn-ubuntu:4.1.4");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "warehouseId": wh_id, "kind": "starrocks",
+            "coordinatorReplicas": 1, "workerReplicas": 1,
+            "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            "starrocks": { "feImage": fe, "cnImage": cn, "feReplicas": 1, "cnReplicas": 1 },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = j["id"].as_str().unwrap().to_string();
+
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/engines/{id}"),
+        &token,
+        Some(serde_json::json!({
+            "name": name, "warehouseId": wh_id, "kind": "starrocks",
+            "coordinatorReplicas": 1, "workerReplicas": 1,
+            "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            "starrocks": { "cnReplicas": 2 },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update; body={j}");
+    let cfg = stored_spec(&f, &id).await["starrocksConfig"].clone();
+    assert_eq!(cfg["feImage"], fe);
+    assert_eq!(cfg["cnImage"], cn);
+    assert_eq!(cfg["cnReplicas"], 2, "the edit itself applied");
+    let applied = port.last_updated();
+    let sr = applied.starrocks.as_ref().expect("starrocks config");
+    assert_eq!((sr.fe_image.as_str(), sr.cn_image.as_str()), (fe, cn));
+}
+
 /// P4: a Trino update re-materializes the connections of assigned workspaces.
 #[tokio::test]
 async fn trino_update_rematerializes_assigned_workspace_connections() {
