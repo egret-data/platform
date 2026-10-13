@@ -1191,7 +1191,8 @@ async fn graph_for(
         depth: 0,
     };
     Ok(Json(
-        crate::graph::expanded_flow_graph(flow, &opts, ws, &st.repo).await?,
+        crate::graph::expanded_flow_graph(flow, &opts, ws, &st.repo, crate::runtime::served())
+            .await?,
     ))
 }
 
@@ -1333,8 +1334,16 @@ async fn get_execution_graph(
         depth: 0,
     };
     Ok(Json(
-        crate::graph::execution_graph(&flow, &frozen.runs, &opts, ws, &st.repo, &st.executions)
-            .await?,
+        crate::graph::execution_graph(
+            &flow,
+            &frozen.runs,
+            &opts,
+            ws,
+            &st.repo,
+            &st.executions,
+            crate::runtime::served(),
+        )
+        .await?,
     ))
 }
 

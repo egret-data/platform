@@ -89,7 +89,11 @@
 //!
 //! # Refusals
 //!
-//! `validate_for_run` runs once; its rules are not re-derived here. An error
+//! The findings are `validate_for_run`'s errors, then -- given the
+//! deployment's `Served` -- `spec::unrunnable`'s `task_type_not_served`, in
+//! that order: the same two lists the validate routes, the draft DTO and
+//! publish show. Each runs once; their rules are not re-derived here. A
+//! finding
 //! **belongs to the task node whose validation path is the LONGEST prefix of
 //! the error's path**, where a prefix is the path itself or one followed by
 //! `.` (controller ruling, Task 1 fix round 1). A node's `refusal` is the code
@@ -131,6 +135,7 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::models::{Flow, Task, TaskKind};
+use crate::runtime::Served;
 use crate::spec::path::{root_lists, task_path};
 use crate::spec::validate_for_run;
 
@@ -306,11 +311,15 @@ pub enum GraphError {
 }
 
 /// Build the topology of `flow` (spec §3). See the module doc for every
-/// rule. Pure: it performs no `Subflow` expansion and does not read `opts`;
-/// [`expanded_flow_graph`] does both.
-pub fn flow_graph(flow: &Flow, opts: &GraphOptions) -> Result<FlowGraph, GraphError> {
-    let _ = opts;
-    build(flow, MAX_NODES).map(|(graph, _)| graph)
+/// rule. Pure: it performs no `Subflow` expansion ([`expanded_flow_graph`]
+/// does, and is the one that reads [`GraphOptions`]).
+///
+/// `served` is the deployment whose `task_type_not_served` refusals the
+/// graph attributes beside `validate_for_run`'s (module doc, "Refusals"):
+/// the routes pass `runtime::served()`. `None` judges the flow alone, with no
+/// deployment.
+pub fn flow_graph(flow: &Flow, served: Option<&Served>) -> Result<FlowGraph, GraphError> {
+    build(flow, served, MAX_NODES).map(|(graph, _)| graph)
 }
 
 /// A `Subflow` task node as placed, with the target it names -- what
@@ -329,13 +338,14 @@ pub(crate) struct SubflowRef {
 /// **`budget` is enforced while building** (spec §3.5): the moment the
 /// node count passes it, no further node, edge or uid is made, the walk
 /// unwinds without placing anything, and the answer is
-/// `TooLarge { nodes: budget + 1 }`. `validate_for_run` runs only for a
-/// graph within the budget. So no input -- 80,000 tasks of one
+/// `TooLarge { nodes: budget + 1 }`. `validate_for_run` and `unrunnable` run
+/// only for a graph within the budget. So no input -- 80,000 tasks of one
 /// id in a 2 MB body included -- costs more than `budget` nodes' work plus
 /// one pass over the parsed lists. [`flow_graph`] passes [`MAX_NODES`]; an
 /// expansion passes what the running total has left.
 pub(crate) fn build(
     flow: &Flow,
+    served: Option<&Served>,
     budget: usize,
 ) -> Result<(FlowGraph, Vec<SubflowRef>), GraphError> {
     let mut b = Builder {
@@ -356,7 +366,7 @@ pub(crate) fn build(
             nodes: b.graph.nodes.len(),
         });
     }
-    b.attribute_refusals(flow);
+    b.attribute_refusals(flow, served);
     Ok((b.graph, b.subflows))
 }
 
@@ -449,11 +459,15 @@ fn owner_of<'p>(path: &'p str, paths: &HashSet<&str>) -> Option<&'p str> {
 }
 
 impl Builder {
-    /// Set every task node's `refusal` (module doc, "Refusals").
-    fn attribute_refusals(&mut self, flow: &Flow) {
+    /// Set every task node's `refusal` (module doc, "Refusals"):
+    /// `validate_for_run`'s errors first, then `unrunnable`'s.
+    fn attribute_refusals(&mut self, flow: &Flow, served: Option<&Served>) {
         let paths: HashSet<&str> = self.task_paths.iter().map(|(_, p)| p.as_str()).collect();
         let mut owned: HashMap<&str, &'static str> = HashMap::new();
-        let errors = validate_for_run(flow).errors;
+        let mut errors = validate_for_run(flow).errors;
+        if let Some(served) = served {
+            errors.extend(crate::spec::unrunnable(flow, served));
+        }
         for finding in &errors {
             if let Some(owner) = owner_of(&finding.path, &paths) {
                 owned.entry(owner).or_insert(finding.code);

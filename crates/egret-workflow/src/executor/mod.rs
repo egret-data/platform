@@ -419,7 +419,7 @@ mod tests {
     /// the two walks see the same tasks.
     #[test]
     fn every_corpus_flow_graphs_and_every_planned_task_is_one_node() {
-        use crate::graph::{flow_graph, GraphOptions, NodeKind};
+        use crate::graph::{flow_graph, NodeKind};
         let mut parsed = 0;
         let mut judged = 0;
         let mut tasks_judged = 0;
@@ -428,8 +428,7 @@ mod tests {
                 continue;
             };
             parsed += 1;
-            let graph =
-                flow_graph(&flow, &GraphOptions::default()).unwrap_or_else(|e| panic!("{id}: {e}"));
+            let graph = flow_graph(&flow, None).unwrap_or_else(|e| panic!("{id}: {e}"));
             let Ok(plan) = plan::plan_stored(&source) else {
                 continue;
             };

@@ -326,7 +326,7 @@ pub(crate) fn level_states(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{flow_graph, GraphOptions};
+    use crate::graph::flow_graph;
     use RunState::*;
 
     const LOG: &str = "io.kestra.plugin.core.log.Log";
@@ -335,7 +335,7 @@ mod tests {
     fn graph_of(tasks: &str) -> FlowGraph {
         let yaml = format!("id: f\nnamespace: t\ntasks:\n{tasks}");
         let flow = crate::spec::parse(&yaml).unwrap_or_else(|e| panic!("parse: {e:?}\n{yaml}"));
-        flow_graph(&flow, &GraphOptions::default()).expect("graph")
+        flow_graph(&flow, None).expect("graph")
     }
 
     fn id(n: u128) -> Uuid {

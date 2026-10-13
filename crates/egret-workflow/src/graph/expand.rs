@@ -113,6 +113,7 @@ use super::{
 };
 use crate::models::Flow;
 use crate::repo::{ExecutionRepo, FlowRepo};
+use crate::runtime::Served;
 use crate::spec::parse;
 
 /// How many expansions deep a graph goes: the request flow's child (1) and
@@ -178,6 +179,8 @@ impl ExecutionSource for ExecutionRepo {
 struct Sources<'a> {
     drafts: &'a dyn SubflowSource,
     executions: Option<&'a dyn ExecutionSource>,
+    /// The deployment every level's refusals are judged against.
+    served: &'a Served,
 }
 
 /// [`super::flow_graph`], with every `Subflow` node whose uid is in
@@ -187,11 +190,13 @@ pub async fn expanded_flow_graph(
     opts: &GraphOptions,
     ws: Uuid,
     source: &dyn SubflowSource,
+    served: &Served,
 ) -> Result<FlowGraph, GraphError> {
     let mut total = 0;
     let sources = Sources {
         drafts: source,
         executions: None,
+        served,
     };
     let (graph, _) = graph_of(flow, opts, String::new(), ws, sources, None, &mut total).await?;
     Ok(graph)
@@ -207,11 +212,13 @@ pub async fn execution_graph(
     ws: Uuid,
     drafts: &dyn SubflowSource,
     executions: &dyn ExecutionSource,
+    served: &Served,
 ) -> Result<ExecutionGraph, GraphError> {
     let mut total = 0;
     let sources = Sources {
         drafts,
         executions: Some(executions),
+        served,
     };
     let (graph, states) = graph_of(
         flow,
@@ -249,12 +256,13 @@ fn graph_of<'a>(
         // This level may place what the running total has left, so the build
         // itself stops as the limit is crossed (`build`).
         let budget = MAX_NODES.saturating_sub(*total);
-        let (mut graph, subflows) = build(flow, budget).map_err(|e| match e {
-            GraphError::TooLarge { nodes } => GraphError::TooLarge {
-                nodes: *total + nodes,
-            },
-            other => other,
-        })?;
+        let (mut graph, subflows) =
+            build(flow, Some(sources.served), budget).map_err(|e| match e {
+                GraphError::TooLarge { nodes } => GraphError::TooLarge {
+                    nodes: *total + nodes,
+                },
+                other => other,
+            })?;
         *total += graph.nodes.len();
         if *total > MAX_NODES {
             return Err(GraphError::TooLarge { nodes: *total });
@@ -597,7 +605,8 @@ mod tests {
             subflows: BTreeSet::from(["tasks.call".to_string()]),
             depth: 0,
         };
-        let g = expanded_flow_graph(&parent, &opts, ws, &source)
+        let served = crate::runtime::served_for(&egret_config::Config::default().workflow);
+        let g = expanded_flow_graph(&parent, &opts, ws, &source, &served)
             .await
             .unwrap();
         let uids: Vec<&str> = g.nodes.iter().map(|n| n.uid.as_str()).collect();
@@ -631,7 +640,8 @@ mod tests {
             subflows: BTreeSet::from(["tasks.call".to_string()]),
             depth: 0,
         };
-        let g = expanded_flow_graph(&parent, &opts, ws, &source)
+        let served = crate::runtime::served_for(&egret_config::Config::default().workflow);
+        let g = expanded_flow_graph(&parent, &opts, ws, &source, &served)
             .await
             .unwrap();
         let refusal = |uid: &str| match &g.nodes.iter().find(|n| n.uid == uid).unwrap().kind {

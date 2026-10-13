@@ -13,7 +13,7 @@ mod common;
 use axum::http::StatusCode;
 use egret_core::UserId;
 use egret_metastore::Db;
-use egret_workflow::graph::{flow_graph, GraphOptions, MAX_NODES};
+use egret_workflow::graph::{flow_graph, MAX_NODES};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -38,7 +38,10 @@ fn flow_yaml(namespace: &str, id: &str, tasks: &[String]) -> String {
 /// What `flow_graph` answers for `source`, as the route serialises it.
 fn expected(source: &str) -> Value {
     let flow = egret_workflow::spec::parse(source).expect("parse");
-    serde_json::to_value(flow_graph(&flow, &GraphOptions::default()).expect("graph")).unwrap()
+    // The deployment the routes judge against: the one this binary installs.
+    common::install_served_default();
+    let served = egret_workflow::runtime::served();
+    serde_json::to_value(flow_graph(&flow, Some(served)).expect("graph")).unwrap()
 }
 
 /// `?subflows=a&subflows=b`, each value percent-encoded (`/` as `%2F`).
@@ -237,6 +240,47 @@ async fn post_yaml_that_fails_validation_still_gets_its_graph_with_refusals() {
     assert_eq!(g, expected(&source));
     assert_eq!(node(&g, "tasks.bad")["refusal"], "unknown_task_type");
     assert_eq!(node(&g, "tasks.a")["refusal"], Value::Null);
+}
+
+/// The final review's Important: the graph marks what THIS deployment will
+/// not run, as the validate routes, the draft DTO and publish do. This binary
+/// serves the runner set (`common::install_served_default`), which still has
+/// no handler for `egret.sql`; a `Subflow` child expanded in place is judged
+/// against the same set.
+#[tokio::test]
+async fn a_task_type_this_deployment_does_not_serve_is_refused_here_and_in_an_expansion() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = reader(&db).await;
+    assert!(
+        !egret_workflow::runtime::served().serves("egret.sql"),
+        "the fixture needs a type this binary does not serve"
+    );
+    let unserved = "{id: q, type: egret.sql, database: d, sql: SELECT 1}";
+    common::seed_flow(
+        &db,
+        ws,
+        user,
+        &flow_yaml("company.child", "c", &[unserved.to_string(), leaf("ok")]),
+        "draft",
+    )
+    .await;
+    let source = format!(
+        "id: f\nnamespace: company.team\ntasks:\n  - {unserved}\n  - {}\n  - {}\n",
+        leaf("a"),
+        subflow("call", "company.child", "c")
+    );
+    let app = common::app(&db).await;
+    let res = post_graph(&app, ws, &subflows_query(&["tasks.call"]), &source, user).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let g = common::json(res).await;
+    assert_eq!(node(&g, "tasks.q")["refusal"], "task_type_not_served");
+    assert_eq!(node(&g, "tasks.a")["refusal"], Value::Null);
+    assert_eq!(
+        node(&g, "tasks.call/tasks.q")["refusal"],
+        "task_type_not_served"
+    );
+    assert_eq!(node(&g, "tasks.call/tasks.ok")["refusal"], Value::Null);
+    assert_eq!(node(&g, "tasks.call")["refusal"], Value::Null);
 }
 
 // ---- 3. Permissions -----------------------------------------------------

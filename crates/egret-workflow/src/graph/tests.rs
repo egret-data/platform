@@ -19,7 +19,7 @@ fn leaf(id: &str) -> String {
 fn graph(body: &str) -> FlowGraph {
     let yaml = format!("id: f\nnamespace: company.team\n{body}");
     let flow = parse(&yaml).unwrap_or_else(|e| panic!("parse: {e:?}\n{yaml}"));
-    flow_graph(&flow, &GraphOptions::default()).expect("graph")
+    flow_graph(&flow, None).expect("graph")
 }
 
 fn uids(g: &FlowGraph) -> Vec<&str> {
@@ -915,7 +915,7 @@ fn a_flow_level_error_attaches_to_no_node() {
         "{:?}",
         errors_of(&yaml)
     );
-    let g = flow_graph(&parse(&yaml).unwrap(), &GraphOptions::default()).unwrap();
+    let g = flow_graph(&parse(&yaml).unwrap(), None).unwrap();
     for node in &g.nodes {
         if let NodeKind::Task { refusal, .. } = &node.kind {
             assert_eq!(refusal, &None, "{}", node.uid);
@@ -1067,11 +1067,10 @@ fn a_graph_over_five_thousand_nodes_is_refused() {
         );
         parse(&yaml).unwrap()
     };
-    let at_limit = flow_graph(&flow_of(MAX_NODES - 2), &GraphOptions::default())
-        .expect("exactly the limit is allowed");
+    let at_limit = flow_graph(&flow_of(MAX_NODES - 2), None).expect("exactly the limit is allowed");
     assert_eq!(at_limit.nodes.len(), MAX_NODES);
     assert_eq!(
-        flow_graph(&flow_of(MAX_NODES - 1), &GraphOptions::default()),
+        flow_graph(&flow_of(MAX_NODES - 1), None),
         Err(GraphError::TooLarge {
             nodes: MAX_NODES + 1
         })
@@ -1113,7 +1112,7 @@ fn six_thousand_duplicates_of_one_id_are_refused_at_the_limit() {
     );
     let flow = parse(&yaml).unwrap();
     assert_eq!(
-        flow_graph(&flow, &GraphOptions::default()),
+        flow_graph(&flow, None),
         Err(GraphError::TooLarge {
             nodes: MAX_NODES + 1
         })
@@ -1131,15 +1130,35 @@ fn a_five_thousand_and_one_task_flow_is_refused_without_building_past_the_limit(
     );
     let flow = parse(&yaml).unwrap();
     assert_eq!(
-        flow_graph(&flow, &GraphOptions::default()),
+        flow_graph(&flow, None),
         Err(GraphError::TooLarge {
             nodes: MAX_NODES + 1
         })
     );
     // The same through `build` with a smaller budget: the walk places
     // `budget + 1` nodes and no more.
-    match build(&flow, 10) {
+    match build(&flow, None, 10) {
         Err(GraphError::TooLarge { nodes }) => assert_eq!(nodes, 11),
         other => panic!("{other:?}"),
     }
+}
+
+/// `task_type_not_served` from the deployment's served set is a refusal,
+/// attributed after `validate_for_run`'s errors; with no deployment
+/// (`None`) it is not judged.
+#[test]
+fn a_task_type_this_deployment_does_not_serve_is_its_refusal() {
+    let served = crate::runtime::served_for(&egret_config::Config::default().workflow);
+    assert!(!served.serves("egret.sql"));
+    let yaml = format!(
+        "id: f\nnamespace: company.team\ntasks:\n  - {{id: q, type: egret.sql, database: d, sql: SELECT 1}}\n  - {}\n  - {{id: bad, type: no.such.Type}}\n",
+        leaf("a")
+    );
+    let flow = parse(&yaml).unwrap();
+    let g = flow_graph(&flow, Some(&served)).unwrap();
+    assert_eq!(task(&g, "tasks.q").refusal, Some("task_type_not_served"));
+    assert_eq!(task(&g, "tasks.a").refusal, None);
+    assert_eq!(task(&g, "tasks.bad").refusal, Some("unknown_task_type"));
+    let alone = flow_graph(&flow, None).unwrap();
+    assert_eq!(task(&alone, "tasks.q").refusal, None);
 }
