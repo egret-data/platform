@@ -1361,13 +1361,13 @@ mod tests {
         spec.ranger = Some(RangerBinding {
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
-            poll_interval_ms: 30_000,
+            poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
         });
         let rendered = ranger_plugin_files(
             egret_engine_mgmt_api::EngineKind::StarRocks,
             "sr1",
             "http://host.docker.internal:8080",
-            30_000,
+            egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
         );
         let cm = starrocks_ranger_configmap(&spec).unwrap();
         for k in [RANGER_SECURITY_XML_KEY, RANGER_AUDIT_XML_KEY] {
@@ -1407,7 +1407,7 @@ mod tests {
         spec.ranger = Some(RangerBinding {
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
-            poll_interval_ms: 30_000,
+            poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
         });
         let conf = starrocks_fe_configmap(&spec)["data"]["fe.conf"]
             .as_str()
@@ -1443,7 +1443,7 @@ mod tests {
         spec.ranger = Some(RangerBinding {
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
-            poll_interval_ms: 30_000,
+            poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
         });
         let cr = starrocks_cluster_cr(&spec);
         let mounts = cr["spec"]["starRocksFeSpec"]["configMaps"]
@@ -1780,7 +1780,7 @@ mod tests {
         spec.ranger = Some(RangerBinding {
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
-            poll_interval_ms: 30_000,
+            poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
         });
         for cm in [
             Some(starrocks_fe_configmap(&spec)),
@@ -1855,7 +1855,7 @@ mod tests {
         spec.ranger = Some(RangerBinding {
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
-            poll_interval_ms: 30_000,
+            poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
         });
         let cr = starrocks_cluster_cr(&spec);
         let cm_mounts = cr["spec"]["starRocksFeSpec"]["configMaps"]
@@ -2156,7 +2156,7 @@ mod tests {
             spec.ranger = Some(RangerBinding {
                 service_name: svc.into(),
                 egret_url: "http://host.docker.internal:8080".into(),
-                poll_interval_ms: 30_000,
+                poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
             });
             starrocks_cluster_cr(&spec)
         };
@@ -2214,7 +2214,7 @@ mod tests {
         bound.ranger = Some(RangerBinding {
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
-            poll_interval_ms: 30_000,
+            poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
         });
         let ck = |spec: &EngineSpec| {
             starrocks_cluster_cr(spec)["spec"]["starRocksFeSpec"]["annotations"]

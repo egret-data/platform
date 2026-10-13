@@ -18,7 +18,7 @@
 //!   refused at ANY priority (spec o3's row).
 //! * **Tag ↔ tag.** `tag=[pii]` and `tag=[gdpr]` never intersect as resource
 //!   maps, but a column carrying both tags is decided by both, and on the tag
-//!   path the order is match type, priority, `hasDeny`, then the policy NAME
+//!   path the order is match type (masks only), priority, `hasDeny`, then the policy NAME
 //!   (`eval.rs`'s tag comparator). Refused when the two are in one band
 //!   (`policyPriority`, `hasDeny`) and differ.
 //!
@@ -132,6 +132,11 @@ pub enum OverlapShape {
         /// The tag each of `first`/`second` covers there, in that order.
         tags: (String, String),
         priority: i64,
+        /// Whether Ranger's MATCH TYPE orders the two at EVERY coordinate they
+        /// meet on: only for masks, and only where one tag is assigned on the
+        /// column itself (`SELF`) and the other on its table (`ANCESTOR`).
+        /// Row filters are not ordered by match type at all.
+        match_type_orders: bool,
     },
 }
 
@@ -197,6 +202,11 @@ impl UnitOverlap {
         let noun = self.arbitrated.noun();
         let disagreement = self.arbitrated.disagreement();
         let coord = &self.coordinate;
+        // A mask decides a column; a row filter decides a whole table.
+        let unit = match self.arbitrated {
+            Arbitrated::Mask => "column",
+            Arbitrated::RowFilter => "table",
+        };
         match &self.shape {
             OverlapShape::SameDownload(pair) => {
                 pair.sentence_with(label, if editor { EDITOR_OVERRIDE_REMEDY } else { "" })
@@ -217,7 +227,7 @@ impl UnitOverlap {
                     format!(
                         "Ranger runs the tag phase first, and a tag {noun} shuts out every \
                          resource {noun} at the same or a lower policyPriority, so today Ranger \
-                         serves {tl} there and {pl} never applies to that column."
+                         serves {tl} there and {pl} never applies to that {unit}."
                     )
                 } else {
                     format!(
@@ -233,16 +243,42 @@ impl UnitOverlap {
                      agree, or unassign tag {tag:?} from {coord}."
                 )
             }
-            OverlapShape::TagAndTag { tags, priority } => {
+            OverlapShape::TagAndTag {
+                tags,
+                priority,
+                match_type_orders,
+            } => {
                 let (fl, sl) = (label(&self.first), label(&self.second));
                 let extra = if editor { EDITOR_OVERRIDE_REMEDY } else { "" };
+                // What orders two tag policies depends on the kind
+                // (`egret_ranger_eval`'s `tag_order_without_the_id_standin`): a
+                // mask by match type first, a row filter by priority and name
+                // alone. Claiming "none of which says which should win" is true
+                // only where nothing in that order separates the two.
+                let order = match (self.arbitrated, match_type_orders) {
+                    (Arbitrated::RowFilter, _) => {
+                        "On the tag path Ranger orders two such policies by priority and then \
+                         the policy name — neither of which says which of the two should win."
+                    }
+                    (Arbitrated::Mask, true) => {
+                        "On the tag path Ranger orders two such policies by match type first — \
+                         a tag assigned on the column itself is evaluated before one assigned \
+                         on its table — and only then by priority and the policy name, so here \
+                         the order comes from where each tag is assigned, not from anything \
+                         either policy says."
+                    }
+                    (Arbitrated::Mask, false) => {
+                        "On the tag path Ranger orders two such policies by match type, then \
+                         priority and then the policy name. Where both tags are assigned at the \
+                         same level the match type ties, and none of the rest says which of the \
+                         two should win."
+                    }
+                };
                 format!(
                     "{fl} (a tag {noun} on tag {:?}) and {sl} (a tag {noun} on tag {:?}) are \
                      served at policyPriority {priority} and both decide {coord}, which carries \
-                     both tags, with {disagreement}. On the tag path Ranger orders two such \
-                     policies by match type, priority and then the policy name — none of which \
-                     says which of the two should win. Narrow one of the two so they no longer \
-                     meet there, or delete one, or make them agree, or unassign one of the two \
+                     both tags, with {disagreement}. {order} Narrow one of the two so they no \
+                     longer meet there, or delete one, or make them agree, or unassign one of the two \
                      tags from {coord}{extra}.",
                     tags.0, tags.1
                 )
@@ -448,13 +484,22 @@ pub fn unit_overlaps(policies: &[UnitPolicy<'_>], assignments: &[AssignedTag]) -
             }
             let (f, s) = if a.name <= b.name { (a, b) } else { (b, a) };
             let shape = match shape {
-                OverlapShape::TagAndTag { tags, priority } if f.name != a.name => {
-                    OverlapShape::TagAndTag {
-                        tags: (tags.1, tags.0),
-                        priority,
-                    }
-                }
+                OverlapShape::TagAndTag {
+                    tags,
+                    priority,
+                    match_type_orders,
+                } if f.name != a.name => OverlapShape::TagAndTag {
+                    tags: (tags.1, tags.0),
+                    priority,
+                    match_type_orders,
+                },
                 other => other,
+            };
+            let orders_here = match &shape {
+                OverlapShape::TagAndTag {
+                    match_type_orders, ..
+                } => Some(*match_type_orders),
+                _ => None,
             };
             let report = out
                 .entry((kind.policy_type(), f.name.to_string(), s.name.to_string()))
@@ -473,6 +518,17 @@ pub fn unit_overlaps(policies: &[UnitPolicy<'_>], assignments: &[AssignedTag]) -
             // intersection whatever is assigned, so its set stays its hint.
             if !matches!(report.shape, OverlapShape::SameDownload(_)) {
                 report.coordinates.insert(coord.to_string());
+            }
+            // The match type orders the pair only if it does at every
+            // coordinate the pair meets on.
+            if let (
+                Some(here),
+                OverlapShape::TagAndTag {
+                    match_type_orders, ..
+                },
+            ) = (orders_here, &mut report.shape)
+            {
+                *match_type_orders &= here;
             }
         };
 
@@ -520,6 +576,8 @@ pub fn unit_overlaps(policies: &[UnitPolicy<'_>], assignments: &[AssignedTag]) -
                             OverlapShape::TagAndTag {
                                 tags: (a1.tag.clone(), a2.tag.clone()),
                                 priority: t1.priority,
+                                match_type_orders: kind == Arbitrated::Mask
+                                    && a1.column.is_empty() != a2.column.is_empty(),
                             },
                         );
                     }
@@ -881,6 +939,85 @@ mod tests {
         let got = run(&tags, &[(n, b)], &[assigned("orders", "email", "pii")]);
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[0].coordinate, "wh.sales.orders");
+    }
+
+    // -- refusal copy, pinned per kind (SP4d-4 minors M2, M5) ---------------------
+
+    #[test]
+    fn the_tag_path_sentence_names_a_column_for_a_mask_and_a_table_for_a_row_filter() {
+        let mask = run(
+            &[tag_mask("t-pii", "pii", "MASK", 1)],
+            &[path_mask("p-email", "orders", "email", "MASK_NULL")],
+            &[assigned("orders", "email", "pii")],
+        );
+        let s = mask[0].refusal(false);
+        assert!(s.contains("never applies to that column"), "{s}");
+
+        let tags = [tag_filter("t-pii", "pii", "id > 2")];
+        let (n, mut b) = path_mask("p-orders", "orders", "x", "MASK");
+        b["policyType"] = json!(2);
+        b["resources"].as_object_mut().unwrap().remove("column");
+        b["rowFilterPolicyItems"] =
+            json!([{"groups": ["public"], "rowFilterInfo": {"filterExpr": "country = 'US'"}}]);
+        let filter = run(&tags, &[(n, b)], &[assigned("orders", "email", "pii")]);
+        let s = filter[0].refusal(false);
+        assert!(s.contains("never applies to that table"), "{s}");
+        assert!(!s.contains("column"), "a row filter is table-level: {s}");
+    }
+
+    #[test]
+    fn the_tag_tag_sentence_claims_no_winner_only_where_the_match_type_ties() {
+        let tags = [
+            tag_mask("t-pii", "pii", "MASK", 0),
+            tag_mask("t-gdpr", "gdpr", "MASK_NULL", 0),
+        ];
+        // Both tags on the column itself: the match type ties.
+        let same = run(
+            &tags,
+            &[],
+            &[
+                assigned("orders", "email", "pii"),
+                assigned("orders", "email", "gdpr"),
+            ],
+        );
+        let s = same[0].refusal(false);
+        assert!(s.contains("match type ties"), "{s}");
+        assert!(s.contains("none of the rest says which"), "{s}");
+
+        // One on the column, one on its table: the match type orders them.
+        let mixed = run(
+            &tags,
+            &[],
+            &[
+                assigned("orders", "", "pii"),
+                assigned("orders", "email", "gdpr"),
+            ],
+        );
+        let s = mixed[0].refusal(false);
+        assert!(
+            s.contains(
+                "a tag assigned on the column itself is evaluated before one assigned on its table"
+            ),
+            "{s}"
+        );
+        assert!(!s.contains("says which of the two should win"), "{s}");
+
+        // A row filter is not ordered by match type at all.
+        let filters = [
+            tag_filter("t-pii", "pii", "id > 2"),
+            tag_filter("t-gdpr", "gdpr", "id > 3"),
+        ];
+        let rf = run(
+            &filters,
+            &[],
+            &[
+                assigned("orders", "", "pii"),
+                assigned("orders", "email", "gdpr"),
+            ],
+        );
+        let s = rf[0].refusal(false);
+        assert!(!s.contains("match type"), "{s}");
+        assert!(s.contains("priority and then the policy name"), "{s}");
     }
 
     #[test]

@@ -1353,13 +1353,13 @@ mod tests {
         spec.ranger = Some(RangerBinding {
             service_name: "demo2".into(),
             egret_url: "http://host.docker.internal:8080".into(),
-            poll_interval_ms: 30_000,
+            poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
         });
         let rendered = crate::ranger_config::ranger_plugin_files(
             egret_engine_mgmt_api::EngineKind::Trino,
             "demo2",
             "http://host.docker.internal:8080",
-            30_000,
+            egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
         );
         let cm = trino_config_map(&spec);
         for (name, content) in &rendered.files {
@@ -1389,7 +1389,7 @@ mod tests {
         spec.ranger = Some(RangerBinding {
             service_name: "demo2".into(),
             egret_url: "http://host.docker.internal:8080".into(),
-            poll_interval_ms: 30_000,
+            poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
         });
         let cm = trino_config_map(&spec);
         let data = &cm["data"];
@@ -1428,7 +1428,7 @@ mod tests {
         spec.ranger = Some(RangerBinding {
             service_name: "demo2".into(),
             egret_url: "http://host.docker.internal:8080".into(),
-            poll_interval_ms: 30_000,
+            poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
         });
         let dep = trino_deployment(&spec, Role::Coordinator);
         let mounts = dep["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]

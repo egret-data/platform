@@ -11537,6 +11537,186 @@ async fn a_trino_create_adopting_a_profile_that_creates_an_overlap_is_409_and_cr
     assert_eq!(authz_service_of(&f, &ok_name).await, Some(ok.profile));
 }
 
+/// M-3: a guarded bind whose check cannot complete for a reason that is NOT an
+/// overlap used to log and bind anyway, unchecked. It refuses: the Trino create
+/// fails and is undone, and a StarRocks create leaves the engine unbound.
+#[tokio::test]
+async fn a_guarded_bind_whose_check_cannot_complete_binds_nothing() {
+    let Some((mut f, port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "bind_unchecked_admin", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let unit = overlap_unit(&f, Some(wh), false).await;
+    f.perm_compiler = Some(Arc::new(ConflictAfterDryRun {
+        fail_snapshot: true,
+        inner: RealProfileCompiler {
+            perm: egret_perm::PermStore::new(f.db.pool.clone()),
+            policy: egret_policy::PolicyStore::new(f.db.clone()),
+        },
+        conflict: tokio::sync::Mutex::new(None),
+    }));
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+    );
+
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(trino_create_body(&name, wh, unit.profile)),
+    )
+    .await;
+    assert!(
+        status.is_server_error(),
+        "the create is refused: {status} {body}"
+    );
+    assert_eq!(
+        engine_rows_named(&f, &name).await,
+        0,
+        "the create is undone"
+    );
+    assert!(
+        port.provisioned.lock().unwrap().is_empty(),
+        "nothing provisioned"
+    );
+
+    let wh_sr = seed_provisioned_warehouse_with_secret(&f).await;
+    let sr_unit = overlap_unit(&f, Some(wh_sr), false).await;
+    let sr_name = format!("sr-{}", Uuid::new_v4().simple());
+    let count = |sql: &'static str, name: String| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(sql)
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(starrocks_create_body(&sr_name, wh_sr, sr_unit.profile)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    // (The credential secret is removed by `compensate_failed_create`, pinned by
+    // its own unit test; here the client it belongs to must be gone.)
+    assert_eq!(
+        count(
+            "SELECT count(*) FROM catalog.catalog_clients WHERE name = $1",
+            format!("engine-{sr_name}")
+        )
+        .await,
+        0,
+        "the minted catalog client is revoked"
+    );
+    assert_eq!(
+        engine_rows_named(&f, &sr_name).await,
+        0,
+        "a StarRocks create never comes out unbound"
+    );
+
+    // An authzServiceId that names no profile refuses the create too.
+    let sr_name = format!("sr-{}", Uuid::new_v4().simple());
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(starrocks_create_body(&sr_name, wh_sr, i64::MAX)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(engine_rows_named(&f, &sr_name).await, 0);
+}
+
+/// The Trino late-bind inside an apply: a guarded bind that cannot complete for a
+/// reason other than an overlap fails the apply instead of leaving the engine
+/// unbound (allow-all) with only a warning.
+#[tokio::test]
+async fn a_late_bind_that_cannot_complete_fails_the_apply_and_leaves_the_engine_retryable() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        false,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let rebuild = |f: &Fixture, ranger: bool| {
+        build_app(
+            &f.db,
+            &f.sessions,
+            f.engine_provisioner.clone(),
+            f.kube.clone(),
+            std::sync::Arc::new(AllowAllPdp),
+            ranger,
+            f.starrocks_ddl.clone(),
+            f.perm_compiler.clone(),
+        )
+    };
+    f.perm_compiler = Some(Arc::new(ConflictAfterDryRun {
+        fail_snapshot: true,
+        inner: RealProfileCompiler {
+            perm: egret_perm::PermStore::new(f.db.pool.clone()),
+            policy: egret_policy::PolicyStore::new(f.db.clone()),
+        },
+        conflict: tokio::sync::Mutex::new(None),
+    }));
+    f.app = rebuild(&f, false);
+    let token = session_for(&f, "late_bind_fail_admin", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = j["id"].as_str().unwrap().to_string();
+    let _orphan = overlap_unit_named(&f, Some(wh), false, &name).await;
+
+    f.app = rebuild(&f, true);
+    f.ranger_enabled = true;
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{id}/rotate-secrets"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(authz_service_of(&f, &name).await, None);
+
+    // Retryable: with a working compiler the same apply binds.
+    f.perm_compiler = Some(real_compiler(&f));
+    f.app = rebuild(&f, true);
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{id}/rotate-secrets"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body:?}");
+    assert!(authz_service_of(&f, &name).await.is_some());
+}
+
 /// C1, StarRocks: `POST /engines` with `authzServiceId`.
 #[tokio::test]
 async fn a_starrocks_create_with_authz_service_id_that_creates_an_overlap_is_409_and_creates_nothing(
@@ -11586,11 +11766,11 @@ async fn a_starrocks_create_with_authz_service_id_that_creates_an_overlap_is_409
 }
 
 /// C1, the late-bind inside an apply: Ranger turned on after an unbound create
-/// adopts the profile named after the engine. A bind that would create a pair is
-/// SKIPPED (the apply still succeeds, the engine stays unbound); one that does
-/// not is made.
+/// adopts the profile named after the engine. A bind that would create a pair
+/// FAILS the apply with the structured 409 (the engine stays unbound, nothing is
+/// provisioned or minted); one that does not is made.
 #[tokio::test]
-async fn a_late_bind_that_would_create_an_overlap_is_skipped_and_one_that_would_not_is_made() {
+async fn a_late_bind_that_would_create_an_overlap_fails_the_apply_and_one_that_would_not_is_made() {
     let port = FakeEnginePort::default();
     let Some(mut f) = setup_with_ranger(
         Some(Arc::new(port.clone())),
@@ -11632,35 +11812,116 @@ async fn a_late_bind_that_would_create_an_overlap_is_skipped_and_one_that_would_
 
     f.app = rebuild(&f, true);
     f.ranger_enabled = true;
-    for (id, ..) in &ids {
-        let resp = f
-            .app
-            .clone()
-            .oneshot(req(
-                "POST",
-                &format!("/engines/{id}/rotate-secrets"),
-                &token,
-                None,
-            ))
+    let secrets_of = |f: &Fixture, id: String| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM workspace_secrets WHERE name LIKE $1",
+            )
+            .bind(format!("%{id}%"))
+            .fetch_one(&pool)
             .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::NO_CONTENT,
-            "the apply itself succeeds"
-        );
+            .unwrap()
+        }
+    };
+    for (n, (id, ..)) in ids.iter().enumerate() {
+        let provisioned = port.provisioned.lock().unwrap().len();
+        let updated = port.updated.lock().unwrap().len();
+        let minted = secrets_of(&f, id.clone()).await;
+        let (status, body) = call(
+            &f,
+            "POST",
+            &format!("/engines/{id}/rotate-secrets"),
+            &token,
+            None,
+        )
+        .await;
+        if n == 0 {
+            assert_rule_overlap(status, &body);
+            assert_eq!(port.provisioned.lock().unwrap().len(), provisioned);
+            assert_eq!(port.updated.lock().unwrap().len(), updated);
+            assert_eq!(secrets_of(&f, id.clone()).await, minted, "no secret minted");
+        } else {
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body:?}");
+        }
     }
     let (_, ovl_name, _) = &ids[0];
     assert_eq!(
         authz_service_of(&f, ovl_name).await,
         None,
-        "a bind that creates a pair is skipped"
+        "a bind that creates a pair is refused"
     );
     let (_, ok_name, ok_profile) = &ids[1];
     assert_eq!(
         authz_service_of(&f, ok_name).await,
         Some(*ok_profile),
         "a bind that creates none is made"
+    );
+}
+
+/// A same-name profile of another type makes every apply of an unbound engine
+/// fail with a 409 that names the profile and the remedy.
+#[tokio::test]
+async fn a_late_bind_blocked_by_a_wrong_type_profile_says_what_to_do() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        false,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "late_bind_type_admin", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = j["id"].as_str().unwrap().to_string();
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    egret_policy::seed_starrocks(&policy).await.expect("seed");
+    egret_policy_api::PolicyPort::create_service(
+        &policy,
+        &name,
+        "starrocks",
+        &serde_json::json!({}),
+    )
+    .await
+    .expect("wrong-type profile");
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        true,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+    );
+    f.ranger_enabled = true;
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{id}/rotate-secrets"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let msg = body["error"].as_str().unwrap();
+    assert!(
+        msg.contains(&format!(
+            "a profile named {name} already exists with type starrocks"
+        )),
+        "{msg}"
+    );
+    assert!(
+        msg.contains(&format!(
+            "DELETE /api/control-plane/policies/services/{name}"
+        )),
+        "{msg}"
     );
 }
 
@@ -12723,7 +12984,7 @@ async fn an_external_starrocks_engine_gets_the_three_files_and_the_default_url_w
         egret_engine_mgmt_api::EngineKind::StarRocks,
         &service,
         "http://egret:8080",
-        30_000,
+        egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
     );
     assert_eq!(
         j["files"][1]["content"].as_str().unwrap(),

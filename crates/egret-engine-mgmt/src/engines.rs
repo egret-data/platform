@@ -580,8 +580,8 @@ pub(crate) async fn build_provision_req_with(
     // back on, every later apply would otherwise keep re-rendering explicit
     // allow-all with no operator-accessible remedy. Reuses the SAME
     // plan/bind a create uses (create / adopt-orphan / 409-if-bound-
-    // elsewhere); best-effort — any failure here just leaves the engine
-    // unbound, exactly as it was, and never fails the apply itself.
+    // elsewhere). Any refusal - an overlap the bind would create or any other
+    // failure - fails the apply with its cause; the engine is never left unbound.
     let mut authz_service_id = engine.authz_service_id;
     if st.ranger_enabled && authz_service_id.is_none() {
         match plan_trino_profile(st, &engine.name, None).await {
@@ -606,22 +606,29 @@ pub(crate) async fn build_provision_req_with(
                         )
                         .await;
                     }
-                    // A bind that would create an order-ambiguous pair is
-                    // SKIPPED, never made (C1): the guarded bind rolled back, so
-                    // the engine stays unbound and the warning names the pair.
-                    Err(CpError::RuleOverlap(body)) => tracing::warn!(
-                        engine = %engine.name,
-                        overlap = %body,
-                        "late Ranger bind skipped: binding this engine's catalogs into the \
-                         profile would create an order-ambiguous mask or row-filter pair; \
-                         engine stays unbound"
-                    ),
-                    Err(e) => tracing::warn!(engine = %engine.name, error = %e,
-                        "late Ranger bind failed; engine stays unbound"),
+                    // A bind that would create an order-ambiguous pair fails the
+                    // apply with the structured 409, as create and PUT do: the
+                    // guarded bind rolled back, and an engine must not come out
+                    // of an apply unbound (allow-all) while Ranger is enabled.
+                    Err(e @ CpError::RuleOverlap(_)) => return Err(e),
+                    // Any OTHER failure fails the apply, naming the cause: an
+                    // engine must not come out of an apply unbound (allow-all)
+                    // while Ranger is enabled. Nothing is half-applied - this
+                    // runs before the cluster is touched, the bind is one
+                    // transaction, and a profile the bind created is adopted by
+                    // the retry's plan (`Existing`) - so the operator can retry.
+                    Err(e) => {
+                        tracing::error!(engine = %engine.name, error = %e,
+                            "late Ranger bind failed; the apply is refused");
+                        return Err(e);
+                    }
                 }
             }
-            Err(e) => tracing::warn!(engine = %engine.name, error = %e,
-                "late Ranger bind plan failed; engine stays unbound"),
+            Err(e) => {
+                tracing::error!(engine = %engine.name, error = %e,
+                    "late Ranger bind plan failed; the apply is refused");
+                return Err(e);
+            }
         }
     }
     // Impersonate-mode delegation: when auth is on, provision the `egret_delegator`
@@ -690,7 +697,7 @@ pub(crate) async fn build_provision_req_with(
             .map(|service_name| egret_engine_mgmt_api::RangerBinding {
                 service_name,
                 egret_url: st.engine_egret_url.clone(),
-                poll_interval_ms: RANGER_POLL_INTERVAL_MS,
+                poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
             });
     Ok(BuiltReq {
         req: EngineProvisionReq {
@@ -2503,10 +2510,6 @@ async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
     }
 }
 
-/// How often an engine's Ranger plugin polls egret for policy: one value for the
-/// engines egret provisions and the files an external engine's admin installs.
-pub(crate) const RANGER_POLL_INTERVAL_MS: u32 = 30_000;
-
 /// Resolve the Ranger service NAME an engine's `authz_service_id` actually
 /// names, by reading the bound profile row (`policy.authz_services`) — never
 /// by assuming it is spelled like the engine (SP4a Task 3b).
@@ -2564,6 +2567,27 @@ enum ProfilePlan {
     Create,
 }
 
+/// The 409 for a same-name profile of the wrong type. It says what is wrong and
+/// the one remedy that exists as a route: delete that profile.
+fn profile_type_conflict(name: &str, found_type: &str) -> String {
+    format!(
+        "engine {name} cannot take its own policy profile: a profile named {name} already exists \
+         with type {found_type}, not trino. If no engine uses it, delete it \
+         (DELETE /api/control-plane/policies/services/{name}) and retry"
+    )
+}
+
+/// The 409 for a same-name profile another engine already binds.
+fn profile_bound_conflict(name: &str, engines: &[String]) -> String {
+    format!(
+        "engine {name} cannot take its own policy profile: profile {name} is already bound to \
+         engine(s) {}, and one profile serves one engine. Re-point those engines at another \
+         profile (PUT /api/control-plane/engines/{{id}} with authzServiceId) or delete them, \
+         then retry",
+        engines.join(", ")
+    )
+}
+
 /// Decide the profile for a Trino create named `name`.
 async fn plan_trino_profile(
     st: &CpState,
@@ -2571,11 +2595,10 @@ async fn plan_trino_profile(
     requested: Option<i64>,
 ) -> Result<ProfilePlan, CpError> {
     if let Some(sid) = requested {
-        let services = st
-            .authz
-            .list_services()
-            .await
-            .map_err(|e| CpError::BadRequest(format!("list policy profiles: {e}")))?;
+        let services = st.authz.list_services().await.map_err(|e| {
+            tracing::error!(error = %e, "listing policy profiles failed");
+            CpError::Internal
+        })?;
         if services.iter().any(|s| s.id == sid) {
             return Ok(ProfilePlan::Existing(sid));
         }
@@ -2588,27 +2611,29 @@ async fn plan_trino_profile(
         );
         return Ok(ProfilePlan::Unbound);
     }
-    match st
-        .authz
-        .get_service_opt(name)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("resolve policy profile: {e}")))?
-    {
+    match st.authz.get_service_opt(name).await.map_err(|e| {
+        tracing::error!(error = %e, "resolving the policy profile failed");
+        CpError::Internal
+    })? {
         None => Ok(ProfilePlan::Create),
-        Some(svc) if svc.r#type != "trino" => Err(CpError::Conflict(format!(
-            "a policy profile named {name} already exists with type {}",
-            svc.r#type
-        ))),
-        Some(svc) => match st
-            .engine_mgmt
-            .count_engines_bound_to_authz_service(svc.id)
-            .await?
-        {
-            0 => Ok(ProfilePlan::Existing(svc.id)),
-            bound => Err(CpError::Conflict(format!(
-                "policy profile {name} is already bound to {bound} other engine(s)"
-            ))),
-        },
+        Some(svc) if svc.r#type != "trino" => {
+            Err(CpError::Conflict(profile_type_conflict(name, &svc.r#type)))
+        }
+        Some(svc) => {
+            let bound: Vec<String> = st
+                .engine_mgmt
+                .list_engines()
+                .await?
+                .into_iter()
+                .filter(|e| e.authz_service_id == Some(svc.id))
+                .map(|e| e.name)
+                .collect();
+            if bound.is_empty() {
+                Ok(ProfilePlan::Existing(svc.id))
+            } else {
+                Err(CpError::Conflict(profile_bound_conflict(name, &bound)))
+            }
+        }
     }
 }
 
@@ -2671,7 +2696,7 @@ async fn bind_trino_profile(
         }
     };
     // A pair this bind creates is refused (SP4d-4 Task 7 fix round 1, C1): the
-    // caller undoes the create, or skips the late-bind.
+    // caller undoes the create, or fails the late-bind apply.
     crate::profile_compiler::bind_profile_guarded(st, engine_id, name, profile_id).await
 }
 
@@ -3290,7 +3315,7 @@ async fn build_starrocks_provision_req(
             .map(|service_name| egret_engine_mgmt_api::RangerBinding {
                 service_name,
                 egret_url: st.engine_egret_url.clone(),
-                poll_interval_ms: RANGER_POLL_INTERVAL_MS,
+                poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
             });
 
     // Delegation wiring: provision (idempotently reuse) the TLS cert + delegator
@@ -4114,27 +4139,27 @@ async fn create_starrocks_engine(
     if let Some(sid) = b.authz_service_id {
         match st.authz.list_services().await {
             Ok(svcs) if svcs.iter().any(|s| s.id == sid) => {
-                match crate::profile_compiler::bind_profile_guarded(&st, engine.id, &b.name, sid)
-                    .await
+                if let Err(e) =
+                    crate::profile_compiler::bind_profile_guarded(&st, engine.id, &b.name, sid)
+                        .await
                 {
-                    Ok(()) => {}
-                    // A pair this bind creates refuses the create (C1).
-                    Err(e @ CpError::RuleOverlap(_)) => {
-                        compensate_failed_create(&st, undo).await;
-                        return Err(e);
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "binding the profile failed for starrocks create");
-                    }
+                    // Any refusal undoes the create: an engine created with an
+                    // `authzServiceId` must never come out unbound.
+                    compensate_failed_create(&st, undo).await;
+                    return Err(e);
                 }
             }
             Ok(_) => {
-                tracing::warn!(
-                    sid,
-                    "authz_service_id not found; leaving starrocks engine unlinked"
-                );
+                compensate_failed_create(&st, undo).await;
+                return Err(CpError::BadRequest(format!(
+                    "authzServiceId {sid} is not a policy profile"
+                )));
             }
-            Err(e) => tracing::warn!(error = %e, "list_services failed during starrocks create"),
+            Err(e) => {
+                tracing::error!(error = %e, "list_services failed during starrocks create");
+                compensate_failed_create(&st, undo).await;
+                return Err(CpError::Internal);
+            }
         }
     }
     // Secure-by-default (root-password task): mint + store a strong random FE
@@ -6909,6 +6934,28 @@ pub struct EngineMgmtApi;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_profile_conflicts_name_the_profile_the_engines_and_a_remedy_that_exists() {
+        let t = profile_type_conflict("eng-1", "starrocks");
+        assert!(
+            t.contains("profile named eng-1 already exists with type starrocks"),
+            "{t}"
+        );
+        assert!(
+            t.contains("DELETE /api/control-plane/policies/services/eng-1"),
+            "{t}"
+        );
+        let b = profile_bound_conflict("eng-1", &["a".into(), "b".into()]);
+        assert!(
+            b.contains("profile eng-1 is already bound to engine(s) a, b"),
+            "{b}"
+        );
+        assert!(
+            b.contains("PUT /api/control-plane/engines/{id} with authzServiceId"),
+            "{b}"
+        );
+    }
+
     use super::*;
 
     #[test]

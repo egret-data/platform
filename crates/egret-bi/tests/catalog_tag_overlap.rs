@@ -280,6 +280,13 @@ async fn a_tag_assignment_that_puts_two_masked_tags_on_one_column_is_409() {
             .all(|r| r["id"].is_string()),
         "both members are compiled rules, named by id: {body}"
     );
+    // The sentence describes the assignment, not a recompile nobody asked for.
+    let error = body["error"].as_str().unwrap();
+    assert!(
+        error.starts_with("assigning this tag to sales.orders.email would create"),
+        "{error}"
+    );
+    assert!(!error.contains("recompiling profile"), "{error}");
     assert_eq!(
         assignments_on(&e, &u, "email").await,
         1,

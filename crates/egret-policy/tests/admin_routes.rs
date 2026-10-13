@@ -3662,6 +3662,92 @@ async fn an_empty_catalog_is_refused() {
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 
+/// `PUT /policies/{id}` shares its normaliser with `POST`, but nothing pinned the
+/// PUT route: an emptied catalog and a level gap are refused there too, and the
+/// stored policy is untouched.
+#[tokio::test]
+async fn a_put_with_an_empty_catalog_or_a_level_gap_is_refused_and_changes_nothing() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "t11put", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        serde_json::json!({
+            "name": "put-levels", "service": svc_name, "isEnabled": true,
+            "resources": {"catalog": level(&["c"]), "schema": level(&["s"])},
+            "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = body["id"].as_i64().expect("id");
+    let stored = || async {
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT policy_jsonb FROM policy.authz_policies WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("read the stored body")
+    };
+    let before = stored().await;
+
+    let put = |resources: serde_json::Value| {
+        let app = f.app_empty();
+        let (token, svc_name) = (token.clone(), svc_name.clone());
+        async move {
+            into_json(
+                app.oneshot(req(
+                    "PUT",
+                    &format!("/policies/{id}"),
+                    &token,
+                    Some(serde_json::json!({
+                        "name": "put-levels", "service": svc_name, "isEnabled": true,
+                        "resources": resources,
+                        "items": [{"users": ["bob"], "accesses": ["select"], "effect": "allow"}]
+                    })),
+                ))
+                .await
+                .unwrap(),
+            )
+            .await
+        }
+    };
+    let message = |body: &serde_json::Value| {
+        body["error"]
+            .as_str()
+            .or(body["message"].as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    let (status, body) =
+        put(serde_json::json!({"catalog": level(&[]), "schema": level(&["s"])})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let msg = message(&body);
+    assert!(
+        msg.contains("name a catalog") && msg.contains("every catalog"),
+        "{body}"
+    );
+    assert_eq!(stored().await, before, "an empty catalog changes nothing");
+
+    let (status, body) =
+        put(serde_json::json!({"catalog": level(&["c"]), "column": level(&["email"])})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let msg = message(&body);
+    assert!(
+        msg.contains("`column`") && msg.contains("`schema`"),
+        "{body}"
+    );
+    assert_eq!(stored().await, before, "a level gap changes nothing");
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
 #[tokio::test]
 async fn an_empty_non_root_level_is_stored_as_star() {
     let Some(f) = setup().await else {
@@ -3920,4 +4006,125 @@ async fn a_fill_that_does_not_reorder_warns_nobody() {
     );
 
     f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// The picker used to load the 200 NEWEST users and 200 groups and filter them
+/// in Rust, so anyone older than the 200th newest could never be found by
+/// typing their name. The filter is SQL now.
+#[tokio::test]
+async fn principal_search_finds_a_user_older_than_the_two_hundred_newest_and_a_group_by_name() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "principals_old_admin", true).await;
+    let tag = Uuid::new_v4().simple().to_string();
+
+    let oldest = format!("oldest.{tag}@egret.local");
+    f.users
+        .insert_local(&oldest, "Oldest Of Them All", "x")
+        .await
+        .expect("insert the oldest user");
+    for i in 0..205 {
+        f.users
+            .insert_local(&format!("filler{i}.{tag}@egret.local"), "Filler", "x")
+            .await
+            .expect("insert a newer user");
+    }
+    let group = format!("grp-{tag}");
+    f.groups.create_local(&group).await.expect("insert group");
+
+    let search = |q: String| {
+        let app = f.app_empty();
+        let token = token.clone();
+        async move {
+            let (status, body) = into_json(
+                app.oneshot(req("GET", &format!("/principals?q={q}"), &token, None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "principals; body={body}");
+            body.as_array().expect("array").clone()
+        }
+    };
+
+    let by_email = search(format!("oldest.{tag}")).await;
+    assert!(
+        by_email.iter().any(|p| p["name"] == oldest),
+        "the oldest user must be found; got {by_email:?}"
+    );
+    // By display name, in another case.
+    let by_name = search("oldest%20of%20them%20all".into()).await;
+    assert!(
+        by_name.iter().any(|p| p["name"] == oldest),
+        "found by name, case-insensitively; got {by_name:?}"
+    );
+    let groups = search(format!("GRP-{tag}")).await;
+    assert!(
+        groups
+            .iter()
+            .any(|p| p["kind"] == "group" && p["name"] == group),
+        "the group is found by name; got {groups:?}"
+    );
+    // The cap holds: 205 fillers match, 50 come back.
+    let capped = search("filler".to_string()).await;
+    assert_eq!(capped.len(), 50, "capped at 50");
+}
+
+/// `%`, `_` and `\` in `q` are literal characters, not LIKE wildcards.
+#[tokio::test]
+async fn principal_search_treats_like_metacharacters_literally() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "principals_like_admin", true).await;
+    let tag = Uuid::new_v4().simple().to_string();
+    for email in [
+        format!("pct%{tag}@egret.local"),
+        format!("pctX{tag}@egret.local"),
+        format!("und_{tag}@egret.local"),
+        format!("undX{tag}@egret.local"),
+        format!("back\\{tag}@egret.local"),
+        format!("backX{tag}@egret.local"),
+    ] {
+        f.users
+            .insert_local(&email, "Like Probe", "x")
+            .await
+            .expect("insert");
+    }
+    let names = |q: String| {
+        let app = f.app_empty();
+        let token = token.clone();
+        async move {
+            let (status, body) = into_json(
+                app.oneshot(req("GET", &format!("/principals?q={q}"), &token, None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "principals; body={body}");
+            body.as_array()
+                .expect("array")
+                .iter()
+                .map(|p| p["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(
+        names(format!("pct%25{tag}")).await,
+        vec![format!("pct%{tag}@egret.local")],
+        "a % in q matches a literal %"
+    );
+    assert_eq!(
+        names(format!("und_{tag}")).await,
+        vec![format!("und_{tag}@egret.local")],
+        "a _ in q matches a literal _"
+    );
+    assert_eq!(
+        names(format!("back%5C{tag}")).await,
+        vec![format!("back\\{tag}@egret.local")],
+        "a \\ in q matches a literal backslash"
+    );
 }

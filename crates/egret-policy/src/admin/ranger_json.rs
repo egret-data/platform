@@ -680,6 +680,60 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The editor's level chain is spelled twice: here, and by the embedded
+    /// service-defs (`service-defs/*.json`) that Ranger itself is served. They
+    /// are written by hand in different files, so a def edit that renames or
+    /// reorders a level would silently stop the editor normalising it. Compare
+    /// the editor's chain, per kind, with the def: access = the `column`
+    /// resource's parent chain, masking = `dataMaskDef`, rowfilter =
+    /// `rowFilterDef`.
+    #[test]
+    fn the_editor_level_chain_matches_the_service_defs() {
+        fn names(resources: &serde_json::Value) -> Vec<String> {
+            resources
+                .as_array()
+                .expect("a resource list")
+                .iter()
+                .map(|r| r["name"].as_str().expect("a name").to_string())
+                .collect()
+        }
+        for (service_type, def) in [
+            ("trino", crate::trino_service_def().unwrap()),
+            ("starrocks", crate::starrocks_service_def().unwrap()),
+        ] {
+            let mut access = vec!["column".to_string()];
+            while let Some(parent) = def["resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["name"] == access.last().unwrap().as_str())
+                .and_then(|r| r["parent"].as_str())
+                .filter(|p| !p.is_empty())
+            {
+                access.push(parent.to_string());
+            }
+            access.reverse();
+            let chain = |kind| {
+                editor_level_chain(service_type, kind)
+                    .unwrap_or_else(|| panic!("{service_type}/{kind} has a chain"))
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(chain("access"), access, "{service_type} access");
+            assert_eq!(
+                chain("masking"),
+                names(&def["dataMaskDef"]["resources"]),
+                "{service_type} masking"
+            );
+            assert_eq!(
+                chain("rowfilter"),
+                names(&def["rowFilterDef"]["resources"]),
+                "{service_type} rowfilter"
+            );
+        }
+    }
+
     fn sample() -> AccessPolicyInput {
         serde_json::from_value(json!({
             "name": "allow-analysts-select",
