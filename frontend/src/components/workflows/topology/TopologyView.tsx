@@ -276,7 +276,8 @@ function Topology({ graph, states, selectedUid = null, onSelect, onExpandSubflow
     body = (
       <div role="alert" className="flex flex-col items-start gap-2 rounded-md border border-destructive bg-destructive/15 px-3 py-3 text-sm text-foreground">
         <p className="font-medium">{LAYOUT_FAILED}</p>
-        <p>Use the list view to read its tasks and their states.</p>
+        {/* The editor's graph has no states (nothing has run); the execution's does. */}
+        <p>{states ? "Use the list view to read its tasks and their states." : "Use the list view to read its tasks."}</p>
         <Button variant="outline" size="sm" onClick={() => setListView(true)}>
           <List aria-hidden className="size-4" />
           Show the list view

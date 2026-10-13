@@ -46,8 +46,10 @@
  * Until a tab imports the topology, no build contains it at all, and the stale-marker check
  * would fail for the right reason. `TOPOLOGY_IMPORTED` says which state the tree is in: `false`
  * asserts the topology appears in NO chunk (so wiring it without flipping the flag fails here),
- * `true` runs the checks above. W7c Task 5 sets it to `true` when the editor's tab imports it.
- * Each `topology` marker was proven by scratch builds (W7c task-4-report.md, "Chunk proof").
+ * `true` runs the checks above. W7c Task 5 set it to `true`: the editor's Topology tab is
+ * registered with the other editor tabs (`registerEditorTabs.tsx`, in the flow pages' chunk), but
+ * its body, `TopologyTab.tsx`, is reached through `lazy()` only. Each `topology` marker was proven
+ * by scratch builds (W7c task-4-report.md, "Chunk proof"; task-5-report.md for `TopologyTab.tsx`).
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -55,8 +57,8 @@ import { entryChunkName, entryPreloadNames } from "./dist-entry.mjs";
 
 const DIST = "dist";
 const LIST_MARKER = "egret.wf.ns-collapsed.";
-/** See "THE TOPOLOGY'S OWN CHUNK" above: `false` until a tab imports `components/workflows/topology/`. */
-const TOPOLOGY_IMPORTED = false;
+/** See "THE TOPOLOGY'S OWN CHUNK" above: `true` since the editor's Topology tab imports `components/workflows/topology/` lazily. */
+const TOPOLOGY_IMPORTED = true;
 /** The pages whose chunks must not carry a `topology` marker: their markers below. */
 const TOPOLOGY_HOSTS = ["Changes since v", "Edits made to the flow since it ran are not used."];
 const ASSETS = join(DIST, "assets");
@@ -136,14 +138,19 @@ const MARKERS = [
   ["src/components/workflows/executions/files/FileRow.tsx", "The size could not be read; the file may still open.", "editor"],
   ["src/components/workflows/executions/files/FilePreviewDrawer.tsx", "This file cannot be previewed", "editor"],
   // The topology (W7c Task 4): `ORIENTATION_KEY`; the list view's treegrid name; the context
-  // guard's sentence; `REFUSAL_NOTE`; the triggers cluster's uid, which only the layout spells.
-  // `TopologyEdges.tsx` has no literal worth a marker and is reached only through `TopologyView.tsx`.
+  // guard's sentence; `REFUSAL_NOTE`. `TopologyEdges.tsx` has no literal worth a marker and is
+  // reached only through `TopologyView.tsx`. `layout.ts` lost its literal (`"cluster:triggers"`) in
+  // Task 4's fix round 1 and has none left; it is the only importer of `@dagrejs/dagre`, so a static
+  // import of it pulls dagre along, and dagre's marker below goes where it goes (W7c Task 5 found
+  // the stale marker when the flag turned the checks on).
   ["src/components/workflows/topology/TopologyView.tsx", "egret.workflows.topology.orientation", "topology"],
   ["src/components/workflows/topology/TopologyListView.tsx", "Tasks of the flow", "topology"],
   ["src/components/workflows/topology/TopologyNodes.tsx", "A topology node is drawn outside TopologyView.", "topology"],
   ["src/components/workflows/topology/topologyModel.ts", "egret does not run this task", "topology"],
-  ["src/components/workflows/topology/layout.ts", "cluster:triggers", "topology"],
-  // The two libraries: a class name of xyflow's viewport, and one of dagre's ranker names.
+  // The two libraries: a class name of xyflow's viewport, and one of dagre's ranker names (which
+  // also stands for `layout.ts`, see above).
+  // The editor's Topology tab (W7c Task 5): its note for a node no longer in the YAML.
+  ["src/components/workflows/topology/TopologyTab.tsx", "is not in the YAML as it is now.", "topology"],
   ["node_modules/@xyflow/react (via TopologyView.tsx)", "react-flow__viewport-portal", "topology"],
   ["node_modules/@dagrejs/dagre (via layout.ts)", "network-simplex", "topology"],
 ];
@@ -166,7 +173,28 @@ if (listChunks.length !== 1) {
   failed = true;
 }
 const listChunk = listChunks.length === 1 ? listChunks[0] : null;
-const listSource = listChunk ? readFileSync(join(ASSETS, listChunk), "utf8") : "";
+
+/**
+ * `chunk` and every chunk it imports statically, transitively: what the browser fetches with it.
+ * A lazy `import("./x.js")` is not followed. Rollup moves a module two lazy chunks share (the flow
+ * pages share `FlowEditPage.tsx` and the editor tabs) into a chunk of its own that both import
+ * statically, so "not in the page's chunk" alone does not mean "not loaded with the page": W7c
+ * Task 5's scratch static import of `TopologyTab.tsx` from `registerEditorTabs.tsx` put the whole
+ * topology into `FlowEditPage-*.js`, and a check of `FlowDetail-*.js` alone passed it.
+ */
+function loadedWith(chunk) {
+  const seen = new Set();
+  const queue = [chunk];
+  while (queue.length > 0) {
+    const name = queue.pop();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const source = readFileSync(join(ASSETS, name), "utf8");
+    for (const m of source.matchAll(/\b(?:import|export)\s*(?:[^"'();]*?\bfrom\s*)?["']\.\/([^"']+\.js)["']/g)) queue.push(m[1]);
+  }
+  return [...seen].filter((f) => others.includes(f));
+}
+const listLoads = listChunk ? loadedWith(listChunk) : [];
 
 const hostChunks = TOPOLOGY_HOSTS.map((marker) => {
   const found = others.filter((f) => readFileSync(join(ASSETS, f), "utf8").includes(marker));
@@ -176,6 +204,7 @@ const hostChunks = TOPOLOGY_HOSTS.map((marker) => {
   }
   return found[0];
 });
+const hostLoads = hostChunks.map((host) => (host ? loadedWith(host) : []));
 
 for (const [module, marker, flag] of MARKERS) {
   const carriers = others.filter((f) => readFileSync(join(ASSETS, f), "utf8").includes(marker));
@@ -191,19 +220,21 @@ for (const [module, marker, flag] of MARKERS) {
     continue;
   }
   if (flag === "topology") {
-    for (const host of hostChunks) {
-      if (host && carriers.includes(host)) {
+    for (const [i, host] of hostChunks.entries()) {
+      const loaded = carriers.filter((f) => hostLoads[i].includes(f));
+      if (loaded.length > 0) {
         console.error(
-          `✗ ${marker} (${module}) is in the chunk of the flow page or the execution detail (${host}).\n` +
+          `✗ ${marker} (${module}) loads with the flow page or the execution detail (${host}, in ${loaded.join(", ")}).\n` +
             `  The topology is its own chunk: its tabs reach it through lazy(), never a static import.`,
         );
         failed = true;
       }
     }
   }
-  if (flag && listChunk && listSource.includes(marker)) {
+  const withList = carriers.filter((f) => listLoads.includes(f));
+  if (flag && withList.length > 0) {
     console.error(
-      `✗ ${marker} (${module}) is in the flow list's chunk (${listChunk}).\n` +
+      `✗ ${marker} (${module}) loads with the flow list's chunk (${listChunk}, in ${withList.join(", ")}).\n` +
         `  The flow editor now loads with the flow list. Look for a static import of it from\n` +
         `  FlowsList.tsx or WorkflowsRoutes.tsx; the flow pages are reached through lazy().`,
     );

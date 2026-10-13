@@ -25,6 +25,7 @@ describe("TopologyView when the layout fails", () => {
       </div>,
     );
     expect(screen.getByRole("alert")).toHaveTextContent(LAYOUT_FAILED);
+    expect(screen.getByRole("alert")).toHaveTextContent("Use the list view to read its tasks and their states.");
     expect(document.querySelector(".react-flow")).toBeNull();
     // Controls that act on a drawing are not offered; the ones that still make sense are.
     expect(screen.queryByRole("button", { name: "Zoom in" })).toBeNull();
@@ -45,5 +46,16 @@ describe("TopologyView when the layout fails", () => {
       .getAllByRole("row")
       .find((r) => r.getAttribute("data-uid") === "tasks.p.x") as HTMLElement;
     expect(x).toHaveAttribute("aria-level", "2");
+  });
+
+  it("in the editor, where nothing has run, does not promise states", () => {
+    render(
+      <div style={{ width: 800, height: 600 }}>
+        <TopologyView graph={FLOW} onSelect={vi.fn()} onExpandSubflow={vi.fn()} />
+      </div>,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Use the list view to read its tasks.");
+    expect(alert).not.toHaveTextContent("states");
   });
 });
