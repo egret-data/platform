@@ -33,6 +33,8 @@ import type {
   FileMetasDto,
   FilePreviewDto,
   FlowDto,
+  FlowGraph,
+  FlowGraphRequest,
   FlowListItemDto,
   FlowVersionDto,
   KvDetailDto,
@@ -56,8 +58,10 @@ import type {
   WorkflowDownloadNamespaceFileParams,
   WorkflowExecutionFileMetasParams,
   WorkflowGetExecutionLogsParams,
+  WorkflowGetFlowGraphParams,
   WorkflowGetFlowSchema200,
   WorkflowGetKvValueParams,
+  WorkflowGraphUnsavedFlowParams,
   WorkflowListExecutionsParams,
   WorkflowListFlowsParams,
   WorkflowListNamespaceDirectoryParams,
@@ -1555,6 +1559,125 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getWorkflowCreateFlowMutationOptions(options), queryClient);
     }
+    export type workflowGraphUnsavedFlowResponse200 = {
+  data: FlowGraph
+  status: 200
+}
+
+export type workflowGraphUnsavedFlowResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowGraphUnsavedFlowResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowGraphUnsavedFlowResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowGraphUnsavedFlowResponse422 = {
+  data: ErrorBody
+  status: 422
+}
+
+export type workflowGraphUnsavedFlowResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowGraphUnsavedFlowResponseSuccess = (workflowGraphUnsavedFlowResponse200) & {
+  headers: Headers;
+};
+export type workflowGraphUnsavedFlowResponseError = (workflowGraphUnsavedFlowResponse400 | workflowGraphUnsavedFlowResponse401 | workflowGraphUnsavedFlowResponse403 | workflowGraphUnsavedFlowResponse422 | workflowGraphUnsavedFlowResponse500) & {
+  headers: Headers;
+};
+
+export type workflowGraphUnsavedFlowResponse = (workflowGraphUnsavedFlowResponseSuccess | workflowGraphUnsavedFlowResponseError)
+
+export const getWorkflowGraphUnsavedFlowUrl = (workspace: string,
+    params?: WorkflowGraphUnsavedFlowParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    const explodeParameters = ["subflows"];
+
+    if (Array.isArray(value) && explodeParameters.includes(key)) {
+      value.forEach((v) => {
+        normalizedParams.append(key, v === null ? 'null' : String(v));
+      });
+      return;
+    }
+
+
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/flows/graph?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/flows/graph`
+}
+
+export const workflowGraphUnsavedFlow = async (workspace: string,
+    flowGraphRequest: FlowGraphRequest,
+    params?: WorkflowGraphUnsavedFlowParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowGraphUnsavedFlowResponse> => {
+
+  return customInstance<workflowGraphUnsavedFlowResponse>(getWorkflowGraphUnsavedFlowUrl(workspace,params),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(flowGraphRequest)
+  }
+);}
+
+
+
+
+
+export const getWorkflowGraphUnsavedFlowMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowGraphUnsavedFlow>>, TError,{workspace: string;data: FlowGraphRequest;params?: WorkflowGraphUnsavedFlowParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowGraphUnsavedFlow>>, TError,{workspace: string;data: FlowGraphRequest;params?: WorkflowGraphUnsavedFlowParams}, TContext> => {
+
+const mutationKey = ['workflowGraphUnsavedFlow'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowGraphUnsavedFlow>>, {workspace: string;data: FlowGraphRequest;params?: WorkflowGraphUnsavedFlowParams}> = (props) => {
+          const {workspace,data,params} = props ?? {};
+
+          return  workflowGraphUnsavedFlow(workspace,data,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowGraphUnsavedFlowMutationResult = NonNullable<Awaited<ReturnType<typeof workflowGraphUnsavedFlow>>>
+    export type WorkflowGraphUnsavedFlowMutationBody = FlowGraphRequest
+    export type WorkflowGraphUnsavedFlowMutationError = ErrorBody
+
+    export const useWorkflowGraphUnsavedFlow = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowGraphUnsavedFlow>>, TError,{workspace: string;data: FlowGraphRequest;params?: WorkflowGraphUnsavedFlowParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowGraphUnsavedFlow>>,
+        TError,
+        {workspace: string;data: FlowGraphRequest;params?: WorkflowGraphUnsavedFlowParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowGraphUnsavedFlowMutationOptions(options), queryClient);
+    }
     export type workflowValidateUnsavedFlowResponse200 = {
   data: ValidationReportDto
   status: 200
@@ -2136,7 +2259,176 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getWorkflowStartFlowExecutionMutationOptions(options), queryClient);
     }
-    export type workflowPublishFlowResponse200 = {
+    export type workflowGetFlowGraphResponse200 = {
+  data: FlowGraph
+  status: 200
+}
+
+export type workflowGetFlowGraphResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowGetFlowGraphResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowGetFlowGraphResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowGetFlowGraphResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowGetFlowGraphResponse422 = {
+  data: ErrorBody
+  status: 422
+}
+
+export type workflowGetFlowGraphResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowGetFlowGraphResponseSuccess = (workflowGetFlowGraphResponse200) & {
+  headers: Headers;
+};
+export type workflowGetFlowGraphResponseError = (workflowGetFlowGraphResponse400 | workflowGetFlowGraphResponse401 | workflowGetFlowGraphResponse403 | workflowGetFlowGraphResponse404 | workflowGetFlowGraphResponse422 | workflowGetFlowGraphResponse500) & {
+  headers: Headers;
+};
+
+export type workflowGetFlowGraphResponse = (workflowGetFlowGraphResponseSuccess | workflowGetFlowGraphResponseError)
+
+export const getWorkflowGetFlowGraphUrl = (workspace: string,
+    id: string,
+    params?: WorkflowGetFlowGraphParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    const explodeParameters = ["subflows"];
+
+    if (Array.isArray(value) && explodeParameters.includes(key)) {
+      value.forEach((v) => {
+        normalizedParams.append(key, v === null ? 'null' : String(v));
+      });
+      return;
+    }
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/flows/${encodeURIComponent(id)}/graph?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/flows/${encodeURIComponent(id)}/graph`
+}
+
+export const workflowGetFlowGraph = async (workspace: string,
+    id: string,
+    params?: WorkflowGetFlowGraphParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowGetFlowGraphResponse> => {
+
+  return customInstance<workflowGetFlowGraphResponse>(getWorkflowGetFlowGraphUrl(workspace,id,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowGetFlowGraphQueryKey = (workspace: string,
+    id: string,
+    params?: WorkflowGetFlowGraphParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/flows/${encodeURIComponent(id)}/graph`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowGetFlowGraphQueryOptions = <TData = Awaited<ReturnType<typeof workflowGetFlowGraph>>, TError = ErrorBody>(workspace: string,
+    id: string,
+    params?: WorkflowGetFlowGraphParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetFlowGraph>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowGetFlowGraphQueryKey(workspace,id,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowGetFlowGraph>>> = ({ signal }) => workflowGetFlowGraph(workspace,id,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowGetFlowGraph>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowGetFlowGraphQueryResult = NonNullable<Awaited<ReturnType<typeof workflowGetFlowGraph>>>
+export type WorkflowGetFlowGraphQueryError = ErrorBody
+
+
+export function useWorkflowGetFlowGraph<TData = Awaited<ReturnType<typeof workflowGetFlowGraph>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: undefined |  WorkflowGetFlowGraphParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetFlowGraph>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowGetFlowGraph>>,
+          TError,
+          Awaited<ReturnType<typeof workflowGetFlowGraph>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowGetFlowGraph<TData = Awaited<ReturnType<typeof workflowGetFlowGraph>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params?: WorkflowGetFlowGraphParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetFlowGraph>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowGetFlowGraph>>,
+          TError,
+          Awaited<ReturnType<typeof workflowGetFlowGraph>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowGetFlowGraph<TData = Awaited<ReturnType<typeof workflowGetFlowGraph>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params?: WorkflowGetFlowGraphParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetFlowGraph>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowGetFlowGraph<TData = Awaited<ReturnType<typeof workflowGetFlowGraph>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params?: WorkflowGetFlowGraphParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetFlowGraph>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowGetFlowGraphQueryOptions(workspace,id,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowPublishFlowResponse200 = {
   data: FlowVersionDto
   status: 200
 }

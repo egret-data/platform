@@ -13,6 +13,8 @@
 //! POST   /api/ws/{workspace}/workflows/flows/{id}/publish
 //! GET    /api/ws/{workspace}/workflows/flows/{id}/versions
 //! GET    /api/ws/{workspace}/workflows/flows/{id}/versions/{version}
+//! POST   /api/ws/{workspace}/workflows/flows/graph
+//! GET    /api/ws/{workspace}/workflows/flows/{id}/graph
 //! POST   /api/ws/{workspace}/workflows/flows/{id}/executions
 //! GET    /api/ws/{workspace}/workflows/executions
 //! GET    /api/ws/{workspace}/workflows/executions/{id}
@@ -870,12 +872,7 @@ async fn validate_flow(
 /// [`validate`], plus [`crate::spec::unrunnable`] against this deployment's
 /// served set. Writes nothing.
 fn validate_flow_source(source: &str) -> EgretResult<ValidationReportDto> {
-    let flow = parse(source).map_err(|e| {
-        Error::InvalidInput(match (e.line, e.column) {
-            (Some(l), Some(c)) => format!("{} (line {l}, column {c})", e.message),
-            _ => e.message,
-        })
-    })?;
+    let flow = parse_unsaved(source)?;
     let mut report = validate(&flow);
     report
         .errors
@@ -1087,6 +1084,205 @@ async fn get_flow_version(
     egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
     let row = st.repo.get_version(ctx.workspace_id.0, id, version).await?;
     Ok(Json(FlowVersionDto::from(row)))
+}
+
+// ---------- The flow graph (W7c Task 2, spec §3.4, §3.5, §5) ----------
+//
+// ```text
+// GET  /api/ws/{workspace}/workflows/flows/{id}/graph?version=&subflows=   workflow:read
+// POST /api/ws/{workspace}/workflows/flows/graph?subflows=                 workflow:manage
+// ```
+//
+// Both build [`crate::graph::expanded_flow_graph`] with the request's
+// workspace as the only place a `Subflow` child is loaded from
+// ([`FlowRepo`]'s [`crate::graph::SubflowSource`]). `GET` reads the stored
+// draft, or with `version=` that version's frozen `source`; a foreign flow or
+// version is the 404 every other read here gives, since both reads are scoped
+// by the workspace. `POST` is the editor's: it draws unsaved YAML, so it is
+// `:manage` as the validate route is, a parse error is that route's 400 with
+// line and column, and YAML that parses but fails validation still gets its
+// graph (the refused tasks carry `refusal`).
+
+/// `POST /flows/graph` body: the unsaved YAML to draw.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct FlowGraphRequest {
+    pub source: String,
+}
+
+/// `GET /flows/{id}/graph`'s typed query parameter. `subflows` is read from
+/// the raw query instead ([`subflows_param`]), because it repeats.
+#[derive(Debug, Deserialize)]
+pub struct FlowGraphQuery {
+    pub version: Option<i32>,
+}
+
+/// `ErrorBody.code` of a graph over [`crate::graph::MAX_NODES`] (422).
+pub const GRAPH_TOO_LARGE_CODE: &str = "graph_too_large";
+
+/// The error of the graph routes: every [`egret_core::Error`], plus the 422
+/// `egret_core::Error` has no variant for.
+#[derive(Debug)]
+pub enum GraphRouteError {
+    Core(Error),
+    Graph(crate::graph::GraphError),
+}
+
+impl From<Error> for GraphRouteError {
+    fn from(e: Error) -> Self {
+        GraphRouteError::Core(e)
+    }
+}
+
+impl From<crate::graph::GraphError> for GraphRouteError {
+    fn from(e: crate::graph::GraphError) -> Self {
+        GraphRouteError::Graph(e)
+    }
+}
+
+impl axum::response::IntoResponse for GraphRouteError {
+    fn into_response(self) -> axum::response::Response {
+        use crate::graph::GraphError;
+        match self {
+            GraphRouteError::Core(e) => e.into_response(),
+            GraphRouteError::Graph(e @ GraphError::TooLarge { .. }) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(egret_core::http::ErrorBody {
+                    error: e.to_string(),
+                    code: Some(GRAPH_TOO_LARGE_CODE.to_string()),
+                }),
+            )
+                .into_response(),
+            GraphRouteError::Graph(e @ GraphError::Source(_)) => {
+                Error::Internal(anyhow::anyhow!("{e}")).into_response()
+            }
+        }
+    }
+}
+
+/// Every `subflows` value of the query string, in order (`?subflows=a&subflows=b`,
+/// each percent-decoded). Unknown keys are ignored.
+fn subflows_param(raw: Option<&str>) -> std::collections::BTreeSet<String> {
+    crate::webhook_routes::parse_query(raw)
+        .into_iter()
+        .filter(|(k, _)| k == "subflows")
+        .map(|(_, v)| v)
+        .collect()
+}
+
+/// Parse unsaved YAML for the editor's routes (validate, graph): a YAML that
+/// does not parse is a 400 whose message carries the line and column.
+fn parse_unsaved(source: &str) -> EgretResult<crate::models::Flow> {
+    parse(source).map_err(|e| {
+        Error::InvalidInput(match (e.line, e.column) {
+            (Some(l), Some(c)) => format!("{} (line {l}, column {c})", e.message),
+            _ => e.message,
+        })
+    })
+}
+
+async fn graph_for(
+    st: &WorkflowState,
+    ws: Uuid,
+    flow: &crate::models::Flow,
+    raw_query: Option<&str>,
+) -> std::result::Result<Json<crate::graph::FlowGraph>, GraphRouteError> {
+    let opts = crate::graph::GraphOptions {
+        subflows: subflows_param(raw_query),
+        depth: 0,
+    };
+    Ok(Json(
+        crate::graph::expanded_flow_graph(flow, &opts, ws, &st.repo).await?,
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/flows/{id}/graph",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Flow id"),
+        ("version" = Option<i32>, Query, description = "Draw this published version's frozen source instead of the draft"),
+        ("subflows" = Option<Vec<String>>, Query, explode, description = "Uids of `Subflow` nodes to expand in place, repeated (`subflows=a&subflows=b`). A uid inside an expansion is `{subflow_uid}/{child_uid}`; a uid that names no `Subflow` node is ignored"),
+    ),
+    responses(
+        (status = 200, description = "The topology of the draft, or of the version", body = crate::graph::FlowGraph),
+        (status = 400, description = "`version` is not an integer", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such flow, or no such version of it, in this workspace", body = egret_core::http::ErrorBody),
+        (status = 422, description = "The graph, counted after expansion, has more than 5,000 nodes; the message names the count", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn get_flow_graph(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Query(q): Query<FlowGraphQuery>,
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
+) -> std::result::Result<Json<crate::graph::FlowGraph>, GraphRouteError> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    let ws = ctx.workspace_id.0;
+    let source = match q.version {
+        // Scoped by the workspace through the flow: a foreign flow's version
+        // is `NotFound`, as `get_flow_version` answers.
+        Some(v) => {
+            let row = st.repo.get_version(ws, id, v).await?;
+            row.snapshot
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    Error::Internal(anyhow::anyhow!(
+                        "flow version {} has no source in its snapshot",
+                        row.id
+                    ))
+                })?
+        }
+        None => st.repo.get(ws, id).await?.source,
+    };
+    // A stored source parsed when it was saved, so a failure here is ours.
+    let flow = parse(&source).map_err(|e| {
+        Error::Internal(anyhow::anyhow!(
+            "stored source of flow {id} no longer parses: {} (line {:?}, column {:?})",
+            e.message,
+            e.line,
+            e.column
+        ))
+    })?;
+    graph_for(&st, ws, &flow, raw.as_deref()).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/flows/graph",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("subflows" = Option<Vec<String>>, Query, explode, description = "Uids of `Subflow` nodes to expand in place, repeated (`subflows=a&subflows=b`). A uid inside an expansion is `{subflow_uid}/{child_uid}`; a uid that names no `Subflow` node is ignored"),
+    ),
+    request_body = FlowGraphRequest,
+    responses(
+        (status = 200, description = "The topology of the unsaved YAML. A flow that parses but fails validation still gets its graph; its refused tasks carry `refusal`. Nothing is written", body = crate::graph::FlowGraph),
+        (status = 400, description = "The YAML does not parse; the message carries the line and column", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 422, description = "The graph, counted after expansion, has more than 5,000 nodes; the message names the count", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn graph_unsaved_flow(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
+    Json(body): Json<FlowGraphRequest>,
+) -> std::result::Result<Json<crate::graph::FlowGraph>, GraphRouteError> {
+    // `:manage`, as the validate routes: the editor draws what is being
+    // authored.
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let flow = parse_unsaved(&body.source)?;
+    graph_for(&st, ctx.workspace_id.0, &flow, raw.as_deref()).await
 }
 
 // ---------- Executions (W10 Task 4) ----------
@@ -2721,6 +2917,14 @@ pub fn management_router() -> Router<WorkflowState> {
             post(validate_flow),
         )
         .route(
+            "/ws/{workspace}/workflows/flows/graph",
+            post(graph_unsaved_flow),
+        )
+        .route(
+            "/ws/{workspace}/workflows/flows/{id}/graph",
+            get(get_flow_graph),
+        )
+        .route(
             "/ws/{workspace}/workflows/flows/{id}/publish",
             post(publish_flow),
         )
@@ -2851,6 +3055,8 @@ pub fn management_router() -> Router<WorkflowState> {
         publish_flow,
         list_flow_versions,
         get_flow_version,
+        get_flow_graph,
+        graph_unsaved_flow,
         list_executions,
         get_execution,
         get_execution_logs,
@@ -2888,6 +3094,8 @@ pub fn management_router() -> Router<WorkflowState> {
         UpdateFlowRequest,
         ValidateFlowRequest,
         PublishFlowRequest,
+        FlowGraphRequest,
+        crate::graph::FlowGraph,
         ExecutionListItemDto,
         TaskRunDto,
         ExecutionDto,

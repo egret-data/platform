@@ -29076,6 +29076,110 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/flows/graph": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "graph_unsaved_flow",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "subflows",
+            "in": "query",
+            "description": "Uids of `Subflow` nodes to expand in place, repeated (`subflows=a&subflows=b`). A uid inside an expansion is `{subflow_uid}/{child_uid}`; a uid that names no `Subflow` node is ignored",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "explode": true
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FlowGraphRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The topology of the unsaved YAML. A flow that parses but fails validation still gets its graph; its refused tasks carry `refusal`. Nothing is written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowGraph"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The YAML does not parse; the message carries the line and column",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The graph, counted after expansion, has more than 5,000 nodes; the message names the count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/flows/validate": {
       "post": {
         "tags": [
@@ -29596,6 +29700,138 @@
           },
           "503": {
             "description": "Internal storage failed while an uploaded file was being stored. Nothing is created; the request can be retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/flows/{id}/graph": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "get_flow_graph",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "description": "Draw this published version's frozen source instead of the draft",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "subflows",
+            "in": "query",
+            "description": "Uids of `Subflow` nodes to expand in place, repeated (`subflows=a&subflows=b`). A uid inside an expansion is `{subflow_uid}/{child_uid}`; a uid that names no `Subflow` node is ignored",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "explode": true
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The topology of the draft, or of the version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowGraph"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`version` is not an integer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such flow, or no such version of it, in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The graph, counted after expansion, has more than 5,000 nodes; the message names the count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
             "content": {
               "application/json": {
                 "schema": {
@@ -34096,6 +34332,15 @@
           }
         }
       },
+      "Branch": {
+        "type": "string",
+        "enum": [
+          "tasks",
+          "errors",
+          "finally",
+          "after_execution"
+        ]
+      },
       "CacheScope": {
         "type": "string",
         "enum": [
@@ -34754,6 +34999,60 @@
           }
         }
       },
+      "Cluster": {
+        "type": "object",
+        "required": [
+          "uid",
+          "kind",
+          "nodes",
+          "start",
+          "end"
+        ],
+        "properties": {
+          "uid": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The flowable's task id; `None` for the triggers cluster."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ClusterKind"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start": {
+            "type": "string"
+          },
+          "end": {
+            "type": "string"
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExpansionReason",
+                "description": "Why a `subflow` cluster is empty (spec §3.4); `None` on every other\ncluster and on a `subflow` cluster that expanded."
+              }
+            ]
+          }
+        }
+      },
       "ClusterDto": {
         "type": "object",
         "required": [
@@ -34785,6 +35084,23 @@
             }
           }
         }
+      },
+      "ClusterKind": {
+        "type": "string",
+        "enum": [
+          "sequential",
+          "parallel",
+          "if",
+          "switch",
+          "dag",
+          "loop",
+          "loop_until",
+          "allow_failure",
+          "working_directory",
+          "pause",
+          "triggers",
+          "subflow"
+        ]
       },
       "ColumnDto": {
         "type": "object",
@@ -37329,6 +37645,31 @@
           }
         }
       },
+      "Edge": {
+        "type": "object",
+        "required": [
+          "source",
+          "target",
+          "relation"
+        ],
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "relation": {
+            "$ref": "#/components/schemas/Relation"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "Effect": {
         "type": "string",
         "description": "`perm.effect`.",
@@ -38014,6 +38355,14 @@
           }
         }
       },
+      "ExpansionReason": {
+        "type": "string",
+        "enum": [
+          "not_found",
+          "dynamic",
+          "depth"
+        ]
+      },
       "ExplainAccess": {
         "type": "object",
         "description": "One Ranger ACCESS TYPE's verdict inside one profile.\n\n**A `write` explain is several of these, and they are never collapsed.**\nRanger has no `write`: `AccessRequest.access_type` is one string, and\n`egret_perm::engine_accesses` maps `write` to `insert,delete` on Trino and\n`insert,update,delete` on StarRocks. An operator who can insert but not\ndelete has to be able to see that, which one merged verdict cannot say.",
@@ -38534,6 +38883,46 @@
           "can_manage": {
             "type": "boolean",
             "description": "Whether the caller may save, publish, run and delete this flow: they\nhold `workflow:manage` in this workspace. An editor opens read-only\nwhen this is false; every mutating route still checks for itself."
+          }
+        }
+      },
+      "FlowGraph": {
+        "type": "object",
+        "required": [
+          "nodes",
+          "edges",
+          "clusters"
+        ],
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            }
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Edge"
+            }
+          },
+          "clusters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Cluster"
+            }
+          }
+        }
+      },
+      "FlowGraphRequest": {
+        "type": "object",
+        "description": "`POST /flows/graph` body: the unsaved YAML to draw.",
+        "required": [
+          "source"
+        ],
+        "properties": {
+          "source": {
+            "type": "string"
           }
         }
       },
@@ -39949,6 +40338,24 @@
           }
         }
       },
+      "Node": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/NodeKind"
+          },
+          {
+            "type": "object",
+            "required": [
+              "uid"
+            ],
+            "properties": {
+              "uid": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
       "NodeDto": {
         "type": "object",
         "required": [
@@ -39964,6 +40371,111 @@
             "format": "double"
           }
         }
+      },
+      "NodeKind": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "task_id",
+              "type",
+              "canonical_type",
+              "kind",
+              "branch",
+              "disabled",
+              "node"
+            ],
+            "properties": {
+              "task_id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "description": "The `type:` as written."
+              },
+              "canonical_type": {
+                "type": "string",
+                "description": "The FQCN for a flowable or `Subflow` (whichever spelling was\nwritten) and for a registry type (its canonical row); otherwise\nthe type as written."
+              },
+              "kind": {
+                "$ref": "#/components/schemas/TaskNodeKind"
+              },
+              "branch": {
+                "$ref": "#/components/schemas/Branch"
+              },
+              "disabled": {
+                "type": "boolean"
+              },
+              "refusal": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "node": {
+                "type": "string",
+                "enum": [
+                  "task"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "trigger_id",
+              "type",
+              "disabled",
+              "node"
+            ],
+            "properties": {
+              "trigger_id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              },
+              "disabled": {
+                "type": "boolean"
+              },
+              "node": {
+                "type": "string",
+                "enum": [
+                  "trigger"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "node"
+            ],
+            "properties": {
+              "node": {
+                "type": "string",
+                "enum": [
+                  "start"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "node"
+            ],
+            "properties": {
+              "node": {
+                "type": "string",
+                "enum": [
+                  "end"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "The node's kind, serialised as the `node` tag beside its fields."
       },
       "NsFileRevisionDto": {
         "type": "object",
@@ -41722,6 +42234,19 @@
             "description": "Why this row's stored `config` no longer parses, if it does not.\nA stored row the tightened validator now refuses stays visible and\nrepairable instead of vanishing — and, critically, never fails the\nwhole list (SP3c-1 review N1)."
           }
         }
+      },
+      "Relation": {
+        "type": "string",
+        "description": "Kestra's seven `RelationType`s.",
+        "enum": [
+          "sequential",
+          "choice",
+          "parallel",
+          "dynamic",
+          "error",
+          "finally",
+          "after_execution"
+        ]
       },
       "RenameFolder": {
         "type": "object",
@@ -44275,6 +44800,14 @@
             "type": "string"
           }
         }
+      },
+      "TaskNodeKind": {
+        "type": "string",
+        "enum": [
+          "leaf",
+          "executable",
+          "flowable"
+        ]
       },
       "TaskRunDto": {
         "type": "object",

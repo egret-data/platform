@@ -679,6 +679,35 @@ impl FlowRepo {
             .map_err(db_err)
     }
 
+    /// The `source` of the draft named `(namespace, flow_id)` in `ws`, or
+    /// `Ok(None)`: what a `Subflow` expands to in the topology (W7c spec
+    /// §3.4, [`crate::graph::SubflowSource`]).
+    ///
+    /// SCOPED by `ws`, unlike [`Self::find_by_name`] below: a `Subflow`
+    /// resolves within its own workspace (as `worker::subflow::resolve`
+    /// does at run time), so a flow of the same name in another workspace
+    /// is "no such flow", never its graph. A trashed flow does not resolve;
+    /// a disabled one does -- the graph shows what the flow IS, and
+    /// disabling it changes whether it runs, not its shape.
+    pub async fn draft_source_by_name(
+        &self,
+        ws: Uuid,
+        namespace: &str,
+        flow_id: &str,
+    ) -> Result<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT source FROM workflow.flows \
+              WHERE workspace_id = $1 AND namespace = $2 AND flow_id = $3 \
+                AND deleted_at IS NULL",
+        )
+        .bind(ws)
+        .bind(namespace)
+        .bind(flow_id)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
+
     /// `(id, workspace_id)` of the flow named `(namespace, flow_id)`, or
     /// `Ok(None)` if no such row exists in ANY workspace.
     ///

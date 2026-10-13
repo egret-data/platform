@@ -662,7 +662,7 @@ async fn handle(
 /// Written out rather than taken from `serde_urlencoded`, because that crate
 /// deserialises into a map and a map cannot hold `?a=1&a=2`, which is the one
 /// shape this function exists to preserve.
-fn parse_query(raw: Option<&str>) -> Vec<(String, String)> {
+pub(crate) fn parse_query(raw: Option<&str>) -> Vec<(String, String)> {
     let Some(raw) = raw else {
         return Vec::new();
     };

@@ -106,6 +106,14 @@
 //! whose id is literally a property name -- a task with id `tasks` under a
 //! flowable -- has the path `tasks.x.tasks`, so it captures its parent's
 //! error at the property path `tasks.x.tasks`.
+//!
+//! # `Subflow` expansion
+//!
+//! [`flow_graph`] stays pure and never expands. [`expanded_flow_graph`]
+//! (module `expand`) builds the same graph and splices each requested
+//! `Subflow`'s child flow in, loaded through [`SubflowSource`]; its module doc
+//! holds the expansion's rules: the `{subflow_uid}/{child_uid}` uids, the
+//! reasons, the depth limit and how the node limit is counted.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -139,9 +147,11 @@ pub fn cluster_uid(owner: &str) -> String {
     format!("cluster:{owner}")
 }
 
-/// What to build. `subflows` (the `Subflow` node uids to expand) and `depth`
-/// are honoured from W7c Task 2 through a loader seam; today
-/// [`flow_graph`] performs no expansion and ignores both.
+/// What to build. `subflows` (the `Subflow` node uids to expand, in the
+/// final, prefixed uid space) and `depth` (how many expansions deep the flow
+/// being built sits: 0 for the flow the request names) are read by
+/// [`expanded_flow_graph`] only; [`flow_graph`] performs no expansion and
+/// ignores both.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GraphOptions {
     pub subflows: BTreeSet<String>,
@@ -236,7 +246,8 @@ pub struct Cluster {
     pub parent: Option<String>,
     pub start: String,
     pub end: String,
-    /// Why a `subflow` cluster is empty (Task 2). Always `None` today.
+    /// Why a `subflow` cluster is empty (spec §3.4); `None` on every other
+    /// cluster and on a `subflow` cluster that expanded.
     pub reason: Option<ExpansionReason>,
 }
 
@@ -254,7 +265,8 @@ pub enum ClusterKind {
     WorkingDirectory,
     Pause,
     Triggers,
-    /// An expanded `Subflow` (Task 2).
+    /// An expanded `Subflow`, or one that could not be (`reason`); see
+    /// [`expand`].
     Subflow,
 }
 
@@ -268,14 +280,37 @@ pub enum ExpansionReason {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GraphError {
+    /// During expansion, `nodes` is the count when the limit was crossed:
+    /// building stops there, so a larger expansion is never built whole.
     #[error("the graph has {nodes} nodes, over the limit of {MAX_NODES}")]
     TooLarge { nodes: usize },
+    /// A `Subflow`'s child could not be loaded, or its stored draft no longer
+    /// parses (a stored draft always parsed when it was saved).
+    #[error("expanding a subflow: {0}")]
+    Source(String),
 }
 
 /// Build the topology of `flow` (spec §3). See the module doc for every
-/// rule. `opts` is not read yet (Task 2 adds `Subflow` expansion).
+/// rule. Pure: it performs no `Subflow` expansion and does not read `opts`;
+/// [`expanded_flow_graph`] does both.
 pub fn flow_graph(flow: &Flow, opts: &GraphOptions) -> Result<FlowGraph, GraphError> {
     let _ = opts;
+    build(flow).map(|(graph, _)| graph)
+}
+
+/// A `Subflow` task node as placed, with the target it names -- what
+/// [`expand`] needs and the node does not carry.
+#[derive(Debug, Clone)]
+pub(crate) struct SubflowRef {
+    pub uid: String,
+    pub task_id: String,
+    pub branch: Branch,
+    pub namespace: Option<String>,
+    pub flow_id: Option<String>,
+}
+
+/// [`flow_graph`], plus every `Subflow` node it placed, in walk order.
+pub(crate) fn build(flow: &Flow) -> Result<(FlowGraph, Vec<SubflowRef>), GraphError> {
     let mut b = Builder {
         graph: FlowGraph {
             nodes: Vec::new(),
@@ -284,6 +319,7 @@ pub fn flow_graph(flow: &Flow, opts: &GraphOptions) -> Result<FlowGraph, GraphEr
         },
         used: HashSet::new(),
         task_paths: Vec::new(),
+        subflows: Vec::new(),
     };
     b.flow(flow);
     b.attribute_refusals(flow);
@@ -291,7 +327,7 @@ pub fn flow_graph(flow: &Flow, opts: &GraphOptions) -> Result<FlowGraph, GraphEr
     if nodes > MAX_NODES {
         return Err(GraphError::TooLarge { nodes });
     }
-    Ok(b.graph)
+    Ok((b.graph, b.subflows))
 }
 
 /// Where a list (or a task) placed in the graph is entered and left.
@@ -329,6 +365,8 @@ struct Builder {
     used: HashSet<String>,
     /// Every task node, as (index into `graph.nodes`, validation path).
     task_paths: Vec<(usize, String)>,
+    /// Every `Subflow` node, in walk order.
+    subflows: Vec<SubflowRef>,
 }
 
 /// The longest prefix of `path` -- `path` itself, or a part of it ending
@@ -531,6 +569,15 @@ impl Builder {
         };
 
         let Some(kind) = cluster_kind else {
+            if let TaskKind::Subflow(s) = &task.kind {
+                self.subflows.push(SubflowRef {
+                    uid: uid.clone(),
+                    task_id: task.id.clone(),
+                    branch: ctx.branch,
+                    namespace: s.namespace.clone(),
+                    flow_id: s.flow_id.clone(),
+                });
+            }
             self.add_node(uid.clone(), node, ctx.cluster);
             self.task_paths.push((self.graph.nodes.len() - 1, path));
             return Span {
@@ -750,6 +797,9 @@ fn canonical_type(task: &Task) -> String {
     };
     format!("io.kestra.plugin.core.flow.{class}")
 }
+
+mod expand;
+pub use expand::{expanded_flow_graph, SubflowSource, MAX_EXPANSION_DEPTH, SUBFLOW_SEPARATOR};
 
 #[cfg(test)]
 mod tests;
