@@ -155,15 +155,72 @@ describe("EngineCreate", () => {
     await waitFor(() => expect(api.createEngine).toHaveBeenCalledTimes(1));
     const body = vi.mocked(api.createEngine).mock.calls[0][0];
     expect(body.kind).toBe("starrocks");
+    // Untouched image fields are OMITTED, so the server's pinned defaults
+    // (DEFAULT_ENGINE_IMAGES) apply; the UI never sends a default of its own.
     expect(body.starrocks).toEqual({
-      feImage: "starrocks/fe-ubuntu:4.1-latest",
-      cnImage: "starrocks/cn-ubuntu:4.1-latest",
       feReplicas: 1,
       cnReplicas: 1,
     });
     // Required Trino-only body fields still sent with harmless defaults.
     expect(body.coordinatorReplicas).toBe(1);
     expect(body.memory).toBe("4Gi");
+  });
+
+  test.each(["trino", "starrocks"] as const)(
+    "%s: a create with untouched image fields carries no floating or stale image",
+    async (type) => {
+      const user = userEvent.setup();
+      renderCreate(type);
+      await user.type(screen.getByLabelText("Name"), "e1");
+      await makePrimary(user, "demo-catalog");
+
+      await user.click(screen.getByRole("button", { name: "Create engine" }));
+      await waitFor(() => expect(api.createEngine).toHaveBeenCalledTimes(1));
+      const wire = JSON.stringify(vi.mocked(api.createEngine).mock.calls[0][0]);
+      expect(wire).not.toContain("latest");
+      expect(wire).not.toContain("470");
+      expect(wire).not.toContain("imageVersion");
+      expect(wire).not.toContain("feImage");
+      expect(wire).not.toContain("cnImage");
+    },
+  );
+
+  test("Trino: the image placeholder is the server's pinned 483 default", () => {
+    renderCreate("trino");
+    const image = screen.getByLabelText("Image");
+    expect(image).toHaveValue("");
+    expect(image).toHaveAttribute(
+      "placeholder",
+      "trinodb/trino:483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534",
+    );
+  });
+
+  test("StarRocks: the image placeholders are the server's pinned 4.1.6 defaults", () => {
+    renderCreate("starrocks");
+    expect(screen.getByLabelText("FE image")).toHaveValue("");
+    expect(screen.getByLabelText("FE image")).toHaveAttribute(
+      "placeholder",
+      "starrocks/fe-ubuntu:4.1.6@sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31",
+    );
+    expect(screen.getByLabelText("CN image")).toHaveValue("");
+    expect(screen.getByLabelText("CN image")).toHaveAttribute(
+      "placeholder",
+      "starrocks/cn-ubuntu:4.1.6@sha256:bf0f5ca7fd9fc4e568d4d0e593e362f229b376976b513a5a549b1b922d9ec23b",
+    );
+  });
+
+  test("StarRocks: an image the operator types is sent as typed", async () => {
+    const user = userEvent.setup();
+    renderCreate("starrocks");
+    await user.type(screen.getByLabelText("Name"), "sr1");
+    await makePrimary(user, "demo-catalog");
+    await user.type(screen.getByLabelText("FE image"), " starrocks/fe-ubuntu:4.1.4 ");
+
+    await user.click(screen.getByRole("button", { name: "Create engine" }));
+    await waitFor(() => expect(api.createEngine).toHaveBeenCalledTimes(1));
+    const body = vi.mocked(api.createEngine).mock.calls[0][0];
+    expect(body.starrocks?.feImage).toBe("starrocks/fe-ubuntu:4.1.4");
+    expect(body.starrocks).not.toHaveProperty("cnImage");
   });
 
   test("StarRocks: a delegation mode adds delegationMode + tlsEnabled", async () => {
