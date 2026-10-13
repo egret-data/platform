@@ -3289,6 +3289,7 @@ dependencies = [
  "egret-storage",
  "egret-test-db",
  "egret-workspace",
+ "futures-util",
  "http-body-util",
  "serde",
  "serde_json",
