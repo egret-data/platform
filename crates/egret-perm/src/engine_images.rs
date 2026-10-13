@@ -123,6 +123,16 @@ fn parse(image_ref: &str) -> (&str, Option<&str>, Option<&str>) {
     }
 }
 
+/// `repository:tag` of every known image of `engine_type`, in table order: what
+/// an operator may pin such an engine to.
+pub fn known_image_refs(engine_type: &str) -> Vec<String> {
+    KNOWN_ENGINE_IMAGES
+        .iter()
+        .filter(|k| k.engine_type == engine_type)
+        .map(|k| format!("{}:{}", k.repository, k.tag))
+        .collect()
+}
+
 pub fn plugin_version_for_image(
     engine_type: &str,
     image_ref: &str,
@@ -137,11 +147,7 @@ pub fn plugin_version_for_image(
     match hit {
         Some(k) => Ok(k.plugin_version),
         None => {
-            let known: Vec<String> = KNOWN_ENGINE_IMAGES
-                .iter()
-                .filter(|k| k.engine_type == engine_type)
-                .map(|k| format!("{}:{}", k.repository, k.tag))
-                .collect();
+            let known = known_image_refs(engine_type);
             Err(format!(
                 "image \"{image_ref}\" is not one whose Ranger plugin egret has measured for a \
                  {engine_type} engine; pin the engine to one of: {}",
@@ -318,6 +324,25 @@ mod tests {
             ),
             Some("trinodb/trino:483".into())
         );
+    }
+
+    /// Every image egret knows ships a plugin its evaluator models: a known
+    /// image whose pair is not modelled would be reported unmodelled for an
+    /// engine pinned exactly as the guide says.
+    #[test]
+    fn every_known_images_plugin_is_a_modelled_pair() {
+        for k in KNOWN_ENGINE_IMAGES.iter() {
+            assert!(
+                crate::MODELLED_RANGER_PLUGINS
+                    .iter()
+                    .any(|(t, v)| *t == k.engine_type && *v == k.plugin_version),
+                "{}:{} ships {} {}, not in MODELLED_RANGER_PLUGINS",
+                k.repository,
+                k.tag,
+                k.engine_type,
+                k.plugin_version
+            );
+        }
     }
 
     #[test]

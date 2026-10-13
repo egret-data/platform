@@ -361,7 +361,7 @@ fn plugin_report(e: &Engine, image: Option<&str>) -> (Option<String>, bool, Opti
             Some(format!(
                 "the spec pins no image, so egret cannot tell which Ranger plugin it runs; pin \
                  its image to one of: {}",
-                egret_perm::modelled_ranger_plugins_sentence()
+                egret_perm::engine_images::known_image_refs(&e.r#type).join(", ")
             )),
         );
     };
@@ -7142,6 +7142,30 @@ mod tests {
         assert_eq!(d.image, None);
         assert_eq!(d.ranger_plugin_version_modelled, Some(false));
         assert!(d.ranger_plugin_version_note.is_some());
+    }
+
+    /// The fix for an engine with no image is to pin an IMAGE, so the note
+    /// lists the known images of the engine's own type (as
+    /// `plugin_version_for_image` does), not (type, plugin) pairs.
+    #[test]
+    fn the_no_image_note_lists_the_known_images_of_its_type() {
+        for (ty, spec) in [
+            ("trino", serde_json::json!({})),
+            ("starrocks", serde_json::json!({ "starrocksConfig": {} })),
+        ] {
+            let note = dto_of(ty, "provisioned", spec, None)
+                .ranger_plugin_version_note
+                .expect("a note");
+            for k in egret_perm::KNOWN_ENGINE_IMAGES.iter() {
+                let image = format!("{}:{}", k.repository, k.tag);
+                assert_eq!(
+                    note.contains(&image),
+                    k.engine_type == ty,
+                    "{ty}: {image} in {note}"
+                );
+            }
+            assert!(!note.contains("@2."), "{ty}: no pairs: {note}");
+        }
     }
 
     #[test]
