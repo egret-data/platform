@@ -626,6 +626,22 @@ struct PluginConfigFacts<'a> {
     version: Option<&'a str>,
 }
 
+/// Whether `raw` parses as a URL whose host is `localhost`, an address in
+/// `127.0.0.0/8` or `::1`. Parsed, never substring-matched: `localhost.example.com`
+/// is an ordinary name.
+fn is_loopback_url(raw: &str) -> bool {
+    use url::Host;
+    match url::Url::parse(raw)
+        .ok()
+        .and_then(|u| u.host().map(|h| h.to_owned()))
+    {
+        Some(Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
 fn plugin_config_judgements(
     f: &PluginConfigFacts<'_>,
 ) -> (&'static str, Vec<String>, Vec<String>, bool) {
@@ -639,6 +655,13 @@ fn plugin_config_judgements(
         warnings.push(format!(
             "The download URL ({host_part}) is an in-cluster address: an engine outside the \
              cluster cannot reach it. Set `[catalog] public_url` to an address the engine can reach."
+        ));
+    }
+    if is_loopback_url(host_part) {
+        warnings.push(format!(
+            "The download URL ({host_part}) is a loopback address: no external engine can reach \
+             it. It comes from `[catalog] public_url`, which defaults to localhost on a fresh \
+             install; set it to an address the engine can reach."
         ));
     }
     let auth_mode = if f.bearer_configured {
@@ -801,6 +824,39 @@ mod plugin_config_tests {
             Some("2.8.0"),
         ));
         assert!(!w.iter().any(|m| m.contains("public_url")));
+    }
+
+    #[test]
+    fn a_loopback_download_url_warns_and_names_the_setting() {
+        for url in [
+            "http://localhost:8080",
+            "http://LocalHost:8080/",
+            "http://127.0.0.1:8080",
+            "http://127.1.2.3",
+            "http://[::1]:8080",
+        ] {
+            let (_, w, _, _) = plugin_config_judgements(&facts(url, false, true, Some("2.8.0")));
+            assert!(
+                w.iter()
+                    .any(|m| m.contains("loopback") && m.contains("[catalog] public_url")),
+                "{url}: {w:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_that_only_contains_localhost_or_a_loopback_looking_name_does_not_warn() {
+        for url in [
+            "https://localhost.example.com",
+            "https://mylocalhost:8080",
+            "https://128.0.0.1",
+            "https://egret.example.com/127.0.0.1",
+            "https://[::2]:8080",
+            "not a url",
+        ] {
+            let (_, w, _, _) = plugin_config_judgements(&facts(url, false, true, Some("2.8.0")));
+            assert!(!w.iter().any(|m| m.contains("loopback")), "{url}: {w:?}");
+        }
     }
 
     #[test]

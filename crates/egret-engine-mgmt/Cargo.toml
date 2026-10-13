@@ -74,6 +74,10 @@ rcgen.workspace = true
 # user-facing query execution, not a fire-and-forget admin DDL.
 mysql_async.workspace = true
 
+# Parses `[catalog] public_url` to judge its host (external plugin config), and
+# EGRET_TEST_STARROCKS_URL in the engine-gated DDL-runner live suite.
+url.workspace = true
+
 [dev-dependencies]
 # One private, already-migrated database per test process, cloned from a
 # shared template. Replaces the shared `DATABASE_URL` database, which
@@ -115,6 +119,3 @@ pem = "3"
 x509-parser = "0.18"
 # Reads back the log line the database-error backstop writes (tests/error_mapping.rs).
 tracing-subscriber.workspace = true
-# Parses EGRET_TEST_STARROCKS_URL for the engine-gated DDL-runner live suite
-# (tests/starrocks_ddl_live.rs), same convention as egret-query's connector suites.
-url.workspace = true
