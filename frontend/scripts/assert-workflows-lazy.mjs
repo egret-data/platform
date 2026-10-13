@@ -43,13 +43,10 @@
  * the flow list's chunk, AND out of the chunks that carry the flow page (`FlowDetail.tsx`) and the
  * execution detail (`ExecutionDetail.tsx`), found by their own markers below.
  *
- * Until a tab imports the topology, no build contains it at all, and the stale-marker check
- * would fail for the right reason. `TOPOLOGY_IMPORTED` says which state the tree is in: `false`
- * asserts the topology appears in NO chunk (so wiring it without flipping the flag fails here),
- * `true` runs the checks above. W7c Task 5 set it to `true`: the editor's Topology tab is
- * registered with the other editor tabs (`registerEditorTabs.tsx`, in the flow pages' chunk), but
- * its body, `TopologyTab.tsx`, is reached through `lazy()` only. W7c Task 6 added the execution's
- * tab, `ExecutionTopologyTab.tsx`, which `ExecutionDetail.tsx` reaches through `lazy()` only. Each
+ * The editor's Topology tab (W7c Task 5) is registered with the other editor tabs
+ * (`registerEditorTabs.tsx`, in the flow pages' chunk), but its body, `TopologyTab.tsx`, is reached
+ * through `lazy()` only. W7c Task 6 added the execution's tab, `ExecutionTopologyTab.tsx`, which
+ * `ExecutionDetail.tsx` reaches through `lazy()` only. Each
  * `topology` marker was proven by scratch builds (W7c task-4-report.md, "Chunk proof";
  * task-5-report.md for `TopologyTab.tsx`; task-6-report.md for the execution's tab).
  */
@@ -59,8 +56,6 @@ import { entryChunkName, entryPreloadNames } from "./dist-entry.mjs";
 
 const DIST = "dist";
 const LIST_MARKER = "egret.wf.ns-collapsed.";
-/** See "THE TOPOLOGY'S OWN CHUNK" above: `true` since the editor's Topology tab imports `components/workflows/topology/` lazily. */
-const TOPOLOGY_IMPORTED = true;
 /** The pages whose chunks must not carry a `topology` marker: their markers below. */
 const TOPOLOGY_HOSTS = ["Changes since v", "Edits made to the flow since it ran are not used."];
 const ASSETS = join(DIST, "assets");
@@ -149,8 +144,6 @@ const MARKERS = [
   ["src/components/workflows/topology/TopologyListView.tsx", "Tasks of the flow", "topology"],
   ["src/components/workflows/topology/TopologyNodes.tsx", "A topology node is drawn outside TopologyView.", "topology"],
   ["src/components/workflows/topology/topologyModel.ts", "egret does not run this task", "topology"],
-  // The two libraries: a class name of xyflow's viewport, and one of dagre's ranker names (which
-  // also stands for `layout.ts`, see above).
   // The editor's Topology tab (W7c Task 5): its note for a node no longer in the YAML.
   ["src/components/workflows/topology/TopologyTab.tsx", "is not in the YAML as it is now.", "topology"],
   // The execution's Topology tab (W7c Task 6), reached from `ExecutionDetail.tsx` through `lazy()`
@@ -158,6 +151,8 @@ const MARKERS = [
   // sentence. `selection.ts` has no literal worth a marker and is reached only through these two.
   ["src/components/workflows/executions/topology/ExecutionTopologyTab.tsx", "is not a node of this execution's graph.", "topology"],
   ["src/components/workflows/executions/topology/LoopIterations.tsx", "has not run in any iteration yet.", "topology"],
+  // The two libraries: a class name of xyflow's viewport, and one of dagre's ranker names (which
+  // also stands for `layout.ts`, see above).
   ["node_modules/@xyflow/react (via TopologyView.tsx)", "react-flow__viewport-portal", "topology"],
   ["node_modules/@dagrejs/dagre (via layout.ts)", "network-simplex", "topology"],
 ];
@@ -215,17 +210,6 @@ const hostLoads = hostChunks.map((host) => (host ? loadedWith(host) : []));
 
 for (const [module, marker, flag] of MARKERS) {
   const carriers = others.filter((f) => readFileSync(join(ASSETS, f), "utf8").includes(marker));
-  if (flag === "topology" && !TOPOLOGY_IMPORTED) {
-    if (carriers.length > 0 || entrySource.includes(marker)) {
-      console.error(
-        `✗ ${marker} (${module}) is in a built chunk, but TOPOLOGY_IMPORTED is false.\n` +
-          `  Something now imports the topology. If a Topology tab reaches it through lazy(), set\n` +
-          `  TOPOLOGY_IMPORTED to true so the checks below run; otherwise find the import.`,
-      );
-      failed = true;
-    }
-    continue;
-  }
   if (flag === "topology") {
     for (const [i, host] of hostChunks.entries()) {
       const loaded = carriers.filter((f) => hostLoads[i].includes(f));
@@ -272,10 +256,8 @@ if (failed) process.exit(1);
 const topologyCount = MARKERS.filter((m) => m[2] === "topology").length;
 console.log(
   `✓ The Workflows area stays out of the entry chunk (${entry}); ` +
-    `${MARKERS.length - (TOPOLOGY_IMPORTED ? 0 : topologyCount)} module markers found in lazy chunks.\n` +
+    `${MARKERS.length} module markers found in lazy chunks.\n` +
     `✓ The flow editor stays out of the flow list's chunk (${listChunk}); ` +
     `${MARKERS.filter((m) => m[2] === "editor").length} editor markers checked.\n` +
-    (TOPOLOGY_IMPORTED
-      ? `✓ The topology stays in its own chunk: ${topologyCount} topology markers checked.`
-      : `✓ The topology is in no chunk yet (TOPOLOGY_IMPORTED is false): ${topologyCount} topology markers absent.`),
+    `✓ The topology stays in its own chunk: ${topologyCount} topology markers checked.`,
 );

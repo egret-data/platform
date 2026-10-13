@@ -259,10 +259,17 @@ pub struct Cluster {
     pub kind: ClusterKind,
     pub nodes: Vec<String>,
     pub parent: Option<String>,
+    /// The uid of the cluster's `start` marker node. **Exception: a
+    /// `subflow` cluster with a `reason`** (an expansion that could not
+    /// happen) has no markers and no nodes; its `start` and `end` are both
+    /// the `Subflow` task's own uid, a node that stays in its parent cluster.
     pub start: String,
+    /// The uid of the cluster's `end` marker node; for a `subflow` cluster
+    /// with a `reason`, the `Subflow` task's own uid (see `start`).
     pub end: String,
-    /// Why a `subflow` cluster is empty (spec §3.4); `None` on every other
-    /// cluster and on a `subflow` cluster that expanded.
+    /// Why a `subflow` cluster is empty (spec §3.4): it then has no nodes and
+    /// no markers, and `start`/`end` name the `Subflow` task node. `None` on
+    /// every other cluster and on a `subflow` cluster that expanded.
     pub reason: Option<ExpansionReason>,
 }
 

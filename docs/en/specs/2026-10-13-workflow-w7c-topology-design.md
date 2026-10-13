@@ -83,6 +83,7 @@ Every node has a `uid`: the task's path in the same form as validation findings 
 `refusal` covers the constructs no-silent-stall refuses, so the graph can mark a task egret will not run. **Ruled 2026-10-13 (Task 1):**
 - An error of `validate_for_run` belongs to the task node whose uid is the longest prefix of the error's path: the path itself, or a part of it followed by `.`. So an error at a property path (`tasks.p.tasks` for a `Pause`, `tasks.l.checkFrequency.maxIterations` for a `LoopUntil`) belongs to its task.
 - A node's `refusal` is the code of the first such error, in validation order.
+- **The deployment's refusals too (final review, 2026-10-13).** The findings are `validate_for_run`'s errors, then `task_type_not_served` from `spec::unrunnable` against the deployment's served set, in that order: the same two lists the validate routes, the draft DTO and publish show. `flow_graph` takes the served set as an argument and stays pure; the routes pass the process's set, and an expanded child is judged against the same set.
 - Only task nodes own errors. An error no task path prefixes (`namespace`, `inputs.x`) belongs to none.
 - A residual ambiguity is accepted: a child whose id is literally a property name of its parent (a child `tasks` under a flowable) takes its parent's property-path error.
 
@@ -130,6 +131,8 @@ On the execution graph (§4), a `Subflow` node whose run started a child executi
 ### 3.5 Limits
 
 A graph over 5,000 nodes, counted after expansion, is refused with 422 and a message naming the count. No corpus flow is near it; the limit only stops a pathological flow from building a huge response.
+
+**The limit is enforced while building, not after (final review, 2026-10-13).** Each flow's build stops placing nodes, edges and uids the moment its count passes what the limit leaves, and validation runs only for a graph within it, so no input does more than the limit's worth of work before the 422. Repeated ids are given their `~n` suffixes in linear time.
 
 ## 4. Execution states
 
@@ -241,7 +244,7 @@ One component under `frontend/src/components/workflows/topology/`, shared by bot
 
 **Rust:**
 - `flow_graph` for every flowable: node and edge counts, relations, `choice` labels, `Dag` dependency edges, the `errors`, `finally` and `afterExecution` branches, the trigger cluster, `refusal` on refused constructs, and disabled tasks.
-- A sweep over the 345 flows of `oracle-exec/corpus`: every flow that parses builds a graph without panicking, and every task of the executor's plan has a node.
+- A sweep over `oracle-exec/corpus`: every flow that parses builds a graph without panicking, and every task of the executor's plan has a node. Measured by the sweep: 339 flows parse, 336 of them flatten, holding 808 planned tasks.
 - The routes:
   - permissions;
   - 404 for another workspace;
@@ -284,3 +287,4 @@ The same flow runs on the local Kestra image. Its topology, in the editor and on
 - Fit shows the whole graph and may draw it too small to read (0.12 to 0.20 for a 15-task flow in Task 7's measurements). The first view is readable instead (§6.1), and the list view reads at any size.
 - An edit in the editor and a `Subflow` expansion keep the user's view and do not refit, so a new node, or an expanded child flow, can land off the canvas until the user presses Fit. Collapsing or expanding a cluster, or changing the orientation, places the first view again: those redraw the whole layout at the user's request.
 - Ranks are not aligned across sibling clusters: each container is laid out on its own (§6.1), so two parallel clusters can place their members at different depths.
+- A `Loop` iteration retried by a `CREATE_NEW_EXECUTION` replay shows RETRIED, even if the replay succeeded.

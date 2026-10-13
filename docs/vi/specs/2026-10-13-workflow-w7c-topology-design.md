@@ -2,7 +2,7 @@
 
 > Bản tham khảo tiếng Việt. Bản chính là `docs/en/specs/2026-10-13-workflow-w7c-topology-design.md`; khi hai bản khác nhau, bản tiếng Anh thắng.
 
-**Trạng thái:** đã triển khai, 2026-10-13. Bài end to end (`frontend/tests/e2e/workflows-topology.spec.ts`) chạy xanh trên một stack riêng. Đồ thị của editor đi theo một lần sửa 1 s sau đó và giữ đồ thị cuối dưới banner khi YAML hỏng; chọn một node chuyển con trỏ Code; đồ thị của execution hiện `Sleep` ở RUNNING rồi SUCCESS trong lúc polling, không làm dịch khung nhìn, rồi các trạng thái cuối, và không đọc lần nào trong 32 s sau khi kết thúc; thân `Loop` liệt kê ba iteration, một cái FAILED; `Subflow` mở rộng kèm trạng thái của flow con. Đo trên flow 15 task của bài: khung nhìn đầu tiên mở ở zoom 0.8, mức sàn đọc được (§6.1), với điểm bắt đầu của flow trong khung và id của task đầu tiên được vẽ ở 10,4 px, theo chiều ngang và chiều dọc, trong editor và trên execution. Fit, vốn hiện toàn bộ đồ thị, xuống tới 0.12–0.20 ở đó; ở mức zoom ấy mọi card, cluster và marker vẫn nằm trong canvas và không nhãn nào bị cắt, nhưng chữ quá nhỏ để đọc. Vòng focus bàn phím đo được 3,5:1 (sáng) và 3,6:1 (tối) so với card của nó. Phần so sánh với Kestra 2.0 nightly ở §2.
+**Trạng thái:** đã triển khai, 2026-10-13. Bài end to end (`frontend/tests/e2e/workflows-topology.spec.ts`) chạy xanh trên một stack riêng. Đồ thị của editor đi theo một lần sửa 1 s sau đó và giữ đồ thị cuối dưới banner khi YAML hỏng; chọn một node chuyển con trỏ Code; đồ thị của execution hiện `Sleep` ở RUNNING rồi SUCCESS trong lúc polling, không làm dịch khung nhìn, rồi các trạng thái cuối, và không đọc lần nào trong 32 s sau khi kết thúc; thân `Loop` liệt kê ba iteration, một cái FAILED; `Subflow` mở rộng kèm trạng thái của flow con. Đo trên flow 15 task của bài: khung nhìn đầu tiên mở ở zoom 0,8, mức sàn đọc được (§6.1), với điểm bắt đầu của flow trong khung và id của task đầu tiên được vẽ ở 10,4 px, theo chiều ngang và chiều dọc, trong editor và trên execution. Fit, vốn hiện toàn bộ đồ thị, xuống tới 0,12–0,20 ở đó; ở mức zoom ấy mọi card, cluster và marker vẫn nằm trong canvas và không nhãn nào bị cắt, nhưng chữ quá nhỏ để đọc. Vòng focus bàn phím đo được 3,5:1 (sáng) và 3,6:1 (tối) so với card của nó. Phần so sánh với Kestra 2.0 nightly ở §2.
 
 **Phụ thuộc:**
 - W7a (#659): khu vực Workflows, editor nhiều panel và sổ đăng ký tab của nó (`registerTab`), phép ánh xạ từ path sang YAML của tab Problems.
@@ -85,6 +85,7 @@ Mỗi node có một `uid`: path của task theo cùng dạng mà các finding c
 `refusal` bao các cấu trúc mà no-silent-stall từ chối, để đồ thị có thể đánh dấu một task egret sẽ không chạy. **Phán quyết 2026-10-13 (Task 1):**
 - Một lỗi của `validate_for_run` thuộc về node task có uid là tiền tố dài nhất của path lỗi: chính path đó, hoặc một phần của nó mà theo sau là `.`. Vì vậy một lỗi ở path của thuộc tính (`tasks.p.tasks` với một `Pause`, `tasks.l.checkFrequency.maxIterations` với một `LoopUntil`) thuộc về task của nó.
 - `refusal` của một node là mã của lỗi đầu tiên như vậy, theo thứ tự validation.
+- **Cả các từ chối của deployment (review cuối, 2026-10-13).** Các finding là lỗi của `validate_for_run`, rồi tới `task_type_not_served` từ `spec::unrunnable` theo tập served của deployment, theo đúng thứ tự đó: chính hai danh sách mà các route validate, DTO của draft và publish hiển thị. `flow_graph` nhận tập served làm tham số và vẫn thuần; các route truyền tập của tiến trình, và một flow con được mở rộng được xét theo cùng tập đó.
 - Chỉ node task sở hữu lỗi. Một lỗi mà không path task nào là tiền tố (`namespace`, `inputs.x`) không thuộc về node nào.
 - Chấp nhận một chỗ còn nhập nhằng: một task con có id đúng bằng tên một thuộc tính của cha (một con tên `tasks` dưới một flowable) nhận lỗi ở path thuộc tính của cha.
 
@@ -132,6 +133,8 @@ Trên đồ thị execution (§4), một node `Subflow` mà lần chạy của n
 ### 3.5 Giới hạn
 
 Một đồ thị trên 5.000 node, đếm sau khi mở rộng, bị từ chối bằng 422 kèm thông báo nêu số đếm. Không flow nào trong corpus gần mức đó; giới hạn chỉ ngăn một flow bệnh lý dựng ra response khổng lồ.
+
+**Giới hạn được áp trong lúc dựng, không phải sau đó (review cuối, 2026-10-13).** Lần dựng của mỗi flow ngừng đặt node, cạnh và uid ngay khi số đếm vượt phần giới hạn còn lại, và validation chỉ chạy cho đồ thị nằm trong giới hạn, nên không input nào tốn quá lượng việc của giới hạn trước khi trả 422. Các id lặp lại được gán hậu tố `~n` trong thời gian tuyến tính.
 
 ## 4. Trạng thái execution
 
@@ -202,8 +205,8 @@ Một component dưới `frontend/src/components/workflows/topology/`, dùng chu
 - Một task có `refusal` có viền gạch chéo và ghi chú "egret does not run this task" kèm mã của nó. Một task bị disable bị làm mờ và nói rõ điều đó.
 
 **Điều khiển:**
-- Zoom in, zoom out và fit. Fit hiện toàn bộ đồ thị, xuống tới zoom tối thiểu 0.1 của canvas.
-- **Khung nhìn đầu tiên** (sửa đổi 2026-10-13, Task 7). Một lần fit dưới 0.8 không đọc được: id task chữ mono cao 13 px, được vẽ ở 10,4 px khi zoom 0.8, và flow 15 task của bài end to end fit ở 0.12 tới 0.20. Vì vậy khi fit sẽ xuống dưới 0.8, khung nhìn đầu tiên mở ở 0.8 trên `start:flow` của flow và task đầu tiên của nó, card đầu tiên của danh sách `tasks:` (sửa đổi lần nữa, fix round 2). Theo hướng của bố cục, nó bắt đầu ở cạnh đầu của đồ thị khi task đầu tiên vẫn vừa canvas tính từ đó, để chuỗi trigger ở lại trên màn hình; còn không thì nó bắt đầu ngay trước `start:flow`, để các trigger nằm ngoài màn hình bên trái (hoặc phía trên). Theo chiều ngang của hướng đó, nó căn giữa điểm bắt đầu và task đầu tiên. Còn không thì khung nhìn đầu tiên là phép fit. Nó được đặt khi đồ thị đầu tiên tới và lại được đặt cho một flow hay execution khác, một hướng khác hoặc một tập cluster thu gọn khác, không bao giờ cho trạng thái của một lần poll, đồ thị của một lần sửa cùng flow hay một lần mở rộng `Subflow`, nên việc pan và zoom của người dùng được giữ.
+- Zoom in, zoom out và fit. Fit hiện toàn bộ đồ thị, xuống tới zoom tối thiểu 0,1 của canvas.
+- **Khung nhìn đầu tiên** (sửa đổi 2026-10-13, Task 7). Một lần fit dưới 0,8 không đọc được: id task chữ mono cao 13 px, được vẽ ở 10,4 px khi zoom 0,8, và flow 15 task của bài end to end fit ở 0,12 tới 0,20. Vì vậy khi fit sẽ xuống dưới 0,8, khung nhìn đầu tiên mở ở 0,8 trên `start:flow` của flow và task đầu tiên của nó, card đầu tiên của danh sách `tasks:` (sửa đổi lần nữa, fix round 2). Theo hướng của bố cục, nó bắt đầu ở cạnh đầu của đồ thị khi task đầu tiên vẫn vừa canvas tính từ đó, để chuỗi trigger ở lại trên màn hình; còn không thì nó bắt đầu ngay trước `start:flow`, để các trigger nằm ngoài màn hình bên trái (hoặc phía trên). Theo chiều ngang của hướng đó, nó căn giữa điểm bắt đầu và task đầu tiên. Còn không thì khung nhìn đầu tiên là phép fit. Nó được đặt khi đồ thị đầu tiên tới và lại được đặt cho một flow hay execution khác, một hướng khác hoặc một tập cluster thu gọn khác, không bao giờ cho trạng thái của một lần poll, đồ thị của một lần sửa cùng flow hay một lần mở rộng `Subflow`, nên việc pan và zoom của người dùng được giữ.
 - Một nút chuyển hướng, ngang hoặc dọc, được nhớ trong `localStorage`.
 - "Expand all".
 - Cluster thu gọn và mở rộng được.
@@ -243,7 +246,7 @@ Một component dưới `frontend/src/components/workflows/topology/`, dùng chu
 
 **Rust:**
 - `flow_graph` cho mọi flowable: số node và cạnh, relation, nhãn `choice`, cạnh phụ thuộc của `Dag`, các nhánh `errors`, `finally` và `afterExecution`, cluster trigger, `refusal` trên các cấu trúc bị từ chối, và task bị disable.
-- Một đợt quét 345 flow của `oracle-exec/corpus`: mọi flow parse được đều dựng được đồ thị mà không panic, và mọi task của plan của executor đều có một node.
+- Một đợt quét `oracle-exec/corpus`: mọi flow parse được đều dựng được đồ thị mà không panic, và mọi task của plan của executor đều có một node. Đợt quét đo được: 339 flow parse được, 336 trong số đó flatten được, chứa 808 task trong plan.
 - Các route:
   - quyền;
   - 404 với workspace khác;
@@ -283,6 +286,7 @@ Cùng một flow chạy trên image Kestra cục bộ. Topology của nó, trong
 - Một `Subflow` mở rộng thành draft hiện tại của flow con trong editor, không phải version sẽ chạy. Mỗi execution chạy draft đã lưu, nên hai thứ này giống nhau khi flow con đã được lưu.
 - Đồ thị execution đọc lại mọi lần chạy ở mỗi lần poll, và payload của nó là O(số lần chạy trong thân): `iterations.runs` liệt kê mọi iteration của mọi node trong thân và được gửi lại ở mỗi lần poll. Một flow có hàng nghìn iteration của loop làm lần đọc đó và câu trả lời đó nặng hơn; giới hạn 5.000 node không chặn số iteration, vì các iteration được gộp vào một node.
 - Một `Subflow` bên trong thân `Loop` được mở rộng, trên đồ thị execution, từ draft hiện tại của flow con và không có trạng thái: các lần chạy của nó nằm trong execution con riêng của từng iteration.
-- Fit hiện toàn bộ đồ thị và có thể vẽ nó quá nhỏ để đọc (0.12 tới 0.20 với một flow 15 task theo phép đo của Task 7). Thay vào đó, khung nhìn đầu tiên đọc được (§6.1), và list view đọc được ở mọi kích thước.
+- Fit hiện toàn bộ đồ thị và có thể vẽ nó quá nhỏ để đọc (0,12 tới 0,20 với một flow 15 task theo phép đo của Task 7). Thay vào đó, khung nhìn đầu tiên đọc được (§6.1), và list view đọc được ở mọi kích thước.
 - Một lần sửa trong editor và một lần mở rộng `Subflow` giữ khung nhìn của người dùng và không fit lại, nên một node mới, hoặc một flow con vừa mở rộng, có thể nằm ngoài canvas cho tới khi người dùng bấm Fit. Thu gọn hoặc mở rộng một cluster, hoặc đổi hướng, đặt lại khung nhìn đầu tiên: những thao tác đó vẽ lại toàn bộ bố cục theo yêu cầu của người dùng.
 - Các bậc (rank) không được căn thẳng giữa các cluster anh em: mỗi container được bố cục riêng (§6.1), nên hai cluster song song có thể đặt thành viên của chúng ở độ sâu khác nhau.
+- Một iteration của `Loop` được thử lại bằng một lần replay `CREATE_NEW_EXECUTION` hiện RETRIED, kể cả khi lần replay thành công.

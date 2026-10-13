@@ -19,7 +19,17 @@ export interface Cluster {
   nodes: string[];
   /** @nullable */
   parent?: string | null;
+  /**
+     * The uid of the cluster's `start` marker node. **Exception: a
+     * `subflow` cluster with a `reason`** (an expansion that could not
+     * happen) has no markers and no nodes; its `start` and `end` are both
+     * the `Subflow` task's own uid, a node that stays in its parent cluster.
+     */
   start: string;
+  /**
+     * The uid of the cluster's `end` marker node; for a `subflow` cluster
+     * with a `reason`, the `Subflow` task's own uid (see `start`).
+     */
   end: string;
   reason?: null | ExpansionReason;
 }

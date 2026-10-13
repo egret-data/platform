@@ -35157,10 +35157,12 @@
             ]
           },
           "start": {
-            "type": "string"
+            "type": "string",
+            "description": "The uid of the cluster's `start` marker node. **Exception: a\n`subflow` cluster with a `reason`** (an expansion that could not\nhappen) has no markers and no nodes; its `start` and `end` are both\nthe `Subflow` task's own uid, a node that stays in its parent cluster."
           },
           "end": {
-            "type": "string"
+            "type": "string",
+            "description": "The uid of the cluster's `end` marker node; for a `subflow` cluster\nwith a `reason`, the `Subflow` task's own uid (see `start`)."
           },
           "reason": {
             "oneOf": [
@@ -35169,7 +35171,7 @@
               },
               {
                 "$ref": "#/components/schemas/ExpansionReason",
-                "description": "Why a `subflow` cluster is empty (spec §3.4); `None` on every other\ncluster and on a `subflow` cluster that expanded."
+                "description": "Why a `subflow` cluster is empty (spec §3.4): it then has no nodes and\nno markers, and `start`/`end` name the `Subflow` task node. `None` on\nevery other cluster and on a `subflow` cluster that expanded."
               }
             ]
           }
