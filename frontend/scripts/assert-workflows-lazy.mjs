@@ -48,8 +48,10 @@
  * asserts the topology appears in NO chunk (so wiring it without flipping the flag fails here),
  * `true` runs the checks above. W7c Task 5 set it to `true`: the editor's Topology tab is
  * registered with the other editor tabs (`registerEditorTabs.tsx`, in the flow pages' chunk), but
- * its body, `TopologyTab.tsx`, is reached through `lazy()` only. Each `topology` marker was proven
- * by scratch builds (W7c task-4-report.md, "Chunk proof"; task-5-report.md for `TopologyTab.tsx`).
+ * its body, `TopologyTab.tsx`, is reached through `lazy()` only. W7c Task 6 added the execution's
+ * tab, `ExecutionTopologyTab.tsx`, which `ExecutionDetail.tsx` reaches through `lazy()` only. Each
+ * `topology` marker was proven by scratch builds (W7c task-4-report.md, "Chunk proof";
+ * task-5-report.md for `TopologyTab.tsx`; task-6-report.md for the execution's tab).
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -151,6 +153,11 @@ const MARKERS = [
   // also stands for `layout.ts`, see above).
   // The editor's Topology tab (W7c Task 5): its note for a node no longer in the YAML.
   ["src/components/workflows/topology/TopologyTab.tsx", "is not in the YAML as it is now.", "topology"],
+  // The execution's Topology tab (W7c Task 6), reached from `ExecutionDetail.tsx` through `lazy()`
+  // only: its note for a `?node=` the graph does not have, and the iteration list's truncation
+  // note. `selection.ts` has no literal worth a marker and is reached only through these two.
+  ["src/components/workflows/executions/topology/ExecutionTopologyTab.tsx", "is not a node of this execution's graph.", "topology"],
+  ["src/components/workflows/executions/topology/LoopIterations.tsx", "so later iterations are not listed.", "topology"],
   ["node_modules/@xyflow/react (via TopologyView.tsx)", "react-flow__viewport-portal", "topology"],
   ["node_modules/@dagrejs/dagre (via layout.ts)", "network-simplex", "topology"],
 ];

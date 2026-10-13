@@ -88,6 +88,11 @@ class Server {
   childTotal: number | null = null;
   resume: Reply = { status: 200, body: execution("RUNNING") };
   replay: Reply = { status: 201, body: { ...execution("RUNNING"), id: NEW } };
+  /** `GET …/executions/{EXEC}/graph` (W7c): a graph with no tasks. */
+  graph: Reply = {
+    status: 200,
+    body: { graph: { nodes: [{ uid: "start:flow", node: "start" }, { uid: "end:flow", node: "end" }], edges: [], clusters: [] }, states: {} },
+  };
   private served = 0;
 
   constructor(...gets: Reply[]) {
@@ -107,6 +112,7 @@ class Server {
     if (method === "GET" && path === `${BASE}/executions`) {
       return { status: 200, body: { rows: this.children, total: this.childTotal ?? this.children.length, limit: 50, offset: 0 } };
     }
+    if (method === "GET" && path === `${EXEC_PATH}/graph`) return this.graph;
     if (method === "POST" && path === `${EXEC_PATH}/resume`) return this.resume;
     if (method === "POST" && path === `${EXEC_PATH}/replay`) return this.replay;
     return { status: 404, body: { error: `no route ${method} ${path}` } };
@@ -218,6 +224,40 @@ describe("ExecutionDetail: the header", () => {
     await userEvent.click(screen.getByRole("tab", { name: "Logs" }));
     expect(screen.getByTestId("where")).toHaveTextContent(`/explore/${WS}/workflows/executions/${EXEC}/logs`);
     expect(screen.getByRole("tab", { name: "Logs" })).toHaveAttribute("aria-selected", "true");
+  });
+});
+
+describe("ExecutionDetail: the Topology tab (W7c spec §6.3)", () => {
+  it("comes second, in Kestra's order", async () => {
+    new Server(ok(execution("SUCCESS")));
+    renderPage();
+    await screen.findByRole("heading", { level: 1, name: EXEC });
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Overview", "Topology", "Gantt", "Logs", "Outputs"]);
+  });
+
+  it("opens from its URL, and loads the execution's graph", async () => {
+    const server = new Server(ok(execution("SUCCESS")));
+    renderPage("topology");
+    await screen.findByRole("heading", { level: 1, name: EXEC });
+    expect(screen.getByRole("tab", { name: "Topology" })).toHaveAttribute("aria-selected", "true");
+    // The lazily loaded tab draws the graph's answer: a flow with no tasks.
+    expect(await screen.findByText("This flow has no tasks")).toBeInTheDocument();
+    expect(server.calls.filter((c) => c.path === `${EXEC_PATH}/graph`)).toHaveLength(1);
+  });
+
+  it("is reached by a tab click", async () => {
+    new Server(ok(execution("SUCCESS")));
+    renderPage();
+    await screen.findByRole("heading", { level: 1, name: EXEC });
+    await userEvent.click(screen.getByRole("tab", { name: "Topology" }));
+    expect(screen.getByTestId("where")).toHaveTextContent(`/explore/${WS}/workflows/executions/${EXEC}/topology`);
+  });
+
+  it("still sends an unknown tab to overview", async () => {
+    new Server(ok(execution("SUCCESS")));
+    renderPage("topologie");
+    await screen.findByRole("heading", { level: 1, name: EXEC });
+    expect(screen.getByTestId("where")).toHaveTextContent(`/explore/${WS}/workflows/executions/${EXEC}/overview`);
   });
 });
 
