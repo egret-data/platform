@@ -1231,6 +1231,36 @@ async fn the_modelled_ranger_plugins_route_lists_exactly_the_modelled_pairs() {
     assert_eq!(j["rangerPluginVersionModelled"], true, "{j}");
 }
 
+/// The modelled-pairs list is gated on `engine:read`: a non-admin without it is
+/// refused, one holding exactly that key is served (the positive control that
+/// makes the 403 attributable to the missing key, not to the route).
+#[tokio::test]
+async fn the_modelled_ranger_plugins_route_needs_engine_read() {
+    let Some(mut f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let path = "/engines/modelled-ranger-plugins";
+    // Seed every principal BEFORE the real Cedar PDP snapshots the roles
+    // catalog (the fixture's default PDP allows everything).
+    let none = session_for(&f, "engine_modelled_none", false).await;
+    let creator = session_for_with_permission(&f, "engine_modelled_create", "engine:create").await;
+    let reader = session_for_with_permission(&f, "engine_modelled_reader", "engine:read").await;
+    attach_real_pdp(&mut f).await;
+    for (tag, token) in [("none", none), ("engine:create", creator)] {
+        let (status, j) = call(&f, "GET", path, &token, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{tag}: {j}");
+        assert!(j.get(0).is_none(), "{tag}: no pairs leak: {j}");
+    }
+    let (status, j) = call(&f, "GET", path, &reader, None).await;
+    assert_eq!(status, StatusCode::OK, "engine:read: {j}");
+}
+
 /// `POST /engines` with `kind: "starrocks"` persists a `"starrocks"`-type
 /// engine row (not the back-compat-default `"trino"`), auto-wires a PRIMARY
 /// `egret-warehouse` catalog row the same way the Trino path does (T6 — the
@@ -4407,6 +4437,98 @@ async fn starrocks_update_without_images_keeps_the_stored_images() {
     let applied = port.last_updated();
     let sr = applied.starrocks.as_ref().expect("starrocks config");
     assert_eq!((sr.fe_image.as_str(), sr.cn_image.as_str()), (fe, cn));
+}
+
+/// The StarRocks update guard: with no image in the body AND none stored (a row
+/// 0185 did not foresee), the update is refused with a 400 naming the engine and
+/// the field. It never falls back to the current default, which would roll the
+/// pods onto a release nobody asked for; the provisioner is never called.
+#[tokio::test]
+async fn starrocks_update_with_no_stored_and_no_body_image_is_refused() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_sr_noimg_admin", true).await;
+    let wh_id = seed_provisioned_warehouse_with_secret(&f).await;
+    let name = format!("sr-{}", Uuid::new_v4().simple());
+    let (fe, cn) = ("starrocks/fe-ubuntu:4.1.4", "starrocks/cn-ubuntu:4.1.4");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "warehouseId": wh_id, "kind": "starrocks",
+            "coordinatorReplicas": 1, "workerReplicas": 1,
+            "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            "starrocks": { "feImage": fe, "cnImage": cn, "feReplicas": 1, "cnReplicas": 1 },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = j["id"].as_str().unwrap().to_string();
+
+    for field in ["feImage", "cnImage"] {
+        // Drop the one stored image; the other stays, so the refusal is
+        // attributable to this field alone.
+        let other = if field == "feImage" {
+            ("cnImage", cn)
+        } else {
+            ("feImage", fe)
+        };
+        sqlx::query(
+            "UPDATE engine_mgmt.engines \
+                SET spec = jsonb_set(spec, '{starrocksConfig}', \
+                      (spec -> 'starrocksConfig') - $2 || jsonb_build_object($3::text, $4::text)) \
+              WHERE id = $1",
+        )
+        .bind(Uuid::parse_str(&id).unwrap())
+        .bind(field)
+        .bind(other.0)
+        .bind(other.1)
+        .execute(&f.db.pool)
+        .await
+        .expect("drop the stored image");
+        let before = stored_spec(&f, &id).await;
+        let updates_before = port.updated.lock().unwrap().len();
+
+        let (status, j) = call(
+            &f,
+            "PUT",
+            &format!("/engines/{id}"),
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id, "kind": "starrocks",
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "starrocks": { "cnReplicas": 2, field: "  " },
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}; body={j}");
+        let msg = j["error"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains(&name) && msg.contains(&format!("starrocksConfig.{field}")),
+            "{field}: {msg}"
+        );
+        assert_eq!(
+            stored_spec(&f, &id).await,
+            before,
+            "{field}: spec untouched"
+        );
+        assert_eq!(
+            port.updated.lock().unwrap().len(),
+            updates_before,
+            "{field}: nothing applied"
+        );
+    }
 }
 
 /// P4: a Trino update re-materializes the connections of assigned workspaces.
