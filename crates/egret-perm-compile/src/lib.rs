@@ -55,6 +55,9 @@ pub mod explain_wire;
 // — the one place egret emits a tag ACCESS policy, which AMENDS SP4a's D2. The
 // argument is in that module's own doc comment, at the site.
 pub(crate) mod clearance;
+// View governance A2: the StarRocks priority-1 clearance MASK per classified
+// column, its cleared items folded through `egret-ranger-eval`.
+pub(crate) mod clearance_mask;
 // SP4d-3 Task 5: classify every policy of a profile (owner, verdict, blocker
 // sentences) for `GET /perm/policies/services/{id}/classify`.
 pub mod classify;

@@ -2407,7 +2407,7 @@ async fn profile_plugin_version(
 /// The plugin version of egret's own default image for an engine type: what an
 /// UNBOUND profile is evaluated at. Refused, naming the image, when that pair
 /// is not one the evaluator models.
-fn default_image_plugin_version(
+pub(crate) fn default_image_plugin_version(
     engine: egret_ranger_eval::eval::EngineType,
 ) -> Result<egret_ranger_eval::eval::PluginVersion, String> {
     use egret_ranger_eval::eval::EngineType as E;

@@ -137,6 +137,14 @@
 //! BLOCKED (§4c) and declined to call them measured. The ruling is to state the
 //! limit, not to block view creation, so it is stated in D0b, in D5's
 //! acceptance criterion, and in the UI where a clearance is authored.
+//!
+//! **Amended by view governance A2 (2026-10-13) for StarRocks.** The per-column
+//! deny above is unchanged and still withholds only the DIRECT read. Each
+//! tagged column now also gets a priority-1 `MASK_NULL` clearance mask, which a
+//! base-column mask applies through every view kind; this module hands the
+//! (tag, column, cleared) triples to `crate::trigger`, which folds them through
+//! the evaluator once the whole desired set is known. See
+//! `crate::clearance_mask`.
 
 use std::collections::BTreeMap;
 
@@ -150,6 +158,7 @@ use egret_policy::admin::{
 };
 use egret_policy::{tagged_columns_for_service_via, COMPILER_CLEARANCE_PREFIX};
 
+use crate::clearance_mask::PendingMask;
 use crate::grants::PolicyTarget;
 use crate::rules::{column_resources, stamp_service_type, TaggedColumn, PUBLIC_GROUP};
 use crate::trigger::{SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING};
@@ -185,6 +194,11 @@ struct GateRow {
 pub(crate) struct Clearances {
     pub(crate) policies: Vec<(String, Value)>,
     pub(crate) skipped: Vec<SkippedItem>,
+    /// StarRocks only (view governance A2): one entry per (gated tag, tagged
+    /// column), for `crate::trigger` to fold into a priority-1 clearance MASK
+    /// once the whole desired set is known — the fold reads the profile's other
+    /// masks, which this function cannot see. Empty on Trino.
+    pub(crate) masks: Vec<PendingMask>,
 }
 
 /// Compile every gated tag into a clearance deny for one profile.
@@ -226,6 +240,7 @@ pub(crate) async fn compile_clearance(
     let mut out = Clearances {
         policies: Vec::new(),
         skipped: Vec::new(),
+        masks: Vec::new(),
     };
     if gates.is_empty() {
         return Ok(out);
@@ -370,6 +385,14 @@ pub(crate) async fn compile_clearance(
                         name,
                         stamp_service_type(access_to_ranger_json(&input), engine),
                     ));
+                    // The deny withholds a DIRECT read only; a plain view reads
+                    // straight through it. The column's mask (A2) is what holds
+                    // through views — see `crate::clearance_mask`.
+                    out.masks.push(PendingMask {
+                        tag_id: g.tag_id,
+                        column: col.clone(),
+                        cleared: cleared.clone(),
+                    });
                 }
             }
         }

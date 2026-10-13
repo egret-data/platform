@@ -59,6 +59,8 @@ struct Fixture {
     policy: PolicyStore,
     service_id: i64,
     warehouse_id: Uuid,
+    catalog_id: Uuid,
+    engine_id: Uuid,
     catalog_name: String,
 }
 
@@ -108,10 +110,16 @@ async fn seed_starrocks(db: &Db) -> Fixture {
     .expect("warehouse");
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'starrocks','egret','{}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'starrocks','egret',$3,$2) RETURNING id",
     )
     .bind(unique("clr-eng"))
     .bind(service.id)
+    // Pinned to egret's default image: the clearance MASK (view governance A2)
+    // is folded through the evaluator at the bound engine's plugin version,
+    // and an engine whose image says nothing about its plugin refuses.
+    .bind(serde_json::json!({
+        "starrocksConfig": {"feImage": egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image}
+    }))
     .fetch_one(pool)
     .await
     .expect("engine");
@@ -141,6 +149,8 @@ async fn seed_starrocks(db: &Db) -> Fixture {
         policy,
         service_id: service.id,
         warehouse_id,
+        catalog_id,
+        engine_id,
         catalog_name,
     }
 }
@@ -237,10 +247,14 @@ async fn gate(db: &Db, tag_id: Uuid, roles: &[&str]) {
 /// Every clearance policy for `tag_id` under `service_id`, as
 /// `(name, policy_jsonb)` ordered by name. Scoped to this test's own tag by the
 /// name prefix the compiler builds: `<prefix><tag_id>-<catalog>.<schema>.…`.
+///
+/// The DENIES only (`policyType 0`): since view governance A2 each tagged column
+/// also gets a clearance MASK under the same prefix — see [`clearance_masks`].
 async fn clearance_policies(db: &Db, service_id: i64, tag_id: Uuid) -> Vec<(String, Value)> {
     sqlx::query_as(
         "SELECT name, policy_jsonb FROM policy.authz_policies \
-         WHERE service_id = $1 AND name LIKE $2 || '%' ORDER BY name",
+         WHERE service_id = $1 AND name LIKE $2 || '%' \
+           AND (policy_jsonb->>'policyType')::int = 0 ORDER BY name",
     )
     .bind(service_id)
     .bind(format!("{COMPILER_CLEARANCE_PREFIX}{tag_id}-"))
@@ -499,5 +513,323 @@ async fn a_gate_with_no_tagged_column_compiles_to_nothing_but_still_compiles_onc
         1,
         "the same gate must compile once a column carries the tag — otherwise this file would \
          pass against a compiler that ignored StarRocks clearances altogether"
+    );
+}
+
+// ── view governance A2: the clearance MASK, folded through the evaluator ──
+
+/// The clearance MASK for `tag_id` on `{catalog}.sales.{table}.{column}`, by
+/// the name the compiler builds:
+/// `<prefix><tag_id>-mask-<catalog>.<database>.<table>.<column>`.
+async fn clearance_mask(
+    db: &Db,
+    service_id: i64,
+    tag_id: Uuid,
+    catalog: &str,
+    table: &str,
+    column: &str,
+) -> Option<Value> {
+    sqlx::query_scalar(
+        "SELECT policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(service_id)
+    .bind(format!(
+        "{COMPILER_CLEARANCE_PREFIX}{tag_id}-mask-{catalog}.sales.{table}.{column}"
+    ))
+    .fetch_optional(&db.pool)
+    .await
+    .expect("policy read")
+}
+
+/// Every clearance MASK for `tag_id` under `service_id`, ordered by name.
+async fn clearance_masks(db: &Db, service_id: i64, tag_id: Uuid) -> Vec<(String, Value)> {
+    sqlx::query_as(
+        "SELECT name, policy_jsonb FROM policy.authz_policies \
+         WHERE service_id = $1 AND name LIKE $2 || '%' ORDER BY name",
+    )
+    .bind(service_id)
+    .bind(format!("{COMPILER_CLEARANCE_PREFIX}{tag_id}-mask-"))
+    .fetch_all(&db.pool)
+    .await
+    .expect("policy read")
+}
+
+/// `(users, groups, dataMaskType)` of each item, in order.
+fn mask_items(body: &Value) -> Vec<(Vec<String>, Vec<String>, String)> {
+    body["dataMaskPolicyItems"]
+        .as_array()
+        .expect("dataMaskPolicyItems")
+        .iter()
+        .map(|i| {
+            (
+                strings_of(&i["users"]),
+                strings_of(&i["groups"]),
+                i["dataMaskInfo"]["dataMaskType"]
+                    .as_str()
+                    .expect("dataMaskType")
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+/// A path mask rule on `{catalog}.sales.orders.{column}` — `*` is every column
+/// of the table — exempting `exempt` (bare usernames).
+fn mask_rule(f: &Fixture, column: &str, mask_type: &str, exempt: &[&str]) -> egret_perm::Rule {
+    egret_perm::Rule {
+        id: Uuid::nil(),
+        name: unique("viewgov-mask"),
+        kind: egret_perm::RuleKind::Mask {
+            mask_type: mask_type.to_string(),
+            value_expr: None,
+        },
+        selector: egret_perm::Selector::Path(egret_perm::Scope {
+            catalog_id: f.catalog_id,
+            schema: Some("sales".to_string()),
+            table: Some("orders".to_string()),
+            column: Some(column.to_string()),
+        }),
+        exempt: egret_perm::PrincipalSet {
+            include: exempt
+                .iter()
+                .map(|u| egret_perm::Principal {
+                    kind: egret_perm::PrincipalKind::User,
+                    r#ref: u.to_string(),
+                })
+                .collect(),
+            exclude: Vec::new(),
+        },
+    }
+}
+
+async fn rule_policy(db: &Db, service_id: i64, rule_id: Uuid) -> (i64, Value) {
+    sqlx::query_as(
+        "SELECT id, policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(service_id)
+    .bind(format!("{}{rule_id}", egret_policy::COMPILER_RULE_PREFIX))
+    .fetch_one(&db.pool)
+    .await
+    .expect("rule policy")
+}
+
+/// Two cleared users (`ann`, `bob`) and the classification gating `ssn`.
+async fn cleared_pair(db: &Db, tag_id: Uuid) -> (String, String) {
+    let ann = unique("ann");
+    let bob = unique("bob");
+    let ann_id = new_user(db, &format!("{ann}@egret.local"), &ann).await;
+    let bob_id = new_user(db, &format!("{bob}@egret.local"), &bob).await;
+    let role_name = unique("viewgov-clear");
+    let role_id = new_role(db, &role_name).await;
+    grant_role(db, ann_id, role_id).await;
+    grant_role(db, bob_id, role_id).await;
+    gate(db, tag_id, &[&role_name]).await;
+    (ann, bob)
+}
+
+/// **The headline of A2.** A StarRocks classified column beside a WILDCARD rule
+/// mask (`MASK` on every column of the table, exempting ann) compiles to a
+/// priority-1 clearance mask whose cleared items are what that rule gives each
+/// cleared user — ann `MASK_NONE`, bob `MASK` — then `{public}` `MASK_NULL`.
+/// The rule's own policy is untouched, and the stored-overlap report finds no
+/// pair on that column: different priorities are ordered, not ambiguous.
+#[tokio::test]
+async fn a_classified_column_gets_a_priority_one_mask_folded_from_the_rule_masks() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, _key) = new_tag(&db).await;
+    tag_column(&db, tag_id, f.warehouse_id, "orders", "ssn").await;
+
+    let ann = unique("ann");
+    let rule_id = f
+        .perm
+        .create_rule(&mask_rule(&f, "*", "MASK", &[&ann]))
+        .await
+        .expect("create rule");
+    // The rule policy BEFORE any clearance exists.
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile before the gate");
+    let (rule_policy_id, rule_body_before) = rule_policy(&db, f.service_id, rule_id).await;
+    assert!(
+        clearance_masks(&db, f.service_id, tag_id).await.is_empty(),
+        "no gate, no clearance mask"
+    );
+
+    let bob = unique("bob");
+    let ann_id = new_user(&db, &format!("{ann}@egret.local"), &ann).await;
+    let bob_id = new_user(&db, &format!("{bob}@egret.local"), &bob).await;
+    let role_name = unique("viewgov-clear");
+    let role_id = new_role(&db, &role_name).await;
+    grant_role(&db, ann_id, role_id).await;
+    grant_role(&db, bob_id, role_id).await;
+    gate(&db, tag_id, &[&role_name]).await;
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile with the gate");
+
+    let mask = clearance_mask(&db, f.service_id, tag_id, &f.catalog_name, "orders", "ssn")
+        .await
+        .expect("the classified column must get a clearance mask");
+    assert_eq!(
+        mask_items(&mask),
+        vec![
+            (vec![ann.clone()], vec![], "MASK_NONE".to_string()),
+            (vec![bob.clone()], vec![], "MASK".to_string()),
+            (vec![], vec!["public".to_string()], "MASK_NULL".to_string()),
+        ],
+        "cleared items reproduce the rule mask per user, then {{public}} MASK_NULL"
+    );
+    assert_eq!(mask["policyPriority"], serde_json::json!(1));
+    assert_eq!(mask["policyType"], serde_json::json!(1));
+    assert_eq!(mask["serviceType"], serde_json::json!("starrocks"));
+    let r = &mask["resources"];
+    assert_eq!(
+        strings_of(&r["catalog"]["values"]),
+        vec![f.catalog_name.clone()]
+    );
+    assert_eq!(strings_of(&r["database"]["values"]), vec!["sales"]);
+    assert_eq!(strings_of(&r["table"]["values"]), vec!["orders"]);
+    assert_eq!(strings_of(&r["column"]["values"]), vec!["ssn"]);
+    assert_eq!(
+        clearance_masks(&db, f.service_id, tag_id).await.len(),
+        1,
+        "one mask per classified column"
+    );
+    // The deny for direct reads is still there (A1).
+    assert_eq!(clearance_policies(&db, f.service_id, tag_id).await.len(), 1);
+
+    // The rule policy is unchanged: same row, same body.
+    let (rule_policy_id_after, rule_body_after) = rule_policy(&db, f.service_id, rule_id).await;
+    assert_eq!(rule_policy_id_after, rule_policy_id);
+    assert_eq!(rule_body_after, rule_body_before);
+
+    // `GET /perm/overlaps`' store function reports no pair in this profile.
+    let mut conn = db.pool.acquire().await.expect("conn");
+    let overlaps: Vec<_> = egret_perm_compile::overlap::stored_overlaps_via(&mut conn)
+        .await
+        .expect("overlaps")
+        .into_iter()
+        .filter(|o| o.service_id == f.service_id)
+        .collect();
+    assert!(
+        overlaps.is_empty(),
+        "a priority-1 clearance mask beside a priority-0 rule mask is ordered, not ambiguous: \
+         {overlaps:?}"
+    );
+}
+
+/// Two priority-0 rule masks that both reach a cleared user on the classified
+/// column and disagree: the evaluator is `Undecidable` for that user, and the
+/// recompile refuses, naming the column and the user — nothing is guessed.
+#[tokio::test]
+async fn an_undecidable_cleared_user_refuses_the_recompile() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, _key) = new_tag(&db).await;
+    tag_column(&db, tag_id, f.warehouse_id, "orders", "ssn").await;
+    let (ann, bob) = cleared_pair(&db, tag_id).await;
+    let (first, _) = if ann < bob { (ann, bob) } else { (bob, ann) };
+
+    f.perm
+        .create_rule(&mask_rule(&f, "ssn", "MASK", &[]))
+        .await
+        .expect("create rule");
+    f.perm
+        .create_rule(&mask_rule(&f, "*", "MASK_NULL", &[]))
+        .await
+        .expect("create rule");
+
+    let err = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect_err("an undecidable fold must refuse");
+    assert_eq!(
+        err,
+        egret_perm::CompileError::ClearanceMaskUndecidable {
+            column: format!("{}.sales.orders.ssn", f.catalog_name),
+            user: first,
+        }
+    );
+    assert!(clearance_masks(&db, f.service_id, tag_id).await.is_empty());
+}
+
+/// The fold is an evaluation at the bound engine's plugin version. An engine
+/// whose image names no plugin egret has measured refuses the recompile, naming
+/// the engine — never a fold at a guessed version.
+#[tokio::test]
+async fn an_unmodelled_bound_engine_refuses_the_fold() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, _key) = new_tag(&db).await;
+    tag_column(&db, tag_id, f.warehouse_id, "orders", "ssn").await;
+    cleared_pair(&db, tag_id).await;
+    sqlx::query("UPDATE engine_mgmt.engines SET spec = '{}'::jsonb WHERE id = $1")
+        .bind(f.engine_id)
+        .execute(&db.pool)
+        .await
+        .expect("unpin the engine");
+
+    let err = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect_err("an unmodelled engine must refuse");
+    match err {
+        egret_perm::CompileError::ClearanceMaskEngineUnmodelled { reason, .. } => {
+            assert!(reason.contains("has no image in its spec"), "{reason}");
+        }
+        other => panic!("expected ClearanceMaskEngineUnmodelled, got {other:?}"),
+    }
+}
+
+/// A hand-written (operator) mask on the classified column is served beside the
+/// compiled set and reaches a cleared user exactly as a rule mask does, so the
+/// fold reads it too. Left out, the cleared user would be folded `MASK_NONE`
+/// where they are served `MASK` today.
+#[tokio::test]
+async fn a_hand_written_mask_is_folded_like_a_rule_mask() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, _key) = new_tag(&db).await;
+    tag_column(&db, tag_id, f.warehouse_id, "orders", "ssn").await;
+    let (ann, bob) = cleared_pair(&db, tag_id).await;
+
+    let lvl =
+        |v: &str| serde_json::json!({"values": [v], "isExcludes": false, "isRecursive": false});
+    let name = unique("hand-mask");
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+         VALUES ($1, $2, $3, true, 'operator')",
+    )
+    .bind(f.service_id)
+    .bind(&name)
+    .bind(serde_json::json!({
+        "name": name, "service": "x", "serviceType": "starrocks",
+        "policyType": 1, "isEnabled": true,
+        "resources": {"catalog": lvl(&f.catalog_name), "database": lvl("sales"),
+                      "table": lvl("orders"), "column": lvl("ssn")},
+        "dataMaskPolicyItems": [{
+            "users": [], "groups": ["public"], "roles": [],
+            "accesses": [{"type": "select", "isAllowed": true}],
+            "dataMaskInfo": {"dataMaskType": "MASK"}
+        }],
+        "policyItems": [], "denyPolicyItems": []
+    }))
+    .execute(&db.pool)
+    .await
+    .expect("hand-written mask");
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+    let mask = clearance_mask(&db, f.service_id, tag_id, &f.catalog_name, "orders", "ssn")
+        .await
+        .expect("clearance mask");
+    let mut both = vec![ann, bob];
+    both.sort();
+    assert_eq!(
+        mask_items(&mask),
+        vec![
+            (both, vec![], "MASK".to_string()),
+            (vec![], vec!["public".to_string()], "MASK_NULL".to_string()),
+        ]
     );
 }

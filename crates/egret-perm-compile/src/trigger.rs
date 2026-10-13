@@ -559,6 +559,28 @@ async fn compile_desired(
         );
     }
 
+    // **View governance A2: the StarRocks clearance MASK, folded through the
+    // evaluator.** A base deny does not hold through a plain view; a base mask
+    // does. Each classified column gets a priority-1 data-mask policy whose
+    // `{public}` item is `MASK_NULL` and whose cleared items reproduce what the
+    // profile's OTHER masks give each cleared user — computed by
+    // `egret-ranger-eval`, refused when undecidable. Folded HERE because only
+    // the complete desired set holds every rule mask (exact AND wildcard) that
+    // can reach the column, and BEFORE the overlap check below, which must see
+    // the masks it will serve. Read `crate::clearance_mask`'s module doc.
+    if engine == EngineType::StarRocks && !clearances.masks.is_empty() {
+        fold_clearance_masks(
+            conn,
+            service_id,
+            &svc.name,
+            engine,
+            clearances.masks,
+            &writable,
+            &mut desired,
+        )
+        .await?;
+    }
+
     // **SP4d debt Task 6, item 1: the write side of `EvalOrderAmbiguous`** —
     // widened by SP4d-4 Task 3 to the profile's whole evaluation unit.
     // Checked HERE, on the complete desired set, because no single
@@ -648,6 +670,67 @@ struct Compiled {
     /// [`apply_diff_in_tx`]'s [`CompileError::ProfileExpansionCeiling`]
     /// refusal can name the profile, not just its numeric id.
     profile_name: String,
+}
+
+/// Fold one priority-1 clearance mask per classified column into `desired`
+/// (StarRocks only — see the call site and `crate::clearance_mask`).
+///
+/// `others` is every data-mask body this profile will serve that is not a
+/// clearance mask: the desired rule masks, plus the profile's ENABLED
+/// hand-written masks (stored policies outside the compiler's prefixes). The
+/// latter are served beside the compiled set and reach a cleared user exactly
+/// as a rule mask does, so leaving them out would fold a cleared user a weaker
+/// mask than the one they are served today.
+async fn fold_clearance_masks(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    profile: &str,
+    engine: EngineType,
+    pending: Vec<crate::clearance_mask::PendingMask>,
+    writable: &HashMap<String, i64>,
+    desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
+) -> Result<(), CompileError> {
+    let is_mask = |b: &Value| b.get("policyType").and_then(Value::as_i64) == Some(1);
+    let mut others: Vec<Value> = desired
+        .iter()
+        .filter(|((sid, _), dp)| {
+            *sid == service_id && dp.source_kind != SourceKind::Clearance && is_mask(&dp.body)
+        })
+        .map(|(_, dp)| dp.body.clone())
+        .collect();
+    others.extend(
+        egret_policy::enabled_policies_for_service_via(conn, service_id)
+            .await
+            .map_err(db_err)?
+            .into_iter()
+            .filter(|b| {
+                is_mask(b)
+                    && !b
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(egret_policy::is_compiler_owned_policy_name)
+            }),
+    );
+
+    let plugins =
+        crate::clearance_mask::fold_plugin_versions(conn, service_id, profile, engine).await?;
+    for p in crate::clearance_mask::merge_by_column(pending) {
+        let name = crate::clearance_mask::clearance_mask_name(p.tag_id, &p.column);
+        let body = crate::clearance_mask::fold_at_versions(
+            profile, &name, &p.column, &p.cleared, &others, engine, &plugins,
+        )?;
+        let target = target_service_id(&body, writable, &format!("clearance mask {name}"))?;
+        desired.insert(
+            (target, name),
+            DesiredPolicy {
+                body,
+                source_kind: SourceKind::Clearance,
+                grant_id: None,
+                rule_id: None,
+            },
+        );
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
