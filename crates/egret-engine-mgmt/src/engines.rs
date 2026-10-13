@@ -307,9 +307,10 @@ pub(crate) struct EngineDto {
     /// External only: the port the engine answers on.
     #[serde(skip_serializing_if = "Option::is_none")]
     port: Option<i32>,
-    /// Provisioned only: the full image ref the engine's stored spec pins (for
-    /// StarRocks the FE image; Trino's bare `imageVersion` expanded to
-    /// `trinodb/trino:<version>`). Absent when the spec pins none.
+    /// Provisioned only: the full image ref the engine's stored spec runs (for
+    /// StarRocks the FE image; for Trino the `trinoConfig.image` override when
+    /// set, else the bare `imageVersion` expanded to `trinodb/trino:<version>`).
+    /// Absent when the spec pins none.
     #[serde(skip_serializing_if = "Option::is_none")]
     image: Option<String>,
     /// The Ranger plugin version egret reads this engine at. External: the
@@ -1515,7 +1516,14 @@ fn trino_config_from_json(v: &serde_json::Value) -> TrinoConfigReq {
         autoscaling: parse_autoscaling(&v["autoscaling"]),
         // ── pod & scheduling (cluster-wide) — k8s object names / raw JSON, no
         //    secret resolution, so parsed straight from the wire here. ────────
-        image: v["image"].as_str().map(Into::into),
+        // Trimmed, and blank means "no override" (run `trinodb/trino:{imageVersion}`),
+        // exactly as `egret_perm::stored_engine_image` reads it — the image egret
+        // reports and judges is the image this renders.
+        image: v["image"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(Into::into),
         image_pull_secrets: v["imagePullSecrets"]
             .as_array()
             .map(|a| {
@@ -7064,6 +7072,52 @@ mod tests {
         assert_eq!(d.ranger_plugin_version.as_deref(), Some("2.8.0"));
         assert_eq!(d.ranger_plugin_version_modelled, Some(true));
         assert_eq!(d.ranger_plugin_version_note, None);
+    }
+
+    #[test]
+    fn a_trino_image_override_is_what_the_dto_shows_and_judges() {
+        let d = dto_of(
+            "trino",
+            "provisioned",
+            serde_json::json!({
+                "imageVersion": "483",
+                "trinoConfig": { "coordinator": {}, "image": "registry.corp/trino-custom:x" }
+            }),
+            None,
+        );
+        assert_eq!(d.image.as_deref(), Some("registry.corp/trino-custom:x"));
+        assert_eq!(d.ranger_plugin_version, None);
+        assert_eq!(d.ranger_plugin_version_modelled, Some(false));
+        let note = d.ranger_plugin_version_note.expect("a note");
+        assert!(note.contains("registry.corp/trino-custom:x"), "{note}");
+    }
+
+    #[test]
+    fn the_provisioner_and_the_report_agree_on_the_trino_image() {
+        // Whatever the DTO reports is the image the provisioner renders: a
+        // blank override falls back to `imageVersion` in BOTH, and a padded one
+        // is trimmed in both.
+        for (raw, expected) in [
+            ("", None),
+            ("   ", None),
+            ("  trinodb/trino:470  ", Some("trinodb/trino:470")),
+            ("registry.corp/x:1", Some("registry.corp/x:1")),
+        ] {
+            let spec = serde_json::json!({
+                "imageVersion": "483",
+                "trinoConfig": { "coordinator": {}, "image": raw }
+            });
+            let cfg = build_trino_config(&spec);
+            assert_eq!(cfg.image.as_deref(), expected, "{raw:?}");
+            let runs = cfg.image.clone().unwrap_or_else(|| {
+                format!("trinodb/trino:{}", spec["imageVersion"].as_str().unwrap())
+            });
+            assert_eq!(
+                egret_perm::stored_engine_image("trino", &spec).as_deref(),
+                Some(runs.as_str()),
+                "{raw:?}"
+            );
+        }
     }
 
     #[test]

@@ -66,6 +66,14 @@ Trino, `imageVersion` is the bare tag and optionally the digest:
 
 egret stores this as `spec.imageVersion` and shows it as `trinodb/trino:483@sha256:...`.
 
+**A Trino image override wins over `imageVersion`.** When the engine's per-role config sets `trinoConfig.image` (the "Image" field on the engine's config page), the provisioner runs that image and ignores `imageVersion`. egret reads the same field: the engine page, the API's `image` and the plugin resolution all use the override as written, and the exact-image table above decides what it means. So:
+
+- `trinoConfig.image: "trinodb/trino:483"` (or with the measured digest) resolves to plugin 2.8.0;
+- `trinoConfig.image: "trinodb/trino:483@sha256:<any other digest>"` is not modelled;
+- a custom or mirrored image (`registry.corp/trino-custom:x`) is not modelled, and the note names it, even when `imageVersion` is 483. egret cannot tell which plugin a rebuilt image carries.
+
+A blank override counts as no override, in both the provisioner and the report. To pin an engine that has an override, either set the override to a measured image or clear it and pin `imageVersion`.
+
 StarRocks, the body's `starrocks` object takes `feImage` and `cnImage`; egret stores them as `spec.starrocksConfig.feImage` and `spec.starrocksConfig.cnImage`. Plugin resolution reads `feImage`:
 
 ```json

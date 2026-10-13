@@ -37646,7 +37646,7 @@
               "string",
               "null"
             ],
-            "description": "Provisioned only: the full image ref the engine's stored spec pins (for\nStarRocks the FE image; Trino's bare `imageVersion` expanded to\n`trinodb/trino:<version>`). Absent when the spec pins none."
+            "description": "Provisioned only: the full image ref the engine's stored spec runs (for\nStarRocks the FE image; for Trino the `trinoConfig.image` override when\nset, else the bare `imageVersion` expanded to `trinodb/trino:<version>`).\nAbsent when the spec pins none."
           },
           "rangerPluginVersion": {
             "type": [

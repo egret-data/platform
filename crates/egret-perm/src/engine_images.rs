@@ -60,9 +60,34 @@ pub fn trino_image_ref(image_version: &str) -> String {
     format!("trinodb/trino:{image_version}")
 }
 
-/// The full image ref an engine's stored spec pins, or `None` when the spec
-/// carries no image for this engine type (absent or blank).
+/// A non-blank string at `v`, trimmed.
+fn non_blank(v: Option<&serde_json::Value>) -> Option<&str> {
+    v?.as_str().map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// The image a Trino spec overrides `imageVersion` with. Mirrors the
+/// provisioner: `trinoConfig.image` is read only from the per-role shape
+/// (`trinoConfig.coordinator` an object) and only when non-blank; otherwise the
+/// engine runs `trinodb/trino:{imageVersion}`.
+fn trino_image_override(spec: &serde_json::Value) -> Option<&str> {
+    let tc = spec.get("trinoConfig")?;
+    if !tc.get("coordinator").is_some_and(|c| c.is_object()) {
+        return None;
+    }
+    non_blank(tc.get("image"))
+}
+
+/// The full image ref an engine's stored spec runs, or `None` when the spec
+/// carries no image for this engine type (absent or blank). For Trino a
+/// `trinoConfig.image` override wins over `imageVersion`, as it does in the
+/// provisioner, and is returned as written (trimmed) for the exact-image table
+/// to judge.
 pub fn stored_engine_image(engine_type: &str, spec: &serde_json::Value) -> Option<String> {
+    if engine_type == "trino" {
+        if let Some(image) = trino_image_override(spec) {
+            return Some(image.to_string());
+        }
+    }
     let raw = match engine_type {
         "trino" => spec.get("imageVersion")?.as_str()?.trim().to_string(),
         "starrocks" => spec
@@ -220,6 +245,78 @@ mod tests {
         assert_eq!(
             stored_engine_image("risingwave", &json!({"imageVersion": "1"})),
             None
+        );
+    }
+
+    fn trino_spec_with_image(image: &str) -> serde_json::Value {
+        json!({
+            "imageVersion": "483",
+            "trinoConfig": {"coordinator": {"replicas": 1}, "image": image}
+        })
+    }
+
+    fn trino_report(spec: &serde_json::Value) -> Result<&'static str, String> {
+        let image = stored_engine_image("trino", spec).expect("an image");
+        plugin_version_for_image("trino", &image)
+    }
+
+    #[test]
+    fn a_trino_image_override_is_the_image_that_runs() {
+        // A custom image is reported as itself, so it is unmodelled and the
+        // note names it — never the plugin of `imageVersion`.
+        let custom = trino_spec_with_image("registry.corp/trino-custom:x");
+        assert_eq!(
+            stored_engine_image("trino", &custom),
+            Some("registry.corp/trino-custom:x".into())
+        );
+        let err = trino_report(&custom).unwrap_err();
+        assert!(err.contains("registry.corp/trino-custom:x"), "{err}");
+
+        // The override is trimmed and the exact-image table decides.
+        assert_eq!(
+            trino_report(&trino_spec_with_image("  trinodb/trino:483  ")),
+            Ok("2.8.0")
+        );
+        let wrong = "trinodb/trino:483@sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        assert!(trino_report(&trino_spec_with_image(wrong)).is_err());
+
+        // A blank override falls back to `imageVersion`, as the provisioner does.
+        for blank in ["", "   "] {
+            assert_eq!(
+                stored_engine_image("trino", &trino_spec_with_image(blank)),
+                Some("trinodb/trino:483".into()),
+                "{blank:?}"
+            );
+        }
+        // A non-string override is not an image either.
+        assert_eq!(
+            stored_engine_image(
+                "trino",
+                &json!({"imageVersion": "483", "trinoConfig": {"coordinator": {}, "image": 7}})
+            ),
+            Some("trinodb/trino:483".into())
+        );
+        // An override with no imageVersion still names the image that runs.
+        assert_eq!(
+            stored_engine_image(
+                "trino",
+                &json!({"trinoConfig": {"coordinator": {}, "image": "trinodb/trino:470"}})
+            ),
+            Some("trinodb/trino:470".into())
+        );
+    }
+
+    #[test]
+    fn a_legacy_flat_trino_spec_ignores_the_override_like_the_provisioner() {
+        // The provisioner reads `trinoConfig.image` only from the per-role shape
+        // (`trinoConfig.coordinator` an object); the legacy flat spec runs
+        // `trinodb/trino:{imageVersion}` whatever `trinoConfig.image` says.
+        assert_eq!(
+            stored_engine_image(
+                "trino",
+                &json!({"imageVersion": "483", "trinoConfig": {"image": "registry.corp/x:1"}})
+            ),
+            Some("trinodb/trino:483".into())
         );
     }
 

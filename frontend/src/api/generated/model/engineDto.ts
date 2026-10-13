@@ -34,9 +34,10 @@ export interface EngineDto {
      */
   port?: number | null;
   /**
-     * Provisioned only: the full image ref the engine's stored spec pins (for
-     * StarRocks the FE image; Trino's bare `imageVersion` expanded to
-     * `trinodb/trino:<version>`). Absent when the spec pins none.
+     * Provisioned only: the full image ref the engine's stored spec runs (for
+     * StarRocks the FE image; for Trino the `trinoConfig.image` override when
+     * set, else the bare `imageVersion` expanded to `trinodb/trino:<version>`).
+     * Absent when the spec pins none.
      * @nullable
      */
   image?: string | null;
