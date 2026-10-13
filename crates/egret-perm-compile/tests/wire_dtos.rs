@@ -345,7 +345,6 @@ fn cause_plugin_version_mismatch() {
     let cause = UndecidableCause::PluginVersionMismatch {
         engine: EngineType::StarRocks,
         declared: PluginVersion::Ranger2_5_0,
-        measured: PluginVersion::Ranger2_8_0,
     };
     let wire = WireUndecidableCause::from(&cause);
     assert_eq!(
@@ -353,7 +352,6 @@ fn cause_plugin_version_mismatch() {
         WireUndecidableCause::PluginVersionMismatch {
             engine: WireEngineType::StarRocks,
             declared: WirePluginVersion::Ranger2_5_0,
-            measured: WirePluginVersion::Ranger2_8_0,
         }
     );
 }

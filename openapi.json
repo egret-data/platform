@@ -46725,7 +46725,6 @@
             "required": [
               "engine",
               "declared",
-              "measured",
               "kind"
             ],
             "properties": {
@@ -46733,9 +46732,6 @@
                 "$ref": "#/components/schemas/WireEngineType"
               },
               "declared": {
-                "$ref": "#/components/schemas/WirePluginVersion"
-              },
-              "measured": {
                 "$ref": "#/components/schemas/WirePluginVersion"
               },
               "kind": {

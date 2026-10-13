@@ -1107,14 +1107,10 @@ fn a_declared_plugin_version_must_match_the_measured_one_for_the_engine() {
         mask_causes(&d)
     );
 
-    assert_eq!(
-        EngineType::Trino.plugin_version(),
-        PluginVersion::Ranger2_5_0
-    );
-    assert_eq!(
-        EngineType::StarRocks.plugin_version(),
-        PluginVersion::Ranger2_8_0
-    );
+    assert!(EngineType::Trino.models(PluginVersion::Ranger2_5_0));
+    assert!(!EngineType::Trino.models(PluginVersion::Ranger2_8_0));
+    assert!(EngineType::StarRocks.models(PluginVersion::Ranger2_8_0));
+    assert!(!EngineType::StarRocks.models(PluginVersion::Ranger2_5_0));
 }
 
 /// Declaring the engine that DOES match changes nothing — the guard is a

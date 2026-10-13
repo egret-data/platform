@@ -62,7 +62,7 @@ async fn trino_profile_with_engine_and_config(
         .expect("create trino service");
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'trino','egret','{\"imageVersion\":\"470\"}'::jsonb,$2) RETURNING id",
     )
     .bind(unique("mig-eng"))
     .bind(svc.id)
@@ -1534,4 +1534,73 @@ async fn an_external_trino_declaring_2_5_0_is_proved_on_2_5_0() {
         body["profiles"][0]["plugin_versions"],
         json!(["ranger_2_5_0"])
     );
+}
+
+/// Point the provisioned engine bound to `f.p` at a Trino `imageVersion`.
+async fn pin_bound_trino_image(f: &Fixture, image_version: &str) {
+    let res = sqlx::query(
+        "UPDATE engine_mgmt.engines SET spec = jsonb_build_object('imageVersion', $2::text) \
+          WHERE authz_service_id = $1",
+    )
+    .bind(f.p)
+    .bind(image_version)
+    .execute(&f.db.pool)
+    .await
+    .expect("pin the bound engine's image");
+    assert_eq!(res.rows_affected(), 1);
+}
+
+/// A provisioned engine's plugin comes from its exact image. Trino 483 ships
+/// 2.8.0, a pair the evaluator is not yet read against, so the gate refuses.
+/// TEMPORARY: Task 5 proves Trino@2.8.0 and inverts this test.
+#[tokio::test]
+async fn a_provisioned_trino_on_an_unmodelled_image_refuses_the_migration() {
+    let Some(f) = setup().await else { return };
+    pin_bound_trino_image(&f, "483").await;
+    let name = unique("alice reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let refusal = body["refusal"].as_str().expect("refusal");
+    assert!(
+        refusal.contains("2.8.0") && refusal.contains("not been verified"),
+        "{refusal}"
+    );
+    assert_eq!(grants_on_catalog(&f).await, 0, "nothing is written");
+    assert!(enabled(&f, id).await, "the original stays on");
+}
+
+/// A floating tag cannot say which plugin it ships, so the gate refuses with
+/// the fix (pin the image) instead of assuming the type's plugin.
+#[tokio::test]
+async fn a_provisioned_trino_on_a_floating_image_refuses_the_migration_with_the_fix() {
+    let Some(f) = setup().await else { return };
+    pin_bound_trino_image(&f, "latest").await;
+    let name = unique("alice reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], true).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let refusal = body["refusal"].as_str().expect("refusal");
+    assert!(
+        refusal.contains("trinodb/trino:latest") && refusal.contains("pin"),
+        "{refusal}"
+    );
+    assert_eq!(grants_on_catalog(&f).await, 0, "nothing is written");
+    assert!(enabled(&f, id).await, "the original stays on");
 }

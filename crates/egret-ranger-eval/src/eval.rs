@@ -654,16 +654,20 @@ impl EngineType {
         }
     }
 
-    /// The `ranger-plugins-common` version the engine egret provisions
-    /// actually loads, measured on the running pods and recorded in
-    /// `docs/en/plans/2026-09-28-sp4d-plugin-version-result.md`:
-    /// `trinodb/trino:470` ships 2.5.0, `starrocks/fe-ubuntu:4.1-latest`
-    /// ships 2.8.0.
-    pub fn plugin_version(self) -> PluginVersion {
+    /// The `ranger-plugins-common` versions this crate has been read against
+    /// for this engine type: the evaluator's own list, independent of which
+    /// image egret provisions (that is `egret_perm::engine_images`). A
+    /// deployment declaring any other version is refused, never evaluated.
+    pub fn modelled_versions(self) -> &'static [PluginVersion] {
         match self {
-            EngineType::Trino => PluginVersion::Ranger2_5_0,
-            EngineType::StarRocks => PluginVersion::Ranger2_8_0,
+            EngineType::Trino => &[PluginVersion::Ranger2_5_0],
+            EngineType::StarRocks => &[PluginVersion::Ranger2_8_0],
         }
+    }
+
+    /// Whether this crate has been read against `version` for this engine type.
+    pub fn models(self, version: PluginVersion) -> bool {
+        self.modelled_versions().contains(&version)
     }
 }
 
@@ -1316,14 +1320,13 @@ pub enum UndecidableCause {
         policy_id: Option<i64>,
         policy_name: String,
     },
-    /// [`EngineConfig::plugin_version`] disagrees with the version measured
-    /// for [`EngineConfig::engine`] ([`EngineType::plugin_version`]). The
-    /// deployment being described is not one this crate has been read
-    /// against.
+    /// [`EngineConfig::plugin_version`] is not one of the versions this crate
+    /// has been read against for [`EngineConfig::engine`]
+    /// ([`EngineType::modelled_versions`]). The deployment being described is
+    /// not one this crate has been read against.
     PluginVersionMismatch {
         engine: EngineType,
         declared: PluginVersion,
-        measured: PluginVersion,
     },
     /// One resolved tag ATTACHMENT carries something this crate cannot
     /// reproduce — see [`TagAttachmentProblem`] for the three shapes and
@@ -3111,11 +3114,10 @@ fn request_preamble(
             });
         }
         if let Some(version) = engine.plugin_version {
-            if version != declared.plugin_version() {
+            if !declared.models(version) {
                 why.push(UndecidableCause::PluginVersionMismatch {
                     engine: declared,
                     declared: version,
-                    measured: declared.plugin_version(),
                 });
             }
         }

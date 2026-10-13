@@ -756,7 +756,6 @@ pub enum WireUndecidableCause {
     PluginVersionMismatch {
         engine: WireEngineType,
         declared: WirePluginVersion,
-        measured: WirePluginVersion,
     },
 }
 
@@ -946,15 +945,12 @@ impl From<&UndecidableCause> for WireUndecidableCause {
                 declared: WireEngineType::from(*declared),
                 service_def_name: service_def_name.clone(),
             },
-            UndecidableCause::PluginVersionMismatch {
-                engine,
-                declared,
-                measured,
-            } => WireUndecidableCause::PluginVersionMismatch {
-                engine: WireEngineType::from(*engine),
-                declared: WirePluginVersion::from(*declared),
-                measured: WirePluginVersion::from(*measured),
-            },
+            UndecidableCause::PluginVersionMismatch { engine, declared } => {
+                WireUndecidableCause::PluginVersionMismatch {
+                    engine: WireEngineType::from(*engine),
+                    declared: WirePluginVersion::from(*declared),
+                }
+            }
         }
     }
 }

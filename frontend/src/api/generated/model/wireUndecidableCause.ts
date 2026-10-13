@@ -151,6 +151,5 @@ export type WireUndecidableCause = {
 } | {
   engine: WireEngineType;
   declared: WirePluginVersion;
-  measured: WirePluginVersion;
   kind: 'plugin_version_mismatch';
 };

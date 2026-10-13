@@ -276,7 +276,7 @@ async fn setup() -> Option<Fixture> {
     .expect("warehouse");
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'starrocks','egret','{}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'starrocks','egret','{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1.4\"}}'::jsonb,$2) RETURNING id",
     )
     .bind(unique("perm-routes-eng"))
     .bind(service.id)
@@ -1028,7 +1028,7 @@ async fn extra_profile(f: &Fixture, tag: &str) -> (i64, Uuid) {
     .expect("warehouse");
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'starrocks','egret','{}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'starrocks','egret','{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1.4\"}}'::jsonb,$2) RETURNING id",
     )
     .bind(unique(tag))
     .bind(service.id)
@@ -1118,7 +1118,7 @@ async fn two_profile_catalog(f: &Fixture, tag: &str) -> (i64, i64, Uuid) {
     .expect("warehouse");
     let trino_engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'trino','egret','{\"imageVersion\":\"470\"}'::jsonb,$2) RETURNING id",
     )
     .bind(unique(&format!("{tag}_trino_eng")))
     .bind(trino_service.id)
@@ -1127,7 +1127,7 @@ async fn two_profile_catalog(f: &Fixture, tag: &str) -> (i64, i64, Uuid) {
     .expect("trino engine");
     let starrocks_engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'starrocks','egret','{}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'starrocks','egret','{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1.4\"}}'::jsonb,$2) RETURNING id",
     )
     .bind(unique(&format!("{tag}_sr_eng")))
     .bind(starrocks_service.id)
@@ -2351,7 +2351,7 @@ async fn extra_trino_profile(f: &Fixture, tag: &str) -> i64 {
         .expect("create trino service");
     sqlx::query(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'trino','egret','{}'::jsonb,$2)",
+         VALUES ($1,'trino','egret','{\"imageVersion\":\"470\"}'::jsonb,$2)",
     )
     .bind(unique(tag))
     .bind(service.id)
@@ -2808,6 +2808,95 @@ async fn explain_refuses_an_external_engine_declaring_an_unmeasured_plugin_versi
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
+}
+
+/// Set the image of the provisioned StarRocks engine bound to `f.service_id`.
+async fn pin_bound_starrocks_image(f: &Fixture, fe_image: &str) {
+    let res = sqlx::query(
+        "UPDATE engine_mgmt.engines \
+            SET spec = jsonb_build_object('starrocksConfig', \
+                                          jsonb_build_object('feImage', $2::text)) \
+          WHERE authz_service_id = $1",
+    )
+    .bind(f.service_id)
+    .bind(fe_image)
+    .execute(&f.db.pool)
+    .await
+    .expect("pin the bound engine's image");
+    assert_eq!(res.rows_affected(), 1);
+}
+
+async fn explain_status(f: &Fixture, token: &str) -> (StatusCode, Value) {
+    into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                token,
+                Some(explain_body(f.catalog_id, "nobody")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await
+}
+
+/// A provisioned engine's plugin comes from its EXACT image, not its type: the
+/// same StarRocks type on a floating tag is refused with the fix, on 4.1.6
+/// (plugin 2.9.0, not yet modelled) is refused naming 2.9.0, and on 4.1.4 is
+/// explained. TEMPORARY half: Task 4 proves 4.1.6 and inverts that cell.
+#[tokio::test]
+async fn explain_resolves_a_provisioned_engines_plugin_through_its_exact_image() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+
+    pin_bound_starrocks_image(&f, "starrocks/fe-ubuntu:4.1-latest").await;
+    let (status, body) = explain_status(&f, &token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("4.1-latest") && error.contains("pin"),
+        "the refusal must name the image and the fix: {body}"
+    );
+
+    pin_bound_starrocks_image(&f, "starrocks/fe-ubuntu:4.1.6").await;
+    let (status, body) = explain_status(&f, &token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("2.9.0") && error.contains("StarRocks@2.8.0"),
+        "the refusal must name the plugin and what is modelled: {body}"
+    );
+
+    pin_bound_starrocks_image(&f, "starrocks/fe-ubuntu:4.1.4").await;
+    let (status, body) = explain_status(&f, &token).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+}
+
+/// Two engines on one profile that resolve to different plugins cannot share
+/// one verdict. 4.1.6 is refused on its own account first (unmodelled), so the
+/// disagreement shows once both images are modelled; until then the profile is
+/// refused on the unmodelled engine, which is what this pins.
+#[tokio::test]
+async fn a_profile_with_a_second_engine_on_an_unmodelled_image_is_refused() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    sqlx::query(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'starrocks','egret', \
+                 '{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1.6\"}}'::jsonb,$2)",
+    )
+    .bind(unique("perm-routes-eng2"))
+    .bind(f.service_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("second engine");
+    let (status, body) = explain_status(&f, &token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("2.9.0"),
+        "body: {body}"
+    );
 }
 
 /// A policy that DENIED and nothing matching at all are different facts, and
