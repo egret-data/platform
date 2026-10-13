@@ -59,3 +59,74 @@ Files: `fe.conf (add this line)` = `access_control = ranger` (appended to `/data
 ### 1.7 Left behind
 
 Removed: containers `engup-trino`, `engup-trino-prov`, `engup-sr`; egret (:8096, stopped by its recorded PID). Kept: database `egret_engup_live` in `egret-dev-postgres-1` (profiles `engup-trino`, `engup-tag`, `engup-sr`, two external engines, the policies above) and the pulled `starrocks/allin1-ubuntu:4.1.6` image. Never touched: DB `egret`, `egret-dev-*` containers, `egret-w7c-postgres`, ports 5173, 5000, 8080.
+
+## 2. The view-clearance matrix on Trino 483 and StarRocks 4.1.6 (Task 8)
+
+> **Status of this section while it holds only 2.0:** these are the predictions, committed BEFORE any cell was
+> observed. Observations replace the "prediction" column's neighbours in a second commit. A wrong prediction is a
+> finding; no prediction is edited afterwards.
+
+### 2.0 Predictions
+
+Cell ids are those of `2026-10-13-view-clearance-measurement.md` (rounds 1 and 2). Round 2 questions A and B
+were StarRocks-only, so they are run on StarRocks 4.1.6 only; Trino 483 runs round 1's Q1 to Q5. "Same" means the
+observed result is the one that document recorded for the old version (Trino 470 / ranger 2.5.0; StarRocks 4.1.4 /
+ranger 2.8.0). The old document already contains a live StarRocks **4.1.6** run (questions A and B), so for
+StarRocks the "old" column is 4.1.4 and, where measured, that earlier 4.1.6 run; a cell that differs between 4.1.4
+and 4.1.6 is predicted to match the earlier 4.1.6 run.
+
+Setup differences that are not cell results (labelled, expected): Trino 483 needs baseline `trinouser:*` impersonate
+and `queryid:*` execute policies for every test user (Task 6); egret now models the engines (plugin 2.8.0 on Trino,
+2.9.0 on StarRocks), so registration goes through the supported path; the Trino tag service and the stub warehouse
+rows still need the round 1 SQL deviations (DEV-1, DEV-2) because nothing in egret changed for them.
+
+**Trino 483 (ranger plugin 2.8.0), all cells predicted SAME as Trino 470:**
+
+| cell | prediction |
+|---|---|
+| 1.T1 | same: `CreateView`/`create` on the view name, identical to `CreateTable`; per-column `select` on the base for the creator; `CreateViewWithSelectFromColumns` asked at read time as the owner |
+| 1.T2 | same: deny `create` on `*` blocks CREATE VIEW, CREATE TABLE, CTAS together |
+| 1.T3 | same: `v_*` pattern blocks by name only; `innocent` is created |
+| 1.T4 | same: `CREATE OR REPLACE VIEW` denied by the `create` deny; rename allowed (`alter`); SET AUTHORIZATION asks `alter` |
+| 1.T5 | same: uncleared creator denied over a tagged column once the tag cache has refreshed (F-6 delay may differ in length, I predict the same order, tens of seconds to a minute) |
+| 2.T1, 2.T2 | same: a path deny / mask on the view column applies to a read of the view, as the reader |
+| 2.T3 | same: the base check still runs as the owner |
+| 2.T4 | same: egret accepts any string coordinate with no existence check (no egret change in this branch touches it) |
+| 2.T5 | same: a tag on a view column behaves like the path policy |
+| Q3 memory (8 cells) | same: `vd_u` denied/denied, `vd_c` allowed/**allowed (leak)**, `vi_u` allowed/denied, `vi_c` allowed/denied |
+| Q3 Iceberg | same as memory if `TESTING_FILE_METASTORE` still exists in 483; if the property was removed this is a labelled deviation (another catalog type) or `not run` |
+| 3.R | same: DEFINER evaluates base mask and row filter as the owner (bypass when the owner is not listed); INVOKER follows the reader |
+| 3.C | same: no session property or setting forces INVOKER; DEFINER stays the default |
+| 3.V | same as 1.T5 |
+| Q5 | same: both checks run, deny final, masks stack, second mask on one coordinate refused 409 |
+
+**StarRocks 4.1.6 (ranger plugin 2.9.0):**
+
+| cell | prediction | vs 4.1.4 |
+|---|---|---|
+| 1.S1, 1.S2 | same: `create view` and `create table` are separate access types; `create view` deny leaves `create table`, CTAS, DML working; `ALTER VIEW ... AS` and `SET SECURITY` still pass with `alter` only | same |
+| 1.S3 | same: `CREATE MATERIALIZED VIEW` passes a `create view` deny | same |
+| 2.S1 (a1) | **CHANGED**: a deny of `select` on resource `view=v_c` now bites (4.1.6 asks `policyType=0 select [view=v_c]`) | changed |
+| 2.S1 (a2) | same: a column-level deny addressed `table=v_c column=secret` is never consulted for a view | same |
+| 2.S1, user with no grant | **CHANGED**: `vc_nobody` is refused on a plain view (F-1 fixed) | changed |
+| 2.S2 | same: a mask addressed at the view as a table applies; a base-column mask applies through views for the reader | same |
+| 2.S3 | inferred only (egret cannot tag native StarRocks tables): same inference, not measured | same |
+| 4.1 | deny not applied through a plain view for a user who holds the view grant: same. Base mask applies through the view: same | same |
+| 4.2 | **CHANGED**: `SECURITY INVOKER` is enforced: `vc_plain` denied on `vi_u`/`vi_c`, `vc_cleared` allowed, a no-grant user denied (F-2 fixed). `SHOW CREATE VIEW` prints it as before | changed |
+| 4.3 | same: MV carries neither base deny nor base mask; policies on its own columns apply; `vc_nobody` still refused on the MV, with new error text naming MATERIALIZED VIEW | same (text changed) |
+| 4.4 | not run (not cheap), as before | n/a |
+| Q5 StarRocks | same: base mask + view-level mask addressed as the view stack (`NULL`) | same |
+| A1 to A5 (N, H) | same as the earlier 4.1.6 run; vs 4.1.4 the only difference is `vc_nobody` on views (refused instead of reading masked values) | changed for `vc_nobody` on views only |
+| A6a, A6b, A10b | same: MV and cleared copies leak real values; **6b is not fixed** (uncleared owner's MV holds real values) | same |
+| A6c | same: the MV rewrite happens and the mask is re-applied above the MV scan | same |
+| A7 to A9, A8h | same (N leaks nothing through predicates; H leaks equality, cardinality, dictionary attack; hash length 128) | same |
+| A10 | same (N: copy holds NULL; H: INSERT/CTAS fail on the `varchar(64)` target) | same |
+| B (F-1, F-2, F-3-deny, F-3-mask) | F-1 and F-2 fixed; F-3-deny unchanged (plain view is a boundary); F-3-mask unchanged. Plugin jar is 2.9.0 | as the earlier 4.1.6 run |
+
+**SP4d-4 live essentials (Trino 483 and StarRocks 4.1.6):** the 409 overlap refusal and the broader rule winning
+live are predicted to hold on both engines (broad `MASK` wins over narrow `MASK_NULL`, as before). A table-stopping
+`select` is denied at column depth on StarRocks (`count(*)` denied on `___count___`, as B-1 found) and on Trino
+`count(*)` is predicted to be allowed with `select id` denied (Trino checks `select` per referenced column; a
+column-less query asks no column), which would make the editor callout true on Trino and false on StarRocks (a
+claim/engine difference, Critical by the brief's rule, repeated from B-1). One pruned migration: the preview says
+equivalent and the engine answers the same before and after migrate and after undo, on both engines.
