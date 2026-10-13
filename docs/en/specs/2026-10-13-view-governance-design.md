@@ -1,0 +1,210 @@
+# View governance under clearance: StarRocks deny + MASK_NULL, Trino lineage tags held at commit
+
+> **Status:** design approved in conversation on 2026-10-13. Canonical (English).
+> **Inputs:**
+> - the view-clearance measurement `docs/en/plans/2026-10-13-view-clearance-measurement.md` (rounds 1 and 2: Trino 470, StarRocks 4.1.4 and 4.1.6);
+> - its re-run on the upgraded engines, `docs/en/plans/2026-10-13-engine-upgrade-live-result.md` §2 (Trino 483, StarRocks 4.1.6). §2.6 lists what this spec may assume.
+>
+> **Amends:** SP4c (`2026-09-28-classification-clearance-sp4c-design.md`). SP4c ruled "state the limit, do not block view creation". This spec keeps "do not block view *creation*" on StarRocks. On Trino, it holds the *commit* of a view that reads classified data until the view's columns are tagged.
+
+## The defect
+
+A classification's clearance withholds a classified column from direct reads on both engines. It does not hold through views:
+
+- **StarRocks.** A plain (`SECURITY NONE`) view is an access boundary. A reader who holds the view grant reads the classified column even when the base column has a deny. This is still true on 4.1.6 (§2.1).
+  - A materialized view built by an uncleared user holds real values, because the refresh runs as the builder without a mask lookup (cell 6b).
+  - A materialized view built by a cleared user is readable by anyone it is granted to (cell 6a).
+- **Trino.** Views are DEFINER by default, and Ranger cannot tell `CREATE VIEW` apart from `CREATE TABLE` (cells 1.T1 to 1.T3).
+  - A cleared owner hands the classified column to every reader of the view (`vd_c`).
+  - An uncleared owner blocks everybody, the cleared included (`vd_u`).
+  - Base masks and row filters apply as the owner (`wd_c`).
+  - Only `SECURITY INVOKER` views enforce correctly, and egret cannot force that mode.
+
+Effective access is therefore the union of the direct path and the view path. It should be the intersection.
+
+## Decisions (user rulings, 2026-10-13)
+
+| # | Question | Ruling |
+|---|---|---|
+| R1 | One spec or two | **One spec, two parts.** One plan covers both. |
+| R2 | Scope of the StarRocks materialized-view deny | **Per database that holds a classified column.** The exceptions are the users cleared for **every** classification in that database. |
+| R3 | How precise Trino lineage is | **Table-level, decided by the engine.** If a view reads a table with a classified column, every column of the view gets the union of that table's classification tags. egret does not parse SQL. |
+| R4 | The window between a view existing and its tags reaching the engines | **Hold the commit until every engine has the tags.** If that cannot be done in time, refuse the view, with a reason. |
+
+## Part A — StarRocks
+
+StarRocks has no tag service (upstream `starrocks#67458`), so a clearance compiles to resource policies (SP4c Task 2d), one set per classified column.
+
+### A1. Keep the column deny for direct reads
+
+There is no change here. The deny on `{catalog, database, table, column}`, with the cleared users in `denyExceptions` and the access type `select`, keeps refusing an uncleared direct read with `ERROR 5204`.
+
+### A2. Add a MASK_NULL policy per classified column, folded with the rule masks
+
+A base-column **mask** applies through every view kind, for every reader. It also leaks nothing through predicates, aggregates or joins (§2.6 item 4). A base deny does not apply through a plain view. So each classified column also gets one data-mask policy.
+
+`MASK_HASH` is not used: it leaks equality, cardinality and, with a guess, content (round 2 A). The type is always `MASK_NULL`.
+
+Ranger stops at the **first matching item** of the first applicable data-mask policy, and a data-mask policy has no exceptions. So the clearance mask cannot sit beside a rule mask on the same column: the item for cleared users would decide the outcome and shadow the rule mask. The compiler therefore **folds** every rule mask on that column into the single clearance mask policy. The items, in this order:
+
+1. Each rule mask item, restricted to the principals who are also cleared. The item keeps its own mask type and condition. A rule item that names a group or `{public}` is restricted by enumeration: its users ∩ the cleared users, as bare usernames. An item whose intersection is empty is dropped.
+2. The remaining cleared users: `MASK_NONE`.
+3. `{public}`: `MASK_NULL`.
+
+The separate rule mask policy for that column is then not emitted. The compiler never creates a pair of overlapping masks, so SP4d-4's overlap rule (409 on a write that creates an overlap) is not triggered by its own output. The `GET /perm/overlaps` report must not list a folded pair.
+
+**Why "users", not principals.** The cleared set is enumerated as bare usernames (SP4c D0/D0b), because a role in a policy item matches nobody. The same enumeration feeds items 1 and 2. SP4c's membership recompile trigger already covers a change to that set.
+
+### A3. Deny `create materialized view` per database (R2)
+
+For each database that holds at least one classified column, the compiler emits one access policy:
+
+- **resource:** `{catalog, database}`;
+- **deny:** `create materialized view` for `{public}`;
+- **denyExceptions:** the users cleared for **every** classification that has a column in that database.
+
+`create materialized view` is its own access type on the database resource (cell 1.S2 shape; check it in `starrocks.json`). Denying it leaves `create view`, `create table`, CTAS and DML alone.
+
+A database with no classified column gets no policy. The policy is recompiled whenever:
+- a classification gains or loses a column in that database;
+- a clearance changes;
+- membership changes.
+
+These are the three SP4c D3 triggers.
+
+### A4. Report the materialized views that already exist
+
+A3 only prevents new materialized views. egret lists the materialized views that already exist in each database from A3 and shows them on the classification page with a warning: they may hold real classified values (cells 6a and 6b), and egret does not drop them.
+- The listing comes from the engine (`SHOW MATERIALIZED VIEWS FROM <db>`), run by egret's StarRocks admin connection.
+- If the engine is unreachable, the page says so. It never shows an empty list in that case.
+
+### A5. What Part A does not cover
+
+These limits are stated in the guide and on the classification page:
+- **Data a cleared user copies out** (CTAS, `INSERT … SELECT`, export) is not protected (cell 10b). Clearance does not follow the data.
+- **Native StarRocks tables.** The registry cannot hold `default_catalog`, so native tables cannot carry a classification (§2.6 item 6d). Part A applies to classified columns of external catalogs that egret registers.
+- **Engines older than 4.1.6.** On these, a zero-grant reader of a plain view reads it without any view grant (F-1). The mask still nulls the classified column, so A2 holds. The view grant itself is unchecked, and that is the engine's defect. The guide points to the pinning procedure in `engine-versions.md`.
+
+## Part B — Trino
+
+### B1. Lineage at table level, decided by the engine (R3)
+
+For a view, the egret **lineage** is the set of base tables that Trino reports it reads.
+- It comes from `EXPLAIN (TYPE IO, FORMAT JSON)` of the view's SQL.
+- The SQL is run with the view's default catalog and namespace, taken from the Iceberg view metadata.
+- Nested views resolve through the engine, so the reported inputs are base tables.
+
+egret does not parse the SQL. Earlier sqlparser-based gates were bypassed four times through lexer differences, which is why.
+
+If any lineage table has a classified column, **every** column of the view gets the union of those tables' classification tags. This over-tags: a view column that does not derive from a classified column is still denied to uncleared readers. That is the accepted cost of R3.
+
+A tag on a view column is enforced end to end on Trino 483 (§2.6 item 2). The clearance deny, which is a tag policy and is evaluated first, applies to the reader **whatever the view's security mode**. This closes the `vd_c` leak.
+
+**Who runs the EXPLAIN.**
+- A dedicated principal, `egret-lineage`. egret compiles the minimum policy it needs on the catalogs egret governs.
+- The plan measures what that minimum is: whether EXPLAIN asks for `select` on base columns, or only metadata.
+- egret only ever sends `EXPLAIN` as this principal. A statement that is not EXPLAIN is refused in egret's client before it reaches the engine.
+
+**Which engine.** Any running Trino engine bound to the view's catalog. If none is reachable, B2's refusal applies.
+
+### B2. Hold the commit until the tags are on every engine (R4)
+
+The Iceberg catalog runs inside egret (embedded lakekeeper), so a view create or replace reaches egret **before** it is committed. For a create or replace (`POST …/namespaces/{ns}/views` and the view commit endpoint):
+
+1. Compute the lineage (B1) from the SQL in the request.
+2. If no lineage table is classified, commit with no further delay. Record the lineage, which is still needed for B3.
+3. Otherwise, in one transaction:
+   - write the tag assignments for every column of the to-be view;
+   - record the lineage;
+   - bump the tag version of the affected tag service(s).
+4. Wait until every engine bound to that tag service has downloaded a tag version at or above the new one (B4).
+5. Then commit the view.
+
+The view does not exist until step 5, so nobody can read it untagged. Tags are resource paths, so they can be assigned before the resource exists.
+
+**Refusal.** egret refuses the create or replace, rolls back the tag assignments and the lineage, and answers with an error the engine shows the user, in each of these cases:
+- the lineage cannot be computed (EXPLAIN fails, or no engine is reachable);
+- an engine does not confirm the new tag version within the hold limit, which is 2 × the plugin poll interval (60 s with today's 30 s).
+
+The message names the reason and what to do about it. A view that egret cannot judge is never committed untagged.
+
+**Cost.** A `CREATE VIEW` that reads classified data waits up to one poll interval. A view that reads no classified table is not delayed.
+
+**Where to hook.** The plan decides between two options and measures that the chosen one sees create, `CREATE OR REPLACE` and `ALTER VIEW … AS`:
+- lakekeeper's contract-verification hook, if it runs before the view commit and can veto it;
+- an axum layer in front of the mounted Iceberg router (`egret-catalog-engine/src/mount.rs`).
+
+### B3. Keep view tags in step with base classifications
+
+The recorded lineage (view → base tables) is what keeps view tags current when the base changes. When a column of a table is classified, reclassified or declassified, the same transaction that changes the base tag also does the following, all in one tag-version bump:
+- recomputes the tag set of every view whose lineage contains that table;
+- writes those view tag assignments.
+
+Dropping a view deletes its lineage and its tag assignments. Renaming a base table is handled as drop and create: the views over it fail on the engine anyway, and their lineage is recomputed on their next replace.
+
+When the lineage cannot be trusted, the view keeps its old tags. Tags are never removed on uncertainty. A **sweep** recomputes every view's lineage on a schedule, and on demand from the classification page. It reports views whose lineage could not be computed.
+
+### B4. Know which tag version each engine holds
+
+egret serves `download_tags` (`egret-policy/src/ranger/api/download.rs`), so it can record what each plugin last fetched. Each tag download records:
+- the service;
+- the plugin's id (`pluginId` query parameter);
+- the version the plugin held (`lastKnownVersion`);
+- the version served;
+- the time.
+
+"Engine E holds version ≥ V" means a download from E's plugin has been served version ≥ V. The engine-to-plugin mapping comes from the bound engine's service name and its pod or host, which the plan works out from the `pluginId` format.
+
+StarRocks runs two plugin instances that switch versions seconds apart (§2.6 item 6e). The confirmation therefore waits for every plugin id seen for that service within the last three poll intervals, not for the first one.
+
+### B5. Audit DEFINER views
+
+A DEFINER view over classified data no longer leaks with B1 in place. Two DEFINER behaviours still surprise operators:
+- an uncleared owner blocks every reader, cleared readers included (`vd_u`);
+- base masks and row filters apply as the owner, not the reader (`wd_c`).
+
+The classification page lists every view in egret's catalogs whose lineage contains a classified table, or a table with a mask or row-filter rule. For each, it shows the view's security mode, its owner, and whether the owner is cleared. The guide recommends `SECURITY INVOKER`. egret does not rewrite views.
+
+The plan measures first whether Trino stores the security mode in the Iceberg view metadata. If it does not, the column shows "unknown", never "DEFINER".
+
+### B6. What Part B does not cover
+
+These limits are stated in the guide and on the classification page:
+- **Views of other connectors** (memory, Hive, or any catalog not in egret's registry) are not seen by the hook, and so are not tagged.
+- **Materialized views on Trino.** These could not be created on an Iceberg REST catalog in the measurement (SP4c §4c), so they are out of scope. If a later engine allows them, they need their own measurement.
+- **Data a cleared user copies out** (CTAS), as in A5.
+
+## Part C — explain, migration and the evaluator
+
+- **Evaluator and differential.**
+  - The folded StarRocks masks (A2) and the database-level `create materialized view` deny (A3) are ordinary Ranger shapes that `egret-ranger-eval` already models.
+  - The differential corpus gains a folded-mask profile and a materialized-view deny profile.
+  - Both run against the real jars at every modelled pair, and must show 0 disagreements.
+- **`explain`.**
+  - For an uncleared reader of a classified StarRocks column, explain names the clearance in two places: as the deny for a direct read, and as `MASK_NULL` when the request is masked.
+  - On Trino, a view column denied by a propagated tag names the classification and the base table that caused it, read from the stored lineage.
+- **Migration.**
+  - A2 and A3 add policies, which count against the probe budget, so the plan measures the new worst shape against `MAX_PROBE_WORK`.
+  - The tag-service grouping that refused a small profile (§2.6 item 6b) is not changed here. It is listed as a follow-up.
+
+## Testing
+
+| What | How |
+|---|---|
+| A2 fold order | Unit: a column with two rule masks and a clearance gives one policy with items in order 1, 2, 3; no second mask policy is emitted; `GET /perm/overlaps` is empty. |
+| A3 exceptions | Unit: a database with columns of classifications X and Y excepts exactly users cleared for both. |
+| A4 unreachable engine | The page shows "could not list" when the engine is unreachable, never an empty list. |
+| B1 no parsing | Mutation: replacing the EXPLAIN result with an empty input set must fail a test. The view is then committed untagged, so a test must see it. |
+| B2 hold and refusal | DB test with a fake plugin: the view is not committed until the fake plugin downloads version ≥ V. A plugin that never polls gives a refusal, with the tags and lineage rolled back. |
+| B3 transaction | DB test: classifying a base column updates every dependent view's tags in the same tag version. |
+| B4 two instances | Unit: two plugin ids for one service; confirmation waits for both. |
+| Real jars | Differential at Trino@2.5.0, Trino@2.8.0, StarRocks@2.8.0 and StarRocks@2.9.0, with 0 disagreements. |
+| Live | Re-run the view matrix on Trino 483 and StarRocks 4.1.6:<br>• StarRocks: an uncleared reader gets `NULL` through plain, nested and INVOKER views; `create materialized view` is refused.<br>• Trino: a DEFINER view made by a cleared owner is refused to an uncleared reader on the **first** read after `CREATE VIEW` returns, with no window. A view on a classified table returns only after the engines confirm the tags.<br>• Page or preview against engine: any difference is Critical. |
+
+## Not in this spec
+
+- Column-level lineage for Trino. This could follow if Trino's event listener reports per-column lineage for views; that is not measured.
+- Protecting data that a cleared user copies out.
+- The tag-service grouping in the migration probe cap.
+- A tag assigned before its catalog is attached being dropped from the download (§2.6 item 6c). B2 writes tags for catalogs that are already attached, and the plan checks this. The general defect is a separate ticket.
+- The `POST /policies` empty-resource defect found in the engine-upgrade live check. That is a separate ticket.
