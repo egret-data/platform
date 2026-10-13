@@ -27,7 +27,7 @@ Effective access is therefore the union of the direct path and the view path. It
 | # | Question | Ruling |
 |---|---|---|
 | R1 | One spec or two | **One spec, two parts.** One plan covers both. |
-| R2 | Scope of the StarRocks materialized-view deny | **Per database that holds a classified column.** The exceptions are the users cleared for **every** classification in that database. |
+| R2 | Scope of the StarRocks materialized-view deny | ~~Per database that holds a classified column.~~ **Revised 2026-10-14: the whole engine.** One deny on `default_catalog`, every database, for each StarRocks profile that holds a classified column. The exceptions are the users cleared for **every** classification with a column on that profile. (A per-database deny cannot match, see A3.) |
 | R3 | How precise Trino lineage is | **Table-level, decided by the engine.** If a view reads a table with a classified column, every column of the view gets the union of that table's classification tags. egret does not parse SQL. |
 | R4 | The window between a view existing and its tags reaching the engines | **Hold the commit until every engine has the tags.** If that cannot be done in time, refuse the view, with a reason. |
 
@@ -56,28 +56,42 @@ Ranger stops at the **first matching item** of the first applicable data-mask po
 
 **Why "users", not principals.** The cleared set is enumerated as bare usernames (SP4c D0/D0b), because a role in a policy item matches nobody. The same enumeration feeds items 1 and 2. SP4c's membership recompile trigger already covers a change to that set.
 
-### A3. Deny `create materialized view` per database (R2)
+### A3. Deny `create materialized view` on the whole engine (R2, revised 2026-10-14)
 
-For each database that holds at least one classified column, the compiler emits one access policy:
+**Why not per database.** Measured on StarRocks 4.1.6-6862092 with a real Iceberg REST catalog (`docs/en/plans/2026-10-14-starrocks-mv-placement-measurement.md`):
+- A materialized view can only be created in `default_catalog`. `CREATE MATERIALIZED VIEW ice.db1.mv …` fails with `Materialized view can only be created in default_catalog`.
+- `default_catalog.db1.mv AS SELECT … FROM ice.db1.t` succeeds and copies the Iceberg rows.
+- The `CREATE MATERIALIZED VIEW` privilege is checked on the **target** database `default_catalog.<db>`, never on the base table's catalog or database.
 
-- **resource:** `{catalog, database}`;
+A deny on `{catalog: <external catalog>, database}` therefore never matches a real `CREATE MATERIALIZED VIEW`, and the target database is any database the builder may write to.
+
+For each StarRocks profile that holds at least one classified column, the compiler emits one access policy:
+
+- **resource:** `{catalog: default_catalog, database: *}`;
 - **deny:** `create materialized view` for `{public}`;
-- **denyExceptions:** the users cleared for **every** classification that has a column in that database.
+- **denyExceptions:** the users cleared for **every** classification that has a column on that profile.
 
-`create materialized view` is its own access type on the database resource (cell 1.S2 shape; check it in `starrocks.json`). Denying it leaves `create view`, `create table`, CTAS and DML alone.
+`create materialized view` is its own access type on the database resource. Denying it leaves `create view`, `create table`, CTAS and DML alone.
 
-A database with no classified column gets no policy. The policy is recompiled whenever:
-- a classification gains or loses a column in that database;
+**Cost (accepted by the user).** A user who is not cleared for every classification on the engine can no longer create any materialized view on that engine, including over unclassified data. The classification page and the guide state this.
+
+A profile with no classified column gets no policy. The policy is recompiled on the three SP4c D3 triggers:
+- a classification gains or loses a column on that profile;
 - a clearance changes;
 - membership changes.
 
-These are the three SP4c D3 triggers.
+The compiled per-database policies named `…mv-{catalog}.{database}` from the first draft are swept by the compiler prefix.
 
-### A4. Report the materialized views that already exist
+### A4. Report the materialized views that already exist (revised 2026-10-14)
 
-A3 only prevents new materialized views. egret lists the materialized views that already exist in each database from A3 and shows them on the classification page with a warning: they may hold real classified values (cells 6a and 6b), and egret does not drop them.
-- The listing comes from the engine (`SHOW MATERIALIZED VIEWS FROM <db>`), run by egret's StarRocks admin connection.
-- If the engine is unreachable, the page says so. It never shows an empty list in that case.
+A3 only prevents new materialized views. egret lists the ones that already exist and read a classified table, and shows them on the classification page with a warning: they may hold real classified values (cells 6a and 6b), and egret does not drop them.
+
+- **Where.** The views live in `default_catalog`. `SHOW MATERIALIZED VIEWS FROM <external catalog>.<db>` returns an empty set (measured), so it is not used.
+- **How.** egret's StarRocks admin connection queries `information_schema.materialized_views` once per running engine on the profile.
+  - **Match by base table.** A view matches when a key of `BASE_TABLE_REFRESH_VERSION_TIMES` (a JSON map keyed `catalog.db.table`) names a classified table of that classification, in a catalog attached to that engine.
+  - **Match by text.** A view whose map is empty or missing (for example, never refreshed) is matched by text instead. `MATERIALIZED_VIEW_DEFINITION` must contain the classified `catalog` and `db` names, and the view is flagged "matched by text".
+- **Engines not running.** These are not dialled. The page names them as "not checked".
+- **Unreachable engine.** If a running engine cannot be reached, the page says so and never shows an empty list.
 
 ### A5. What Part A does not cover
 
@@ -178,7 +192,7 @@ These limits are stated in the guide and on the classification page:
 ## Part C — explain, migration and the evaluator
 
 - **Evaluator and differential.**
-  - The folded StarRocks masks (A2) and the database-level `create materialized view` deny (A3) are ordinary Ranger shapes that `egret-ranger-eval` already models.
+  - The folded StarRocks masks (A2) and the engine-wide `create materialized view` deny (A3) are ordinary Ranger shapes that `egret-ranger-eval` already models.
   - The differential corpus gains a folded-mask profile and a materialized-view deny profile.
   - Both run against the real jars at every modelled pair, and must show 0 disagreements.
 - **`explain`.**
@@ -193,8 +207,9 @@ These limits are stated in the guide and on the classification page:
 | What | How |
 |---|---|
 | A2 fold | Unit: a column with a rule mask (exact and wildcard) and a clearance gives a priority-1 clearance mask whose cleared items equal the evaluator's per-user outcome, then `{public}` `MASK_NULL`. Rule policies are unchanged, and `GET /perm/overlaps` is empty. An undecidable cleared user refuses the compile. |
-| A3 exceptions | Unit: a database with columns of classifications X and Y excepts exactly users cleared for both. |
+| A3 exceptions | Unit: a profile with columns of classifications X and Y gets one deny on `default_catalog`/`*` that excepts exactly users cleared for both. Real jars: an uncleared user is denied `create materialized view` on `default_catalog.<any db>`; a user cleared for both is not. |
 | A4 unreachable engine | The page shows "could not list" when the engine is unreachable, never an empty list. |
+| A4 matching | Unit: a view whose base-table map names a classified table matches; a view with an empty map matches by text and is flagged; a view over another engine's catalog does not match; a non-running engine is named "not checked". Live (Task 11): an MV over a classified Iceberg table is listed. |
 | B1 no parsing | Mutation: replacing the EXPLAIN result with an empty input set must fail a test. The view is then committed untagged, so a test must see it. |
 | B2 hold and refusal | DB test with a fake plugin: the view is not committed until the fake plugin downloads version ≥ V. A plugin that never polls gives a refusal, with the tags and lineage rolled back. |
 | B3 transaction | DB test: classifying a base column updates every dependent view's tags in the same tag version. |

@@ -238,6 +238,53 @@ fn never_emits_mask_hash_for_public() {}
 
 ---
 
+### Task 4b: Move the materialized-view deny and listing to `default_catalog` (A3/A4 revised 2026-10-14)
+
+**Why:** measured on StarRocks 4.1.6 (`docs/en/plans/2026-10-14-starrocks-mv-placement-measurement.md`). A materialized view can only be created in `default_catalog`, and the privilege is checked on the target `default_catalog.<db>`. Task 2's per-(catalog, database) deny never matches, and Task 4's `SHOW MATERIALIZED VIEWS FROM <ext>.<db>` returns an empty set. Read spec §A3 and §A4 (revised) first.
+
+**Files:**
+- Modify: `crates/egret-perm-compile/src/clearance.rs` (`mv_deny_inputs`), plus its tests.
+- Modify: `crates/egret-ranger-eval/tests/differential.rs`, the scenario test `the_clearance_mask_and_the_materialized_view_deny_decide_as_designed_on_the_real_jars`, and `harness_support` if needed.
+- Modify: `crates/egret-perm-compile/src/view_exposure.rs` and `crates/egret-controlplane/src/view_exposure.rs`; the engine-mgmt lister; their tests; the frontend section.
+
+**Interfaces:**
+- Produces:
+  - `mv_deny_inputs` emits **at most one** policy per StarRocks service:
+    - name `{COMPILER_CLEARANCE_PREFIX}mv` (no catalog or database in the name);
+    - resource `{catalog: ["default_catalog"], database: ["*"]}`;
+    - deny `create materialized view` for group `public`;
+    - `denyExceptions` = the users cleared for every classification with a column on the service, with the existing group-only-gate skip rule unchanged.
+  - The lister trait becomes `list(engine) -> Result<Vec<MvRow>, String>`.
+    - `MvRow { database, name, base_tables: Option<Vec<String>>, definition: String }`.
+    - Read from `SELECT TABLE_SCHEMA, TABLE_NAME, BASE_TABLE_REFRESH_VERSION_TIMES, MATERIALIZED_VIEW_DEFINITION FROM information_schema.materialized_views`, selecting columns by name.
+    - `base_tables` holds the keys of the JSON map, and is `None` when the map is empty or missing.
+  - `ViewExposureDto` items gain `matchedBy: "baseTable" | "text"`, and the DTO gains `enginesNotChecked: Vec<{engine, status}>`.
+
+- [ ] **Step 1: failing tests (compiler).**
+  - A service with classifications X and Y gets exactly one MV deny on `default_catalog`/`*`, excepting exactly the users cleared for both.
+  - A service with no classified column gets none.
+  - A stored `…mv-{catalog}.{database}` policy from the old shape is swept on recompile (DB test).
+- [ ] **Step 2: failing tests (real jars).**
+  - Change the scenario's MV-deny probes to `create materialized view` on `{catalog: default_catalog, database: <some db>}`, including a database that holds no classified column.
+  - The uncleared user is denied there; the user cleared for all is allowed.
+  - Run only that test at StarRocks@2.8.0 and @2.9.0, then the full `just test-ranger-gates` once: 0 disagreements, and STOP on any disagreement.
+- [ ] **Step 3: failing tests (listing).**
+  - A row whose `base_tables` names a classified `catalog.db.table` of this classification, in a catalog attached to *this engine*, matches as `baseTable`.
+  - A row with `base_tables: None` whose definition contains the classified catalog and db names matches as `text`.
+  - A row over another engine's catalog does not match.
+  - A non-running engine is not dialled and appears in `enginesNotChecked`.
+  - Mixed success and failure, and the deadline behaviour from fix round 1, stay as they are.
+  - This also closes Task 4 review finding I-3.
+- [ ] **Step 4: implement.** The per-engine scope comes from that engine's own catalog attachments, not from every engine sharing the profile.
+- [ ] **Step 5: frontend.**
+  - Show `matchedBy: text` as "matched by text".
+  - List `enginesNotChecked`.
+  - The warning names the cost: users not cleared for every classification on the engine cannot create any materialized view there.
+  - Write the vitest first, then run `npm run gen:api`.
+- [ ] **Step 6: run tests and lint, then commit.** Message: `fix(perm-compile): deny materialized views where StarRocks creates them, and list them there`.
+
+---
+
 ### Task 5: Measure before building Part B (STOP gates)
 
 **Files:**
