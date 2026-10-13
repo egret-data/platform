@@ -843,12 +843,12 @@ async fn trino_config(
     let _ = st.store.get_service(&service).await?; // 404 if the profile doesn't exist
 
     // ONE renderer: the same code that writes the files egret mounts into its own
-    // engines (SP4d-4 Task 9). The poll interval is the provisioner's default.
+    // engines (SP4d-4 Task 9). The poll interval is the one shared constant.
     let rendered = egret_engine_mgmt_api::ranger_config::ranger_plugin_files(
         egret_engine_mgmt_api::EngineKind::Trino,
         &service,
         &st.engine_egret_url,
-        30_000,
+        egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
     );
     Ok(Json(
         rendered

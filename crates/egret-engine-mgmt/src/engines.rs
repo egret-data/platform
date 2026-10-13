@@ -690,7 +690,7 @@ pub(crate) async fn build_provision_req_with(
             .map(|service_name| egret_engine_mgmt_api::RangerBinding {
                 service_name,
                 egret_url: st.engine_egret_url.clone(),
-                poll_interval_ms: RANGER_POLL_INTERVAL_MS,
+                poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
             });
     Ok(BuiltReq {
         req: EngineProvisionReq {
@@ -2503,10 +2503,6 @@ async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
     }
 }
 
-/// How often an engine's Ranger plugin polls egret for policy: one value for the
-/// engines egret provisions and the files an external engine's admin installs.
-pub(crate) const RANGER_POLL_INTERVAL_MS: u32 = 30_000;
-
 /// Resolve the Ranger service NAME an engine's `authz_service_id` actually
 /// names, by reading the bound profile row (`policy.authz_services`) — never
 /// by assuming it is spelled like the engine (SP4a Task 3b).
@@ -3290,7 +3286,7 @@ async fn build_starrocks_provision_req(
             .map(|service_name| egret_engine_mgmt_api::RangerBinding {
                 service_name,
                 egret_url: st.engine_egret_url.clone(),
-                poll_interval_ms: RANGER_POLL_INTERVAL_MS,
+                poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
             });
 
     // Delegation wiring: provision (idempotently reuse) the TLS cert + delegator

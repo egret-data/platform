@@ -12796,7 +12796,7 @@ async fn an_external_starrocks_engine_gets_the_three_files_and_the_default_url_w
         egret_engine_mgmt_api::EngineKind::StarRocks,
         &service,
         "http://egret:8080",
-        30_000,
+        egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
     );
     assert_eq!(
         j["files"][1]["content"].as_str().unwrap(),

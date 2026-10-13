@@ -27,6 +27,11 @@ pub const STARROCKS_SECURITY_XML: &str = "ranger-starrocks-security.xml";
 /// StarRocks: the plugin's audit configuration.
 pub const STARROCKS_AUDIT_XML: &str = "ranger-starrocks-audit.xml";
 
+/// How often an engine's Ranger plugin polls egret for policy, in milliseconds:
+/// one value for the engines egret provisions, the files an external engine's
+/// admin installs and the files the policy admin API serves.
+pub const RANGER_POLL_INTERVAL_MS: u32 = 30_000;
+
 /// The `fe.conf` line that switches StarRocks' access control to Ranger.
 pub const STARROCKS_ACCESS_CONTROL_LINE: &str = "access_control = ranger\n";
 
@@ -116,10 +121,20 @@ mod tests {
     const URL: &str = "http://host.docker.internal:8080";
 
     fn trino() -> RangerPluginFiles {
-        ranger_plugin_files(EngineKind::Trino, "demo2", URL, 30_000)
+        ranger_plugin_files(
+            EngineKind::Trino,
+            "demo2",
+            URL,
+            RANGER_POLL_INTERVAL_MS.into(),
+        )
     }
     fn starrocks() -> RangerPluginFiles {
-        ranger_plugin_files(EngineKind::StarRocks, "sr1", URL, 30_000)
+        ranger_plugin_files(
+            EngineKind::StarRocks,
+            "sr1",
+            URL,
+            RANGER_POLL_INTERVAL_MS.into(),
+        )
     }
 
     /// The files captured from the provisioners BEFORE they were refactored onto
