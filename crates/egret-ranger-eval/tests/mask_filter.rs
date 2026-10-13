@@ -1085,7 +1085,8 @@ fn a_declared_engine_must_agree_with_the_service_def() {
 
 /// Which `ranger-plugins-common` each engine loads was MEASURED on the
 /// running pods (`docs/en/plans/2026-09-28-sp4d-plugin-version-result.md`):
-/// Trino 470 → 2.5.0, StarRocks fe-ubuntu 4.1 → 2.8.0. A caller that
+/// Trino 470 → 2.5.0, StarRocks fe-ubuntu 4.1 → 2.8.0 (Trino 483 → 2.8.0 and
+/// fe-ubuntu 4.1.6 → 2.9.0 were read from the images later). A caller that
 /// declares a different pairing is describing a deployment this crate has
 /// not been verified against.
 #[test]
@@ -1097,7 +1098,8 @@ fn a_declared_plugin_version_must_match_the_measured_one_for_the_engine() {
     )]));
     let mut engine = EngineConfig::without_super_users();
     engine.engine = Some(EngineType::Trino);
-    engine.plugin_version = Some(PluginVersion::Ranger2_8_0);
+    // 2.9.0 is the off-pairing now: Trino 483 runs 2.8.0 and is modelled.
+    engine.plugin_version = Some(PluginVersion::Ranger2_9_0);
     let d = evaluate_data_mask(&set, &trino_request("alice"), &trino_def(), &engine);
     assert!(
         mask_causes(&d)
@@ -1108,7 +1110,8 @@ fn a_declared_plugin_version_must_match_the_measured_one_for_the_engine() {
     );
 
     assert!(EngineType::Trino.models(PluginVersion::Ranger2_5_0));
-    assert!(!EngineType::Trino.models(PluginVersion::Ranger2_8_0));
+    // Trino 483 runs 2.8.0: read and proved on the real jar (engine-upgrade Task 5).
+    assert!(EngineType::Trino.models(PluginVersion::Ranger2_8_0));
     assert!(EngineType::StarRocks.models(PluginVersion::Ranger2_8_0));
     assert!(!EngineType::StarRocks.models(PluginVersion::Ranger2_5_0));
     // 2.9.0: read (`docs/en/plans/2026-10-13-ranger-2-9-0-reading.md`) and proved on

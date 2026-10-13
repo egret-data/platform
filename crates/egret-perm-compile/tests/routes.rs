@@ -2782,7 +2782,7 @@ async fn explain_refuses_an_external_engine_declaring_an_unmeasured_plugin_versi
     // The pair, not the version: StarRocks declaring 2.5.0 (the version only
     // Trino is modelled at) is refused too, and the sentence names the pair and
     // what is modelled (the migration gate refuses the other off-diagonal pair,
-    // Trino@2.8.0, with the same derivation: `migrate_route.rs`).
+    // Trino@2.9.0, with the same derivation: `migrate_route.rs`).
     assert_eq!(declare("2.5.0").await, 1);
     let (status, body) = into_json(
         f.app()

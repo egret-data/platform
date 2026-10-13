@@ -80,8 +80,9 @@ pub struct OverlapRule {
 /// on, so the answer the API reports (`rangerPluginVersionModelled`), the one
 /// the migration gate proves on and the one `explain` evaluates at are ONE
 /// predicate, [`ranger_plugin_is_modelled`].
-pub const MODELLED_RANGER_PLUGINS: [(&str, &str); 3] = [
+pub const MODELLED_RANGER_PLUGINS: [(&str, &str); 4] = [
     ("trino", "2.5.0"),
+    ("trino", "2.8.0"),
     ("starrocks", "2.8.0"),
     ("starrocks", "2.9.0"),
 ];

@@ -4637,18 +4637,17 @@ mod engine_plugin_version_tests {
         assert!(err.contains("t1") && err.contains("no image"), "{err}");
     }
 
-    // TEMPORARY for the Trino half. Until Task 5 (Trino 483) proves its pair, an
-    // image resolving to Trino@2.8.0 is refused, not guessed; Task 5 inverts it.
-    // The StarRocks half was inverted by Task 4: 4.1.6 runs Ranger 2.9.0, proved.
+    // Both engines' default images are modelled: Trino 483 runs Ranger 2.8.0
+    // (proved in engine-upgrade Task 5) and StarRocks 4.1.6 runs 2.9.0 (Task 4).
+    // No known image is unmodelled any more, so the "refused, not guessed" cover
+    // below uses an UNKNOWN image (a floating or unrecognised tag).
     #[test]
-    fn an_unbound_profile_is_evaluated_at_the_default_image_and_refused_naming_it() {
+    fn an_unbound_profile_is_evaluated_at_the_default_image() {
         use egret_ranger_eval::eval::EngineType;
-        // TEMPORARY like the test below: the default Trino image is 483,
-        // unmodelled until Task 5.
-        let err = super::default_image_plugin_version(EngineType::Trino).unwrap_err();
-        assert!(
-            err.contains("trinodb/trino:483") && err.contains("2.8.0"),
-            "{err}"
+        assert_eq!(
+            super::default_image_plugin_version(EngineType::Trino),
+            Ok(PluginVersion::Ranger2_8_0),
+            "egret's default Trino image is 483, which runs Ranger 2.8.0"
         );
         assert_eq!(
             super::default_image_plugin_version(EngineType::StarRocks),
@@ -4657,13 +4656,20 @@ mod engine_plugin_version_tests {
         );
     }
 
-    // TEMPORARY until Task 5 inverts it: the Trino 483 half still pins a refusal.
-    // Task 4 already inverted the StarRocks 4.1.6 half below.
     #[test]
-    fn an_image_whose_pair_is_not_yet_modelled_is_refused_not_guessed() {
+    fn a_provisioned_trino_483_resolves_to_ranger_2_8_0() {
         let trino483 = serde_json::json!({"imageVersion": "483"});
-        let err = engine_plugin_version("t", "provisioned", "trino", None, &trino483).unwrap_err();
-        assert!(err.contains("2.8.0"), "{err}");
+        assert_eq!(
+            engine_plugin_version("t", "provisioned", "trino", None, &trino483),
+            Ok(PluginVersion::Ranger2_8_0)
+        );
+    }
+
+    #[test]
+    fn an_image_the_table_does_not_know_is_refused_not_guessed() {
+        let unknown = serde_json::json!({"imageVersion": "999"});
+        let err = engine_plugin_version("t", "provisioned", "trino", None, &unknown).unwrap_err();
+        assert!(err.contains("999"), "{err}");
     }
 
     #[test]
@@ -4682,7 +4688,7 @@ mod engine_plugin_version_tests {
     fn only_the_proved_pairs_are_modelled() {
         for (t, v, modelled) in [
             ("trino", "2.5.0", true),
-            ("trino", "2.8.0", false),
+            ("trino", "2.8.0", true),
             ("trino", "2.9.0", false),
             ("starrocks", "2.5.0", false),
             ("starrocks", "2.8.0", true),

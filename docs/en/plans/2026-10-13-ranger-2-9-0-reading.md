@@ -108,3 +108,22 @@ providers), `RangerReadWriteLock` (`StringBuilder.append(Object)` in a log strin
 * This is a READING. Byte-identity of the code egret reproduces does not prove egret's
   model of it: the proof is the real-jar differential at 2.9.0, recorded in
   `.superpowers/sdd/2026-10-13-engine-upgrade/task-4-report.md`.
+
+## Task 5: Trino at Ranger 2.8.0 (Trino 483)
+
+Step 1 asks whether any Trino-only path assumes 2.5.0 behaviour that 2.8.0 changed.
+Every place `crates/egret-ranger-eval/src` branches on `EngineType::Trino` or on a
+Trino service-def construct:
+
+| place | what it does | branches on `PluginVersion`? | arm 2.8.0 takes |
+|---|---|---|---|
+| `EngineType::service_def_name` (`eval.rs`) | names the def `"trino"` for the `EngineMismatch` refusal | no | n/a |
+| `EngineType::modelled_versions` / `models` (`eval.rs`) | the evaluator's list of modelled versions per engine | it IS the version list | Trino gains `Ranger2_8_0` in this task |
+| `trinouser` resource (`trino.json:83`) | a resource name in the def, matched by the generic resource matcher | no: `grep` finds no `trinouser`, `sysinfo`, `"function"` or `"procedure"` in `src/`, so no code is specific to them | the shared matcher path, byte-identical 2.5.0 to 2.8.0 per the `PluginVersion` doc |
+| `function`, `procedure`, `sysinfo` resources, `read_sysinfo` / `write_sysinfo` access types (`trino.json`) | data in the def, handled by the same generic code | no | same |
+| `impliedGrants` `all` (flat `all => [select, insert, ...]`, Trino only) | `with_implied_grants` and `chained_implied_grants` (`servicedef.rs`) | no | the only arm; `RangerDefaultPolicyEvaluator` is identical in the two jars on this path (read for Task 5 of the earlier plan, and 2.8.0 to 2.9.0 byte-identical) |
+| tag-deny-reopened refusal (`eval.rs:2503`) | the one `PluginVersion` conditional, shared by both engines | yes | 2.8.0: no refusal |
+
+Result: no Trino-only path branches on the plugin version, and none assumes a 2.5.0
+behaviour. This is a reading; the proof is the real-jar differential at Trino@2.8.0
+recorded in `.superpowers/sdd/2026-10-13-engine-upgrade/task-5-report.md`.

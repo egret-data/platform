@@ -448,6 +448,18 @@ fn trino() -> Profile {
     }
 }
 
+/// Trino as it runs once Trino 483 ships Ranger 2.8.0 (engine-upgrade Task 5):
+/// the same service-def, hierarchy and vocabulary as [`trino`], a different
+/// `ranger-plugins-common`. Its own profile so every test that iterates profiles
+/// reports it on its own line.
+fn trino_2_8_0() -> Profile {
+    Profile {
+        plugin_version: PluginVersion::Ranger2_8_0,
+        ranger_version: "2.8.0",
+        ..trino()
+    }
+}
+
 /// StarRocks as it runs once fe-ubuntu 4.1.6 ships Ranger 2.9.0 (engine-upgrade
 /// Task 4): the same service-def, hierarchy and vocabulary as [`starrocks`], a
 /// different `ranger-plugins-common`. A separate profile rather than a loop
@@ -5267,7 +5279,7 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
     check_measured_priority_composite(&pin_def_json, &load_tag_def(), &pin_def, &pin_engine);
 
     let mut total = Tally::default();
-    for profile in [trino(), starrocks(), starrocks_2_9_0()] {
+    for profile in [trino(), trino_2_8_0(), starrocks(), starrocks_2_9_0()] {
         let tally = run_profile(&profile, seed, count);
         eprintln!(
             "differential: ranger {} — {} cases ({} with a tag phase), {} compared and \
@@ -5536,7 +5548,7 @@ fn the_prepared_path_decides_every_corpus_case_exactly_as_the_unprepared_one() {
     };
     const REUSE: usize = 4;
     let mut compared = 0usize;
-    for profile in [trino(), starrocks(), starrocks_2_9_0()] {
+    for profile in [trino(), trino_2_8_0(), starrocks(), starrocks_2_9_0()] {
         let (def_json, def, engine) = load_engine(&profile);
         let tag_def_json = load_tag_def();
         let mut rng =
