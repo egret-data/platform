@@ -230,12 +230,13 @@ pub(crate) async fn recompile_refusing_created_overlaps(
 /// One transaction: snapshot the profile's unit, write the binding, recompile,
 /// compare. An overlap the bind creates is `Err(RuleOverlap)` and NOTHING is
 /// bound (the transaction is dropped); the create path undoes the rest with
-/// `compensate_failed_create`, and the late-bind skips the bind and logs.
+/// `compensate_failed_create`, and the late-bind fails the apply with the same 409.
 ///
-/// Any OTHER failure of the guarded path (no compiler, a compile error) keeps
-/// the behaviour these binds always had: the binding is written plainly and the
-/// profile is repaired by the fire-and-forget recompile that follows. Only an
-/// overlap refuses.
+/// A guarded path that cannot complete for any OTHER reason (a snapshot, compile
+/// or database failure) REFUSES too (SP4d-4 M-3): binding without the check is
+/// the thing the guard exists to prevent, and `PUT /engines/{id}` and the
+/// catalog attach already refuse the same way. Only the deployment with no
+/// compiler wired (`perm_compiler` is `None`) binds plainly, as it always has.
 pub(crate) async fn bind_profile_guarded(
     st: &crate::EngineMgmtState,
     engine_id: Uuid,
@@ -280,11 +281,7 @@ pub(crate) async fn bind_profile_guarded(
             }
             Err(e) => {
                 drop(tx);
-                if let Some(body) = e.rule_overlap_body() {
-                    return Err(crate::EngineHttpError::RuleOverlap(body));
-                }
-                tracing::error!(engine = %engine_name, service_id = profile_id, error = %e,
-                    "the guarded bind could not complete; binding without the overlap check");
+                return Err(bind_refusal(engine_name, profile_id, e));
             }
         }
     }
@@ -292,4 +289,56 @@ pub(crate) async fn bind_profile_guarded(
         .set_engine_authz_service(engine_id, Some(profile_id))
         .await?;
     Ok(())
+}
+
+/// The refusal for a guarded bind that did not complete. An overlap the bind
+/// created is the caller's 409; a database failure is ours (5xx, logged); any
+/// other compile failure is a fact about the profile the operator can act on, so
+/// it is a 409 that names the engine, the profile and the cause.
+fn bind_refusal(
+    engine_name: &str,
+    profile_id: i64,
+    e: egret_perm::CompileError,
+) -> crate::EngineHttpError {
+    if let Some(body) = e.rule_overlap_body() {
+        return crate::EngineHttpError::RuleOverlap(body);
+    }
+    tracing::error!(engine = %engine_name, service_id = profile_id, error = %e,
+        "the guarded bind could not complete; the engine was not bound");
+    match e {
+        egret_perm::CompileError::Db(_) => crate::EngineHttpError::Internal,
+        other => crate::EngineHttpError::Conflict(format!(
+            "engine {engine_name} was not bound to policy profile {profile_id}: the profile \
+             could not be checked for order-ambiguous pairs: {other}"
+        )),
+    }
+}
+
+#[cfg(test)]
+mod bind_refusal_tests {
+    use super::*;
+    use crate::EngineHttpError;
+
+    #[test]
+    fn a_database_failure_is_internal_and_binds_nothing_to_say() {
+        let e = egret_perm::CompileError::Db("boom".into());
+        assert!(matches!(bind_refusal("e", 7, e), EngineHttpError::Internal));
+    }
+
+    #[test]
+    fn a_compile_failure_is_a_409_naming_the_engine_the_profile_and_the_cause() {
+        let e = egret_perm::CompileError::ProfileExpansionCeiling {
+            profile: "p".into(),
+            total: 10,
+            ceiling: 5,
+        };
+        match bind_refusal("eng-1", 7, e) {
+            EngineHttpError::Conflict(m) => {
+                assert!(m.contains("eng-1") && m.contains('7'), "{m}");
+                assert!(m.contains("ceiling of 5"), "{m}");
+                assert!(m.contains("not bound"), "{m}");
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
 }

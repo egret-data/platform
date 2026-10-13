@@ -31,6 +31,21 @@ impl GroupRepo {
             .map_err(db_err)
     }
 
+    /// Groups whose name contains `q` (case-insensitive; `%`, `_` and `\` in `q`
+    /// are literal), name-ordered, at most `limit` — [`list`](Self::list) filtered
+    /// in SQL rather than in the caller, which could only filter its own page.
+    pub async fn search(&self, q: &str, limit: i64) -> Result<Vec<Group>> {
+        sqlx::query_as::<_, Group>(
+            "SELECT id, name, source FROM groups WHERE name ILIKE $1 ESCAPE '\\' \
+             ORDER BY name LIMIT $2",
+        )
+        .bind(crate::contains_pattern(q))
+        .bind(limit)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
+
     /// Insert (source='oidc') or return the existing group id by name.
     pub async fn upsert_oidc_group(&self, name: &str) -> Result<Uuid> {
         let id: Uuid = sqlx::query_scalar(

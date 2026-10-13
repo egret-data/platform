@@ -27,6 +27,11 @@ pub const STARROCKS_SECURITY_XML: &str = "ranger-starrocks-security.xml";
 /// StarRocks: the plugin's audit configuration.
 pub const STARROCKS_AUDIT_XML: &str = "ranger-starrocks-audit.xml";
 
+/// How often an engine's Ranger plugin polls egret for policy, in milliseconds:
+/// one value for the engines egret provisions, the files an external engine's
+/// admin installs and the files the policy admin API serves.
+pub const RANGER_POLL_INTERVAL_MS: u32 = 30_000;
+
 /// The `fe.conf` line that switches StarRocks' access control to Ranger.
 pub const STARROCKS_ACCESS_CONTROL_LINE: &str = "access_control = ranger\n";
 
@@ -116,10 +121,20 @@ mod tests {
     const URL: &str = "http://host.docker.internal:8080";
 
     fn trino() -> RangerPluginFiles {
-        ranger_plugin_files(EngineKind::Trino, "demo2", URL, 30_000)
+        ranger_plugin_files(
+            EngineKind::Trino,
+            "demo2",
+            URL,
+            RANGER_POLL_INTERVAL_MS.into(),
+        )
     }
     fn starrocks() -> RangerPluginFiles {
-        ranger_plugin_files(EngineKind::StarRocks, "sr1", URL, 30_000)
+        ranger_plugin_files(
+            EngineKind::StarRocks,
+            "sr1",
+            URL,
+            RANGER_POLL_INTERVAL_MS.into(),
+        )
     }
 
     /// The files captured from the provisioners BEFORE they were refactored onto
@@ -188,5 +203,79 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -- the committed deploy files cannot drift from the renderer -------------
+
+    /// The StarRocks files `deploy/docker-compose.dev.yml` mounts. They are kept
+    /// (compose mounts them) but the renderer owns their content.
+    const DEPLOY_SECURITY_XML: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deploy/starrocks/ranger/ranger-starrocks-security.xml"
+    ));
+    const DEPLOY_AUDIT_XML: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deploy/starrocks/ranger/ranger-starrocks-audit.xml"
+    ));
+
+    /// The service name and URL the deploy security file is written for.
+    const DEPLOY_SERVICE: &str = "sr1";
+    const DEPLOY_URL: &str = "http://host.docker.internal:8080";
+
+    /// The deploy files differ from the renderer in two ways that carry no
+    /// meaning to Hadoop's configuration parser: an explanatory XML comment (the
+    /// renderer emits none by design, see the module doc) and two-space
+    /// indentation (the renderer's string literals continue with `\`, which
+    /// drops it; the byte-identity golden above pins that output, so it is the
+    /// deploy files that are indented, not the renderer that is wrong). The
+    /// comparison is on everything else: every property name and value.
+    fn comparable(xml: &str) -> String {
+        without_xml_comments(xml)
+            .lines()
+            .map(str::trim_start)
+            .map(|l| format!("{l}\n"))
+            .collect()
+    }
+
+    fn without_xml_comments(xml: &str) -> String {
+        let mut out = String::new();
+        let mut rest = xml;
+        while let Some(start) = rest.find("<!--") {
+            out.push_str(&rest[..start]);
+            let end = rest[start..]
+                .find("-->")
+                .expect("an unterminated XML comment");
+            rest = rest[start + end + "-->".len()..].trim_start_matches('\n');
+        }
+        out.push_str(rest);
+        out
+    }
+
+    #[test]
+    fn the_deploy_starrocks_files_equal_the_renderer_output_but_for_comments() {
+        let rendered = ranger_plugin_files(
+            EngineKind::StarRocks,
+            DEPLOY_SERVICE,
+            DEPLOY_URL,
+            RANGER_POLL_INTERVAL_MS.into(),
+        );
+        assert_eq!(
+            comparable(DEPLOY_SECURITY_XML),
+            rendered.get(STARROCKS_SECURITY_XML).unwrap(),
+            "deploy/starrocks/ranger/{STARROCKS_SECURITY_XML} drifted from the renderer"
+        );
+        assert_eq!(
+            comparable(DEPLOY_AUDIT_XML),
+            rendered.get(STARROCKS_AUDIT_XML).unwrap(),
+            "deploy/starrocks/ranger/{STARROCKS_AUDIT_XML} drifted from the renderer"
+        );
+    }
+
+    #[test]
+    fn stripping_comments_removes_only_the_comment() {
+        assert_eq!(
+            without_xml_comments("<?xml?>\n<!--\n a - b\n-->\n<a/>\n"),
+            "<?xml?>\n<a/>\n"
+        );
     }
 }

@@ -28,6 +28,12 @@ pub enum CpError {
     /// A named secret is still referenced and cannot be deleted.
     #[error("secret is in use by {0} connection(s)")]
     InUse(i64),
+    /// A tag write (rename, classification) would create an order-ambiguous
+    /// mask or row-filter pair. 409 with the structured body the perm routes
+    /// answer (`code: "rule_overlap"`, `rules`, `coordinate`, `kind`), which the
+    /// console parses to name the two rules.
+    #[error("rule overlap: {0}")]
+    RuleOverlap(serde_json::Value),
     #[error("internal error")]
     Internal,
 }
@@ -102,13 +108,9 @@ impl From<egret_bi::BiError> for CpError {
             E::Forbidden => CpError::Forbidden,
             E::BadRequest(s) => CpError::BadRequest(s),
             E::Conflict(s) => CpError::Conflict(s),
-            // SP4d-4 Task 3: a rule overlap is a 409 whose sentence is `error`.
-            E::Overlap { body } => CpError::Conflict(
-                body["error"]
-                    .as_str()
-                    .unwrap_or("two mask or row-filter rules overlap")
-                    .to_string(),
-            ),
+            // SP4d-4 Task 3: a rule overlap is a 409 whose sentence is `error`,
+            // and whose structured body is served as is.
+            E::Overlap { body } => CpError::RuleOverlap(body),
             E::Engine(_) | E::Db(_) => CpError::Internal,
         }
     }
@@ -137,6 +139,9 @@ impl From<egret_core::Error> for CpError {
 
 impl IntoResponse for CpError {
     fn into_response(self) -> Response {
+        if let CpError::RuleOverlap(body) = self {
+            return (StatusCode::CONFLICT, Json(body)).into_response();
+        }
         let (status, msg) = match &self {
             CpError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
             CpError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
@@ -148,7 +153,30 @@ impl IntoResponse for CpError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal error".to_string(),
             ),
+            CpError::RuleOverlap(_) => unreachable!("answered above with its structured body"),
         };
         (status, Json(serde_json::json!({ "error": msg }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn a_tag_write_overlap_keeps_its_structured_409_body() {
+        let body = serde_json::json!({
+            "error": "assigning this tag would create an order-ambiguous pair",
+            "code": "rule_overlap",
+            "rules": [{"id": null, "name": "a"}, {"id": null, "name": "b"}],
+            "coordinate": "wh.sales.orders.email",
+            "kind": "mask",
+        });
+        let resp = CpError::from(egret_bi::BiError::Overlap { body: body.clone() }).into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let got: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(got, body);
     }
 }
