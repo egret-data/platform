@@ -50,14 +50,18 @@ import { csrf, firstWorkspace, loginLocalAdmin, postJson } from "./helpers";
  * cd frontend && EGRET_E2E_WORKFLOWS=1 EGRET_E2E_BASE_URL=http://localhost:5217 \
  *   npx playwright test workflows-topology
  *
- * #    The first run after Vite starts can fail with a blank editor: Vite optimises a dependency on
- * #    first use and reloads the page mid-test ("optimized dependencies changed. reloading"). Run it again.
+ * #    Vite reloads every open page when it optimises a dependency on first use; the spec's
+ * #    `beforeAll` warms those modules up on a throwaway page first.
  *
  * # 5. Afterwards: stop both servers, `docker rm -f -v w7c-rustfs`, and drop the database by its name:
  * docker exec egret-w7c-postgres psql -U egret -d postgres -c "DROP DATABASE egret_w7c_live"
  * ```
  */
 const ENABLED = process.env.EGRET_E2E_WORKFLOWS === "1";
+
+/** W7b's polling (`executions/polling.ts`): a live read every 2 s, at most 30 s apart while reads fail. */
+const POLL_MS = 2_000;
+const POLL_MAX_MS = 30_000;
 
 const RUN = Date.now().toString(36);
 const NAMESPACE = "e2e.w7c";
@@ -274,6 +278,54 @@ async function measureCanvas(page: Page): Promise<CanvasMeasure> {
   });
 }
 
+/** `READABLE_ZOOM` in `TopologyView.tsx`: the first view's least zoom. */
+const READABLE_ZOOM = 0.8;
+
+interface FirstView {
+  zoom: number;
+  /** The flow's start marker is inside the canvas. */
+  startInView: boolean;
+  /** The first task's id, as drawn: its font size times the zoom, and its box's height on screen. */
+  firstTaskFontPx: number;
+  firstTaskTextHeight: number;
+  firstTaskInView: boolean;
+}
+
+/** The view as the canvas first shows it (no Fit pressed): its zoom, and how the flow's start and first task are drawn. */
+async function measureFirstView(page: Page, firstTask: string): Promise<FirstView> {
+  // The first view is placed once the canvas has its size; wait until a view is applied.
+  await expect.poll(() => canvas(page).evaluate((root) => getComputedStyle(root.querySelector(".react-flow__viewport")!).transform !== "none")).toBe(true);
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  return canvas(page).evaluate((root, uid) => {
+    const box = root.getBoundingClientRect();
+    const inside = (r: DOMRect) => r.left >= box.left - 0.5 && r.top >= box.top - 0.5 && r.right <= box.right + 0.5 && r.bottom <= box.bottom + 0.5;
+    const transform = getComputedStyle(root.querySelector(".react-flow__viewport")!).transform;
+    const zoom = new DOMMatrix(transform).a;
+    const start = root.querySelector<HTMLElement>('[data-marker="start:flow"]')!.getBoundingClientRect();
+    const label = root.querySelector<HTMLElement>(`button[data-uid="${uid}"] .font-mono`)!;
+    const labelBox = label.getBoundingClientRect();
+    return {
+      zoom: Math.round(zoom * 1000) / 1000,
+      startInView: inside(start),
+      firstTaskFontPx: Math.round(Number.parseFloat(getComputedStyle(label).fontSize) * zoom * 100) / 100,
+      firstTaskTextHeight: Math.round(labelBox.height * 100) / 100,
+      firstTaskInView: inside(labelBox),
+    };
+  }, firstTask);
+}
+
+function expectReadableFirstView(v: FirstView, what: string): void {
+  console.log(`first view [${what}]: ${JSON.stringify(v)}`);
+  expect(v.zoom, `${what}: first zoom`).toBeGreaterThanOrEqual(READABLE_ZOOM - 0.001);
+  expect(v.startInView, `${what}: the flow's start is in view`).toBe(true);
+  expect(v.firstTaskFontPx, `${what}: first task's text size`).toBeGreaterThanOrEqual(10);
+  expect(v.firstTaskTextHeight, `${what}: first task's text box`).toBeGreaterThanOrEqual(10);
+}
+
+/** The viewport's transform, to show a poll leaves the user's view alone. */
+const viewportTransform = (page: Page): Promise<string> =>
+  canvas(page).evaluate((root) => getComputedStyle(root.querySelector(".react-flow__viewport")!).transform);
+
 function expectCanvasFits(m: CanvasMeasure, what: string): void {
   expect(m.cards, `${what}: cards drawn`).toBeGreaterThan(5);
   expect(m.outside, `${what}: boxes outside the canvas`).toEqual([]);
@@ -314,6 +366,33 @@ test.describe("W7c topology: editor, execution, Loop, Subflow, measured", () => 
   test.skip(!ENABLED, "opt-in: set EGRET_E2E_WORKFLOWS=1 with a private local stack up (see the comment above)");
   test.setTimeout(300_000);
 
+  // Vite optimises a dependency the first time a module needs it (Monaco's worker, xyflow) and then
+  // reloads every open page, which would land mid-test. Load those modules once on a throwaway
+  // page first, until a load passes without a reload.
+  test.beforeAll(async ({ browser }, testInfo) => {
+    test.setTimeout(120_000);
+    const page = await browser.newPage({ baseURL: testInfo.project.use.baseURL });
+    try {
+      for (let i = 0; i < 4; i++) {
+        await page.goto("/login");
+        await page.evaluate(() => Object.assign(window, { egretWarm: true }));
+        await page
+          .evaluate((paths) => Promise.all(paths.map((p) => import(/* @vite-ignore */ p))), [
+            "/src/lib/monaco.ts",
+            "/src/components/workflows/editor/registerEditorTabs.tsx",
+            "/src/components/workflows/topology/TopologyTab.tsx",
+            "/src/components/workflows/executions/topology/ExecutionTopologyTab.tsx",
+          ])
+          .catch(() => undefined);
+        await page.waitForTimeout(3_000);
+        const kept = await page.evaluate(() => "egretWarm" in window).catch(() => false);
+        if (kept) break;
+      }
+    } finally {
+      await page.close();
+    }
+  });
+
   test("editor graph follows the YAML → stale banner → cursor → live states → Loop iterations → Subflow → measured", async ({ page, context }) => {
     // Every unsaved-graph request, to show the debounce.
     const graphPosts: number[] = [];
@@ -344,6 +423,13 @@ test.describe("W7c topology: editor, execution, Loop, Subflow, measured", () => 
     await page.getByRole("button", { name: "Reopen a tab in panel 2" }).click();
     await page.getByRole("menuitem", { name: "Topology" }).click();
     await expect(nodeButton(page, "tasks.prepare.check.when_true")).toBeVisible({ timeout: 30_000 });
+    // The first view is readable (a fit of this flow is about 0.15 here), horizontally and vertically.
+    expectReadableFirstView(await measureFirstView(page, "tasks.prepare"), "editor first view LR");
+    await page.getByRole("button", { name: "Vertical" }).click();
+    expectReadableFirstView(await measureFirstView(page, "tasks.prepare"), "editor first view TB");
+    await page.getByRole("button", { name: "Horizontal" }).click();
+    // The steps below click nodes all over the graph: Fit puts every one of them on the canvas.
+    await page.getByRole("button", { name: "Fit view" }).click();
     // Every construct is there: a trigger, the clusters, the errors branch, the Loop body.
     for (const uid of ["triggers.nightly", "tasks.prepare.nap", "tasks.fan.left", "tasks.fan.right", "tasks.call", "tasks.each.item", "errors.alert"]) {
       await expect(nodeButton(page, uid), uid).toBeAttached();
@@ -386,6 +472,8 @@ test.describe("W7c topology: editor, execution, Loop, Subflow, measured", () => 
     await page.getByRole("button", { name: "Expand subflow call" }).click();
     await expect(nodeButton(page, "tasks.call/tasks.child_log")).toBeAttached({ timeout: 10_000 });
     await expect(canvas(page).locator('[data-cluster="cluster:tasks.call"]')).toBeAttached();
+    // An expansion keeps the view (the same flow); Fit brings the child's cluster onto the canvas.
+    await page.getByRole("button", { name: "Fit view" }).click();
     // Selecting a task of the child flow says where it lives instead of moving the cursor.
     await nodeButton(page, "tasks.call/tasks.child_log").click();
     await expect(page.getByRole("status").filter({ hasText: "child_log is a task of the Subflow call's flow" })).toBeVisible();
@@ -420,11 +508,15 @@ test.describe("W7c topology: editor, execution, Loop, Subflow, measured", () => 
     const execId: string = started.id;
     await page.goto(`${base}/executions/${execId}/topology`);
     await expect(nodeButton(page, "tasks.prepare.nap")).toBeVisible({ timeout: 30_000 });
+    expectReadableFirstView(await measureFirstView(page, "tasks.prepare"), "execution first view LR");
+    const firstTransform = await viewportTransform(page);
     // The 8 s Sleep is seen running, then done, without a reload.
     await expect(cardState(page, "tasks.prepare.nap", "RUNNING")).toBeVisible({ timeout: 20_000 });
     const readsWhileRunning = executionGraphReads.length;
     await expect(cardState(page, "tasks.prepare.nap", "SUCCESS")).toBeVisible({ timeout: 30_000 });
     expect(executionGraphReads.length, "the graph was polled while the execution ran").toBeGreaterThan(readsWhileRunning);
+    // The polls did not move the view.
+    expect(await viewportTransform(page), "the view after the polls").toBe(firstTransform);
 
     // The final states, once the execution is over.
     await expect(headerState(page, "FAILED")).toBeVisible({ timeout: 60_000 });
@@ -438,10 +530,19 @@ test.describe("W7c topology: editor, execution, Loop, Subflow, measured", () => 
     // The branch that did not run is dimmed, with no state.
     await expect(nodeCard(page, "tasks.prepare.check.when_false")).toHaveAttribute("data-dimmed", "true");
     await expect(nodeCard(page, "tasks.prepare.check.when_false").locator("[data-state]")).toHaveCount(0);
-    // Terminal: the polling stops (one last read for the final states is allowed).
+    // Terminal: the polling stops. The tab reads once more when the execution ends; then, over a
+    // window longer than W7b's backoff ceiling (`POLL_MAX_MS`, 30 s; a live poll is every 2 s),
+    // there is no read at all.
+    await page.waitForTimeout(POLL_MS + 1_000);
     const readsAtEnd = executionGraphReads.length;
-    await page.waitForTimeout(5_000);
-    expect(executionGraphReads.length - readsAtEnd, "graph reads after the end").toBeLessThanOrEqual(1);
+    await page.waitForTimeout(POLL_MAX_MS + POLL_MS);
+    expect(executionGraphReads.length - readsAtEnd, "graph reads after the end").toBe(0);
+
+    // The vertical first view of the execution, then back, and Fit so every node can be clicked.
+    await page.getByRole("button", { name: "Vertical" }).click();
+    expectReadableFirstView(await measureFirstView(page, "tasks.prepare"), "execution first view TB");
+    await page.getByRole("button", { name: "Horizontal" }).click();
+    await page.getByRole("button", { name: "Fit view" }).click();
 
     // ── 5. The Loop body node: three iterations, one failed ─────────────
     await nodeButton(page, "tasks.each.item").click();
@@ -463,6 +564,7 @@ test.describe("W7c topology: editor, execution, Loop, Subflow, measured", () => 
     await page.getByRole("button", { name: "Expand subflow call" }).click();
     await expect(page).toHaveURL(/[?&]expand=tasks\.call/);
     await expect(cardState(page, "tasks.call/tasks.child_log", "SUCCESS")).toBeVisible({ timeout: 15_000 });
+    await page.getByRole("button", { name: "Fit view" }).click();
     await nodeButton(page, "tasks.call/tasks.child_log").click();
     await expect(page.getByRole("link", { name: "Open the child execution" })).toHaveAttribute("href", /\/workflows\/executions\/[0-9a-f-]{36}\/topology\?node=tasks\.child_log$/);
 

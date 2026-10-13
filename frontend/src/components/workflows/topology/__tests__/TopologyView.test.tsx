@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { TopologyView, type TopologyViewProps } from "@/components/workflows/topology/TopologyView";
+import { READABLE_ZOOM, TopologyView, type TopologyViewProps } from "@/components/workflows/topology/TopologyView";
 import { installXyflowJsdom } from "./xyflowJsdom";
 import { EMPTY_FLOW, EXPANDED, FLOW, LINE, NESTED, NESTED_FAILED, STATES, chain } from "./fixtures";
 
@@ -181,6 +181,95 @@ describe("TopologyView edges and colours", () => {
     expect(path(container, "triggers.daily", "end:triggers").style.strokeDasharray).not.toBe("");
     expect(path(container, "end:triggers", "start:flow").style.strokeDasharray).not.toBe("");
     expect(path(container, "start:flow", "tasks.a").style.strokeDasharray).toBe("");
+  });
+});
+
+/** The viewport's pan and zoom, as xyflow writes them on the viewport element. */
+function viewportOf(container: HTMLElement): { x: number; y: number; zoom: number } {
+  const t = (container.querySelector(".react-flow__viewport") as HTMLElement).style.transform;
+  const m = /translate\(([-\d.e]+)px,\s*([-\d.e]+)px\)\s*scale\(([\d.e]+)\)/.exec(t);
+  if (!m) throw new Error(`no viewport transform in ${t}`);
+  return { x: Number(m[1]), y: Number(m[2]), zoom: Number(m[3]) };
+}
+
+/** A node's box on the screen: its graph position through the viewport (the 800 × 600 canvas of `installXyflowJsdom`). */
+function onScreen(container: HTMLElement, uid: string): { left: number; top: number; right: number; bottom: number } {
+  const el = container.querySelector(`.react-flow__node[data-id="${uid}"]`) as HTMLElement;
+  const m = /translate\(([-\d.e]+)px,\s*([-\d.e]+)px\)/.exec(el.style.transform)!;
+  const v = viewportOf(container);
+  const left = Number(m[1]) * v.zoom + v.x;
+  const top = Number(m[2]) * v.zoom + v.y;
+  return { left, top, right: left + Number.parseFloat(el.style.width || "10") * v.zoom, bottom: top + Number.parseFloat(el.style.height || "10") * v.zoom };
+}
+const inCanvas = (b: { left: number; top: number; right: number; bottom: number }) => b.left >= 0 && b.top >= 0 && b.right <= 800 && b.bottom <= 600;
+
+describe("TopologyView first view", () => {
+  it("a graph too long to fit readably opens at the readable zoom with the flow's start in view", async () => {
+    const { container } = renderView({ graph: chain(30) });
+    await settle();
+    expect(viewportOf(container).zoom).toBeCloseTo(READABLE_ZOOM, 5);
+    expect(inCanvas(onScreen(container, "start:flow"))).toBe(true);
+    // The first rank is near the leading (left) edge, and the first task is in view too.
+    expect(onScreen(container, "start:flow").left).toBeLessThan(100);
+    expect(inCanvas(onScreen(container, "tasks.t0"))).toBe(true);
+    // Fit still fits the whole graph, below the readable zoom.
+    await userEvent.setup().click(screen.getByRole("button", { name: "Fit view" }));
+    await settle();
+    expect(viewportOf(container).zoom).toBeLessThan(READABLE_ZOOM);
+    expect(inCanvas(onScreen(container, `tasks.t29`))).toBe(true);
+  });
+
+  it("vertically, the start is near the top", async () => {
+    localStorage.setItem(ORIENTATION_KEY, "TB");
+    const { container } = renderView({ graph: chain(30) });
+    await settle();
+    expect(viewportOf(container).zoom).toBeCloseTo(READABLE_ZOOM, 5);
+    const startBox = onScreen(container, "start:flow");
+    expect(inCanvas(startBox)).toBe(true);
+    expect(startBox.top).toBeLessThan(100);
+  });
+
+  // (The Fit button is not compared: jsdom's observer reports every node at 800 × 600, which xyflow's own fit measures.)
+  it("a small graph opens fitted: the whole graph in view, at a readable zoom, no larger than life", async () => {
+    // Two tasks fit the 800 px canvas above the readable zoom.
+    const { container } = renderView({ graph: chain(2) });
+    await settle();
+    const first = viewportOf(container);
+    expect(first.zoom).toBeGreaterThanOrEqual(READABLE_ZOOM);
+    expect(first.zoom).toBeLessThanOrEqual(1);
+    for (const uid of ["start:flow", "tasks.t0", "tasks.t1", "end:flow"]) expect(inCanvas(onScreen(container, uid)), uid).toBe(true);
+    // Centred, as a fit is: the room left of the graph matches the room right of it.
+    const left = onScreen(container, "start:flow").left;
+    const right = 800 - onScreen(container, "end:flow").right;
+    expect(Math.abs(left - right)).toBeLessThan(2);
+  });
+
+  it("a poll or an edit of the same flow keeps the user's view; another flow gets a first view", async () => {
+    const user = userEvent.setup();
+    const { container, rerender, props } = renderView({ graph: chain(30), viewKey: "flow-a" });
+    await settle();
+    await user.click(screen.getByRole("button", { name: "Zoom out" }));
+    await settle();
+    const mine = viewportOf(container);
+    expect(mine.zoom).toBeLessThan(READABLE_ZOOM);
+    const draw = (over: Partial<TopologyViewProps>) =>
+      rerender(
+        <div style={{ width: 800, height: 600 }}>
+          <TopologyView {...props} {...over} />
+        </div>,
+      );
+    // A poll: the same graph, new states.
+    draw({ graph: chain(30), viewKey: "flow-a", states: { "tasks.t0": STATES["tasks.a"] } });
+    await settle();
+    expect(viewportOf(container)).toEqual(mine);
+    // An edit: another graph of the same flow.
+    draw({ graph: chain(31), viewKey: "flow-a" });
+    await settle();
+    expect(viewportOf(container)).toEqual(mine);
+    // Another flow.
+    draw({ graph: chain(31), viewKey: "flow-b" });
+    await settle();
+    expect(viewportOf(container).zoom).toBeCloseTo(READABLE_ZOOM, 5);
   });
 });
 

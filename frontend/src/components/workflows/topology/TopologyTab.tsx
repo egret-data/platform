@@ -143,6 +143,7 @@ export function TopologyTab({ ctx }: { ctx: EditorContext }) {
           busy={busy}
           error={error}
           stale={stale}
+          viewKey={`${workspace}/${modelKey}`}
         />
       </div>
     </div>

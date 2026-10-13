@@ -1,6 +1,6 @@
 import "@xyflow/react/dist/base.css";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
-import { ReactFlow, ReactFlowProvider, ViewportPortal, useReactFlow, useStoreApi, type Node as FlowNode } from "@xyflow/react";
+import { ReactFlow, ReactFlowProvider, ViewportPortal, getViewportForBounds, useReactFlow, useStore, useStoreApi, type Node as FlowNode, type Viewport } from "@xyflow/react";
 import { ChevronsDownUp, ChevronsUpDown, GitFork, List, Maximize, ZoomIn, ZoomOut } from "lucide-react";
 import type { FlowGraph, NodeState } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
@@ -93,6 +93,12 @@ export interface TopologyViewProps {
   error?: string | null;
   /** The graph no longer matches the source (the editor's YAML does not parse). */
   stale?: boolean;
+  /**
+   * What the graph is OF (a flow, an execution). The first view is placed when the first graph
+   * arrives and again when this changes, not when a poll or an edit brings a new graph of the
+   * same thing: the user's pan and zoom stay.
+   */
+  viewKey?: string;
 }
 
 /**
@@ -104,6 +110,45 @@ const XY_THEME = { "--xy-attribution-background-color": "var(--background)" } as
 const FOCUSABLE = new Set<Positioned["kind"]>(["task", "trigger", "collapsed"]);
 /** Fit: room around the graph, and never blown up past life size. */
 const FIT = { padding: 0.12, maxZoom: 1 } as const;
+/** The canvas's zoom range; Fit may go as low as `MIN_ZOOM` on a large graph. */
+const MIN_ZOOM = 0.1;
+const MAX_ZOOM = 2;
+
+/**
+ * The FIRST view's least zoom. A card's task id is `text-sm` in the mono font, 13 px as the
+ * theme sets it (measured in the browser), so at 0.8 it is drawn at 10.4 px. A fit that would go lower (a 15-task flow fits at about 0.2 in a 600 px panel) is not
+ * a view anyone can read; the first view stays at this zoom instead and shows where the flow
+ * starts. The Fit button still fits the whole graph, at any zoom down to `MIN_ZOOM`.
+ */
+export const READABLE_ZOOM = 0.8;
+/** Room between the canvas's leading edge and the graph in the first view, in screen pixels. */
+const LEAD = 24;
+
+/**
+ * Where the first view of a graph looks: the fit, when it is readable; else `READABLE_ZOOM`
+ * with the graph's leading edge (left when horizontal, top when vertical) near the canvas's,
+ * centred across on the flow's start (`start:flow`), so the first rank is in view.
+ */
+export function firstView(nodes: readonly Positioned[], orientation: Orientation, width: number, height: number): Viewport {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const n of nodes) {
+    minX = Math.min(minX, n.x);
+    minY = Math.min(minY, n.y);
+    maxX = Math.max(maxX, n.x + n.width);
+    maxY = Math.max(maxY, n.y + n.height);
+  }
+  if (minX === Infinity) return { x: 0, y: 0, zoom: 1 };
+  const fit = getViewportForBounds({ x: minX, y: minY, width: maxX - minX, height: maxY - minY }, width, height, MIN_ZOOM, FIT.maxZoom, FIT.padding);
+  if (fit.zoom >= READABLE_ZOOM) return fit;
+  const z = READABLE_ZOOM;
+  const start = nodes.find((n) => n.id === "start:flow") ?? nodes[0];
+  return orientation === "LR"
+    ? { zoom: z, x: LEAD - minX * z, y: height / 2 - (start.y + start.height / 2) * z }
+    : { zoom: z, x: width / 2 - (start.x + start.width / 2) * z, y: LEAD - minY * z };
+}
 
 export function TopologyView(props: TopologyViewProps) {
   return (
@@ -113,7 +158,7 @@ export function TopologyView(props: TopologyViewProps) {
   );
 }
 
-function Topology({ graph, states, selectedUid = null, onSelect, onExpandSubflow, busy, error, stale }: TopologyViewProps) {
+function Topology({ graph, states, selectedUid = null, onSelect, onExpandSubflow, busy, error, stale, viewKey = "" }: TopologyViewProps) {
   const [orientation, setOrientation] = useState<Orientation>(readOrientation);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   const [listView, setListView] = useState(false);
@@ -240,14 +285,23 @@ function Topology({ graph, states, selectedUid = null, onSelect, onExpandSubflow
     });
   }, [placed]);
 
-  // Fit again when the shape changes (orientation, collapse, another graph), not on every poll's states.
-  const shape = placed ? placed.nodes.map((n) => n.id).join("|") + orientation : "";
-  const fitted = useRef("");
+  // The first view (`firstView`): placed once the canvas has a size, and again for another flow or
+  // execution (`viewKey`), another orientation or another set of collapsed clusters, which are the
+  // user's own requests to redraw. A poll's states or an edit's graph of the same flow keep the view.
+  const canvasWidth = useStore((s) => s.width);
+  const canvasHeight = useStore((s) => s.height);
+  const view = placed ? JSON.stringify([viewKey, orientation, [...collapsed].sort()]) : null;
+  const viewed = useRef<string | null>(null);
+  // Without the canvas (the list view, a failed layout) there is no view to keep: showing it again places the first view.
+  const canvasShown = !listView && !layoutFailed;
   useEffect(() => {
-    if (fitted.current === shape) return;
-    fitted.current = shape;
-    void rf.fitView(FIT);
-  }, [shape, rf]);
+    if (!canvasShown) viewed.current = null;
+  }, [canvasShown]);
+  useEffect(() => {
+    if (!placed || view === null || canvasWidth <= 0 || canvasHeight <= 0 || viewed.current === view) return;
+    viewed.current = view;
+    void rf.setViewport(firstView(placed.nodes, orientation, canvasWidth, canvasHeight));
+  }, [placed, view, orientation, canvasWidth, canvasHeight, rf]);
 
   const clusters = graph?.clusters ?? [];
   const collapseAll = () => setCollapsed(new Set(clusters.filter((c) => !c.reason && !c.parent).map((c) => c.uid)));
@@ -292,10 +346,8 @@ function Topology({ graph, states, selectedUid = null, onSelect, onExpandSubflow
             nodes={flowNodes}
             edges={[]}
             nodeTypes={NODE_TYPES}
-            fitView
-            fitViewOptions={FIT}
-            minZoom={0.1}
-            maxZoom={2}
+            minZoom={MIN_ZOOM}
+            maxZoom={MAX_ZOOM}
             nodesDraggable={false}
             nodesConnectable={false}
             nodesFocusable={false}

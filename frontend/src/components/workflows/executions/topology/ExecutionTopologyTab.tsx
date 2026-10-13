@@ -197,6 +197,7 @@ export default function ExecutionTopologyTab({
           onExpandSubflow={onExpandSubflow}
           busy={busy}
           error={error}
+          viewKey={execution.id}
         />
       </div>
       {/* Present before it changes, so a screen reader announces the note (FE-A11Y). */}
