@@ -27,6 +27,8 @@ pub fn has_platform_jwks(engine_jwks_uri: &str, engine_oidc_issuer: &str) -> boo
 /// never a hard-fail.
 pub fn starrocks_image_is_pre_3_5(image: Option<&str>) -> bool {
     let Some(image) = image else { return false };
+    // A pinned ref is `repo:tag@sha256:<hex>`; the digest's own `:` is not the tag's.
+    let image = image.split('@').next().unwrap_or(image);
     let tag = match image.rsplit_once(':') {
         Some((_, t)) => t,
         None => return false,
@@ -94,6 +96,13 @@ mod tests {
         )));
         assert!(!starrocks_image_is_pre_3_5(Some("starrocks/fe-ubuntu")));
         assert!(!starrocks_image_is_pre_3_5(Some("")));
+        let digest = "@sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31";
+        assert!(starrocks_image_is_pre_3_5(Some(&format!(
+            "starrocks/fe-ubuntu:3.4.10{digest}"
+        ))));
+        assert!(!starrocks_image_is_pre_3_5(Some(&format!(
+            "starrocks/fe-ubuntu:4.1.6{digest}"
+        ))));
         assert!(!starrocks_image_is_pre_3_5(None));
     }
 
