@@ -34,17 +34,33 @@ export interface EngineDto {
      */
   port?: number | null;
   /**
-     * External only: the Ranger plugin version the operator declared installed.
+     * Provisioned only: the full image ref the engine's stored spec pins (for
+     * StarRocks the FE image; Trino's bare `imageVersion` expanded to
+     * `trinodb/trino:<version>`). Absent when the spec pins none.
+     * @nullable
+     */
+  image?: string | null;
+  /**
+     * The Ranger plugin version egret reads this engine at. External: the
+     * version the operator declared. Provisioned: the version its exact image
+     * ships (`egret_perm::plugin_version_for_image`); absent when the image is
+     * not one egret has measured.
      * @nullable
      */
   rangerPluginVersion?: string | null;
   /**
-     * External only: whether egret's Ranger evaluator has been read against this
-     * engine's (type, declared version) PAIR: only the pairs in
+     * Whether egret's Ranger evaluator has been read against this engine's
+     * (type, plugin version) PAIR: only the pairs in
      * `egret_perm::MODELLED_RANGER_PLUGINS` are. When `false`, a migration to the profile bound to this
      * engine is refused (never evaluated at a guessed version) and `explain`
-     * answers that it cannot.
+     * answers that it cannot. Enforcement is unchanged.
      * @nullable
      */
   rangerPluginVersionModelled?: boolean | null;
+  /**
+     * Why the engine is not modelled, and how to fix it (for a provisioned
+     * engine: pin its image). Absent when modelled.
+     * @nullable
+     */
+  rangerPluginVersionNote?: string | null;
 }

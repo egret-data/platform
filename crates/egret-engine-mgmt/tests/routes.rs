@@ -1189,6 +1189,48 @@ async fn create_and_get_engine() {
     );
 }
 
+/// The register picker's source: exactly the modelled (type, version) pairs, in
+/// the order egret declares them; and a provisioned engine reports its image.
+#[tokio::test]
+async fn the_modelled_ranger_plugins_route_lists_exactly_the_modelled_pairs() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_modelled_admin", true).await;
+    let (status, j) = call(&f, "GET", "/engines/modelled-ranger-plugins", &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    let want: Vec<serde_json::Value> = egret_perm::MODELLED_RANGER_PLUGINS
+        .iter()
+        .map(|(t, v)| serde_json::json!({ "type": t, "version": v }))
+        .collect();
+    assert_eq!(j, serde_json::Value::Array(want));
+
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "warehouseId": wh_id, "coordinatorReplicas": 1,
+            "workerReplicas": 1, "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            "imageVersion": "483",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert_eq!(j["image"], "trinodb/trino:483", "{j}");
+    assert_eq!(j["rangerPluginVersion"], "2.8.0", "{j}");
+    assert_eq!(j["rangerPluginVersionModelled"], true, "{j}");
+}
+
 /// `POST /engines` with `kind: "starrocks"` persists a `"starrocks"`-type
 /// engine row (not the back-compat-default `"trino"`), auto-wires a PRIMARY
 /// `egret-warehouse` catalog row the same way the Trino path does (T6 — the

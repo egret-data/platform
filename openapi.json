@@ -3895,6 +3895,49 @@
         }
       }
     },
+    "/api/control-plane/engines/modelled-ranger-plugins": {
+      "get": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "operationId": "list_modelled_ranger_plugins",
+        "responses": {
+          "200": {
+            "description": "The (engine type, Ranger plugin version) pairs egret's evaluator is verified against, in declaration order: what an external engine may be registered at and still be modelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ModelledRangerPluginDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/engines/{id}": {
       "get": {
         "tags": [
@@ -37598,19 +37641,33 @@
             "format": "int32",
             "description": "External only: the port the engine answers on."
           },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Provisioned only: the full image ref the engine's stored spec pins (for\nStarRocks the FE image; Trino's bare `imageVersion` expanded to\n`trinodb/trino:<version>`). Absent when the spec pins none."
+          },
           "rangerPluginVersion": {
             "type": [
               "string",
               "null"
             ],
-            "description": "External only: the Ranger plugin version the operator declared installed."
+            "description": "The Ranger plugin version egret reads this engine at. External: the\nversion the operator declared. Provisioned: the version its exact image\nships (`egret_perm::plugin_version_for_image`); absent when the image is\nnot one egret has measured."
           },
           "rangerPluginVersionModelled": {
             "type": [
               "boolean",
               "null"
             ],
-            "description": "External only: whether egret's Ranger evaluator has been read against this\nengine's (type, declared version) PAIR: only the pairs in\n`egret_perm::MODELLED_RANGER_PLUGINS` are. When `false`, a migration to the profile bound to this\nengine is refused (never evaluated at a guessed version) and `explain`\nanswers that it cannot."
+            "description": "Whether egret's Ranger evaluator has been read against this engine's\n(type, plugin version) PAIR: only the pairs in\n`egret_perm::MODELLED_RANGER_PLUGINS` are. When `false`, a migration to the profile bound to this\nengine is refused (never evaluated at a guessed version) and `explain`\nanswers that it cannot. Enforcement is unchanged."
+          },
+          "rangerPluginVersionNote": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the engine is not modelled, and how to fix it (for a provisioned\nengine: pin its image). Absent when modelled."
           }
         }
       },
@@ -39741,6 +39798,22 @@
           "migrated_at": {
             "type": "string",
             "description": "RFC 3339, UTC."
+          }
+        }
+      },
+      "ModelledRangerPluginDto": {
+        "type": "object",
+        "description": "One modelled (engine type, Ranger plugin version) pair.",
+        "required": [
+          "type",
+          "version"
+        ],
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
           }
         }
       },

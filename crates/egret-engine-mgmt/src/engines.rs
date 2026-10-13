@@ -84,6 +84,10 @@ pub use egret_engine_mgmt_api::{
 pub fn router() -> Router<CpState> {
     Router::new()
         .route("/engines", get(list_engines).post(create_engine))
+        .route(
+            "/engines/modelled-ranger-plugins",
+            get(list_modelled_ranger_plugins),
+        )
         // Register an engine egret did not provision (SP4d-4 Part C).
         .merge(crate::external::routes())
         .route(
@@ -303,25 +307,81 @@ pub(crate) struct EngineDto {
     /// External only: the port the engine answers on.
     #[serde(skip_serializing_if = "Option::is_none")]
     port: Option<i32>,
-    /// External only: the Ranger plugin version the operator declared installed.
+    /// Provisioned only: the full image ref the engine's stored spec pins (for
+    /// StarRocks the FE image; Trino's bare `imageVersion` expanded to
+    /// `trinodb/trino:<version>`). Absent when the spec pins none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image: Option<String>,
+    /// The Ranger plugin version egret reads this engine at. External: the
+    /// version the operator declared. Provisioned: the version its exact image
+    /// ships (`egret_perm::plugin_version_for_image`); absent when the image is
+    /// not one egret has measured.
     #[serde(skip_serializing_if = "Option::is_none")]
     ranger_plugin_version: Option<String>,
-    /// External only: whether egret's Ranger evaluator has been read against this
-    /// engine's (type, declared version) PAIR: only the pairs in
+    /// Whether egret's Ranger evaluator has been read against this engine's
+    /// (type, plugin version) PAIR: only the pairs in
     /// `egret_perm::MODELLED_RANGER_PLUGINS` are. When `false`, a migration to the profile bound to this
     /// engine is refused (never evaluated at a guessed version) and `explain`
-    /// answers that it cannot.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// answers that it cannot. Enforcement is unchanged.
     ranger_plugin_version_modelled: Option<bool>,
+    /// Why the engine is not modelled, and how to fix it (for a provisioned
+    /// engine: pin its image). Absent when modelled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ranger_plugin_version_note: Option<String>,
+}
+
+/// `(plugin version, modelled, note)` for an engine row.
+fn plugin_report(e: &Engine, image: Option<&str>) -> (Option<String>, bool, Option<String>) {
+    let unmodelled = |version: &str| {
+        format!(
+            "Ranger plugin {version} on a {} engine is not a pair egret's evaluator has been \
+             verified against (it models {}); explain and migrations for its profile refuse",
+            e.r#type,
+            egret_perm::modelled_ranger_plugins_sentence()
+        )
+    };
+    if crate::external::is_external(e) {
+        return match e.ranger_plugin_version.as_deref() {
+            Some(v) if crate::external::plugin_version_is_modelled(&e.r#type, v) => {
+                (Some(v.to_string()), true, None)
+            }
+            Some(v) => (Some(v.to_string()), false, Some(unmodelled(v))),
+            None => (
+                None,
+                false,
+                Some("no Ranger plugin version is declared".into()),
+            ),
+        };
+    }
+    let Some(image) = image else {
+        return (
+            None,
+            false,
+            Some(format!(
+                "the spec pins no image, so egret cannot tell which Ranger plugin it runs; pin \
+                 its image to one of: {}",
+                egret_perm::modelled_ranger_plugins_sentence()
+            )),
+        );
+    };
+    match egret_perm::plugin_version_for_image(&e.r#type, image) {
+        Ok(v) if crate::external::plugin_version_is_modelled(&e.r#type, v) => {
+            (Some(v.to_string()), true, None)
+        }
+        Ok(v) => (Some(v.to_string()), false, Some(unmodelled(v))),
+        Err(sentence) => (None, false, Some(sentence)),
+    }
 }
 
 impl From<Engine> for EngineDto {
     fn from(e: Engine) -> Self {
+        let image = if crate::external::is_external(&e) {
+            None
+        } else {
+            egret_perm::stored_engine_image(&e.r#type, &e.spec)
+        };
+        let (version, modelled, note) = plugin_report(&e, image.as_deref());
         let spec = serde_json::from_value(e.spec).unwrap_or_default();
-        let modelled = e
-            .ranger_plugin_version
-            .as_deref()
-            .map(|v| crate::external::plugin_version_is_modelled(&e.r#type, v));
         EngineDto {
             id: e.id,
             name: e.name,
@@ -332,10 +392,46 @@ impl From<Engine> for EngineDto {
             origin: e.origin,
             host: e.external_host,
             port: e.external_port,
-            ranger_plugin_version: e.ranger_plugin_version,
-            ranger_plugin_version_modelled: modelled,
+            image,
+            ranger_plugin_version: version,
+            ranger_plugin_version_modelled: Some(modelled),
+            ranger_plugin_version_note: note,
         }
     }
+}
+
+/// One modelled (engine type, Ranger plugin version) pair.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct ModelledRangerPluginDto {
+    #[serde(rename = "type")]
+    r#type: String,
+    version: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/modelled-ranger-plugins",
+    tag = "control-plane-engines",
+    responses(
+        (status = 200, description = "The (engine type, Ranger plugin version) pairs egret's evaluator is verified against, in declaration order: what an external engine may be registered at and still be modelled", body = Vec<ModelledRangerPluginDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+    ),
+)]
+async fn list_modelled_ranger_plugins(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+) -> Result<Json<Vec<ModelledRangerPluginDto>>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
+    Ok(Json(
+        egret_perm::MODELLED_RANGER_PLUGINS
+            .iter()
+            .map(|(t, v)| ModelledRangerPluginDto {
+                r#type: (*t).into(),
+                version: (*v).into(),
+            })
+            .collect(),
+    ))
 }
 
 /// What `POST /engines` returns: the engine, plus whichever of the body's
@@ -6879,6 +6975,7 @@ async fn bridge_exec(
 #[openapi(
     paths(
         list_engines,
+        list_modelled_ranger_plugins,
         create_engine,
         get_engine,
         update_engine,
@@ -6896,6 +6993,7 @@ async fn bridge_exec(
         pod_exec,
     ),
     components(schemas(
+        ModelledRangerPluginDto,
         CreateEngineBody,
         NewEngineCatalog,
         EngineSpecDto,
@@ -6923,6 +7021,91 @@ pub struct EngineMgmtApi;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dto_of(
+        kind: &str,
+        origin: &str,
+        spec: serde_json::Value,
+        declared: Option<&str>,
+    ) -> EngineDto {
+        Engine {
+            id: Uuid::new_v4(),
+            name: "e".into(),
+            r#type: kind.into(),
+            namespace: "ns".into(),
+            spec,
+            status: "running".into(),
+            authz_service_id: None,
+            delegator_secret_id: None,
+            root_secret_id: None,
+            tls_secret_id: None,
+            coordinator_cert: None,
+            tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
+            created_at: chrono::Utc::now(),
+            origin: origin.into(),
+            external_host: None,
+            external_port: None,
+            ranger_plugin_version: declared.map(str::to_string),
+        }
+        .into()
+    }
+
+    #[test]
+    fn a_provisioned_trino_shows_its_image_and_the_plugin_that_image_ships() {
+        let d = dto_of(
+            "trino",
+            "provisioned",
+            serde_json::json!({ "imageVersion": "483" }),
+            None,
+        );
+        assert_eq!(d.image.as_deref(), Some("trinodb/trino:483"));
+        assert_eq!(d.ranger_plugin_version.as_deref(), Some("2.8.0"));
+        assert_eq!(d.ranger_plugin_version_modelled, Some(true));
+        assert_eq!(d.ranger_plugin_version_note, None);
+    }
+
+    #[test]
+    fn a_provisioned_starrocks_on_a_floating_tag_is_unmodelled_and_the_note_says_pin() {
+        let d = dto_of(
+            "starrocks",
+            "provisioned",
+            serde_json::json!({ "starrocksConfig": { "feImage": "starrocks/fe-ubuntu:4.1-latest" } }),
+            None,
+        );
+        assert_eq!(d.image.as_deref(), Some("starrocks/fe-ubuntu:4.1-latest"));
+        assert_eq!(d.ranger_plugin_version, None);
+        assert_eq!(d.ranger_plugin_version_modelled, Some(false));
+        let note = d.ranger_plugin_version_note.expect("a note");
+        assert!(note.contains("pin"), "{note}");
+        assert!(note.contains("4.1-latest"), "{note}");
+    }
+
+    #[test]
+    fn a_provisioned_engine_with_no_image_is_unmodelled_not_silently_fine() {
+        let d = dto_of("trino", "provisioned", serde_json::json!({}), None);
+        assert_eq!(d.image, None);
+        assert_eq!(d.ranger_plugin_version_modelled, Some(false));
+        assert!(d.ranger_plugin_version_note.is_some());
+    }
+
+    #[test]
+    fn an_external_engine_keeps_its_declared_version_and_has_no_image() {
+        let d = dto_of(
+            "starrocks",
+            "external",
+            serde_json::json!({ "starrocksConfig": { "feImage": "starrocks/fe-ubuntu:4.1.6" } }),
+            Some("2.9.0"),
+        );
+        assert_eq!(d.image, None);
+        assert_eq!(d.ranger_plugin_version.as_deref(), Some("2.9.0"));
+        assert_eq!(d.ranger_plugin_version_modelled, Some(true));
+        assert_eq!(d.ranger_plugin_version_note, None);
+        let d = dto_of("trino", "external", serde_json::json!({}), Some("2.9.0"));
+        assert_eq!(d.ranger_plugin_version_modelled, Some(false));
+        assert!(d.ranger_plugin_version_note.is_some());
+    }
 
     #[test]
     fn per_role_pod_shape_parses_and_legacy_falls_back_to_both_roles() {

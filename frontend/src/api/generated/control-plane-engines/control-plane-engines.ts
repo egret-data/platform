@@ -37,6 +37,7 @@ import type {
   EngineDto,
   EngineWorkspaceDto,
   ErrorBody,
+  ModelledRangerPluginDto,
   PodLogsDto,
   QueryDetailDto,
   QueryDto,
@@ -740,7 +741,125 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getControlPlaneEnginesRegisterExternalEngineMutationOptions(options), queryClient);
     }
-    export type controlPlaneEnginesGetEngineResponse200 = {
+    export type controlPlaneEnginesListModelledRangerPluginsResponse200 = {
+  data: ModelledRangerPluginDto[]
+  status: 200
+}
+
+export type controlPlaneEnginesListModelledRangerPluginsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesListModelledRangerPluginsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesListModelledRangerPluginsResponseSuccess = (controlPlaneEnginesListModelledRangerPluginsResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesListModelledRangerPluginsResponseError = (controlPlaneEnginesListModelledRangerPluginsResponse401 | controlPlaneEnginesListModelledRangerPluginsResponse403) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesListModelledRangerPluginsResponse = (controlPlaneEnginesListModelledRangerPluginsResponseSuccess | controlPlaneEnginesListModelledRangerPluginsResponseError)
+
+export const getControlPlaneEnginesListModelledRangerPluginsUrl = () => {
+
+
+
+
+  return `/api/control-plane/engines/modelled-ranger-plugins`
+}
+
+export const controlPlaneEnginesListModelledRangerPlugins = async ( options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesListModelledRangerPluginsResponse> => {
+
+  return customInstance<controlPlaneEnginesListModelledRangerPluginsResponse>(getControlPlaneEnginesListModelledRangerPluginsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesListModelledRangerPluginsQueryKey = () => {
+    return [
+    `/api/control-plane/engines/modelled-ranger-plugins`
+    ] as const;
+    }
+
+
+export const getControlPlaneEnginesListModelledRangerPluginsQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>, TError = ErrorBody>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneEnginesListModelledRangerPluginsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>> = ({ signal }) => controlPlaneEnginesListModelledRangerPlugins({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneEnginesListModelledRangerPluginsQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>>
+export type ControlPlaneEnginesListModelledRangerPluginsQueryError = ErrorBody
+
+
+export function useControlPlaneEnginesListModelledRangerPlugins<TData = Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>, TError = ErrorBody>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesListModelledRangerPlugins<TData = Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesListModelledRangerPlugins<TData = Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlaneEnginesListModelledRangerPlugins<TData = Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListModelledRangerPlugins>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneEnginesListModelledRangerPluginsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneEnginesGetEngineResponse200 = {
   data: EngineDetailDto
   status: 200
 }
