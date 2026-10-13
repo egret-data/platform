@@ -1,4 +1,4 @@
-import { useId, useMemo, useState, type ReactNode } from "react";
+import { lazy, useId, useMemo, useState, type ReactNode } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -11,6 +11,7 @@ import {
 } from "@/api/generated/workflow/workflow";
 import type { ExecutionDto, TaskRunDto } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
+import { LazyRouteArea } from "@/components/layout/LazyRouteArea";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
@@ -23,6 +24,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
 import { StateChip } from "@/components/workflows/StateChip";
@@ -47,8 +49,17 @@ import { Forbidden } from "@/routes/Forbidden";
 import ExecutionOverview from "@/routes/workflows/ExecutionOverview";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
-/** The execution detail's tabs (W7b spec §4), Kestra's minus Metrics and Dependencies (§2). */
-export const EXECUTION_TABS = ["overview", "gantt", "logs", "outputs"] as const;
+/**
+ * The execution's Topology tab (W7c spec §6.3). Through `lazy()` only: it brings `@xyflow/react`
+ * and `@dagrejs/dagre`, which the rest of the page never needs (`scripts/assert-workflows-lazy.mjs`).
+ */
+const ExecutionTopologyTab = lazy(() => import("@/components/workflows/executions/topology/ExecutionTopologyTab"));
+
+/**
+ * The execution detail's tabs (W7b spec §4), Kestra's minus Metrics and Dependencies (§2), in
+ * Kestra's order; W7c added Topology (its spec §6.3).
+ */
+export const EXECUTION_TABS = ["overview", "topology", "gantt", "logs", "outputs"] as const;
 type ExecutionTab = (typeof EXECUTION_TABS)[number];
 const isExecutionTab = (t: string | undefined): t is ExecutionTab => (EXECUTION_TABS as readonly string[]).includes(t ?? "");
 
@@ -164,12 +175,18 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
       <Tabs value={tab} onValueChange={(t) => navigate(`${href}/${t}`)} className="mt-3 flex min-h-0 flex-1 flex-col">
         <TabsList className="mx-4 self-start">
           <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="topology">Topology</TabsTrigger>
           <TabsTrigger value="gantt">Gantt</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
           <TabsTrigger value="outputs">Outputs</TabsTrigger>
         </TabsList>
         <TabsContent value="overview" className="min-h-0 flex-1 overflow-auto p-4">
           <ExecutionOverview ws={ws} execution={execution} now={now} />
+        </TabsContent>
+        <TabsContent value="topology" className="min-h-0 flex-1 overflow-auto p-4">
+          <LazyRouteArea area="Topology" fallback={<Skeleton className="h-[32rem] w-full" />}>
+            <ExecutionTopologyTab ws={ws} execution={execution} slots={ganttSlots} now={now} />
+          </LazyRouteArea>
         </TabsContent>
         <TabsContent value="gantt" className="min-h-0 flex-1 overflow-auto p-4">
           <ExecutionGanttTab execution={execution} slots={ganttSlots} />

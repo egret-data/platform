@@ -679,6 +679,35 @@ impl FlowRepo {
             .map_err(db_err)
     }
 
+    /// The `source` of the draft named `(namespace, flow_id)` in `ws`, or
+    /// `Ok(None)`: what a `Subflow` expands to in the topology (W7c spec
+    /// §3.4, [`crate::graph::SubflowSource`]).
+    ///
+    /// SCOPED by `ws`, unlike [`Self::find_by_name`] below: a `Subflow`
+    /// resolves within its own workspace (as `worker::subflow::resolve`
+    /// does at run time), so a flow of the same name in another workspace
+    /// is "no such flow", never its graph. A trashed flow does not resolve;
+    /// a disabled one does -- the graph shows what the flow IS, and
+    /// disabling it changes whether it runs, not its shape.
+    pub async fn draft_source_by_name(
+        &self,
+        ws: Uuid,
+        namespace: &str,
+        flow_id: &str,
+    ) -> Result<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT source FROM workflow.flows \
+              WHERE workspace_id = $1 AND namespace = $2 AND flow_id = $3 \
+                AND deleted_at IS NULL",
+        )
+        .bind(ws)
+        .bind(namespace)
+        .bind(flow_id)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
+
     /// `(id, workspace_id)` of the flow named `(namespace, flow_id)`, or
     /// `Ok(None)` if no such row exists in ANY workspace.
     ///
@@ -1268,6 +1297,78 @@ impl ExecutionRepo {
         .map_err(db_err)?;
         let (state, complete) = row.ok_or_else(|| Error::NotFound("execution".into()))?;
         Ok(ExecutionLogStatus { state, complete })
+    }
+}
+
+/// [`ExecutionRepo::graph_source`]'s run read: the runs of `$1` (workspace
+/// `$2`) and of every `Loop` iteration beneath it, at any depth -- one
+/// statement, whatever the number of nodes or iterations (spec §11).
+///
+/// - The family walks `parent_execution_id` over rows WITH a `loop_index`
+///   only, so a `CREATE_NEW_EXECUTION` replay (a parent, no index) and a
+///   `Subflow` child (`trigger_execution_id`) are not in it. The root carries
+///   the workspace predicate; every step repeats it, though the composite FKs
+///   of migration 0138 already make a cross-workspace child unrepresentable.
+/// - `child_execution_id` is the newest execution the run started as a
+///   `Subflow` (`trigger_execution_id` + `trigger_run_ix`, served by
+///   `workflow_executions_trigger_idx`); a retried `Subflow` starts one per
+///   attempt. A `Flow`-trigger child has no `trigger_run_ix`, so it never
+///   matches.
+/// - Each family row carries `top`/`top_index`: the iteration of `$1` it lies
+///   under (itself at depth 1) and that iteration's `loop_index`, so a nested
+///   `Loop`'s deeper runs are attributed to the outer iteration the graph
+///   lists (`IterationRun`), with no further statement.
+/// - Ordered root first, then each loop's iterations by `loop_index`, then
+///   `run_ix`: an iteration list in loop order.
+const GRAPH_RUNS_SQL: &str =
+    "WITH RECURSIVE fam(id, depth, parent, parent_run_ix, loop_index, top, top_index) AS ( \
+       SELECT id, 0, NULL::uuid, NULL::int, NULL::int, NULL::uuid, NULL::int \
+         FROM workflow.executions WHERE id = $1 AND workspace_id = $2 \
+     UNION ALL \
+       SELECT e.id, fam.depth + 1, e.parent_execution_id, e.parent_run_ix, e.loop_index, \
+              CASE WHEN fam.depth = 0 THEN e.id ELSE fam.top END, \
+              CASE WHEN fam.depth = 0 THEN e.loop_index ELSE fam.top_index END \
+         FROM workflow.executions e JOIN fam ON e.parent_execution_id = fam.id \
+        WHERE e.loop_index IS NOT NULL AND e.workspace_id = $2) \
+     SELECT t.execution_id, fam.depth > 0 AS iteration, \
+            fam.top AS iteration_execution_id, fam.top_index AS iteration_index, \
+            t.id AS run_id, t.task_id, t.state, \
+            jsonb_array_length(t.attempts) AS attempts, t.started_at, t.ended_at, \
+            (SELECT c.id FROM workflow.executions c \
+              WHERE c.trigger_execution_id = t.execution_id AND c.trigger_run_ix = t.run_ix \
+                AND c.workspace_id = $2 \
+              ORDER BY c.created_at DESC, c.id DESC LIMIT 1) AS child_execution_id \
+       FROM fam JOIN workflow.task_runs t ON t.execution_id = fam.id \
+      ORDER BY fam.depth, fam.parent, fam.parent_run_ix, fam.loop_index, t.run_ix";
+
+impl ExecutionRepo {
+    /// What `GET …/executions/{id}/graph` draws an execution from: its frozen
+    /// `source` and [`GRAPH_RUNS_SQL`]'s runs. Two statements, no per-node
+    /// read. `None` for an id that is not `ws`'s, as [`Self::get`]'s
+    /// `NotFound` -- indistinguishable from one that never existed.
+    pub async fn graph_source(
+        &self,
+        ws: Uuid,
+        id: Uuid,
+    ) -> Result<Option<crate::graph::FrozenExecution>> {
+        let source: Option<String> = sqlx::query_scalar(
+            "SELECT source FROM workflow.executions WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(id)
+        .bind(ws)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        let runs = sqlx::query_as(GRAPH_RUNS_SQL)
+            .bind(id)
+            .bind(ws)
+            .fetch_all(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(Some(crate::graph::FrozenExecution { source, runs }))
     }
 }
 

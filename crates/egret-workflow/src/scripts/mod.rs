@@ -972,18 +972,13 @@ pub(crate) fn script_tasks(flow: &Flow) -> Vec<(String, &Task, ScriptKind, &Valu
             out.push((path.clone(), task, kind, spec));
         }
         for child in task.children().into_iter().chain(task.error_children()) {
-            walk(child, format!("{path}.{}", child.id), out);
+            walk(child, crate::spec::path::task_path(&path, &child.id), out);
         }
     }
     let mut out = Vec::new();
-    for (name, list) in [
-        ("tasks", &flow.tasks),
-        ("errors", &flow.errors),
-        ("finally", &flow.finally_),
-        ("afterExecution", &flow.after_execution),
-    ] {
+    for (name, list) in crate::spec::path::root_lists(flow) {
         for task in list {
-            walk(task, format!("{name}.{}", task.id), &mut out);
+            walk(task, crate::spec::path::task_path(name, &task.id), &mut out);
         }
     }
     out

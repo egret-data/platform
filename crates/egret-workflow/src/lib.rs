@@ -45,6 +45,9 @@ pub mod executor;
 /// W13a: `process_events`, the Flow-trigger outbox processor. `pub` because
 /// `tests/flow_trigger_fire.rs` drives it directly.
 pub mod flow_trigger;
+/// W7c: the read-only topology graph of a flow (`flow_graph`), pure like
+/// `executor`. `pub` because the routes (Task 2) and the corpus sweep use it.
+pub mod graph;
 /// W11: `workflow.task_logs` -- the log vocabulary and `LogRepo`. `pub`
 /// because `tests/task_logs.rs` drives the repository directly.
 pub mod logs;

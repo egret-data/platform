@@ -411,6 +411,58 @@ mod tests {
         out
     }
 
+    /// W7c Task 1: the topology graph over the whole corpus. For every flow
+    /// that parses, `graph::flow_graph` answers `Ok`, and every task the
+    /// executor's plan holds (`plan_stored`: parse + flatten, no validation,
+    /// where the flow flattens) is exactly one task node. The graph walks the
+    /// parsed model and the plan the flattened one, so this is the check that
+    /// the two walks see the same tasks.
+    #[test]
+    fn every_corpus_flow_graphs_and_every_planned_task_is_one_node() {
+        use crate::graph::{flow_graph, NodeKind};
+        let mut parsed = 0;
+        let mut judged = 0;
+        let mut tasks_judged = 0;
+        for (id, source) in every_corpus_flow() {
+            let Ok(flow) = crate::spec::parse(&source) else {
+                continue;
+            };
+            parsed += 1;
+            let graph = flow_graph(&flow, None).unwrap_or_else(|e| panic!("{id}: {e}"));
+            let Ok(plan) = plan::plan_stored(&source) else {
+                continue;
+            };
+            judged += 1;
+            for task in &plan.tasks {
+                let nodes = graph
+                    .nodes
+                    .iter()
+                    .filter(|n| matches!(&n.kind, NodeKind::Task { task_id, .. } if *task_id == task.id))
+                    .count();
+                // An id the plan holds once is exactly one node. An id it
+                // holds k times (`invalids/duplicate`, refused but flattened)
+                // is k nodes, each with its own uid (`~2`, ...).
+                let planned = plan.tasks.iter().filter(|t| t.id == task.id).count();
+                assert_eq!(
+                    nodes, planned,
+                    "{id}: planned task '{}' is {nodes} nodes, planned {planned} times",
+                    task.id
+                );
+                tasks_judged += 1;
+            }
+        }
+        // The population, measured when this test was written (W7c Task 1):
+        // 339 flows parse, 336 of them flatten, holding 808 planned tasks. A
+        // floor, not an equality, so adding a corpus flow does not fail it; a
+        // sweep that judged nothing does.
+        assert!(parsed >= 339, "parsed only {parsed} flows");
+        assert!(
+            judged >= 336,
+            "judged only {judged} flows ({parsed} parsed)"
+        );
+        assert!(tasks_judged >= 808, "judged only {tasks_judged} tasks");
+    }
+
     /// Drive `advance` to a fixed point, completing every `Runnable` that goes
     /// `Running` with `outcome`. A unit-test stand-in for the oracle's
     /// environment: no golden, one outcome for every task.

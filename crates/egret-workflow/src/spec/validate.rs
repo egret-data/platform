@@ -580,14 +580,9 @@ pub fn validate_for_run(flow: &Flow) -> ValidationReport {
     // `finally:`/`afterExecution:` can never silently double as (be
     // "referenced as") a normal `tasks:` successor.
     let mut seen_ids: HashMap<String, Vec<String>> = HashMap::new();
-    for (list_name, list) in [
-        ("tasks", &flow.tasks),
-        ("errors", &flow.errors),
-        ("finally", &flow.finally_),
-        ("afterExecution", &flow.after_execution),
-    ] {
+    for (list_name, list) in super::path::root_lists(flow) {
         for task in list {
-            let path = format!("{list_name}.{}", task.id);
+            let path = super::path::task_path(list_name, &task.id);
             walk_task(flow, task, path, &mut seen_ids, &mut report);
         }
     }
@@ -1866,7 +1861,7 @@ fn walk_task(
     // `error_children()`, first match wins, so two tasks sharing an id there
     // would hand a worker whichever came first.
     for child in task.children().into_iter().chain(task.error_children()) {
-        let child_path = format!("{path}.{}", child.id);
+        let child_path = super::path::task_path(&path, &child.id);
         walk_task(flow, child, child_path, seen_ids, report);
     }
 }

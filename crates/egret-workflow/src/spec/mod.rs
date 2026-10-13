@@ -6,6 +6,7 @@
 //! single function alongside `parse`/`validate`.
 
 mod parse;
+pub(crate) mod path;
 pub mod registry;
 pub mod schema;
 mod unrunnable;

@@ -33,6 +33,11 @@ export const workflowsKeys = {
    */
   executionChildren: (id: string) => ["workflows", "execution", id, "children"] as const,
   /**
+   * The execution's graph with its states (`GET …/executions/{id}/graph`,
+   * W7c spec §4), per set of expanded `Subflow`s, under `execution(id)`.
+   */
+  executionGraph: (id: string, subflows: readonly string[]) => ["workflows", "execution", id, "graph", subflows] as const,
+  /**
    * One file of an execution (`path` is its `kestra:///` URI), under
    * `execution(id)`: every read of it (`metas`, a `preview` per row cap) is
    * keyed beneath this one.

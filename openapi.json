@@ -28515,6 +28515,128 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/executions/{id}/graph": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "get_execution_graph",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subflows",
+            "in": "query",
+            "description": "Uids of `Subflow` nodes to expand in place, repeated (`subflows=a&subflows=b`). A `Subflow` whose run started a child execution expands from that execution's frozen source, with its states; otherwise from the child flow's current draft, without states. A uid inside an expansion is `{subflow_uid}/{child_uid}`; a uid that names no `Subflow` node is ignored",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "explode": true
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The graph of the execution's frozen source, and the state of every node that has a run. A task with no run has no entry; a task in a `Loop` body is folded over every iteration by Kestra's priority, with `iterations` and no `run_id`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionGraph"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`{id}` is not a UUID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace; one of another workspace answers exactly this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The graph, counted after expansion, has more than 5,000 nodes; the message names the count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/executions/{id}/logs": {
       "get": {
         "tags": [
@@ -29076,6 +29198,110 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/flows/graph": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "graph_unsaved_flow",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "subflows",
+            "in": "query",
+            "description": "Uids of `Subflow` nodes to expand in place, repeated (`subflows=a&subflows=b`). A uid inside an expansion is `{subflow_uid}/{child_uid}`; a uid that names no `Subflow` node is ignored",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "explode": true
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FlowGraphRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The topology of the unsaved YAML. A flow that parses but fails validation still gets its graph; its refused tasks carry `refusal`. Nothing is written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowGraph"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The YAML does not parse; the message carries the line and column",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The graph, counted after expansion, has more than 5,000 nodes; the message names the count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/flows/validate": {
       "post": {
         "tags": [
@@ -29596,6 +29822,138 @@
           },
           "503": {
             "description": "Internal storage failed while an uploaded file was being stored. Nothing is created; the request can be retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/flows/{id}/graph": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "get_flow_graph",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "description": "Draw this published version's frozen source instead of the draft",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "subflows",
+            "in": "query",
+            "description": "Uids of `Subflow` nodes to expand in place, repeated (`subflows=a&subflows=b`). A uid inside an expansion is `{subflow_uid}/{child_uid}`; a uid that names no `Subflow` node is ignored",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "explode": true
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The topology of the draft, or of the version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowGraph"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`version` is not an integer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such flow, or no such version of it, in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The graph, counted after expansion, has more than 5,000 nodes; the message names the count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
             "content": {
               "application/json": {
                 "schema": {
@@ -34096,6 +34454,15 @@
           }
         }
       },
+      "Branch": {
+        "type": "string",
+        "enum": [
+          "tasks",
+          "errors",
+          "finally",
+          "after_execution"
+        ]
+      },
       "CacheScope": {
         "type": "string",
         "enum": [
@@ -34754,6 +35121,62 @@
           }
         }
       },
+      "Cluster": {
+        "type": "object",
+        "required": [
+          "uid",
+          "kind",
+          "nodes",
+          "start",
+          "end"
+        ],
+        "properties": {
+          "uid": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The flowable's task id; `None` for the triggers cluster."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ClusterKind"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start": {
+            "type": "string",
+            "description": "The uid of the cluster's `start` marker node. **Exception: a\n`subflow` cluster with a `reason`** (an expansion that could not\nhappen) has no markers and no nodes; its `start` and `end` are both\nthe `Subflow` task's own uid, a node that stays in its parent cluster."
+          },
+          "end": {
+            "type": "string",
+            "description": "The uid of the cluster's `end` marker node; for a `subflow` cluster\nwith a `reason`, the `Subflow` task's own uid (see `start`)."
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExpansionReason",
+                "description": "Why a `subflow` cluster is empty (spec §3.4): it then has no nodes and\nno markers, and `start`/`end` name the `Subflow` task node. `None` on\nevery other cluster and on a `subflow` cluster that expanded."
+              }
+            ]
+          }
+        }
+      },
       "ClusterDto": {
         "type": "object",
         "required": [
@@ -34785,6 +35208,23 @@
             }
           }
         }
+      },
+      "ClusterKind": {
+        "type": "string",
+        "enum": [
+          "sequential",
+          "parallel",
+          "if",
+          "switch",
+          "dag",
+          "loop",
+          "loop_until",
+          "allow_failure",
+          "working_directory",
+          "pause",
+          "triggers",
+          "subflow"
+        ]
       },
       "ColumnDto": {
         "type": "object",
@@ -37329,6 +37769,31 @@
           }
         }
       },
+      "Edge": {
+        "type": "object",
+        "required": [
+          "source",
+          "target",
+          "relation"
+        ],
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "relation": {
+            "$ref": "#/components/schemas/Relation"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "Effect": {
         "type": "string",
         "description": "`perm.effect`.",
@@ -37837,6 +38302,29 @@
         ],
         "description": "One execution in full: every list field, plus the two things only a detail\npage needs — the frozen `source` and every task run, ordered by `run_ix`."
       },
+      "ExecutionGraph": {
+        "type": "object",
+        "description": "`GET …/executions/{id}/graph`'s answer: the graph of the execution's frozen\nsource, and the state of every node that has a run.",
+        "required": [
+          "graph",
+          "states"
+        ],
+        "properties": {
+          "graph": {
+            "$ref": "#/components/schemas/FlowGraph"
+          },
+          "states": {
+            "type": "object",
+            "description": "Node uid -> its state. A node with no run has no entry.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/NodeState"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "ExecutionListItemDto": {
         "type": "object",
         "description": "One execution as `GET /executions` lists it.\n\n**No `source`.** It is the whole frozen flow YAML — one document per row —\nand a fifty-row page would carry fifty of them to show a column that does\nnot exist. The field is not merely omitted here: [`ExecutionRow`] does not\nhave it at all, so no future edit to this DTO can put it back by accident.\n`GET /executions/{id}` carries it, because a detail page draws the topology\nfrom it.\n\n`workspace_id` is dropped for the reason every other DTO in this module\ndrops it: the `{workspace}` path segment already named it, and a body field\nthat merely echoes the URL is a second place for it to be wrong.",
@@ -38013,6 +38501,14 @@
             "description": "The offset actually used, after the clamp."
           }
         }
+      },
+      "ExpansionReason": {
+        "type": "string",
+        "enum": [
+          "not_found",
+          "dynamic",
+          "depth"
+        ]
       },
       "ExplainAccess": {
         "type": "object",
@@ -38537,6 +39033,46 @@
           }
         }
       },
+      "FlowGraph": {
+        "type": "object",
+        "required": [
+          "nodes",
+          "edges",
+          "clusters"
+        ],
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            }
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Edge"
+            }
+          },
+          "clusters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Cluster"
+            }
+          }
+        }
+      },
+      "FlowGraphRequest": {
+        "type": "object",
+        "description": "`POST /flows/graph` body: the unsaved YAML to draw.",
+        "required": [
+          "source"
+        ],
+        "properties": {
+          "source": {
+            "type": "string"
+          }
+        }
+      },
       "FlowListItemDto": {
         "type": "object",
         "description": "A flow draft as `GET /flows` lists it — no `source`/`plan`/`validation`:\nre-parsing and re-validating every draft in the workspace on every list\ncall is the wrong cost to pay for a list view, and the list route was\nnever asked to answer \"is this flow currently valid\" (`GET /flows/{id}`\nis).",
@@ -38989,6 +39525,72 @@
             ],
             "format": "date-time",
             "description": "Optional hard expiry. Absent means the client lives until revoked."
+          }
+        }
+      },
+      "IterationRun": {
+        "type": "object",
+        "description": "One iteration of the `Loop` the execution ran itself, as one node of its\nbody saw it (W7c Task 6, fix round 1).",
+        "required": [
+          "loop_index",
+          "state",
+          "child_execution_id"
+        ],
+        "properties": {
+          "loop_index": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The iteration's index in its `Loop`."
+          },
+          "state": {
+            "type": "string",
+            "description": "THIS NODE's state in the iteration: its runs there, folded by\n[`FOLD_PRIORITY`] -- not the iteration's own state, which another body\ntask can decide."
+          },
+          "child_execution_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The iteration: the child execution of the graph's execution that ran it."
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The node's run, when the iteration ran it exactly once; null when a\nnested `Loop` ran it in several deeper iterations."
+          }
+        }
+      },
+      "Iterations": {
+        "type": "object",
+        "required": [
+          "total",
+          "by_state",
+          "runs"
+        ],
+        "properties": {
+          "total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many iterations this node ran in: `runs.len()`."
+          },
+          "by_state": {
+            "type": "object",
+            "description": "Iterations by their folded state's wire name: `runs` counted by `state`.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IterationRun"
+            },
+            "description": "The node's own run in each iteration it ran in, by `loop_index`. An\niteration where the node never ran has no entry."
           }
         }
       },
@@ -39949,6 +40551,24 @@
           }
         }
       },
+      "Node": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/NodeKind"
+          },
+          {
+            "type": "object",
+            "required": [
+              "uid"
+            ],
+            "properties": {
+              "uid": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
       "NodeDto": {
         "type": "object",
         "required": [
@@ -39962,6 +40582,171 @@
           "recentFailures": {
             "type": "number",
             "format": "double"
+          }
+        }
+      },
+      "NodeKind": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "task_id",
+              "type",
+              "canonical_type",
+              "kind",
+              "branch",
+              "disabled",
+              "node"
+            ],
+            "properties": {
+              "task_id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "description": "The `type:` as written."
+              },
+              "canonical_type": {
+                "type": "string",
+                "description": "The FQCN for a flowable or `Subflow` (whichever spelling was\nwritten) and for a registry type (its canonical row); otherwise\nthe type as written."
+              },
+              "kind": {
+                "$ref": "#/components/schemas/TaskNodeKind"
+              },
+              "branch": {
+                "$ref": "#/components/schemas/Branch"
+              },
+              "disabled": {
+                "type": "boolean"
+              },
+              "refusal": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "node": {
+                "type": "string",
+                "enum": [
+                  "task"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "trigger_id",
+              "type",
+              "disabled",
+              "node"
+            ],
+            "properties": {
+              "trigger_id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              },
+              "disabled": {
+                "type": "boolean"
+              },
+              "node": {
+                "type": "string",
+                "enum": [
+                  "trigger"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "node"
+            ],
+            "properties": {
+              "node": {
+                "type": "string",
+                "enum": [
+                  "start"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "node"
+            ],
+            "properties": {
+              "node": {
+                "type": "string",
+                "enum": [
+                  "end"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "The node's kind, serialised as the `node` tag beside its fields."
+      },
+      "NodeState": {
+        "type": "object",
+        "description": "One node's state (module doc, \"One run, or a fold\").",
+        "required": [
+          "state",
+          "attempts"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "description": "A `RunState` wire name (`RUNNING`, `SUCCESS`, ...)."
+          },
+          "attempts": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The run's attempt count; for a fold, the most any one run took."
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The run's id; null for a fold."
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "ended_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "iterations": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Iterations",
+                "description": "Set when the runs live in `Loop` iterations."
+              }
+            ]
+          },
+          "child_execution_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "For a `Subflow` node's single run: the newest child execution it\nstarted. Absent for any other node, and for a fold."
           }
         }
       },
@@ -41722,6 +42507,19 @@
             "description": "Why this row's stored `config` no longer parses, if it does not.\nA stored row the tightened validator now refuses stays visible and\nrepairable instead of vanishing — and, critically, never fails the\nwhole list (SP3c-1 review N1)."
           }
         }
+      },
+      "Relation": {
+        "type": "string",
+        "description": "Kestra's seven `RelationType`s.",
+        "enum": [
+          "sequential",
+          "choice",
+          "parallel",
+          "dynamic",
+          "error",
+          "finally",
+          "after_execution"
+        ]
       },
       "RenameFolder": {
         "type": "object",
@@ -44275,6 +45073,14 @@
             "type": "string"
           }
         }
+      },
+      "TaskNodeKind": {
+        "type": "string",
+        "enum": [
+          "leaf",
+          "executable",
+          "flowable"
+        ]
       },
       "TaskRunDto": {
         "type": "object",
