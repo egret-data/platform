@@ -828,7 +828,7 @@ fn migration_0185_scoped_statements() -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(|s| s.replacen("WHERE ", "WHERE id = ANY($1) AND ", 1))
         .collect();
-    assert_eq!(statements.len(), 3, "three UPDATEs: {statements:?}");
+    assert_eq!(statements.len(), 6, "six UPDATEs: {statements:?}");
     for s in &statements {
         assert!(s.contains("id = ANY($1)"), "scoped: {s}");
     }
@@ -897,7 +897,30 @@ async fn migration_0185_writes_todays_implicit_images_and_touches_nothing_explic
         "external",
     )
     .await;
-    let ids = vec![trino_empty, trino_explicit, sr_implicit, sr_external];
+    let trino_number = insert_engine_spec(
+        &db,
+        &format!("img-trino-number-{tag}"),
+        "trino",
+        serde_json::json!({"imageVersion": 470}),
+        "provisioned",
+    )
+    .await;
+    let sr_number = insert_engine_spec(
+        &db,
+        &format!("img-sr-number-{tag}"),
+        "starrocks",
+        serde_json::json!({"starrocksConfig": {"feImage": 41, "cnImage": 42}}),
+        "provisioned",
+    )
+    .await;
+    let ids = vec![
+        trino_empty,
+        trino_explicit,
+        sr_implicit,
+        sr_external,
+        trino_number,
+        sr_number,
+    ];
 
     let mut run_error = None;
     for statement in migration_0185_scoped_statements() {
@@ -936,4 +959,14 @@ async fn migration_0185_writes_todays_implicit_images_and_touches_nothing_explic
     assert_eq!(sr["cnImage"], "starrocks/cn-ubuntu:4.1-latest");
     assert_eq!(sr["feReplicas"], 1, "other config kept");
     assert_eq!(specs[3], serde_json::json!({}), "external untouched");
+    // A non-string image becomes the string it spells, so Rust's `as_str()` sees it.
+    assert_eq!(specs[4]["imageVersion"], serde_json::json!("470"));
+    assert_eq!(
+        specs[5]["starrocksConfig"]["feImage"],
+        serde_json::json!("41")
+    );
+    assert_eq!(
+        specs[5]["starrocksConfig"]["cnImage"],
+        serde_json::json!("42")
+    );
 }

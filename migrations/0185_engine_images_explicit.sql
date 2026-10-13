@@ -31,3 +31,23 @@ UPDATE engine_mgmt.engines
                 || jsonb_build_object('cnImage', 'starrocks/cn-ubuntu:4.1-latest'))
  WHERE type = 'starrocks' AND origin = 'provisioned'
    AND coalesce(btrim(spec #>> '{starrocksConfig,cnImage}'), '') = '';
+
+-- A non-string image (e.g. the JSON number 470) reads as '470' through `->>`, so
+-- the statements above skip it, but the Rust side reads it with `as_str()` and
+-- finds none. Normalise each to the JSON string it spells.
+UPDATE engine_mgmt.engines
+   SET spec = jsonb_set(spec, '{imageVersion}', to_jsonb(spec ->> 'imageVersion'))
+ WHERE type = 'trino' AND origin = 'provisioned'
+   AND jsonb_typeof(spec -> 'imageVersion') NOT IN ('string', 'null');
+
+UPDATE engine_mgmt.engines
+   SET spec = jsonb_set(spec, '{starrocksConfig,feImage}',
+                to_jsonb(spec #>> '{starrocksConfig,feImage}'))
+ WHERE type = 'starrocks' AND origin = 'provisioned'
+   AND jsonb_typeof(spec #> '{starrocksConfig,feImage}') NOT IN ('string', 'null');
+
+UPDATE engine_mgmt.engines
+   SET spec = jsonb_set(spec, '{starrocksConfig,cnImage}',
+                to_jsonb(spec #>> '{starrocksConfig,cnImage}'))
+ WHERE type = 'starrocks' AND origin = 'provisioned'
+   AND jsonb_typeof(spec #> '{starrocksConfig,cnImage}') NOT IN ('string', 'null');
