@@ -8,7 +8,7 @@
 //! the `ProfileCase` build, and `compare`. Release only:
 //!
 //! ```bash
-//! cargo test -p egret-perm-compile --release --test gate_timing -- --ignored --nocapture
+//! cargo test -p egret-perm-compile --release --features harness --test gate_timing -- --ignored --nocapture
 //! ```
 //!
 //! Shapes: `base` (single-user allow policies), `deny` (the base plus one deny

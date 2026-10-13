@@ -60,6 +60,7 @@ pub(crate) mod clearance;
 pub(crate) mod clearance_mask;
 // Task 3 of view governance: the two StarRocks bodies the differential harness
 // asks the real jars about, built by the compiler's own functions.
+#[cfg(feature = "harness")]
 #[doc(hidden)]
 pub mod harness_support;
 // SP4d-3 Task 5: classify every policy of a profile (owner, verdict, blocker

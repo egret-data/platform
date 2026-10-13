@@ -59,6 +59,17 @@ egret-ranger-eval.workspace = true
 # evaluated" and "what the engine received" cannot.
 egret-policy-api.workspace = true
 
+[features]
+# View governance Task 3: `harness_support`, the doc-hidden wrappers the
+# differential and the timing harness use to build the compiler's own bodies.
+# Off in every production build; enabled only by `egret-ranger-eval`'s
+# dev-dependency and by `tests/gate_timing.rs` (`required-features`).
+harness = []
+
+[[test]]
+name = "gate_timing"
+required-features = ["harness"]
+
 [dev-dependencies]
 egret-metastore.workspace = true
 egret-test-db.workspace = true
