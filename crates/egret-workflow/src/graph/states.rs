@@ -72,14 +72,38 @@ pub struct NodeState {
     pub ended_at: Option<DateTime<Utc>>,
     /// Set when the runs live in `Loop` iterations.
     pub iterations: Option<Iterations>,
+    /// For a `Subflow` node's single run: the newest child execution it
+    /// started. Absent for any other node, and for a fold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_execution_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct Iterations {
-    /// How many iterations this node ran in.
+    /// How many iterations this node ran in: `runs.len()`.
     pub total: i32,
-    /// Iterations by their folded state's wire name.
+    /// Iterations by their folded state's wire name: `runs` counted by `state`.
     pub by_state: BTreeMap<String, i32>,
+    /// The node's own run in each iteration it ran in, by `loop_index`. An
+    /// iteration where the node never ran has no entry.
+    pub runs: Vec<IterationRun>,
+}
+
+/// One iteration of the `Loop` the execution ran itself, as one node of its
+/// body saw it (W7c Task 6, fix round 1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct IterationRun {
+    /// The iteration's index in its `Loop`.
+    pub loop_index: i32,
+    /// THIS NODE's state in the iteration: its runs there, folded by
+    /// [`FOLD_PRIORITY`] -- not the iteration's own state, which another body
+    /// task can decide.
+    pub state: String,
+    /// The iteration: the child execution of the graph's execution that ran it.
+    pub child_execution_id: Uuid,
+    /// The node's run, when the iteration ran it exactly once; null when a
+    /// nested `Loop` ran it in several deeper iterations.
+    pub run_id: Option<Uuid>,
 }
 
 /// One task run, as the graph needs it: no outputs, no history.
@@ -89,6 +113,11 @@ pub struct GraphRun {
     /// The run is in a `Loop` iteration (a loop descendant of the execution
     /// the graph is drawn for), not in that execution itself.
     pub iteration: bool,
+    /// For a run in an iteration: the iteration of the graph's execution it
+    /// lies under (its depth-1 ancestor, itself at depth 1), and that
+    /// iteration's `loop_index`. Null for a run of the execution itself.
+    pub iteration_execution_id: Option<Uuid>,
+    pub iteration_index: Option<i32>,
     pub run_id: Uuid,
     pub task_id: String,
     /// The wire name, as stored.
@@ -174,6 +203,10 @@ fn parse_state(wire: &str) -> Result<RunState, GraphError> {
         .ok_or_else(|| GraphError::State(format!("a run's state {wire:?} is not a RunState")))
 }
 
+/// One iteration of the graph's execution, its `loop_index`, and one node's
+/// runs (with their parsed states) under it.
+type IterationRuns<'a> = (Uuid, i32, Vec<(&'a GraphRun, RunState)>);
+
 /// Map `runs` onto `graph`'s task nodes (module doc). `graph` is ONE flow's,
 /// not yet spliced into a parent.
 pub(crate) fn level_states(
@@ -208,6 +241,7 @@ pub(crate) fn level_states(
                     started_at: r.started_at,
                     ended_at: r.ended_at,
                     iterations: None,
+                    child_execution_id: r.child_execution_id,
                 },
             );
             if let Some(child) = r.child_execution_id {
@@ -221,23 +255,43 @@ pub(crate) fn level_states(
             .map(|r| parse_state(&r.state))
             .collect::<Result<Vec<_>, _>>()?;
         let iterations = if looped {
-            // Each iteration's runs, folded to one state.
-            let mut per_iteration: Vec<(Uuid, Vec<RunState>)> = Vec::new();
+            // Each iteration's runs of this node, folded to one state. An
+            // iteration is a child of the graph's execution: a nested Loop's
+            // deeper iterations fold into the outer one they ran under.
+            let mut per_iteration: Vec<IterationRuns> = Vec::new();
             for (r, s) in rs.iter().zip(&states).filter(|(r, _)| r.iteration) {
-                match per_iteration.iter_mut().find(|(e, _)| *e == r.execution_id) {
-                    Some((_, v)) => v.push(*s),
-                    None => per_iteration.push((r.execution_id, vec![*s])),
+                let (Some(it), Some(ix)) = (r.iteration_execution_id, r.iteration_index) else {
+                    return Err(GraphError::State(format!(
+                        "run {} is in an iteration with no iteration of its own",
+                        r.run_id
+                    )));
+                };
+                match per_iteration.iter_mut().find(|(e, _, _)| *e == it) {
+                    Some((_, _, v)) => v.push((r, *s)),
+                    None => per_iteration.push((it, ix, vec![(r, *s)])),
                 }
             }
+            per_iteration.sort_by_key(|(e, ix, _)| (*ix, *e));
+            let runs: Vec<IterationRun> = per_iteration
+                .iter()
+                .map(|(e, ix, v)| IterationRun {
+                    loop_index: *ix,
+                    state: fold_state(v.iter().map(|(_, s)| *s)).wire().to_string(),
+                    child_execution_id: *e,
+                    run_id: match v.as_slice() {
+                        [(r, _)] => Some(r.run_id),
+                        _ => None,
+                    },
+                })
+                .collect();
             let mut by_state: BTreeMap<String, i32> = BTreeMap::new();
-            for (_, v) in &per_iteration {
-                *by_state
-                    .entry(fold_state(v.iter().copied()).wire().to_string())
-                    .or_default() += 1;
+            for r in &runs {
+                *by_state.entry(r.state.clone()).or_default() += 1;
             }
             Some(Iterations {
-                total: per_iteration.len() as i32,
+                total: runs.len() as i32,
                 by_state,
+                runs,
             })
         } else {
             None
@@ -256,6 +310,7 @@ pub(crate) fn level_states(
                 started_at: rs.iter().filter_map(|r| r.started_at).min(),
                 ended_at,
                 iterations,
+                child_execution_id: None,
             },
         );
     }
@@ -265,7 +320,165 @@ pub(crate) fn level_states(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::{flow_graph, GraphOptions};
     use RunState::*;
+
+    const LOG: &str = "io.kestra.plugin.core.log.Log";
+    const FLOW: &str = "io.kestra.plugin.core.flow";
+
+    fn graph_of(tasks: &str) -> FlowGraph {
+        let yaml = format!("id: f\nnamespace: t\ntasks:\n{tasks}");
+        let flow = crate::spec::parse(&yaml).unwrap_or_else(|e| panic!("parse: {e:?}\n{yaml}"));
+        flow_graph(&flow, &GraphOptions::default()).expect("graph")
+    }
+
+    fn id(n: u128) -> Uuid {
+        Uuid::from_u128(n)
+    }
+
+    /// A run of `task` in execution `exec`; `top` is `(iteration, loop_index)` for a run under an iteration.
+    fn run(exec: u128, top: Option<(u128, i32)>, run: u128, task: &str, state: &str) -> GraphRun {
+        GraphRun {
+            execution_id: id(exec),
+            iteration: top.is_some(),
+            iteration_execution_id: top.map(|(e, _)| id(e)),
+            iteration_index: top.map(|(_, ix)| ix),
+            run_id: id(run),
+            task_id: task.into(),
+            state: state.into(),
+            attempts: 1,
+            started_at: None,
+            ended_at: None,
+            child_execution_id: None,
+        }
+    }
+
+    /// Body `[a, b, c]` over three iterations (100, 101, 102). Iteration #1 fails
+    /// on `c`; iteration #2 fails on `a`, so its `b` and `c` never run. Each
+    /// node's per-iteration state is ITS OWN run there, not the iteration's.
+    #[test]
+    fn each_iteration_lists_the_nodes_own_run_not_the_iterations_state() {
+        let g = graph_of(&format!(
+            "  - id: each\n    type: {FLOW}.Loop\n    values: '[1, 2, 3]'\n    tasks:\n      \
+             - {{id: a, type: {LOG}, message: m}}\n      - {{id: b, type: {LOG}, message: m}}\n      \
+             - {{id: c, type: {LOG}, message: m}}\n"
+        ));
+        // Out of loop order, as rows of several parents can come.
+        let runs = vec![
+            run(1, None, 1, "each", "FAILED"),
+            run(102, Some((102, 2)), 20, "a", "FAILED"),
+            run(100, Some((100, 0)), 10, "a", "SUCCESS"),
+            run(100, Some((100, 0)), 11, "b", "SUCCESS"),
+            run(100, Some((100, 0)), 12, "c", "SUCCESS"),
+            run(101, Some((101, 1)), 13, "a", "SUCCESS"),
+            run(101, Some((101, 1)), 14, "b", "SUCCESS"),
+            run(101, Some((101, 1)), 15, "c", "FAILED"),
+        ];
+        let out = level_states(&g, &runs).expect("states");
+
+        let a = out.states["tasks.each.a"]
+            .iterations
+            .clone()
+            .expect("a is folded");
+        assert_eq!(
+            a.runs,
+            vec![
+                IterationRun {
+                    loop_index: 0,
+                    state: "SUCCESS".into(),
+                    child_execution_id: id(100),
+                    run_id: Some(id(10))
+                },
+                // Iteration #1 failed, on `c`: `a` itself succeeded there.
+                IterationRun {
+                    loop_index: 1,
+                    state: "SUCCESS".into(),
+                    child_execution_id: id(101),
+                    run_id: Some(id(13))
+                },
+                IterationRun {
+                    loop_index: 2,
+                    state: "FAILED".into(),
+                    child_execution_id: id(102),
+                    run_id: Some(id(20))
+                },
+            ]
+        );
+        assert_eq!(a.total, 3);
+        assert_eq!(
+            a.by_state,
+            BTreeMap::from([("SUCCESS".into(), 2), ("FAILED".into(), 1)])
+        );
+
+        // `c` never ran in iteration #2: two entries, and the counts agree with them.
+        let c = out.states["tasks.each.c"]
+            .iterations
+            .clone()
+            .expect("c is folded");
+        assert_eq!(
+            c.runs
+                .iter()
+                .map(|r| (r.loop_index, r.state.as_str()))
+                .collect::<Vec<_>>(),
+            [(0, "SUCCESS"), (1, "FAILED")]
+        );
+        assert_eq!(c.total, 2);
+        assert_eq!(
+            c.by_state,
+            BTreeMap::from([("SUCCESS".into(), 1), ("FAILED".into(), 1)])
+        );
+        assert_eq!(out.states["tasks.each.c"].state, "FAILED");
+        // The Loop itself is one run of the execution.
+        assert_eq!(out.states["tasks.each"].run_id, Some(id(1)));
+    }
+
+    /// An outer Loop over an inner Loop: the inner body's runs sit in deeper
+    /// iterations and are listed under the OUTER iteration they ran in, folded.
+    #[test]
+    fn a_nested_loops_runs_are_listed_under_the_outer_iteration() {
+        let g = graph_of(&format!(
+            "  - id: outer\n    type: {FLOW}.Loop\n    values: '[1, 2]'\n    tasks:\n      \
+             - id: inner\n        type: {FLOW}.Loop\n        values: '[1, 2]'\n        tasks:\n          \
+             - {{id: x, type: {LOG}, message: m}}\n"
+        ));
+        let runs = vec![
+            run(1, None, 1, "outer", "FAILED"),
+            run(100, Some((100, 0)), 2, "inner", "SUCCESS"),
+            run(101, Some((101, 1)), 3, "inner", "FAILED"),
+            run(200, Some((100, 0)), 4, "x", "SUCCESS"),
+            run(201, Some((100, 0)), 5, "x", "SUCCESS"),
+            run(202, Some((101, 1)), 6, "x", "SUCCESS"),
+            run(203, Some((101, 1)), 7, "x", "FAILED"),
+        ];
+        let out = level_states(&g, &runs).expect("states");
+        let x = out.states["tasks.outer.inner.x"]
+            .iterations
+            .clone()
+            .expect("x is folded");
+        assert_eq!(
+            x.runs,
+            vec![
+                IterationRun {
+                    loop_index: 0,
+                    state: "SUCCESS".into(),
+                    child_execution_id: id(100),
+                    run_id: None
+                },
+                IterationRun {
+                    loop_index: 1,
+                    state: "FAILED".into(),
+                    child_execution_id: id(101),
+                    run_id: None
+                },
+            ]
+        );
+        assert_eq!(x.total, 2);
+        let inner = out.states["tasks.outer.inner"]
+            .iterations
+            .clone()
+            .expect("inner is folded");
+        assert_eq!(inner.runs[1].run_id, Some(id(3)));
+    }
 
     #[test]
     fn fold_priority_lists_every_run_state_once_in_rank_order() {

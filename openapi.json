@@ -39526,21 +39526,55 @@
           }
         }
       },
+      "IterationRun": {
+        "type": "object",
+        "description": "One iteration of the `Loop` the execution ran itself, as one node of its\nbody saw it (W7c Task 6, fix round 1).",
+        "required": [
+          "loop_index",
+          "state",
+          "child_execution_id"
+        ],
+        "properties": {
+          "loop_index": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The iteration's index in its `Loop`."
+          },
+          "state": {
+            "type": "string",
+            "description": "THIS NODE's state in the iteration: its runs there, folded by\n[`FOLD_PRIORITY`] -- not the iteration's own state, which another body\ntask can decide."
+          },
+          "child_execution_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The iteration: the child execution of the graph's execution that ran it."
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The node's run, when the iteration ran it exactly once; null when a\nnested `Loop` ran it in several deeper iterations."
+          }
+        }
+      },
       "Iterations": {
         "type": "object",
         "required": [
           "total",
-          "by_state"
+          "by_state",
+          "runs"
         ],
         "properties": {
           "total": {
             "type": "integer",
             "format": "int32",
-            "description": "How many iterations this node ran in."
+            "description": "How many iterations this node ran in: `runs.len()`."
           },
           "by_state": {
             "type": "object",
-            "description": "Iterations by their folded state's wire name.",
+            "description": "Iterations by their folded state's wire name: `runs` counted by `state`.",
             "additionalProperties": {
               "type": "integer",
               "format": "int32"
@@ -39548,6 +39582,13 @@
             "propertyNames": {
               "type": "string"
             }
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IterationRun"
+            },
+            "description": "The node's own run in each iteration it ran in, by `loop_index`. An\niteration where the node never ran has no entry."
           }
         }
       },
@@ -40696,6 +40737,14 @@
                 "description": "Set when the runs live in `Loop` iterations."
               }
             ]
+          },
+          "child_execution_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "For a `Subflow` node's single run: the newest child execution it\nstarted. Absent for any other node, and for a fold."
           }
         }
       },

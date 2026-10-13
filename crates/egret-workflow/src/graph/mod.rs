@@ -817,7 +817,9 @@ pub use expand::{
     execution_graph, expanded_flow_graph, ExecutionSource, FrozenExecution, SubflowSource,
     MAX_EXPANSION_DEPTH, SUBFLOW_SEPARATOR,
 };
-pub use states::{fold_state, ExecutionGraph, GraphRun, Iterations, NodeState, FOLD_PRIORITY};
+pub use states::{
+    fold_state, ExecutionGraph, GraphRun, IterationRun, Iterations, NodeState, FOLD_PRIORITY,
+};
 
 #[cfg(test)]
 mod tests;

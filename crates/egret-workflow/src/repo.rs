@@ -1314,17 +1314,25 @@ impl ExecutionRepo {
 ///   `workflow_executions_trigger_idx`); a retried `Subflow` starts one per
 ///   attempt. A `Flow`-trigger child has no `trigger_run_ix`, so it never
 ///   matches.
+/// - Each family row carries `top`/`top_index`: the iteration of `$1` it lies
+///   under (itself at depth 1) and that iteration's `loop_index`, so a nested
+///   `Loop`'s deeper runs are attributed to the outer iteration the graph
+///   lists (`IterationRun`), with no further statement.
 /// - Ordered root first, then each loop's iterations by `loop_index`, then
 ///   `run_ix`: an iteration list in loop order.
 const GRAPH_RUNS_SQL: &str =
-    "WITH RECURSIVE fam(id, depth, parent, parent_run_ix, loop_index) AS ( \
-       SELECT id, 0, NULL::uuid, NULL::int, NULL::int \
+    "WITH RECURSIVE fam(id, depth, parent, parent_run_ix, loop_index, top, top_index) AS ( \
+       SELECT id, 0, NULL::uuid, NULL::int, NULL::int, NULL::uuid, NULL::int \
          FROM workflow.executions WHERE id = $1 AND workspace_id = $2 \
      UNION ALL \
-       SELECT e.id, fam.depth + 1, e.parent_execution_id, e.parent_run_ix, e.loop_index \
+       SELECT e.id, fam.depth + 1, e.parent_execution_id, e.parent_run_ix, e.loop_index, \
+              CASE WHEN fam.depth = 0 THEN e.id ELSE fam.top END, \
+              CASE WHEN fam.depth = 0 THEN e.loop_index ELSE fam.top_index END \
          FROM workflow.executions e JOIN fam ON e.parent_execution_id = fam.id \
         WHERE e.loop_index IS NOT NULL AND e.workspace_id = $2) \
-     SELECT t.execution_id, fam.depth > 0 AS iteration, t.id AS run_id, t.task_id, t.state, \
+     SELECT t.execution_id, fam.depth > 0 AS iteration, \
+            fam.top AS iteration_execution_id, fam.top_index AS iteration_index, \
+            t.id AS run_id, t.task_id, t.state, \
             jsonb_array_length(t.attempts) AS attempts, t.started_at, t.ended_at, \
             (SELECT c.id FROM workflow.executions c \
               WHERE c.trigger_execution_id = t.execution_id AND c.trigger_run_ix = t.run_ix \

@@ -1048,6 +1048,29 @@ async fn a_loop_body_folds_over_its_iterations(pool: sqlx::PgPool) {
 
     let g = exec_graph_ok(&app, ws, ex, "", user).await;
 
+    // Each node's own run in each iteration (fix round 1), by `loop_index`.
+    let own_runs = |task: &'static str| {
+        let pool = pool.clone();
+        let iterations = iterations.clone();
+        async move {
+            let mut out = Vec::new();
+            for (ix, (it, _)) in iterations.iter().enumerate() {
+                let r = run_rows(&pool, *it)
+                    .await
+                    .into_iter()
+                    .find(|r| r.task_id == task)
+                    .expect("the task ran in every iteration");
+                out.push(json!({
+                    "loop_index": ix,
+                    "state": r.state,
+                    "child_execution_id": it.to_string(),
+                    "run_id": r.id.to_string(),
+                }));
+            }
+            out
+        }
+    };
+    let b_runs_json = own_runs("b").await;
     assert_eq!(
         g["states"]["tasks.each.b"],
         json!({
@@ -1056,13 +1079,25 @@ async fn a_loop_body_folds_over_its_iterations(pool: sqlx::PgPool) {
             "run_id": null,
             "started_at": g["states"]["tasks.each.b"]["started_at"],
             "ended_at": g["states"]["tasks.each.b"]["ended_at"],
-            "iterations": { "total": 3, "by_state": { "SUCCESS": 2, "FAILED": 1 } },
+            "iterations": {
+                "total": 3,
+                "by_state": { "SUCCESS": 2, "FAILED": 1 },
+                "runs": b_runs_json,
+            },
         })
     );
+    // `a` succeeded in every iteration, the failed one (#1) included: its own
+    // state there is SUCCESS, not the iteration's FAILED.
+    let a_runs_json = own_runs("a").await;
     assert_eq!(
         g["states"]["tasks.each.a"]["iterations"],
-        json!({ "total": 3, "by_state": { "SUCCESS": 3 } })
+        json!({ "total": 3, "by_state": { "SUCCESS": 3 }, "runs": a_runs_json })
     );
+    assert_eq!(
+        g["states"]["tasks.each.a"]["iterations"]["runs"][1]["state"],
+        "SUCCESS"
+    );
+    assert_eq!(iterations[1].1, "FAILED", "the iteration itself failed");
     assert_eq!(g["states"]["tasks.each.a"]["state"], "SUCCESS");
     assert_eq!(g["states"]["tasks.each.a"]["run_id"], Value::Null);
     // The span covers every iteration's run of `b`.
@@ -1141,9 +1176,23 @@ async fn an_expanded_subflow_draws_the_child_executions_frozen_source_and_states
     let call = run_rows(&pool, ex).await.into_iter().next().unwrap();
     assert_matches_row(&g, "tasks.call", &call);
 
-    // Unexpanded, the same execution carries only its own states.
+    // The Subflow's run names the child execution it started (fix round 1);
+    // the child's own leaf, and any other node, carries no such field.
+    assert_eq!(
+        g["states"]["tasks.call"]["child_execution_id"],
+        child_ex.to_string()
+    );
+    assert!(g["states"]["tasks.call/tasks.x"]
+        .get("child_execution_id")
+        .is_none());
+
+    // Unexpanded, the same execution carries only its own states, the link included.
     let g = exec_graph_ok(&app, ws, ex, "", user).await;
     assert_eq!(state_keys(&g), ["tasks.call"]);
+    assert_eq!(
+        g["states"]["tasks.call"]["child_execution_id"],
+        child_ex.to_string()
+    );
 }
 
 // ---- 8. The execution's frozen source, not the draft ---------------------
