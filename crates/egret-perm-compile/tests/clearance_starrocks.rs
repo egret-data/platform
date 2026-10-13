@@ -918,3 +918,125 @@ async fn a_hand_written_mask_is_folded_like_a_rule_mask() {
         ]
     );
 }
+
+/// The A3 database-level `create materialized view` deny for `sales`, if any.
+async fn mv_deny(db: &Db, f: &Fixture) -> Option<Value> {
+    sqlx::query_scalar(
+        "SELECT policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(f.service_id)
+    .bind(format!(
+        "{COMPILER_CLEARANCE_PREFIX}mv-{}.sales",
+        f.catalog_name
+    ))
+    .fetch_optional(&db.pool)
+    .await
+    .expect("policy read")
+}
+
+/// A second classification in the same database narrows the exceptions to the
+/// users cleared for BOTH; untagging every column of the database deletes the
+/// policy on the next recompile.
+#[tokio::test]
+async fn the_mv_deny_narrows_with_a_second_classification_and_goes_with_the_last_column() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_x, _) = new_tag(&db).await;
+    tag_column(&db, tag_x, f.warehouse_id, "orders", "ssn").await;
+    let (ann, bob) = cleared_pair(&db, tag_x).await;
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let body = mv_deny(&db, &f)
+        .await
+        .expect("a database with a classified column");
+    assert_eq!(body["serviceType"], serde_json::json!("starrocks"));
+    assert_eq!(body["policyType"], serde_json::json!(0));
+    assert_eq!(
+        strings_of(&body["resources"]["database"]["values"]),
+        vec!["sales"]
+    );
+    assert!(body["resources"].get("table").is_none());
+    let deny = &body["denyPolicyItems"][0];
+    assert_eq!(strings_of(&deny["groups"]), vec!["public"]);
+    assert_eq!(access_types(deny), vec!["create materialized view"]);
+    let mut both = vec![ann.clone(), bob.clone()];
+    both.sort();
+    assert_eq!(users_of(&body["denyExceptions"][0]), both);
+
+    // A second classification on another table of the same database, cleared
+    // for bob only.
+    let (tag_y, _) = new_tag(&db).await;
+    tag_column(&db, tag_y, f.warehouse_id, "customers", "email").await;
+    let bob_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(&bob)
+        .fetch_one(&db.pool)
+        .await
+        .expect("bob");
+    let role_y = unique("viewgov-clear-y");
+    let role_y_id = new_role(&db, &role_y).await;
+    grant_role(&db, bob_id, role_y_id).await;
+    gate(&db, tag_y, &[&role_y]).await;
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile with the second classification");
+    let body = mv_deny(&db, &f).await.expect("still one policy");
+    assert_eq!(users_of(&body["denyExceptions"][0]), vec![bob.clone()]);
+
+    // Untag every column: the database holds no classified column any more.
+    sqlx::query("DELETE FROM catalog_tag_assignments WHERE tag_id = ANY($1)")
+        .bind(vec![tag_x, tag_y])
+        .execute(&db.pool)
+        .await
+        .expect("untag");
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile after untagging");
+    assert!(
+        mv_deny(&db, &f).await.is_none(),
+        "a database with no classified column keeps no deny"
+    );
+}
+
+/// Engine goes from modelled to unmodelled: the clearance mask is deleted, the
+/// per-column deny stays, and a skip is reported.
+#[tokio::test]
+async fn binding_an_unmodelled_engine_after_a_modelled_one_removes_the_mask_only() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, _) = new_tag(&db).await;
+    tag_column(&db, tag_id, f.warehouse_id, "orders", "ssn").await;
+    cleared_pair(&db, tag_id).await;
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile with a modelled engine");
+    assert_eq!(clearance_masks(&db, f.service_id, tag_id).await.len(), 1);
+
+    sqlx::query("UPDATE engine_mgmt.engines SET spec = '{}'::jsonb WHERE id = $1")
+        .bind(f.engine_id)
+        .execute(&db.pool)
+        .await
+        .expect("unpin the engine");
+    let summary = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile with an unmodelled engine");
+
+    assert!(
+        clearance_masks(&db, f.service_id, tag_id).await.is_empty(),
+        "the previously compiled mask must be deleted"
+    );
+    assert_eq!(clearance_policies(&db, f.service_id, tag_id).await.len(), 1);
+    assert!(
+        mv_deny(&db, &f).await.is_some(),
+        "the MV deny is engine-independent"
+    );
+    assert!(
+        summary
+            .skipped
+            .iter()
+            .any(|s| s.id == tag_id && s.source_kind == egret_perm_compile::SourceKind::Clearance),
+        "{:?}",
+        summary.skipped
+    );
+}

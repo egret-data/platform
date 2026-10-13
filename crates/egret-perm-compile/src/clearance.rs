@@ -159,7 +159,7 @@ use egret_policy::admin::{
 use egret_policy::{tagged_columns_for_service_via, COMPILER_CLEARANCE_PREFIX};
 
 use crate::clearance_mask::PendingMask;
-use crate::grants::PolicyTarget;
+use crate::grants::{level, PolicyTarget};
 use crate::rules::{column_resources, stamp_service_type, TaggedColumn, PUBLIC_GROUP};
 use crate::trigger::{SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING};
 
@@ -398,7 +398,59 @@ pub(crate) async fn compile_clearance(
         }
     }
 
+    if engine == EngineType::StarRocks {
+        for (name, input) in mv_deny_inputs(&out.masks, service) {
+            out.policies.push((
+                name,
+                stamp_service_type(access_to_ranger_json(&input), engine),
+            ));
+        }
+    }
+
     Ok(out)
+}
+
+/// The access type that lets a user store a query result as a materialized
+/// view. Spelled as in `service-defs/starrocks.json`.
+const CREATE_MV_ACCESS: &str = "create materialized view";
+
+/// A3: one deny per database that holds a classified column. Denying `create
+/// materialized view` to `{public}` keeps an uncleared user from building a view
+/// that STORES real values (a mask does not follow stored data). The exceptions
+/// are the users cleared for EVERY classification with a column in that
+/// database: the intersection across every pending (gate, column) pair there.
+/// An empty intersection leaves no exception, so the deny holds for everyone.
+///
+/// `pending` is one entry per (gate, column), as `compile_clearance` records
+/// them, so a database with no classified column never appears.
+fn mv_deny_inputs(pending: &[PendingMask], service: &str) -> Vec<(String, AccessPolicyInput)> {
+    let mut by_db: BTreeMap<(&str, &str), Option<Vec<String>>> = BTreeMap::new();
+    for p in pending {
+        let slot = by_db
+            .entry((p.column.catalog.as_str(), p.column.schema.as_str()))
+            .or_insert(None);
+        *slot = Some(match slot.take() {
+            None => p.cleared.clone(),
+            Some(have) => have.into_iter().filter(|u| p.cleared.contains(u)).collect(),
+        });
+    }
+    by_db
+        .into_iter()
+        .map(|((catalog, database), cleared)| {
+            let name = format!("{COMPILER_CLEARANCE_PREFIX}mv-{catalog}.{database}");
+            let mut resources = BTreeMap::new();
+            resources.insert("catalog".to_string(), level(catalog.to_string()));
+            resources.insert("database".to_string(), level(database.to_string()));
+            let input = clearance_input(
+                name.clone(),
+                service.to_string(),
+                resources,
+                &[CREATE_MV_ACCESS.to_string()],
+                cleared.unwrap_or_default(),
+            );
+            (name, input)
+        })
+        .collect()
 }
 
 /// The one clearance policy shape, built once for both engines: deny `{public}`
@@ -525,4 +577,76 @@ fn withheld_accesses(engine: EngineType) -> Result<Vec<String>, CompileError> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending(tag: u128, db: &str, table: &str, cleared: &[&str]) -> PendingMask {
+        PendingMask {
+            tag_id: Uuid::from_u128(tag),
+            column: TaggedColumn {
+                catalog: "lake".into(),
+                schema: db.into(),
+                table: table.into(),
+                column: "c".into(),
+            },
+            cleared: cleared.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn exceptions(i: &AccessPolicyInput) -> Vec<String> {
+        i.deny_exceptions[0].users.clone()
+    }
+
+    #[test]
+    fn a_database_with_two_classifications_gets_one_deny_excepting_the_intersection() {
+        let got = mv_deny_inputs(
+            &[
+                pending(1, "sales", "t1", &["ann", "bob"]),
+                pending(2, "sales", "t2", &["bob", "cy"]),
+            ],
+            "sr",
+        );
+        assert_eq!(got.len(), 1);
+        let (name, i) = &got[0];
+        assert_eq!(name, &format!("{COMPILER_CLEARANCE_PREFIX}mv-lake.sales"));
+        assert_eq!(i.resources.len(), 2);
+        assert_eq!(i.resources["catalog"].values, vec!["lake"]);
+        assert_eq!(i.resources["database"].values, vec!["sales"]);
+        assert_eq!(i.items[0].groups, vec!["public"]);
+        assert_eq!(i.items[0].accesses, vec!["create materialized view"]);
+        assert_eq!(i.items[0].effect, "deny");
+        assert_eq!(exceptions(i), vec!["bob"]);
+    }
+
+    #[test]
+    fn databases_are_independent_and_unclassified_ones_get_nothing() {
+        let got = mv_deny_inputs(
+            &[
+                pending(1, "sales", "t", &["ann"]),
+                pending(2, "hr", "t", &["bob"]),
+            ],
+            "sr",
+        );
+        assert_eq!(got.len(), 2);
+        assert_eq!(exceptions(&got[0].1), vec!["bob"], "hr");
+        assert_eq!(exceptions(&got[1].1), vec!["ann"], "sales");
+        assert!(mv_deny_inputs(&[], "sr").is_empty());
+    }
+
+    #[test]
+    fn an_empty_intersection_denies_everyone() {
+        let got = mv_deny_inputs(
+            &[
+                pending(1, "sales", "t1", &["ann"]),
+                pending(2, "sales", "t2", &["bob"]),
+            ],
+            "sr",
+        );
+        assert_eq!(got.len(), 1);
+        assert!(exceptions(&got[0].1).is_empty());
+        assert_eq!(got[0].1.items[0].groups, vec!["public"]);
+    }
 }
