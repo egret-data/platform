@@ -92,7 +92,8 @@
 //! # The node limit (§3.5)
 //!
 //! [`MAX_NODES`] counts nodes after expansion. Each flow's graph is built
-//! (itself refused above the limit), its node count added to a running total,
+//! with what the running total has left as its budget (and stops placing
+//! nodes the moment it passes it), its node count added to a running total,
 //! and the total checked BEFORE any of its `Subflow`s is loaded: building
 //! stops the moment the total crosses the limit, so a pathological expansion
 //! never builds more than the limit plus one flow. A splice adds
@@ -245,7 +246,10 @@ fn graph_of<'a>(
     total: &'a mut usize,
 ) -> BoxFuture<'a, Result<Drawn, GraphError>> {
     Box::pin(async move {
-        let (mut graph, subflows) = build(flow).map_err(|e| match e {
+        // This level may place what the running total has left, so the build
+        // itself stops as the limit is crossed (`build`).
+        let budget = MAX_NODES.saturating_sub(*total);
+        let (mut graph, subflows) = build(flow, budget).map_err(|e| match e {
             GraphError::TooLarge { nodes } => GraphError::TooLarge {
                 nodes: *total + nodes,
             },

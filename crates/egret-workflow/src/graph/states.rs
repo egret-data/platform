@@ -259,6 +259,9 @@ pub(crate) fn level_states(
             // iteration is a child of the graph's execution: a nested Loop's
             // deeper iterations fold into the outer one they ran under.
             let mut per_iteration: Vec<IterationRuns> = Vec::new();
+            // Index of each iteration's entry in `per_iteration`, so grouping
+            // is linear in the runs rather than quadratic in the iterations.
+            let mut slot: HashMap<Uuid, usize> = HashMap::new();
             for (r, s) in rs.iter().zip(&states).filter(|(r, _)| r.iteration) {
                 let (Some(it), Some(ix)) = (r.iteration_execution_id, r.iteration_index) else {
                     return Err(GraphError::State(format!(
@@ -266,9 +269,12 @@ pub(crate) fn level_states(
                         r.run_id
                     )));
                 };
-                match per_iteration.iter_mut().find(|(e, _, _)| *e == it) {
-                    Some((_, _, v)) => v.push((r, *s)),
-                    None => per_iteration.push((it, ix, vec![(r, *s)])),
+                match slot.get(&it) {
+                    Some(&i) => per_iteration[i].2.push((r, *s)),
+                    None => {
+                        slot.insert(it, per_iteration.len());
+                        per_iteration.push((it, ix, vec![(r, *s)]));
+                    }
                 }
             }
             per_iteration.sort_by_key(|(e, ix, _)| (*ix, *e));

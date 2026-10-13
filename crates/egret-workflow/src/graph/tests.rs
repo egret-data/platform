@@ -1077,3 +1077,69 @@ fn a_graph_over_five_thousand_nodes_is_refused() {
         })
     );
 }
+
+// ---- final-review fix wave ----------------------------------------------
+
+/// De-duplication is linear: k copies of one path probe O(k) uids, not
+/// O(k^2). Counted, not timed. The old scan from `~2` each time probed
+/// k(k+1)/2 (200 million here).
+#[test]
+fn de_duplicating_k_copies_of_one_path_probes_linearly() {
+    let mut uids = UidSet::default();
+    // A real id already spelled like a suffix is still skipped.
+    assert_eq!(uids.unique("tasks.a~3".to_string()), "tasks.a~3");
+    let k = 20_000;
+    let got: Vec<String> = (0..k).map(|_| uids.unique("tasks.a".to_string())).collect();
+    assert_eq!(got[0], "tasks.a");
+    assert_eq!(got[1], "tasks.a~2");
+    assert_eq!(got[2], "tasks.a~4", "~3 is taken");
+    assert_eq!(got[k - 1], format!("tasks.a~{}", k + 1));
+    assert_eq!(got.iter().collect::<HashSet<_>>().len(), k);
+    assert!(
+        uids.probes <= 2 * k + 2,
+        "{} probes for {k} copies",
+        uids.probes
+    );
+}
+
+/// The review's Critical: thousands of duplicates of one id are refused at
+/// the limit, without placing a node past it.
+#[test]
+fn six_thousand_duplicates_of_one_id_are_refused_at_the_limit() {
+    let tasks: Vec<String> = (0..6_000).map(|_| leaf("same")).collect();
+    let yaml = format!(
+        "id: f\nnamespace: company.team\ntasks: [{}]\n",
+        tasks.join(", ")
+    );
+    let flow = parse(&yaml).unwrap();
+    assert_eq!(
+        flow_graph(&flow, &GraphOptions::default()),
+        Err(GraphError::TooLarge {
+            nodes: MAX_NODES + 1
+        })
+    );
+}
+
+/// The build stops as the count passes the limit: a 5,001-task flow answers
+/// the count at the crossing (`MAX_NODES + 1`), not the 5,003 it would hold.
+#[test]
+fn a_five_thousand_and_one_task_flow_is_refused_without_building_past_the_limit() {
+    let tasks: Vec<String> = (0..5_001).map(|i| leaf(&format!("t{i}"))).collect();
+    let yaml = format!(
+        "id: f\nnamespace: company.team\ntasks: [{}]\n",
+        tasks.join(", ")
+    );
+    let flow = parse(&yaml).unwrap();
+    assert_eq!(
+        flow_graph(&flow, &GraphOptions::default()),
+        Err(GraphError::TooLarge {
+            nodes: MAX_NODES + 1
+        })
+    );
+    // The same through `build` with a smaller budget: the walk places
+    // `budget + 1` nodes and no more.
+    match build(&flow, 10) {
+        Err(GraphError::TooLarge { nodes }) => assert_eq!(nodes, 11),
+        other => panic!("{other:?}"),
+    }
+}

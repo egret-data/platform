@@ -29,7 +29,9 @@
 //!   node. The first occurrence in walk order keeps the plain path; a later
 //!   one takes the first free of `~2`, `~3`, ... Its descendants' uids are
 //!   built under the suffixed uid, while their `refusal` is looked up under
-//!   the plain validation path.
+//!   the plain validation path. Each base path remembers its last suffix, so
+//!   k copies of one id cost O(k) (`UidSet`), and the node limit stops the
+//!   build as it is crossed (`build`), not after.
 //!
 //! # Edges (spec §3.2, refined by the controller's rulings of 2026-10-13)
 //!
@@ -308,7 +310,7 @@ pub enum GraphError {
 /// [`expanded_flow_graph`] does both.
 pub fn flow_graph(flow: &Flow, opts: &GraphOptions) -> Result<FlowGraph, GraphError> {
     let _ = opts;
-    build(flow).map(|(graph, _)| graph)
+    build(flow, MAX_NODES).map(|(graph, _)| graph)
 }
 
 /// A `Subflow` task node as placed, with the target it names -- what
@@ -323,24 +325,72 @@ pub(crate) struct SubflowRef {
 }
 
 /// [`flow_graph`], plus every `Subflow` node it placed, in walk order.
-pub(crate) fn build(flow: &Flow) -> Result<(FlowGraph, Vec<SubflowRef>), GraphError> {
+///
+/// **`budget` is enforced while building** (spec §3.5): the moment the
+/// node count passes it, no further node, edge or uid is made, the walk
+/// unwinds without placing anything, and the answer is
+/// `TooLarge { nodes: budget + 1 }`. `validate_for_run` runs only for a
+/// graph within the budget. So no input -- 80,000 tasks of one
+/// id in a 2 MB body included -- costs more than `budget` nodes' work plus
+/// one pass over the parsed lists. [`flow_graph`] passes [`MAX_NODES`]; an
+/// expansion passes what the running total has left.
+pub(crate) fn build(
+    flow: &Flow,
+    budget: usize,
+) -> Result<(FlowGraph, Vec<SubflowRef>), GraphError> {
     let mut b = Builder {
         graph: FlowGraph {
             nodes: Vec::new(),
             edges: Vec::new(),
             clusters: Vec::new(),
         },
-        used: HashSet::new(),
+        uids: UidSet::default(),
+        budget,
+        over: false,
         task_paths: Vec::new(),
         subflows: Vec::new(),
     };
     b.flow(flow);
-    b.attribute_refusals(flow);
-    let nodes = b.graph.nodes.len();
-    if nodes > MAX_NODES {
-        return Err(GraphError::TooLarge { nodes });
+    if b.over {
+        return Err(GraphError::TooLarge {
+            nodes: b.graph.nodes.len(),
+        });
     }
+    b.attribute_refusals(flow);
     Ok((b.graph, b.subflows))
+}
+
+/// Uids handed out so far, and for each base path the last `~n` suffix
+/// tried, so de-duplicating k copies of one id costs O(k), not O(k^2): a
+/// suffix is never re-probed. A suffix already taken (`a~2` written as a
+/// real id) is skipped, as before.
+#[derive(Default)]
+struct UidSet {
+    used: HashSet<String>,
+    next: HashMap<String, u32>,
+    /// Every uid probed, for the linearity test.
+    probes: usize,
+}
+
+impl UidSet {
+    /// `path`, or the first of `path~2`, `path~3`, ... not yet used.
+    fn unique(&mut self, path: String) -> String {
+        self.probes += 1;
+        if !self.used.contains(&path) {
+            self.used.insert(path.clone());
+            return path;
+        }
+        let n = self.next.entry(path.clone()).or_insert(1);
+        loop {
+            *n += 1;
+            self.probes += 1;
+            let uid = format!("{path}~{n}");
+            if !self.used.contains(&uid) {
+                self.used.insert(uid.clone());
+                return uid;
+            }
+        }
+    }
 }
 
 /// Where a list (or a task) placed in the graph is entered and left.
@@ -375,7 +425,11 @@ impl Ctx {
 
 struct Builder {
     graph: FlowGraph,
-    used: HashSet<String>,
+    uids: UidSet,
+    /// The most nodes this build may place (see [`build`]).
+    budget: usize,
+    /// The node count passed `budget`: nothing more is placed.
+    over: bool,
     /// Every task node, as (index into `graph.nodes`, validation path).
     task_paths: Vec<(usize, String)>,
     /// Every `Subflow` node, in walk order.
@@ -499,7 +553,10 @@ impl Builder {
         });
         self.add_node(start.clone(), NodeKind::Start, Some(ix));
         for trigger in &flow.triggers {
-            let uid = self.unique(task_path(TRIGGERS_OWNER, &trigger.id));
+            if self.over {
+                break;
+            }
+            let uid = self.uids.unique(task_path(TRIGGERS_OWNER, &trigger.id));
             self.add_node(
                 uid.clone(),
                 NodeKind::Trigger {
@@ -528,6 +585,9 @@ impl Builder {
     ) -> Option<Span> {
         let mut span: Option<Span> = None;
         for task in tasks {
+            if self.over {
+                break;
+            }
             let placed = self.task(task, ctx);
             span = Some(match span {
                 None => placed,
@@ -562,8 +622,15 @@ impl Builder {
     }
 
     fn task(&mut self, task: &Task, ctx: &Ctx) -> Span {
+        if self.over {
+            // Over the budget: place nothing (the build answers `TooLarge`).
+            return Span {
+                entry: String::new(),
+                exit: String::new(),
+            };
+        }
         let path = task_path(&ctx.path, &task.id);
-        let uid = self.unique(task_path(&ctx.uid, &task.id));
+        let uid = self.uids.unique(task_path(&ctx.uid, &task.id));
         let cluster_kind = cluster_kind(task);
         let node_kind = match (&task.kind, cluster_kind) {
             (_, Some(_)) => TaskNodeKind::Flowable,
@@ -645,6 +712,9 @@ impl Builder {
             TaskKind::Loop(l) => self.chain(&uid, &l.tasks, &inner, Dynamic, Dynamic, None, &end),
             TaskKind::Parallel(p) => {
                 for child in &p.tasks {
+                    if self.over {
+                        break;
+                    }
                     let s = self.task(child, &inner);
                     self.edge(&uid, &s.entry, Parallel, None);
                     self.edge(&s.exit, &end, Parallel, None);
@@ -742,26 +812,23 @@ impl Builder {
         }
     }
 
-    /// `path`, or the first of `path~2`, `path~3`, ... not yet used.
-    fn unique(&mut self, path: String) -> String {
-        let mut uid = path.clone();
-        let mut n = 1;
-        while self.used.contains(&uid) {
-            n += 1;
-            uid = format!("{path}~{n}");
-        }
-        self.used.insert(uid.clone());
-        uid
-    }
-
     fn add_node(&mut self, uid: String, kind: NodeKind, cluster: Option<usize>) {
+        if self.over {
+            return;
+        }
         if let Some(ix) = cluster {
             self.graph.clusters[ix].nodes.push(uid.clone());
         }
         self.graph.nodes.push(Node { uid, kind });
+        if self.graph.nodes.len() > self.budget {
+            self.over = true;
+        }
     }
 
     fn edge(&mut self, source: &str, target: &str, relation: Relation, label: Option<&str>) {
+        if self.over {
+            return;
+        }
         self.graph.edges.push(Edge {
             source: source.to_string(),
             target: target.to_string(),
