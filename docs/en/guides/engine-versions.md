@@ -96,3 +96,23 @@ StarRocks, the body's `starrocks` object takes `feImage` and `cnImage`; egret st
 The engine page and `GET /api/control-plane/engines/{id}` then report the new `image`, the plugin version it ships and `rangerPluginVersionModelled: true`.
 
 An external engine is never updated this way: egret does not run its cluster. Declare the plugin version you installed with `PATCH /api/control-plane/engines/{id}/external`.
+
+### Pinning a StarRocks engine that ran `4.1-latest`
+
+Migration 0185 wrote `starrocks/fe-ubuntu:4.1-latest` and `starrocks/cn-ubuntu:4.1-latest` into every provisioned StarRocks engine that named no image, because that floating tag is what those engines ran. egret reports such an engine as not modelled: **`explain` and migrations for its profile refuse until you pin it.** Enforcement is unchanged in the meantime.
+
+Do not pick the pin from the table by habit. `4.1-latest` has resolved to 4.1.6 since 2026-10-01, so an engine whose pods pulled the image on or after that date already runs 4.1.6, and pinning it to 4.1.4 would be a **downgrade**. StarRocks does not support downgrading FE metadata: an FE that has written 4.1.6 metadata may fail to start on 4.1.4, or start on metadata it does not fully understand.
+
+Read what the FE pod actually runs, then pin to the matching known image:
+
+```bash
+kubectl -n <namespace> get pod <engine-name>-fe-0 -o jsonpath='{..imageID}'
+```
+
+The output ends in the running digest (`...@sha256:<digest>`). Compare it with the table above:
+
+- `sha256:d07aa750...` is 4.1.6: pin `starrocks/fe-ubuntu:4.1.6@sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31`, and the CN image to `starrocks/cn-ubuntu:4.1.6@sha256:bf0f5ca7fd9fc4e568d4d0e593e362f229b376976b513a5a549b1b922d9ec23b`.
+- `sha256:0b909948...` is 4.1.4: pin the 4.1.4 FE image. Moving it to 4.1.6 afterwards is an upgrade, with the view-privilege changes described above.
+- Any other digest is an image egret has not measured. Pin it to the known image of the same StarRocks version only if you can confirm that version; otherwise move it forward to 4.1.6, never back.
+
+Check the CN pods the same way (`<engine-name>-cn-0`) and pin the CN image to the same version as the FE.
