@@ -16,6 +16,7 @@
 //! consumer of `egret-policy`.
 pub mod actions;
 pub mod assignment;
+pub mod engine_images;
 pub mod error;
 pub mod eval;
 pub mod model;
@@ -26,6 +27,10 @@ pub use actions::{
     EngineType, OverlapKind, OverlapRule, EXTERNAL_PLUGIN_ASSUMPTIONS, MODELLED_RANGER_PLUGINS,
 };
 pub use assignment::{sync_assignment_grants, sync_assignment_grants_in_tx};
+pub use engine_images::{
+    plugin_version_for_image, stored_engine_image, trino_image_ref, DefaultEngineImages,
+    KnownEngineImage, DEFAULT_ENGINE_IMAGES, KNOWN_ENGINE_IMAGES,
+};
 pub use error::PermError;
 // **`evaluate` is deliberately NOT re-exported here (SP4d-2a Task 5).** It was
 // the function `/perm/explain` answered with, and `explain` now evaluates the
