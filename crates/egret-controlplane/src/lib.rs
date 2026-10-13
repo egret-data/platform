@@ -17,8 +17,12 @@ mod error;
 mod secrets;
 mod storage;
 mod tags;
+mod view_exposure;
 
 pub use error::CpError;
+pub use view_exposure::{
+    ExposureEngine, MaterializedViewLister, ViewExposureDto, ViewExposureItem,
+};
 
 use axum::extract::FromRef;
 use axum::Router;
@@ -71,6 +75,13 @@ pub struct CpState {
     /// the Cedar PDP reloads. Model + CRUD only in this task; PDP enforcement is
     /// a later task.
     pub classification_policies: egret_bi::ClassificationPolicyRepo,
+    /// The database, for the cross-schema reads the classification page needs
+    /// (`GET /classifications/{id}/view-exposure`).
+    pub db: egret_metastore::Db,
+    /// Lists a StarRocks database's materialized views (view governance A4).
+    /// The real one dials the engine's FE and is wired in `egret-bin`; tests
+    /// pass a fake.
+    pub mv_lister: std::sync::Arc<dyn MaterializedViewLister>,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
@@ -89,6 +100,7 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(access::router())
         .merge(audit::audit_router())
         .merge(tags::router())
+        .merge(view_exposure::router())
 }
 
 /// The control-plane seam's OpenAPI document (E0·P4b-3): the access, storage,
@@ -102,5 +114,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     doc.merge(secrets::ControlPlaneSecretsApi::openapi());
     doc.merge(audit::ControlPlaneAuditApi::openapi());
     doc.merge(tags::ControlPlaneTagsApi::openapi());
+    doc.merge(view_exposure::ControlPlaneViewExposureApi::openapi());
     doc
 }

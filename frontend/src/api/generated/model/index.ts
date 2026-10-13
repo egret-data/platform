@@ -531,6 +531,8 @@ export * from './userRef';
 export * from './validateFlowRequest';
 export * from './validationReportDto';
 export * from './validatorType';
+export * from './viewExposureDto';
+export * from './viewExposureItem';
 export * from './warehouseConfigDto';
 export * from './warehouseDto';
 export * from './warnedPolicy';

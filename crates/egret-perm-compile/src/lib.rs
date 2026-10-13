@@ -86,6 +86,7 @@ pub mod role_membership;
 pub mod routes;
 pub mod rules;
 pub mod trigger;
+pub mod view_exposure;
 
 pub use attribution::{attribute_policy_name, PolicyAttribution};
 pub use grants::{compile_grant, validate_grant_shape};

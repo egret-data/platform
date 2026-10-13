@@ -76,6 +76,8 @@ async fn setup() -> Option<Fixture> {
             db.clone(),
             egret_events::EventBus::new(),
         ),
+        db: db.clone(),
+        mv_lister: std::sync::Arc::new(NoListing),
     });
 
     Some(Fixture {
@@ -298,4 +300,20 @@ async fn service_account_is_absent_from_the_users_route() {
         !ids.contains(&svc.0.to_string().as_str()),
         "GET /users leaked a service account"
     );
+}
+
+/// These tests never reach the materialized-view report; a lister that is asked
+/// anyway fails loudly instead of reporting an empty database.
+struct NoListing;
+
+#[async_trait::async_trait]
+impl egret_controlplane::MaterializedViewLister for NoListing {
+    async fn list(
+        &self,
+        _engine: &egret_controlplane::ExposureEngine,
+        _catalog: &str,
+        _database: &str,
+    ) -> Result<Vec<String>, String> {
+        Err("no StarRocks in this test".to_string())
+    }
 }

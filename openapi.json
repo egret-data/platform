@@ -3619,6 +3619,78 @@
         }
       }
     },
+    "/api/control-plane/classifications/{id}/view-exposure": {
+      "get": {
+        "tags": [
+          "control-plane-tags"
+        ],
+        "operationId": "get_view_exposure",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Classification (tag) id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The materialized views already present in the databases that hold this classification's columns",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ViewExposureDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing tag:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such classification",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/clients/{id}": {
       "delete": {
         "tags": [
@@ -47821,6 +47893,62 @@
           "not_null",
           "operator"
         ]
+      },
+      "ViewExposureDto": {
+        "type": "object",
+        "required": [
+          "trinoViews"
+        ],
+        "properties": {
+          "starrocksMaterializedViews": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ViewExposureItem"
+            },
+            "description": "`null` when at least one listing failed; see `starrocks_list_error`."
+          },
+          "starrocksListError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set exactly when `starrocks_materialized_views` is `null`; names each\nfailing engine and database."
+          },
+          "trinoViews": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ViewExposureItem"
+            },
+            "description": "Always empty until Trino views are reported."
+          }
+        }
+      },
+      "ViewExposureItem": {
+        "type": "object",
+        "description": "One view that exists in a classified database. Shared by the StarRocks list\nand the Trino list (filled by a later task).",
+        "required": [
+          "engine",
+          "catalog",
+          "database",
+          "name"
+        ],
+        "properties": {
+          "engine": {
+            "type": "string"
+          },
+          "catalog": {
+            "type": "string"
+          },
+          "database": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
       },
       "WarehouseConfigDto": {
         "type": "object",

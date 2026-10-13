@@ -2041,30 +2041,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| "http://egret:8080".to_string());
 
-    // Control plane: global platform-admin Storage + Secrets + Access console.
-    // Keeps `storage` (CatalogStore) + `browser` for the Storage router's
-    // credential-rotation push-down onto provisioned warehouses; the warehouse
-    // admin router itself moved to egret-catalog-engine (E3d-3, see
-    // `catalog_admin` below).
-    let control_plane = Some(egret_controlplane::CpState {
-        storage: egret_catalog_engine::CatalogStore::new(db.clone()),
-        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
-        users: egret_auth::users::UserRepo::new(db.clone()),
-        groups: egret_auth::groups::GroupRepo::new(db.clone()),
-        roles: egret_auth::roles::RoleRepo::new(db.clone(), bus.clone()),
-        access_resolver: egret_auth::effective::AccessResolver::new(db.clone()),
-        secrets: workspace_secrets.clone(),
-        sessions: sessions.clone(),
-        browser: catalog_browser.clone(),
-        pdp: pdp.clone(),
-        audit: audit_sink.clone(),
-        audit_store: audit_store.clone(),
-        tags: egret_bi::TagRepo::new(db.clone()),
-        // SAME `bus` as `roles` so a classification-policy change publishes the
-        // RolesChanged reload the Cedar PDP subscribes to (Access P3.3).
-        classification_policies: egret_bi::ClassificationPolicyRepo::new(db.clone(), bus.clone()),
-    });
-
     // Recompiles a catalog's implicit assignment grant (SP4a Task 16, D3
     // defects 2 and 3) — built once here, shared (as two DIFFERENT trait
     // objects, one per port) with the identical instance `perm_compiler`
@@ -2191,6 +2167,39 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         ),
         catalog_assignment_compiler: Some(profile_compiler.clone()
             as std::sync::Arc<dyn egret_catalog_registry::CatalogAssignmentCompiler>),
+    });
+
+    // Control plane: global platform-admin Storage + Secrets + Access console.
+    // Keeps `storage` (CatalogStore) + `browser` for the Storage router's
+    // credential-rotation push-down onto provisioned warehouses; the warehouse
+    // admin router itself moved to egret-catalog-engine (E3d-3, see
+    // `catalog_admin` below).
+    let control_plane = Some(egret_controlplane::CpState {
+        storage: egret_catalog_engine::CatalogStore::new(db.clone()),
+        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        groups: egret_auth::groups::GroupRepo::new(db.clone()),
+        roles: egret_auth::roles::RoleRepo::new(db.clone(), bus.clone()),
+        access_resolver: egret_auth::effective::AccessResolver::new(db.clone()),
+        secrets: workspace_secrets.clone(),
+        sessions: sessions.clone(),
+        browser: catalog_browser.clone(),
+        pdp: pdp.clone(),
+        audit: audit_sink.clone(),
+        audit_store: audit_store.clone(),
+        tags: egret_bi::TagRepo::new(db.clone()),
+        // SAME `bus` as `roles` so a classification-policy change publishes the
+        // RolesChanged reload the Cedar PDP subscribes to (Access P3.3).
+        classification_policies: egret_bi::ClassificationPolicyRepo::new(db.clone(), bus.clone()),
+        db: db.clone(),
+        // The classification page's materialized-view report dials the same
+        // engines, through the same admin connection, as the catalog apply path
+        // — hence built from the engine-mgmt state, and placed after it.
+        mv_lister: std::sync::Arc::new(EngineMaterializedViewLister {
+            engine_mgmt: engine_mgmt
+                .clone()
+                .expect("engine-mgmt state is built just above"),
+        }),
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).
@@ -2726,5 +2735,25 @@ mod catalog_guard_audience_tests {
             .await
             .expect_err("a data-api token must not reach the catalog");
         assert_eq!(err.0, axum::http::StatusCode::UNAUTHORIZED, "{}", err.1);
+    }
+}
+
+/// Lists a StarRocks database's materialized views through the engine-mgmt
+/// admin connection (view governance A4). The control plane owns the route and
+/// cannot depend on the engine-mgmt crate, so the composition root bridges them.
+struct EngineMaterializedViewLister {
+    engine_mgmt: egret_engine_mgmt::EngineMgmtState,
+}
+
+#[async_trait::async_trait]
+impl egret_controlplane::MaterializedViewLister for EngineMaterializedViewLister {
+    async fn list(
+        &self,
+        engine: &egret_controlplane::ExposureEngine,
+        catalog: &str,
+        database: &str,
+    ) -> Result<Vec<String>, String> {
+        egret_engine_mgmt::list_materialized_views(&self.engine_mgmt, engine.id, catalog, database)
+            .await
     }
 }

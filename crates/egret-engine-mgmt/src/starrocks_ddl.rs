@@ -710,6 +710,62 @@ pub async fn show_create_catalog(
     }
 }
 
+/// `SHOW MATERIALIZED VIEWS FROM <catalog>.<database>` → column 2 (`name`; the
+/// reply's columns lead `id, database_name, name, refresh_type, …`). View
+/// governance A4 reports these: they may already hold copies of classified
+/// values, and egret does not drop them.
+///
+/// Both identifiers go through [`escape_ident`] inside backticks. Inside a
+/// backtick-quoted identifier a backslash is an ordinary character in
+/// StarRocks, so the only character that can close the quote is the backtick,
+/// and that is the one `escape_ident` doubles — the identifier is
+/// admin-controlled but a catalog or schema name is free text end to end.
+pub async fn show_materialized_views(
+    ddl: &dyn StarRocksDdl,
+    fe: &FeTarget,
+    catalog: &str,
+    database: &str,
+) -> Result<Vec<String>, FeError> {
+    let sql = format!(
+        "SHOW MATERIALIZED VIEWS FROM `{}`.`{}`",
+        escape_ident(catalog),
+        escape_ident(database)
+    );
+    Ok(ddl
+        .query(fe, &sql)
+        .await?
+        .into_iter()
+        .filter_map(|row| row.into_iter().nth(2).flatten())
+        .collect())
+}
+
+/// [`show_materialized_views`] on a stored engine, for the classification
+/// page's exposure report. Every failure — an unknown or non-StarRocks engine,
+/// an unresolvable FE target, an unreachable FE — is a message, because the
+/// caller must tell "could not list" apart from "none exist" and never render
+/// the former as the latter. The FE's own text is scrubbed of the root password
+/// first.
+pub async fn list_materialized_views(
+    st: &CpState,
+    engine_id: uuid::Uuid,
+    catalog: &str,
+    database: &str,
+) -> Result<Vec<String>, String> {
+    let engine = st
+        .engine_mgmt
+        .get_engine(engine_id)
+        .await
+        .map_err(|e| format!("read engine: {e}"))?
+        .ok_or_else(|| "engine no longer exists".to_string())?;
+    if !engine.is_starrocks() {
+        return Err("engine is not a StarRocks engine".to_string());
+    }
+    let fe = fe_target(st, &engine).await.map_err(|e| e.to_string())?;
+    show_materialized_views(&*st.starrocks_ddl, &fe, catalog, database)
+        .await
+        .map_err(|e| e.scrubbed(&fe, &BTreeMap::new()))
+}
+
 /// The `"k" = "v"` pairs inside a parenthesized property body — the core
 /// [`parse_show_create_properties`] shares with [`FakeStarRocksDdl`]'s own
 /// re-parse of the statements it just ran (see that module's doc). `\"`
@@ -853,6 +909,9 @@ pub fn compare_to_fe(rendered: &StarRocksCatalogDdl, fe: &BTreeMap<String, Strin
     Drift::Matching
 }
 
+/// `(catalog, database)` → the materialized view names the fake FE reports.
+type MaterializedViewsByDatabase = BTreeMap<(String, String), Vec<String>>;
+
 /// A StarRocks FE that lives in memory. Public because the route tests are an
 /// external crate; it is the whole of design D8 — without it, every statement
 /// egret builds could only be exercised against a real MySQL port, which is
@@ -876,6 +935,9 @@ pub struct FakeStarRocksDdl {
     /// staying green (fix round 1, F1).
     queried: Arc<Mutex<Vec<String>>>,
     catalogs: Arc<Mutex<BTreeMap<String, BTreeMap<String, String>>>>,
+    /// `(catalog, database)` → materialized view names, for
+    /// `SHOW MATERIALIZED VIEWS FROM`.
+    materialized_views: Arc<Mutex<MaterializedViewsByDatabase>>,
     /// When set, every `execute`/`query` fails with this message.
     fail: Arc<Mutex<Option<String>>>,
     /// `(needle, message)`: fail only the statements containing `needle` —
@@ -993,6 +1055,15 @@ impl FakeStarRocksDdl {
         );
     }
 
+    /// Seed the materialized views `SHOW MATERIALIZED VIEWS FROM` reports for a
+    /// database. A database never seeded reports none, like an FE with none.
+    pub fn seed_materialized_views(&self, catalog: &str, database: &str, names: &[&str]) {
+        self.materialized_views.lock().unwrap().insert(
+            (catalog.to_string(), database.to_string()),
+            names.iter().map(|n| n.to_string()).collect(),
+        );
+    }
+
     /// Remove a catalog WITHOUT recording a statement — an FE that lost it to
     /// someone else's `DROP`, which is what detach must tolerate (D7).
     pub fn forget(&self, name: &str) {
@@ -1082,6 +1153,19 @@ impl StarRocksDdl for FakeStarRocksDdl {
                 .map(|n| vec![Some(n.clone()), Some("External".into()), None])
                 .collect());
         }
+        if let Some(rest) = sql.strip_prefix("SHOW MATERIALIZED VIEWS FROM") {
+            let names = statement_targets(rest.trim_start());
+            if let [catalog, database] = names.as_slice() {
+                let views = self.materialized_views.lock().unwrap();
+                return Ok(views
+                    .get(&(catalog.clone(), database.clone()))
+                    .into_iter()
+                    .flatten()
+                    // `id, database_name, name, …` — name is column 2.
+                    .map(|n| vec![Some("1".into()), Some(database.clone()), Some(n.clone())])
+                    .collect());
+            }
+        }
         if let Some(name) = statement_target("SHOW CREATE CATALOG", sql) {
             let Some(props) = self.catalogs.lock().unwrap().get(&name).cloned() else {
                 return Err(fe_error(format!("Unknown catalog '{name}'")));
@@ -1093,6 +1177,35 @@ impl StarRocksDdl for FakeStarRocksDdl {
         }
         Ok(vec![])
     }
+}
+
+/// Every backtick-quoted identifier in `text`, in order, with doubled backticks
+/// undone — `` `a`.`b` `` → `["a", "b"]`.
+fn statement_targets(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('`') {
+        let mut name = String::new();
+        let mut chars = rest[start + 1..].char_indices().peekable();
+        let mut end = None;
+        while let Some((i, c)) = chars.next() {
+            if c == '`' {
+                if matches!(chars.peek(), Some((_, '`'))) {
+                    chars.next();
+                    name.push('`');
+                } else {
+                    end = Some(start + 1 + i + 1);
+                    break;
+                }
+            } else {
+                name.push(c);
+            }
+        }
+        let Some(end) = end else { break };
+        out.push(name);
+        rest = &rest[end..];
+    }
+    out
 }
 
 /// The backtick-quoted name out of a statement that starts with `prefix`,
@@ -1174,6 +1287,53 @@ mod tests {
             root_password: None,
             tls_cert_pem: None,
         }
+    }
+
+    // ---- show_materialized_views (view governance A4) ----
+
+    #[tokio::test]
+    async fn show_materialized_views_reads_the_name_column_of_the_qualified_database() {
+        let ddl = FakeStarRocksDdl::default();
+        ddl.seed_materialized_views("lake", "sales", &["mv_a", "mv_b"]);
+        ddl.seed_materialized_views("lake", "other", &["mv_elsewhere"]);
+
+        let got = show_materialized_views(&ddl, &fe(), "lake", "sales")
+            .await
+            .unwrap();
+
+        assert_eq!(got, ["mv_a", "mv_b"]);
+        assert_eq!(
+            ddl.queried(),
+            ["SHOW MATERIALIZED VIEWS FROM `lake`.`sales`"]
+        );
+    }
+
+    #[tokio::test]
+    async fn show_materialized_views_cannot_be_closed_early_by_a_backtick_in_a_name() {
+        let ddl = FakeStarRocksDdl::default();
+        let hostile = "sales`; DROP DATABASE x; --";
+        ddl.seed_materialized_views("lake", hostile, &["mv_a"]);
+
+        let got = show_materialized_views(&ddl, &fe(), "lake", hostile)
+            .await
+            .unwrap();
+
+        assert_eq!(got, ["mv_a"], "the doubled backtick round-trips");
+        assert_eq!(
+            ddl.queried(),
+            ["SHOW MATERIALIZED VIEWS FROM `lake`.`sales``; DROP DATABASE x; --`"],
+            "the backtick is doubled, so the statement stays one identifier"
+        );
+    }
+
+    #[tokio::test]
+    async fn show_materialized_views_surfaces_an_fe_failure_instead_of_an_empty_list() {
+        let ddl = FakeStarRocksDdl::default();
+        ddl.set_fail(Some("connect timed out"));
+
+        let got = show_materialized_views(&ddl, &fe(), "lake", "sales").await;
+
+        assert!(got.is_err(), "a failed listing is an Err, never Ok(vec![])");
     }
 
     // ---- fe_error / redact_quoted (fix round 2 review, F-14) ----

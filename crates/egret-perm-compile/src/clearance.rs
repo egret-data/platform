@@ -410,6 +410,15 @@ pub(crate) async fn compile_clearance(
     Ok(out)
 }
 
+/// The StarRocks database a classified column lives in, as `(catalog,
+/// database)`. The ONE place that answers "which database holds this column":
+/// the A3 deny ([`mv_deny_inputs`]) and the A4 exposure report
+/// ([`crate::view_exposure`]) both group by it, so the databases the page lists
+/// can never differ from the databases the deny covers.
+pub(crate) fn database_of(col: &TaggedColumn) -> (&str, &str) {
+    (col.catalog.as_str(), col.schema.as_str())
+}
+
 /// The access type that lets a user store a query result as a materialized
 /// view. Spelled as in `service-defs/starrocks.json`.
 const CREATE_MV_ACCESS: &str = "create materialized view";
@@ -429,9 +438,7 @@ pub(crate) fn mv_deny_inputs(
 ) -> Vec<(String, AccessPolicyInput)> {
     let mut by_db: BTreeMap<(&str, &str), Option<Vec<String>>> = BTreeMap::new();
     for p in pending {
-        let slot = by_db
-            .entry((p.column.catalog.as_str(), p.column.schema.as_str()))
-            .or_insert(None);
+        let slot = by_db.entry(database_of(&p.column)).or_insert(None);
         *slot = Some(match slot.take() {
             None => p.cleared.clone(),
             Some(have) => have.into_iter().filter(|u| p.cleared.contains(u)).collect(),

@@ -38,6 +38,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import ViewExposureSection from "@/routes/governance/ViewExposureSection";
 
 const DEFAULT_COLOR = "#6366f1";
 
@@ -416,6 +417,8 @@ export default function TagDetail() {
         />
       </section>
       </div>
+
+      <ViewExposureSection tagId={id} />
 
       <ConfirmDeleteDialog
         open={deleteOpen}

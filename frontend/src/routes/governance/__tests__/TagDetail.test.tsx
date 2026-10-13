@@ -13,6 +13,9 @@ import type { Me } from "@/api/hooks";
 vi.mock("@/api/tags");
 vi.mock("@/api/access");
 vi.mock("@/auth/useAuth");
+vi.mock("@/routes/governance/ViewExposureSection", () => ({
+  default: ({ tagId }: { tagId: string }) => <div data-testid="view-exposure">{tagId}</div>,
+}));
 vi.mock("react-router-dom", async () => {
   const actual = await vi.importActual<typeof import("react-router-dom")>("react-router-dom");
   return { ...actual, useParams: () => ({ id: "t1" }), useNavigate: () => vi.fn() };
@@ -82,6 +85,11 @@ describe("TagDetail", () => {
     expect(screen.getByText("pii")).toBeInTheDocument();
     // Key input is present and read-only.
     expect(screen.getByLabelText("Key")).toHaveAttribute("readonly");
+  });
+
+  test("shows the existing-materialized-views section for this tag", async () => {
+    renderPage();
+    expect(await screen.findByTestId("view-exposure")).toHaveTextContent("t1");
   });
 
   test("links back to Governance → Classifications", async () => {
