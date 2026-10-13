@@ -31,18 +31,25 @@ export const PLUGIN_VERSION_RE = /^[0-9]+\.[0-9]+\.[0-9]+$/;
  * The (type, version) pairs egret's evaluator has been read against, as the server
  * lists them (`GET /engines/modelled-ranger-plugins`). `ready` is false until the
  * list has arrived (or if it failed): callers then offer only "Other…" and show no
- * unmodelled warning, rather than warning on a list they do not have.
+ * unmodelled warning, rather than warning on a list they do not have. `failed`
+ * is true when the read errored; callers render `ModelledPluginsUnavailable` so
+ * the missing choices are explained, never shown as an empty list (FE-STATE-1).
  */
 export function useModelledPlugins() {
   const q = useControlPlaneEnginesListModelledRangerPlugins<
     controlPlaneEnginesListModelledRangerPluginsResponse,
     ApiError
-  >({ query: { retry: false, staleTime: 5 * 60_000 } });
+  // `retryOnMount: false`: a failed read must stay failed while the page is
+  // open. The Settings tab shows a skeleton while this loads and then mounts a
+  // form that reads it again; with a refetch on that mount, the errored query
+  // went back to pending, the form unmounted, and the two looped forever.
+  >({ query: { retry: false, retryOnMount: false, staleTime: 5 * 60_000 } });
   const pairs: ModelledRangerPluginDto[] = q.data?.status === 200 ? q.data.data : [];
   const ready = q.data?.status === 200;
   return {
     ready,
     loading: q.isLoading,
+    failed: q.isError,
     versionsFor: (type: string) => pairs.filter((p) => p.type === type).map((p) => p.version),
     isModelled: (type: string, version: string) =>
       pairs.some((p) => p.type === type && p.version === version),
@@ -59,6 +66,16 @@ function modelledVersionHint(pairs: ModelledRangerPluginDto[]): string {
     .filter((x): x is string => x !== null);
   const only = parts.length ? parts.join(" and ") : "the versions listed here";
   return `egret proves migrations and explains access only for ${only}. Any other version is recorded as you declare it, and those features refuse on this engine.`;
+}
+
+/** The line shown when the modelled versions could not be read. */
+export function ModelledPluginsUnavailable() {
+  return (
+    <p className="text-sm text-muted-foreground" data-testid="modelled-unavailable">
+      The modelled plugin versions could not be loaded, so only “Other…” is offered. The server checks the
+      version you declare when you save.
+    </p>
+  );
 }
 
 export const ENGINE_TYPE_LABEL: Record<string, string> = { trino: "Trino", starrocks: "StarRocks" };

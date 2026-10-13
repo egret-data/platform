@@ -33,6 +33,7 @@ import {
   UnmodelledVersionNote,
   profilesQueryKey,
   useCan,
+  ModelledPluginsUnavailable,
   useModelledPlugins,
 } from "./externalEngine";
 
@@ -258,7 +259,11 @@ export default function EngineRegister() {
                 </div>
               )}
             </div>
-            <p className="text-sm text-muted-foreground">{modelled.hint}</p>
+            {modelled.failed ? (
+              <ModelledPluginsUnavailable />
+            ) : (
+              <p className="text-sm text-muted-foreground">{modelled.hint}</p>
+            )}
             {versionOk && modelled.ready && !modelled.isModelled(type, version) && <UnmodelledVersionNote />}
           </section>
 

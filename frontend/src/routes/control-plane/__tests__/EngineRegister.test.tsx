@@ -231,6 +231,26 @@ describe("EngineRegister", () => {
     expect(screen.getByRole("option", { name: "Other…" })).toBeInTheDocument();
   });
 
+  test("when the modelled versions cannot be loaded, it says so and that the server checks the version", async () => {
+    stubFetch({
+      ...READS,
+      "GET /api/control-plane/engines/modelled-ranger-plugins": { status: 500, body: { error: "boom" } },
+    });
+    renderRegister();
+    expect(await screen.findByTestId("modelled-unavailable")).toHaveTextContent(
+      /could not be loaded.*server checks the version/,
+    );
+  });
+
+  test("the unavailable line is absent once the modelled versions load", async () => {
+    stubFetch(READS);
+    const user = userEvent.setup();
+    renderRegister();
+    await user.click(screen.getByRole("combobox", { name: "Plugin version" }));
+    expect(await screen.findByRole("option", { name: "2.5.0" })).toBeInTheDocument();
+    expect(screen.queryByTestId("modelled-unavailable")).not.toBeInTheDocument();
+  });
+
   test("a user without engine:create sees no form, only the reason", async () => {
     stubFetch(READS);
     renderRegister(userWith("engine:read"));

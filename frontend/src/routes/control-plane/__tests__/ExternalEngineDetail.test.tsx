@@ -289,6 +289,18 @@ describe("EngineDetail for an external engine", () => {
     expect(screen.queryByTestId("unmodelled-note")).not.toBeInTheDocument();
   });
 
+  test("Settings: when the modelled versions cannot be loaded, it says so and that the server checks the version", async () => {
+    stubFetch(
+      routes({
+        "GET /api/control-plane/engines/modelled-ranger-plugins": { status: 500, body: { error: "boom" } },
+      }),
+    );
+    renderDetail(ADMIN, "/control-plane/engines/x1?tab=settings");
+    expect(await screen.findByTestId("modelled-unavailable")).toHaveTextContent(
+      /could not be loaded.*server checks the version/,
+    );
+  });
+
   test("a read-only user sees the engine and its config but no write control, and is told why", async () => {
     stubFetch(routes());
     const user = userEvent.setup();

@@ -64,6 +64,7 @@ import {
   UnmodelledVersionNote,
   profilesQueryKey,
   useCan,
+  ModelledPluginsUnavailable,
   useModelledPlugins,
 } from "./externalEngine";
 import { catalogKey, catalogsQueryKey } from "./queryKeys";
@@ -609,6 +610,7 @@ function SettingsForm({
             </div>
           )}
         </div>
+        {modelled.failed && <ModelledPluginsUnavailable />}
         {versionOk && modelled.ready && !modelled.isModelled(engine.type, version) && <UnmodelledVersionNote />}
       </section>
 
