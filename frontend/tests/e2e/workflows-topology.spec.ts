@@ -377,7 +377,12 @@ test.describe("W7c topology: editor, execution, Loop, Subflow, measured", () => 
         await page.goto("/login");
         await page.evaluate(() => Object.assign(window, { egretWarm: true }));
         await page
-          .evaluate((paths) => Promise.all(paths.map((p) => import(/* @vite-ignore */ p))), [
+          .evaluate(async (paths) => {
+            await Promise.all(paths.map((p) => import(/* @vite-ignore */ p)));
+            // Monaco's workers import their own dependencies only once they start: start both, as an editor does.
+            const env = (self as unknown as { MonacoEnvironment?: { getWorker: (id: string, label: string) => Worker } }).MonacoEnvironment;
+            for (const label of ["yaml", "editorWorkerService"]) env?.getWorker("", label);
+          }, [
             "/src/lib/monaco.ts",
             "/src/components/workflows/editor/registerEditorTabs.tsx",
             "/src/components/workflows/topology/TopologyTab.tsx",
