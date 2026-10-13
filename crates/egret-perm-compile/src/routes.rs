@@ -70,7 +70,7 @@ use egret_policy::{
 };
 use egret_policy_api::ServicePolicies;
 use egret_ranger_eval::eval::{
-    AccessRequest, Decision, EngineConfig, TagServiceResource, UnenrichedTags,
+    AccessRequest, Decision, EngineConfig, MaskDecision, TagServiceResource, UnenrichedTags,
 };
 use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::{requests_all_values, RequestResource};
@@ -78,7 +78,7 @@ use egret_ranger_eval::servicedef::ServiceDef;
 use sqlx::{Postgres, Transaction};
 
 use crate::attribution::{attribute_policy_name, PolicyAttribution};
-use crate::explain_wire::{WireDecision, WireEngineType};
+use crate::explain_wire::{WireDecision, WireEngineType, WireMaskDecision};
 use crate::grants::{resource_level_names, validate_grant_shape};
 use crate::rules::validate_rule_shape;
 use crate::trigger::{
@@ -199,13 +199,15 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         // from `WireDecision`, which is why they are listed: `WireDecision`'s
         // `Undecidable` arm carries `WireUndecidableCause`, which carries
         // `WireUnmodelled`/`WireServiceDefIssue`, which carry the four leaf
-        // enums. The mask and row-filter mirrors in that module
-        // (`WireMaskDecision`, `WireRowFilterDecision`, and their results) are
-        // deliberately NOT registered: no response shape carries one yet, and a
-        // registered-but-unreachable schema is a contract claim nothing
-        // honours. Register them in the same breath as the field that returns
-        // one.
+        // enums. The mask mirrors (`WireMaskDecision`, `WireMaskResult`) are
+        // registered because `ExplainProfile::mask` returns one (view governance
+        // Task 3). The row-filter mirrors are deliberately NOT: no response
+        // shape carries one yet, and a registered-but-unreachable schema is a
+        // contract claim nothing honours. Register them in the same breath as
+        // the field that returns one.
         crate::explain_wire::WireDecision,
+        crate::explain_wire::WireMaskDecision,
+        crate::explain_wire::WireMaskResult,
         crate::explain_wire::WireDenyReason,
         crate::explain_wire::WireUndecidableCause,
         crate::explain_wire::WireUnmodelled,
@@ -591,6 +593,30 @@ pub struct ExplainProfile {
     /// column is tagged — the question H1's steward is left with otherwise — and
     /// it is the predicate [`ExplainProfile::tags`] is narrowed by.
     pub tag_policies_in_download: usize,
+    /// What the engine masks the target COLUMN to for this subject — the second
+    /// place a StarRocks clearance shows (view governance A2). The clearance is a
+    /// per-column deny for a direct read (`accesses`) AND a priority-1 data mask
+    /// that applies through every view, so an uncleared reader sees both reasons:
+    /// the deny, and `MASK_NULL` here.
+    ///
+    /// Present only for a `read` explain of a COLUMN on a StarRocks profile. A
+    /// table-level target has no column to mask, a `write` has no masked request,
+    /// and Trino's masks come from the tag service, which the evaluator refuses
+    /// (tier c), so none is asked there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mask: Option<ExplainMask>,
+}
+
+/// The data-mask verdict for the target column: Ranger's `select` request
+/// evaluated as a masked read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainMask {
+    /// Always `select`: a mask is applied to a read.
+    pub access_type: String,
+    pub decision: WireMaskDecision,
+    /// The deciding mask policy's `perm` model object, as for an access verdict;
+    /// `None` for no mask or an undecidable answer.
+    pub attribution: Option<ExplainAttribution>,
 }
 
 /// One tag egret resolved for the target, and **where the attachment that
@@ -1931,6 +1957,39 @@ async fn explain(
         // whose block is present but empty (`bind_trino_profile` creates exactly
         // that): in both cases no tag policy of any kind can decide here.
         let tag_policies_in_download = artifact.tag_policies.len();
+        // The masked-read question, asked only where a mask can be the answer.
+        let mask = if body.action == Action::Read
+            && engine == EngineType::StarRocks
+            && body.target.column.is_some()
+        {
+            let request = AccessRequest {
+                user: body.subject.user.clone(),
+                groups: BTreeSet::new(),
+                roles: BTreeSet::new(),
+                access_type: "select".to_string(),
+                resource: resource.clone(),
+                owner: None,
+                // StarRocks has no tag service: no tag can reach a mask.
+                resolved_tags: None,
+            };
+            let decision = egret_ranger_eval::eval::evaluate_data_mask(
+                &artifact,
+                &request,
+                &service_def,
+                &config,
+            );
+            let attribution = match &decision {
+                MaskDecision::Masked(m) => attribution_for_name(&mut *conn, &m.policy_name).await?,
+                MaskDecision::NoMask | MaskDecision::Undecidable { .. } => None,
+            };
+            Some(ExplainMask {
+                access_type: "select".to_string(),
+                decision: WireMaskDecision::from(&decision),
+                attribution,
+            })
+        } else {
+            None
+        };
         profiles.push(ExplainProfile {
             service_id,
             service_name: svc.name,
@@ -1938,6 +1997,7 @@ async fn explain(
             accesses,
             tags: tags_for_profile(&resolved_for_display, tag_policies_in_download),
             tag_policies_in_download,
+            mask,
         });
     }
 
@@ -2580,6 +2640,15 @@ async fn attribution_for<L: ClearanceLookups + Send>(
         Decision::Allowed { policy_name, .. } | Decision::Denied { policy_name, .. } => policy_name,
         Decision::Undecidable { .. } => return Ok(None),
     };
+    attribution_for_name(conn, name).await
+}
+
+/// [`attribution_for`] for a deciding policy's NAME, which is all a mask
+/// verdict carries.
+async fn attribution_for_name<L: ClearanceLookups + Send>(
+    conn: &mut L,
+    name: &str,
+) -> Result<Option<ExplainAttribution>, PermHttpError> {
     Ok(match attribute_policy_name(name) {
         None => None,
         Some(PolicyAttribution::Grant(grant_id)) => Some(ExplainAttribution::Grant { grant_id }),

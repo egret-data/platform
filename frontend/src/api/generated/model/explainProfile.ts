@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ExplainAccess } from './explainAccess';
+import type { ExplainMask } from './explainMask';
 import type { ExplainResolvedTag } from './explainResolvedTag';
 import type { WireEngineType } from './wireEngineType';
 
@@ -90,4 +91,5 @@ export interface ExplainProfile {
      * @minimum 0
      */
   tag_policies_in_download: number;
+  mask?: null | ExplainMask;
 }

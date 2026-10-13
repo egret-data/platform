@@ -423,7 +423,10 @@ const CREATE_MV_ACCESS: &str = "create materialized view";
 ///
 /// `pending` is one entry per (gate, column), as `compile_clearance` records
 /// them, so a database with no classified column never appears.
-fn mv_deny_inputs(pending: &[PendingMask], service: &str) -> Vec<(String, AccessPolicyInput)> {
+pub(crate) fn mv_deny_inputs(
+    pending: &[PendingMask],
+    service: &str,
+) -> Vec<(String, AccessPolicyInput)> {
     let mut by_db: BTreeMap<(&str, &str), Option<Vec<String>>> = BTreeMap::new();
     for p in pending {
         let slot = by_db

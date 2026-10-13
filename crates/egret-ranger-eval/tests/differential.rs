@@ -8780,3 +8780,277 @@ fn editor_shaped_levels_on_the_real_ranger_jars() {
     assert!(compared > 0, "no cell compared with the evaluator");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+// ── View governance Task 3: the clearance mask and the materialized-view deny ─
+//
+// Two StarRocks shapes the compiler now emits (docs/en/specs/2026-10-13-view-
+// governance-design.md, Part A2 and A3):
+//
+//   * a priority-1 data mask on each classified column whose cleared-user items
+//     are FOLDED, through `egret-ranger-eval`, from the profile's other masks;
+//   * a per-database deny of `create materialized view`.
+//
+// Both bodies come from the compiler's own functions (`harness_support`), not a
+// hand-copied JSON. The real jars are asked, at the plugin versions StarRocks
+// runs, what each user receives, and the answer must equal both the expectation
+// written here from the spec and this crate's evaluator.
+const VG_TAG: u128 = 0x7667_0001;
+const VG_CLEARED: [&str; 2] = ["ann", "bob"];
+const VG_UNCLEARED: &str = "carl";
+
+fn vg_column() -> egret_perm_compile::TaggedColumn {
+    egret_perm_compile::TaggedColumn {
+        catalog: "wh".into(),
+        schema: "sales".into(),
+        table: "orders".into(),
+        column: "email".into(),
+    }
+}
+
+/// Two rule masks, one a wildcard over the whole table: `ann` is mapped to
+/// `MASK_HASH` by the wildcard, `carl` to `MASK` by the exact policy on the
+/// classified column, and nobody to anything on `bob`'s behalf. A third mask on
+/// an unclassified column shows the clearance mask reaches nothing else.
+fn vg_rule_masks(profile: &Profile) -> Vec<Value> {
+    let col = |c: &str| lv_resources(profile, &[(0, "wh"), (1, "sales"), (2, "orders"), (3, c)]);
+    let mask = |id: i64, name: &str, resources: Value, items: Vec<Value>| {
+        json!({
+            "id": id, "name": name, "service": profile.service_name, "policyType": 1,
+            "isEnabled": true, "policyPriority": 0, "resources": resources,
+            "dataMaskPolicyItems": items,
+        })
+    };
+    vec![
+        mask(
+            1,
+            "rule-wildcard",
+            col("*"),
+            vec![mig_mask_item(&["ann"], &[], "MASK_HASH", None)],
+        ),
+        mask(
+            2,
+            "rule-exact-email",
+            col("email"),
+            vec![mig_mask_item(&[VG_UNCLEARED], &[], "MASK", None)],
+        ),
+        mask(
+            3,
+            "rule-exact-phone",
+            col("phone"),
+            vec![mig_mask_item(&[], &["public"], "MASK_HASH", None)],
+        ),
+    ]
+}
+
+fn vg_request(profile: &Profile, user: &str, access: &str, levels: &[&str]) -> AccessRequest {
+    let mut request = lv_request(profile, levels.len(), access, None);
+    request.user = user.to_string();
+    request.resource = RequestResource::new();
+    for (level, value) in profile.hierarchy.iter().zip(levels) {
+        request.resource.insert(*level, *value);
+    }
+    request
+}
+
+#[test]
+fn the_clearance_mask_and_the_materialized_view_deny_decide_as_designed_on_the_real_jars() {
+    if std::env::var("EGRET_TEST_RANGER_E2E").ok().as_deref() != Some("1") {
+        eprintln!("EGRET_TEST_RANGER_E2E != 1 — skipping the view-governance differential");
+        return;
+    }
+    let started = std::time::Instant::now();
+    let tag_def_json = load_tag_def();
+    let mut failures: Vec<String> = Vec::new();
+    let (mut asked, mut errors) = (0usize, 0usize);
+    let cleared: Vec<String> = VG_CLEARED.iter().map(|u| u.to_string()).collect();
+
+    for profile in [starrocks(), starrocks_2_9_0()] {
+        let service_type = profile.engine.service_def_name();
+        let (def_json, def, engine) = load_engine(&profile);
+        let rules = vg_rule_masks(&profile);
+
+        // The bodies under test, from the compiler's own functions.
+        let mask = egret_perm_compile::harness_support::starrocks_clearance_mask(
+            profile.service_name,
+            Uuid::from_u128(VG_TAG),
+            &vg_column(),
+            &cleared,
+            &rules,
+            profile.plugin_version,
+        )
+        .expect("the fold decides every cleared user");
+        let mv = egret_perm_compile::harness_support::starrocks_mv_denies(
+            profile.service_name,
+            &[(vg_column(), cleared.clone())],
+        );
+        assert_eq!(mv.len(), 1, "one deny for the one database");
+        // The fold's shape, pinned so a drifting compiler cannot make the jars
+        // answer a different question than the one this test names.
+        assert_eq!(mask["policyPriority"], json!(1));
+        let items = mask["dataMaskPolicyItems"].as_array().expect("mask items");
+        assert_eq!(items.len(), 3, "ann, bob, public: {mask}");
+        assert_eq!(
+            items.last().unwrap()["dataMaskInfo"]["dataMaskType"],
+            "MASK_NULL"
+        );
+
+        let with_id = |mut body: Value, id: i64| {
+            body["id"] = json!(id);
+            body
+        };
+        // An allow that makes the MV deny the thing that decides: everyone named
+        // may create a materialized view in every database of `wh`.
+        let allow_mv = json!({
+            "id": 20, "name": "allow-mv", "service": profile.service_name, "policyType": 0,
+            "isEnabled": true, "policyPriority": 0,
+            "resources": lv_resources(&profile, &[(0, "wh"), (1, "*")]),
+            "policyItems": [mig_item(
+                &["ann", "bob", VG_UNCLEARED, "eve"], &[], &["create materialized view"],
+            )],
+        });
+        let mut policies = rules.clone();
+        policies.push(with_id(mask.clone(), 10));
+        policies.push(with_id(mv[0].clone(), 11));
+        policies.push(allow_mv);
+        let set_json = mig_envelope(&profile, &def_json, &tag_def_json, policies, None);
+        let set: ServicePolicySet = serde_json::from_value(set_json.clone()).expect("parse set");
+
+        // (label, policyType, request, expected maskType | isAllowed)
+        struct Probe {
+            label: String,
+            policy_type: i32,
+            request: AccessRequest,
+            want_mask: Option<&'static str>,
+            want_allowed: Option<bool>,
+        }
+        let email = ["wh", "sales", "orders", "email"];
+        let phone = ["wh", "sales", "orders", "phone"];
+        let other = ["wh", "sales", "orders", "zip"];
+        let mut probes: Vec<Probe> = Vec::new();
+        let mut mask_probe = |label: &str, user: &str, levels: &[&str], want: &'static str| {
+            probes.push(Probe {
+                label: format!("{label}: {user} masks {}", levels.join(".")),
+                policy_type: 1,
+                request: vg_request(&profile, user, "select", levels),
+                want_mask: Some(want),
+                want_allowed: None,
+            });
+        };
+        // The three users: cleared with a rule mask, cleared with none, uncleared.
+        mask_probe("cleared, rule mask", "ann", &email, "MASK_HASH");
+        mask_probe("cleared, no rule mask", "bob", &email, "MASK_NONE");
+        mask_probe("uncleared", VG_UNCLEARED, &email, "MASK_NULL");
+        // A user no policy names is uncleared: public MASK_NULL.
+        mask_probe("unnamed user", "eve", &email, "MASK_NULL");
+        // Unclassified columns keep the rule masks, whoever asks.
+        mask_probe("unclassified, wildcard rule", "ann", &other, "MASK_HASH");
+        mask_probe("unclassified, no rule", "bob", &other, "");
+        mask_probe("unclassified, exact rule", "bob", &phone, "MASK_HASH");
+        let mut mv_probe = |label: &str, user: &str, db: &str, want: bool| {
+            probes.push(Probe {
+                label: format!("{label}: {user} creates a materialized view in {db}"),
+                policy_type: 0,
+                request: vg_request(&profile, user, "create materialized view", &["wh", db]),
+                want_mask: None,
+                want_allowed: Some(want),
+            });
+        };
+        mv_probe("cleared", "ann", "sales", true);
+        mv_probe("cleared", "bob", "sales", true);
+        mv_probe("uncleared", VG_UNCLEARED, "sales", false);
+        mv_probe("unnamed in the allow list", "eve", "sales", false);
+        // A database that holds no classified column is untouched.
+        mv_probe("other database", VG_UNCLEARED, "hr", true);
+        mv_probe("other database", "eve", "hr", true);
+
+        let payload: Vec<Value> = probes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                lv_case(
+                    format!("vg-{i}"),
+                    p.policy_type,
+                    set_json.clone(),
+                    p.request.clone(),
+                )
+                .to_json(service_type)
+            })
+            .collect();
+        let sent = payload.len();
+        let version = profile.ranger_version;
+        let verdicts = ask_ranger_json(payload, version, &format!("vg-{service_type}"));
+        assert_eq!(verdicts.len(), sent);
+
+        for (p, v) in probes.iter().zip(&verdicts) {
+            asked += 1;
+            if !v["error"].is_null() {
+                errors += 1;
+                failures.push(format!(
+                    "[{service_type} @ {version}] ranger threw on `{}`: {}",
+                    p.label, v["error"]
+                ));
+                continue;
+            }
+            let java = java_outcome(p.policy_type, v);
+            let mine = match p.policy_type {
+                1 => match evaluate_data_mask(&set, &p.request, &def, &engine) {
+                    MaskDecision::NoMask => Outcome::Mask {
+                        mask_type: None,
+                        masked_value: None,
+                        mask_condition: None,
+                    },
+                    MaskDecision::Masked(m) => Outcome::Mask {
+                        mask_type: m.mask_type,
+                        masked_value: m.masked_value,
+                        mask_condition: m.mask_condition,
+                    },
+                    MaskDecision::Undecidable { why } => Outcome::Refused(format!("{why:?}")),
+                },
+                _ => match evaluate(&set, &p.request, &def, &engine) {
+                    Decision::Allowed { .. } => Outcome::Access { allowed: true },
+                    Decision::Denied { .. } => Outcome::Access { allowed: false },
+                    Decision::Undecidable { why } => Outcome::Refused(format!("{why:?}")),
+                },
+            };
+            if java != mine {
+                failures.push(format!(
+                    "CRITICAL [{service_type} @ {version}] `{}`: java {java:?}, evaluator {mine:?}",
+                    p.label
+                ));
+            }
+            match (&java, p.want_mask, p.want_allowed) {
+                (Outcome::Mask { mask_type, .. }, Some(want), _) => {
+                    // `""` means no mask at all.
+                    let got = mask_type.as_deref().unwrap_or("");
+                    if got != want {
+                        failures.push(format!(
+                            "[{service_type} @ {version}] `{}`: java maskType {got:?}, designed {want:?}",
+                            p.label
+                        ));
+                    }
+                }
+                (Outcome::Access { allowed }, _, Some(want)) => {
+                    if *allowed != want {
+                        failures.push(format!(
+                            "[{service_type} @ {version}] `{}`: java isAllowed {allowed}, designed {want}",
+                            p.label
+                        ));
+                    }
+                }
+                _ => failures.push(format!("`{}`: unexpected outcome shape {java:?}", p.label)),
+            }
+        }
+        eprintln!("view governance [{service_type} @ ranger {version}]: {sent} probes");
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    eprintln!(
+        "view-governance differential: {asked} probes, {errors} errors, {} failures, {elapsed:.2} s",
+        failures.len()
+    );
+    assert_eq!(asked, 26, "every probe was asked: {asked}");
+    assert!(
+        elapsed > 1.0,
+        "a real-jar run takes seconds, not {elapsed:.2} s — vacuous"
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -3644,6 +3644,199 @@ async fn a_clearance_deny_in_the_artifact_refuses_the_uncleared_and_not_the_clea
         .expect("lift the gate");
 }
 
+/// View governance Task 3. Gates the fixture's tag on a fresh role, mints one
+/// reader who holds it and one who does not, and gives both a read grant, so the
+/// clearance is the only thing that can tell them apart. Returns
+/// `(tag_id, role, cleared, uncleared)`. The caller lifts the gate.
+async fn clearance_readers(f: &Fixture, token: &str) -> (Uuid, String, String, String) {
+    let tag_id: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
+        .bind(&f.tag_key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("the fixture's tag");
+    let role_name = unique("viewgov-clearing-role");
+    let role_id: Uuid =
+        sqlx::query_scalar("INSERT INTO roles (scope, name) VALUES ('platform', $1) RETURNING id")
+            .bind(&role_name)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("clearing role");
+    let mut names = Vec::new();
+    for label in ["cleared", "uncleared"] {
+        let id = f
+            .users
+            .insert_local(&format!("{}@example.com", unique(label)), label, "x")
+            .await
+            .expect("insert user")
+            .0;
+        let mut conn = f.db.pool.acquire().await.expect("acquire conn");
+        let name = egret_auth::users::ensure_username_via(&mut conn, egret_core::UserId(id))
+            .await
+            .expect("mint username");
+        drop(conn);
+        if label == "cleared" {
+            sqlx::query(
+                "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, \
+                 scope_id) VALUES ('user', $1, $2, 'platform', NULL)",
+            )
+            .bind(id)
+            .bind(role_id)
+            .execute(&f.db.pool)
+            .await
+            .expect("role grant");
+        }
+        names.push(name);
+    }
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, '{}') \
+         ON CONFLICT (tag_id) DO UPDATE SET required_roles = EXCLUDED.required_roles",
+    )
+    .bind(tag_id)
+    .bind(vec![role_name.clone()])
+    .execute(&f.db.pool)
+    .await
+    .expect("gate the tag");
+    for name in &names {
+        let (status, body) = into_json(
+            f.app()
+                .oneshot(req(
+                    "POST",
+                    "/perm/grants",
+                    token,
+                    Some(grant_body(f.catalog_id, name)),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    }
+    let uncleared = names.pop().unwrap();
+    let cleared = names.pop().unwrap();
+    (tag_id, role_name, cleared, uncleared)
+}
+
+async fn explain_column(f: &Fixture, token: &str, user: &str) -> Value {
+    let mut body = explain_body(f.catalog_id, user);
+    body["target"]["column"] = json!("email");
+    let (status, out) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", token, Some(body)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {out}");
+    out
+}
+
+async fn lift_gate(f: &Fixture, tag_id: Uuid) {
+    sqlx::query("DELETE FROM classification_policies WHERE tag_id = $1")
+        .bind(tag_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("lift the gate");
+}
+
+/// View governance Task 3. For an UNCLEARED reader of a classified StarRocks
+/// column, explain names the clearance twice: as the deny for the direct read,
+/// and as `MASK_NULL` for the masked request. Both carry the clearance
+/// attribution, and the mask's is the compiled mask policy, not the deny.
+#[tokio::test]
+async fn explain_names_the_clearance_as_deny_and_as_mask_for_an_uncleared_reader() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, role, _cleared, uncleared) = clearance_readers(&f, &token).await;
+
+    let body = explain_column(&f, &token, &uncleared).await;
+    let profile = profile_for(&body, "starrocks");
+    let deny = access_for(profile, "select");
+    assert_eq!(deny["decision"]["kind"], "denied", "body: {body}");
+    assert_eq!(
+        deny["decision"]["reason"], "deny_policy_item",
+        "body: {body}"
+    );
+    assert_eq!(deny["attribution"]["kind"], "clearance", "body: {body}");
+
+    let mask = &profile["mask"];
+    assert_eq!(mask["access_type"], "select", "body: {body}");
+    assert_eq!(mask["decision"]["kind"], "masked", "body: {body}");
+    assert_eq!(
+        mask["decision"]["result"]["mask_type"], "MASK_NULL",
+        "body: {body}"
+    );
+    assert_eq!(mask["attribution"]["kind"], "clearance", "body: {body}");
+    assert_eq!(
+        mask["attribution"]["tag_id"],
+        tag_id.to_string(),
+        "body: {body}"
+    );
+    assert_eq!(
+        mask["attribution"]["required_roles"],
+        json!([role]),
+        "body: {body}"
+    );
+    assert!(
+        mask["decision"]["result"]["policy_name"]
+            .as_str()
+            .is_some_and(|n| n.contains("-mask-")),
+        "the mask names the compiled mask policy, not the deny; body: {body}"
+    );
+    assert_ne!(
+        deny["decision"]["policy_name"], mask["decision"]["result"]["policy_name"],
+        "two reasons, two policies; body: {body}"
+    );
+    lift_gate(&f, tag_id).await;
+}
+
+/// The other reader kind: a CLEARED reader is allowed by their grant, and the
+/// mask the clearance folded for them transforms nothing (`MASK_NONE`) — the
+/// page must not tell them their column is nulled.
+#[tokio::test]
+async fn explain_shows_a_cleared_reader_the_clearance_mask_as_no_transform() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, cleared, _uncleared) = clearance_readers(&f, &token).await;
+
+    let body = explain_column(&f, &token, &cleared).await;
+    let profile = profile_for(&body, "starrocks");
+    assert_eq!(
+        access_for(profile, "select")["decision"]["kind"],
+        "allowed",
+        "body: {body}"
+    );
+    let mask = &profile["mask"];
+    assert_eq!(mask["decision"]["kind"], "masked", "body: {body}");
+    assert_eq!(
+        mask["decision"]["result"]["mask_type"], "MASK_NONE",
+        "body: {body}"
+    );
+    assert_eq!(mask["attribution"]["kind"], "clearance", "body: {body}");
+
+    // A target that names no column has no mask to report.
+    let (status, table_level) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain_body(f.catalog_id, &cleared)),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {table_level}");
+    assert!(
+        profile_for(&table_level, "starrocks").get("mask").is_none(),
+        "a table-level explain carries no mask; body: {table_level}"
+    );
+    lift_gate(&f, tag_id).await;
+}
+
 // ---------------------------------------------------------------------------
 // compile (the manual repair trigger)
 // ---------------------------------------------------------------------------

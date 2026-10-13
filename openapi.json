@@ -39589,6 +39589,34 @@
         ],
         "description": "The `perm` model object the DECIDING policy's Ranger NAME maps back to —\n[`crate::attribute_policy_name`], resolved per decision.\n\n**`None` on the owning [`ExplainAccess`] is a real answer, not a gap.**\nFour live categories of policy have no model object at all — the\n`egret-admin`/`all` hierarchies auto-bind seeds onto every generated\nprofile, `egret-engine-mgmt`'s delegator plumbing, operator-written raw\nJSON, and Ranger's own `superuser` short-circuit — and every one of them\ncan decide a real request. They are reported by their Ranger name and id on\nthe decision itself and never dropped: dropping what egret's compiler does\nnot own is exactly the blindness this endpoint was rerouted to remove."
       },
+      "ExplainMask": {
+        "type": "object",
+        "description": "The data-mask verdict for the target column: Ranger's `select` request\nevaluated as a masked read.",
+        "required": [
+          "access_type",
+          "decision"
+        ],
+        "properties": {
+          "access_type": {
+            "type": "string",
+            "description": "Always `select`: a mask is applied to a read."
+          },
+          "decision": {
+            "$ref": "#/components/schemas/WireMaskDecision"
+          },
+          "attribution": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainAttribution",
+                "description": "The deciding mask policy's `perm` model object, as for an access verdict;\n`None` for no mask or an undecidable answer."
+              }
+            ]
+          }
+        }
+      },
       "ExplainOutcome": {
         "type": "string",
         "description": "Which of `explain`'s two shapes a response carries.\n\n**\"No engine serves this catalog\" is not a refusal.** Collapsing it into a\n`Denied` would tell a steward the model is withholding an access when in\nfact no plugin is ever consulted about the resource — nothing is enforcing,\nwhich is a different fact. `profiles` is empty for exactly this outcome,\nand this discriminator exists so a client never has to infer a\nsecurity-relevant fact from the absence of data (an empty list also reads\nas \"we did not look\").",
@@ -39638,6 +39666,17 @@
             "type": "integer",
             "description": "How many tag policies **this profile's download** carries —\n`tagPolicies.policies.len()`, or `0` when there is no tag block at all\nbecause the profile has no bound tag service.\n\nCarried so the page can say WHY a profile's tag set is empty while the\ncolumn is tagged — the question H1's steward is left with otherwise — and\nit is the predicate [`ExplainProfile::tags`] is narrowed by.",
             "minimum": 0
+          },
+          "mask": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainMask",
+                "description": "What the engine masks the target COLUMN to for this subject — the second\nplace a StarRocks clearance shows (view governance A2). The clearance is a\nper-column deny for a direct read (`accesses`) AND a priority-1 data mask\nthat applies through every view, so an uncleared reader sees both reasons:\nthe deny, and `MASK_NULL` here.\n\nPresent only for a `read` explain of a COLUMN on a StarRocks profile. A\ntable-level target has no column to mask, a `write` has no masked request,\nand Trino's masks come from the tag service, which the evaluator refuses\n(tier c), so none is asked there."
+              }
+            ]
           }
         }
       },
@@ -48189,6 +48228,101 @@
           "data_mask_policy_items",
           "row_filter_policy_items"
         ]
+      },
+      "WireMaskDecision": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "no_mask"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "result",
+              "kind"
+            ],
+            "properties": {
+              "result": {
+                "$ref": "#/components/schemas/WireMaskResult"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "masked"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "why",
+              "kind"
+            ],
+            "properties": {
+              "why": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/WireUndecidableCause"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "undecidable"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`MaskDecision`]."
+      },
+      "WireMaskResult": {
+        "type": "object",
+        "description": "Wire mirror of [`MaskResult`].",
+        "required": [
+          "policy_name"
+        ],
+        "properties": {
+          "policy_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "policy_name": {
+            "type": "string"
+          },
+          "mask_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "masked_value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mask_condition": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       },
       "WirePluginVersion": {
         "type": "string",

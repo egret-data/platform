@@ -58,6 +58,10 @@ pub(crate) mod clearance;
 // View governance A2: the StarRocks priority-1 clearance MASK per classified
 // column, its cleared items folded through `egret-ranger-eval`.
 pub(crate) mod clearance_mask;
+// Task 3 of view governance: the two StarRocks bodies the differential harness
+// asks the real jars about, built by the compiler's own functions.
+#[doc(hidden)]
+pub mod harness_support;
 // SP4d-3 Task 5: classify every policy of a profile (owner, verdict, blocker
 // sentences) for `GET /perm/policies/services/{id}/classify`.
 pub mod classify;
