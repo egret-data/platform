@@ -783,3 +783,416 @@ async fn several_subflows_expand_at_once_and_an_unknown_uid_is_ignored() {
     .await;
     assert_eq!(g, expected(&parent));
 }
+
+// =========================================================================
+// W7c Task 3: `GET executions/{id}/graph` (spec §4, §5).
+//
+// Every test here drives the REAL worker on a private database
+// (`#[sqlx::test]`): `worker::tick` is global and would take a neighbour's
+// runs on the shared one, and what is under test is what the production
+// writer leaves behind, not what a fixture chose to insert.
+// =========================================================================
+
+use chrono::{DateTime, Utc};
+use egret_workflow::worker::{self, Outcome, Registry, TaskInput};
+
+/// Renders a leaf's `message` and answers by it: `boom` fails every attempt,
+/// `once` fails the first attempt only, anything else succeeds.
+struct ByMessage;
+
+#[async_trait::async_trait]
+impl Registry for ByMessage {
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        let raw = task.spec["message"].as_str().unwrap_or_default();
+        let msg = egret_workflow::render_str(raw, &task.render).unwrap_or_else(|_| raw.into());
+        Ok(match (msg.as_str(), task.attempt) {
+            ("boom", _) | ("once", 1) => Outcome::failed_with(format!("{msg} fails")),
+            _ => Outcome::success(),
+        })
+    }
+    async fn cancel(&self, _task: &TaskInput) -> egret_core::Result<()> {
+        Ok(())
+    }
+}
+
+async fn seeded(pool: &sqlx::PgPool) -> (Db, Uuid, UserId) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    (db, ws, user)
+}
+
+async fn start(pool: &sqlx::PgPool, ws: Uuid, flow: Option<Uuid>, source: &str) -> Uuid {
+    worker::start_execution(pool, ws, flow, source, json!({}))
+        .await
+        .expect("start execution")
+}
+
+/// Tick until the worker claims nothing.
+async fn drain(pool: &sqlx::PgPool) {
+    for _ in 0..64 {
+        if worker::tick(pool, 16, &ByMessage).await.expect("tick") == 0 {
+            return;
+        }
+    }
+    panic!("the worker never stopped claiming");
+}
+
+async fn execution_state(pool: &sqlx::PgPool, id: Uuid) -> String {
+    sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("execution state")
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct RunRow {
+    id: Uuid,
+    task_id: String,
+    state: String,
+    attempts: Value,
+    started_at: Option<DateTime<Utc>>,
+    ended_at: Option<DateTime<Utc>>,
+}
+
+async fn run_rows(pool: &sqlx::PgPool, execution: Uuid) -> Vec<RunRow> {
+    sqlx::query_as(
+        "SELECT id, task_id, state, attempts, started_at, ended_at \
+           FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix",
+    )
+    .bind(execution)
+    .fetch_all(pool)
+    .await
+    .expect("runs")
+}
+
+async fn exec_graph(
+    app: &common::App,
+    ws: Uuid,
+    id: Uuid,
+    query: &str,
+    user: UserId,
+) -> axum::response::Response {
+    common::get(
+        app,
+        &format!("/api/ws/{ws}/workflows/executions/{id}/graph?{query}"),
+        user,
+    )
+    .await
+}
+
+async fn exec_graph_ok(app: &common::App, ws: Uuid, id: Uuid, query: &str, user: UserId) -> Value {
+    let res = exec_graph(app, ws, id, query, user).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    common::json(res).await
+}
+
+fn ts(v: &Value) -> Option<DateTime<Utc>> {
+    v.as_str().map(|s| s.parse().expect("an RFC 3339 instant"))
+}
+
+fn state_keys(g: &Value) -> Vec<String> {
+    g["states"].as_object().unwrap().keys().cloned().collect()
+}
+
+/// Every run's state, attempt count, id and timestamps against its row.
+fn assert_matches_row(g: &Value, uid: &str, row: &RunRow) {
+    let s = &g["states"][uid];
+    assert_eq!(s["state"], row.state, "{uid}: {s}");
+    assert_eq!(
+        s["attempts"],
+        row.attempts.as_array().unwrap().len(),
+        "{uid}: {s}"
+    );
+    assert_eq!(s["run_id"], row.id.to_string(), "{uid}: {s}");
+    assert_eq!(ts(&s["started_at"]), row.started_at, "{uid}: {s}");
+    assert_eq!(ts(&s["ended_at"]), row.ended_at, "{uid}: {s}");
+    assert_eq!(s["iterations"], Value::Null, "{uid}: {s}");
+}
+
+// ---- 1. A finished execution ---------------------------------------------
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn each_run_of_a_finished_execution_sits_on_its_node(pool: sqlx::PgPool) {
+    let (db, ws, user) = seeded(&pool).await;
+    let source = format!(
+        "id: f\nnamespace: t\ntasks:\n  - {{id: s, type: {FLOW}.Sequential, tasks: [{}, {}]}}\n  - {}\n",
+        leaf("a"),
+        leaf("b"),
+        leaf("c"),
+    );
+    let ex = start(&pool, ws, None, &source).await;
+    drain(&pool).await;
+    assert_eq!(execution_state(&pool, ex).await, "SUCCESS");
+    let app = common::app(&db).await;
+
+    let g = exec_graph_ok(&app, ws, ex, "", user).await;
+
+    assert_eq!(g["graph"], expected(&source));
+    assert_eq!(
+        state_keys(&g),
+        ["tasks.c", "tasks.s", "tasks.s.a", "tasks.s.b"]
+    );
+    let rows = run_rows(&pool, ex).await;
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    for row in &rows {
+        let uid = match row.task_id.as_str() {
+            "s" => "tasks.s",
+            "a" => "tasks.s.a",
+            "b" => "tasks.s.b",
+            "c" => "tasks.c",
+            other => panic!("unexpected run {other}"),
+        };
+        assert!(row.ended_at.is_some(), "a finished run has an end: {row:?}");
+        assert_matches_row(&g, uid, row);
+    }
+}
+
+// ---- 2. A retried task ---------------------------------------------------
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_retried_task_has_two_attempts(pool: sqlx::PgPool) {
+    let (db, ws, user) = seeded(&pool).await;
+    let source = format!(
+        "id: r\nnamespace: t\ntasks:\n  - id: a\n    type: {LOG}\n    message: once\n    \
+         retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 2\n"
+    );
+    let ex = start(&pool, ws, None, &source).await;
+    drain(&pool).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    worker::wake(&pool, 16).await.expect("wake");
+    drain(&pool).await;
+    assert_eq!(execution_state(&pool, ex).await, "SUCCESS");
+    let app = common::app(&db).await;
+
+    let g = exec_graph_ok(&app, ws, ex, "", user).await;
+
+    assert_eq!(g["states"]["tasks.a"]["attempts"], 2, "{}", g["states"]);
+    assert_eq!(g["states"]["tasks.a"]["state"], "SUCCESS");
+    assert_matches_row(&g, "tasks.a", &run_rows(&pool, ex).await[0]);
+}
+
+// ---- 3. A waiting Pause --------------------------------------------------
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_waiting_pause_is_paused(pool: sqlx::PgPool) {
+    let (db, ws, user) = seeded(&pool).await;
+    let source = format!(
+        "id: p\nnamespace: t\ntasks:\n  - id: wait\n    type: {FLOW}.Pause\n  - {}\n",
+        leaf("after")
+    );
+    let ex = start(&pool, ws, None, &source).await;
+    drain(&pool).await;
+    assert_eq!(execution_state(&pool, ex).await, "PAUSED");
+    let app = common::app(&db).await;
+
+    let g = exec_graph_ok(&app, ws, ex, "", user).await;
+
+    assert_eq!(g["states"]["tasks.wait"]["state"], "PAUSED");
+    assert_eq!(g["states"]["tasks.wait"]["ended_at"], Value::Null);
+    assert_matches_row(&g, "tasks.wait", &run_rows(&pool, ex).await[0]);
+    assert_eq!(state_keys(&g), ["tasks.wait"], "`after` has not run yet");
+}
+
+// ---- 4. A task that never ran --------------------------------------------
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_task_that_never_ran_has_no_entry(pool: sqlx::PgPool) {
+    let (db, ws, user) = seeded(&pool).await;
+    let source = format!(
+        "id: i\nnamespace: t\ntasks:\n  - id: choose\n    type: {FLOW}.If\n    condition: \"{{{{ true }}}}\"\n    then: [{}]\n    else: [{}]\n",
+        leaf("yes"),
+        leaf("no")
+    );
+    let ex = start(&pool, ws, None, &source).await;
+    drain(&pool).await;
+    assert_eq!(execution_state(&pool, ex).await, "SUCCESS");
+    let app = common::app(&db).await;
+
+    let g = exec_graph_ok(&app, ws, ex, "", user).await;
+
+    node(&g["graph"], "tasks.choose.no");
+    assert_eq!(state_keys(&g), ["tasks.choose", "tasks.choose.yes"]);
+}
+
+// ---- 5. A Loop with one failing iteration --------------------------------
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_body_folds_over_its_iterations(pool: sqlx::PgPool) {
+    let (db, ws, user) = seeded(&pool).await;
+    // `boom` is the MIDDLE value: a "last run wins" fold would read `ok2`.
+    // `concurrencyLimit: 0` starts every iteration at once (the default, 1,
+    // stops at the first failure and never runs `ok2`).
+    let source = format!(
+        "id: l\nnamespace: t\ntasks:\n  - id: each\n    type: {FLOW}.Loop\n    \
+         concurrencyLimit: 0\n    values: '[\"ok1\", \"boom\", \"ok2\"]'\n    tasks:\n      - {}\n      \
+         - {{id: b, type: {LOG}, message: \"{{{{ item.value }}}}\"}}\n",
+        leaf("a")
+    );
+    let ex = start(&pool, ws, None, &source).await;
+    drain(&pool).await;
+    assert_eq!(execution_state(&pool, ex).await, "FAILED");
+    let iterations: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, state FROM workflow.executions \
+          WHERE parent_execution_id = $1 AND loop_index IS NOT NULL ORDER BY loop_index",
+    )
+    .bind(ex)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let states: Vec<&str> = iterations.iter().map(|(_, s)| s.as_str()).collect();
+    assert_eq!(states, ["SUCCESS", "FAILED", "SUCCESS"], "the fixture");
+    let app = common::app(&db).await;
+
+    let g = exec_graph_ok(&app, ws, ex, "", user).await;
+
+    assert_eq!(
+        g["states"]["tasks.each.b"],
+        json!({
+            "state": "FAILED",
+            "attempts": 1,
+            "run_id": null,
+            "started_at": g["states"]["tasks.each.b"]["started_at"],
+            "ended_at": g["states"]["tasks.each.b"]["ended_at"],
+            "iterations": { "total": 3, "by_state": { "SUCCESS": 2, "FAILED": 1 } },
+        })
+    );
+    assert_eq!(
+        g["states"]["tasks.each.a"]["iterations"],
+        json!({ "total": 3, "by_state": { "SUCCESS": 3 } })
+    );
+    assert_eq!(g["states"]["tasks.each.a"]["state"], "SUCCESS");
+    assert_eq!(g["states"]["tasks.each.a"]["run_id"], Value::Null);
+    // The span covers every iteration's run of `b`.
+    let mut b_runs = Vec::new();
+    for (it, _) in &iterations {
+        b_runs.extend(
+            run_rows(&pool, *it)
+                .await
+                .into_iter()
+                .filter(|r| r.task_id == "b"),
+        );
+    }
+    assert_eq!(b_runs.len(), 3);
+    let b = &g["states"]["tasks.each.b"];
+    assert_eq!(
+        ts(&b["started_at"]),
+        b_runs.iter().filter_map(|r| r.started_at).min()
+    );
+    assert_eq!(
+        ts(&b["ended_at"]),
+        b_runs.iter().filter_map(|r| r.ended_at).max()
+    );
+    // The Loop itself is one run in the execution.
+    let each = run_rows(&pool, ex)
+        .await
+        .into_iter()
+        .find(|r| r.task_id == "each")
+        .unwrap();
+    assert_matches_row(&g, "tasks.each", &each);
+    assert_eq!(each.state, "FAILED");
+}
+
+// ---- 7. Expanding a Subflow on an execution ------------------------------
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_expanded_subflow_draws_the_child_executions_frozen_source_and_states(
+    pool: sqlx::PgPool,
+) {
+    let (db, ws, user) = seeded(&pool).await;
+    let child_ran = flow_yaml("t", "child", &[leaf("x")]);
+    let child = common::seed_flow(&db, ws, user, &child_ran, "draft").await;
+    let parent = flow_yaml("t", "parent", &[subflow("call", "t", "child")]);
+    let ex = start(&pool, ws, None, &parent).await;
+    drain(&pool).await;
+    assert_eq!(execution_state(&pool, ex).await, "SUCCESS");
+    let child_ex: Uuid =
+        sqlx::query_scalar("SELECT id FROM workflow.executions WHERE trigger_execution_id = $1")
+            .bind(ex)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    // The child's draft moves on after the run.
+    sqlx::query("UPDATE workflow.flows SET source = $2 WHERE id = $1")
+        .bind(child)
+        .bind(flow_yaml("t", "child", &[leaf("x"), leaf("later")]))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = common::app(&db).await;
+
+    let g = exec_graph_ok(&app, ws, ex, &subflows_query(&["tasks.call"]), user).await;
+
+    let got = uids(&g["graph"]);
+    assert!(got.contains(&"tasks.call/tasks.x".to_string()), "{got:?}");
+    assert!(
+        !got.iter().any(|u| u.starts_with("tasks.call/tasks.later")),
+        "the child EXECUTION's frozen source, not the draft: {got:?}"
+    );
+    assert_eq!(
+        cluster(&g["graph"], "cluster:tasks.call")["reason"],
+        Value::Null
+    );
+    assert_eq!(state_keys(&g), ["tasks.call", "tasks.call/tasks.x"]);
+    let x = run_rows(&pool, child_ex).await.into_iter().next().unwrap();
+    assert_matches_row(&g, "tasks.call/tasks.x", &x);
+    let call = run_rows(&pool, ex).await.into_iter().next().unwrap();
+    assert_matches_row(&g, "tasks.call", &call);
+
+    // Unexpanded, the same execution carries only its own states.
+    let g = exec_graph_ok(&app, ws, ex, "", user).await;
+    assert_eq!(state_keys(&g), ["tasks.call"]);
+}
+
+// ---- 8. The execution's frozen source, not the draft ---------------------
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_execution_graph_is_drawn_from_the_frozen_source(pool: sqlx::PgPool) {
+    let (db, ws, user) = seeded(&pool).await;
+    let ran = flow_yaml("t", "f", &[leaf("a"), leaf("b")]);
+    let flow = common::seed_flow(&db, ws, user, &ran, "draft").await;
+    let ex = start(&pool, ws, Some(flow), &ran).await;
+    drain(&pool).await;
+    let edited = flow_yaml("t", "f", &[leaf("z")]);
+    sqlx::query("UPDATE workflow.flows SET source = $2 WHERE id = $1")
+        .bind(flow)
+        .bind(&edited)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = common::app(&db).await;
+
+    let g = exec_graph_ok(&app, ws, ex, "", user).await;
+
+    assert_eq!(g["graph"], expected(&ran));
+    assert_ne!(g["graph"], expected(&edited));
+    assert_eq!(state_keys(&g), ["tasks.a", "tasks.b"]);
+}
+
+// ---- 9. Another workspace's execution, and permissions -------------------
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn another_workspaces_execution_is_404(pool: sqlx::PgPool) {
+    let (db, ws, user) = seeded(&pool).await;
+    let (other_ws, _) = common::seed_workspace(&db).await;
+    let source = flow_yaml("t", "f", &[leaf("a")]);
+    let foreign = start(&pool, other_ws, None, &source).await;
+    let mine = start(&pool, ws, None, &source).await;
+    let app = common::app(&db).await;
+
+    let res = exec_graph(&app, ws, foreign, "", user).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = exec_graph(&app, ws, Uuid::new_v4(), "", user).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    // Positive control: the same request for my own execution is served.
+    let res = exec_graph(&app, ws, mine, "", user).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // `workflow:read` is required; `:manage` alone is not it.
+    let (_, stranger) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, stranger, &["workflow:manage"]).await;
+    let res = exec_graph(&app, ws, mine, "", stranger).await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}

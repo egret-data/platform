@@ -29,6 +29,7 @@ import type {
   CreateFlowRequest,
   ErrorBody,
   ExecutionDto,
+  ExecutionGraph,
   ExecutionPageDto,
   FileMetasDto,
   FilePreviewDto,
@@ -57,6 +58,7 @@ import type {
   WorkflowDownloadExecutionFileParams,
   WorkflowDownloadNamespaceFileParams,
   WorkflowExecutionFileMetasParams,
+  WorkflowGetExecutionGraphParams,
   WorkflowGetExecutionLogsParams,
   WorkflowGetFlowGraphParams,
   WorkflowGetFlowSchema200,
@@ -836,6 +838,173 @@ export function useWorkflowPreviewExecutionFile<TData = Awaited<ReturnType<typeo
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getWorkflowPreviewExecutionFileQueryOptions(workspace,id,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowGetExecutionGraphResponse200 = {
+  data: ExecutionGraph
+  status: 200
+}
+
+export type workflowGetExecutionGraphResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowGetExecutionGraphResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowGetExecutionGraphResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowGetExecutionGraphResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowGetExecutionGraphResponse422 = {
+  data: ErrorBody
+  status: 422
+}
+
+export type workflowGetExecutionGraphResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowGetExecutionGraphResponseSuccess = (workflowGetExecutionGraphResponse200) & {
+  headers: Headers;
+};
+export type workflowGetExecutionGraphResponseError = (workflowGetExecutionGraphResponse400 | workflowGetExecutionGraphResponse401 | workflowGetExecutionGraphResponse403 | workflowGetExecutionGraphResponse404 | workflowGetExecutionGraphResponse422 | workflowGetExecutionGraphResponse500) & {
+  headers: Headers;
+};
+
+export type workflowGetExecutionGraphResponse = (workflowGetExecutionGraphResponseSuccess | workflowGetExecutionGraphResponseError)
+
+export const getWorkflowGetExecutionGraphUrl = (workspace: string,
+    id: string,
+    params?: WorkflowGetExecutionGraphParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    const explodeParameters = ["subflows"];
+
+    if (Array.isArray(value) && explodeParameters.includes(key)) {
+      value.forEach((v) => {
+        normalizedParams.append(key, v === null ? 'null' : String(v));
+      });
+      return;
+    }
+
+
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/graph?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/graph`
+}
+
+export const workflowGetExecutionGraph = async (workspace: string,
+    id: string,
+    params?: WorkflowGetExecutionGraphParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowGetExecutionGraphResponse> => {
+
+  return customInstance<workflowGetExecutionGraphResponse>(getWorkflowGetExecutionGraphUrl(workspace,id,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowGetExecutionGraphQueryKey = (workspace: string,
+    id: string,
+    params?: WorkflowGetExecutionGraphParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/graph`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowGetExecutionGraphQueryOptions = <TData = Awaited<ReturnType<typeof workflowGetExecutionGraph>>, TError = ErrorBody>(workspace: string,
+    id: string,
+    params?: WorkflowGetExecutionGraphParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecutionGraph>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowGetExecutionGraphQueryKey(workspace,id,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowGetExecutionGraph>>> = ({ signal }) => workflowGetExecutionGraph(workspace,id,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecutionGraph>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowGetExecutionGraphQueryResult = NonNullable<Awaited<ReturnType<typeof workflowGetExecutionGraph>>>
+export type WorkflowGetExecutionGraphQueryError = ErrorBody
+
+
+export function useWorkflowGetExecutionGraph<TData = Awaited<ReturnType<typeof workflowGetExecutionGraph>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: undefined |  WorkflowGetExecutionGraphParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecutionGraph>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowGetExecutionGraph>>,
+          TError,
+          Awaited<ReturnType<typeof workflowGetExecutionGraph>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowGetExecutionGraph<TData = Awaited<ReturnType<typeof workflowGetExecutionGraph>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params?: WorkflowGetExecutionGraphParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecutionGraph>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowGetExecutionGraph>>,
+          TError,
+          Awaited<ReturnType<typeof workflowGetExecutionGraph>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowGetExecutionGraph<TData = Awaited<ReturnType<typeof workflowGetExecutionGraph>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params?: WorkflowGetExecutionGraphParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecutionGraph>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowGetExecutionGraph<TData = Awaited<ReturnType<typeof workflowGetExecutionGraph>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params?: WorkflowGetExecutionGraphParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecutionGraph>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowGetExecutionGraphQueryOptions(workspace,id,params,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

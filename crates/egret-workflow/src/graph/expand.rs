@@ -70,6 +70,25 @@
 //! is not `tasks` (Kestra's `updateWithChildren(branchType)`), so an
 //! expansion under `errors:` is drawn as an error branch.
 //!
+//! # On an execution (spec §3.4 last paragraph, §4)
+//!
+//! [`execution_graph`] expands through the same splice, with one more source:
+//!
+//! - A `Subflow` node whose ONE run (in the execution itself) started a child
+//!   execution expands from that child EXECUTION's frozen `source`, read
+//!   through [`ExecutionSource`], and carries the child's states under the
+//!   prefixed uids. The child is the newest execution linked to the run by
+//!   `trigger_execution_id` + `trigger_run_ix` (a retried `Subflow` starts one
+//!   per attempt). `dynamic` does not apply: the child execution is the
+//!   target the run rendered. `depth` still does, checked first.
+//! - Otherwise -- the run has not started a child yet (or failed before it
+//!   could), the node never ran, or its runs are folded over `Loop`
+//!   iterations and so name several children -- the node expands exactly as
+//!   on the flow graph: the reasons above, then the child flow's CURRENT
+//!   draft, with no states. Every execution runs the saved draft (W7a), so
+//!   once the child starts, the next poll draws the same shape from its
+//!   frozen source, now with states.
+//!
 //! # The node limit (§3.5)
 //!
 //! [`MAX_NODES`] counts nodes after expansion. Each flow's graph is built
@@ -80,18 +99,19 @@
 //! `start:S` and drops the child's `start:flow`, so the running total is the
 //! final count exactly.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use futures_util::future::BoxFuture;
 use uuid::Uuid;
 
+use super::states::{level_states, ExecutionGraph, GraphRun, LevelStates, NodeState};
 use super::{
     build, cluster_uid, end_uid, start_uid, Branch, Cluster, ClusterKind, Edge, ExpansionReason,
     FlowGraph, GraphError, GraphOptions, Node, NodeKind, Relation, SubflowRef, FLOW_OWNER,
     MAX_NODES,
 };
 use crate::models::Flow;
-use crate::repo::FlowRepo;
+use crate::repo::{ExecutionRepo, FlowRepo};
 use crate::spec::parse;
 
 /// How many expansions deep a graph goes: the request flow's child (1) and
@@ -127,6 +147,38 @@ impl SubflowSource for FlowRepo {
     }
 }
 
+/// An execution's frozen source and the runs its graph is drawn with.
+#[derive(Debug, Clone)]
+pub struct FrozenExecution {
+    pub source: String,
+    /// Its runs and its `Loop` iterations' runs (at any depth), iterations
+    /// in loop order.
+    pub runs: Vec<GraphRun>,
+}
+
+/// Where an execution graph loads an execution from.
+#[async_trait::async_trait]
+pub trait ExecutionSource: Send + Sync {
+    /// Execution `id` of workspace `ws`, or `None` when that workspace has no
+    /// such execution.
+    async fn frozen(&self, ws: Uuid, id: Uuid) -> egret_core::Result<Option<FrozenExecution>>;
+}
+
+#[async_trait::async_trait]
+impl ExecutionSource for ExecutionRepo {
+    async fn frozen(&self, ws: Uuid, id: Uuid) -> egret_core::Result<Option<FrozenExecution>> {
+        self.graph_source(ws, id).await
+    }
+}
+
+/// The sources one expansion reads: drafts always; executions only for an
+/// execution graph.
+#[derive(Clone, Copy)]
+struct Sources<'a> {
+    drafts: &'a dyn SubflowSource,
+    executions: Option<&'a dyn ExecutionSource>,
+}
+
 /// [`super::flow_graph`], with every `Subflow` node whose uid is in
 /// `opts.subflows` expanded from `source` within workspace `ws` (module doc).
 pub async fn expanded_flow_graph(
@@ -136,19 +188,62 @@ pub async fn expanded_flow_graph(
     source: &dyn SubflowSource,
 ) -> Result<FlowGraph, GraphError> {
     let mut total = 0;
-    graph_of(flow, opts, String::new(), ws, source, &mut total).await
+    let sources = Sources {
+        drafts: source,
+        executions: None,
+    };
+    let (graph, _) = graph_of(flow, opts, String::new(), ws, sources, None, &mut total).await?;
+    Ok(graph)
 }
+
+/// The graph of an execution whose frozen source parsed to `flow` and whose
+/// runs are `runs`, with each node's state (spec §4) and every requested
+/// `Subflow` expanded (module doc, "On an execution").
+pub async fn execution_graph(
+    flow: &Flow,
+    runs: &[GraphRun],
+    opts: &GraphOptions,
+    ws: Uuid,
+    drafts: &dyn SubflowSource,
+    executions: &dyn ExecutionSource,
+) -> Result<ExecutionGraph, GraphError> {
+    let mut total = 0;
+    let sources = Sources {
+        drafts,
+        executions: Some(executions),
+    };
+    let (graph, states) = graph_of(
+        flow,
+        opts,
+        String::new(),
+        ws,
+        sources,
+        Some(runs),
+        &mut total,
+    )
+    .await?;
+    Ok(ExecutionGraph { graph, states })
+}
+
+/// One flow's graph, with its expansions spliced in, and its states.
+type Drawn = (FlowGraph, BTreeMap<String, NodeState>);
+
+/// A child's graph and states, or why it has none.
+type Child = Result<Drawn, ExpansionReason>;
 
 /// `prefix`: the final uid of the `Subflow` node this flow expands (empty
 /// for the request flow), so a node here is selected by its final uid.
+/// `runs`: this flow's runs when it is an execution's, `None` when it is a
+/// draft (no states).
 fn graph_of<'a>(
     flow: &'a Flow,
     opts: &'a GraphOptions,
     prefix: String,
     ws: Uuid,
-    source: &'a dyn SubflowSource,
+    sources: Sources<'a>,
+    runs: Option<&'a [GraphRun]>,
     total: &'a mut usize,
-) -> BoxFuture<'a, Result<FlowGraph, GraphError>> {
+) -> BoxFuture<'a, Result<Drawn, GraphError>> {
     Box::pin(async move {
         let (mut graph, subflows) = build(flow).map_err(|e| match e {
             GraphError::TooLarge { nodes } => GraphError::TooLarge {
@@ -160,6 +255,14 @@ fn graph_of<'a>(
         if *total > MAX_NODES {
             return Err(GraphError::TooLarge { nodes: *total });
         }
+        // Mapped before any splice: this flow's runs name this flow's tasks.
+        let LevelStates {
+            mut states,
+            children,
+        } = match runs {
+            Some(runs) => level_states(&graph, runs)?,
+            None => LevelStates::default(),
+        };
         for sub in subflows {
             let full = if prefix.is_empty() {
                 sub.uid.clone()
@@ -169,34 +272,81 @@ fn graph_of<'a>(
             if !opts.subflows.contains(&full) {
                 continue;
             }
-            let child = match target(&sub, opts.depth) {
-                Err(reason) => Err(reason),
-                Ok((namespace, flow_id)) => {
-                    match source
-                        .current_draft(ws, namespace, flow_id)
-                        .await
-                        .map_err(|e| GraphError::Source(e.to_string()))?
-                    {
-                        None => Err(ExpansionReason::NotFound),
-                        Some(yaml) => {
-                            let child_flow = parse(&yaml).map_err(|e| {
-                                GraphError::Source(format!(
-                                    "the draft of '{namespace}'.'{flow_id}' does not parse: {}",
-                                    e.message
-                                ))
-                            })?;
-                            let child_opts = GraphOptions {
-                                subflows: opts.subflows.clone(),
-                                depth: opts.depth + 1,
-                            };
-                            Ok(graph_of(&child_flow, &child_opts, full, ws, source, total).await?)
-                        }
+            let child_opts = GraphOptions {
+                subflows: opts.subflows.clone(),
+                depth: opts.depth + 1,
+            };
+            let started = match (sources.executions, children.get(&sub.uid)) {
+                (Some(executions), Some(child)) => {
+                    if opts.depth >= MAX_EXPANSION_DEPTH {
+                        Some(Err(ExpansionReason::Depth))
+                    } else {
+                        executions
+                            .frozen(ws, *child)
+                            .await
+                            .map_err(|e| GraphError::Source(e.to_string()))?
+                            .map(Ok)
                     }
                 }
+                _ => None,
             };
-            splice(&mut graph, &sub, child);
+            let child: Child = match started {
+                Some(Err(reason)) => Err(reason),
+                Some(Ok(frozen)) => {
+                    let child_flow = parse(&frozen.source).map_err(|e| {
+                        GraphError::Source(format!(
+                            "the frozen source of execution of '{}'.'{}' does not parse: {}",
+                            sub.namespace.as_deref().unwrap_or_default(),
+                            sub.flow_id.as_deref().unwrap_or_default(),
+                            e.message
+                        ))
+                    })?;
+                    Ok(graph_of(
+                        &child_flow,
+                        &child_opts,
+                        full,
+                        ws,
+                        sources,
+                        Some(&frozen.runs),
+                        total,
+                    )
+                    .await?)
+                }
+                None => match target(&sub, opts.depth) {
+                    Err(reason) => Err(reason),
+                    Ok((namespace, flow_id)) => {
+                        match sources
+                            .drafts
+                            .current_draft(ws, namespace, flow_id)
+                            .await
+                            .map_err(|e| GraphError::Source(e.to_string()))?
+                        {
+                            None => Err(ExpansionReason::NotFound),
+                            Some(yaml) => {
+                                let child_flow = parse(&yaml).map_err(|e| {
+                                    GraphError::Source(format!(
+                                        "the draft of '{namespace}'.'{flow_id}' does not parse: {}",
+                                        e.message
+                                    ))
+                                })?;
+                                Ok(graph_of(
+                                    &child_flow,
+                                    &child_opts,
+                                    full,
+                                    ws,
+                                    sources,
+                                    None,
+                                    total,
+                                )
+                                .await?)
+                            }
+                        }
+                    }
+                },
+            };
+            splice(&mut graph, &mut states, &sub, child);
         }
-        Ok(graph)
+        Ok((graph, states))
     })
 }
 
@@ -227,8 +377,13 @@ fn owner_of_marker(uid: &str) -> Option<&str> {
 }
 
 /// Put `child` (or the reason it is missing) in place of the `Subflow` node
-/// `sub` (module doc, "Uids").
-fn splice(graph: &mut FlowGraph, sub: &SubflowRef, child: Result<FlowGraph, ExpansionReason>) {
+/// `sub` (module doc, "Uids"); the child's states move to its renamed uids.
+fn splice(
+    graph: &mut FlowGraph,
+    states: &mut BTreeMap<String, NodeState>,
+    sub: &SubflowRef,
+    child: Child,
+) {
     let s = sub.uid.as_str();
     let home = graph
         .clusters
@@ -236,7 +391,7 @@ fn splice(graph: &mut FlowGraph, sub: &SubflowRef, child: Result<FlowGraph, Expa
         .position(|c| c.nodes.iter().any(|n| n == s));
     let parent = home.map(|ix| graph.clusters[ix].uid.clone());
 
-    let child = match child {
+    let (child, child_states) = match child {
         Ok(child) => child,
         Err(reason) => {
             graph.clusters.push(Cluster {
@@ -307,6 +462,10 @@ fn splice(graph: &mut FlowGraph, sub: &SubflowRef, child: Result<FlowGraph, Expa
         }
         names[uid].clone()
     };
+
+    for (uid, state) in child_states {
+        states.insert(map(&uid), state);
+    }
 
     // The parent's edges now enter and leave the expansion's markers.
     for e in &mut graph.edges {

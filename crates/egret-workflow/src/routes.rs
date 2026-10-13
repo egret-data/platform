@@ -1152,7 +1152,7 @@ impl axum::response::IntoResponse for GraphRouteError {
                 }),
             )
                 .into_response(),
-            GraphRouteError::Graph(e @ GraphError::Source(_)) => {
+            GraphRouteError::Graph(e @ (GraphError::Source(_) | GraphError::State(_))) => {
                 Error::Internal(anyhow::anyhow!("{e}")).into_response()
             }
         }
@@ -1283,6 +1283,59 @@ async fn graph_unsaved_flow(
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
     let flow = parse_unsaved(&body.source)?;
     graph_for(&st, ctx.workspace_id.0, &flow, raw.as_deref()).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/graph",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+        ("subflows" = Option<Vec<String>>, Query, explode, description = "Uids of `Subflow` nodes to expand in place, repeated (`subflows=a&subflows=b`). A `Subflow` whose run started a child execution expands from that execution's frozen source, with its states; otherwise from the child flow's current draft, without states. A uid inside an expansion is `{subflow_uid}/{child_uid}`; a uid that names no `Subflow` node is ignored"),
+    ),
+    responses(
+        (status = 200, description = "The graph of the execution's frozen source, and the state of every node that has a run. A task with no run has no entry; a task in a `Loop` body is folded over every iteration by Kestra's priority, with `iterations` and no `run_id`", body = crate::graph::ExecutionGraph),
+        (status = 400, description = "`{id}` is not a UUID", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace; one of another workspace answers exactly this", body = egret_core::http::ErrorBody),
+        (status = 422, description = "The graph, counted after expansion, has more than 5,000 nodes; the message names the count", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn get_execution_graph(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
+) -> std::result::Result<Json<crate::graph::ExecutionGraph>, GraphRouteError> {
+    use crate::graph::ExecutionSource as _;
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    let ws = ctx.workspace_id.0;
+    // Scoped by the workspace in the read itself: a foreign id is `None`.
+    let frozen = st
+        .executions
+        .frozen(ws, id)
+        .await?
+        .ok_or_else(|| Error::NotFound("execution".into()))?;
+    // The source it ran, frozen at start; it parsed then, so a failure is ours.
+    let flow = parse(&frozen.source).map_err(|e| {
+        Error::Internal(anyhow::anyhow!(
+            "frozen source of execution {id} no longer parses: {} (line {:?}, column {:?})",
+            e.message,
+            e.line,
+            e.column
+        ))
+    })?;
+    let opts = crate::graph::GraphOptions {
+        subflows: subflows_param(raw.as_deref()),
+        depth: 0,
+    };
+    Ok(Json(
+        crate::graph::execution_graph(&flow, &frozen.runs, &opts, ws, &st.repo, &st.executions)
+            .await?,
+    ))
 }
 
 // ---------- Executions (W10 Task 4) ----------
@@ -2949,6 +3002,10 @@ pub fn management_router() -> Router<WorkflowState> {
             get(get_execution),
         )
         .route(
+            "/ws/{workspace}/workflows/executions/{id}/graph",
+            get(get_execution_graph),
+        )
+        .route(
             "/ws/{workspace}/workflows/executions/{id}/logs",
             get(get_execution_logs),
         )
@@ -3057,6 +3114,7 @@ pub fn management_router() -> Router<WorkflowState> {
         get_flow_version,
         get_flow_graph,
         graph_unsaved_flow,
+        get_execution_graph,
         list_executions,
         get_execution,
         get_execution_logs,
@@ -3096,6 +3154,7 @@ pub fn management_router() -> Router<WorkflowState> {
         PublishFlowRequest,
         FlowGraphRequest,
         crate::graph::FlowGraph,
+        crate::graph::ExecutionGraph,
         ExecutionListItemDto,
         TaskRunDto,
         ExecutionDto,

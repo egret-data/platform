@@ -28515,6 +28515,128 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/executions/{id}/graph": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "get_execution_graph",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subflows",
+            "in": "query",
+            "description": "Uids of `Subflow` nodes to expand in place, repeated (`subflows=a&subflows=b`). A `Subflow` whose run started a child execution expands from that execution's frozen source, with its states; otherwise from the child flow's current draft, without states. A uid inside an expansion is `{subflow_uid}/{child_uid}`; a uid that names no `Subflow` node is ignored",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "explode": true
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The graph of the execution's frozen source, and the state of every node that has a run. A task with no run has no entry; a task in a `Loop` body is folded over every iteration by Kestra's priority, with `iterations` and no `run_id`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionGraph"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`{id}` is not a UUID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace; one of another workspace answers exactly this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The graph, counted after expansion, has more than 5,000 nodes; the message names the count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/executions/{id}/logs": {
       "get": {
         "tags": [
@@ -38178,6 +38300,29 @@
         ],
         "description": "One execution in full: every list field, plus the two things only a detail\npage needs — the frozen `source` and every task run, ordered by `run_ix`."
       },
+      "ExecutionGraph": {
+        "type": "object",
+        "description": "`GET …/executions/{id}/graph`'s answer: the graph of the execution's frozen\nsource, and the state of every node that has a run.",
+        "required": [
+          "graph",
+          "states"
+        ],
+        "properties": {
+          "graph": {
+            "$ref": "#/components/schemas/FlowGraph"
+          },
+          "states": {
+            "type": "object",
+            "description": "Node uid -> its state. A node with no run has no entry.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/NodeState"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "ExecutionListItemDto": {
         "type": "object",
         "description": "One execution as `GET /executions` lists it.\n\n**No `source`.** It is the whole frozen flow YAML — one document per row —\nand a fifty-row page would carry fifty of them to show a column that does\nnot exist. The field is not merely omitted here: [`ExecutionRow`] does not\nhave it at all, so no future edit to this DTO can put it back by accident.\n`GET /executions/{id}` carries it, because a detail page draws the topology\nfrom it.\n\n`workspace_id` is dropped for the reason every other DTO in this module\ndrops it: the `{workspace}` path segment already named it, and a body field\nthat merely echoes the URL is a second place for it to be wrong.",
@@ -39381,6 +39526,31 @@
           }
         }
       },
+      "Iterations": {
+        "type": "object",
+        "required": [
+          "total",
+          "by_state"
+        ],
+        "properties": {
+          "total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many iterations this node ran in."
+          },
+          "by_state": {
+            "type": "object",
+            "description": "Iterations by their folded state's wire name.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "JoinableWorkspaceDto": {
         "type": "object",
         "description": "A workspace a user may request to join (they are not already a member).",
@@ -40476,6 +40646,58 @@
           }
         ],
         "description": "The node's kind, serialised as the `node` tag beside its fields."
+      },
+      "NodeState": {
+        "type": "object",
+        "description": "One node's state (module doc, \"One run, or a fold\").",
+        "required": [
+          "state",
+          "attempts"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "description": "A `RunState` wire name (`RUNNING`, `SUCCESS`, ...)."
+          },
+          "attempts": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The run's attempt count; for a fold, the most any one run took."
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The run's id; null for a fold."
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "ended_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "iterations": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Iterations",
+                "description": "Set when the runs live in `Loop` iterations."
+              }
+            ]
+          }
+        }
       },
       "NsFileRevisionDto": {
         "type": "object",

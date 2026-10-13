@@ -114,6 +114,14 @@
 //! `Subflow`'s child flow in, loaded through [`SubflowSource`]; its module doc
 //! holds the expansion's rules: the `{subflow_uid}/{child_uid}` uids, the
 //! reasons, the depth limit and how the node limit is counted.
+//!
+//! # The execution graph (spec §4)
+//!
+//! [`execution_graph`] draws an execution's FROZEN source and overlays each
+//! node's run state ([`ExecutionGraph`]; module `states` holds the run-to-node
+//! map and [`fold_state`]). A `Subflow` expanded on an execution draws the
+//! child EXECUTION's frozen source with its states when the node's run
+//! started one (module `expand`, "On an execution").
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -288,6 +296,11 @@ pub enum GraphError {
     /// parses (a stored draft always parsed when it was saved).
     #[error("expanding a subflow: {0}")]
     Source(String),
+    /// A stored run's state is not a `RunState` wire name (execution graph
+    /// only; a run is written through `RunState::wire`, so this is corrupt
+    /// data).
+    #[error("{0}")]
+    State(String),
 }
 
 /// Build the topology of `flow` (spec §3). See the module doc for every
@@ -799,7 +812,12 @@ fn canonical_type(task: &Task) -> String {
 }
 
 mod expand;
-pub use expand::{expanded_flow_graph, SubflowSource, MAX_EXPANSION_DEPTH, SUBFLOW_SEPARATOR};
+mod states;
+pub use expand::{
+    execution_graph, expanded_flow_graph, ExecutionSource, FrozenExecution, SubflowSource,
+    MAX_EXPANSION_DEPTH, SUBFLOW_SEPARATOR,
+};
+pub use states::{fold_state, ExecutionGraph, GraphRun, Iterations, NodeState, FOLD_PRIORITY};
 
 #[cfg(test)]
 mod tests;
