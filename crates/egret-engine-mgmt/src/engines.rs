@@ -580,8 +580,8 @@ pub(crate) async fn build_provision_req_with(
     // back on, every later apply would otherwise keep re-rendering explicit
     // allow-all with no operator-accessible remedy. Reuses the SAME
     // plan/bind a create uses (create / adopt-orphan / 409-if-bound-
-    // elsewhere); best-effort — any failure here just leaves the engine
-    // unbound, exactly as it was, and never fails the apply itself.
+    // elsewhere). An overlap the bind would create skips the bind (the apply
+    // proceeds, engine unbound); any other failure fails the apply.
     let mut authz_service_id = engine.authz_service_id;
     if st.ranger_enabled && authz_service_id.is_none() {
         match plan_trino_profile(st, &engine.name, None).await {
@@ -616,12 +616,24 @@ pub(crate) async fn build_provision_req_with(
                          profile would create an order-ambiguous mask or row-filter pair; \
                          engine stays unbound"
                     ),
-                    Err(e) => tracing::warn!(engine = %engine.name, error = %e,
-                        "late Ranger bind failed; engine stays unbound"),
+                    // Any OTHER failure fails the apply, naming the cause: an
+                    // engine must not come out of an apply unbound (allow-all)
+                    // while Ranger is enabled. Nothing is half-applied - this
+                    // runs before the cluster is touched, the bind is one
+                    // transaction, and a profile the bind created is adopted by
+                    // the retry's plan (`Existing`) - so the operator can retry.
+                    Err(e) => {
+                        tracing::error!(engine = %engine.name, error = %e,
+                            "late Ranger bind failed; the apply is refused");
+                        return Err(e);
+                    }
                 }
             }
-            Err(e) => tracing::warn!(engine = %engine.name, error = %e,
-                "late Ranger bind plan failed; engine stays unbound"),
+            Err(e) => {
+                tracing::error!(engine = %engine.name, error = %e,
+                    "late Ranger bind plan failed; the apply is refused");
+                return Err(e);
+            }
         }
     }
     // Impersonate-mode delegation: when auth is on, provision the `egret_delegator`
@@ -4110,27 +4122,27 @@ async fn create_starrocks_engine(
     if let Some(sid) = b.authz_service_id {
         match st.authz.list_services().await {
             Ok(svcs) if svcs.iter().any(|s| s.id == sid) => {
-                match crate::profile_compiler::bind_profile_guarded(&st, engine.id, &b.name, sid)
-                    .await
+                if let Err(e) =
+                    crate::profile_compiler::bind_profile_guarded(&st, engine.id, &b.name, sid)
+                        .await
                 {
-                    Ok(()) => {}
-                    // A pair this bind creates refuses the create (C1).
-                    Err(e @ CpError::RuleOverlap(_)) => {
-                        compensate_failed_create(&st, undo).await;
-                        return Err(e);
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "binding the profile failed for starrocks create");
-                    }
+                    // Any refusal undoes the create: an engine created with an
+                    // `authzServiceId` must never come out unbound.
+                    compensate_failed_create(&st, undo).await;
+                    return Err(e);
                 }
             }
             Ok(_) => {
-                tracing::warn!(
-                    sid,
-                    "authz_service_id not found; leaving starrocks engine unlinked"
-                );
+                compensate_failed_create(&st, undo).await;
+                return Err(CpError::BadRequest(format!(
+                    "authzServiceId {sid} is not a policy profile"
+                )));
             }
-            Err(e) => tracing::warn!(error = %e, "list_services failed during starrocks create"),
+            Err(e) => {
+                tracing::error!(error = %e, "list_services failed during starrocks create");
+                compensate_failed_create(&st, undo).await;
+                return Err(CpError::Internal);
+            }
         }
     }
     // Secure-by-default (root-password task): mint + store a strong random FE

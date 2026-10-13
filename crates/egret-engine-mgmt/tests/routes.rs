@@ -11602,12 +11602,98 @@ async fn a_guarded_bind_whose_check_cannot_complete_binds_nothing() {
         Some(starrocks_create_body(&sr_name, wh_sr, sr_unit.profile)),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     assert_eq!(
-        authz_service_of(&f, &sr_name).await,
-        None,
-        "the unchecked bind is not made"
+        engine_rows_named(&f, &sr_name).await,
+        0,
+        "a StarRocks create never comes out unbound"
     );
+
+    // An authzServiceId that names no profile refuses the create too.
+    let sr_name = format!("sr-{}", Uuid::new_v4().simple());
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(starrocks_create_body(&sr_name, wh_sr, i64::MAX)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(engine_rows_named(&f, &sr_name).await, 0);
+}
+
+/// The Trino late-bind inside an apply: a guarded bind that cannot complete for a
+/// reason other than an overlap fails the apply instead of leaving the engine
+/// unbound (allow-all) with only a warning.
+#[tokio::test]
+async fn a_late_bind_that_cannot_complete_fails_the_apply_and_leaves_the_engine_retryable() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        false,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let rebuild = |f: &Fixture, ranger: bool| {
+        build_app(
+            &f.db,
+            &f.sessions,
+            f.engine_provisioner.clone(),
+            f.kube.clone(),
+            std::sync::Arc::new(AllowAllPdp),
+            ranger,
+            f.starrocks_ddl.clone(),
+            f.perm_compiler.clone(),
+        )
+    };
+    f.perm_compiler = Some(Arc::new(ConflictAfterDryRun {
+        fail_snapshot: true,
+        inner: RealProfileCompiler {
+            perm: egret_perm::PermStore::new(f.db.pool.clone()),
+            policy: egret_policy::PolicyStore::new(f.db.clone()),
+        },
+        conflict: tokio::sync::Mutex::new(None),
+    }));
+    f.app = rebuild(&f, false);
+    let token = session_for(&f, "late_bind_fail_admin", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = j["id"].as_str().unwrap().to_string();
+    let _orphan = overlap_unit_named(&f, Some(wh), false, &name).await;
+
+    f.app = rebuild(&f, true);
+    f.ranger_enabled = true;
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{id}/rotate-secrets"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(authz_service_of(&f, &name).await, None);
+
+    // Retryable: with a working compiler the same apply binds.
+    f.perm_compiler = Some(real_compiler(&f));
+    f.app = rebuild(&f, true);
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{id}/rotate-secrets"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body:?}");
+    assert!(authz_service_of(&f, &name).await.is_some());
 }
 
 /// C1, StarRocks: `POST /engines` with `authzServiceId`.
