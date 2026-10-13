@@ -11594,6 +11594,16 @@ async fn a_guarded_bind_whose_check_cannot_complete_binds_nothing() {
     let wh_sr = seed_provisioned_warehouse_with_secret(&f).await;
     let sr_unit = overlap_unit(&f, Some(wh_sr), false).await;
     let sr_name = format!("sr-{}", Uuid::new_v4().simple());
+    let count = |sql: &'static str, name: String| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(sql)
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
     let (status, body) = call(
         &f,
         "POST",
@@ -11603,6 +11613,17 @@ async fn a_guarded_bind_whose_check_cannot_complete_binds_nothing() {
     )
     .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    // (The credential secret is removed by `compensate_failed_create`, pinned by
+    // its own unit test; here the client it belongs to must be gone.)
+    assert_eq!(
+        count(
+            "SELECT count(*) FROM catalog.catalog_clients WHERE name = $1",
+            format!("engine-{sr_name}")
+        )
+        .await,
+        0,
+        "the minted catalog client is revoked"
+    );
     assert_eq!(
         engine_rows_named(&f, &sr_name).await,
         0,
@@ -11791,21 +11812,22 @@ async fn a_late_bind_that_would_create_an_overlap_fails_the_apply_and_one_that_w
 
     f.app = rebuild(&f, true);
     f.ranger_enabled = true;
-    let secrets = |f: &Fixture| {
+    let secrets_of = |f: &Fixture, id: String| {
         let pool = f.db.pool.clone();
         async move {
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM workspace_secrets")
-                .fetch_one(&pool)
-                .await
-                .unwrap()
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM workspace_secrets WHERE name LIKE $1",
+            )
+            .bind(format!("%{id}%"))
+            .fetch_one(&pool)
+            .await
+            .unwrap()
         }
     };
     for (n, (id, ..)) in ids.iter().enumerate() {
-        let (provisioned, updated, minted) = (
-            port.provisioned.lock().unwrap().len(),
-            port.updated.lock().unwrap().len(),
-            secrets(&f).await,
-        );
+        let provisioned = port.provisioned.lock().unwrap().len();
+        let updated = port.updated.lock().unwrap().len();
+        let minted = secrets_of(&f, id.clone()).await;
         let (status, body) = call(
             &f,
             "POST",
@@ -11818,7 +11840,7 @@ async fn a_late_bind_that_would_create_an_overlap_fails_the_apply_and_one_that_w
             assert_rule_overlap(status, &body);
             assert_eq!(port.provisioned.lock().unwrap().len(), provisioned);
             assert_eq!(port.updated.lock().unwrap().len(), updated);
-            assert_eq!(secrets(&f).await, minted, "no secret minted");
+            assert_eq!(secrets_of(&f, id.clone()).await, minted, "no secret minted");
         } else {
             assert_eq!(status, StatusCode::NO_CONTENT, "{body:?}");
         }
@@ -11834,6 +11856,72 @@ async fn a_late_bind_that_would_create_an_overlap_fails_the_apply_and_one_that_w
         authz_service_of(&f, ok_name).await,
         Some(*ok_profile),
         "a bind that creates none is made"
+    );
+}
+
+/// A same-name profile of another type makes every apply of an unbound engine
+/// fail with a 409 that names the profile and the remedy.
+#[tokio::test]
+async fn a_late_bind_blocked_by_a_wrong_type_profile_says_what_to_do() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        false,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "late_bind_type_admin", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = j["id"].as_str().unwrap().to_string();
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    egret_policy::seed_starrocks(&policy).await.expect("seed");
+    egret_policy_api::PolicyPort::create_service(
+        &policy,
+        &name,
+        "starrocks",
+        &serde_json::json!({}),
+    )
+    .await
+    .expect("wrong-type profile");
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        true,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+    );
+    f.ranger_enabled = true;
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{id}/rotate-secrets"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let msg = body["error"].as_str().unwrap();
+    assert!(
+        msg.contains(&format!(
+            "a profile named {name} already exists with type starrocks"
+        )),
+        "{msg}"
+    );
+    assert!(
+        msg.contains(&format!(
+            "DELETE /api/control-plane/policies/services/{name}"
+        )),
+        "{msg}"
     );
 }
 

@@ -6934,6 +6934,28 @@ pub struct EngineMgmtApi;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_profile_conflicts_name_the_profile_the_engines_and_a_remedy_that_exists() {
+        let t = profile_type_conflict("eng-1", "starrocks");
+        assert!(
+            t.contains("profile named eng-1 already exists with type starrocks"),
+            "{t}"
+        );
+        assert!(
+            t.contains("DELETE /api/control-plane/policies/services/eng-1"),
+            "{t}"
+        );
+        let b = profile_bound_conflict("eng-1", &["a".into(), "b".into()]);
+        assert!(
+            b.contains("profile eng-1 is already bound to engine(s) a, b"),
+            "{b}"
+        );
+        assert!(
+            b.contains("PUT /api/control-plane/engines/{id} with authzServiceId"),
+            "{b}"
+        );
+    }
+
     use super::*;
 
     #[test]
