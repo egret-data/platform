@@ -124,10 +124,16 @@ export const READABLE_ZOOM = 0.8;
 /** Room between the canvas's leading edge and the graph in the first view, in screen pixels. */
 const LEAD = 24;
 
+/** How much of the edge into the flow's start the first view keeps before it, in graph pixels. */
+const BEFORE_START = 16;
+
 /**
- * Where the first view of a graph looks: the fit, when it is readable; else `READABLE_ZOOM`
- * with the graph's leading edge (left when horizontal, top when vertical) near the canvas's,
- * centred across on the flow's start (`start:flow`), so the first rank is in view.
+ * Where the first view of a graph looks: the fit, when it is readable; else `READABLE_ZOOM`,
+ * anchored on the flow's start (`start:flow`) and its first task, the first card of the flow's
+ * `tasks:` list along the layout. Along the main axis (x when horizontal, y when vertical) the
+ * view starts at the graph's leading edge when the first task still fits in the canvas from there,
+ * which keeps a trigger chain on screen; otherwise just before `start:flow`, so the triggers are
+ * off-screen and the start and the first task are not. Across, it centres the two.
  */
 export function firstView(nodes: readonly Positioned[], orientation: Orientation, width: number, height: number): Viewport {
   let minX = Infinity;
@@ -144,10 +150,29 @@ export function firstView(nodes: readonly Positioned[], orientation: Orientation
   const fit = getViewportForBounds({ x: minX, y: minY, width: maxX - minX, height: maxY - minY }, width, height, MIN_ZOOM, FIT.maxZoom, FIT.padding);
   if (fit.zoom >= READABLE_ZOOM) return fit;
   const z = READABLE_ZOOM;
+  const lr = orientation === "LR";
+  // Main axis position and length, and cross axis, of a box.
+  const main = (n: Positioned) => (lr ? n.x : n.y);
+  const mainLen = (n: Positioned) => (lr ? n.width : n.height);
+  const cross = (n: Positioned) => (lr ? n.y : n.x);
+  const crossLen = (n: Positioned) => (lr ? n.height : n.width);
   const start = nodes.find((n) => n.id === "start:flow") ?? nodes[0];
-  return orientation === "LR"
-    ? { zoom: z, x: LEAD - minX * z, y: height / 2 - (start.y + start.height / 2) * z }
-    : { zoom: z, x: width / 2 - (start.x + start.width / 2) * z, y: LEAD - minY * z };
+  let first: Positioned | undefined;
+  for (const n of nodes) {
+    if (n.node?.node !== "task" || n.node.branch !== "tasks" || main(n) < main(start)) continue;
+    if (!first || main(n) < main(first)) first = n;
+  }
+  first ??= start;
+  const span = lr ? width : height;
+  const graphLead = lr ? minX : minY;
+  // From the graph's leading edge, the first task's far edge lands here on screen.
+  const fromGraphLead = LEAD + (main(first) + mainLen(first) - graphLead) * z;
+  const anchor = fromGraphLead <= span - LEAD ? graphLead : main(start) - BEFORE_START;
+  const lo = Math.min(cross(start), cross(first));
+  const hi = Math.max(cross(start) + crossLen(start), cross(first) + crossLen(first));
+  const alongMain = LEAD - anchor * z;
+  const across = (lr ? height : width) / 2 - ((lo + hi) / 2) * z;
+  return lr ? { zoom: z, x: alongMain, y: across } : { zoom: z, x: across, y: alongMain };
 }
 
 export function TopologyView(props: TopologyViewProps) {

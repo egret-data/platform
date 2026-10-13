@@ -2,7 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { READABLE_ZOOM, TopologyView, type TopologyViewProps } from "@/components/workflows/topology/TopologyView";
-import { installXyflowJsdom } from "./xyflowJsdom";
+import { installXyflowJsdom, setXyflowSize } from "./xyflowJsdom";
 import { EMPTY_FLOW, EXPANDED, FLOW, LINE, NESTED, NESTED_FAILED, STATES, chain } from "./fixtures";
 
 const ORIENTATION_KEY = "egret.workflows.topology.orientation";
@@ -201,7 +201,8 @@ function onScreen(container: HTMLElement, uid: string): { left: number; top: num
   const top = Number(m[2]) * v.zoom + v.y;
   return { left, top, right: left + Number.parseFloat(el.style.width || "10") * v.zoom, bottom: top + Number.parseFloat(el.style.height || "10") * v.zoom };
 }
-const inCanvas = (b: { left: number; top: number; right: number; bottom: number }) => b.left >= 0 && b.top >= 0 && b.right <= 800 && b.bottom <= 600;
+const inCanvas = (b: { left: number; top: number; right: number; bottom: number }, width = 800, height = 600) =>
+  b.left >= 0 && b.top >= 0 && b.right <= width && b.bottom <= height;
 
 describe("TopologyView first view", () => {
   it("a graph too long to fit readably opens at the readable zoom with the flow's start in view", async () => {
@@ -230,6 +231,23 @@ describe("TopologyView first view", () => {
   });
 
   // (The Fit button is not compared: jsdom's observer reports every node at 800 × 600, which xyflow's own fit measures.)
+  // The editor's default panel is about 480 × 370; a flow with a trigger chain before its start.
+  for (const orientation of ["LR", "TB"] as const) {
+    it(`in a narrow canvas, a flow with triggers opens on its start and its first task (${orientation})`, async () => {
+      setXyflowSize(480, 370);
+      try {
+        localStorage.setItem(ORIENTATION_KEY, orientation);
+        const { container } = renderView({ graph: FLOW });
+        await settle();
+        expect(viewportOf(container).zoom).toBeCloseTo(READABLE_ZOOM, 5);
+        expect(inCanvas(onScreen(container, "start:flow"), 480, 370), "start:flow").toBe(true);
+        expect(inCanvas(onScreen(container, "tasks.a"), 480, 370), "the first task").toBe(true);
+      } finally {
+        setXyflowSize(800, 600);
+      }
+    });
+  }
+
   it("a small graph opens fitted: the whole graph in view, at a readable zoom, no larger than life", async () => {
     // Two tasks fit the 800 px canvas above the readable zoom.
     const { container } = renderView({ graph: chain(2) });

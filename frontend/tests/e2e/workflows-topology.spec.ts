@@ -318,6 +318,7 @@ function expectReadableFirstView(v: FirstView, what: string): void {
   console.log(`first view [${what}]: ${JSON.stringify(v)}`);
   expect(v.zoom, `${what}: first zoom`).toBeGreaterThanOrEqual(READABLE_ZOOM - 0.001);
   expect(v.startInView, `${what}: the flow's start is in view`).toBe(true);
+  expect(v.firstTaskInView, `${what}: the flow's first task is in view`).toBe(true);
   expect(v.firstTaskFontPx, `${what}: first task's text size`).toBeGreaterThanOrEqual(10);
   expect(v.firstTaskTextHeight, `${what}: first task's text box`).toBeGreaterThanOrEqual(10);
 }
