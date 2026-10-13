@@ -3652,6 +3652,79 @@ async fn a_clearance_deny_in_the_artifact_refuses_the_uncleared_and_not_the_clea
 /// after something outside the model made it drift. Proven by deleting the
 /// compiled policy row directly — the one thing no endpoint does — and
 /// watching the trigger restore it.
+/// View governance A2, fix round 1: a StarRocks clearance whose mask cannot be
+/// folded because the bound engine runs an unmodelled image is a SKIP, and the
+/// skip reaches the wire — `POST /perm/compile`'s `skipped` list carries it as a
+/// `clearance` item naming the engine and the remedy, while the call succeeds.
+#[tokio::test]
+async fn compile_reports_a_skipped_clearance_mask_on_the_wire() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let tag_id: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
+        .bind(&f.tag_key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("fixture tag");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, ARRAY[$2], ARRAY[]::uuid[])",
+    )
+    .bind(tag_id)
+    .bind(unique("viewgov-role"))
+    .execute(&f.db.pool)
+    .await
+    .expect("gate the fixture tag");
+    let engine_name: String = sqlx::query_scalar(
+        "UPDATE engine_mgmt.engines \
+            SET spec = '{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:3.3.0\"}}'::jsonb \
+          WHERE authz_service_id = $1 RETURNING name",
+    )
+    .bind(f.service_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("an unmodelled image");
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                &format!("/perm/compile/{}", f.service_id),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let skips: Vec<&Value> = body["skipped"]
+        .as_array()
+        .expect("skipped")
+        .iter()
+        .filter(|s| s["id"] == json!(tag_id.to_string()))
+        .collect();
+    assert_eq!(skips.len(), 1, "body: {body}");
+    assert_eq!(
+        skips[0]["source_kind"].as_str(),
+        Some("clearance"),
+        "body: {body}"
+    );
+    let reason = skips[0]["reason"].as_str().expect("reason");
+    assert!(
+        reason.contains("view protection (clearance mask) not active"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains(&format!("engine {engine_name} ")),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("docs/en/guides/engine-versions.md"),
+        "{reason}"
+    );
+}
+
 #[tokio::test]
 async fn compile_restores_a_profile_that_drifted() {
     let Some(f) = setup().await else { return };

@@ -36,6 +36,16 @@
 //! a type other than `CUSTOM` (the renderer writes `valueExpr` only for
 //! `CUSTOM`).
 //!
+//! **Skip, never guess, when the cause is not the steward's policies** (user
+//! ruling 2026-10-13). When a bound engine runs a plugin the evaluator does not
+//! model, when bound plugin versions fold differently, or when a mask that
+//! reaches the column names a group other than `public` or any role (the fold
+//! evaluates a cleared user with no groups and no roles), no clearance mask is
+//! emitted for the column. The per-column deny is compiled as before, so a
+//! direct read stays withheld, and the recompile reports a `SkippedItem`
+//! (`clearance`, the tag id) saying view protection is not active and why.
+//! Binding such an engine is not refused.
+//!
 //! # Why priority 1 does not trip SP4d-4's overlap refusal
 //!
 //! Two policies at different `policyPriority` are ORDERED, not ambiguous
@@ -131,6 +141,19 @@ pub(crate) fn merge_by_column(pending: Vec<PendingMask>) -> Vec<PendingMask> {
     by_col.into_values().collect()
 }
 
+/// The request resource for one fully-named column: exactly the levels the
+/// clearance mask itself addresses.
+fn column_request(engine: EngineType, column: &TaggedColumn) -> RequestResource {
+    let resources = column_resources(engine, column, PolicyTarget::Mask);
+    let mut resource = RequestResource::new();
+    for level in resource_level_names(engine) {
+        if let Some(v) = resources.get(level).and_then(|l| l.values.first()) {
+            resource.insert(level, v.clone());
+        }
+    }
+    resource
+}
+
 /// The parsed StarRocks/Trino service-def the evaluator reads.
 fn service_def(engine: EngineType) -> Result<ServiceDef, CompileError> {
     let def = match engine {
@@ -176,12 +199,7 @@ pub(crate) fn fold_clearance_mask(
     };
 
     let resources = column_resources(engine, column, PolicyTarget::Mask);
-    let mut resource = RequestResource::new();
-    for level in resource_level_names(engine) {
-        if let Some(v) = resources.get(level).and_then(|l| l.values.first()) {
-            resource.insert(level, v.clone());
-        }
-    }
+    let resource = column_request(engine, column);
 
     let users: BTreeSet<&String> = cleared.iter().collect();
     // (type, valueExpr) → users, in first-user order.
@@ -263,8 +281,78 @@ pub(crate) fn fold_clearance_mask(
     Ok(stamp_service_type(masking_to_ranger_json(&input), engine))
 }
 
-/// [`fold_clearance_mask`] at every plugin version in `plugins`, refusing when
-/// they disagree: one download is served to every bound engine.
+/// What folding one column's clearance mask came to.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Folded {
+    /// The priority-1 mask body to serve.
+    Mask(Value),
+    /// No mask can be computed for a reason outside the policies the steward
+    /// wrote about this user (an engine egret has not modelled, plugin versions
+    /// that fold differently, a group or role the fold cannot resolve). The
+    /// per-column DENY is still emitted, so a direct read stays withheld; only
+    /// the view path is unprotected, and the reason says so (user ruling
+    /// 2026-10-13, Task 1 fix round 1).
+    Skipped(String),
+}
+
+/// The skip reason when a data-mask policy that can reach `column` names a
+/// group other than `public`, or any role. The fold evaluates a cleared user
+/// with NO groups and NO roles (egret runs no usersync and serves no role
+/// download), so it cannot know what an engine that does resolve them would
+/// give that user; evaluating anyway would be a guess in one direction or the
+/// other. Only policies whose resources match the column (`Self_` or
+/// `SelfAndAllDescendants`, the matches a mask evaluation admits) are looked
+/// at, and only enabled ones.
+pub(crate) fn principal_gap(
+    profile: &str,
+    column: &TaggedColumn,
+    others: &[Value],
+    engine: EngineType,
+) -> Result<Option<String>, CompileError> {
+    use egret_ranger_eval::resource::{match_policy_resources, MatchType};
+    let def = service_def(engine)?;
+    let set: ServicePolicySet = serde_json::from_value(serde_json::json!({
+        "serviceName": profile,
+        "policies": others,
+    }))
+    .map_err(|e| CompileError::Db(format!("clearance mask fold: unreadable policy set: {e}")))?;
+    let request = column_request(engine, column);
+    for p in set.policies.iter().filter(|p| p.is_enabled) {
+        let reaches = match_policy_resources(p, &request, &def).iter().any(|m| {
+            matches!(
+                m.match_type,
+                MatchType::Self_ | MatchType::SelfAndAllDescendants
+            )
+        });
+        if !reaches {
+            continue;
+        }
+        for item in &p.data_mask_policy_items {
+            let what = item
+                .groups
+                .iter()
+                .find(|g| g.as_str() != PUBLIC_GROUP)
+                .map(|g| format!("group {g:?}"))
+                .or_else(|| item.roles.first().map(|r| format!("role {r:?}")));
+            if let Some(what) = what {
+                return Ok(Some(format!(
+                    "view protection (clearance mask) not active for {profile} on column {}: \
+                     data-mask policy {:?} names {what}, which egret does not resolve the way \
+                     an engine with a group or role provider would, so what a cleared user is \
+                     served there cannot be folded — name users in that policy instead",
+                    column_label(column),
+                    p.name
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// [`fold_clearance_mask`] at every plugin version in `plugins`. Versions that
+/// fold differently are a skip, not a refusal: one download is served to every
+/// bound engine, so no single body is right for all of them, and the cause is
+/// the engines bound, not anything a steward wrote.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fold_at_versions(
     profile: &str,
@@ -274,7 +362,10 @@ pub(crate) fn fold_at_versions(
     others: &[Value],
     engine: EngineType,
     plugins: &[PluginVersion],
-) -> Result<Value, CompileError> {
+) -> Result<Folded, CompileError> {
+    if let Some(reason) = principal_gap(profile, column, others, engine)? {
+        return Ok(Folded::Skipped(reason));
+    }
     let mut folded: Option<Value> = None;
     for &plugin in plugins {
         let body = fold_clearance_mask(name, profile, column, cleared, others, engine, plugin)?;
@@ -282,30 +373,47 @@ pub(crate) fn fold_at_versions(
             None => folded = Some(body),
             Some(first) if *first == body => {}
             Some(_) => {
-                return Err(CompileError::ClearanceMaskDiffersByPluginVersion {
-                    profile: profile.to_string(),
-                    column: column_label(column),
-                })
+                return Ok(Folded::Skipped(format!(
+                    "view protection (clearance mask) not active for {profile} on column {}: \
+                     the engines bound to it run Ranger plugin versions at which the mask folds \
+                     differently, and one download serves them all — bind engines of one plugin \
+                     version (see docs/en/guides/engine-versions.md)",
+                    column_label(column)
+                )))
             }
         }
     }
-    folded.ok_or_else(|| CompileError::ClearanceMaskEngineUnmodelled {
-        profile: profile.to_string(),
-        reason: "no plugin version to fold at".to_string(),
+    Ok(match folded {
+        Some(body) => Folded::Mask(body),
+        None => Folded::Skipped(format!(
+            "view protection (clearance mask) not active for {profile}: no plugin version to \
+             fold at"
+        )),
     })
+}
+
+/// The plugin versions a profile's clearance masks can be folded at, or why
+/// none can.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FoldVersions {
+    Modelled(Vec<PluginVersion>),
+    /// The skip reason, naming the engine and the remedy.
+    Unmodelled(String),
 }
 
 /// The Ranger plugin versions a profile's clearance masks are folded at: each
 /// distinct version of its bound engines, or — with no engine bound — the
 /// plugin of egret's default image for the engine type, which is the version
 /// `explain` evaluates an unbound profile at. An engine whose (type, version)
-/// pair the evaluator does not model refuses, naming the engine.
+/// pair the evaluator does not model makes the masks a SKIP for the profile,
+/// naming the engine (user ruling 2026-10-13): binding such an engine is not
+/// refused, and the per-column denies are still compiled.
 pub(crate) async fn fold_plugin_versions(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
     profile: &str,
     engine: EngineType,
-) -> Result<Vec<PluginVersion>, CompileError> {
+) -> Result<FoldVersions, CompileError> {
     let bound: Vec<crate::routes::BoundEngine> = sqlx::query_as(
         "SELECT name, origin, type, ranger_plugin_version, spec FROM engine_mgmt.engines \
           WHERE authz_service_id = $1 ORDER BY name",
@@ -314,24 +422,28 @@ pub(crate) async fn fold_plugin_versions(
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| CompileError::Db(e.to_string()))?;
-    let unmodelled = |reason: String| CompileError::ClearanceMaskEngineUnmodelled {
-        profile: profile.to_string(),
-        reason,
+    let unmodelled = |name: &str, why: String| {
+        FoldVersions::Unmodelled(format!(
+            "view protection (clearance mask) not active for {profile}: engine {name} runs an \
+             image egret has not modelled — pin it to a known image (see \
+             docs/en/guides/engine-versions.md). {why}"
+        ))
     };
     let mut out: Vec<PluginVersion> = Vec::new();
     for e in &bound {
-        let v = e.plugin_version().map_err(unmodelled)?;
-        if !out.contains(&v) {
-            out.push(v);
+        match e.plugin_version() {
+            Ok(v) if !out.contains(&v) => out.push(v),
+            Ok(_) => {}
+            Err(why) => return Ok(unmodelled(&e.name, why)),
         }
     }
     if out.is_empty() {
-        out.push(
-            crate::routes::default_image_plugin_version(crate::routes::ranger_engine(engine))
-                .map_err(unmodelled)?,
-        );
+        match crate::routes::default_image_plugin_version(crate::routes::ranger_engine(engine)) {
+            Ok(v) => out.push(v),
+            Err(why) => return Ok(unmodelled("(none bound; egret's default image)", why)),
+        }
     }
-    Ok(out)
+    Ok(FoldVersions::Modelled(out))
 }
 
 #[cfg(test)]
@@ -650,5 +762,120 @@ mod tests {
                 cleared: cleared(&["bob"]),
             }]
         );
+    }
+
+    fn fold_v(others: &[Value]) -> Folded {
+        fold_at_versions(
+            SERVICE,
+            &clearance_mask_name(Uuid::nil(), &ssn()),
+            &ssn(),
+            &cleared(&["ann"]),
+            others,
+            EngineType::StarRocks,
+            &[PluginVersion::Ranger2_8_0, PluginVersion::Ranger2_9_0],
+        )
+        .expect("fold")
+    }
+
+    #[test]
+    fn a_mask_naming_a_group_other_than_public_is_a_skip_not_a_guess() {
+        // A hand-written mask: contractors get NULL, everyone else nothing.
+        // The fold evaluates ann with no groups, so it cannot know whether the
+        // engine would put ann in `contractors`.
+        let others = vec![mask_policy(
+            "hand-contractors",
+            "ssn",
+            0,
+            json!([
+                item(&[], &["contractors"], "MASK_NULL"),
+                item(&[], &["public"], "MASK_NONE")
+            ]),
+        )];
+        match fold_v(&others) {
+            Folded::Skipped(reason) => {
+                assert!(reason.contains("hand-contractors"), "{reason}");
+                assert!(reason.contains("\"contractors\""), "{reason}");
+                assert!(reason.contains("sales.s.t.ssn"), "{reason}");
+                assert!(
+                    reason.starts_with("view protection (clearance mask) not active for"),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected a skip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_mask_naming_a_role_is_a_skip() {
+        let mut role_item = item(&[], &[], "MASK_NULL");
+        role_item["roles"] = json!(["analyst"]);
+        let others = vec![mask_policy(
+            "perm-rule-r",
+            "*",
+            0,
+            json!([role_item, item(&[], &["public"], "MASK")]),
+        )];
+        match fold_v(&others) {
+            Folded::Skipped(reason) => assert!(reason.contains("role \"analyst\""), "{reason}"),
+            other => panic!("expected a skip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_group_on_a_mask_that_cannot_reach_the_column_does_not_skip() {
+        let others = vec![
+            mask_policy(
+                "hand-email",
+                "email",
+                0,
+                json!([item(&[], &["contractors"], "MASK_NULL")]),
+            ),
+            mask_policy(
+                "perm-rule-b",
+                "*",
+                0,
+                json!([item(&[], &["public"], "MASK")]),
+            ),
+        ];
+        match fold_v(&others) {
+            Folded::Mask(body) => assert_eq!(
+                items_of(&body),
+                vec![
+                    (s(&["ann"]), s(&[]), "MASK".to_string()),
+                    (s(&[]), s(&["public"]), "MASK_NULL".to_string()),
+                ]
+            ),
+            other => panic!("expected a mask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_undecidable_user_still_refuses_through_the_version_fold() {
+        let others = vec![
+            mask_policy(
+                "perm-rule-e",
+                "ssn",
+                0,
+                json!([item(&[], &["public"], "MASK")]),
+            ),
+            mask_policy(
+                "perm-rule-f",
+                "ssn",
+                0,
+                json!([item(&[], &["public"], "MASK_NULL")]),
+            ),
+        ];
+        assert!(matches!(
+            fold_at_versions(
+                SERVICE,
+                "n",
+                &ssn(),
+                &cleared(&["ann"]),
+                &others,
+                EngineType::StarRocks,
+                &[PluginVersion::Ranger2_9_0],
+            ),
+            Err(CompileError::ClearanceMaskUndecidable { .. })
+        ));
     }
 }

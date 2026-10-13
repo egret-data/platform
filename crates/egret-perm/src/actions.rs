@@ -176,23 +176,6 @@ pub enum CompileError {
          be reproduced in a mask item — resolve the rule masks on that column"
     )]
     ClearanceMaskUndecidable { column: String, user: String },
-    /// The StarRocks clearance mask for `column` folds to different items at
-    /// the plugin versions of the engines bound to the profile. One download is
-    /// served to every bound engine, so no single body is right for all of
-    /// them.
-    #[error(
-        "the clearance mask on column {column:?} folds differently at the Ranger plugin versions \
-         of the engines bound to profile {profile:?}"
-    )]
-    ClearanceMaskDiffersByPluginVersion { profile: String, column: String },
-    /// A StarRocks profile with a clearance mask to fold is bound to an engine
-    /// whose (type, Ranger plugin version) pair `egret-ranger-eval` does not
-    /// model, so the fold cannot be computed. `reason` names the engine.
-    #[error(
-        "the clearance masks of profile {profile:?} cannot be compiled, because the fold needs \
-         the evaluator at the plugin version of every bound engine: {reason}"
-    )]
-    ClearanceMaskEngineUnmodelled { profile: String, reason: String },
     /// The per-rule [`Self::ExpansionCeiling`] bounds one rule; this bounds the
     /// profile's SUM across every rule and grant compiled for it — the gap
     /// SP4a Task 12 closes (see `egret-perm-compile::trigger::

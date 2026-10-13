@@ -754,30 +754,115 @@ async fn an_undecidable_cleared_user_refuses_the_recompile() {
 }
 
 /// The fold is an evaluation at the bound engine's plugin version. An engine
-/// whose image names no plugin egret has measured refuses the recompile, naming
-/// the engine — never a fold at a guessed version.
+/// whose image names no plugin egret has measured does NOT refuse the recompile
+/// (user ruling 2026-10-13, Task 1 fix round 1): the per-column deny is still
+/// compiled, no clearance mask is emitted, and the recompile reports a skip that
+/// names the engine and the remedy.
 #[tokio::test]
-async fn an_unmodelled_bound_engine_refuses_the_fold() {
+async fn an_unmodelled_bound_engine_skips_the_mask_and_keeps_the_deny() {
     let Some(db) = test_db().await else { return };
     let f = seed_starrocks(&db).await;
     let (tag_id, _key) = new_tag(&db).await;
     tag_column(&db, tag_id, f.warehouse_id, "orders", "ssn").await;
     cleared_pair(&db, tag_id).await;
-    sqlx::query("UPDATE engine_mgmt.engines SET spec = '{}'::jsonb WHERE id = $1")
-        .bind(f.engine_id)
-        .execute(&db.pool)
-        .await
-        .expect("unpin the engine");
+    let engine_name: String = sqlx::query_scalar(
+        "UPDATE engine_mgmt.engines SET spec = '{}'::jsonb WHERE id = $1 RETURNING name",
+    )
+    .bind(f.engine_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("unpin the engine");
 
-    let err = recompile_service(&f.perm, &f.policy, f.service_id)
+    let summary = recompile_service(&f.perm, &f.policy, f.service_id)
         .await
-        .expect_err("an unmodelled engine must refuse");
-    match err {
-        egret_perm::CompileError::ClearanceMaskEngineUnmodelled { reason, .. } => {
-            assert!(reason.contains("has no image in its spec"), "{reason}");
-        }
-        other => panic!("expected ClearanceMaskEngineUnmodelled, got {other:?}"),
-    }
+        .expect("an unmodelled engine must not refuse the recompile");
+
+    assert_eq!(
+        clearance_policies(&db, f.service_id, tag_id).await.len(),
+        1,
+        "the direct-read deny is compiled exactly as before"
+    );
+    assert!(
+        clearance_masks(&db, f.service_id, tag_id).await.is_empty(),
+        "no mask can be folded at an unmodelled plugin"
+    );
+    let skips: Vec<_> = summary.skipped.iter().filter(|s| s.id == tag_id).collect();
+    assert_eq!(skips.len(), 1, "{:?}", summary.skipped);
+    assert_eq!(
+        skips[0].source_kind,
+        egret_perm_compile::SourceKind::Clearance
+    );
+    let reason = &skips[0].reason;
+    assert!(
+        reason.starts_with("view protection (clearance mask) not active for "),
+        "{reason}"
+    );
+    assert!(
+        reason.contains(&format!(
+            "engine {engine_name} runs an image egret has not modelled"
+        )),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("pin it to a known image (see docs/en/guides/engine-versions.md)"),
+        "{reason}"
+    );
+}
+
+/// A hand-written mask naming a group other than `public` can reach the
+/// classified column. The fold evaluates a cleared user with no groups, so it
+/// cannot know what an engine resolving `contractors` would serve them: the
+/// mask is skipped with a reason naming the policy and the group, and the deny
+/// is kept — never a silent evaluation.
+#[tokio::test]
+async fn a_mask_naming_a_group_skips_the_clearance_mask_and_keeps_the_deny() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, _key) = new_tag(&db).await;
+    tag_column(&db, tag_id, f.warehouse_id, "orders", "ssn").await;
+    cleared_pair(&db, tag_id).await;
+
+    let lvl =
+        |v: &str| serde_json::json!({"values": [v], "isExcludes": false, "isRecursive": false});
+    let name = unique("hand-contractors");
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+         VALUES ($1, $2, $3, true, 'operator')",
+    )
+    .bind(f.service_id)
+    .bind(&name)
+    .bind(serde_json::json!({
+        "name": name, "service": "x", "serviceType": "starrocks",
+        "policyType": 1, "isEnabled": true,
+        "resources": {"catalog": lvl(&f.catalog_name), "database": lvl("sales"),
+                      "table": lvl("orders"), "column": lvl("ssn")},
+        "dataMaskPolicyItems": [
+            {"users": [], "groups": ["contractors"], "roles": [],
+             "accesses": [{"type": "select", "isAllowed": true}],
+             "dataMaskInfo": {"dataMaskType": "MASK_NULL"}},
+            {"users": [], "groups": ["public"], "roles": [],
+             "accesses": [{"type": "select", "isAllowed": true}],
+             "dataMaskInfo": {"dataMaskType": "MASK_NONE"}}
+        ],
+        "policyItems": [], "denyPolicyItems": []
+    }))
+    .execute(&db.pool)
+    .await
+    .expect("hand-written mask");
+
+    let summary = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("a group gap must not refuse the recompile");
+    assert_eq!(clearance_policies(&db, f.service_id, tag_id).await.len(), 1);
+    assert!(clearance_masks(&db, f.service_id, tag_id).await.is_empty());
+    let skips: Vec<_> = summary.skipped.iter().filter(|s| s.id == tag_id).collect();
+    assert_eq!(skips.len(), 1, "{:?}", summary.skipped);
+    assert!(skips[0].reason.contains(&name), "{}", skips[0].reason);
+    assert!(
+        skips[0].reason.contains("group \"contractors\""),
+        "{}",
+        skips[0].reason
+    );
 }
 
 /// A hand-written (operator) mask on the classified column is served beside the

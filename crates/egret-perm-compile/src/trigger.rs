@@ -577,6 +577,7 @@ async fn compile_desired(
             clearances.masks,
             &writable,
             &mut desired,
+            &mut skipped,
         )
         .await?;
     }
@@ -681,6 +682,7 @@ struct Compiled {
 /// latter are served beside the compiled set and reach a cleared user exactly
 /// as a rule mask does, so leaving them out would fold a cleared user a weaker
 /// mask than the one they are served today.
+#[allow(clippy::too_many_arguments)]
 async fn fold_clearance_masks(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
@@ -689,6 +691,7 @@ async fn fold_clearance_masks(
     pending: Vec<crate::clearance_mask::PendingMask>,
     writable: &HashMap<String, i64>,
     desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
+    skipped: &mut Vec<SkippedItem>,
 ) -> Result<(), CompileError> {
     let is_mask = |b: &Value| b.get("policyType").and_then(Value::as_i64) == Some(1);
     let mut others: Vec<Value> = desired
@@ -712,13 +715,41 @@ async fn fold_clearance_masks(
             }),
     );
 
+    use crate::clearance_mask::{FoldVersions, Folded};
+    let merged = crate::clearance_mask::merge_by_column(pending);
+    let mut skip = |tag_id: Uuid, reason: String| {
+        tracing::warn!(service_id, tag_id = %tag_id, reason = %reason,
+            "clearance mask skipped during recompile; the per-column deny is still compiled");
+        skipped.push(SkippedItem {
+            source_kind: SourceKind::Clearance,
+            id: tag_id,
+            reason,
+        });
+    };
     let plugins =
-        crate::clearance_mask::fold_plugin_versions(conn, service_id, profile, engine).await?;
-    for p in crate::clearance_mask::merge_by_column(pending) {
+        match crate::clearance_mask::fold_plugin_versions(conn, service_id, profile, engine).await?
+        {
+            FoldVersions::Modelled(v) => v,
+            // An engine-level reason: no mask for ANY column of this profile,
+            // one skip per column so each classified column says so.
+            FoldVersions::Unmodelled(reason) => {
+                for p in &merged {
+                    skip(p.tag_id, reason.clone());
+                }
+                return Ok(());
+            }
+        };
+    for p in merged {
         let name = crate::clearance_mask::clearance_mask_name(p.tag_id, &p.column);
-        let body = crate::clearance_mask::fold_at_versions(
+        let body = match crate::clearance_mask::fold_at_versions(
             profile, &name, &p.column, &p.cleared, &others, engine, &plugins,
-        )?;
+        )? {
+            Folded::Mask(body) => body,
+            Folded::Skipped(reason) => {
+                skip(p.tag_id, reason);
+                continue;
+            }
+        };
         let target = target_service_id(&body, writable, &format!("clearance mask {name}"))?;
         desired.insert(
             (target, name),
