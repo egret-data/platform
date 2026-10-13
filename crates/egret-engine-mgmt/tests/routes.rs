@@ -11537,6 +11537,79 @@ async fn a_trino_create_adopting_a_profile_that_creates_an_overlap_is_409_and_cr
     assert_eq!(authz_service_of(&f, &ok_name).await, Some(ok.profile));
 }
 
+/// M-3: a guarded bind whose check cannot complete for a reason that is NOT an
+/// overlap used to log and bind anyway, unchecked. It refuses: the Trino create
+/// fails and is undone, and a StarRocks create leaves the engine unbound.
+#[tokio::test]
+async fn a_guarded_bind_whose_check_cannot_complete_binds_nothing() {
+    let Some((mut f, port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "bind_unchecked_admin", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let unit = overlap_unit(&f, Some(wh), false).await;
+    f.perm_compiler = Some(Arc::new(ConflictAfterDryRun {
+        fail_snapshot: true,
+        inner: RealProfileCompiler {
+            perm: egret_perm::PermStore::new(f.db.pool.clone()),
+            policy: egret_policy::PolicyStore::new(f.db.clone()),
+        },
+        conflict: tokio::sync::Mutex::new(None),
+    }));
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+    );
+
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(trino_create_body(&name, wh, unit.profile)),
+    )
+    .await;
+    assert!(
+        status.is_server_error(),
+        "the create is refused: {status} {body}"
+    );
+    assert_eq!(
+        engine_rows_named(&f, &name).await,
+        0,
+        "the create is undone"
+    );
+    assert!(
+        port.provisioned.lock().unwrap().is_empty(),
+        "nothing provisioned"
+    );
+
+    let wh_sr = seed_provisioned_warehouse_with_secret(&f).await;
+    let sr_unit = overlap_unit(&f, Some(wh_sr), false).await;
+    let sr_name = format!("sr-{}", Uuid::new_v4().simple());
+    let (status, body) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(starrocks_create_body(&sr_name, wh_sr, sr_unit.profile)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        authz_service_of(&f, &sr_name).await,
+        None,
+        "the unchecked bind is not made"
+    );
+}
+
 /// C1, StarRocks: `POST /engines` with `authzServiceId`.
 #[tokio::test]
 async fn a_starrocks_create_with_authz_service_id_that_creates_an_overlap_is_409_and_creates_nothing(
