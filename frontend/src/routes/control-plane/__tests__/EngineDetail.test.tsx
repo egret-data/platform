@@ -559,6 +559,54 @@ describe("EngineDetail — header metadata + page-level actions", () => {
   });
 });
 
+describe("EngineDetail — image and Ranger plugin version", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRegistryList([]);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
+  });
+
+  function mockWith(extra: Record<string, unknown>) {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      type: "starrocks",
+      spec: { ...ENGINE.spec, imageVersion: "starrocks/fe-ubuntu:4.1-latest" },
+      status: { phase: "running", message: null, pods: [] },
+      ...extra,
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+  }
+
+  test("an unmodelled engine shows its image and the note, in the warning callout", async () => {
+    mockWith({
+      image: "starrocks/fe-ubuntu:4.1-latest",
+      rangerPluginVersionModelled: false,
+      rangerPluginVersionNote: 'image "starrocks/fe-ubuntu:4.1-latest" is not measured; pin the engine to one of: starrocks/fe-ubuntu:4.1.6',
+    });
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    expect(screen.getByText("starrocks/fe-ubuntu:4.1-latest")).toBeInTheDocument();
+    const note = await screen.findByTestId("plugin-version-note");
+    expect(note).toHaveAttribute("role", "note");
+    expect(note).toHaveTextContent(/pin the engine to one of/);
+  });
+
+  test("a modelled engine shows its plugin version and no note", async () => {
+    mockWith({
+      image: "starrocks/fe-ubuntu:4.1.6",
+      rangerPluginVersion: "2.9.0",
+      rangerPluginVersionModelled: true,
+    });
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    expect(screen.getByText("Ranger plugin 2.9.0")).toBeInTheDocument();
+    expect(screen.queryByTestId("plugin-version-note")).not.toBeInTheDocument();
+  });
+});
+
 describe("EngineDetail — StatusCard states", () => {
   beforeEach(() => {
     vi.clearAllMocks();

@@ -28,14 +28,12 @@ import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { enginesQueryKey } from "./ControlPlaneEngines";
 import {
   ENGINE_TYPE_LABEL,
-  MODELLED_VERSION_HINT,
-  OFFERED_PLUGIN_VERSIONS,
   PLUGIN_VERSION_RE,
-  isModelledPair,
   ServerRefusal,
   UnmodelledVersionNote,
   profilesQueryKey,
   useCan,
+  useModelledPlugins,
 } from "./externalEngine";
 
 const OTHER = "__other__";
@@ -53,6 +51,7 @@ export default function EngineRegister() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const canCreate = useCan("engine:create");
+  const modelled = useModelledPlugins();
 
   const [name, setName] = useState("");
   const [type, setType] = useState("trino");
@@ -233,7 +232,7 @@ export default function EngineRegister() {
                     <SelectValue placeholder="Choose a version" />
                   </SelectTrigger>
                   <SelectContent>
-                    {OFFERED_PLUGIN_VERSIONS.map((v) => (
+                    {modelled.versionsFor(type).map((v) => (
                       <SelectItem key={v} value={v}>
                         {v}
                       </SelectItem>
@@ -259,8 +258,8 @@ export default function EngineRegister() {
                 </div>
               )}
             </div>
-            <p className="text-sm text-muted-foreground">{MODELLED_VERSION_HINT}</p>
-            {versionOk && !isModelledPair(type, version) && <UnmodelledVersionNote />}
+            <p className="text-sm text-muted-foreground">{modelled.hint}</p>
+            {versionOk && modelled.ready && !modelled.isModelled(type, version) && <UnmodelledVersionNote />}
           </section>
 
           <section className="space-y-3 rounded-lg border p-4" aria-labelledby="er-profile-h">

@@ -9,6 +9,7 @@ import {
   CATALOGS,
   Harness,
   LocationProbe,
+  MODELLED_PLUGINS,
   PROFILES,
   stubFetch,
   userWith,
@@ -22,6 +23,7 @@ afterEach(() => {
 const READS = {
   "GET /api/control-plane/policies/services": { body: PROFILES },
   "GET /api/control-plane/catalogs": { body: CATALOGS },
+  "GET /api/control-plane/engines/modelled-ranger-plugins": { body: MODELLED_PLUGINS },
 };
 
 function renderRegister(me = ADMIN) {
@@ -207,6 +209,26 @@ describe("EngineRegister", () => {
       type: "starrocks",
       rangerPluginVersion: "2.7.1",
     });
+  });
+
+  test("the version picker offers only the modelled versions of the chosen type", async () => {
+    stubFetch(READS);
+    const user = userEvent.setup();
+    renderRegister();
+
+    await user.click(screen.getByRole("combobox", { name: "Plugin version" }));
+    expect(await screen.findByRole("option", { name: "2.5.0" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "2.8.0" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "2.9.0" })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+
+    await user.click(screen.getByRole("combobox", { name: "Engine type" }));
+    await user.click(await screen.findByRole("option", { name: "StarRocks" }));
+    await user.click(screen.getByRole("combobox", { name: "Plugin version" }));
+    expect(await screen.findByRole("option", { name: "2.9.0" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "2.8.0" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "2.5.0" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Other…" })).toBeInTheDocument();
   });
 
   test("a user without engine:create sees no form, only the reason", async () => {

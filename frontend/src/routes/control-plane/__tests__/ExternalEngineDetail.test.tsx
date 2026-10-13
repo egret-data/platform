@@ -10,6 +10,7 @@ import {
   EXTERNAL_ENGINE,
   Harness,
   LocationProbe,
+  MODELLED_PLUGINS,
   PROFILES,
   stubFetch,
   userWith,
@@ -65,6 +66,7 @@ function routes(over: Record<string, unknown> = {}) {
     "GET /api/control-plane/policies/services": { body: BOUND_PROFILES },
     "GET /api/control-plane/catalogs": { body: DECLARED_CATALOGS },
     "GET /api/control-plane/engines/x1/ranger-plugin-config": { body: PLUGIN_CONFIG },
+    "GET /api/control-plane/engines/modelled-ranger-plugins": { body: MODELLED_PLUGINS },
     ...over,
   } as Parameters<typeof stubFetch>[0];
 }
@@ -110,7 +112,7 @@ describe("EngineDetail for an external engine", () => {
     stubFetch(
       routes({
         "GET /api/control-plane/engines/x1": {
-          body: { ...EXTERNAL_ENGINE, rangerPluginVersion: "2.8.0", rangerPluginVersionModelled: false },
+          body: { ...EXTERNAL_ENGINE, rangerPluginVersion: "2.6.0", rangerPluginVersionModelled: false },
         },
       }),
     );
@@ -278,8 +280,13 @@ describe("EngineDetail for an external engine", () => {
     const user = userEvent.setup();
     renderDetail(ADMIN, "/control-plane/engines/x1?tab=settings");
     await user.click(await screen.findByRole("combobox", { name: "Plugin version" }));
-    await user.click(await screen.findByRole("option", { name: "2.8.0" }));
+    await user.click(await screen.findByRole("option", { name: "Other…" }));
+    await user.type(screen.getByLabelText("Other plugin version"), "2.6.0");
     expect(await screen.findByTestId("unmodelled-note")).toHaveTextContent(/will be refused/);
+    // A pair egret models (Trino at 2.8.0) carries no warning.
+    await user.clear(screen.getByLabelText("Other plugin version"));
+    await user.type(screen.getByLabelText("Other plugin version"), "2.8.0");
+    expect(screen.queryByTestId("unmodelled-note")).not.toBeInTheDocument();
   });
 
   test("a read-only user sees the engine and its config but no write control, and is told why", async () => {

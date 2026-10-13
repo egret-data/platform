@@ -108,3 +108,11 @@ export const EXTERNAL_ENGINE = {
   rangerPluginVersion: "2.5.0",
   rangerPluginVersionModelled: true,
 };
+
+/** What `GET /engines/modelled-ranger-plugins` answers (egret's MODELLED_RANGER_PLUGINS). */
+export const MODELLED_PLUGINS = [
+  { type: "trino", version: "2.5.0" },
+  { type: "trino", version: "2.8.0" },
+  { type: "starrocks", version: "2.8.0" },
+  { type: "starrocks", version: "2.9.0" },
+];
