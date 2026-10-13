@@ -57,7 +57,7 @@ services:
       - rustfsdata:/data
 
   trino:
-    image: trinodb/trino:latest
+    image: trinodb/trino:483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534
     ports:
       - "8090:8080"
       - "8453:8443"   # F2-P5: HTTPS (JWT auth is only ENFORCED over TLS)
@@ -71,7 +71,7 @@ services:
       - ./trino/etc/trino-keystore.p12:/etc/trino/trino-keystore.p12
 
   starrocks:
-    image: starrocks/allin1-ubuntu:latest
+    image: starrocks/allin1-ubuntu:4.1.6@sha256:5cbf09c4c788d2ca41a8e38599b650f04dbc6af0de51ebda0952770fb8333e5d
     ports:
       - "9030:9030"   # MySQL protocol (query)
       - "8030:8030"   # FE HTTP

@@ -42,22 +42,12 @@ use crate::Engine;
 use crate::EngineHttpError as CpError;
 use crate::EngineMgmtState as CpState;
 use egret_catalog_registry::{AttachedCatalog, WarehouseIdentity};
+use egret_perm::DEFAULT_ENGINE_IMAGES;
 
-/// Default Trino image (official `trinodb/trino` tag) when the body omits it.
-const DEFAULT_IMAGE_VERSION: &str = "470";
 /// Kubernetes namespace engines are provisioned into (fixed for now).
 const DEFAULT_NAMESPACE: &str = "egret-engines";
 /// Shared per-warehouse role that engine Catalog Clients are bound to.
 const ENGINE_ROLE_NAME: &str = "engine";
-/// Default StarRocks FE/CN images when the body omits them. Pinned to the 4.1.x
-/// line: it carries BOTH features egret's delegation needs in open-source —
-/// FE MySQL-protocol TLS (`tlsEnabled`, from v3.4.1) AND JWT authentication
-/// (`CREATE SECURITY INTEGRATION ... authentication_jwt`, community from v3.5+;
-/// the `authentication_jwt` plugin is absent in 3.4, so per-user JWT logins —
-/// the notebook `starrocks()` path — could not authenticate there). Live-proven
-/// end-to-end on 4.1.3 (per-user JWT over pinned TLS returning a row).
-const DEFAULT_SR_FE_IMAGE: &str = "starrocks/fe-ubuntu:4.1-latest";
-const DEFAULT_SR_CN_IMAGE: &str = "starrocks/cn-ubuntu:4.1-latest";
 /// StarRocks FE MySQL-protocol (query) port — `query_port` in `fe.conf`, and
 /// what [`crate::store::Engine::coordinator_port`] answers for a StarRocks
 /// engine. Since SP3b Task 5 nothing in production reads it here: every
@@ -698,7 +688,7 @@ pub(crate) async fn build_provision_req_with(
             namespace: engine.namespace.clone(),
             image_version: engine.spec["imageVersion"]
                 .as_str()
-                .unwrap_or(DEFAULT_IMAGE_VERSION)
+                .unwrap_or(DEFAULT_ENGINE_IMAGES.trino_image_version)
                 .into(),
             catalogs,
             config,
@@ -2969,7 +2959,7 @@ async fn create_engine(
         .image_version
         .clone()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_IMAGE_VERSION.into());
+        .unwrap_or_else(|| DEFAULT_ENGINE_IMAGES.trino_image_version.into());
     let namespace = DEFAULT_NAMESPACE.to_string();
     let mut spec = serde_json::json!({
         "coordinatorReplicas": b.coordinator_replicas,
@@ -3145,8 +3135,8 @@ async fn create_engine(
 /// `StarRocksDelegationBootstrap` the post-Ready wire step consumes.
 ///
 /// Every read here comes from the persisted `spec.starrocksConfig` (NOT a create
-/// body): `feImage`/`cnImage` (defaulting to [`DEFAULT_SR_FE_IMAGE`]/
-/// [`DEFAULT_SR_CN_IMAGE`] when absent or blank), `feReplicas`/`cnReplicas`
+/// body): `feImage`/`cnImage` (defaulting to `DEFAULT_ENGINE_IMAGES`'s
+/// StarRocks images when absent or blank), `feReplicas`/`cnReplicas`
 /// (default 1), `feResources`/`cnResources` (parsed when a non-null value is
 /// present), and the `delegation` `{mode, tlsEnabled}` block — matching what
 /// `create_starrocks_engine` persisted so create and update produce an identical
@@ -3190,13 +3180,13 @@ async fn build_starrocks_provision_req(
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_SR_FE_IMAGE.into());
+        .unwrap_or_else(|| DEFAULT_ENGINE_IMAGES.starrocks_fe_image.into());
     let cn_image = cfg
         .and_then(|c| c.get("cnImage"))
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_SR_CN_IMAGE.into());
+        .unwrap_or_else(|| DEFAULT_ENGINE_IMAGES.starrocks_cn_image.into());
     let fe_replicas = cfg
         .and_then(|c| c.get("feReplicas"))
         .and_then(|v| v.as_u64())
@@ -3689,7 +3679,7 @@ fn validate_sr_fe_meta_immutable(
 ///
 /// Per-field rule: use the body value when present (non-blank for strings), else
 /// the corresponding `existing.starrocksConfig.<field>`, else the create-time
-/// default (`DEFAULT_SR_FE_IMAGE`/`DEFAULT_SR_CN_IMAGE`, replicas `1`, resources
+/// default (`DEFAULT_ENGINE_IMAGES`, replicas `1`, resources
 /// `null`).
 ///
 /// Delegation-preserve rule: the delegation block is ONLY rewritten when the
@@ -3717,13 +3707,13 @@ fn build_starrocks_spec(
         .clone()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| existing_str("feImage"))
-        .unwrap_or_else(|| DEFAULT_SR_FE_IMAGE.into());
+        .unwrap_or_else(|| DEFAULT_ENGINE_IMAGES.starrocks_fe_image.into());
     let cn_image = sr_body
         .cn_image
         .clone()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| existing_str("cnImage"))
-        .unwrap_or_else(|| DEFAULT_SR_CN_IMAGE.into());
+        .unwrap_or_else(|| DEFAULT_ENGINE_IMAGES.starrocks_cn_image.into());
     let fe_replicas = sr_body
         .fe_replicas
         .or_else(|| {
@@ -5368,7 +5358,7 @@ async fn update_trino_engine(
         .image_version
         .clone()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_IMAGE_VERSION.into());
+        .unwrap_or_else(|| DEFAULT_ENGINE_IMAGES.trino_image_version.into());
     let mut spec = serde_json::json!({
         "coordinatorReplicas": b.coordinator_replicas,
         "workerReplicas": b.worker_replicas,
@@ -7426,8 +7416,8 @@ mod tests {
         // delegation null.
         let created = build_starrocks_spec(&StarRocksConfigBody::default(), None);
         let ccfg = &created["starrocksConfig"];
-        assert_eq!(ccfg["feImage"], DEFAULT_SR_FE_IMAGE);
-        assert_eq!(ccfg["cnImage"], DEFAULT_SR_CN_IMAGE);
+        assert_eq!(ccfg["feImage"], DEFAULT_ENGINE_IMAGES.starrocks_fe_image);
+        assert_eq!(ccfg["cnImage"], DEFAULT_ENGINE_IMAGES.starrocks_cn_image);
         assert_eq!(ccfg["feReplicas"], 1);
         assert_eq!(ccfg["cnReplicas"], 1);
         assert!(ccfg["feResources"].is_null());
@@ -8055,8 +8045,8 @@ mod tests {
             .await
             .expect("build_starrocks_provision_req (no delegation)");
         let sr2 = req2.starrocks.as_ref().expect("starrocks config present");
-        assert_eq!(sr2.fe_image, DEFAULT_SR_FE_IMAGE);
-        assert_eq!(sr2.cn_image, DEFAULT_SR_CN_IMAGE);
+        assert_eq!(sr2.fe_image, DEFAULT_ENGINE_IMAGES.starrocks_fe_image);
+        assert_eq!(sr2.cn_image, DEFAULT_ENGINE_IMAGES.starrocks_cn_image);
         assert_eq!(sr2.fe_replicas, 2);
         assert_eq!(sr2.cn_replicas, 1);
         assert!(sr2.delegation.is_none());
@@ -9405,10 +9395,10 @@ mod tests {
     /// bare row.
     async fn seed_sr_engine(st: &CpState) -> Engine {
         let spec = serde_json::json!({
-            "imageVersion": DEFAULT_SR_FE_IMAGE,
+            "imageVersion": DEFAULT_ENGINE_IMAGES.starrocks_fe_image,
             "starrocksConfig": {
-                "feImage": DEFAULT_SR_FE_IMAGE,
-                "cnImage": DEFAULT_SR_CN_IMAGE,
+                "feImage": DEFAULT_ENGINE_IMAGES.starrocks_fe_image,
+                "cnImage": DEFAULT_ENGINE_IMAGES.starrocks_cn_image,
                 "feReplicas": 1,
                 "cnReplicas": 1,
                 "feResources": null,
@@ -10846,10 +10836,10 @@ mod tests {
     /// and so the one whose every statement must go out over it (D6).
     async fn seed_sr_delegating_engine(st: &CpState, cert: &str) -> Engine {
         let spec = serde_json::json!({
-            "imageVersion": DEFAULT_SR_FE_IMAGE,
+            "imageVersion": DEFAULT_ENGINE_IMAGES.starrocks_fe_image,
             "starrocksConfig": {
-                "feImage": DEFAULT_SR_FE_IMAGE,
-                "cnImage": DEFAULT_SR_CN_IMAGE,
+                "feImage": DEFAULT_ENGINE_IMAGES.starrocks_fe_image,
+                "cnImage": DEFAULT_ENGINE_IMAGES.starrocks_cn_image,
                 "feReplicas": 1,
                 "cnReplicas": 1,
                 // `tlsEnabled` deliberately OMITTED: it defaults to on, which
@@ -11493,7 +11483,7 @@ mod tests {
         assert_eq!(cfg["cnReplicas"], 1); // untouched ⇒ preserved
         assert_eq!(cfg["feResources"]["memRequest"], "2Gi");
         assert_eq!(cfg["feResources"]["memLimit"], "4Gi");
-        assert_eq!(cfg["feImage"], DEFAULT_SR_FE_IMAGE); // untouched ⇒ preserved
+        assert_eq!(cfg["feImage"], DEFAULT_ENGINE_IMAGES.starrocks_fe_image); // untouched ⇒ preserved
     }
 
     /// An update must never leak storage coords into the stored spec, and the

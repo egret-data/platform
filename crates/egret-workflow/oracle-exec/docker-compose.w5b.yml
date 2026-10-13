@@ -35,5 +35,5 @@ services:
     mem_limit: 3g
 
   starrocks:
-    # StarRocks 4.1.4 all-in-one (FE MySQL protocol on 9030, user root, no password).
-    image: starrocks/allin1-ubuntu:4.1.4@sha256:faf7ce9c24d9c29c9431b4e8cbd4bb7a74cd169907c63f0c5ebaacc7f9df276b
+    # StarRocks 4.1.6 all-in-one (FE MySQL protocol on 9030, user root, no password).
+    image: starrocks/allin1-ubuntu:4.1.6@sha256:5cbf09c4c788d2ca41a8e38599b650f04dbc6af0de51ebda0952770fb8333e5d

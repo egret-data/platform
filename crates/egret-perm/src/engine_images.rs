@@ -242,4 +242,64 @@ mod tests {
             assert!(image.contains("@sha256:"), "{image} carries its digest");
         }
     }
+
+    #[test]
+    fn every_digest_is_the_measured_literal() {
+        let rows: Vec<_> = KNOWN_ENGINE_IMAGES
+            .iter()
+            .map(|k| (k.repository, k.tag, k.digest))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "trinodb/trino",
+                    "470",
+                    "sha256:a591436ddc20cef15a4424704423326828591727b0e7c40c6ea4165d4564df67"
+                ),
+                (
+                    "trinodb/trino",
+                    "483",
+                    "sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534"
+                ),
+                (
+                    "starrocks/fe-ubuntu",
+                    "4.1.4",
+                    "sha256:0b9099483e52ee66f9ee0244799bd32f3ccb491492857c59ada622ceb15b914b"
+                ),
+                (
+                    "starrocks/fe-ubuntu",
+                    "4.1.6",
+                    "sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31"
+                ),
+            ]
+        );
+        assert_eq!(
+            DEFAULT_ENGINE_IMAGES.starrocks_cn_image,
+            "starrocks/cn-ubuntu:4.1.6@sha256:bf0f5ca7fd9fc4e568d4d0e593e362f229b376976b513a5a549b1b922d9ec23b"
+        );
+    }
+
+    #[test]
+    fn near_misses_of_a_known_image_are_unmodelled() {
+        let sr_digest = "sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31";
+        for (t, image) in [
+            ("starrocks", "localhost:5000/starrocks/fe-ubuntu:4.1.6"),
+            ("starrocks", &format!("starrocks/fe-ubuntu@{sr_digest}")),
+            ("starrocks", "STARROCKS/FE-UBUNTU:4.1.6"),
+            ("trino", "docker.io/library/trinodb/trino:483"),
+            ("trino", ""),
+            ("starrocks", ""),
+        ] {
+            assert!(plugin_version_for_image(t, image).is_err(), "{t} {image:?}");
+        }
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_ignored() {
+        assert_eq!(
+            plugin_version_for_image("trino", "  trinodb/trino:483  "),
+            Ok("2.8.0")
+        );
+    }
 }

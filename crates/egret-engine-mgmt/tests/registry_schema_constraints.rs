@@ -809,3 +809,131 @@ async fn a_declared_attachment_holds_nothing_and_the_check_names_itself() {
     );
     ok.expect("a well-formed declared attachment is accepted");
 }
+
+// -- migration 0185: every provisioned engine's image becomes explicit --------
+
+/// Migration 0185's UPDATEs, comments dropped, each `WHERE` narrowed to the ids
+/// this test inserted so a concurrent test's engines are never touched. The
+/// count of narrowed statements is asserted: a rewrite that matched nothing
+/// would otherwise run nothing and pass.
+fn migration_0185_scoped_statements() -> Vec<String> {
+    let sql: String = include_str!("../../../migrations/0185_engine_images_explicit.sql")
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let statements: Vec<String> = sql
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.replacen("WHERE ", "WHERE id = ANY($1) AND ", 1))
+        .collect();
+    assert_eq!(statements.len(), 3, "three UPDATEs: {statements:?}");
+    for s in &statements {
+        assert!(s.contains("id = ANY($1)"), "scoped: {s}");
+    }
+    statements
+}
+
+async fn insert_engine_spec(
+    db: &Db,
+    name: &str,
+    ty: &str,
+    spec: serde_json::Value,
+    origin: &str,
+) -> Uuid {
+    let external = origin == "external";
+    let sql = "INSERT INTO engine_mgmt.engines \
+         (name, type, namespace, spec, status, origin, external_host, external_port, \
+          ranger_plugin_version) \
+       VALUES ($1, $2, $3, $4, 'running', $5, $6, $7, $8) RETURNING id";
+    sqlx::query_scalar(sql)
+        .bind(name)
+        .bind(ty)
+        .bind(if external { "" } else { "egret-engines" })
+        .bind(spec)
+        .bind(origin)
+        .bind(external.then_some("sr.example.com"))
+        .bind(external.then_some(9030_i32))
+        .bind(external.then_some("2.8.0"))
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert engine")
+}
+
+#[tokio::test]
+async fn migration_0185_writes_todays_implicit_images_and_touches_nothing_explicit() {
+    let db = harness_or_skip!();
+    let tag = Uuid::new_v4().simple().to_string();
+    let trino_empty = insert_engine_spec(
+        &db,
+        &format!("img-trino-empty-{tag}"),
+        "trino",
+        serde_json::json!({}),
+        "provisioned",
+    )
+    .await;
+    let trino_explicit = insert_engine_spec(
+        &db,
+        &format!("img-trino-explicit-{tag}"),
+        "trino",
+        serde_json::json!({"imageVersion": "483"}),
+        "provisioned",
+    )
+    .await;
+    let sr_implicit = insert_engine_spec(
+        &db,
+        &format!("img-sr-implicit-{tag}"),
+        "starrocks",
+        serde_json::json!({"starrocksConfig": {"feReplicas": 1}}),
+        "provisioned",
+    )
+    .await;
+    let sr_external = insert_engine_spec(
+        &db,
+        &format!("img-sr-external-{tag}"),
+        "starrocks",
+        serde_json::json!({}),
+        "external",
+    )
+    .await;
+    let ids = vec![trino_empty, trino_explicit, sr_implicit, sr_external];
+
+    let mut run_error = None;
+    for statement in migration_0185_scoped_statements() {
+        // `AssertSqlSafe`: the text is the checked-in migration file, narrowed by a
+        // fixed literal replacement; nothing user-supplied is interpolated.
+        if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(statement))
+            .bind(&ids)
+            .execute(&db.pool)
+            .await
+        {
+            run_error = Some(e.to_string());
+            break;
+        }
+    }
+    let mut specs = Vec::new();
+    for id in &ids {
+        let spec: serde_json::Value =
+            sqlx::query_scalar("SELECT spec FROM engine_mgmt.engines WHERE id = $1")
+                .bind(id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("read spec");
+        specs.push(spec);
+    }
+    sqlx::query("DELETE FROM engine_mgmt.engines WHERE id = ANY($1)")
+        .bind(&ids)
+        .execute(&db.pool)
+        .await
+        .expect("cleanup");
+
+    assert_eq!(run_error, None);
+    assert_eq!(specs[0]["imageVersion"], "470", "empty Trino spec");
+    assert_eq!(specs[1], serde_json::json!({"imageVersion": "483"}));
+    let sr = &specs[2]["starrocksConfig"];
+    assert_eq!(sr["feImage"], "starrocks/fe-ubuntu:4.1-latest");
+    assert_eq!(sr["cnImage"], "starrocks/cn-ubuntu:4.1-latest");
+    assert_eq!(sr["feReplicas"], 1, "other config kept");
+    assert_eq!(specs[3], serde_json::json!({}), "external untouched");
+}
