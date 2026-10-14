@@ -11,9 +11,9 @@ import type { Enablement } from "@/components/workflows/draftState";
 import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
 import { EnableTriggerDialog } from "@/components/workflows/triggers/EnableTriggerDialog";
 import { TriggerBanners } from "@/components/workflows/triggers/TriggerBanners";
-import { TriggerDetailsDrawer } from "@/components/workflows/triggers/TriggerDetailsDrawer";
+import { TriggerDetailsDrawer, triggerBlock } from "@/components/workflows/triggers/TriggerDetailsDrawer";
 import { selectionKey, TriggersTable } from "@/components/workflows/triggers/TriggersTable";
-import { bannersFor, MANAGE_REASON, triggerBlock, type TriggerRow } from "@/components/workflows/triggers/triggersModel";
+import { bannersFor, MANAGE_REASON, type TriggerRow } from "@/components/workflows/triggers/triggersModel";
 import { useTriggerSwitch } from "@/components/workflows/triggers/useTriggerSwitch";
 
 /** A failed read, in words (FE-COPY-2): the server's sentence, or what to do. */

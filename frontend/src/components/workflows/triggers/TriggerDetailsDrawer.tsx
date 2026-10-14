@@ -14,7 +14,33 @@ import {
   webhookPath,
   type FlowContext,
 } from "@/components/workflows/triggers/triggersModel";
+import { rangeOfPath } from "@/components/workflows/editor/yamlPath";
 import { fullTimestamp, timeAgo } from "@/lib/relativeTime";
+
+/**
+ * The YAML block of one trigger, cut from `source` and dedented, or null when
+ * `source` declares no trigger with that id. `rangeOfPath` finds where the
+ * trigger's mapping starts; the block runs until the first non-blank line
+ * indented less than that mapping (the next trigger's `- ` or the next
+ * top-level key).
+ *
+ * Here rather than in `triggersModel.ts`: it brings the `yaml` library, which the
+ * model's other users (the global Triggers page, in the flow list's chunk) must not.
+ */
+export function triggerBlock(source: string, triggerId: string): string | null {
+  const range = rangeOfPath(source, `triggers.${triggerId}`);
+  if (!range) return null;
+  const lines = source.split("\n");
+  const indent = range.startCol - 1;
+  const block = [lines[range.startLine - 1].slice(indent)];
+  for (let i = range.startLine; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() !== "" && line.length - line.trimStart().length < indent) break;
+    block.push(line.slice(indent));
+  }
+  while (block.length > 1 && block[block.length - 1].trim() === "") block.pop();
+  return block.join("\n");
+}
 
 /** What the drawer says when `?trigger=` names an id the flow no longer declares (spec §5). */
 export const TRIGGER_GONE = "This trigger no longer exists in the flow; reload.";

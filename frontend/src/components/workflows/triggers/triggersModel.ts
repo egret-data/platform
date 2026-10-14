@@ -6,7 +6,6 @@ import type {
   TriggerKindDto,
 } from "@/api/generated/model";
 import type { Enablement } from "@/components/workflows/draftState";
-import { rangeOfPath } from "@/components/workflows/editor/yamlPath";
 import { timeAgo } from "@/lib/relativeTime";
 
 /**
@@ -159,26 +158,4 @@ export function webhookPath(urlPath: string | null | undefined): string | null {
 export function webhookNote(webhooksEnabled: boolean): string {
   const note = "This path is served by the egret backend, at whatever host your operator exposes for webhooks.";
   return webhooksEnabled ? note : `${note} Webhooks are off on this server.`;
-}
-
-/**
- * The YAML block of one trigger, cut from `source` and dedented, or null when
- * `source` declares no trigger with that id. `rangeOfPath` finds where the
- * trigger's mapping starts; the block runs until the first non-blank line
- * indented less than that mapping (the next trigger's `- ` or the next
- * top-level key).
- */
-export function triggerBlock(source: string, triggerId: string): string | null {
-  const range = rangeOfPath(source, `triggers.${triggerId}`);
-  if (!range) return null;
-  const lines = source.split("\n");
-  const indent = range.startCol - 1;
-  const block = [lines[range.startLine - 1].slice(indent)];
-  for (let i = range.startLine; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.trim() !== "" && line.length - line.trimStart().length < indent) break;
-    block.push(line.slice(indent));
-  }
-  while (block.length > 1 && block[block.length - 1].trim() === "") block.pop();
-  return block.join("\n");
 }

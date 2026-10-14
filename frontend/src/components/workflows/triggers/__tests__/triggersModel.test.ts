@@ -9,10 +9,10 @@ import {
   shortType,
   statusText,
   switchEnablement,
-  triggerBlock,
   webhookNote,
   webhookPath,
 } from "@/components/workflows/triggers/triggersModel";
+import { triggerBlock } from "@/components/workflows/triggers/TriggerDetailsDrawer";
 import { flowEntry, flowTriggers, otherEntry, scheduleEntry, TRIGGERS_SOURCE, webhookEntry } from "./triggerFixtures";
 
 const ON = { flowDisabled: false, flowDeleted: false };
