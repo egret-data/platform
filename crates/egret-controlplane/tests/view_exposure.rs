@@ -239,6 +239,25 @@ async fn engine(f: &Fixture, service: i64, status: &str) -> (Uuid, String) {
     (id, name)
 }
 
+/// An EXTERNAL StarRocks engine bound to `service`, stored as SP4d-4 registers
+/// one: `status = 'running'` (a placeholder; migration 0184 did not widen it)
+/// and `origin = 'external'`. egret holds no credential for it.
+async fn external_engine(f: &Fixture, service: i64) -> (Uuid, String) {
+    let name = format!("ve-ext-{}", suffix());
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, status, origin, \
+         external_host, external_port, ranger_plugin_version, authz_service_id) \
+         VALUES ($1,'starrocks','','{}'::jsonb,'running','external','sr.example.com',9030, \
+                 '2.8.0',$2) RETURNING id",
+    )
+    .bind(&name)
+    .bind(service)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    (id, name)
+}
+
 async fn new_tag(f: &Fixture) -> Uuid {
     let s = suffix();
     sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1,$2) RETURNING id")
@@ -495,13 +514,13 @@ async fn each_engine_matches_only_the_catalogs_attached_to_it() {
 
     let j = exposure(&f, lister.clone(), tag).await;
 
-    assert_eq!(
-        listed(&j),
-        [
-            row(&a, "x", "mv_a_own", "baseTable"),
-            row(&b, "y", "mv_b_own", "baseTable"),
-        ]
-    );
+    // `listed` sorts by engine name, which is random: sort the expectation too.
+    let mut expected = vec![
+        row(&a, "x", "mv_a_own", "baseTable"),
+        row(&b, "y", "mv_b_own", "baseTable"),
+    ];
+    expected.sort();
+    assert_eq!(listed(&j), expected);
     let mut want = vec![a.clone(), b.clone()];
     want.sort();
     assert_eq!(lister.asked(), want, "{c} reaches no classified table");
@@ -550,7 +569,7 @@ async fn an_engine_that_is_not_running_is_not_dialled_and_is_named_as_not_checke
     );
     assert_eq!(
         j["enginesNotChecked"],
-        serde_json::json!([{"engine": down, "status": "provisioning"}]),
+        serde_json::json!([{"engine": down, "reason": "not running: provisioning"}]),
         "body={j}"
     );
     assert_eq!(j["starrocksListError"], serde_json::Value::Null, "body={j}");
@@ -558,6 +577,47 @@ async fn an_engine_that_is_not_running_is_not_dialled_and_is_named_as_not_checke
         listed(&j),
         [row(&s.engine_name, "db1", "mv_up", "baseTable")]
     );
+}
+
+/// Task 4b review C-1: an external engine is stored `running`, but egret never
+/// connects to one (SP4d-4) and holds no credential for it. It is not dialled
+/// and is named as not checked, with the reason.
+#[tokio::test]
+async fn an_external_engine_is_never_dialled_and_is_named_as_not_checked() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: no test database");
+        return;
+    };
+    let s = seed(&f).await;
+    let service: i64 =
+        sqlx::query_scalar("SELECT authz_service_id FROM engine_mgmt.engines WHERE name = $1")
+            .bind(&s.engine_name)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    let (ext_id, ext) = external_engine(&f, service).await;
+    let (wh, cat) = attached_catalog(&f, ext_id).await;
+    tag_column(&f, s.tag_id, wh, "sales", "orders", "ssn").await;
+    let lister = Arc::new(FakeLister::default());
+    lister.answer(
+        &ext,
+        Ok(vec![mv("db1", "mv_ext", &[&format!("{cat}.sales.orders")])]),
+    );
+
+    let j = exposure(&f, lister.clone(), s.tag_id).await;
+
+    assert_eq!(
+        lister.asked(),
+        std::slice::from_ref(&s.engine_name),
+        "the external engine must never be dialled; body={j}"
+    );
+    assert_eq!(
+        j["enginesNotChecked"],
+        serde_json::json!([{"engine": ext, "reason": "external"}]),
+        "body={j}"
+    );
+    assert_eq!(j["starrocksListError"], serde_json::Value::Null, "body={j}");
+    assert_eq!(listed(&j), [], "body={j}");
 }
 
 #[tokio::test]
@@ -649,8 +709,10 @@ async fn an_unknown_classification_is_a_404() {
 }
 
 /// A second running engine on the seeded profile, reaching `hr.staff` through
-/// its own catalog; returns its name.
-async fn second_engine(f: &Fixture, s: &Seeded) -> String {
+/// its own catalog; returns `(name, a view over that classified table)`. The
+/// view MATCHES, so the engine's own list is non-empty and a partial list could
+/// be returned if the null-on-any-failure rule were lost (Task 4b review I-1).
+async fn second_engine(f: &Fixture, s: &Seeded) -> (String, MvRow) {
     let service: i64 =
         sqlx::query_scalar("SELECT authz_service_id FROM engine_mgmt.engines WHERE name = $1")
             .bind(&s.engine_name)
@@ -658,9 +720,9 @@ async fn second_engine(f: &Fixture, s: &Seeded) -> String {
             .await
             .unwrap();
     let (id, name) = engine(f, service, "running").await;
-    let (wh, _) = attached_catalog(f, id).await;
+    let (wh, catalog) = attached_catalog(f, id).await;
     tag_column(f, s.tag_id, wh, "hr", "staff", "salary").await;
-    name
+    (name, mv("db1", "mv_hr", &[&format!("{catalog}.hr.staff")]))
 }
 
 #[tokio::test]
@@ -670,9 +732,9 @@ async fn one_listing_ok_and_one_failed_is_null_and_names_only_the_failure() {
         return;
     };
     let s = seed(&f).await;
-    let other = second_engine(&f, &s).await;
+    let (other, matching) = second_engine(&f, &s).await;
     let lister = Arc::new(FakeLister::default());
-    lister.answer(&other, Ok(vec![mv("db1", "mv_hr", &["whatever.hr.staff"])]));
+    lister.answer(&other, Ok(vec![matching]));
     lister.answer(&s.engine_name, Err("connect refused"));
 
     let j = exposure(&f, lister.clone(), s.tag_id).await;
@@ -701,9 +763,9 @@ async fn a_listing_that_never_answers_ends_at_the_deadline_as_a_named_failure() 
         return;
     };
     let s = seed(&f).await;
-    let other = second_engine(&f, &s).await;
+    let (other, matching) = second_engine(&f, &s).await;
     let lister = Arc::new(FakeLister::default());
-    lister.answer(&other, Ok(vec![]));
+    lister.answer(&other, Ok(vec![matching]));
     lister.hangs.lock().unwrap().push(s.engine_name.clone());
     let token = session(&f).await;
     let router = app_with_timeout(

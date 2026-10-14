@@ -42,6 +42,10 @@ pub struct ClassifiedEngine {
     pub engine_name: String,
     /// `engine_mgmt.engines.status`: only a `running` engine is dialled.
     pub status: String,
+    /// `engine_mgmt.engines.origin`: `provisioned` or `external`. An external
+    /// engine is stored `running` (a placeholder, migration 0184) but egret
+    /// never connects to one and holds no credential for it.
+    pub origin: String,
     /// Sorted, without duplicates.
     pub tables: Vec<ClassifiedTable>,
 }
@@ -51,6 +55,7 @@ struct Row {
     engine_id: Uuid,
     engine_name: String,
     status: String,
+    origin: String,
     catalog: String,
     schema_name: String,
     table_name: String,
@@ -66,7 +71,7 @@ pub async fn classified_starrocks_engines(
     tag_key: &str,
 ) -> Result<Vec<ClassifiedEngine>, CompileError> {
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT DISTINCT e.id AS engine_id, e.name AS engine_name, e.status, \
+        "SELECT DISTINCT e.id AS engine_id, e.name AS engine_name, e.status, e.origin, \
                 c.name AS catalog, a.schema_name, a.table_name \
            FROM engine_mgmt.engines e \
            JOIN registry.engine_catalog_attachments ea ON ea.engine_id = e.id \
@@ -95,6 +100,7 @@ pub async fn classified_starrocks_engines(
                 engine_id: r.engine_id,
                 engine_name: r.engine_name,
                 status: r.status,
+                origin: r.origin,
                 tables: vec![table],
             }),
         }

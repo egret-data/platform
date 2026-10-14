@@ -23,8 +23,14 @@
 //! **Null means "could not list", never "none".** `starrocksMaterializedViews`
 //! is `null` exactly when at least one running engine's listing failed, and
 //! `starrocksListError` then names each failing engine. A partial list is never
-//! returned as if it were complete. An engine that is not `running` is not
-//! dialled; it is named in `enginesNotChecked` with its status instead.
+//! returned as if it were complete.
+//!
+//! **Engines that are never dialled.** An EXTERNAL engine (SP4d-4) is stored
+//! with the placeholder status `running`, but egret never connects to a
+//! cluster it does not own and holds no credential for one, so it is split off
+//! on `origin` FIRST (Task 4b review C-1). A provisioned engine that is not
+//! `running` is not dialled either. Both are named in `enginesNotChecked` with
+//! the reason; their views are unknown, not absent.
 
 use axum::extract::{Path, State};
 use axum::routing::get;
@@ -99,13 +105,14 @@ pub struct ViewExposureItem {
     pub matched_by: MatchedBy,
 }
 
-/// An engine that reaches the classification but was not asked, because it is
-/// not running.
+/// An engine that reaches the classification but was not asked.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct EngineNotChecked {
     pub engine: String,
-    /// `engine_mgmt.engines.status`: `provisioning`, `failed` or `deleting`.
-    pub status: String,
+    /// Why it was not asked: `external` (egret never connects to an engine it
+    /// does not run, and holds no credential for it) or `not running: <status>`
+    /// (`provisioning`, `failed` or `deleting`).
+    pub reason: String,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -116,8 +123,8 @@ pub struct ViewExposureDto {
     /// Set exactly when `starrocks_materialized_views` is `null`; names each
     /// failing engine.
     pub starrocks_list_error: Option<String>,
-    /// Engines that reach the classification but are not running, so were not
-    /// asked. Their views are unknown, not absent.
+    /// Engines that reach the classification but were not asked (external, or
+    /// not running). Their views are unknown, not absent.
     pub engines_not_checked: Vec<EngineNotChecked>,
     /// Always empty until Trino views are reported.
     pub trino_views: Vec<ViewExposureItem>,
@@ -156,20 +163,23 @@ async fn get_view_exposure(
                 CpError::Internal
             })?
     };
-    let (running, not_running): (Vec<_>, Vec<_>) =
-        engines.into_iter().partition(|e| e.status == RUNNING);
+    let mut dialled = Vec::new();
+    let mut not_checked = Vec::new();
+    for e in engines {
+        match not_dialled_reason(&e) {
+            None => dialled.push(e),
+            Some(reason) => not_checked.push(EngineNotChecked {
+                engine: e.engine_name,
+                reason,
+            }),
+        }
+    }
 
-    let (views, failures) = list_all(&*st.mv_lister, &running, st.mv_list_timeout).await;
+    let (views, failures) = list_all(&*st.mv_lister, &dialled, st.mv_list_timeout).await;
     Ok(Json(ViewExposureDto {
         starrocks_materialized_views: failures.is_empty().then_some(views),
         starrocks_list_error: (!failures.is_empty()).then(|| failures.join("; ")),
-        engines_not_checked: not_running
-            .into_iter()
-            .map(|e| EngineNotChecked {
-                engine: e.engine_name,
-                status: e.status,
-            })
-            .collect(),
+        engines_not_checked: not_checked,
         trino_views: Vec::new(),
     }))
 }
@@ -177,6 +187,19 @@ async fn get_view_exposure(
 /// `engine_mgmt.engines.status` of an engine whose pods all reported ready
 /// (`migrations/0145_engine_status_check.sql`).
 const RUNNING: &str = "running";
+
+/// `engine_mgmt.engines.origin` of an engine egret does not run
+/// (`migrations/0184_engine_external.sql`).
+const ORIGIN_EXTERNAL: &str = "external";
+
+/// Why `engine` must not be dialled, or `None` when it may be. Origin is checked
+/// BEFORE status: an external engine's `running` is a placeholder.
+fn not_dialled_reason(engine: &ClassifiedEngine) -> Option<String> {
+    if engine.origin == ORIGIN_EXTERNAL {
+        return Some("external".to_string());
+    }
+    (engine.status != RUNNING).then(|| format!("not running: {}", engine.status))
+}
 
 /// How `row` matches one of `engine`'s classified tables, if it does.
 ///

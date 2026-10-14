@@ -816,6 +816,16 @@ pub async fn list_materialized_views(
     if !engine.is_starrocks() {
         return Err("engine is not a StarRocks engine".to_string());
     }
+    // Task 4b review C-1: an external engine is stored `running` (a placeholder),
+    // but egret never connects to a cluster it does not run and holds no
+    // credential for one; `fe_target` would dial it as `root` with no password.
+    // The route already skips external engines; this refuses before any
+    // connection in case a caller does not.
+    if crate::external::is_external(&engine) {
+        return Err(
+            "engine is external: egret does not connect to engines it does not run".to_string(),
+        );
+    }
     let fe = fe_target(st, &engine).await.map_err(|e| e.to_string())?;
     select_materialized_views(&*st.starrocks_ddl, &fe)
         .await

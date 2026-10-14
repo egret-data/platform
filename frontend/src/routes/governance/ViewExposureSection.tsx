@@ -28,8 +28,9 @@ import {
  *
  * Three outcomes, never conflated (FE-STATE-1): the request failed, an engine
  * could not be listed (`starrocksMaterializedViews` is `null`), or the list is
- * genuinely empty. Only the last may say "none". Engines that are not running
- * are named as not checked whichever of the three it is.
+ * genuinely empty. Only the last may say "none". Engines that were not asked
+ * (external ones, which egret never connects to, and ones not running) are
+ * named as not checked, with the reason, whichever of the three it is.
  *
  * `engineGated`: the tag has a role clearance, so it compiles to the A3 deny.
  * Only then does the cost sentence apply; a group-only or informational tag
@@ -75,13 +76,12 @@ export default function ViewExposureSection({
       {notChecked.length > 0 && (
         <div className="text-sm">
           <p className="text-muted-foreground">
-            Not checked: these engines are not running, so their materialized views are unknown.
-            Start the engine, then reload the page.
+            Not checked: egret did not ask these engines, so their materialized views are unknown.
           </p>
           <ul className="list-disc pl-5">
             {notChecked.map((e) => (
               <li key={e.engine}>
-                {e.engine} ({e.status})
+                {e.engine}: {notCheckedText(e.reason)}
               </li>
             ))}
           </ul>
@@ -140,4 +140,15 @@ export default function ViewExposureSection({
       )}
     </section>
   );
+}
+
+/** What a not-checked reason means, and what the reader can do about it. */
+function notCheckedText(reason: string): string {
+  if (reason === "external") {
+    return "external. egret does not connect to engines it does not run; check this engine's materialized views directly.";
+  }
+  if (reason.startsWith("not running")) {
+    return `${reason}. Start the engine, then reload the page.`;
+  }
+  return reason;
 }

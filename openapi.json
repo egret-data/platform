@@ -39167,18 +39167,18 @@
       },
       "EngineNotChecked": {
         "type": "object",
-        "description": "An engine that reaches the classification but was not asked, because it is\nnot running.",
+        "description": "An engine that reaches the classification but was not asked.",
         "required": [
           "engine",
-          "status"
+          "reason"
         ],
         "properties": {
           "engine": {
             "type": "string"
           },
-          "status": {
+          "reason": {
             "type": "string",
-            "description": "`engine_mgmt.engines.status`: `provisioning`, `failed` or `deleting`."
+            "description": "Why it was not asked: `external` (egret never connects to an engine it\ndoes not run, and holds no credential for it) or `not running: <status>`\n(`provisioning`, `failed` or `deleting`)."
           }
         }
       },
@@ -47948,7 +47948,7 @@
             "items": {
               "$ref": "#/components/schemas/EngineNotChecked"
             },
-            "description": "Engines that reach the classification but are not running, so were not\nasked. Their views are unknown, not absent."
+            "description": "Engines that reach the classification but were not asked (external, or\nnot running). Their views are unknown, not absent."
           },
           "trinoViews": {
             "type": "array",

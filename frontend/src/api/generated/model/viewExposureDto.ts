@@ -21,8 +21,8 @@ export interface ViewExposureDto {
      */
   starrocksListError?: string | null;
   /**
-     * Engines that reach the classification but are not running, so were not
-     * asked. Their views are unknown, not absent.
+     * Engines that reach the classification but were not asked (external, or
+     * not running). Their views are unknown, not absent.
      */
   enginesNotChecked: EngineNotChecked[];
   /** Always empty until Trino views are reported. */

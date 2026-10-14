@@ -83,17 +83,24 @@ describe("ViewExposureSection", () => {
     expect(within(row as HTMLElement).getByText(/matched by text/i)).toBeInTheDocument();
   });
 
-  test("names the engines that were not checked, with their status", () => {
+  test("names the engines that were not checked, with the reason", () => {
     respond({
       ...EMPTY,
-      enginesNotChecked: [{ engine: "sr-down", status: "provisioning" }],
+      enginesNotChecked: [
+        { engine: "sr-down", reason: "not running: provisioning" },
+        { engine: "sr-ext", reason: "external" },
+      ],
     });
     render(<ViewExposureSection tagId="t1" engineGated />);
 
     const note = screen.getByText(/not checked/i).closest("div");
     expect(note).not.toBeNull();
-    expect(within(note as HTMLElement).getByText(/sr-down/)).toBeInTheDocument();
-    expect(within(note as HTMLElement).getByText(/provisioning/)).toBeInTheDocument();
+    const down = within(note as HTMLElement).getByText(/sr-down/);
+    expect(down).toHaveTextContent(/not running: provisioning/);
+    expect(down).toHaveTextContent(/start the engine/i);
+    const ext = within(note as HTMLElement).getByText(/sr-ext/);
+    expect(ext).toHaveTextContent(/external/);
+    expect(ext).toHaveTextContent(/egret does not connect to engines it does not run/i);
   });
 
   test("a role clearance names the cost of the engine-wide deny", () => {

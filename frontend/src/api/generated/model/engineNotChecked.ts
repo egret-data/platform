@@ -7,11 +7,14 @@
  */
 
 /**
- * An engine that reaches the classification but was not asked, because it is
- * not running.
+ * An engine that reaches the classification but was not asked.
  */
 export interface EngineNotChecked {
   engine: string;
-  /** `engine_mgmt.engines.status`: `provisioning`, `failed` or `deleting`. */
-  status: string;
+  /**
+     * Why it was not asked: `external` (egret never connects to an engine it
+     * does not run, and holds no credential for it) or `not running: <status>`
+     * (`provisioning`, `failed` or `deleting`).
+     */
+  reason: string;
 }
