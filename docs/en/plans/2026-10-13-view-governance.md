@@ -341,12 +341,13 @@ Each is a design question for the user.
 
 - [ ] **Step 1: Write the failing tests.**
   - A download records a row (upsert).
-  - On a 304 the plugin's `last_known_version` is recorded as held.
+  - A 200 that serves V does not by itself make the plugin hold V. The next poll with `lastKnownVersion=V` does.
   - Two plugin ids for one service: `confirmed` only when both hold version ≥ V.
   - A plugin not seen within `recent` is ignored.
   - With no plugin seen at all, `confirmed: false` and `waiting_on: ["<no plugin has polled>"]`. This is fail-closed: never confirm vacuously.
 - [ ] **Step 2: Write the migration, the upsert in both handlers, and the two functions.**
-  - A plugin "holds" the version it was served on a 200, or its `lastKnownVersion` on a 304.
+  - A plugin "holds" only the `lastKnownVersion` it reports on a later poll. A version served on a 200 is recorded, but it never counts as held (spec B4, revised 2026-10-14).
+  - Key the row by the service the poll names. Trino polls tags under its **resource** service name, not under the tag service (live result §1 Q4). So `wait_for_tag_version` takes the resource service ids of the Trino engines bound to the affected tag service. StarRocks never polls tags.
   - Record without delaying the response. One upsert is acceptable inline; if measured above 5 ms, move it off the request path and say so.
 - [ ] **Step 3: Mutate.** Make `confirmed` true when any one plugin holds the version. The two-plugin test must fail. Restore.
 - [ ] **Step 4: Run the tests, clippy and fmt, then commit.**
@@ -358,7 +359,7 @@ Each is a design question for the user.
 
 **Files:**
 - Create: `migrations/0187_view_lineage.sql`, `crates/egret-perm-compile/src/lineage.rs`.
-- Modify: the compiler, to emit the `egret-lineage` principal's minimum policy as measured in Task 5 Q3, and the engine connection code that runs statements on Trino (`git grep -n "fn run_query" crates/egret-query/src`).
+- Modify: the compiler, to emit the `egret-lineage` principal's policy (spec R5, revised 2026-10-14). On Trino profiles it gets `use` and `select` on every governed catalog, and it joins the exceptions of every compiled deny. It is excluded from every compiled mask and row filter: a test asserts that its EXPLAIN outcome on a classified, masked and filtered column is unmasked and unfiltered. Also modify the engine connection code that runs statements on Trino (`git grep -n "fn run_query" crates/egret-query/src`).
 - Test: unit tests in `lineage.rs`, and a DB test.
 
 **Interfaces:**
@@ -371,14 +372,18 @@ Each is a design question for the user.
   - `pub trait ExplainRunner { async fn explain_io(&self, default_catalog: &str, default_schema: &str, sql: &str) -> Result<serde_json::Value, String>; }`;
   - `pub fn lineage_tables(explain_json: &Value) -> Result<BTreeSet<(String,String,String)>, String>`;
   - `pub async fn view_tag_set(conn, tables: &BTreeSet<…>) -> Result<BTreeSet<Uuid /*tag id*/>, sqlx::Error>`: the union of the clearance-bearing tags on any column of those tables;
-  - `pub fn explain_only(sql: &str) -> Result<String, String>`: wraps the statement as `EXPLAIN (TYPE IO, FORMAT JSON) <sql>`. It refuses a `sql` that contains a statement terminator outside a string, and any `sql` that is not a single query.
+  - `pub fn explain_only(sql: &str) -> Result<String, String>`: wraps the statement as `EXPLAIN (TYPE IO, FORMAT JSON) <sql>`.
+    - Do not write a lexer: a lexer-based gate has been bypassed four times in this repo.
+    - The defences are, first, Trino's statement protocol, which runs exactly one statement per request, so the wrapped text is an EXPLAIN or a parse error. Second, the principal holds only `use` and `select`.
+    - `explain_only` refuses an empty `sql`, and a `sql` whose first keyword after whitespace is `EXPLAIN`, because `EXPLAIN ANALYZE` executes.
+    - The runner checks that the response parses as the IO-plan shape.
 
 - [ ] **Step 1: Write the failing tests.**
-  - `lineage_tables` on the JSON recorded in Task 5 (nested view, join) gives exactly the base tables.
+  - `lineage_tables` on the JSON recorded in Task 5 (nested view, join) gives exactly the base tables. The shape is `inputTableColumnInfos[].table = {catalog, schemaTable: {schema, table}}`; see live result §1 Q3.
   - An unexpected shape gives `Err`, never an empty set.
   - `view_tag_set` gives the union.
-  - `explain_only` refuses `select 1; drop table x`.
-  - A fake `ExplainRunner` returning an empty input list for a view whose SQL names a table gives `Err`. An empty lineage is treated as failure.
+  - `explain_only` refuses `""` and `explain analyze select 1`.
+  - A fake `ExplainRunner` returning an empty input list gives `Err` with the R6 reason ("the engine reports no input table; egret refuses views it cannot judge"). An empty lineage is always a refusal (spec R6).
 - [ ] **Step 2: Implement**, including the runner bound to the `egret-lineage` principal on a Trino engine bound to the view's catalog.
 - [ ] **Step 3: Mutate.** Make `lineage_tables` return `Ok(empty)` on an unknown shape. A test must fail. Restore.
 - [ ] **Step 4: Run the tests, clippy and fmt, then commit.**
@@ -389,7 +394,7 @@ Each is a design question for the user.
 ### Task 8: Hold the view commit until the tags are on every plugin (B2)
 
 **Files:**
-- Create: `crates/egret-catalog-engine/src/view_hold.rs`, wired at the hook Task 5 Q1 chose.
+- Create: `crates/egret-catalog-engine/src/view_hold.rs`, wired as an axum layer in front of the mounted Iceberg router in `mount.rs`. This is the hook Task 5 Q1 chose; read live result §1 Q1 for the exact requests.
 - Test: a DB test with a fake `ExplainRunner` and a fake plugin. The plugin is a task that calls `download_tags` with an advancing `lastKnownVersion`, or never does.
 
 **Interfaces:**
@@ -403,7 +408,14 @@ Each is a design question for the user.
 4. Wait (`wait_for_tag_version`, limit 2 × poll interval) for every tag service a bound Trino engine uses.
 5. On success, let the view commit proceed. On timeout, or if the view commit itself fails, compensate in one transaction: delete exactly the assignments and lineage rows written in step 3, and bump the tag version again. Then refuse.
 
-**Refusal.** An Iceberg REST error the engine shows the user (`403`/`409`/`503`; choose per Task 5's observation of what Trino prints). The message names one of the reasons:
+**Requests (live result §1 Q1).**
+- Create is `POST …/namespaces/{ns}/views`. Replace is `POST …/views/{v}` carrying `add-view-version`.
+- The SQL, the default catalog and the default namespace come from the view version in the body.
+- A commit with no new view version passes through untouched. Examples are `COMMENT ON VIEW` and a replace whose updates are empty.
+- If lakekeeper answers non-2xx after a hold, compensate exactly as in step 5.
+- Rename (`POST …/views/rename`) moves the lineage rows and the view column tag assignments to the new name, under the same hold.
+
+**Refusal.** A `409` Iceberg REST error, which Trino prints verbatim (measured). The message names one of the reasons:
 - `lineage could not be computed: …`;
 - `engines did not confirm the classification tags within 60 s: <plugin ids>`.
 
@@ -412,7 +424,10 @@ Each is a design question for the user.
   2. With a plugin that never polls, the request is refused within the limit plus a margin. No view exists, and no assignment or lineage row remains.
   3. A view over unclassified tables commits with no wait.
   4. An EXPLAIN failure refuses, and nothing is written.
-  5. `CREATE OR REPLACE` (and `ALTER VIEW … AS`, if Task 5 found it) goes through the same hold.
+  5. `CREATE OR REPLACE` goes through the same hold. (`ALTER VIEW … AS` is not in Trino 483's grammar.)
+  6. A commit with no new view version passes untouched.
+  7. When lakekeeper answers non-2xx after the hold, nothing written in step 3 remains.
+  8. Rename moves the lineage and the tags.
 - [ ] **Step 2: Implement.**
 - [ ] **Step 3: Mutate.** Skip the wait. Test 1 must fail. Restore.
 - [ ] **Step 4: Run the tests, clippy and fmt, then commit.**
@@ -437,6 +452,7 @@ Each is a design question for the user.
   - A view whose `view_lineage_state` is `failed` keeps its old tags.
   - Dropping a view deletes its lineage and its assignments.
   - The sweep recomputes lineage and reports the failures.
+  - The sweep tags a view whose pruned branch now reads a classified table (spec R6). Simulate this with a fake runner whose answer changes between runs.
 - [ ] **Step 2: Implement.**
 - [ ] **Step 3: Mutate.** Bump the tag version twice (once for the base, once for the views). The single-bump test must fail. Restore.
 - [ ] **Step 4: Run the tests, clippy and fmt, then commit.**
@@ -452,12 +468,13 @@ Each is a design question for the user.
 - Test: a route test and a vitest.
 
 **Interfaces:**
-- Produces: `trinoViews: Vec<{catalog, schema, name, securityMode: "definer"|"invoker"|"unknown", owner: Option<String>, ownerCleared: Option<bool>, reason: "classified"|"mask_or_row_filter"}>`. Use `"unknown"` whenever Task 5 Q2 found the mode is not stored. Never infer "definer".
+- Produces: `trinoViews: Vec<{catalog, schema, name, securityMode: "definer"|"invoker"|"unknown", owner: Option<String>, ownerCleared: Option<bool>, reason: "classified"|"mask_or_row_filter"}>`. The mode comes from the stored view property `trino.run-as-owner`. It is present for DEFINER (the value is the owner) and absent for INVOKER, as live result §1 Q2 found. `load_view_detail` drops properties, so read them separately. Use `"unknown"` when the metadata cannot be read. Never infer "definer". `trinoViews` items also carry `matchedBy: "lineage"`, on the shared item type from Task 4b.
 
 - [ ] **Step 1: Write the failing tests.**
   - A view whose lineage includes a classified table is listed with `reason: "classified"`.
   - A view over a table with a mask rule is listed with `reason: "mask_or_row_filter"`.
-  - When the mode is not stored, it is `"unknown"`.
+  - When the metadata cannot be read, the mode is `"unknown"`.
+  - A view with `trino.run-as-owner` is `"definer"` with that owner. A view without it is `"invoker"`.
 - [ ] **Step 2: Implement the route.** Then build the page section: the table, plus a one-line explanation of DEFINER versus INVOKER. Write the vitest first.
 - [ ] **Step 3: Write the guide.**
   - What is protected:
@@ -470,7 +487,13 @@ Each is a design question for the user.
     - engines older than 4.1.6;
     - existing materialized views.
   - The `CREATE VIEW` wait and its refusal messages, and what to do about each.
-  - The `SECURITY INVOKER` recommendation.
+  - The `SECURITY INVOKER` recommendation. Because of the Trino 483 defect, switching a view to INVOKER needs `DROP VIEW` then `CREATE VIEW`: `CREATE OR REPLACE … SECURITY INVOKER` keeps DEFINER.
+  - The accepted risks, in plain words (spec R2, R5, R6, B4):
+    - users not cleared for every classification on a StarRocks engine cannot create any materialized view there;
+    - the `egret-lineage` principal can read governed data, and only egret holds its credential;
+    - a view is refused when the engine reports no input table;
+    - a pruned branch is caught only at the next sweep;
+    - the anonymous download endpoint lets a forged poll end a hold early, and the real plugin catches up within one interval.
 - [ ] **Step 4: Regenerate the API client, run the tests and lint, then commit.**
   Message: `feat(control-plane): audit DEFINER views over classified data; view-governance guide`.
 
@@ -488,13 +511,17 @@ Each is a design question for the user.
   - a direct read is refused;
   - a cleared reader with a rule mask gets the rule mask;
   - `create materialized view` by an uncleared user is refused, while `create view` and `create table` work;
-  - the page lists a materialized view created before the deny.
+  - the page lists a materialized view created before the deny;
+  - the FE sends `create materialized view` on `{default_catalog, <db>}` to the plugin (from egret's or the FE's audit log);
+  - the admin connection sees every materialized view in `information_schema.materialized_views` under Ranger.
 - [ ] **Step 3: Observe on Trino 483**, with an Iceberg catalog served by egret:
   - a DEFINER view by a cleared owner is refused to an uncleared reader on the **first** read after `CREATE VIEW` returns (run the read immediately, in the same script);
   - a cleared reader reads it;
   - `CREATE VIEW` over a classified table returns after at most one poll interval;
   - stopping the engine's polling (pause the container) gives the refusal message, and no view is created;
-  - classifying a base column after the view exists denies the view to the uncleared reader once the tags arrive.
+  - classifying a base column after the view exists denies the view to the uncleared reader once the tags arrive;
+  - whether Trino workers, not only the coordinator, poll tags (from the plugin ledger), and that the hold waits for all of them;
+  - a view with an empty lineage (`WHERE false`) is refused with the R6 reason.
 - [ ] **Step 4: Compare explain and the page with the engine** for each reader. Any difference is **Critical**.
 - [ ] **Step 5: Write section 2**, stop your own PIDs and `vg-*` containers, list what is left, and commit.
   Message: `docs(plans): view governance live on Trino 483 and StarRocks 4.1.6`.

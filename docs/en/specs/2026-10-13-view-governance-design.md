@@ -29,6 +29,8 @@ Effective access is therefore the union of the direct path and the view path. It
 | R1 | One spec or two | **One spec, two parts.** One plan covers both. |
 | R2 | Scope of the StarRocks materialized-view deny | ~~Per database that holds a classified column.~~ **Revised 2026-10-14: the whole engine.** One deny on `default_catalog`, every database, for each StarRocks profile that holds a classified column. The exceptions are the users cleared for **every** classification with a column on that profile. (A per-database deny cannot match, see A3.) |
 | R3 | How precise Trino lineage is | **Table-level, decided by the engine.** If a view reads a table with a classified column, every column of the view gets the union of that table's classification tags. egret does not parse SQL. |
+| R5 | Privileges of the lineage principal (2026-10-14, after Task 5 measured that EXPLAIN needs `select`) | **It reads everything egret governs.** `egret-lineage` gets `use` and `select` on every governed catalog, and is excepted from every compiled deny, mask and row filter. Only egret holds its credential, and egret's client sends nothing but EXPLAIN as it. |
+| R6 | An empty lineage (2026-10-14) | **Refuse the view, and sweep.** A view whose EXPLAIN reports no input table is refused with a reason. The B3 sweep re-runs EXPLAIN on a schedule to catch branches the optimizer pruned. |
 | R4 | The window between a view existing and its tags reaching the engines | **Hold the commit until every engine has the tags.** If that cannot be done in time, refuse the view, with a reason. |
 
 ## Part A — StarRocks
@@ -115,10 +117,19 @@ If any lineage table has a classified column, **every** column of the view gets 
 
 A tag on a view column is enforced end to end on Trino 483 (§2.6 item 2). The clearance deny, which is a tag policy and is evaluated first, applies to the reader **whatever the view's security mode**. This closes the `vd_c` leak.
 
-**Who runs the EXPLAIN.**
-- A dedicated principal, `egret-lineage`. egret compiles the minimum policy it needs on the catalogs egret governs.
-- The plan measures what that minimum is: whether EXPLAIN asks for `select` on base columns, or only metadata.
-- egret only ever sends `EXPLAIN` as this principal. A statement that is not EXPLAIN is refused in egret's client before it reaches the engine.
+**Who runs the EXPLAIN (R5, measured in live result §1 Q3).**
+- A dedicated principal, `egret-lineage`.
+- **Why it needs `select`.** On Trino 483, `EXPLAIN (TYPE IO)` needs `use` on the catalog and `select` on every column the SQL references, including the bases of INVOKER inner views. No metadata-only grant is enough.
+- **Why it is excepted.** A row filter or a mask on the principal corrupts the lineage: a `1 = 0` filter gives `[]`, and a `MASK_NULL` mask dropped a column from a join.
+- **What the compiler emits.** It gives `egret-lineage` `use` and `select` on every catalog egret governs. It also adds the principal to the exceptions of every compiled deny, and excludes it from every compiled mask and row filter.
+- **Who holds the credential.** Only egret. egret's client sends nothing but `EXPLAIN` as this principal: any other statement is refused before it reaches the engine.
+- **Accepted risk.** The principal can read governed data. egret is already the Ranger Admin and could grant itself the same, so the added exposure is the credential itself. The guide states this.
+
+**Empty lineage (R6).** EXPLAIN reports inputs after optimization, so `WHERE false`, `LIMIT 0` and `WHERE current_date > DATE '2099-01-01'` all report no input.
+- A view whose lineage is empty is refused, and the reason names this rule.
+- A branch the optimizer prunes while others remain (for example one arm of a `UNION`) cannot be seen at commit. The B3 sweep re-runs EXPLAIN on a schedule and tags the view when that branch appears. The window between the predicate becoming true and the next sweep is stated in the guide.
+
+**Input shape.** The JSON gives `inputTableColumnInfos[].table = {catalog, schemaTable: {schema, table}}`. It lists only base tables, for nested views and joins alike.
 
 **Which engine.** Any running Trino engine bound to the view's catalog. If none is reachable, B2's refusal applies.
 
@@ -145,9 +156,17 @@ The message names the reason and what to do about it. A view that egret cannot j
 
 **Cost.** A `CREATE VIEW` that reads classified data waits up to one poll interval. A view that reads no classified table is not delayed.
 
-**Where to hook.** The plan decides between two options and measures that the chosen one sees create, `CREATE OR REPLACE` and `ALTER VIEW … AS`:
-- lakekeeper's contract-verification hook, if it runs before the view commit and can veto it;
-- an axum layer in front of the mounted Iceberg router (`egret-catalog-engine/src/mount.rs`).
+**Where to hook (measured, live result §1 Q1).** An axum layer in front of the mounted Iceberg router (`egret-catalog-engine/src/mount.rs`).
+- lakekeeper's contract verification is not used. It never runs on view create, and on a commit it runs inside an open Postgres write transaction.
+- Trino 483 sends create as `POST …/namespaces/{ns}/views`, and replace as `POST …/views/{v}` carrying `add-view-version`.
+- `ALTER VIEW … AS` is not in Trino 483's grammar.
+- A 65 s hold succeeded with no client retry, and a 409 is printed verbatim by Trino.
+
+**Requests the layer must handle.**
+- **A commit with no new view version** (`COMMENT ON VIEW`, or a replace whose updates are empty) passes through with no lineage work.
+- **lakekeeper refuses the request.** The layer runs before lakekeeper's own validation, so when lakekeeper answers non-2xx after a hold, egret rolls back the tag assignments and the lineage it wrote.
+- **Rename** moves the lineage and the tag assignments to the new name, within a hold.
+- **Drop** deletes them after lakekeeper answers 2xx.
 
 ### B3. Keep view tags in step with base classifications
 
@@ -168,9 +187,17 @@ egret serves `download_tags` (`egret-policy/src/ranger/api/download.rs`), so it 
 - the version served;
 - the time.
 
-"Engine E holds version ≥ V" means a download from E's plugin has been served version ≥ V. The engine-to-plugin mapping comes from the bound engine's service name and its pod or host, which the plan works out from the `pluginId` format.
+"Engine E holds version ≥ V" means a **later** download from E's plugin reports `lastKnownVersion` ≥ V. A served version is not enough, because the plugin may fail to apply it.
 
-StarRocks runs two plugin instances that switch versions seconds apart (§2.6 item 6e). The confirmation therefore waits for every plugin id seen for that service within the last three poll intervals, not for the first one.
+**Mapping a `pluginId` to an engine** (live result §1 Q4). The format is `<appId>@<hostname>-<serviceName>`, for example `trino@e00d4f5be6a4-vg-trino`.
+- The host part is the container or pod name, not the engine host registered in egret.
+- The mapping uses the service name: each profile binds one engine.
+- Trino polls tags under its **resource** service name, not under the tag service, so the ledger is keyed by the service the poll names.
+- StarRocks never polls tags, so B2 waits only for Trino plugins.
+
+**Forged polls.** The download endpoint is anonymous, so anyone who can reach egret can forge a confirming poll. A forged poll can only end a hold early: the real plugin still applies the new version on its next poll, within one interval. The guide states this.
+
+The confirmation waits for every plugin id seen for that service within the last three poll intervals, not for the first one. (StarRocks runs two plugin instances, §2.6 item 6e, but it does not poll tags. Trino workers may poll too; Task 11 checks this.)
 
 ### B5. Audit DEFINER views
 
@@ -180,7 +207,9 @@ A DEFINER view over classified data no longer leaks with B1 in place. Two DEFINE
 
 The classification page lists every view in egret's catalogs whose lineage contains a classified table, or a table with a mask or row-filter rule. For each, it shows the view's security mode, its owner, and whether the owner is cleared. The guide recommends `SECURITY INVOKER`. egret does not rewrite views.
 
-The plan measures first whether Trino stores the security mode in the Iceberg view metadata. If it does not, the column shows "unknown", never "DEFINER".
+**Where the mode is stored** (measured, live result §1 Q2). A DEFINER view carries `properties["trino.run-as-owner"] = <owner>`; an INVOKER view does not. The audit reads this stored property and never trusts the statement. `load_view_detail` does not return properties today, so the audit reads them separately.
+
+**Trino 483 defect.** `CREATE OR REPLACE … SECURITY INVOKER` does not remove the property, so a view that was ever DEFINER stays DEFINER. The guide says to switch a view to INVOKER with `DROP VIEW` then `CREATE VIEW`.
 
 ### B6. What Part B does not cover
 
