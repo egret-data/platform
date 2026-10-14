@@ -30173,6 +30173,134 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/disabled": {
+      "put": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "set_trigger_disabled",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "trigger_id",
+            "in": "path",
+            "description": "The trigger's `id` in the flow's YAML",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetTriggerDisabledRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Switched (idempotent: off twice, or on with no switch, is a 200). The answer is the trigger's entry as `GET .../triggers` returns it. Off stops the trigger's schedule claim, Flow-trigger listener and webhook; a fire already claimed commits first, and no new schedule fire starts after the answer. A Flow-trigger pass or a webhook request that read the switch before it changed may still fire once more after the answer. A re-enabled `Schedule` whose next date has passed skips the missed ticks, or with `recover_missed: true` follows its `recoverMissedSchedules`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerEntryDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The flow's saved source does not parse (`code: source_does_not_parse`), or the body is not a switch request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such flow in this workspace, the flow is in the trash, or its source declares no trigger with this id (`code: not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`code: trigger_disabled_in_source` (switching on a trigger whose flow or trigger YAML says `disabled: true`; switching it off is accepted), `trigger_not_supported` (a trigger type egret does not run), or `recover_missed_unknown` (`recover_missed: true` and `recoverMissedSchedules` is not ALL, NONE or LAST)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/flows/{id}/validate": {
       "post": {
         "tags": [
@@ -32951,6 +33079,105 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/triggers/disabled": {
+      "put": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "set_triggers_disabled",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetTriggersDisabledRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A result per entry, in the order given. Each entry is switched in its own transaction, as the per-trigger route does, and a refusal (`ok: false` with its `code`: a flow outside this workspace is `not_found`, never a 403) does not stop the next. A Flow-trigger pass or a webhook request that read a switch before it changed may still fire once more after the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkResultsDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "More than 100 entries (nothing is switched), or the body is not a bulk switch request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 64 KiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error; entries before the failing one may be switched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/data-api/v1/{ws}": {
       "get": {
         "tags": [
@@ -35015,6 +35242,86 @@
           "finally",
           "after_execution"
         ]
+      },
+      "BulkResultDto": {
+        "type": "object",
+        "description": "One entry's outcome.",
+        "required": [
+          "flow_id",
+          "trigger_id",
+          "ok"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "trigger_id": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "Switched (and committed)."
+          },
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why not: `not_found`, `source_does_not_parse`,\n`trigger_disabled_in_source`, `trigger_not_supported`,\n`recover_missed_unknown`."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The refusal's sentence."
+          },
+          "trigger": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TriggerEntryDto",
+                "description": "The trigger's entry after the switch, when `ok`."
+              }
+            ]
+          }
+        }
+      },
+      "BulkResultsDto": {
+        "type": "object",
+        "description": "A result per entry, in the order given.",
+        "required": [
+          "results"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkResultDto"
+            }
+          }
+        }
+      },
+      "BulkTriggerRef": {
+        "type": "object",
+        "description": "One trigger of a bulk switch.",
+        "required": [
+          "flow_id",
+          "trigger_id"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The flow's uuid."
+          },
+          "trigger_id": {
+            "type": "string"
+          }
+        }
       },
       "CacheScope": {
         "type": "string",
@@ -45016,6 +45323,47 @@
           }
         }
       },
+      "SetTriggerDisabledRequest": {
+        "type": "object",
+        "description": "Switch one trigger on or off.",
+        "required": [
+          "disabled"
+        ],
+        "properties": {
+          "disabled": {
+            "type": "boolean",
+            "description": "`true`: off; `false`: on."
+          },
+          "recover_missed": {
+            "type": "boolean",
+            "description": "On a re-enable of an overdue `Schedule` only: `false` (the default)\nskips the missed ticks (the next date becomes the first tick after\nnow); `true` follows the trigger's `recoverMissedSchedules` (absent or\n`ALL`: every missed tick runs; `NONE`: skip; `LAST`: the latest one\nruns). Ignored otherwise."
+          }
+        }
+      },
+      "SetTriggersDisabledRequest": {
+        "type": "object",
+        "description": "Switch up to 100 triggers on or off, each on its own.",
+        "required": [
+          "triggers",
+          "disabled"
+        ],
+        "properties": {
+          "triggers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkTriggerRef"
+            },
+            "description": "At most 100."
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "recover_missed": {
+            "type": "boolean",
+            "description": "As [`SetTriggerDisabledRequest::recover_missed`], for every entry."
+          }
+        }
+      },
       "SetWorkspacesBody": {
         "type": "object",
         "description": "`PUT /engines/{id}/workspaces` body: the FULL desired set of workspace ids the\nengine should be assigned to (the handler diffs it against the current set).",
@@ -46510,7 +46858,8 @@
             "required": [
               "flow_uuid",
               "namespace",
-              "flow_id"
+              "flow_id",
+              "flow_disabled"
             ],
             "properties": {
               "flow_uuid": {
@@ -46524,6 +46873,10 @@
               "flow_id": {
                 "type": "string",
                 "description": "The flow's YAML `id`."
+              },
+              "flow_disabled": {
+                "type": "boolean",
+                "description": "The flow's YAML says `disabled: true`, or its `state` is `disabled`\n(the per-flow route's top-level `flow_disabled`, per row): what makes a\ntrigger `effective_disabled` when neither `yaml_disabled` (which also\ncovers the flow's YAML) nor `runtime_disabled` does."
               }
             }
           }

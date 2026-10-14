@@ -1,4 +1,6 @@
 //! Reading triggers (W7e spec §3.5, §3.6): a flow's, and the workspace's.
+//! Switching them on and off at runtime (§3.3, §3.7) is [`switch`], behind
+//! the two `PUT` routes in [`routes`].
 //!
 //! # What is read, from where
 //!
@@ -32,6 +34,7 @@
 pub(crate) mod entry;
 pub(crate) mod routes;
 pub(crate) mod state;
+pub(crate) mod switch;
 
 #[cfg(test)]
 mod tests {

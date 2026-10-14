@@ -1,9 +1,12 @@
-//! The two read routes (W7e spec §3.5): a flow's triggers and the
-//! workspace's, their wire shapes, and the error the list adds.
+//! The trigger routes: the two reads (W7e spec §3.5), a flow's triggers and
+//! the workspace's, and the two switches (§3.3, §3.7), one trigger or a
+//! selection; their wire shapes and the coded errors they add.
 //!
 //! ```text
 //! GET /api/ws/{workspace}/workflows/flows/{id}/triggers
 //! GET /api/ws/{workspace}/workflows/triggers
+//! PUT /api/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/disabled
+//! PUT /api/ws/{workspace}/workflows/triggers/disabled
 //! ```
 
 use axum::extract::{Path, Query, State};
@@ -17,9 +20,10 @@ use uuid::Uuid;
 
 use super::entry::{self, Detail, FlowCtx};
 use super::state::{db_err, last_executions, read_state, Key};
+use super::switch::{self, SwitchRefusal};
 use crate::namespaces::dependencies::{off_runtime, DraftRow, MAX_FLOWS};
 use crate::repo::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
-use crate::routes::{caller_may_manage, WorkflowState, WF_READ};
+use crate::routes::{caller_may_manage, WorkflowState, WF_MANAGE, WF_READ};
 
 /// What a trigger is, as egret runs it: one of the three kinds it fires, or
 /// `other` (a `Leaf`: any other type, which egret never fires).
@@ -213,6 +217,11 @@ pub struct TriggerRowDto {
     pub namespace: String,
     /// The flow's YAML `id`.
     pub flow_id: String,
+    /// The flow's YAML says `disabled: true`, or its `state` is `disabled`
+    /// (the per-flow route's top-level `flow_disabled`, per row): what makes a
+    /// trigger `effective_disabled` when neither `yaml_disabled` (which also
+    /// covers the flow's YAML) nor `runtime_disabled` does.
+    pub flow_disabled: bool,
     #[serde(flatten)]
     pub entry: TriggerEntryDto,
 }
@@ -506,6 +515,7 @@ pub(crate) fn build_rows(
                     flow_uuid: d.id,
                     namespace: d.namespace.clone(),
                     flow_id: d.flow_id.clone(),
+                    flow_disabled: parsed.disabled || d.state == "disabled",
                     entry: e,
                 });
             }
@@ -602,4 +612,308 @@ pub(crate) async fn list_triggers(
         worker_enabled: flags.worker_enabled,
         webhooks_enabled: flags.webhooks_enabled,
     }))
+}
+
+// ── The switches (§3.3, §3.7) ────────────────────────────────────────────────
+
+/// 409: switching on a trigger the flow's or the trigger's YAML disables (D4).
+pub const TRIGGER_DISABLED_IN_SOURCE: &str = "trigger_disabled_in_source";
+/// 409: a `Leaf` trigger, which egret never fires, has no switch.
+pub const TRIGGER_NOT_SUPPORTED: &str = "trigger_not_supported";
+/// 409: `recover_missed: true` and the trigger's `recoverMissedSchedules` is
+/// not `ALL`, `NONE` or `LAST`.
+pub const RECOVER_MISSED_UNKNOWN: &str = "recover_missed_unknown";
+/// 404: no such flow in the workspace (or in the trash), or no such trigger.
+pub const TRIGGER_NOT_FOUND: &str = "not_found";
+/// 400: the flow's saved source does not parse.
+pub const TRIGGER_SOURCE_UNPARSABLE: &str = "source_does_not_parse";
+
+/// The most entries one bulk request switches.
+pub const MAX_BULK_TRIGGERS: usize = 100;
+/// The bulk route's body cap (`DefaultBodyLimit`): 100 entries fit many
+/// times over.
+pub const MAX_BULK_TRIGGERS_BODY_BYTES: usize = 64 * 1024;
+
+/// Switch one trigger on or off.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SetTriggerDisabledRequest {
+    /// `true`: off; `false`: on.
+    pub disabled: bool,
+    /// On a re-enable of an overdue `Schedule` only: `false` (the default)
+    /// skips the missed ticks (the next date becomes the first tick after
+    /// now); `true` follows the trigger's `recoverMissedSchedules` (absent or
+    /// `ALL`: every missed tick runs; `NONE`: skip; `LAST`: the latest one
+    /// runs). Ignored otherwise.
+    #[serde(default)]
+    pub recover_missed: bool,
+}
+
+/// One trigger of a bulk switch.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BulkTriggerRef {
+    /// The flow's uuid.
+    pub flow_id: Uuid,
+    pub trigger_id: String,
+}
+
+/// Switch up to 100 triggers on or off, each on its own.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SetTriggersDisabledRequest {
+    /// At most 100.
+    pub triggers: Vec<BulkTriggerRef>,
+    pub disabled: bool,
+    /// As [`SetTriggerDisabledRequest::recover_missed`], for every entry.
+    #[serde(default)]
+    pub recover_missed: bool,
+}
+
+/// One entry's outcome.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct BulkResultDto {
+    pub flow_id: Uuid,
+    pub trigger_id: String,
+    /// Switched (and committed).
+    pub ok: bool,
+    /// Why not: `not_found`, `source_does_not_parse`,
+    /// `trigger_disabled_in_source`, `trigger_not_supported`,
+    /// `recover_missed_unknown`.
+    pub code: Option<String>,
+    /// The refusal's sentence.
+    pub message: Option<String>,
+    /// The trigger's entry after the switch, when `ok`.
+    pub trigger: Option<TriggerEntryDto>,
+}
+
+/// A result per entry, in the order given.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct BulkResultsDto {
+    pub results: Vec<BulkResultDto>,
+}
+
+const TRIGGER_GONE: &str = "This trigger no longer exists in the flow; reload";
+
+/// A refusal's status, code and sentence.
+fn refusal_parts(r: &SwitchRefusal) -> (StatusCode, &'static str, String) {
+    match r {
+        SwitchRefusal::NotFound => (
+            StatusCode::NOT_FOUND,
+            TRIGGER_NOT_FOUND,
+            TRIGGER_GONE.to_string(),
+        ),
+        SwitchRefusal::Unparsable(m) => (
+            StatusCode::BAD_REQUEST,
+            TRIGGER_SOURCE_UNPARSABLE,
+            format!("the flow's saved source does not parse, so its triggers are unknown: {m}"),
+        ),
+        SwitchRefusal::DisabledInSource { flow: true } => (
+            StatusCode::CONFLICT,
+            TRIGGER_DISABLED_IN_SOURCE,
+            "This flow is disabled in its YAML; remove `disabled: true` there".to_string(),
+        ),
+        SwitchRefusal::DisabledInSource { flow: false } => (
+            StatusCode::CONFLICT,
+            TRIGGER_DISABLED_IN_SOURCE,
+            "This trigger is disabled in the flow's YAML; remove `disabled: true` there"
+                .to_string(),
+        ),
+        SwitchRefusal::NotSupported => (
+            StatusCode::CONFLICT,
+            TRIGGER_NOT_SUPPORTED,
+            "egret does not run this trigger type, so it has no switch".to_string(),
+        ),
+        SwitchRefusal::RecoverUnknown(v) => (
+            StatusCode::CONFLICT,
+            RECOVER_MISSED_UNKNOWN,
+            format!("recoverMissedSchedules is {v}; egret knows ALL, NONE and LAST"),
+        ),
+    }
+}
+
+impl From<SwitchRefusal> for TriggerRouteError {
+    fn from(r: SwitchRefusal) -> Self {
+        let (status, code, message) = refusal_parts(&r);
+        TriggerRouteError::Coded {
+            status,
+            code,
+            message,
+        }
+    }
+}
+
+/// One switch in its own transaction: [`switch::set_disabled`], then the
+/// trigger's entry read **in that transaction** (so the answer is what was
+/// committed), the commit, and the audit event. The caller has passed
+/// `workflow:manage`.
+async fn switch_one(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    ws_slug: &str,
+    flow: Uuid,
+    trigger_id: &str,
+    disabled: bool,
+    recover_missed: bool,
+) -> egret_core::Result<std::result::Result<TriggerEntryDto, SwitchRefusal>> {
+    let ws = ctx.workspace_id.0;
+    let mut tx = st.db.pool.begin().await.map_err(db_err)?;
+    let sw = match switch::set_disabled(
+        &mut tx,
+        ws,
+        flow,
+        trigger_id,
+        disabled,
+        recover_missed,
+        ctx.principal.user_id.0,
+    )
+    .await?
+    {
+        Ok(sw) => sw,
+        Err(refusal) => {
+            tx.rollback().await.map_err(db_err)?;
+            return Ok(Err(refusal));
+        }
+    };
+    let state = read_state(&mut tx, &[flow]).await?;
+    let fctx = FlowCtx {
+        id: sw.flow.id,
+        ws_slug,
+        namespace: &sw.flow.namespace,
+        flow_id: &sw.flow.flow_id,
+        state: &sw.flow.state,
+        deleted: false,
+    };
+    // The first declaration with this id: the one the switch resolved.
+    let Some(at) = sw.parsed.triggers.iter().position(|t| t.id == trigger_id) else {
+        return Err(egret_core::Error::Internal(anyhow::anyhow!(
+            "the switched trigger {trigger_id} vanished from its parsed flow"
+        )));
+    };
+    let mut e =
+        entry::entries_for_flow(&fctx, &sw.parsed, &state, true, Detail::Full).swap_remove(at);
+    let key: Key = (flow, trigger_id.to_string());
+    e.last_execution = last_executions(&mut tx, std::slice::from_ref(&key))
+        .await?
+        .remove(&key);
+    tx.commit().await.map_err(db_err)?;
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ws),
+        if disabled {
+            "workflow_trigger:disable"
+        } else {
+            "workflow_trigger:enable"
+        },
+        "workflow_trigger",
+        Some(format!("{flow}/{trigger_id}")),
+        serde_json::json!({
+            "recover_missed": recover_missed,
+            "next_evaluation_date": sw.moved_to,
+        }),
+    ));
+    Ok(Ok(e))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/disabled",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Flow id"),
+        ("trigger_id" = String, Path, description = "The trigger's `id` in the flow's YAML"),
+    ),
+    request_body = SetTriggerDisabledRequest,
+    responses(
+        (status = 200, description = "Switched (idempotent: off twice, or on with no switch, is a 200). The answer is the trigger's entry as `GET .../triggers` returns it. Off stops the trigger's schedule claim, Flow-trigger listener and webhook; a fire already claimed commits first, and no new schedule fire starts after the answer. A Flow-trigger pass or a webhook request that read the switch before it changed may still fire once more after the answer. A re-enabled `Schedule` whose next date has passed skips the missed ticks, or with `recover_missed: true` follows its `recoverMissedSchedules`.", body = TriggerEntryDto),
+        (status = 400, description = "The flow's saved source does not parse (`code: source_does_not_parse`), or the body is not a switch request", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such flow in this workspace, the flow is in the trash, or its source declares no trigger with this id (`code: not_found`)", body = egret_core::http::ErrorBody),
+        (status = 409, description = "`code: trigger_disabled_in_source` (switching on a trigger whose flow or trigger YAML says `disabled: true`; switching it off is accepted), `trigger_not_supported` (a trigger type egret does not run), or `recover_missed_unknown` (`recover_missed: true` and `recoverMissedSchedules` is not ALL, NONE or LAST)", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+pub(crate) async fn set_trigger_disabled(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((ws_slug, id, trigger_id)): Path<(String, Uuid, String)>,
+    Json(body): Json<SetTriggerDisabledRequest>,
+) -> Result<Json<TriggerEntryDto>, TriggerRouteError> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let e = switch_one(
+        &st,
+        &ctx,
+        &ws_slug,
+        id,
+        &trigger_id,
+        body.disabled,
+        body.recover_missed,
+    )
+    .await??;
+    Ok(Json(e))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/workflows/triggers/disabled",
+    tag = "workflow",
+    params(WorkspacePath),
+    request_body = SetTriggersDisabledRequest,
+    responses(
+        (status = 200, description = "A result per entry, in the order given. Each entry is switched in its own transaction, as the per-trigger route does, and a refusal (`ok: false` with its `code`: a flow outside this workspace is `not_found`, never a 403) does not stop the next. A Flow-trigger pass or a webhook request that read a switch before it changed may still fire once more after the answer.", body = BulkResultsDto),
+        (status = 400, description = "More than 100 entries (nothing is switched), or the body is not a bulk switch request", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 413, description = "The body is over 64 KiB", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error; entries before the failing one may be switched", body = egret_core::http::ErrorBody),
+    ),
+)]
+pub(crate) async fn set_triggers_disabled(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path(ws_slug): Path<String>,
+    Json(body): Json<SetTriggersDisabledRequest>,
+) -> Result<Json<BulkResultsDto>, TriggerRouteError> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    if body.triggers.len() > MAX_BULK_TRIGGERS {
+        return Err(Error::InvalidInput(format!(
+            "{} triggers: a bulk switch takes at most {MAX_BULK_TRIGGERS}; nothing was switched",
+            body.triggers.len()
+        ))
+        .into());
+    }
+    let mut results = Vec::with_capacity(body.triggers.len());
+    for r in body.triggers {
+        let outcome = switch_one(
+            &st,
+            &ctx,
+            &ws_slug,
+            r.flow_id,
+            &r.trigger_id,
+            body.disabled,
+            body.recover_missed,
+        )
+        .await?;
+        results.push(match outcome {
+            Ok(e) => BulkResultDto {
+                flow_id: r.flow_id,
+                trigger_id: r.trigger_id,
+                ok: true,
+                code: None,
+                message: None,
+                trigger: Some(e),
+            },
+            Err(refusal) => {
+                let (_, code, message) = refusal_parts(&refusal);
+                BulkResultDto {
+                    flow_id: r.flow_id,
+                    trigger_id: r.trigger_id,
+                    ok: false,
+                    code: Some(code.to_string()),
+                    message: Some(message),
+                    trigger: None,
+                }
+            }
+        });
+    }
+    Ok(Json(BulkResultsDto { results }))
 }

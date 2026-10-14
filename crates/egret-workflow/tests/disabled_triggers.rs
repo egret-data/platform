@@ -305,9 +305,12 @@ async fn stage_a_resync_of_y(db: &Db, flow: Uuid) {
     .unwrap();
 }
 
-/// The switch route's first half (W7e spec §3.2 "Concurrency"; the route
-/// itself is Task 5): in one open transaction, the flow row `FOR NO KEY
-/// UPDATE`, then the switch row for `trig`.
+/// The switch route's first half (W7e spec §3.2 "Concurrency"), in the
+/// route's order (`triggers::switch::set_disabled`): in one open transaction,
+/// the flow row `FOR NO KEY UPDATE`, then the switch row for `trig`. A mimic
+/// rather than the route: these tests need the transaction held open between
+/// its two halves, which a request cannot be; `tests/runtime.rs`'s
+/// `a_save_and_a_switch_on_one_flow_end_with_the_switch` holds the real route.
 async fn route_holds_the_flow(
     db: &Db,
     flow: Uuid,

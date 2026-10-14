@@ -695,6 +695,25 @@ pub async fn anon_post(app: &App, path: &str) -> axum::response::Response {
         .unwrap()
 }
 
+/// `PUT` a JSON body to the authenticated app carrying **no session cookie**
+/// -- the 401 case for a `PUT` route (W7e's trigger switch). [`anon_get`]'s
+/// sibling; see its doc.
+pub async fn anon_put(app: &App, path: &str, body: serde_json::Value) -> axum::response::Response {
+    use tower::ServiceExt;
+    app.router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri(path)
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
 pub async fn put(
     app: &App,
     path: &str,

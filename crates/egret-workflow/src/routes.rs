@@ -15,6 +15,8 @@
 //! GET    /api/ws/{workspace}/workflows/flows/{id}/versions/{version}
 //! GET    /api/ws/{workspace}/workflows/flows/{id}/triggers              (triggers::routes)
 //! GET    /api/ws/{workspace}/workflows/triggers
+//! PUT    /api/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/disabled
+//! PUT    /api/ws/{workspace}/workflows/triggers/disabled
 //! POST   /api/ws/{workspace}/workflows/flows/graph
 //! GET    /api/ws/{workspace}/workflows/flows/{id}/graph
 //! POST   /api/ws/{workspace}/workflows/flows/{id}/executions
@@ -72,7 +74,7 @@ use std::sync::Arc;
 
 use axum::extract::{FromRef, Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use egret_auth::session::SessionService;
@@ -3334,6 +3336,20 @@ pub fn management_router() -> Router<WorkflowState> {
             get(crate::triggers::routes::list_triggers),
         )
         .route(
+            "/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/disabled",
+            put(crate::triggers::routes::set_trigger_disabled),
+        )
+        .route(
+            "/ws/{workspace}/workflows/triggers/disabled",
+            // The bulk body's own cap, as the KV bulk delete's.
+            put(axum::handler::Handler::layer(
+                crate::triggers::routes::set_triggers_disabled,
+                axum::extract::DefaultBodyLimit::max(
+                    crate::triggers::routes::MAX_BULK_TRIGGERS_BODY_BYTES,
+                ),
+            )),
+        )
+        .route(
             "/ws/{workspace}/workflows/flows/{id}/versions/{version}",
             get(get_flow_version),
         )
@@ -3479,6 +3495,8 @@ pub fn management_router() -> Router<WorkflowState> {
         namespace_dependencies,
         crate::triggers::routes::list_flow_triggers,
         crate::triggers::routes::list_triggers,
+        crate::triggers::routes::set_trigger_disabled,
+        crate::triggers::routes::set_triggers_disabled,
         crate::storage::nsfiles::routes::download_namespace_file,
         crate::storage::nsfiles::routes::namespace_file_stats,
         crate::storage::nsfiles::routes::namespace_file_revisions,
@@ -3539,6 +3557,11 @@ pub fn management_router() -> Router<WorkflowState> {
         crate::triggers::routes::FlowTriggersDto,
         crate::triggers::routes::TriggerRowDto,
         crate::triggers::routes::TriggerPageDto,
+        crate::triggers::routes::SetTriggerDisabledRequest,
+        crate::triggers::routes::BulkTriggerRef,
+        crate::triggers::routes::SetTriggersDisabledRequest,
+        crate::triggers::routes::BulkResultDto,
+        crate::triggers::routes::BulkResultsDto,
         crate::storage::routes::FileMetasDto,
         crate::storage::routes::FilePreviewDto,
         crate::storage::nsfiles::routes::NsFileStatsDto,

@@ -20,4 +20,11 @@ export type TriggerRowDto = TriggerEntryDto & {
   namespace: string;
   /** The flow's YAML `id`. */
   flow_id: string;
+  /**
+     * The flow's YAML says `disabled: true`, or its `state` is `disabled`
+     * (the per-flow route's top-level `flow_disabled`, per row): what makes a
+     * trigger `effective_disabled` when neither `yaml_disabled` (which also
+     * covers the flow's YAML) nor `runtime_disabled` does.
+     */
+  flow_disabled: boolean;
 };

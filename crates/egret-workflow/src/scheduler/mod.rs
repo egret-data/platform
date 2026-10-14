@@ -173,8 +173,7 @@ pub(crate) mod start;
 mod sync;
 
 pub use fire::{fire_due, PassReport};
-// The switch route (W7e Task 5) writes the same effective value `sync` does;
-// until it lands nothing outside `sync` reads it.
-#[allow(unused_imports)]
+// The switch route (`triggers::switch`) writes the same effective value `sync`
+// does; the read routes report it.
 pub(crate) use sync::effective_disabled;
 pub use sync::{reconcile, sync, Reconciled};

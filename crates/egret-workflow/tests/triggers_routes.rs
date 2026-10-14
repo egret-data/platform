@@ -681,8 +681,19 @@ async fn the_top_flags_and_a_trashed_flow() {
     .await;
     let off = list(&app, ws, user, "?state=disabled").await;
     assert_eq!(names(&off), vec!["soff/s", "soff/h", "yoff/s"]);
+    // The row explains an effective-off trigger that neither the YAML of the
+    // trigger nor the switch disables: its flow is off (YAML or `state`).
+    for r in off["rows"].as_array().unwrap() {
+        assert_eq!(r["flow_disabled"], json!(true), "{r}");
+    }
+    assert_eq!(
+        off["rows"][0]["yaml_disabled"],
+        json!(false),
+        "soff: by state"
+    );
     let on = list(&app, ws, user, "?state=enabled").await;
     assert_eq!(names(&on), vec!["fon/s"]);
+    assert_eq!(on["rows"][0]["flow_disabled"], json!(false));
 
     let gone = common::seed_flow(&db, ws, user, &every_kind(), "draft").await;
     egret_workflow::FlowRepo::new(db.clone())
@@ -1071,4 +1082,832 @@ async fn a_source_that_does_not_parse_is_a_400_per_flow() {
         flow_res(&app, ws, user, bad).await.status(),
         StatusCode::BAD_REQUEST
     );
+}
+
+// ── 11. the switch (W7e Task 5, spec §3.3, §3.7) ──────────────────────────────
+
+fn switch_path(ws: Uuid, flow: Uuid, trig: &str) -> String {
+    format!("/api/ws/{ws}/workflows/flows/{flow}/triggers/{trig}/disabled")
+}
+
+fn bulk_path(ws: Uuid) -> String {
+    format!("/api/ws/{ws}/workflows/triggers/disabled")
+}
+
+async fn switch_res(
+    app: &common::App,
+    ws: Uuid,
+    user: UserId,
+    flow: Uuid,
+    trig: &str,
+    body: Value,
+) -> axum::response::Response {
+    common::put(app, &switch_path(ws, flow, trig), user, body).await
+}
+
+/// Switch `trig` and expect a 200; the answer (the trigger's entry).
+async fn switch(
+    app: &common::App,
+    ws: Uuid,
+    user: UserId,
+    flow: Uuid,
+    trig: &str,
+    disabled: bool,
+    recover_missed: bool,
+) -> Value {
+    let res = switch_res(
+        app,
+        ws,
+        user,
+        flow,
+        trig,
+        json!({"disabled": disabled, "recover_missed": recover_missed}),
+    )
+    .await;
+    let status = res.status();
+    let body = common::json(res).await;
+    assert_eq!(status, StatusCode::OK, "{trig}: {body}");
+    body
+}
+
+/// The status and the JSON body of a response.
+async fn answer(res: axum::response::Response) -> (StatusCode, Value) {
+    let status = res.status();
+    (status, common::json(res).await)
+}
+
+/// `workflow.triggers.disabled` (the effective copy) of a schedule.
+async fn schedule_copy(db: &Db, flow: Uuid, trig: &str) -> bool {
+    sqlx::query_scalar(
+        "SELECT disabled FROM workflow.triggers WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .fetch_one(&db.pool)
+    .await
+    .expect("a schedule row")
+}
+
+/// `workflow.flow_listeners.disabled` (the effective copy) of a listener.
+async fn listener_copy(db: &Db, flow: Uuid, trig: &str) -> bool {
+    sqlx::query_scalar(
+        "SELECT disabled FROM workflow.flow_listeners WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .fetch_one(&db.pool)
+    .await
+    .expect("a listener row")
+}
+
+async fn db_now(db: &Db) -> chrono::DateTime<chrono::Utc> {
+    sqlx::query_scalar("SELECT now()")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
+async fn executions_of(db: &Db, flow: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM workflow.executions WHERE flow_id = $1")
+        .bind(flow)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
+/// A `*/1` schedule with `recoverMissedSchedules: r` when given.
+fn schedule_recovering(id: &str, r: Option<&str>) -> String {
+    let mut s = schedule(id);
+    if let Some(r) = r {
+        s.push_str(&format!("    recoverMissedSchedules: {r}\n"));
+    }
+    s
+}
+
+fn yaml_disabled_schedule(id: &str) -> String {
+    format!("{}    disabled: true\n", schedule(id))
+}
+
+fn is_minute(t: chrono::DateTime<chrono::Utc>) -> bool {
+    t.timestamp() % 60 == 0 && t.timestamp_subsec_nanos() == 0
+}
+
+/// A user holding `perms` in `ws`.
+async fn user_with(db: &Db, ws: Uuid, perms: &[&str]) -> UserId {
+    let u = egret_core::UserId(
+        sqlx::query_scalar(
+            "INSERT INTO users (email, name, provider, status, password_hash) \
+             VALUES ($1, 'r', 'local', 'active', 'x') RETURNING id",
+        )
+        .bind(format!("r_{}@t.local", Uuid::new_v4().simple()))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+    );
+    common::grant(db, ws, u, perms).await;
+    u
+}
+
+#[tokio::test]
+async fn off_then_on_for_each_kind() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = manager(&db).await;
+    let flow = common::seed_flow(
+        &db,
+        ws,
+        user,
+        &src(
+            "company.a",
+            "sw",
+            &format!(
+                "{}{}{}",
+                schedule("sched"),
+                webhook("hook", "k"),
+                window_free("on_done")
+            ),
+        ),
+        "draft",
+    )
+    .await;
+    let app = flagged_app(&db).await;
+    assert!(!schedule_copy(&db, flow, "sched").await);
+    assert!(!listener_copy(&db, flow, "on_done").await);
+
+    for trig in ["sched", "hook", "on_done"] {
+        let e = switch(&app, ws, user, flow, trig, true, false).await;
+        assert_eq!(e["trigger_id"], json!(trig), "{e}");
+        assert_eq!(e["runtime_disabled"], json!(true), "{e}");
+        assert_eq!(e["effective_disabled"], json!(true), "{e}");
+        assert_eq!(e["disabled_by"], json!(user.0), "{e}");
+        assert_eq!(e["disabled_by_name"], json!("t"), "{e}");
+        assert_eq!(
+            common::audit_mutations(&app),
+            vec![(
+                "workflow_trigger:disable".to_string(),
+                Some(format!("{flow}/{trig}")),
+                json!({"recover_missed": false, "next_evaluation_date": null}),
+            )]
+        );
+    }
+    assert_eq!(
+        common::switched_off(&db, flow).await,
+        vec!["hook", "on_done", "sched"]
+    );
+    let by: Vec<Option<Uuid>> =
+        sqlx::query_scalar("SELECT disabled_by FROM workflow.disabled_triggers WHERE flow_id = $1")
+            .bind(flow)
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert!(by.iter().all(|b| *b == Some(user.0)), "{by:?}");
+    assert!(
+        schedule_copy(&db, flow, "sched").await,
+        "the schedule's copy"
+    );
+    assert!(
+        listener_copy(&db, flow, "on_done").await,
+        "the listener's copy"
+    );
+    // The read route agrees with the answers.
+    let body = flow_triggers(&app, ws, user, flow).await;
+    for trig in ["sched", "hook", "on_done"] {
+        assert_eq!(entry(&body, trig)["runtime_disabled"], json!(true));
+    }
+
+    for trig in ["sched", "hook", "on_done"] {
+        let e = switch(&app, ws, user, flow, trig, false, false).await;
+        assert_eq!(e["runtime_disabled"], json!(false), "{e}");
+        assert_eq!(e["effective_disabled"], json!(false), "{e}");
+        assert_eq!(e["disabled_by"], json!(null), "{e}");
+        assert_eq!(
+            common::audit_mutations(&app),
+            vec![(
+                "workflow_trigger:enable".to_string(),
+                Some(format!("{flow}/{trig}")),
+                json!({"recover_missed": false, "next_evaluation_date": null}),
+            )]
+        );
+    }
+    assert!(common::switched_off(&db, flow).await.is_empty());
+    assert!(!schedule_copy(&db, flow, "sched").await);
+    assert!(!listener_copy(&db, flow, "on_done").await);
+}
+
+/// §3.3's outcomes on a schedule overdue by five ticks, switched off, then on.
+#[tokio::test]
+async fn re_enabling_an_overdue_schedule_skips_or_recovers() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = manager(&db).await;
+    let ids: [(&str, Option<&str>); 8] = [
+        ("skip", None),
+        ("absent", None),
+        ("all", Some("ALL")),
+        ("none", Some("NONE")),
+        ("last", Some("LAST")),
+        ("last_never", Some("LAST")),
+        ("some", Some("SOME")),
+        ("some_skip", Some("SOME")),
+    ];
+    let triggers: String = ids
+        .iter()
+        .map(|(id, r)| schedule_recovering(id, *r))
+        .collect();
+    let flow = common::seed_flow(&db, ws, user, &src("company.a", "re", &triggers), "draft").await;
+    let app = flagged_app(&db).await;
+    for (id, _) in ids {
+        common::make_due(&db, flow, id, 5).await;
+        switch(&app, ws, user, flow, id, true, false).await;
+    }
+    // `evaluated_at` and `last_error` are never written by the switch.
+    sql(
+        &db,
+        "UPDATE workflow.triggers SET evaluated_at = next_evaluation_date - interval '1 minute', \
+                last_error = 'kept' \
+          WHERE flow_id = $1 AND trigger_id IN ('skip', 'last')",
+        flow,
+    )
+    .await;
+    common::audit_mutations(&app);
+
+    // A skip: the first tick after the transaction's now().
+    let assert_skipped = |id: &'static str,
+                          before: chrono::DateTime<chrono::Utc>,
+                          after: chrono::DateTime<chrono::Utc>,
+                          next: Option<chrono::DateTime<chrono::Utc>>| {
+        let next = next.unwrap_or_else(|| panic!("{id}: off the queue"));
+        assert!(
+            next > before && next <= after + chrono::Duration::seconds(60) && is_minute(next),
+            "{id}: {next} is not the first tick after a now() in [{before}, {after}]"
+        );
+        next
+    };
+
+    for (id, recover) in [
+        ("skip", false),
+        ("none", true),
+        ("last_never", true),
+        ("some_skip", false),
+    ] {
+        let (_, evaluated, err) = schedule_row(&db, flow, id).await;
+        let before = db_now(&db).await;
+        let e = switch(&app, ws, user, flow, id, false, recover).await;
+        let after = db_now(&db).await;
+        let (next, evaluated_after, err_after) = schedule_row(&db, flow, id).await;
+        let next = assert_skipped(id, before, after, next);
+        assert_eq!(
+            ts(&e["schedule"]["next_evaluation_date"]),
+            next,
+            "{id}: the answer is what was committed"
+        );
+        assert_eq!((evaluated_after, err_after), (evaluated, err), "{id}");
+        assert_eq!(
+            common::audit_mutations(&app),
+            vec![(
+                "workflow_trigger:enable".to_string(),
+                Some(format!("{flow}/{id}")),
+                json!({"recover_missed": recover, "next_evaluation_date": next}),
+            )],
+            "{id}"
+        );
+    }
+
+    // Recovered: every missed tick stays owed.
+    for id in ["absent", "all"] {
+        let row = schedule_row(&db, flow, id).await;
+        switch(&app, ws, user, flow, id, false, true).await;
+        assert_eq!(schedule_row(&db, flow, id).await, row, "{id}: dates kept");
+        assert_eq!(
+            common::audit_mutations(&app)[0].2,
+            json!({"recover_missed": true, "next_evaluation_date": null}),
+            "{id}"
+        );
+    }
+
+    // LAST: the latest tick at or before now(), after `evaluated_at`.
+    let (old, evaluated, err) = schedule_row(&db, flow, "last").await;
+    let before = db_now(&db).await;
+    switch(&app, ws, user, flow, "last", false, true).await;
+    let after = db_now(&db).await;
+    let (next, evaluated_after, err_after) = schedule_row(&db, flow, "last").await;
+    let next = next.expect("LAST stays on the queue");
+    assert!(
+        next <= after && next > before - chrono::Duration::seconds(60) && is_minute(next),
+        "LAST: {next} is not the latest tick at or before a now() in [{before}, {after}]"
+    );
+    assert!(next > old.unwrap(), "LAST moved the date forward");
+    assert_eq!((evaluated_after, err_after), (evaluated, err));
+    common::audit_mutations(&app);
+
+    // An unknown value with recover_missed: 409, and nothing written.
+    let row = schedule_row(&db, flow, "some").await;
+    let (status, body) = answer(
+        switch_res(
+            &app,
+            ws,
+            user,
+            flow,
+            "some",
+            json!({"disabled": false, "recover_missed": true}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], json!("recover_missed_unknown"));
+    assert_eq!(
+        body["error"],
+        json!("recoverMissedSchedules is \"SOME\"; egret knows ALL, NONE and LAST")
+    );
+    assert_eq!(schedule_row(&db, flow, "some").await, row);
+    assert!(schedule_copy(&db, flow, "some").await, "still off");
+    assert_eq!(common::switched_off(&db, flow).await, vec!["some"]);
+    assert!(common::audit_mutations(&app).is_empty());
+
+    assert_eq!(
+        executions_of(&db, flow).await,
+        0,
+        "the switch fires nothing"
+    );
+}
+
+/// A schedule not yet due keeps its date whatever `recover_missed` says, and
+/// a row off the queue stays off.
+#[tokio::test]
+async fn a_future_date_and_an_off_queue_row_are_kept() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = manager(&db).await;
+    let flow = common::seed_flow(
+        &db,
+        ws,
+        user,
+        &src(
+            "company.a",
+            "keep",
+            &format!("{}{}", schedule("fut"), schedule("offq")),
+        ),
+        "draft",
+    )
+    .await;
+    let app = flagged_app(&db).await;
+    // An hour ahead: no minute boundary crossed by the test makes it due.
+    sql(
+        &db,
+        "UPDATE workflow.triggers SET next_evaluation_date = date_trunc('minute', now()) + interval '1 hour' \
+          WHERE flow_id = $1 AND trigger_id = 'fut'",
+        flow,
+    )
+    .await;
+    sql(
+        &db,
+        "UPDATE workflow.triggers SET next_evaluation_date = NULL, last_error = 'gone' \
+          WHERE flow_id = $1 AND trigger_id = 'offq'",
+        flow,
+    )
+    .await;
+    let fut = schedule_row(&db, flow, "fut").await;
+    for recover in [false, true] {
+        for id in ["fut", "offq"] {
+            switch(&app, ws, user, flow, id, true, false).await;
+            switch(&app, ws, user, flow, id, false, recover).await;
+        }
+        assert_eq!(
+            schedule_row(&db, flow, "fut").await,
+            fut,
+            "recover {recover}"
+        );
+        assert_eq!(
+            schedule_row(&db, flow, "offq").await,
+            (None, None, Some("gone".to_string())),
+            "recover {recover}: an off-queue row stays off"
+        );
+    }
+}
+
+/// A later save does not undo a skip; a new cron re-initialises it.
+#[tokio::test]
+async fn a_later_save_keeps_a_skip() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = manager(&db).await;
+    let source = src("company.a", "later", &schedule("s"));
+    let flow = common::seed_flow(&db, ws, user, &source, "draft").await;
+    let app = flagged_app(&db).await;
+    common::make_due(&db, flow, "s", 5).await;
+    switch(&app, ws, user, flow, "s", true, false).await;
+    switch(&app, ws, user, flow, "s", false, false).await;
+    let (moved, _, _) = schedule_row(&db, flow, "s").await;
+
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let save = |source: String| {
+        let repo = repo.clone();
+        async move {
+            repo.update(
+                ws,
+                flow,
+                user,
+                &egret_workflow::UpdateFlowInput {
+                    source: Some(source),
+                    plan: Some(json!({})),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("save")
+        }
+    };
+    save(source.replace("message: hi", "message: edited")).await;
+    assert_eq!(schedule_row(&db, flow, "s").await.0, moved, "a task edit");
+
+    save(src(
+        "company.a",
+        "later",
+        &format!("  - id: s\n    type: {SCHEDULE}\n    cron: \"0 0 1 1 *\"\n"),
+    ))
+    .await;
+    let next = schedule_row(&db, flow, "s").await.0.unwrap();
+    use chrono::Datelike;
+    assert!(
+        (next.month(), next.day()) == (1, 1) && next > db_now(&db).await,
+        "a new cron re-initialises to its next tick: {next}"
+    );
+}
+
+#[tokio::test]
+async fn the_switch_refusals() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = manager(&db).await;
+    let flow = common::seed_flow(
+        &db,
+        ws,
+        user,
+        &src(
+            "company.a",
+            "ref",
+            &format!(
+                "{}{}{}",
+                yaml_disabled_schedule("yoff"),
+                leaf("poll"),
+                schedule("s")
+            ),
+        ),
+        "draft",
+    )
+    .await;
+    let app = flagged_app(&db).await;
+    let on = json!({"disabled": false});
+    let off = json!({"disabled": true});
+
+    // A trigger the YAML disables: on is refused, off is accepted.
+    let (status, body) = answer(switch_res(&app, ws, user, flow, "yoff", on.clone()).await).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], json!("trigger_disabled_in_source"));
+    assert_eq!(
+        body["error"],
+        json!("This trigger is disabled in the flow's YAML; remove `disabled: true` there")
+    );
+    assert!(common::switched_off(&db, flow).await.is_empty());
+    switch(&app, ws, user, flow, "yoff", true, false).await;
+    assert_eq!(common::switched_off(&db, flow).await, vec!["yoff"]);
+    let (status, _) = answer(switch_res(&app, ws, user, flow, "yoff", on.clone()).await).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(common::switched_off(&db, flow).await, vec!["yoff"], "kept");
+
+    // A Leaf has no switch, either way.
+    for body in [&off, &on] {
+        let (status, body) =
+            answer(switch_res(&app, ws, user, flow, "poll", body.clone()).await).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], json!("trigger_not_supported"));
+        assert_eq!(
+            body["error"],
+            json!("egret does not run this trigger type, so it has no switch")
+        );
+    }
+
+    // An unknown id.
+    assert_eq!(
+        switch_res(&app, ws, user, flow, "nope", off.clone())
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    // The flow's YAML disables it.
+    let yaml_off = format!(
+        "id: fd\nnamespace: company.a\ndisabled: true\ntriggers:\n{}tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n",
+        schedule("s")
+    );
+    let fd = common::seed_flow(&db, ws, user, &yaml_off, "draft").await;
+    let (status, body) = answer(switch_res(&app, ws, user, fd, "s", on.clone()).await).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], json!("trigger_disabled_in_source"));
+    assert_eq!(
+        body["error"],
+        json!("This flow is disabled in its YAML; remove `disabled: true` there")
+    );
+
+    // Another workspace's flow: 404, never 403, and nothing written.
+    let (other_ws, other_user) = manager(&db).await;
+    let theirs = common::seed_flow(
+        &db,
+        other_ws,
+        other_user,
+        &src("company.a", "theirs", &schedule("s")),
+        "draft",
+    )
+    .await;
+    assert_eq!(
+        switch_res(&app, ws, user, theirs, "s", off.clone())
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert!(common::switched_off(&db, theirs).await.is_empty());
+    assert!(!schedule_copy(&db, theirs, "s").await);
+
+    // A trashed flow.
+    let gone = common::seed_flow(
+        &db,
+        ws,
+        user,
+        &src("company.a", "gone", &webhook("h", "k")),
+        "draft",
+    )
+    .await;
+    egret_workflow::FlowRepo::new(db.clone())
+        .soft_delete(ws, gone)
+        .await
+        .unwrap();
+    assert_eq!(
+        switch_res(&app, ws, user, gone, "h", off.clone())
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert!(common::switched_off(&db, gone).await.is_empty());
+
+    // A source that does not parse (as a parser change would leave it).
+    let bad: Uuid = sqlx::query_scalar(
+        "INSERT INTO workflow.flows (workspace_id, namespace, flow_id, source, plan) \
+         VALUES ($1, 'company.c', 'bad', 'tasks: [unclosed', '{}'::jsonb) RETURNING id",
+    )
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        switch_res(&app, ws, user, bad, "s", off.clone())
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert!(common::switched_off(&db, bad).await.is_empty());
+    assert!(
+        common::audit_mutations(&app).len() == 1,
+        "only the accepted switch-off of `yoff` was audited"
+    );
+
+    // `workflow:read` only: 403, both routes; no session: 401.
+    let reader = user_with(&db, ws, &["workflow:read"]).await;
+    let app = flagged_app(&db).await;
+    assert_eq!(
+        switch_res(&app, ws, reader, flow, "s", off.clone())
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let bulk = json!({"triggers": [{"flow_id": flow, "trigger_id": "s"}], "disabled": true});
+    assert_eq!(
+        common::put(&app, &bulk_path(ws), reader, bulk.clone())
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        common::anon_put(&app, &switch_path(ws, flow, "s"), off.clone())
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        common::anon_put(&app, &bulk_path(ws), bulk).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(common::switched_off(&db, flow).await, vec!["yoff"]);
+    assert!(common::audit_mutations(&app).is_empty());
+}
+
+#[tokio::test]
+async fn switching_is_idempotent() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = manager(&db).await;
+    let flow = common::seed_flow(
+        &db,
+        ws,
+        user,
+        &src("company.a", "idem", &schedule("s")),
+        "draft",
+    )
+    .await;
+    let app = flagged_app(&db).await;
+    switch(&app, ws, user, flow, "s", true, false).await;
+    let e = switch(&app, ws, user, flow, "s", true, false).await;
+    assert_eq!(e["runtime_disabled"], json!(true));
+    assert_eq!(common::switched_off(&db, flow).await, vec!["s"], "one row");
+    switch(&app, ws, user, flow, "s", false, false).await;
+    let e = switch(&app, ws, user, flow, "s", false, false).await;
+    assert_eq!(e["runtime_disabled"], json!(false), "on with no row");
+    assert!(common::switched_off(&db, flow).await.is_empty());
+    assert!(!schedule_copy(&db, flow, "s").await);
+}
+
+#[tokio::test]
+async fn bulk_switching_is_per_entry_and_bounded() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = manager(&db).await;
+    let many: String = (0..100)
+        .map(|i| webhook(&format!("h{i}"), &format!("k{i}")))
+        .collect();
+    let flow = common::seed_flow(&db, ws, user, &src("company.a", "many", &many), "draft").await;
+    let app = flagged_app(&db).await;
+    let entries: Vec<Value> = (0..100)
+        .map(|i| json!({"flow_id": flow, "trigger_id": format!("h{i}")}))
+        .collect();
+
+    // 101: refused before any write.
+    let mut over = entries.clone();
+    over.push(json!({"flow_id": flow, "trigger_id": "h0"}));
+    let (status, body) = answer(
+        common::put(
+            &app,
+            &bulk_path(ws),
+            user,
+            json!({"triggers": over, "disabled": true}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(common::switched_off(&db, flow).await.is_empty());
+    assert!(common::audit_mutations(&app).is_empty());
+
+    // Over the body cap: 413.
+    let huge = json!({"triggers": [{"flow_id": flow, "trigger_id": "x".repeat(70_000)}], "disabled": true});
+    assert_eq!(
+        common::put(&app, &bulk_path(ws), user, huge).await.status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+
+    // 100: every one switched, a result each, in order.
+    let (status, body) = answer(
+        common::put(
+            &app,
+            &bulk_path(ws),
+            user,
+            json!({"triggers": entries, "disabled": true}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 100);
+    for (i, r) in results.iter().enumerate() {
+        assert_eq!(r["flow_id"], json!(flow), "{r}");
+        assert_eq!(r["trigger_id"], json!(format!("h{i}")), "{r}");
+        assert_eq!(r["ok"], json!(true), "{r}");
+        assert_eq!(r["trigger"]["runtime_disabled"], json!(true), "{r}");
+    }
+    assert_eq!(common::switched_off(&db, flow).await.len(), 100);
+    common::audit_mutations(&app);
+
+    // A mix: one result each, in order; the refusals do not stop the rest.
+    let mix = common::seed_flow(
+        &db,
+        ws,
+        user,
+        &src(
+            "company.a",
+            "mix",
+            &format!(
+                "{}{}{}",
+                schedule("s"),
+                leaf("poll"),
+                yaml_disabled_schedule("yoff")
+            ),
+        ),
+        "draft",
+    )
+    .await;
+    switch(&app, ws, user, mix, "s", true, false).await;
+    common::audit_mutations(&app);
+    let (other_ws, other_user) = manager(&db).await;
+    let theirs = common::seed_flow(
+        &db,
+        other_ws,
+        other_user,
+        &src("company.a", "theirs", &schedule("x")),
+        "draft",
+    )
+    .await;
+    common::switch_off(&db, theirs, "x").await;
+    let (status, body) = answer(
+        common::put(
+            &app,
+            &bulk_path(ws),
+            user,
+            json!({
+                "triggers": [
+                    {"flow_id": theirs, "trigger_id": "x"},
+                    {"flow_id": mix, "trigger_id": "poll"},
+                    {"flow_id": mix, "trigger_id": "s"},
+                    {"flow_id": mix, "trigger_id": "yoff"},
+                    {"flow_id": mix, "trigger_id": "nope"},
+                ],
+                "disabled": false,
+            }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let got: Vec<(Value, Value, Value, Value)> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["flow_id"].clone(),
+                r["trigger_id"].clone(),
+                r["ok"].clone(),
+                r["code"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (json!(theirs), json!("x"), json!(false), json!("not_found")),
+            (
+                json!(mix),
+                json!("poll"),
+                json!(false),
+                json!("trigger_not_supported")
+            ),
+            (json!(mix), json!("s"), json!(true), json!(null)),
+            (
+                json!(mix),
+                json!("yoff"),
+                json!(false),
+                json!("trigger_disabled_in_source")
+            ),
+            (json!(mix), json!("nope"), json!(false), json!("not_found")),
+        ]
+    );
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results[2]["trigger"]["runtime_disabled"], json!(false));
+    assert_eq!(results[2]["message"], json!(null));
+    assert_eq!(results[1]["trigger"], json!(null));
+    assert!(results[1]["message"].is_string());
+    assert!(common::switched_off(&db, mix).await.is_empty(), "s is on");
+    assert_eq!(
+        common::switched_off(&db, theirs).await,
+        vec!["x"],
+        "another workspace's switch is untouched"
+    );
+    assert_eq!(
+        common::audit_mutations(&app),
+        vec![(
+            "workflow_trigger:enable".to_string(),
+            Some(format!("{mix}/s")),
+            json!({"recover_missed": false, "next_evaluation_date": null}),
+        )],
+        "one event per switched trigger"
+    );
+}
+
+#[tokio::test]
+async fn a_duplicate_id_switches_the_id() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = manager(&db).await;
+    let flow = common::seed_flow(
+        &db,
+        ws,
+        user,
+        &src(
+            "company.a",
+            "dup",
+            &format!(
+                "{}  - id: t\n    type: {SCHEDULE}\n    cron: \"0 * * * *\"\n",
+                schedule("t")
+            ),
+        ),
+        "draft",
+    )
+    .await;
+    let app = flagged_app(&db).await;
+    let e = switch(&app, ws, user, flow, "t", true, false).await;
+    assert_eq!(e["duplicate_id"], json!(true), "{e}");
+    assert_eq!(e["runtime_disabled"], json!(true), "{e}");
+    assert_eq!(common::switched_off(&db, flow).await, vec!["t"]);
+    assert!(schedule_copy(&db, flow, "t").await);
 }

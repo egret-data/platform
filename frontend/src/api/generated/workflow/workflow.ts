@@ -26,6 +26,7 @@ import type {
 
 import type {
   Ack,
+  BulkResultsDto,
   CreateFlowRequest,
   ErrorBody,
   ExecutionDto,
@@ -50,8 +51,11 @@ import type {
   NsFileStatsDto,
   NsFileUploadForm,
   PublishFlowRequest,
+  SetTriggerDisabledRequest,
+  SetTriggersDisabledRequest,
   StartExecutionMultipart,
   StartExecutionRequest,
+  TriggerEntryDto,
   TriggerPageDto,
   UpdateFlowRequest,
   ValidateFlowRequest,
@@ -2851,7 +2855,120 @@ export function useWorkflowListFlowTriggers<TData = Awaited<ReturnType<typeof wo
 
 
 
-export type workflowValidateFlowResponse200 = {
+export type workflowSetTriggerDisabledResponse200 = {
+  data: TriggerEntryDto
+  status: 200
+}
+
+export type workflowSetTriggerDisabledResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowSetTriggerDisabledResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowSetTriggerDisabledResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowSetTriggerDisabledResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowSetTriggerDisabledResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowSetTriggerDisabledResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowSetTriggerDisabledResponseSuccess = (workflowSetTriggerDisabledResponse200) & {
+  headers: Headers;
+};
+export type workflowSetTriggerDisabledResponseError = (workflowSetTriggerDisabledResponse400 | workflowSetTriggerDisabledResponse401 | workflowSetTriggerDisabledResponse403 | workflowSetTriggerDisabledResponse404 | workflowSetTriggerDisabledResponse409 | workflowSetTriggerDisabledResponse500) & {
+  headers: Headers;
+};
+
+export type workflowSetTriggerDisabledResponse = (workflowSetTriggerDisabledResponseSuccess | workflowSetTriggerDisabledResponseError)
+
+export const getWorkflowSetTriggerDisabledUrl = (workspace: string,
+    id: string,
+    triggerId: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/flows/${encodeURIComponent(id)}/triggers/${encodeURIComponent(triggerId)}/disabled`
+}
+
+export const workflowSetTriggerDisabled = async (workspace: string,
+    id: string,
+    triggerId: string,
+    setTriggerDisabledRequest: SetTriggerDisabledRequest, options?: Parameters<typeof customInstance>[1]): Promise<workflowSetTriggerDisabledResponse> => {
+
+  return customInstance<workflowSetTriggerDisabledResponse>(getWorkflowSetTriggerDisabledUrl(workspace,id,triggerId),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setTriggerDisabledRequest)
+  }
+);}
+
+
+
+
+
+export const getWorkflowSetTriggerDisabledMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowSetTriggerDisabled>>, TError,{workspace: string;id: string;triggerId: string;data: SetTriggerDisabledRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowSetTriggerDisabled>>, TError,{workspace: string;id: string;triggerId: string;data: SetTriggerDisabledRequest}, TContext> => {
+
+const mutationKey = ['workflowSetTriggerDisabled'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowSetTriggerDisabled>>, {workspace: string;id: string;triggerId: string;data: SetTriggerDisabledRequest}> = (props) => {
+          const {workspace,id,triggerId,data} = props ?? {};
+
+          return  workflowSetTriggerDisabled(workspace,id,triggerId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowSetTriggerDisabledMutationResult = NonNullable<Awaited<ReturnType<typeof workflowSetTriggerDisabled>>>
+    export type WorkflowSetTriggerDisabledMutationBody = SetTriggerDisabledRequest
+    export type WorkflowSetTriggerDisabledMutationError = ErrorBody
+
+    export const useWorkflowSetTriggerDisabled = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowSetTriggerDisabled>>, TError,{workspace: string;id: string;triggerId: string;data: SetTriggerDisabledRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowSetTriggerDisabled>>,
+        TError,
+        {workspace: string;id: string;triggerId: string;data: SetTriggerDisabledRequest},
+        TContext
+      > => {
+      return useMutation(getWorkflowSetTriggerDisabledMutationOptions(options), queryClient);
+    }
+    export type workflowValidateFlowResponse200 = {
   data: ValidationReportDto
   status: 200
 }
@@ -6284,3 +6401,107 @@ export function useWorkflowListTriggers<TData = Awaited<ReturnType<typeof workfl
 
 
 
+export type workflowSetTriggersDisabledResponse200 = {
+  data: BulkResultsDto
+  status: 200
+}
+
+export type workflowSetTriggersDisabledResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowSetTriggersDisabledResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowSetTriggersDisabledResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowSetTriggersDisabledResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowSetTriggersDisabledResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowSetTriggersDisabledResponseSuccess = (workflowSetTriggersDisabledResponse200) & {
+  headers: Headers;
+};
+export type workflowSetTriggersDisabledResponseError = (workflowSetTriggersDisabledResponse400 | workflowSetTriggersDisabledResponse401 | workflowSetTriggersDisabledResponse403 | workflowSetTriggersDisabledResponse413 | workflowSetTriggersDisabledResponse500) & {
+  headers: Headers;
+};
+
+export type workflowSetTriggersDisabledResponse = (workflowSetTriggersDisabledResponseSuccess | workflowSetTriggersDisabledResponseError)
+
+export const getWorkflowSetTriggersDisabledUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/triggers/disabled`
+}
+
+export const workflowSetTriggersDisabled = async (workspace: string,
+    setTriggersDisabledRequest: SetTriggersDisabledRequest, options?: Parameters<typeof customInstance>[1]): Promise<workflowSetTriggersDisabledResponse> => {
+
+  return customInstance<workflowSetTriggersDisabledResponse>(getWorkflowSetTriggersDisabledUrl(workspace),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setTriggersDisabledRequest)
+  }
+);}
+
+
+
+
+
+export const getWorkflowSetTriggersDisabledMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowSetTriggersDisabled>>, TError,{workspace: string;data: SetTriggersDisabledRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowSetTriggersDisabled>>, TError,{workspace: string;data: SetTriggersDisabledRequest}, TContext> => {
+
+const mutationKey = ['workflowSetTriggersDisabled'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowSetTriggersDisabled>>, {workspace: string;data: SetTriggersDisabledRequest}> = (props) => {
+          const {workspace,data} = props ?? {};
+
+          return  workflowSetTriggersDisabled(workspace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowSetTriggersDisabledMutationResult = NonNullable<Awaited<ReturnType<typeof workflowSetTriggersDisabled>>>
+    export type WorkflowSetTriggersDisabledMutationBody = SetTriggersDisabledRequest
+    export type WorkflowSetTriggersDisabledMutationError = ErrorBody
+
+    export const useWorkflowSetTriggersDisabled = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowSetTriggersDisabled>>, TError,{workspace: string;data: SetTriggersDisabledRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowSetTriggersDisabled>>,
+        TError,
+        {workspace: string;data: SetTriggersDisabledRequest},
+        TContext
+      > => {
+      return useMutation(getWorkflowSetTriggersDisabledMutationOptions(options), queryClient);
+    }

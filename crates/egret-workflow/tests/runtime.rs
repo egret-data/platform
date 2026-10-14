@@ -1521,6 +1521,319 @@ async fn a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance(pool: s
     assert_eq!(executions_of_flow(&pool, flow).await, 1);
 }
 
+/// Backends of this test's database waiting on a lock of the kind `what`
+/// (`pg_stat_activity`'s `wait_event`): `advisory` is a held transaction,
+/// `transactionid` or `tuple` a writer queued behind a row lock.
+async fn lock_waiters(pool: &sqlx::PgPool, what: &'static [&'static str]) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM pg_stat_activity \
+          WHERE datname = current_database() AND pid <> pg_backend_pid() \
+            AND wait_event_type = 'Lock' AND wait_event = ANY($1)",
+    )
+    .bind(what)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn wait_for_waiters(pool: &sqlx::PgPool, label: &str, what: &'static [&'static str]) {
+    wait_until(label, Duration::from_secs(60), || async {
+        match lock_waiters(pool, what).await {
+            0 => Err(format!("no backend waiting on {what:?}")),
+            _ => Ok(()),
+        }
+    })
+    .await;
+}
+
+/// The trigger switch route (W7e Task 5), sent from a task of its own.
+fn switch_off_by_route(
+    app: &Arc<common::App>,
+    ws: Uuid,
+    user: egret_core::UserId,
+    flow: Uuid,
+) -> tokio::task::JoinHandle<axum::http::StatusCode> {
+    let app = app.clone();
+    tokio::spawn(async move {
+        common::put(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows/{flow}/triggers/s/disabled"),
+            user,
+            serde_json::json!({"disabled": true}),
+        )
+        .await
+        .status()
+    })
+}
+
+/// A save of `flow` that edits a task (its `spec_key` unchanged), from a task
+/// of its own.
+fn save_by_repo(
+    db: &Db,
+    ws: Uuid,
+    user: egret_core::UserId,
+    flow: Uuid,
+    id: &str,
+) -> tokio::task::JoinHandle<egret_core::Result<egret_workflow::repo::FlowRow>> {
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let edited = cron_flow(id).replace("message: hi", "message: edited");
+    tokio::spawn(async move {
+        repo.update(
+            ws,
+            flow,
+            user,
+            &egret_workflow::UpdateFlowInput {
+                source: Some(edited),
+                plan: Some(serde_json::json!({})),
+                ..Default::default()
+            },
+        )
+        .await
+    })
+}
+
+/// `(workflow.triggers.disabled, the switch rows)` of `flow`'s `s`.
+async fn switch_state(pool: &sqlx::PgPool, flow: Uuid) -> (bool, Vec<String>) {
+    let copy: bool = sqlx::query_scalar(
+        "SELECT disabled FROM workflow.triggers WHERE flow_id = $1 AND trigger_id = 's'",
+    )
+    .bind(flow)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    (
+        copy,
+        common::switched_off(&Db { pool: pool.clone() }, flow).await,
+    )
+}
+
+/// **A switch-off that meets a pass holding the trigger row waits, and the
+/// pass's fire is the last** (W7e spec §3.2 "Concurrency", against a pass).
+///
+/// The pass is held at its final `UPDATE` as in
+/// [`a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance`]. The
+/// route takes the flow `FOR NO KEY UPDATE`, which the pass's `KEY SHARE`
+/// (its execution insert) does not block, and is then observed blocked on the
+/// trigger row the claim holds. Released, the pass commits its one fire, the
+/// route commits after it, and a later pass with the next tick due fires
+/// nothing: after the route answers, no new fire of that schedule starts.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_switch_off_that_meets_a_claimed_trigger_waits_and_the_pass_fires_last(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let flow = common::seed_flow(&db, ws, user, &cron_flow("swoff"), "draft").await;
+    let app = Arc::new(common::app(&db).await);
+    common::make_due(&db, flow, "s", 1).await;
+    let due: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT next_evaluation_date FROM workflow.triggers WHERE flow_id = $1")
+            .bind(flow)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let mut release = pool.acquire().await.expect("a connection for the release");
+    sqlx::query("SELECT pg_advisory_lock(1388)")
+        .execute(&mut *release)
+        .await
+        .expect("take the release lock");
+    for ddl in [
+        "CREATE FUNCTION public.w7e_hold_pass() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN IF NEW.next_evaluation_date IS DISTINCT FROM OLD.next_evaluation_date THEN \
+           PERFORM pg_advisory_xact_lock_shared(1388); END IF; RETURN NEW; END $$",
+        "CREATE TRIGGER w7e_hold_pass BEFORE UPDATE ON workflow.triggers \
+         FOR EACH ROW EXECUTE FUNCTION public.w7e_hold_pass()",
+    ] {
+        sqlx::query(ddl)
+            .execute(&pool)
+            .await
+            .expect("install the hold");
+    }
+
+    let pass = {
+        let pool = pool.clone();
+        tokio::spawn(async move { egret_workflow::scheduler::fire_due(&pool).await })
+    };
+    wait_for_waiters(
+        &pool,
+        "the pass to be held inside its transaction, at its final UPDATE",
+        &["advisory"],
+    )
+    .await;
+    let route = switch_off_by_route(&app, ws, user, flow);
+    wait_for_waiters(
+        &pool,
+        "the switch route to be blocked on the claimed trigger's row lock",
+        &["transactionid", "tuple"],
+    )
+    .await;
+    assert!(!route.is_finished(), "the route must still be waiting");
+    assert!(!pass.is_finished(), "the pass is still held");
+
+    sqlx::query("SELECT pg_advisory_unlock(1388)")
+        .execute(&mut *release)
+        .await
+        .expect("release the pass");
+    let report = pass.await.unwrap().expect("the pass");
+    assert_eq!(report.fired, 1, "{report:?}");
+    assert_eq!(route.await.unwrap(), axum::http::StatusCode::OK);
+    sqlx::query("DROP TRIGGER w7e_hold_pass ON workflow.triggers")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let after: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT next_evaluation_date FROM workflow.triggers WHERE flow_id = $1")
+            .bind(flow)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after,
+        due + chrono::Duration::minutes(1),
+        "the switch-off kept the pass's advance"
+    );
+    assert_eq!(switch_state(&pool, flow).await, (true, vec!["s".into()]));
+    assert_eq!(executions_of_flow(&pool, flow).await, 1);
+
+    // The clock passing the next tick, without waiting a minute for it: the
+    // stored date is moved to the current minute, which is due.
+    sqlx::query(
+        "UPDATE workflow.triggers SET next_evaluation_date = date_trunc('minute', now()) \
+          WHERE flow_id = $1",
+    )
+    .bind(flow)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let report = egret_workflow::scheduler::fire_due(&pool)
+        .await
+        .expect("a later pass");
+    assert_eq!(report.fired, 0, "{report:?}");
+    assert_eq!(
+        executions_of_flow(&pool, flow).await,
+        1,
+        "no fire after the route answered"
+    );
+}
+
+/// Run `q` (an advisory lock or unlock) on the test's release connection.
+async fn advisory(release: &mut sqlx::pool::PoolConnection<sqlx::Postgres>, q: &'static str) {
+    sqlx::query(q).execute(&mut **release).await.expect(q);
+}
+
+/// **A save and a switch on one flow end with the switch's value, in either
+/// order** (W7e spec §3.2 "Concurrency", against a save).
+///
+/// The switch route locks the flow `FOR NO KEY UPDATE` first, as a save's
+/// `UPDATE workflow.flows` does, so the two serialise on the flow row and the
+/// save's `sync` never computes the effective copy from a switch about to
+/// change. Each order holds the first writer inside its transaction (an
+/// advisory lock this test releases), observes the second blocked on a row
+/// lock, then releases:
+///
+/// 1. save, then switch: the save is held at its `sync` upsert on
+///    `workflow.triggers` (a `BEFORE UPDATE` trigger), after its flow
+///    `UPDATE`;
+/// 2. switch, then save: the route is held at its insert into
+///    `workflow.disabled_triggers` (a `BEFORE INSERT` trigger), after it
+///    locked the flow and the trigger row.
+///
+/// Without the flow lock, order 2 loses the update: the save reads no switch
+/// row, waits on the trigger row the route holds, and writes `disabled =
+/// false` over the route's `true` once the route commits.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_save_and_a_switch_on_one_flow_end_with_the_switch(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let first = common::seed_flow(&db, ws, user, &cron_flow("save_first"), "draft").await;
+    let second = common::seed_flow(&db, ws, user, &cron_flow("switch_first"), "draft").await;
+    let app = Arc::new(common::app(&db).await);
+    let mut release = pool.acquire().await.expect("a connection for the release");
+    sqlx::query(
+        "CREATE FUNCTION public.w7e_hold() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN PERFORM pg_advisory_xact_lock_shared(1389); RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .expect("the hold function");
+
+    // ── 1. the save first ──
+    advisory(&mut release, "SELECT pg_advisory_lock(1389)").await;
+    sqlx::query(
+        "CREATE TRIGGER w7e_hold BEFORE UPDATE ON workflow.triggers \
+         FOR EACH ROW EXECUTE FUNCTION public.w7e_hold()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let save = save_by_repo(&db, ws, user, first, "save_first");
+    wait_for_waiters(
+        &pool,
+        "the save to be held at its sync upsert, holding the flow row",
+        &["advisory"],
+    )
+    .await;
+    let route = switch_off_by_route(&app, ws, user, first);
+    wait_for_waiters(
+        &pool,
+        "the switch route to be blocked on the flow row the save holds",
+        &["transactionid", "tuple"],
+    )
+    .await;
+    assert!(!route.is_finished() && !save.is_finished());
+    advisory(&mut release, "SELECT pg_advisory_unlock(1389)").await;
+    save.await.unwrap().expect("the save");
+    assert_eq!(route.await.unwrap(), axum::http::StatusCode::OK);
+    sqlx::query("DROP TRIGGER w7e_hold ON workflow.triggers")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        switch_state(&pool, first).await,
+        (true, vec!["s".into()]),
+        "save, then switch: the switch's value"
+    );
+
+    // ── 2. the switch first ──
+    advisory(&mut release, "SELECT pg_advisory_lock(1389)").await;
+    sqlx::query(
+        "CREATE TRIGGER w7e_hold BEFORE INSERT ON workflow.disabled_triggers \
+         FOR EACH ROW EXECUTE FUNCTION public.w7e_hold()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let route = switch_off_by_route(&app, ws, user, second);
+    wait_for_waiters(
+        &pool,
+        "the route to be held at its switch-row insert, holding the flow and the trigger row",
+        &["advisory"],
+    )
+    .await;
+    let save = save_by_repo(&db, ws, user, second, "switch_first");
+    wait_for_waiters(
+        &pool,
+        "the save to be blocked on a row lock the route holds",
+        &["transactionid", "tuple"],
+    )
+    .await;
+    assert!(!route.is_finished() && !save.is_finished());
+    advisory(&mut release, "SELECT pg_advisory_unlock(1389)").await;
+    assert_eq!(route.await.unwrap(), axum::http::StatusCode::OK);
+    save.await.unwrap().expect("the save");
+    assert_eq!(
+        switch_state(&pool, second).await,
+        (true, vec!["s".into()]),
+        "switch, then save: the switch's value, not the one the save would \
+         have computed before the switch committed"
+    );
+}
+
 /// **A flow saved before migration 0156 still fires** (final review I1).
 ///
 /// 0156 created `workflow.triggers` empty, and only a `FlowRepo` write calls
