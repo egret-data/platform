@@ -350,6 +350,7 @@ pub async fn app_with_failing_pdp_action(db: &Db, action: &'static str) -> App {
         egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
         egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
         std::sync::Arc::new(FailingOn { inner, action }),
+        Default::default(),
     )
 }
 
@@ -374,9 +375,32 @@ async fn app_with_dbs(
         upload_total_timeout,
         export_total_timeout,
         pdp,
+        Default::default(),
     )
 }
 
+/// [`app`], whose state echoes `flags` from the trigger routes (W7e).
+pub async fn app_with_trigger_flags(db: &Db, flags: egret_workflow::routes::TriggerFlags) -> App {
+    let pdp: std::sync::Arc<dyn egret_core::authz::Pdp> = std::sync::Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    app_with_dbs_and_pdp(
+        db,
+        db,
+        Default::default(),
+        egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
+        egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
+        egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
+        pdp,
+        flags,
+    )
+}
+
+// One parameter per `WorkflowState` knob a test varies; a builder would be
+// more code than the eight positional arguments it replaces.
+#[allow(clippy::too_many_arguments)]
 fn app_with_dbs_and_pdp(
     db: &Db,
     workflow_db: &Db,
@@ -385,6 +409,7 @@ fn app_with_dbs_and_pdp(
     upload_total_timeout: std::time::Duration,
     export_total_timeout: std::time::Duration,
     pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+    trigger_flags: egret_workflow::routes::TriggerFlags,
 ) -> App {
     install_served_default();
     let sessions = egret_auth::session::SessionService::new(
@@ -411,6 +436,7 @@ fn app_with_dbs_and_pdp(
         upload_idle_timeout,
         upload_total_timeout,
         export_total_timeout,
+        trigger_flags,
     };
     let router = axum::Router::new()
         .nest("/api", egret_workflow::management_router())
@@ -788,6 +814,7 @@ pub async fn webhook_app_with_guard(
         upload_idle_timeout: egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
         upload_total_timeout: egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
         export_total_timeout: egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
+        trigger_flags: Default::default(),
     };
     WebhookApp {
         router: axum::Router::new()

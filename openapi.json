@@ -30074,6 +30074,105 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/flows/{id}/triggers": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "list_flow_triggers",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every trigger the flow's saved draft declares, in declaration order, with its runtime switch, its schedule or listener state, its webhook path and its last execution. A trashed flow answers too, with `flow_deleted: true`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowTriggersDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The flow's saved source does not parse, so its triggers are unknown",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such flow in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/flows/{id}/validate": {
       "post": {
         "tags": [
@@ -32669,6 +32768,168 @@
           },
           "403": {
             "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/triggers": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "list_triggers",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace_prefix",
+            "in": "query",
+            "description": "This namespace and every namespace beneath it, dot-anchored: `a.b`\nmatches `a.b` and `a.b.c`, never `a.bc`. Must be a valid namespace\nname (400 otherwise).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "flow_id",
+            "in": "query",
+            "description": "Only this flow (its uuid).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "One or more kinds, comma-separated: `schedule`, `webhook`, `flow`,\n`other`. Anything else is a 400.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "`enabled` or `disabled`, on `effective_disabled`. Anything else is a\n400.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "A case-insensitive substring of the trigger id, the flow id or the\nnamespace.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many rows to return. Default 50, maximum 200; a larger value is\nclamped, and the clamped value comes back in the response's `limit`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "How many rows to skip. Negative is clamped to zero.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the triggers of the workspace's flows not in the trash, by namespace, flow id and declaration order. Rows carry no `depends_on.conditions` and no `webhook` (read the per-flow route). `unparsable` counts the flows in scope whose source did not parse.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerPageDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`namespace_prefix` is not a valid namespace name, or `kind`/`state` holds an unknown value, or the query string does not decode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "More than 2000 flows match the namespace and flow filters (`code: triggers_too_large`); narrow by namespace",
             "content": {
               "application/json": {
                 "schema": {
@@ -35617,6 +35878,52 @@
           }
         }
       },
+      "ConditionDto": {
+        "type": "object",
+        "description": "One `dependsOn` entry, labelled by its condition key.",
+        "required": [
+          "met"
+        ],
+        "properties": {
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "flow_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "states": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "labels": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "when": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "met": {
+            "type": "boolean",
+            "description": "The open window holds this condition as met."
+          }
+        }
+      },
       "ConfigFile": {
         "type": "object",
         "required": [
@@ -38027,6 +38334,47 @@
           }
         }
       },
+      "DependsOnDto": {
+        "type": "object",
+        "description": "A `Flow` trigger's `dependsOn`.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "description": "`ALL`, `ANY` or `AT_LEAST`."
+          },
+          "min_satisfied": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "conditions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ConditionDto"
+            },
+            "description": "Each entry, in declaration order. `null` in the workspace list (the\ndrawer reads the per-flow route)."
+          },
+          "window": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WindowDto",
+                "description": "The open window; `null` when none is open (an ended one is none)."
+              }
+            ]
+          }
+        }
+      },
       "DiscoveryDoc": {
         "type": "object",
         "description": "OIDC discovery document served at `/.well-known/openid-configuration` so the\nembedded lakekeeper can locate this IdP's JWKS + token endpoint. Doc-only\nmirror of the `serde_json::Value` the handler builds.",
@@ -39436,6 +39784,84 @@
           }
         }
       },
+      "FlowTriggerInfoDto": {
+        "type": "object",
+        "description": "A `Flow` trigger.",
+        "required": [
+          "states",
+          "listening"
+        ],
+        "properties": {
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The source states it hears, after defaults."
+          },
+          "listening": {
+            "type": "boolean",
+            "description": "A `workflow.flow_listeners` row exists."
+          },
+          "not_listening_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why a trigger without `dependsOn` has no listener row: it does not\nresolve."
+          },
+          "depends_on": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DependsOnDto"
+              }
+            ]
+          }
+        }
+      },
+      "FlowTriggersDto": {
+        "type": "object",
+        "description": "A flow's triggers, in declaration order.",
+        "required": [
+          "flow_disabled",
+          "flow_deleted",
+          "scheduler_enabled",
+          "worker_enabled",
+          "webhooks_enabled",
+          "triggers"
+        ],
+        "properties": {
+          "flow_disabled": {
+            "type": "boolean",
+            "description": "The flow's YAML says `disabled: true`, or its `state` is `disabled`."
+          },
+          "flow_deleted": {
+            "type": "boolean",
+            "description": "The flow is in the trash: every trigger is effective-disabled."
+          },
+          "scheduler_enabled": {
+            "type": "boolean",
+            "description": "This deployment runs the schedule loop."
+          },
+          "worker_enabled": {
+            "type": "boolean",
+            "description": "This deployment runs the worker (and the Flow-trigger processor)."
+          },
+          "webhooks_enabled": {
+            "type": "boolean",
+            "description": "This deployment serves webhooks."
+          },
+          "triggers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TriggerEntryDto"
+            }
+          }
+        }
+      },
       "FlowVersionDto": {
         "type": "object",
         "description": "A published version, over the wire.",
@@ -40097,6 +40523,28 @@
           }
         }
       },
+      "LastExecutionDto": {
+        "type": "object",
+        "description": "The newest execution this trigger started.",
+        "required": [
+          "id",
+          "state",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "LimitsSpec": {
         "type": "object",
         "properties": {
@@ -40692,6 +41140,26 @@
           "migrated_at": {
             "type": "string",
             "description": "RFC 3339, UTC."
+          }
+        }
+      },
+      "MissedTicksDto": {
+        "type": "object",
+        "description": "Ticks due and not fired, counted up to 1,000.",
+        "required": [
+          "count",
+          "more"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many, at most 1000.",
+            "minimum": 0
+          },
+          "more": {
+            "type": "boolean",
+            "description": "`true`: there are more than `count` (the UI says \"1000+\")."
           }
         }
       },
@@ -43825,6 +44293,75 @@
           }
         }
       },
+      "ScheduleInfoDto": {
+        "type": "object",
+        "description": "A `Schedule` trigger: its YAML and its `workflow.triggers` row.",
+        "required": [
+          "with_seconds",
+          "timezone",
+          "off_queue"
+        ],
+        "properties": {
+          "cron": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "with_seconds": {
+            "type": "boolean"
+          },
+          "timezone": {
+            "type": "string",
+            "description": "The YAML's `timezone`, `\"UTC\"` when absent."
+          },
+          "next_evaluation_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The next tick the scheduler will fire. `null` with `off_queue`."
+          },
+          "evaluated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The last tick the scheduler processed."
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the schedule went off the queue, when it did."
+          },
+          "off_queue": {
+            "type": "boolean",
+            "description": "`true`: no next date; the schedule does not fire until a save\nre-initialises it (`last_error` says why)."
+          },
+          "missed_ticks": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MissedTicksDto",
+                "description": "On the queue and overdue (`next_evaluation_date <= now`, which a\nswitched-off schedule becomes, since it keeps its date): the ticks from\n`next_evaluation_date` through now. `null` otherwise."
+              }
+            ]
+          },
+          "recover_missed_schedules": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The YAML's `recoverMissedSchedules` as written (`ALL`, `NONE`, `LAST`);\n`null` when absent, which a re-enable treats as `ALL`."
+          }
+        }
+      },
       "ScheduleSummaryDto": {
         "type": "object",
         "description": "One row of the list page.\n\n`last_state` is the column the page exists for, so it is on the summary\nrather than the detail — a list that needs a second request per row to say\nwhether anything is broken would not be opened.",
@@ -45701,6 +46238,16 @@
           "none"
         ]
       },
+      "ToggleRefusal": {
+        "type": "string",
+        "description": "Why the UI's switch is disabled, the first that applies: the flow is in\nthe trash, the trigger is not one egret fires, the caller lacks\n`workflow:manage`, the YAML disables it.",
+        "enum": [
+          "flow_deleted",
+          "not_supported",
+          "forbidden",
+          "yaml_disabled"
+        ]
+      },
       "TokenForm": {
         "type": "object",
         "required": [
@@ -45773,6 +46320,215 @@
           }
         },
         "additionalProperties": false
+      },
+      "TriggerEntryDto": {
+        "type": "object",
+        "description": "One declared trigger and its state.",
+        "required": [
+          "trigger_id",
+          "type",
+          "kind",
+          "yaml_disabled",
+          "runtime_disabled",
+          "effective_disabled",
+          "can_toggle",
+          "duplicate_id"
+        ],
+        "properties": {
+          "trigger_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "The YAML's `type`, in full."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TriggerKindDto"
+          },
+          "yaml_disabled": {
+            "type": "boolean",
+            "description": "The flow's or the trigger's YAML says `disabled: true`."
+          },
+          "runtime_disabled": {
+            "type": "boolean",
+            "description": "Switched off at runtime (`workflow.disabled_triggers`)."
+          },
+          "disabled_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "disabled_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The switcher's display name."
+          },
+          "disabled_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "effective_disabled": {
+            "type": "boolean",
+            "description": "What the scheduler, the listener and the webhook route honour: YAML\n(flow or trigger) or runtime, or the flow is in the trash."
+          },
+          "can_toggle": {
+            "type": "boolean",
+            "description": "Whether the UI's switch is enabled. It is disabled for a trigger the\nYAML disables (`toggle_refusal: yaml_disabled`), but the switch route\nstill accepts switching such a trigger OFF; only switching it ON is\nrefused there (409 `trigger_disabled_in_source`)."
+          },
+          "toggle_refusal": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ToggleRefusal",
+                "description": "Why `can_toggle` is false."
+              }
+            ]
+          },
+          "duplicate_id": {
+            "type": "boolean",
+            "description": "The flow declares this trigger id more than once (a save-time error,\n`duplicate_trigger_id`); the state is the id's."
+          },
+          "schedule": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ScheduleInfoDto"
+              }
+            ]
+          },
+          "flow": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FlowTriggerInfoDto"
+              }
+            ]
+          },
+          "webhook": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WebhookInfoDto",
+                "description": "`null` in the workspace list."
+              }
+            ]
+          },
+          "last_execution": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LastExecutionDto"
+              }
+            ]
+          }
+        }
+      },
+      "TriggerKindDto": {
+        "type": "string",
+        "description": "What a trigger is, as egret runs it: one of the three kinds it fires, or\n`other` (a `Leaf`: any other type, which egret never fires).",
+        "enum": [
+          "schedule",
+          "webhook",
+          "flow",
+          "other"
+        ]
+      },
+      "TriggerPageDto": {
+        "type": "object",
+        "description": "One page of the workspace's triggers.",
+        "required": [
+          "rows",
+          "total",
+          "limit",
+          "offset",
+          "unparsable",
+          "scheduler_enabled",
+          "worker_enabled",
+          "webhooks_enabled"
+        ],
+        "properties": {
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TriggerRowDto"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Every trigger that matches, across pages."
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The page size served (clamped)."
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "unparsable": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Flows in scope whose source did not parse: their triggers are unknown\nand not listed."
+          },
+          "scheduler_enabled": {
+            "type": "boolean"
+          },
+          "worker_enabled": {
+            "type": "boolean"
+          },
+          "webhooks_enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "TriggerRowDto": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/TriggerEntryDto"
+          },
+          {
+            "type": "object",
+            "required": [
+              "flow_uuid",
+              "namespace",
+              "flow_id"
+            ],
+            "properties": {
+              "flow_uuid": {
+                "type": "string",
+                "format": "uuid",
+                "description": "The flow's uuid (what the per-flow route and the switch take)."
+              },
+              "namespace": {
+                "type": "string"
+              },
+              "flow_id": {
+                "type": "string",
+                "description": "The flow's YAML `id`."
+              }
+            }
+          }
+        ],
+        "description": "A row of the workspace list: the flow, then the entry's fields.\n\nThe flow's uuid is `flow_uuid`, not `flow`: the entry is flattened in, and\nits own `flow` (a `Flow` trigger's info) would otherwise be a second key\nof the same name in one object."
       },
       "TryRequest": {
         "type": "object",
@@ -46748,6 +47504,33 @@
           }
         }
       },
+      "WebhookInfoDto": {
+        "type": "object",
+        "description": "A `Webhook` trigger.",
+        "properties": {
+          "url_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`/workflows/v1/{workspace}/executions/webhook/{namespace}/{flow}/{key}`,\neach segment percent-encoded, with the key rendered. A path, not a URL:\nthe server does not know the origin a caller reaches it on. `null` when\nthe key does not render."
+          },
+          "key_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why there is no `url_path`."
+          },
+          "unsupported": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A declared option egret does not implement; a request is refused."
+          }
+        }
+      },
       "WhoCanAccess": {
         "type": "object",
         "description": "Reverse of `EffectiveAccess`: for one object, every principal who can reach it\nand why (`who_can_access`). Mirror of the principal→access resolver.",
@@ -46764,6 +47547,29 @@
             "items": {
               "$ref": "#/components/schemas/AccessEntry"
             }
+          }
+        }
+      },
+      "WindowDto": {
+        "type": "object",
+        "description": "The open `dependsOn` window.",
+        "required": [
+          "kind",
+          "start",
+          "end"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`duration`, `sliding`, `daily_window` or `daily_deadline`."
+          },
+          "start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "end": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },

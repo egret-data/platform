@@ -194,7 +194,7 @@ SELECT k.flow_id, k.trigger_id, e.id, e.state, e.created_at
 ```
 
 - **Hiện chưa index nào phủ được nó.** `workflow_executions_flow_idx` chỉ trên `flow_id` (`0134:93`), nên mỗi lần dò đọc mọi execution của flow; `workflow_executions_one_per_schedule_tick` (`0156:49-51`) chỉ phủ schedule và sắp theo `scheduled_date`.
-- **Migration thêm** `CREATE INDEX workflow_executions_last_by_trigger ON workflow.executions (flow_id, (execution_trigger->>'id'), created_at DESC) WHERE execution_trigger IS NOT NULL`: một lần đi xuống index-only cho mỗi lần dò, tối đa 200 lần dò mỗi trang.
+- **Migration thêm** `CREATE INDEX workflow_executions_last_by_trigger ON workflow.executions (flow_id, (execution_trigger->>'id'), created_at DESC) WHERE execution_trigger IS NOT NULL`: một lần đi xuống index cho mỗi lần dò (Index Scan, không phải index-only: `id` và `state` được đọc từ heap), tối đa 200 lần dò mỗi trang.
 - **Nó được đo, như 0183 đã đo** (`0183:74-85`): một test ghim `EXPLAIN` dùng index. Nếu planner không chọn nó, index bị bỏ khỏi migration và số đo được ghi vào đó thay thế.
 - **Chi phí:** thêm một index cho mỗi lần insert execution do trigger sinh ra; execution khởi động từ API hay bằng replay không có `execution_trigger` (`routes.rs:2656, 2932`: `trigger: None`) và nằm ngoài partial index.
 

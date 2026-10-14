@@ -55,6 +55,13 @@ pub mod models;
 /// W7d: what the namespace pages read beyond the repository -- the
 /// dependencies graph built from flow drafts.
 pub(crate) mod namespaces;
+/// W7e: reading triggers -- a flow's and the workspace's, with their state
+/// (spec §3.5, §3.6).
+pub(crate) mod triggers;
+/// §3.6's last-execution statement, `pub` so `tests/disabled_triggers.rs`
+/// `EXPLAIN`s the text the routes run.
+#[doc(hidden)]
+pub use triggers::state::LAST_EXECUTION_SQL;
 /// W5b: real Kestra plugins run by the plugin host (`plugin-host/`). Task 2
 /// holds only the embedded catalog and its lockfile check.
 pub mod plugins;

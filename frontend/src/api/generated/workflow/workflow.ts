@@ -37,6 +37,7 @@ import type {
   FlowGraph,
   FlowGraphRequest,
   FlowListItemDto,
+  FlowTriggersDto,
   FlowVersionDto,
   KvDetailDto,
   KvEntryDto,
@@ -51,6 +52,7 @@ import type {
   PublishFlowRequest,
   StartExecutionMultipart,
   StartExecutionRequest,
+  TriggerPageDto,
   UpdateFlowRequest,
   ValidateFlowRequest,
   ValidationReportDto,
@@ -69,6 +71,7 @@ import type {
   WorkflowListFlowsParams,
   WorkflowListNamespaceDirectoryParams,
   WorkflowListNamespacesParams,
+  WorkflowListTriggersParams,
   WorkflowMoveNamespaceFileParams,
   WorkflowNamespaceDetailDto,
   WorkflowNamespaceDto,
@@ -2707,7 +2710,148 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getWorkflowPublishFlowMutationOptions(options), queryClient);
     }
-    export type workflowValidateFlowResponse200 = {
+    export type workflowListFlowTriggersResponse200 = {
+  data: FlowTriggersDto
+  status: 200
+}
+
+export type workflowListFlowTriggersResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowListFlowTriggersResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowListFlowTriggersResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowListFlowTriggersResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowListFlowTriggersResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowListFlowTriggersResponseSuccess = (workflowListFlowTriggersResponse200) & {
+  headers: Headers;
+};
+export type workflowListFlowTriggersResponseError = (workflowListFlowTriggersResponse400 | workflowListFlowTriggersResponse401 | workflowListFlowTriggersResponse403 | workflowListFlowTriggersResponse404 | workflowListFlowTriggersResponse500) & {
+  headers: Headers;
+};
+
+export type workflowListFlowTriggersResponse = (workflowListFlowTriggersResponseSuccess | workflowListFlowTriggersResponseError)
+
+export const getWorkflowListFlowTriggersUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/flows/${encodeURIComponent(id)}/triggers`
+}
+
+export const workflowListFlowTriggers = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowListFlowTriggersResponse> => {
+
+  return customInstance<workflowListFlowTriggersResponse>(getWorkflowListFlowTriggersUrl(workspace,id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowListFlowTriggersQueryKey = (workspace: string,
+    id: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/flows/${encodeURIComponent(id)}/triggers`
+    ] as const;
+    }
+
+
+export const getWorkflowListFlowTriggersQueryOptions = <TData = Awaited<ReturnType<typeof workflowListFlowTriggers>>, TError = ErrorBody>(workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListFlowTriggers>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowListFlowTriggersQueryKey(workspace,id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowListFlowTriggers>>> = ({ signal }) => workflowListFlowTriggers(workspace,id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowListFlowTriggers>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowListFlowTriggersQueryResult = NonNullable<Awaited<ReturnType<typeof workflowListFlowTriggers>>>
+export type WorkflowListFlowTriggersQueryError = ErrorBody
+
+
+export function useWorkflowListFlowTriggers<TData = Awaited<ReturnType<typeof workflowListFlowTriggers>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListFlowTriggers>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListFlowTriggers>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListFlowTriggers>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListFlowTriggers<TData = Awaited<ReturnType<typeof workflowListFlowTriggers>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListFlowTriggers>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListFlowTriggers>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListFlowTriggers>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListFlowTriggers<TData = Awaited<ReturnType<typeof workflowListFlowTriggers>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListFlowTriggers>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowListFlowTriggers<TData = Awaited<ReturnType<typeof workflowListFlowTriggers>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListFlowTriggers>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowListFlowTriggersQueryOptions(workspace,id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowValidateFlowResponse200 = {
   data: ValidationReportDto
   status: 200
 }
@@ -5981,6 +6125,154 @@ export function useWorkflowGetFlowSchema<TData = Awaited<ReturnType<typeof workf
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getWorkflowGetFlowSchemaQueryOptions(workspace,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowListTriggersResponse200 = {
+  data: TriggerPageDto
+  status: 200
+}
+
+export type workflowListTriggersResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowListTriggersResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowListTriggersResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowListTriggersResponse422 = {
+  data: ErrorBody
+  status: 422
+}
+
+export type workflowListTriggersResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowListTriggersResponseSuccess = (workflowListTriggersResponse200) & {
+  headers: Headers;
+};
+export type workflowListTriggersResponseError = (workflowListTriggersResponse400 | workflowListTriggersResponse401 | workflowListTriggersResponse403 | workflowListTriggersResponse422 | workflowListTriggersResponse500) & {
+  headers: Headers;
+};
+
+export type workflowListTriggersResponse = (workflowListTriggersResponseSuccess | workflowListTriggersResponseError)
+
+export const getWorkflowListTriggersUrl = (workspace: string,
+    params?: WorkflowListTriggersParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/triggers?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/triggers`
+}
+
+export const workflowListTriggers = async (workspace: string,
+    params?: WorkflowListTriggersParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowListTriggersResponse> => {
+
+  return customInstance<workflowListTriggersResponse>(getWorkflowListTriggersUrl(workspace,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowListTriggersQueryKey = (workspace: string,
+    params?: WorkflowListTriggersParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/triggers`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowListTriggersQueryOptions = <TData = Awaited<ReturnType<typeof workflowListTriggers>>, TError = ErrorBody>(workspace: string,
+    params?: WorkflowListTriggersParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListTriggers>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowListTriggersQueryKey(workspace,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowListTriggers>>> = ({ signal }) => workflowListTriggers(workspace,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowListTriggers>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowListTriggersQueryResult = NonNullable<Awaited<ReturnType<typeof workflowListTriggers>>>
+export type WorkflowListTriggersQueryError = ErrorBody
+
+
+export function useWorkflowListTriggers<TData = Awaited<ReturnType<typeof workflowListTriggers>>, TError = ErrorBody>(
+ workspace: string,
+    params: undefined |  WorkflowListTriggersParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListTriggers>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListTriggers>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListTriggers>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListTriggers<TData = Awaited<ReturnType<typeof workflowListTriggers>>, TError = ErrorBody>(
+ workspace: string,
+    params?: WorkflowListTriggersParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListTriggers>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListTriggers>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListTriggers>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListTriggers<TData = Awaited<ReturnType<typeof workflowListTriggers>>, TError = ErrorBody>(
+ workspace: string,
+    params?: WorkflowListTriggersParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListTriggers>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowListTriggers<TData = Awaited<ReturnType<typeof workflowListTriggers>>, TError = ErrorBody>(
+ workspace: string,
+    params?: WorkflowListTriggersParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListTriggers>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowListTriggersQueryOptions(workspace,params,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

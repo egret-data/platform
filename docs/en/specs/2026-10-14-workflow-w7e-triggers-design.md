@@ -192,7 +192,7 @@ SELECT k.flow_id, k.trigger_id, e.id, e.state, e.created_at
 ```
 
 - **No index covers it today.** `workflow_executions_flow_idx` is on `flow_id` only (`0134:93`), so each probe reads every execution of the flow; `workflow_executions_one_per_schedule_tick` (`0156:49-51`) covers schedules only and orders by `scheduled_date`.
-- **The migration adds** `CREATE INDEX workflow_executions_last_by_trigger ON workflow.executions (flow_id, (execution_trigger->>'id'), created_at DESC) WHERE execution_trigger IS NOT NULL`: one index-only descent per probe, at most 200 probes per page.
+- **The migration adds** `CREATE INDEX workflow_executions_last_by_trigger ON workflow.executions (flow_id, (execution_trigger->>'id'), created_at DESC) WHERE execution_trigger IS NOT NULL`: one index descent per probe (an Index Scan, not index-only: `id` and `state` are read from the heap), at most 200 probes per page.
 - **It is measured, as 0183 measured** (`0183:74-85`): a test pins `EXPLAIN` using the index. If the planner does not choose it, the index is dropped from the migration and the measurement is recorded there instead.
 - **Cost:** one more index on every triggered execution's insert; executions started from the API or by replay have no `execution_trigger` (`routes.rs:2656, 2932`: `trigger: None`) and are outside the partial index.
 

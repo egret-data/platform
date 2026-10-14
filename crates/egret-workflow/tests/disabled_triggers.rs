@@ -23,6 +23,9 @@ use egret_core::UserId;
 use egret_metastore::Db;
 use egret_workflow::flow_trigger::process_events;
 use egret_workflow::scheduler::{fire_due, reconcile, PassReport};
+// §3.6's statement: the crate's own constant, which the trigger routes run,
+// so the plan pinned here is the plan they get.
+use egret_workflow::LAST_EXECUTION_SQL;
 use uuid::Uuid;
 
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -461,19 +464,8 @@ async fn a_resync_of_the_trigger_being_switched_does_not_deadlock() {
 
 // ── §3.6: the last execution per trigger ─────────────────────────────────────
 
-/// §3.6's statement, verbatim. The read route (a later task) must use this
-/// same text, or move it to a crate constant this test then reads.
-const LAST_EXECUTION_SQL: &str = "\
-SELECT k.flow_id, k.trigger_id, e.id, e.state, e.created_at
-  FROM unnest($1::uuid[], $2::text[]) AS k(flow_id, trigger_id)
-  CROSS JOIN LATERAL (
-    SELECT id, state, created_at FROM workflow.executions e
-     WHERE e.flow_id = k.flow_id
-       AND e.execution_trigger IS NOT NULL
-       AND e.execution_trigger->>'id' = k.trigger_id
-     ORDER BY e.created_at DESC LIMIT 1) e";
-
-/// `EXPLAIN` of §3.6's statement over 3,000 triggered executions of ONE flow
+/// `EXPLAIN` of §3.6's statement ([`LAST_EXECUTION_SQL`], the routes' own
+/// text) over 3,000 triggered executions of ONE flow
 /// is served by `workflow_executions_last_by_trigger`, with no sequential scan
 /// of `workflow.executions`. Control: the same rows without the index (dropped
 /// in this test's own database) are not served by it, so the assertion is
@@ -541,8 +533,10 @@ async fn the_last_execution_per_trigger_is_served_by_its_index(pool: sqlx::PgPoo
         .unwrap();
     let plan = plan.join("\n");
     println!("{plan}");
+    // An Index Scan, not index-only: `id` and `state` are not in the index,
+    // so each probe reads its one row from the heap.
     assert!(
-        plan.contains("workflow_executions_last_by_trigger"),
+        plan.contains("Index Scan using workflow_executions_last_by_trigger"),
         "{plan}"
     );
     assert!(!plan.contains("Seq Scan"), "{plan}");
@@ -554,7 +548,7 @@ async fn the_last_execution_per_trigger_is_served_by_its_index(pool: sqlx::PgPoo
     let page = page.join("\n");
     println!("{page}");
     assert!(
-        page.contains("workflow_executions_last_by_trigger"),
+        page.contains("Index Scan using workflow_executions_last_by_trigger"),
         "fifty probes keep the index: {page}"
     );
     assert!(!page.contains("Seq Scan"), "{page}");

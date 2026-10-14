@@ -2324,6 +2324,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         upload_idle_timeout: egret_workflow::routes::UPLOAD_IDLE_TIMEOUT,
         upload_total_timeout: egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
         export_total_timeout: egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
+        // W7e: echoed by the trigger routes, so the UI can say a trigger
+        // cannot fire on this deployment.
+        trigger_flags: egret_workflow::routes::TriggerFlags {
+            scheduler_enabled: config.workflow.scheduler_enabled,
+            worker_enabled: config.workflow.worker_enabled,
+            webhooks_enabled: config.workflow.webhooks_enabled,
+        },
     });
 
     // Data Apps query gateway (`POST /api/apps/query`). Same query engine `Arc`,
