@@ -580,3 +580,184 @@ fn every_flows_writer_calls_sync() {
          exempt: {offenders:?}"
     );
 }
+
+// ── W7e Task 2: the runtime switch (spec 2026-10-14 §3.2, §3.4) ─────────────
+//
+// The switch is a row in `workflow.disabled_triggers`, staged here by SQL
+// (`common::switch_off`) because its route arrives in a later task. The flow
+// is still written only through `FlowRepo`: what is under test is that a save
+// copies the switch into `workflow.triggers.disabled` and keeps the switch
+// rows in step with the declared ids.
+
+const WEBHOOK: &str = "  - id: w\n    type: io.kestra.plugin.core.trigger.Webhook\n    key: k\n";
+
+/// Every cause of `disabled`, each ALONE, writes `true`; with none of them the
+/// same save writes `false`. The runtime cause also keeps the dates: a switch
+/// never touches `next_evaluation_date`.
+#[tokio::test]
+async fn each_cause_alone_disables_the_schedule_row() {
+    // Flow-level YAML.
+    let Some(by_flow) = fx().await else { return };
+    let flow = by_flow
+        .create(&flow_yaml(
+            "disabled: true\n",
+            &schedule("s", "0 2 * * *", ""),
+            "hi",
+        ))
+        .await;
+    assert_eq!(
+        row(&by_flow.db, flow.id, "s").await.map(|r| r.1),
+        Some(true),
+        "flow YAML"
+    );
+
+    // Trigger-level YAML.
+    let Some(by_trigger) = fx().await else { return };
+    let flow = by_trigger
+        .create(&flow_yaml(
+            "",
+            &schedule("s", "0 2 * * *", "    disabled: true\n"),
+            "hi",
+        ))
+        .await;
+    assert_eq!(
+        row(&by_trigger.db, flow.id, "s").await.map(|r| r.1),
+        Some(true),
+        "trigger YAML"
+    );
+
+    // The runtime switch, then a save that keeps the cron.
+    let Some(fx) = fx().await else { return };
+    let flow = fx.create(CRON_A).await;
+    assert_eq!(
+        row(&fx.db, flow.id, "s").await.map(|r| r.1),
+        Some(false),
+        "control: no cause, not disabled"
+    );
+    set_sentinel(&fx.db, flow.id, "s").await;
+    common::switch_off(&fx.db, flow.id, "s").await;
+    let edited = CRON_A.replace("message: hi", "message: saved");
+    fx.update(flow.id, &edited).await;
+    assert_eq!(
+        row(&fx.db, flow.id, "s").await,
+        Some((Some(sentinel()), true, None)),
+        "the runtime switch: disabled, dates untouched"
+    );
+
+    // Control: the same save with the switch row gone writes `false` again,
+    // so the `true` above came from the row and not from the save.
+    common::switch_on(&fx.db, flow.id, "s").await;
+    fx.update(flow.id, CRON_A).await;
+    assert_eq!(
+        row(&fx.db, flow.id, "s").await,
+        Some((Some(sentinel()), false, None)),
+        "switched back on: enabled, dates still untouched"
+    );
+}
+
+/// §3.4: a save deletes the switch rows of ids the source no longer declares,
+/// under any kind, and keeps the rest; a renamed id starts on; a soft delete
+/// deletes them all; another flow's rows are never touched.
+#[tokio::test]
+async fn a_save_keeps_the_switch_rows_of_declared_ids_only() {
+    let Some(fx) = fx().await else { return };
+    let ab = |a: &str| {
+        flow_yaml(
+            "",
+            &(schedule(a, "0 2 * * *", "") + &schedule("b", "0 4 * * *", "") + WEBHOOK),
+            "hi",
+        )
+    };
+    let flow = fx.create(&ab("a")).await;
+    // Another flow of the same workspace, switched off under the same ids.
+    let other = common::draft(
+        &fx.repo,
+        fx.ws,
+        fx.user,
+        &ab("a").replacen("id: f\n", "id: g\n", 1),
+    )
+    .await;
+    for t in ["a", "b", "w"] {
+        common::switch_off(&fx.db, flow.id, t).await;
+        common::switch_off(&fx.db, other.id, t).await;
+    }
+    let all = vec!["a".to_string(), "b".into(), "w".into()];
+
+    // Dropping `b`.
+    let no_b = flow_yaml("", &(schedule("a", "0 2 * * *", "") + WEBHOOK), "hi");
+    fx.update(flow.id, &no_b).await;
+    assert_eq!(
+        common::switched_off(&fx.db, flow.id).await,
+        vec!["a".to_string(), "w".into()],
+        "`b`'s row goes; `a`'s stays, and so does the webhook's although it has \
+         no workflow.triggers row"
+    );
+    assert_eq!(
+        row(&fx.db, flow.id, "a").await.map(|r| r.1),
+        Some(true),
+        "`a` still off"
+    );
+
+    // Renaming `a` to `a2`: a new trigger, so it starts on.
+    let renamed = flow_yaml("", &(schedule("a2", "0 2 * * *", "") + WEBHOOK), "hi");
+    fx.update(flow.id, &renamed).await;
+    assert_eq!(
+        common::switched_off(&fx.db, flow.id).await,
+        vec!["w".to_string()],
+        "the old id's row goes with it"
+    );
+    assert_eq!(
+        row(&fx.db, flow.id, "a2").await.map(|r| r.1),
+        Some(false),
+        "`a2` starts on"
+    );
+    assert_eq!(
+        common::switched_off(&fx.db, other.id).await,
+        all,
+        "other flow untouched"
+    );
+
+    // Soft delete.
+    fx.repo.soft_delete(fx.ws, flow.id).await.expect("delete");
+    assert_eq!(
+        common::switched_off(&fx.db, flow.id).await,
+        Vec::<String>::new(),
+        "a trashed flow keeps no switch (the FK cascade does not fire on a soft delete)"
+    );
+    assert_eq!(
+        common::switched_off(&fx.db, other.id).await,
+        all,
+        "other flow untouched"
+    );
+}
+
+/// §3.4: the switch is per id, whatever the kind -- a `Schedule` `t` that
+/// becomes a `Webhook` `t` keeps its row.
+#[tokio::test]
+async fn a_kind_change_under_the_same_id_keeps_the_switch() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .create(&flow_yaml("", &schedule("t", "0 2 * * *", ""), "hi"))
+        .await;
+    common::switch_off(&fx.db, flow.id, "t").await;
+
+    let hook = flow_yaml(
+        "",
+        "  - id: t\n    type: io.kestra.plugin.core.trigger.Webhook\n    key: k\n",
+        "hi",
+    );
+    assert!(
+        matches!(parses(&hook).triggers[0].kind, TriggerKind::Webhook(_)),
+        "control: `t` is a webhook now"
+    );
+    fx.update(flow.id, &hook).await;
+    assert_eq!(
+        trigger_ids(&fx.db, flow.id).await,
+        Vec::<String>::new(),
+        "control: the schedule row went with the kind"
+    );
+    assert_eq!(
+        common::switched_off(&fx.db, flow.id).await,
+        vec!["t".to_string()]
+    );
+}

@@ -506,3 +506,47 @@ async fn a_mode_shape_save_refuses_without_depends_on_gets_no_listener_row() {
         "control: without the mode lines the same triggers get their rows"
     );
 }
+
+/// W7e Task 2 (spec 2026-10-14 §3.2): a row in `workflow.disabled_triggers`
+/// is the third cause of `disabled`, copied by the next save onto the listener
+/// row of a window-free and of a `dependsOn` Flow trigger alike. The switch
+/// row is staged by SQL (its route arrives in a later task); the flow is
+/// written through `FlowRepo` only.
+#[tokio::test]
+async fn the_runtime_switch_disables_the_listener_row() {
+    for (label, trigger) in [
+        (
+            "window-free",
+            "  - id: on_done\n    type: io.kestra.plugin.core.trigger.Flow\n    states: [SUCCESS]\n",
+        ),
+        (
+            "dependsOn",
+            "  - id: on_done\n    type: io.kestra.plugin.core.trigger.Flow\n    \
+             dependsOn:\n      - namespace: t\n        flowId: other\n",
+        ),
+    ] {
+        let Some(fx) = fx().await else { return };
+        let src = flow_yaml("", trigger, "hi");
+        let flow = fx.create(&src).await;
+        let (_, depends_on, disabled) = listener_row(&fx.db, flow.id, "on_done")
+            .await
+            .unwrap_or_else(|| panic!("{label}: control: a row"));
+        assert_eq!(depends_on, label == "dependsOn", "{label}: control: the kind of row");
+        assert!(!disabled, "{label}: control: no cause, not disabled");
+
+        common::switch_off(&fx.db, flow.id, "on_done").await;
+        fx.update(flow.id, &flow_yaml("", trigger, "saved")).await;
+        let (_, _, disabled) = listener_row(&fx.db, flow.id, "on_done")
+            .await
+            .unwrap_or_else(|| panic!("{label}: row kept"));
+        assert!(disabled, "{label}: the switch row must disable the listener");
+
+        // Control: the same save without the switch row writes `false`.
+        common::switch_on(&fx.db, flow.id, "on_done").await;
+        fx.update(flow.id, &src).await;
+        let (_, _, disabled) = listener_row(&fx.db, flow.id, "on_done")
+            .await
+            .unwrap_or_else(|| panic!("{label}: row kept"));
+        assert!(!disabled, "{label}: switched back on");
+    }
+}

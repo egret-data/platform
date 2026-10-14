@@ -1003,3 +1003,48 @@ pub async fn fired_by(db: &Db, source: Uuid) -> Vec<(Uuid, i32, serde_json::Valu
     .await
     .expect("read the fired executions")
 }
+
+// ---------------------------------------------------------------------------
+// The runtime trigger switch (W7e Task 2)
+// ---------------------------------------------------------------------------
+
+/// Switch `(flow, trigger)` off the way the route (W7e Task 5) will: a row in
+/// `workflow.disabled_triggers`. SQL only, and only this table -- the flow
+/// itself is always written through `FlowRepo`, so what `sync` makes of the
+/// row is under test, not a hand-written copy.
+pub async fn switch_off(db: &Db, flow: Uuid, trigger: &str) {
+    sqlx::query(
+        "INSERT INTO workflow.disabled_triggers (flow_id, trigger_id, workspace_id) \
+         SELECT id, $2, workspace_id FROM workflow.flows WHERE id = $1",
+    )
+    .bind(flow)
+    .bind(trigger)
+    .execute(&db.pool)
+    .await
+    .expect("switch the trigger off");
+}
+
+/// Delete the switch row of `(flow, trigger)`; asserts there was one.
+pub async fn switch_on(db: &Db, flow: Uuid, trigger: &str) {
+    let n = sqlx::query(
+        "DELETE FROM workflow.disabled_triggers WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trigger)
+    .execute(&db.pool)
+    .await
+    .expect("switch the trigger on")
+    .rows_affected();
+    assert_eq!(n, 1, "switch_on must delete exactly one row");
+}
+
+/// The trigger ids of `flow` that are switched off, sorted.
+pub async fn switched_off(db: &Db, flow: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT trigger_id FROM workflow.disabled_triggers WHERE flow_id = $1 ORDER BY trigger_id",
+    )
+    .bind(flow)
+    .fetch_all(&db.pool)
+    .await
+    .expect("read the switch rows")
+}

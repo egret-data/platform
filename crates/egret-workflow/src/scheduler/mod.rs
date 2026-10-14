@@ -128,7 +128,9 @@
 //! is the `SKIP LOCKED` property statement 1 records as unobserved, and no
 //! test holds a save open while a pass runs. The pass's own call, `resync` (a
 //! source that disagrees with the row), runs inside the claim's transaction
-//! and already holds the lock.
+//! and already holds the lock. `sync` also reads `workflow.disabled_triggers`
+//! (the runtime switch, W7e) and deletes its undeclared rows, in the same
+//! transaction.
 //!
 //! Proved by `tests/runtime.rs`'s
 //! `a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance`, which
@@ -155,4 +157,8 @@ pub(crate) mod start;
 mod sync;
 
 pub use fire::{fire_due, PassReport};
+// The switch route (W7e Task 5) writes the same effective value `sync` does;
+// until it lands nothing outside `sync` reads it.
+#[allow(unused_imports)]
+pub(crate) use sync::effective_disabled;
 pub use sync::{reconcile, sync, Reconciled};
