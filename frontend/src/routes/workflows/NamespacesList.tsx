@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ChevronDown, ChevronRight, FolderTree } from "lucide-react";
 import { useWorkflowListNamespaces } from "@/api/generated/workflow/workflow";
@@ -114,18 +114,21 @@ export default function NamespacesList() {
     setFocus(path);
     refs.current.get(path)?.focus();
   };
-  // Whether keyboard focus is in the grid: set when a row takes focus, cleared
-  // when focus moves to something outside it. A removed row fires no blur, or
-  // one with no `relatedTarget`, so the flag survives its row disappearing.
-  const focusInGrid = useRef(false);
+  // Whether a row detached in this commit held keyboard focus at that moment.
+  // Recorded at removal (React detaches a ref before it removes the node), not
+  // as a standing "focus is in the grid" flag: a user who Tabbed or clicked
+  // away has left the grid even though no blur said where to. Inline ref
+  // callbacks also detach surviving rows each render, so the flag is reset on
+  // every effect run and only read when the focused row is really gone.
+  const removedHadFocus = useRef(false);
   const prevLines = useRef(lines);
   // A refetch or a filter can remove the focused row, which drops focus to
-  // `<body>`. If focus was in the grid, it goes to the nearest row above the
+  // `<body>`. If that row held focus, focus goes to the nearest row above the
   // one that vanished, else the first.
   useEffect(() => {
     const before = prevLines.current;
     prevLines.current = lines;
-    if (!focus || !focusInGrid.current || lines.some((l) => l.node.path === focus)) return;
+    if (!focus || !removedHadFocus.current || lines.some((l) => l.node.path === focus)) return;
     const active = document.activeElement;
     if (active && active !== document.body) return;
     const shown = new Set(lines.map((l) => l.node.path));
@@ -141,6 +144,10 @@ export default function NamespacesList() {
     setFocus(target);
     refs.current.get(target)?.focus();
   }, [lines, focus]);
+  // After every commit, and after the effect above has read it.
+  useEffect(() => {
+    removedHadFocus.current = false;
+  });
   const navigate = useNavigate();
   const onRowKeyDown = (e: KeyboardEvent<HTMLTableRowElement>, i: number) => {
     // A modified key is someone else's: Alt/Cmd+Left is the browser's Back,
@@ -263,18 +270,15 @@ export default function NamespacesList() {
                     open={!collapsed.has(line.node.path)}
                     tabStop={tabStop === line.node.path}
                     rowRef={(el) => {
-                      if (el) refs.current.set(line.node.path, el);
-                      else refs.current.delete(line.node.path);
+                      if (el) {
+                        refs.current.set(line.node.path, el);
+                        return;
+                      }
+                      const prev = refs.current.get(line.node.path);
+                      if (prev && document.activeElement === prev) removedHadFocus.current = true;
+                      refs.current.delete(line.node.path);
                     }}
-                    onFocus={() => {
-                      focusInGrid.current = true;
-                      setFocus(line.node.path);
-                    }}
-                    onBlur={(e) => {
-                      // Focus left for something outside the grid's body.
-                      const to = e.relatedTarget;
-                      if (to && !e.currentTarget.parentElement?.contains(to)) focusInGrid.current = false;
-                    }}
+                    onFocus={() => setFocus(line.node.path)}
                     onKeyDown={(e) => onRowKeyDown(e, i)}
                     onToggle={() => {
                       setOpen(line.node.path, collapsed.has(line.node.path));
@@ -311,7 +315,6 @@ function NamespaceRow({
   tabStop,
   rowRef,
   onFocus,
-  onBlur,
   onKeyDown,
   onToggle,
 }: {
@@ -321,7 +324,6 @@ function NamespaceRow({
   tabStop: boolean;
   rowRef: (el: HTMLTableRowElement | null) => void;
   onFocus: () => void;
-  onBlur: (e: FocusEvent<HTMLTableRowElement>) => void;
   onKeyDown: (e: KeyboardEvent<HTMLTableRowElement>) => void;
   onToggle: () => void;
 }) {
@@ -345,7 +347,6 @@ function NamespaceRow({
       aria-expanded={hasChildren ? open : undefined}
       tabIndex={tabStop ? 0 : -1}
       onFocus={onFocus}
-      onBlur={onBlur}
       onKeyDown={onKeyDown}
       className="outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
     >

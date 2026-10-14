@@ -370,6 +370,22 @@ describe("NamespacesList: focus survives re-renders", () => {
     expect(rowOf("company.team").tabIndex).toBe(0);
   });
 
+  it("leaves focus on the page when the user left the grid before the row went", async () => {
+    const world = { namespaces: [...ROWS] };
+    serveNamespaces(world);
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    const etl = rowOf("company.team.etl");
+    etl.focus();
+    // Tab past the last stop, or a click on blank page: a blur with no relatedTarget.
+    etl.blur();
+    expect(document.body).toHaveFocus();
+    world.namespaces = world.namespaces.filter((r) => r.namespace !== "company.team.etl");
+    await act(() => lastClient.invalidateQueries());
+    await waitFor(() => expect(shown()).not.toContain("company.team.etl"));
+    expect(document.body).toHaveFocus();
+  });
+
   it("leaves focus alone when the removed row was not focused", async () => {
     const world = { namespaces: [...ROWS] };
     serveNamespaces(world);
