@@ -270,7 +270,7 @@ async fn wait_for_tag_version_times_out_naming_the_plugin_and_succeeds_when_it_c
     )
     .await;
 
-    let err = wait_for_tag_version(&store, &[id], 1, Duration::from_millis(700))
+    let err = wait_for_tag_version(&store, &[(id, 1)], Duration::from_millis(700))
         .await
         .unwrap_err();
     match err {
@@ -284,14 +284,14 @@ async fn wait_for_tag_version_times_out_naming_the_plugin_and_succeeds_when_it_c
         tokio::time::sleep(Duration::from_millis(300)).await;
         poll(&s2, &uri).await;
     });
-    wait_for_tag_version(&store, &[id], 1, Duration::from_secs(10))
+    wait_for_tag_version(&store, &[(id, 1)], Duration::from_secs(10))
         .await
         .expect("the plugin caught up");
     t.await.unwrap();
 
     // Nothing to wait on is a refusal, never a vacuous success.
     assert!(matches!(
-        wait_for_tag_version(&store, &[], 1, Duration::from_millis(100)).await,
+        wait_for_tag_version(&store, &[], Duration::from_millis(100)).await,
         Err(WaitError::Timeout { .. })
     ));
 }
@@ -324,5 +324,132 @@ async fn inline_upsert_latency() {
         "LATENCY upsert: mean {:?}, worst {:?} over {N}",
         total / N,
         worst
+    );
+}
+
+async fn set_tag_version(pool: &sqlx::PgPool, id: i64, v: i64) {
+    sqlx::query("UPDATE policy.authz_services SET tag_version = $2 WHERE id = $1")
+        .bind(id)
+        .bind(v)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn wait_uses_each_services_own_counter() {
+    let Some(db) = db().await else { return };
+    let (store, pool, a, a_id) = setup(db).await;
+    let b = format!("trino_{}", Uuid::new_v4().simple());
+    let b_id = store
+        .create_service(&b, "trino", &json!({}))
+        .await
+        .unwrap()
+        .id;
+    set_tag_version(&pool, a_id, 10).await;
+    set_tag_version(&pool, b_id, 3).await;
+    let (pa, pb) = (format!("trino@h-{a}"), format!("trino@h-{b}"));
+    poll(
+        &store,
+        &format!("/tags/download/{a}?pluginId={pa}&lastKnownVersion=10"),
+    )
+    .await;
+    poll(
+        &store,
+        &format!("/tags/download/{b}?pluginId={pb}&lastKnownVersion=5"),
+    )
+    .await;
+    let short = Duration::from_millis(600);
+
+    // B's counter moves to 6: its plugin at 5 does not hold it, A's does hold 10.
+    let err = wait_for_tag_version(&store, &[(a_id, 10), (b_id, 6)], short)
+        .await
+        .unwrap_err();
+    match err {
+        WaitError::Timeout { waiting_on } => assert_eq!(waiting_on, vec![pb.clone()]),
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+    // B still at counter 3 (plugin reports 5): confirmed, though 5 < A's 10.
+    wait_for_tag_version(&store, &[(a_id, 10), (b_id, 3)], short)
+        .await
+        .expect("each service is judged against its own counter");
+}
+
+#[tokio::test]
+async fn an_overlong_plugin_id_records_nothing_and_still_serves() {
+    let Some(db) = db().await else { return };
+    let (store, pool, svc, id) = setup(db).await;
+    let long = "x".repeat(257);
+    let ok = "y".repeat(256);
+    assert_eq!(
+        poll(
+            &store,
+            &format!("/tags/download/{svc}?pluginId={long}&lastKnownVersion=-1")
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        poll(
+            &store,
+            &format!("/tags/download/{svc}?pluginId={ok}&lastKnownVersion=-1")
+        )
+        .await,
+        StatusCode::OK
+    );
+    let ids: Vec<(String,)> = sqlx::query_as(
+        "SELECT plugin_id FROM policy.ranger_plugin_downloads WHERE service_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ids, vec![(ok,)], "257 bytes refused, 256 recorded");
+}
+
+#[tokio::test]
+async fn stale_rows_are_pruned_on_upsert_and_fresh_ones_kept() {
+    let Some(db) = db().await else { return };
+    let (store, pool, svc, id) = setup(db).await;
+    let other = format!("trino_{}", Uuid::new_v4().simple());
+    let other_id = store
+        .create_service(&other, "trino", &json!({}))
+        .await
+        .unwrap()
+        .id;
+    for (sid, plugin) in [(id, "old"), (id, "fresh"), (other_id, "old-elsewhere")] {
+        store
+            .record_plugin_download(sid, plugin, egret_policy::DownloadKind::Tags, Some(1), None)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "UPDATE policy.ranger_plugin_downloads SET at = now() - interval '25 hours' \
+         WHERE plugin_id IN ('old', 'old-elsewhere')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // The prune runs on a fixed tick of upserts; 64 in a row always hit it.
+    for i in 0..64 {
+        store
+            .record_plugin_download(id, "fresh", egret_policy::DownloadKind::Tags, Some(i), None)
+            .await
+            .unwrap();
+    }
+    let left: Vec<(String,)> = sqlx::query_as(
+        "SELECT plugin_id FROM policy.ranger_plugin_downloads \
+         WHERE service_id = ANY($1) ORDER BY plugin_id",
+    )
+    .bind(vec![id, other_id])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    // Pruning is per polled service: the other service's old row is untouched.
+    assert_eq!(
+        left,
+        vec![("fresh".to_string(),), ("old-elsewhere".to_string(),)],
+        "{svc}"
     );
 }

@@ -196,6 +196,7 @@ egret serves `download_tags` (`egret-policy/src/ranger/api/download.rs`), so it 
 - StarRocks never polls tags, so B2 waits only for Trino plugins.
 
 **Forged polls.** The download endpoint is anonymous, so anyone who can reach egret can forge a confirming poll. A forged poll can only end a hold early: the real plugin still applies the new version on its next poll, within one interval. The guide states this.
+A forged id that keeps polling a stale `lastKnownVersion` can also block the hold on that service, so a classified `CREATE VIEW` is refused (fail-closed). Configuring the download `auth_token` closes both the early-confirmation and the blocking forgery.
 
 The confirmation waits for every plugin id seen for that service within the last three poll intervals, not for the first one. (StarRocks runs two plugin instances, §2.6 item 6e, but it does not poll tags. Trino workers may poll too; Task 11 checks this.)
 

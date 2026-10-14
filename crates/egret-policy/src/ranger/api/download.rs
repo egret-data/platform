@@ -29,6 +29,9 @@ pub struct PluginParams {
     pub plugin_id: Option<String>,
 }
 
+/// Longest `pluginId` recorded (`<appId>@<host>-<service>` is far shorter).
+const MAX_PLUGIN_ID_BYTES: usize = 256;
+
 /// Record this poll in the plugin download ledger (view governance B4).
 ///
 /// Never changes the download: a poll with no `pluginId` records nothing, and a
@@ -45,6 +48,17 @@ async fn record_poll(
     let Some(plugin_id) = plugin_id.filter(|p| !p.is_empty()) else {
         return;
     };
+    if plugin_id.len() > MAX_PLUGIN_ID_BYTES {
+        // Never log the raw value: the endpoint is anonymous, and an id can be
+        // as long as the URI limit.
+        tracing::warn!(
+            service_id,
+            id_len = plugin_id.len(),
+            id_prefix = %String::from_utf8_lossy(&plugin_id.as_bytes()[..64]),
+            "plugin id over {MAX_PLUGIN_ID_BYTES} bytes; not recorded"
+        );
+        return;
+    }
     if let Err(e) = store
         .record_plugin_download(service_id, plugin_id, kind, last_known, served)
         .await

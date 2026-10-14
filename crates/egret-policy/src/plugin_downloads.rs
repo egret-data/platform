@@ -13,11 +13,17 @@
 //! forged poll can end a hold early. It cannot change what the real plugin
 //! applies on its next poll.
 use crate::{PolicyStore, PolicyStoreError};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// `waiting_on` when no plugin has polled the service within the window.
 /// Confirmation is never vacuous.
 pub const NO_PLUGIN_POLLED: &str = "<no plugin has polled>";
+
+/// Rows silent for this long are pruned.
+const RETENTION: Duration = Duration::from_secs(24 * 3600);
+const PRUNE_EVERY: u64 = 64;
+static PRUNE_TICK: AtomicU64 = AtomicU64::new(0);
 
 const WAIT_STEP: Duration = Duration::from_millis(500);
 /// A plugin that has not polled within three 30 s poll intervals is not waited
@@ -84,7 +90,37 @@ impl PolicyStore {
         .bind(served_version)
         .execute(self.pool())
         .await?;
+        // Retention without a scheduler: every PRUNE_EVERY-th upsert in this
+        // process also deletes this service's long-silent rows. One bounded
+        // statement (the PK prefix is `service_id`), run on 1 of 64 polls, so
+        // it stays off the p99 of the common path. Forged ids cannot pile up
+        // unboundedly; a failed prune is only a missed cleanup.
+        if PRUNE_TICK
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(PRUNE_EVERY)
+        {
+            if let Err(e) = self.prune_stale_plugin_downloads(service_id).await {
+                tracing::warn!(error = %e, service_id, "could not prune stale plugin downloads");
+            }
+        }
         Ok(())
+    }
+
+    /// Delete this service's ledger rows not touched for [`RETENTION`]. Far
+    /// older than the confirmation window, so no live hold can depend on them.
+    pub async fn prune_stale_plugin_downloads(
+        &self,
+        service_id: i64,
+    ) -> Result<u64, PolicyStoreError> {
+        let r = sqlx::query(
+            "DELETE FROM policy.ranger_plugin_downloads \
+             WHERE service_id = $1 AND at < now() - ($2 * interval '1 second')",
+        )
+        .bind(service_id)
+        .bind(RETENTION.as_secs_f64())
+        .execute(self.pool())
+        .await?;
+        Ok(r.rows_affected())
     }
 }
 
@@ -124,27 +160,33 @@ pub async fn plugins_hold_tag_version(
     })
 }
 
-/// Poll [`plugins_hold_tag_version`] every 500 ms until every service in
-/// `service_ids` is confirmed, or `deadline` passes. `service_ids` are the
-/// RESOURCE services of the Trino engines bound to the affected tag service.
-/// An empty list is a [`WaitError::Timeout`]: with nothing to wait on, nothing
-/// is confirmed.
+/// Poll [`plugins_hold_tag_version`] every 500 ms until every pair in
+/// `required` is confirmed, or `deadline` passes.
+///
+/// Each pair is `(resource service id, that service's tag version)`. Tag
+/// counters are per service: `download_tags` serves the POLLED (resource)
+/// service's own `tag_version`, and `bump_bound_tag_versions` bumps each
+/// resource profile and each tag service as a separate counter. So V must be
+/// the counter `download_tags` serves for that resource service, never the tag
+/// service's counter and never one number shared across services. A V that is
+/// too low confirms before the plugin has the new tags; too high never
+/// confirms. An empty slice is a [`WaitError::Timeout`]: with nothing to wait
+/// on, nothing is confirmed.
 pub async fn wait_for_tag_version(
     store: &PolicyStore,
-    service_ids: &[i64],
-    version: i64,
+    required: &[(i64, i64)],
     deadline: Duration,
 ) -> Result<(), WaitError> {
     let end = tokio::time::Instant::now() + deadline;
     loop {
         let mut waiting_on = Vec::new();
-        for &id in service_ids {
+        for &(id, version) in required {
             let s = plugins_hold_tag_version(store, id, version, RECENT).await?;
             if !s.confirmed {
                 waiting_on.extend(s.waiting_on);
             }
         }
-        if service_ids.is_empty() {
+        if required.is_empty() {
             waiting_on.push(NO_PLUGIN_POLLED.to_owned());
         }
         if waiting_on.is_empty() {
