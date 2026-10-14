@@ -27,8 +27,13 @@ The frontend rulebook `docs/en/frontend-rules.md` binds every frontend line.
 - D8. A new index serves "last execution per trigger" (§3.6), kept only if `EXPLAIN` shows the query uses it (0183's rule).
 - D9. The global list parses drafts off the async workers with a bound of 2,000 flows **after** the namespace and flow filters, 422 `triggers_too_large` beyond (§3.5).
 - D10. Bulk switching is by selection only, at most 100 triggers, one transaction per trigger, synchronous, with a result per trigger. No "select all matching" (§3.7).
-- D11. A duplicate trigger id becomes a validation error, `duplicate_trigger_id`, as in Kestra (§3.8).
+- D11. A duplicate trigger id becomes a validation error, `duplicate_trigger_id`, as in Kestra, but a **save-only** finding: it is shown on the draft and blocks publish, and it is not in `validate_for_run`, so stored flows that already declare a duplicate keep running (§3.8).
 - D12. No unlock, restart or delete-state action (egret has no persisted lock; §3.9). No warning that a draft does not fire: a draft fires (§4.4).
+- D13. The migration is numbered **0189**: `0186`-`0188` are taken by the unmerged branch `feat/view-governance` (§3.1).
+- D14. `LAST` recovery uses a new `ScheduleTrigger::last_tick_at_or_before`; the existing `cron.last_before` is strictly-before and private (§3.3).
+- D15. W7d's `off_runtime` (`dependencies.rs:213`) becomes `pub(crate)` with a neutral error message (§3.5).
+- D16. The response carries `disabled_by_name` beside `disabled_by`, because the browser cannot resolve user ids (user listings are admin-gated) (§3.5, §4.1).
+- D17. W7e adds **no** ingress, nginx or Vite routing for webhooks and does not build the webhook URL from `window.location.origin`: the UI shows the webhook path with a copy button and a note (§4.2).
 
 ## 1. Why
 
@@ -60,7 +65,7 @@ Every row below is **read in source** (the Kestra checkout at `data-portal/kestr
 
 ### 3.1 The switch table
 
-Migration `0186_workflow_disabled_triggers.sql` (0185 is the last on main today; renumber if main moves, since the number space is shared).
+Migration `0189_workflow_disabled_triggers.sql` (default decision, 2026-10-14). `0185` is the last on main, but the unmerged branch `feat/view-governance` holds `0186`-`0188`; `0189` collides with neither in either merge order. Re-check every ref before merging, since the number space is shared.
 
 ```sql
 CREATE TABLE workflow.disabled_triggers (
@@ -123,7 +128,7 @@ COMMENT ON COLUMN workflow.flow_listeners.disabled IS
   - `true`: the trigger's `recoverMissedSchedules`:
     - absent or `ALL`: dates kept; every missed tick is replayed, one per pass (`trigger/schedule.rs:226-229`).
     - `NONE`: as `false`.
-    - `LAST`: `next_evaluation_date` = the latest tick at or before `now()` (`cron.last_before`, `schedule.rs:1391`) when it is after `evaluated_at`; otherwise kept. With no `evaluated_at` (never fired), as `NONE`. This is Kestra's `updateForLastMissedSchedule` (`TriggerEventHandler.java:283-306`).
+    - `LAST`: `next_evaluation_date` = the latest tick at or before `now()` (a new `ScheduleTrigger::last_tick_at_or_before`, since the existing `cron.last_before`, `schedule.rs:1391`, is strictly-before and private, so it would miss a tick exactly at `now()`) when it is after `evaluated_at`; otherwise kept. With no `evaluated_at` (never fired), as `NONE`. This is Kestra's `updateForLastMissedSchedule` (`TriggerEventHandler.java:283-306`).
   - `evaluated_at` and `last_error` are not touched. A row that is off the queue stays off; the next save re-queues it (`sync.rs:111-118`). `recover_missed` is ignored for other kinds.
 - **A later save does not undo a skip.** `sync` keeps a queued row's dates while `spec_key` (`cron|withSeconds|timezone`, `sync.rs:338-345`) is unchanged (`sync.rs:126-134`), so the moved date stands. A changed `spec_key` re-initialises to the next tick after now, which is also a skip.
 - **`recoverMissedSchedules` is read for the first time.** `models::Schedule` drops it today (`models/trigger.rs:93-96`) and `serde` has no `deny_unknown_fields`, so it parses and is ignored. W7e captures it as `lateMaximumDelay` is captured (`models/trigger.rs:130-150`): a raw value, kept on re-serialisation. Only this route reads it. A value other than `ALL`, `NONE` or `LAST` answers 409 `recover_missed_unknown` on `recover_missed: true`; the scheduler's other paths are unchanged (§10).
@@ -149,7 +154,7 @@ Both routes require `workflow:read` (`routes.rs:105`).
 | Field | Source |
 |---|---|
 | `trigger_id`, `type`, `kind` (`schedule` / `webhook` / `flow` / `other`) | the YAML |
-| `yaml_disabled` (flow or trigger), `runtime_disabled`, `disabled_by`, `disabled_at`, `effective_disabled` | YAML, `disabled_triggers` |
+| `yaml_disabled` (flow or trigger), `runtime_disabled`, `disabled_by`, `disabled_by_name`, `disabled_at`, `effective_disabled` | YAML, `disabled_triggers` (the name is read in the same statement; the browser cannot resolve a user id, as the user listings are admin-gated) |
 | `can_toggle`, and `toggle_refusal` when false | D3, D4, the caller's `workflow:manage` (`caller_may_manage`, `routes.rs:1651-1660`) |
 | `duplicate_id` | D11 |
 | `schedule`: `cron`, `with_seconds`, `timezone` (absent = UTC), `next_evaluation_date`, `evaluated_at`, `last_error`, `off_queue`, `missed_ticks` (when switched off or overdue; counted up to 1,000, then "1000+"), `recover_missed_schedules` | YAML, `workflow.triggers` |
@@ -169,7 +174,7 @@ And at the top: `flow_disabled` (YAML or `state = 'disabled'`), `flow_deleted`, 
 - **Query:** `namespace_prefix` (dot-anchored, as W7b's), `flow_id` (uuid), `kind` (comma-separated), `state` (`enabled` / `disabled`, on `effective_disabled`), `q` (case-insensitive substring of trigger id, flow id or namespace), `limit` (default 50, max 200, clamped), `offset`.
 - **Row:** the flow's uuid, namespace and flow id, plus the per-flow entry without `depends_on.conditions` and without `webhook` (the drawer fetches the per-flow route).
 - **Page:** `{rows, total, limit, offset, unparsable, scheduler_enabled, worker_enabled, webhooks_enabled}`; `unparsable` counts flows in scope whose source did not parse (their triggers are unknown). Order: namespace, flow id, declaration order.
-- **How (D9):** the flows in scope are read with the namespace and flow filters in SQL, at most 2,001 (`dependency_drafts`'s shape, `repo.rs:381-397`). More than 2,000 answers 422 `triggers_too_large`, "more than 2000 flows match; narrow by namespace". The sources are parsed on the blocking pool (W7d's `off_runtime`, `dependencies.rs:214-221`). The state tables are read in one statement each for the flow ids in scope. Kind, state and search filter in memory, then the page is cut, then `last_execution` is read for that page only.
+- **How (D9):** the flows in scope are read with the namespace and flow filters in SQL, at most 2,001 (`dependency_drafts`'s shape, `repo.rs:381-397`). More than 2,000 answers 422 `triggers_too_large`, "more than 2000 flows match; narrow by namespace". The sources are parsed on the blocking pool (W7d's `off_runtime`, `dependencies.rs:213`, lifted to `pub(crate)` with a neutral error message, since today it is private and its message names the dependencies graph). The state tables are read in one statement each for the flow ids in scope. Kind, state and search filter in memory, then the page is cut, then `last_execution` is read for that page only.
 - **Why parse:** webhooks and `Leaf` triggers have no row anywhere, and only the source knows them.
 
 ### 3.6 Last execution per trigger (D8)
@@ -205,7 +210,7 @@ SELECT k.flow_id, k.trigger_id, e.id, e.state, e.created_at
 
 ### 3.8 Duplicate trigger ids (D11)
 
-`spec::validate` gains `duplicate_trigger_id` (error), as it has `duplicate_task_id` (`spec/validate.rs:593`). Kestra refuses the same (`FlowValidator.java:65-68`). Drafts still save with validation errors, so the read routes mark duplicates (`duplicate_id: true`) and the switch applies to the id, which is all the trigger tables can key on today: their primary key is `(flow_id, trigger_id)`, so `sync` already folds two schedules with one id into one row (`sync.rs:119-145`).
+`spec::validate` gains `duplicate_trigger_id` (error). Kestra refuses the same (`FlowValidator.java:65-68`). Unlike `duplicate_task_id` (`spec/validate.rs:593`, raised in `validate_for_run`), it lives in `save_only_findings`: it is shown on the draft and blocks publish, and it is **not** in `validate_for_run`. `executor::build_plan` calls `validate_for_run` at run time (`validate.rs:335-338`), so a run-time error there would stop every execution of a stored flow that already declares one trigger id twice, a behaviour change this package does not ask for. Drafts still save with validation errors, so the read routes mark duplicates (`duplicate_id: true`) and the switch applies to the id, which is all the trigger tables can key on today: their primary key is `(flow_id, trigger_id)`, so `sync` already folds two schedules with one id into one row (`sync.rs:119-145`).
 
 ### 3.9 What is not built, and why
 
@@ -216,7 +221,7 @@ SELECT k.flow_id, k.trigger_id, e.id, e.state, e.created_at
 ### 3.10 Comments to correct
 
 Each was checked in this worktree:
-- `crates/egret-workflow/src/lib.rs:91-95` says the routes "that create a backfill" live outside the module. None exist. New text: the loop that drives the clock lives in `scheduler`; backfill has no route yet (W7f).
+- `crates/egret-workflow/src/lib.rs:92-96` says the routes "that create a backfill" live outside the module. None exist. New text: the loop that drives the clock lives in `scheduler`; backfill has no route yet (W7f).
 - `crates/egret-workflow/src/routes.rs:2271-2274` and `webhook_routes.rs:569-571` say the `state` column is "the one the management UI writes". No code writes `state = 'disabled'`: the only `UPDATE workflow.flows` statements are `repo.rs:552`, `:664` and `:739` (`state = 'live'`). New text: the column is honoured, but nothing writes it yet; the runtime switch is per trigger (`workflow.disabled_triggers`).
 - `crates/egret-workspace/src/features.rs:312-315` tells operators to stop webhook traffic with `state = 'disabled'` on the flow, a switch nobody can set. New text: the trigger's runtime switch or `disabled: true` in the YAML. `webhook_routes.rs:33-36` gains the trigger switch beside the YAML.
 
@@ -229,7 +234,7 @@ Everything lives inside W7a's lazy Workflows area (FE-ROUTE-2). New modules: `co
 `FLOW_TABS` becomes `["edit", "revisions", "executions", "triggers"]` (`FlowDetail.tsx:52-53`); the URL is `flows/:id/triggers` (FE-PAGE-2).
 
 - **Columns** (`ui/table`, FE-PAGE-4): selection, ID, Type (kind icon and the short type name), Next run, Last tick (`evaluated_at`, labelled "Last evaluated" with a tooltip that it is the tick processed, not the wall-clock fire), Last execution (state chip, relative time, link), Status, Enabled (switch), Details.
-- **Status** says why a trigger does not fire, in words: "Disabled in YAML", "Switched off by {user} {time}", "Off the queue: {last_error}", "Not listening: {reason}", "Not run by egret" (Leaf), "Key does not render". Never by colour alone (FE-A11Y).
+- **Status** says why a trigger does not fire, in words: "Disabled in YAML", "Switched off by {disabled_by_name} {time}", "Off the queue: {last_error}", "Not listening: {reason}", "Not run by egret" (Leaf), "Key does not render". Never by colour alone (FE-A11Y).
 - **The switch.**
   - Disabled with its reason (FE-ACTION-4): "Disabled in the flow's YAML", "Not run by egret", "You need workflow:manage", "The flow is in the trash".
   - Switching off sends the PUT at once.
@@ -252,7 +257,7 @@ Opened from Details or a row's ID; `?trigger=<id>` in the URL so it can be share
 - **Definition:** the trigger's YAML block, read-only, with a link "Edit in the editor" that opens Code at that block.
 - **Schedule:** cron, timezone, next run in the trigger's timezone and the viewer's, last tick, last error, missed ticks when switched off.
 - **Flow trigger:** the states heard; for `dependsOn`, the mode, the window (kind, start and end, time left), and each condition with met or not met. "No window is open" when there is none.
-- **Webhook:** the URL, built as `window.location.origin` + `url_path`, masked with Reveal and Copy (the copy button says "Copied" in an `aria-live` region), plus a `curl` example. If `webhooks_enabled` is false, the URL is shown with "Webhooks are off on this server".
+- **Webhook** (default decision, 2026-10-14): the **path** `url_path` (`/workflows/v1/{ws}/executions/webhook/{namespace}/{flow}/{key}`), masked with Reveal and Copy (the copy button says "Copied" in an `aria-live` region), and a note that it is served by the egret backend at whatever host the operator exposes for webhooks. If `webhooks_enabled` is false, the same "Webhooks are off on this server" warning shows. W7e does **not** build the URL from `window.location.origin` and adds **no** routing: nothing at the browser's origin sends `/workflows/` to the backend (Helm ingress, `nginx-prod.conf`, Vite proxy), so such a URL would answer the SPA's `index.html` with 200 and never fire, and adding the routing would expose an anonymous surface whose review says "not approved for exposure" (`webhook_routes.rs:60-64`). Exposing webhooks through ingress is a follow-up that needs its own security review.
 - **Last execution:** a link to it.
 
 ### 4.3 The enable dialog
