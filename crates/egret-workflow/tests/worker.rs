@@ -9383,6 +9383,34 @@ impl Registry for Sleeper {
     }
 }
 
+/// Wait until the database's clock is more than `age` past `at`. The lease and
+/// the reaper both read that clock, so this is the wait the reaper sees,
+/// whatever a loaded machine does to this process's sleeps.
+async fn until_db_clock_passes(
+    pool: &sqlx::PgPool,
+    at: chrono::DateTime<chrono::Utc>,
+    age: std::time::Duration,
+) {
+    let deadline = std::time::Instant::now() + age + std::time::Duration::from_secs(60);
+    loop {
+        let passed: bool =
+            sqlx::query_scalar("SELECT now() - $1::timestamptz > make_interval(secs => $2)")
+                .bind(at)
+                .bind(age.as_secs_f64())
+                .fetch_one(pool)
+                .await
+                .expect("read the database clock");
+        if passed {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the database clock never passed {at} + {age:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// **A run whose worker stopped renewing is reaped — and not before.**
 ///
 /// The worker dies mid-handler: its tick future is aborted, which is what a
@@ -9393,6 +9421,15 @@ impl Registry for Sleeper {
 /// handler), and one `working_timeout` after it died the same pass reclaims
 /// it (one). A reaper that reclaimed nothing ever, and a worker that never
 /// renewed, are each caught by one of the two numbers.
+///
+/// **Waited on conditions, not on sleeps** (the flaky-wall-clock package):
+/// fixed sleeps against a 900 ms lease failed once under foreign load. The
+/// live pass now runs just after a renewal is SEEN to land, once the lease has
+/// been renewed more than one `working_timeout` past the claim (database
+/// clock); the dead pass runs once the database clock is one
+/// `working_timeout` past the last lease. What is left to load is one renewal
+/// arriving within `working_timeout` (2 s, renewed every 667 ms), which a
+/// live worker must do anyway or it self-fences.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_run_whose_worker_stopped_renewing_is_reaped(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
@@ -9400,35 +9437,69 @@ async fn a_run_whose_worker_stopped_renewing_is_reaped(pool: sqlx::PgPool) {
     let ex = start_execution(&pool, ws, None, &one_task("dies"), serde_json::json!({}))
         .await
         .expect("start execution");
-    let timeout = std::time::Duration::from_millis(900);
-    let reg = std::sync::Arc::new(Sleeper::new(std::time::Duration::from_secs(60)));
+    let timing = lease_of_ms(2_000);
+    let timeout = timing.working_timeout;
+    let reg = std::sync::Arc::new(Sleeper::new(std::time::Duration::from_secs(600)));
 
     let worker = {
         let (pool, reg) = (pool.clone(), reg.clone());
-        tokio::spawn(async move { tick_with(&pool, 1, &*reg, lease_of_ms(900)).await })
+        tokio::spawn(async move { tick_with(&pool, 1, &*reg, timing).await })
     };
     reg.started.notified().await;
     let claimed_at = lease_of(&pool, ex, "a").await.expect("leased");
 
-    // Longer than one working_timeout inside the handler.
-    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
-    let renewed = lease_of(&pool, ex, "a").await.expect("still leased");
-    assert!(
-        renewed > claimed_at,
-        "the live worker renewed its lease: claimed {claimed_at}, now {renewed}"
-    );
+    // Longer than one working_timeout inside the handler, the lease renewed
+    // past it: wait for a renewal that lands more than `timeout` after the
+    // claim, and reap just after it is seen.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut renewed = claimed_at;
+    while renewed - claimed_at <= chrono::Duration::from_std(timeout).unwrap() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the live worker renewed its lease past one working_timeout: claimed \
+             {claimed_at}, last renewed {renewed}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        renewed = lease_of(&pool, ex, "a").await.expect("still leased");
+    }
     assert_eq!(
         reap(&pool, timeout).await.expect("reap"),
         0,
         "a run whose worker is alive is never reclaimed, however long its handler"
     );
+    assert!(
+        !worker.is_finished(),
+        "the live worker still follows its run"
+    );
 
     // The worker dies.
     worker.abort();
     assert!(worker.await.unwrap_err().is_cancelled());
+    // A renewal in flight when the tick was aborted can still commit on the
+    // server (`under_lease`'s doc): wait until no other backend of this
+    // test's database is running a statement, so it has landed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let active: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+              WHERE datname = current_database() AND pid <> pg_backend_pid() \
+                AND state = 'active'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read pg_stat_activity");
+        if active == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the aborted worker's last statement finished ({active} still active)"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     let last = lease_of(&pool, ex, "a").await.expect("still leased");
 
-    tokio::time::sleep(timeout + std::time::Duration::from_millis(300)).await;
+    until_db_clock_passes(&pool, last, timeout).await;
     assert_eq!(
         lease_of(&pool, ex, "a").await,
         Some(last),

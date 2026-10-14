@@ -54,6 +54,34 @@ const NOT_A_MAP: &str = "Cannot apply keyed `value` updates to a non-JSON existi
 
 type Fields = Vec<(String, KvData)>;
 
+/// The path steps a merge takes -- one per dotted segment that the conflict
+/// trie or the nesting arena walks -- counted on the current thread, so a
+/// test measures the merge's WORK rather than its wall-clock time (which a
+/// loaded machine stretches). Nothing is counted outside tests.
+#[cfg(test)]
+mod work {
+    use std::cell::Cell;
+
+    thread_local! {
+        static TAKEN: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn step() {
+        TAKEN.with(|t| t.set(t.get() + 1));
+    }
+
+    /// The steps taken on this thread since the last call, and starts over.
+    pub(super) fn reset() -> u64 {
+        TAKEN.with(|t| t.replace(0))
+    }
+}
+
+#[cfg(not(test))]
+mod work {
+    #[inline(always)]
+    pub(super) fn step() {}
+}
+
 /// Kestra's Put (Put.java:72-121), against w9c `put_merge`, re-stated on
 /// KvData: a map deep-merges into a map (KvData::Struct: field order kept,
 /// an existing name replaced IN PLACE, a new name appended); a list of
@@ -230,6 +258,7 @@ fn refuse_conflicts(updates: &[(String, KvData)]) -> Result<(), String> {
     let mut nodes: Vec<Node> = vec![Node::default()];
     let mut children: HashMap<(usize, &str), usize> = HashMap::new();
     let mut child = |nodes: &mut Vec<Node>, parent: usize, segment| {
+        work::step();
         *children.entry((parent, segment)).or_insert_with(|| {
             nodes.push(Node::default());
             nodes.len() - 1
@@ -352,6 +381,7 @@ fn flatten_to_nested(updates: Fields) -> Result<Fields, String> {
         };
         let mut at = 0;
         for segment in steps {
+            work::step();
             let next = levels.len();
             match levels[at].names.get(*segment).copied() {
                 None => {
@@ -382,6 +412,7 @@ fn flatten_to_nested(updates: Fields) -> Result<Fields, String> {
                 }
             }
         }
+        work::step();
         if !levels[at].names.contains_key(*last) {
             levels[at].push(last, Slot::Leaf(value));
         }
@@ -842,15 +873,18 @@ mod tests {
     /// C1: a dotted key of 50 000 segments took 88 s and then overflowed a
     /// 2 MiB stack while it was dropped, aborting the process. It is refused
     /// before anything is built, naming the limit; so is one of
-    /// `MAX_DEPTH + 1` segments.
+    /// `MAX_DEPTH + 1` segments. "Before anything is built" is counted, not
+    /// timed: the conflict trie and the nesting arena take no step at all
+    /// (a wall-clock bound here failed on a loaded machine, and could not
+    /// see a refusal moved after a LINEAR walk).
     #[test]
     fn a_dotted_key_deeper_than_max_depth_is_refused_at_once() {
         for n in [MAX_DEPTH + 1, 50_000] {
-            let (got, took) = on_a_blocking_pool_stack(move || {
+            let (got, taken) = on_a_blocking_pool_stack(move || {
                 let patch = entry_list([vec!["a"; n].join(".")]);
-                let started = std::time::Instant::now();
+                work::reset();
                 let got = merge(Some(&data(&json!({"x": 1}))), &patch);
-                (got, started.elapsed())
+                (got, work::reset())
             });
             let err = got.unwrap_err();
             assert!(
@@ -859,9 +893,9 @@ mod tests {
                 "{err}"
             );
             assert!(err.len() < 400, "the message quotes the whole key: {err}");
-            assert!(
-                took < std::time::Duration::from_millis(250),
-                "{n} segments took {took:?}"
+            assert_eq!(
+                taken, 0,
+                "{n} segments: the refusal came after {taken} path steps were taken"
             );
         }
     }
@@ -884,36 +918,108 @@ mod tests {
         });
     }
 
+    /// The least wall time of `runs` calls of `f`.
+    fn fastest(runs: usize, mut f: impl FnMut()) -> std::time::Duration {
+        (0..runs)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                f();
+                started.elapsed()
+            })
+            .min()
+            .unwrap()
+    }
+
+    /// The least times of `small` (best of 3 a round) and `big` (best of 2),
+    /// timed in turn in this run, until the least `big` is under `factor`
+    /// times the least `small`, or five rounds have passed, or `big` is over
+    /// `give_up` times
+    /// `small` (no burst of load skews two timings that far; a regressed
+    /// merge would only make every round slow). A complexity bound RELATIVE
+    /// to a baseline timed beside it: a loaded machine stretches both, a
+    /// burst of load in one round is outlasted by the next, and only a cost
+    /// that grows faster than the baseline's keeps `big` over the bound in
+    /// every round.
+    fn least_times(
+        factor: f64,
+        give_up: f64,
+        mut small: impl FnMut(),
+        mut big: impl FnMut(),
+    ) -> (std::time::Duration, std::time::Duration) {
+        let (mut least_small, mut least_big) = (std::time::Duration::MAX, std::time::Duration::MAX);
+        for _ in 0..5 {
+            least_small = least_small.min(fastest(3, &mut small));
+            least_big = least_big.min(fastest(2, &mut big));
+            let ratio = least_big.as_secs_f64() / least_small.as_secs_f64();
+            if ratio < factor || ratio > give_up {
+                break;
+            }
+        }
+        (least_small, least_big)
+    }
+
     /// C1: many keys near the depth limit, as many segments in all as the
-    /// patch budget allows at the default cap (163 840), stay fast: the
-    /// conflict check and the nesting are linear in the segments. Two
-    /// shapes: one long shared prefix, and no prefix shared at all.
+    /// patch budget allows at the default cap (163 840), stay linear in the
+    /// segments. Two shapes: one long shared prefix, and no prefix shared at
+    /// all.
+    ///
+    /// Measured two ways, neither of them against the wall clock alone (an
+    /// absolute 2 s bound failed at 2.8 s under load average 25), each
+    /// guarding a different regression:
+    /// - the WORK, against an EXTRA WALK: the conflict trie and the nesting
+    ///   arena take exactly two steps per segment (4 x `segments` for the
+    ///   two patches; the bound allows 6 x), and a check that re-walks each
+    ///   path from the trie's root takes about `MAX_DEPTH / 2` per segment.
+    ///   It cannot see C1: C1 kept the step count and made each step dear;
+    /// - the TIME, relative, against a DEARER STEP (C1): the two deep
+    ///   patches cost at most `DEPTH_FACTOR` times a baseline of the same
+    ///   number of segments as one-segment keys, timed beside them. Linear,
+    ///   they cost 0.5-0.7 times the baseline, loaded or not (measured,
+    ///   2026-10-14). The C1 defect put back (every prefix of a path hashed
+    ///   as a vector, in the check and in the nesting) costs 2.1-2.3 times;
+    ///   half of it, 1.6-1.8. The depth is capped, so being quadratic in it
+    ///   is a bounded factor, and the margin against half of C1 is about
+    ///   1.1 x: that half may now and then pass (a missed regression, never
+    ///   a red on correct code). This ratio is the only guard against C1.
     #[test]
     fn many_keys_near_the_depth_limit_merge_fast() {
+        const DEPTH_FACTOR: f64 = 1.5;
         let keys = (10 * 1024 * 1024 / 64) / MAX_DEPTH;
-        let took = on_a_blocking_pool_stack(move || {
+        let segments = keys * MAX_DEPTH;
+        let (taken, least_flat, least_deep) = on_a_blocking_pool_stack(move || {
             let shared = vec!["p"; MAX_DEPTH - 1].join(".");
             let deep = vec!["a"; MAX_DEPTH - 1].join(".");
-            let started = std::time::Instant::now();
-            let one = merge(
-                None,
-                &entry_list((0..keys).map(|i| format!("{shared}.k{i}"))),
-            )
-            .unwrap();
-            assert_eq!(nesting(&one), MAX_DEPTH);
-            let other = merge(
-                Some(&data(&json!({"x": 1}))),
-                &entry_list((0..keys).map(|i| format!("k{i}.{deep}"))),
-            )
-            .unwrap();
-            let KvData::Struct(f) = &other else { panic!() };
-            assert_eq!(f.len(), keys + 1);
-            drop((one, other));
-            started.elapsed()
+            let one_patch = entry_list((0..keys).map(|i| format!("{shared}.k{i}")));
+            let other_patch = entry_list((0..keys).map(|i| format!("k{i}.{deep}")));
+            let flat_patch = entry_list((0..segments).map(|i| format!("k{i}")));
+            let current = data(&json!({"x": 1}));
+            let deep_merges = || {
+                let one = merge(None, &one_patch).unwrap();
+                assert_eq!(nesting(&one), MAX_DEPTH);
+                let other = merge(Some(&current), &other_patch).unwrap();
+                let KvData::Struct(f) = &other else { panic!() };
+                assert_eq!(f.len(), keys + 1);
+                drop((one, other));
+            };
+            work::reset();
+            deep_merges();
+            let taken = work::reset();
+            let flat_merge = || {
+                let flat = merge(Some(&current), &flat_patch).unwrap();
+                let KvData::Struct(f) = &flat else { panic!() };
+                assert_eq!(f.len(), segments + 1);
+            };
+            let (flat, deep) = least_times(DEPTH_FACTOR, f64::INFINITY, flat_merge, deep_merges);
+            (taken, flat, deep)
         });
         assert!(
-            took < std::time::Duration::from_secs(2),
-            "{keys} keys of {MAX_DEPTH} segments took {took:?}"
+            taken <= 3 * 2 * segments as u64,
+            "two patches of {keys} keys of {MAX_DEPTH} segments took {taken} path steps"
+        );
+        assert!(
+            least_deep.as_secs_f64() < least_flat.as_secs_f64() * DEPTH_FACTOR,
+            "two patches of {keys} keys of {MAX_DEPTH} segments took {least_deep:?}, more \
+             than {DEPTH_FACTOR} times the {least_flat:?} of {segments} one-segment keys"
         );
     }
 
@@ -936,66 +1042,75 @@ mod tests {
         }
     }
 
-    /// A merge of two maps of 100 000 fields each, and of two lists of
-    /// 100 000 items, is linear: well under a second (a quadratic merge
-    /// takes minutes).
+    /// A merge of two maps of 100 000 fields each, of two lists of 100 000
+    /// items, and of 100 000 keyed entries into a map, is linear: timed
+    /// beside the same three merges at a tenth of the size, it costs at most
+    /// `SIZE_FACTOR` times as much. Linear, that is about ten times; a
+    /// quadratic merge (a field or an item looked up by a scan) a hundred.
+    /// (An absolute 5 s bound failed under load.)
     #[test]
     fn a_large_merge_is_linear() {
-        let n = 100_000;
-        let a = KvData::Struct(
-            (0..n)
-                .map(|i| {
-                    (
-                        format!("f{i}"),
-                        KvData::Number(KvNumber::Int(i.to_string())),
-                    )
-                })
-                .collect(),
-        );
-        let b = KvData::Struct(
-            (n / 2..n + n / 2)
-                .map(|i| (format!("f{i}"), KvData::Number(KvNumber::Int("1".into()))))
-                .collect(),
-        );
-        let la = KvData::Struct(vec![(
-            "l".into(),
-            KvData::List((0..n).map(|i| KvData::String(i.to_string())).collect()),
-        )]);
-        let lb = KvData::Struct(vec![(
-            "l".into(),
-            KvData::List(
-                (n / 2..n + n / 2)
-                    .map(|i| KvData::String(i.to_string()))
+        const SIZE_FACTOR: f64 = 30.0;
+        fn merges(n: usize) -> impl FnMut() {
+            let a = KvData::Struct(
+                (0..n)
+                    .map(|i| {
+                        (
+                            format!("f{i}"),
+                            KvData::Number(KvNumber::Int(i.to_string())),
+                        )
+                    })
                     .collect(),
-            ),
-        )]);
-        let started = std::time::Instant::now();
-        let KvData::Struct(m) = &merge(Some(&a), &b).unwrap() else {
-            panic!()
-        };
-        assert_eq!(m.len(), n + n / 2);
-        let KvData::Struct(l) = &merge(Some(&la), &lb).unwrap() else {
-            panic!()
-        };
-        assert!(matches!(&l[0].1, KvData::List(items) if items.len() == n + n / 2));
-        let entries = KvData::List(
-            (0..n)
-                .map(|i| {
-                    KvData::Struct(vec![
-                        ("key".into(), KvData::String(format!("x.k{i}"))),
-                        ("value".into(), KvData::Bool(true)),
-                    ])
-                })
-                .collect(),
-        );
-        let KvData::Struct(e) = &merge(Some(&a), &entries).unwrap() else {
-            panic!()
-        };
-        assert!(matches!(&e[n].1, KvData::Struct(f) if f.len() == n));
-        let took = started.elapsed();
+            );
+            let b = KvData::Struct(
+                (n / 2..n + n / 2)
+                    .map(|i| (format!("f{i}"), KvData::Number(KvNumber::Int("1".into()))))
+                    .collect(),
+            );
+            let la = KvData::Struct(vec![(
+                "l".into(),
+                KvData::List((0..n).map(|i| KvData::String(i.to_string())).collect()),
+            )]);
+            let lb = KvData::Struct(vec![(
+                "l".into(),
+                KvData::List(
+                    (n / 2..n + n / 2)
+                        .map(|i| KvData::String(i.to_string()))
+                        .collect(),
+                ),
+            )]);
+            let entries = KvData::List(
+                (0..n)
+                    .map(|i| {
+                        KvData::Struct(vec![
+                            ("key".into(), KvData::String(format!("x.k{i}"))),
+                            ("value".into(), KvData::Bool(true)),
+                        ])
+                    })
+                    .collect(),
+            );
+            move || {
+                let KvData::Struct(m) = &merge(Some(&a), &b).unwrap() else {
+                    panic!()
+                };
+                assert_eq!(m.len(), n + n / 2);
+                let KvData::Struct(l) = &merge(Some(&la), &lb).unwrap() else {
+                    panic!()
+                };
+                assert!(matches!(&l[0].1, KvData::List(items) if items.len() == n + n / 2));
+                let KvData::Struct(e) = &merge(Some(&a), &entries).unwrap() else {
+                    panic!()
+                };
+                assert!(matches!(&e[n].1, KvData::Struct(f) if f.len() == n));
+            }
+        }
+        let n = 100_000;
+        let (small, big) = least_times(SIZE_FACTOR, 2.0 * SIZE_FACTOR, merges(n / 10), merges(n));
         assert!(
-            took < std::time::Duration::from_secs(5),
-            "three merges took {took:?}"
+            big.as_secs_f64() < small.as_secs_f64() * SIZE_FACTOR,
+            "three merges of {n} took {big:?}, more than {SIZE_FACTOR} times the {small:?} of \
+             the same merges of {}",
+            n / 10
         );
     }
 }

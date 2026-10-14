@@ -762,7 +762,8 @@ async fn wait_for_count(fx: &Fx, execution: Uuid, n: i64, limit: Duration) {
 /// An [`Inserter`] over the real repository whose inserts can be held
 /// (`gate`) or failed (`fail_next` calls fail with a pool error;
 /// `fail_always` fails every call; `deleted_next` calls fail as
-/// [`InsertError::ExecutionDeleted`]). Counts every call.
+/// [`InsertError::ExecutionDeleted`]). Counts every call, and logs each
+/// call's [`Call`].
 #[derive(Clone)]
 struct Rigged {
     repo: LogRepo,
@@ -771,6 +772,23 @@ struct Rigged {
     fail_always: Arc<AtomicBool>,
     deleted_next: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
+    log: Arc<std::sync::Mutex<Vec<Call>>>,
+    probe: Arc<AtomicBool>,
+}
+
+/// One [`Rigged`] call: when it began, and whether any OTHER task ran since
+/// the call before it began. The second is measured, not timed: each call
+/// spawns a probe task that only sets a flag, and on a single-threaded
+/// runtime the probe can only run once the writer yields -- which a backoff
+/// `sleep` does and an immediate re-run does not. A loaded machine can delay
+/// a poll; it cannot make a task run inside another's. **A test that reads
+/// it must run on `flavor = "current_thread"`**: on a multi-threaded runtime
+/// the probe could run beside the writer and the test would fail on correct
+/// code.
+#[derive(Clone, Copy, Debug)]
+struct Call {
+    at: tokio::time::Instant,
+    yielded_since_the_last: bool,
 }
 
 impl Rigged {
@@ -784,6 +802,8 @@ impl Rigged {
                 fail_always: Arc::default(),
                 deleted_next: Arc::default(),
                 calls: Arc::default(),
+                log: Arc::default(),
+                probe: Arc::default(),
             },
             tx,
         )
@@ -791,6 +811,10 @@ impl Rigged {
 
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    fn log(&self) -> Vec<Call> {
+        self.log.lock().unwrap().clone()
     }
 }
 
@@ -803,6 +827,12 @@ fn take_one(n: &AtomicUsize) -> bool {
 impl Inserter for Rigged {
     async fn insert_batch(&self, lines: &[LogLine]) -> Result<u64, InsertError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.log.lock().unwrap().push(Call {
+            at: tokio::time::Instant::now(),
+            yielded_since_the_last: self.probe.swap(false, Ordering::SeqCst),
+        });
+        let probe = self.probe.clone();
+        tokio::spawn(async move { probe.store(true, Ordering::SeqCst) });
         let mut gate = self.gate.clone();
         gate.wait_for(|open| *open)
             .await
@@ -817,27 +847,41 @@ impl Inserter for Rigged {
     }
 }
 
-#[tokio::test]
+/// Three lines, far short of a 500-line batch, reach Postgres in ONE flush,
+/// in order, and only once the timer is due. Both are measured on the
+/// inserter rather than raced against the timer (a "nothing stored yet" read
+/// taken before a 300 ms timer fired failed on a loaded machine): exactly one
+/// call stored them, and it began no sooner than `flush_every` after the
+/// first write -- a lower bound, which load can only make truer.
+#[tokio::test(flavor = "current_thread")]
 async fn lines_reach_postgres_in_order_within_a_flush() {
     let Some(fx) = fx().await else { return };
     let exec = fx.execution().await;
+    let (rigged, _gate) = Rigged::new(fx.repo.clone(), true);
     let cancel = CancellationToken::new();
     let cfg = WriterConfig {
         flush_every: Duration::from_millis(300),
         ..wcfg()
     };
-    let (sink, handle) = spawn_writer(fx.repo.clone(), cfg, cancel.clone());
+    let (sink, handle) = spawn_writer(rigged.clone(), cfg, cancel.clone());
 
+    let t0 = tokio::time::Instant::now();
     for m in ["first", "second", "third"] {
         sink.write(fx.line(exec, LogLevel::Info, m)).await;
     }
+    wait_for_count(&fx, exec, 3, Duration::from_secs(30)).await;
+    let calls = rigged.log();
     assert_eq!(
-        fx.count(exec).await,
-        0,
-        "control: three lines are far short of a 500-line batch, so only the \
-         timer can flush them, and it has not fired yet"
+        calls.len(),
+        1,
+        "three lines are far short of a 500-line batch: one flush stored them"
     );
-    wait_for_count(&fx, exec, 3, cfg.flush_every + Duration::from_secs(1)).await;
+    assert!(
+        calls[0].at - t0 >= cfg.flush_every,
+        "only the timer can flush them, so not before `flush_every`: the flush \
+         began {:?} after the first write",
+        calls[0].at - t0
+    );
     fx.settle(exec).await;
     assert_eq!(
         messages(&fx.page(exec, &q(None, 10)).await),
@@ -969,7 +1013,13 @@ async fn a_failing_batch_is_retried_then_reported_not_fatal() {
 /// SQLSTATE 23503 is the concurrent-delete race, and a retry with backoff
 /// cannot help it: the batch is re-run ONCE at once (the join then drops the
 /// deleted execution's lines), and a second 23503 drops the batch.
-#[tokio::test]
+///
+/// "At once" is measured, not timed (a `< 400 ms` bound over Postgres round
+/// trips failed on a loaded machine): the re-run begins before any other task
+/// has run (see [`Call`]), which a backoff `sleep` would allow. "Drops" is
+/// shown by what follows: the next batch is stored by the very next call, and
+/// the dropped lines never are.
+#[tokio::test(flavor = "current_thread")]
 async fn an_execution_deleted_batch_is_rerun_once_not_retried() {
     let Some(fx) = fx().await else { return };
     let exec = fx.execution().await;
@@ -983,30 +1033,46 @@ async fn an_execution_deleted_batch_is_rerun_once_not_retried() {
     let (sink, handle) = spawn_writer(rigged.clone(), cfg, cancel.clone());
 
     rigged.deleted_next.store(1, Ordering::SeqCst);
-    let t0 = std::time::Instant::now();
     sink.write(fx.line(exec, LogLevel::Info, "rerun-1")).await;
     sink.write(fx.line(exec, LogLevel::Info, "rerun-2")).await;
-    wait_for_count(&fx, exec, 2, Duration::from_secs(3)).await;
+    wait_for_count(&fx, exec, 2, Duration::from_secs(30)).await;
     assert_eq!(rigged.calls(), 2, "one 23503, one re-run");
     assert!(
-        t0.elapsed() < Duration::from_millis(100 + 300),
-        "the re-run does not wait out a backoff ({:?})",
-        t0.elapsed()
+        !rigged.log()[1].yielded_since_the_last,
+        "the re-run does not wait out a backoff: it begins before any other task runs"
     );
 
     rigged.deleted_next.store(5, Ordering::SeqCst);
     sink.write(fx.line(exec, LogLevel::Info, "dropped-1")).await;
     sink.write(fx.line(exec, LogLevel::Info, "dropped-2")).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(
-        rigged.calls(),
-        4,
-        "a second 23503 drops the batch rather than retrying it"
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while rigged.calls() < 4 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the batch met its two 23503s ({} calls)",
+            rigged.calls()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        !rigged.log()[3].yielded_since_the_last,
+        "the batch's re-run, too, is at once"
     );
     rigged.deleted_next.store(0, Ordering::SeqCst);
     sink.write(fx.line(exec, LogLevel::Info, "after-1")).await;
     sink.write(fx.line(exec, LogLevel::Info, "after-2")).await;
-    wait_for_count(&fx, exec, 4, Duration::from_secs(3)).await;
+    wait_for_count(&fx, exec, 4, Duration::from_secs(30)).await;
+    assert_eq!(
+        rigged.calls(),
+        5,
+        "the next batch is stored by the next call: nothing retried the dropped one"
+    );
+    fx.settle(exec).await;
+    assert_eq!(
+        messages(&fx.page(exec, &q(None, 10)).await),
+        ["rerun-1", "rerun-2", "after-1", "after-2"],
+        "the dropped batch is gone; the ones around it are stored"
+    );
     cancel.cancel();
     handle.await.unwrap();
 }

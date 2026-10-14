@@ -1388,12 +1388,17 @@ async fn a_cron_runs_to_success_with_nothing_driving_it(pool: sqlx::PgPool) {
 ///
 /// The pass is held inside its transaction, after the claim and at its final
 /// `UPDATE`, by a `BEFORE UPDATE` trigger (this test's scratch database only)
-/// that sleeps whenever a row's date *moves* -- which the pass's advance does
-/// and a save with an unchanged `spec_key` does not. A save of the same flow is
-/// then started, and it is observed **blocked on a lock** in
-/// `pg_stat_activity` rather than inferred from timing. When the pass commits,
-/// the save proceeds, reads the advanced row, and keeps its dates: the trigger
-/// is one tick ahead, not rewound to the date the save could have read before.
+/// that waits for an advisory lock this test holds whenever a row's date
+/// *moves* -- which the pass's advance does and a save with an unchanged
+/// `spec_key` does not. A save of the same flow is then started, and it is
+/// observed **blocked on the row lock** in `pg_stat_activity` rather than
+/// inferred from timing. Only then does the test release the pass. The save
+/// proceeds, reads the advanced row, and keeps its dates: the trigger is one
+/// tick ahead, not rewound to the date the save could have read before.
+///
+/// **Nothing here is timed** (the flaky-wall-clock package): the hold used to
+/// be a `pg_sleep(1)`, and on a loaded machine the pass committed before the
+/// save was seen waiting. Now the pass is held until released.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
@@ -1407,10 +1412,17 @@ async fn a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance(pool: s
             .fetch_one(&pool)
             .await
             .unwrap();
+    // The release: an advisory lock held on a connection of this test's own,
+    // which the hold waits to share.
+    let mut release = pool.acquire().await.expect("a connection for the release");
+    sqlx::query("SELECT pg_advisory_lock(1386)")
+        .execute(&mut *release)
+        .await
+        .expect("take the release lock");
     for ddl in [
         "CREATE FUNCTION public.w12_hold() RETURNS trigger LANGUAGE plpgsql AS $$ \
          BEGIN IF NEW.next_evaluation_date IS DISTINCT FROM OLD.next_evaluation_date THEN \
-           PERFORM pg_sleep(1); END IF; RETURN NEW; END $$",
+           PERFORM pg_advisory_xact_lock_shared(1386); END IF; RETURN NEW; END $$",
         "CREATE TRIGGER w12_hold BEFORE UPDATE ON workflow.triggers \
          FOR EACH ROW EXECUTE FUNCTION public.w12_hold()",
     ] {
@@ -1419,13 +1431,16 @@ async fn a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance(pool: s
             .await
             .expect("install the hold");
     }
-    let backends = |what: &'static str| {
+    // Backends waiting on a lock of the kind `what` (`pg_stat_activity`'s
+    // `wait_event`): `advisory` is the held pass, `transactionid` or `tuple`
+    // a writer queued behind the pass's row lock.
+    let backends = |what: &'static [&'static str]| {
         let pool = pool.clone();
         async move {
             sqlx::query_scalar::<_, i64>(
                 "SELECT count(*) FROM pg_stat_activity \
                   WHERE datname = current_database() AND pid <> pg_backend_pid() \
-                    AND wait_event_type = $1",
+                    AND wait_event_type = 'Lock' AND wait_event = ANY($1)",
             )
             .bind(what)
             .fetch_one(&pool)
@@ -1440,10 +1455,10 @@ async fn a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance(pool: s
     };
     wait_until(
         "the pass to be held inside its transaction, at its final UPDATE",
-        Duration::from_secs(5),
+        Duration::from_secs(60),
         || async {
-            match backends("Timeout").await {
-                0 => Err("no backend in pg_sleep".into()),
+            match backends(&["advisory"]).await {
+                0 => Err("no backend waiting for the release".into()),
                 _ => Ok(()),
             }
         },
@@ -1467,16 +1482,23 @@ async fn a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance(pool: s
     });
     wait_until(
         "the save's `sync` to be blocked on the claimed trigger's row lock",
-        Duration::from_secs(5),
+        Duration::from_secs(60),
         || async {
-            match backends("Lock").await {
-                0 => Err("no backend waiting on a lock".into()),
+            match backends(&["transactionid", "tuple"]).await {
+                0 => Err("no backend waiting on a row lock".into()),
                 _ => Ok(()),
             }
         },
     )
     .await;
     assert!(!save.is_finished(), "the save must still be waiting");
+    assert!(!pass.is_finished(), "the pass is still held");
+
+    // Release the pass: it commits, and the save proceeds.
+    sqlx::query("SELECT pg_advisory_unlock(1386)")
+        .execute(&mut *release)
+        .await
+        .expect("release the pass");
 
     let report = pass.await.unwrap().expect("the pass");
     assert_eq!(report.fired, 1, "{report:?}");
