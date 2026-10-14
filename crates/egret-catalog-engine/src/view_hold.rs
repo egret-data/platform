@@ -193,6 +193,13 @@ impl Refusal {
                 .into(),
         )
     }
+    fn create_unjudgeable(why: impl std::fmt::Display) -> Self {
+        Self(format!(
+            "{why}: egret cannot judge this view definition on a catalog with classified \
+             columns; create the view from Trino, with Trino SQL and a single-level default \
+             schema"
+        ))
+    }
     fn unjudgeable(why: impl std::fmt::Display) -> Self {
         Self(format!(
             "{why}: egret cannot judge this view version on a catalog with classified columns; \
@@ -455,8 +462,12 @@ enum Current {
 ///   it; an explicit id names a stored version. The last one wins.
 ///
 /// A commit with adds but no `set-current-view-version` leaves the current
-/// version where it was; its last added version is judged anyway, which
-/// over-judges, safely.
+/// version where it was, so it is [`Change::Untouched`]: what a reader sees
+/// does not change, so neither its recorded lineage nor its tags may. Judging
+/// the added version would record the lineage of SQL that is not current,
+/// and B3 would then follow the wrong tables. An added version can become
+/// current only through a later `set-current-view-version`, which is judged
+/// (a stored version by id is loaded, N3).
 fn commit_change(body: &Value) -> Change {
     let Some(updates) = body.get("updates").and_then(Value::as_array) else {
         // Not a commit body; lakekeeper refuses it.
@@ -485,7 +496,8 @@ fn commit_change(body: &Value) -> Change {
                         }),
                         Some(id) if !schemas_added => Ok(SchemaSource::Stored(id)),
                         Some(_) => Err(
-                            "an added view version names its schema by id beside an add-schema,                              which the catalog may renumber"
+                            "an added view version names its schema by id beside an add-schema, \
+                             which the catalog may renumber"
                                 .to_string(),
                         ),
                         None => Err("an added view version names no schema".to_string()),
@@ -512,10 +524,8 @@ fn commit_change(body: &Value) -> Change {
         }
     }
     let index = match current {
-        None => match last_added {
-            None => return Change::Untouched,
-            Some(i) => i,
-        },
+        // Adds, or nothing, with the current version unchanged.
+        None => return Change::Untouched,
         Some(Current::Added(i)) => i,
         Some(Current::Stored(id)) => return Change::Judge(Ok(Pending::Stored(id))),
         Some(Current::Invalid(why)) => return Change::Judge(Err(why.to_string())),
@@ -957,6 +967,7 @@ impl ViewHold {
     async fn hold_definition(
         &self,
         loader: &axum::Router,
+        create: bool,
         deadline: Instant,
         prefix: &str,
         ns: &str,
@@ -992,34 +1003,18 @@ impl ViewHold {
         if is_multi_level(ns) {
             return Refusal::multi_level().into_response();
         }
+        // A create's definition errors get advice that fits a create.
+        let unjudgeable = |e: String| {
+            if create {
+                Refusal::create_unjudgeable(e)
+            } else {
+                Refusal::unjudgeable(e)
+            }
+        };
         let pending = match change {
             Change::Untouched => return next.run(req).await,
-            Change::Judge(Err(e)) => return Refusal::unjudgeable(e).into_response(),
+            Change::Judge(Err(e)) => return unjudgeable(e).into_response(),
             Change::Judge(Ok(p)) => p,
-        };
-        // N3: a stored version (or schema) is read from the view's metadata,
-        // through lakekeeper's own load, within the deadline.
-        let stored = if pending.needs_stored_metadata() {
-            // The commit's own path, and its request metadata (the guard
-            // put it there); taken out first, since a `Body` is not `Sync`.
-            let path = req.uri().path().to_string();
-            let metadata = req
-                .extensions()
-                .get::<lakekeeper::api::RequestMetadata>()
-                .cloned()
-                .unwrap_or_else(|| {
-                    lakekeeper::api::RequestMetadata::new_lakekeeper_internal(Uuid::now_v7())
-                });
-            match self.load_stored(loader, path, metadata, deadline).await {
-                Ok(m) => Some(m),
-                Err(e) => return Refusal::unjudgeable(e).into_response(),
-            }
-        } else {
-            None
-        };
-        let def = match resolve_pending(pending, stored.as_ref()) {
-            Ok(d) => d,
-            Err(e) => return Refusal::unjudgeable(e).into_response(),
         };
         let Some(catalog) = r.catalog else {
             return Refusal::lineage("the view's warehouse has no catalog in egret's registry")
@@ -1029,11 +1024,48 @@ impl ViewHold {
             Ok(h) => h,
             Err(refusal) => return refusal.into_response(),
         };
-        let response = self
-            .judge(deadline, r.warehouse_id, &catalog, ns, name, def, req, next)
-            .await;
+        // NM2: the stored metadata is read under the view's lock. The commit's
+        // own path and request metadata (the guard put it there) are taken
+        // out first, since a `Body` is not `Sync`.
+        let path = req.uri().path().to_string();
+        let metadata = req
+            .extensions()
+            .get::<lakekeeper::api::RequestMetadata>()
+            .cloned()
+            .unwrap_or_else(|| {
+                lakekeeper::api::RequestMetadata::new_lakekeeper_internal(Uuid::now_v7())
+            });
+        let response = match self
+            .definition_of(loader, pending, path, metadata, deadline)
+            .await
+        {
+            Ok(def) => {
+                self.judge(deadline, r.warehouse_id, &catalog, ns, name, def, req, next)
+                    .await
+            }
+            Err(e) => unjudgeable(e).into_response(),
+        };
         held.release().await;
         response
+    }
+
+    /// The definition `pending` names. N3: a stored version (or schema) is
+    /// read from the view's metadata, through lakekeeper's own load, within
+    /// the deadline.
+    async fn definition_of(
+        &self,
+        loader: &axum::Router,
+        pending: Pending,
+        path: String,
+        metadata: lakekeeper::api::RequestMetadata,
+        deadline: Instant,
+    ) -> Result<Definition, String> {
+        let stored = if pending.needs_stored_metadata() {
+            Some(self.load_stored(loader, path, metadata, deadline).await?)
+        } else {
+            None
+        };
+        resolve_pending(pending, stored.as_ref())
     }
 
     /// Steps 1 to 5 for one definition, under the hold's lock.
@@ -1357,14 +1389,17 @@ pub async fn hold_view_commits(
         Target::Commit { ns, view } => match commit_change(&json) {
             Change::Untouched => next.run(req).await,
             change => {
-                hold.hold_definition(&loader, deadline, &prefix, &ns, &view, change, req, next)
-                    .await
+                hold.hold_definition(
+                    &loader, false, deadline, &prefix, &ns, &view, change, req, next,
+                )
+                .await
             }
         },
         Target::Create { ns } => match create_definition(&json) {
             Ok((name, def)) => {
                 hold.hold_definition(
                     &loader,
+                    true,
                     deadline,
                     &prefix,
                     &ns,
@@ -1563,8 +1598,8 @@ mod tests {
             sql(json!({"updates": [s1, add("A", -1), set(-1), add("B", -1), set(-1)]})),
             "B"
         );
-        // An add with no set-current is still judged (over-judges, safely).
-        assert_eq!(sql(json!({"updates": [s1, add("A", -1)]})), "A");
+        // An add with no set-current leaves the current version: untouched.
+        assert!(judged(&json!({"updates": [s1, add("A", -1)]})).is_none());
         // `-1` before any version, and a `-1` schema before any schema, fail.
         assert!(judged(&json!({"updates": [set(-1), s1, add("A", -1)]}))
             .unwrap()
@@ -1590,7 +1625,8 @@ mod tests {
         assert!(definition(&v, None).is_err());
         // An add-view-version naming a schema the commit did not add.
         let body = json!({"updates": [{"action": "add-view-version", "view-version": {
-            "schema-id": 4, "representations": [{"type": "sql", "sql": "x", "dialect": "trino"}]}}]});
+            "schema-id": 4, "representations": [{"type": "sql", "sql": "x", "dialect": "trino"}]}},
+            {"action": "set-current-view-version", "view-version-id": -1}]});
         assert!(judged(&body).is_some_and(|d| d.is_err()));
     }
 
@@ -1615,6 +1651,7 @@ mod tests {
             Refusal::internal("db", "x"),
             Refusal::multi_level(),
             Refusal::unjudgeable("x"),
+            Refusal::create_unjudgeable("x"),
             Refusal::locked(default_hold_limit()),
             Refusal::full(8),
             Refusal::no_trino(),
@@ -1626,6 +1663,7 @@ mod tests {
                     "retry",
                     "use a single-level",
                     "DROP and CREATE",
+                    "create the view from Trino",
                     "attach a Trino"
                 ]
                 .iter()

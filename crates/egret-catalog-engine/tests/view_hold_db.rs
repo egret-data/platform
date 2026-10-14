@@ -1333,3 +1333,39 @@ async fn tags_that_would_overlap_two_masks_on_a_view_column_are_refused() {
         "the refused write rolled back"
     );
 }
+
+/// Fix round 3 (a): a commit that adds a version but leaves the current one in
+/// place changes nothing a reader sees. It passes untouched: no EXPLAIN, and
+/// the recorded lineage stays that of the version that is still current.
+#[tokio::test]
+async fn adding_a_version_without_making_it_current_keeps_the_lineage() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let plugin = env.start_plugin();
+    plugin.polled().await;
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let calls = env.runner.calls.load(Ordering::SeqCst);
+    let view = env.view("v1").await.unwrap();
+    let uuid = view["metadata"]["view-uuid"].as_str().unwrap();
+    let body = json!({
+        "requirements": [{"type": "assert-view-uuid", "uuid": uuid}],
+        "updates": [
+            {"action": "add-schema", "schema": schema(1, &["id", "name"])},
+            {"action": "add-view-version", "view-version": version(2, -1, "SELECT id, name FROM orders")}
+        ]
+    });
+    let (status, resp) = env.call("POST", "namespaces/s/views/v1", Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        current_sql(&env.view("v1").await.unwrap()),
+        "SELECT id, ssn FROM pii"
+    );
+    assert_eq!(env.runner.calls.load(Ordering::SeqCst), calls, "no EXPLAIN");
+    assert_eq!(env.lineage("v1").await, computed(&["pii"], &env.catalog));
+    assert_eq!(
+        env.assignments("v1").await,
+        env.expected_pii_tags(&["id", "ssn"])
+    );
+}

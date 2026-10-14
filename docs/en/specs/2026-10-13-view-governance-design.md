@@ -155,9 +155,9 @@ The Iceberg catalog runs inside egret (embedded lakekeeper), so a view create or
 
 Before step 1: if the profile that governs the view's catalog has no classified column at all, the commit passes through with no EXPLAIN, and the lineage is left missing for the B3 sweep to compute (user ruling, 2026-10-14, Task 8); otherwise a profile with no eligible lineage engine would refuse every view although nothing is classified.
 
-The view does not exist until step 5, so nobody can read it untagged.
+The view does not exist until step 5, so nobody can read it untagged. Tags are resource paths, so they can be assigned before the resource exists.
 
-**Throughput (Task 8 fix rounds).** One held request has one deadline of 2 × the poll interval (60 s) from its arrival, covering its lock, its EXPLAIN (at most 5 s) and its wait. At most 8 holds run at once per egret process. A ninth classified `CREATE VIEW` is refused at once with a retry message; it does not queue. So a run of many concurrent classified view changes (a dbt run with more than 8 threads, for example) sees some refusals, and they succeed on retry. Task 11 measures the refusal rate. Tags are resource paths, so they can be assigned before the resource exists.
+**Throughput (Task 8 fix rounds).** One held request has one deadline of 2 × the poll interval (60 s) from its arrival, covering its lock, its EXPLAIN (at most 5 s) and its wait. At most 8 holds run at once per egret process. Any view change on a catalog with classified columns takes a hold (a create, a replace or a rename, whether or not its own tables are classified). A ninth one at once is refused with a retry message; it does not queue. So a run of many concurrent classified view changes (a dbt run with more than 8 threads, for example) sees some refusals, and they succeed on retry. Task 11 measures the refusal rate.
 
 **Refusal.** egret refuses the create or replace, rolls back the tag assignments and the lineage, and answers with an error the engine shows the user, in each of these cases:
 - the lineage cannot be computed (EXPLAIN fails, or no engine is reachable);
