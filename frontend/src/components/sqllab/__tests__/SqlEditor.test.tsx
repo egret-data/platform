@@ -27,6 +27,8 @@ const monacoStub = vi.hoisted(() => {
     editorSeq: 0,
     /** Each mounted editor's model, in mount order. */
     models: [] as unknown[],
+    /** Gives the last mounted editor a new model, as a changed `path` does; returns it. */
+    swapModel: undefined as (() => unknown) | undefined,
     /**
      * Every `registerCompletionItemProvider`, as Monaco keeps them: per LANGUAGE,
      * not per editor. `disposed` turns true when the component disposes it.
@@ -84,7 +86,7 @@ vi.mock("@/components/monaco/MonacoEditor", () => ({
       beforeMount?.(monaco);
       const editorId = `editor-${++monacoStub.editorSeq}`;
       // Each editor owns its model, as `@monaco-editor/react` gives it one.
-      const model = {
+      let model = {
         editorId,
         getValue: () => latest.current,
         getValueInRange: () => latest.current,
@@ -112,6 +114,10 @@ vi.mock("@/components/monaco/MonacoEditor", () => ({
       };
       onMount?.(editor, monaco);
       monacoStub.remount = () => onMount?.(editor, monaco);
+      monacoStub.swapModel = () => {
+        model = { ...model };
+        return model;
+      };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
     return <textarea aria-label={options?.ariaLabel} readOnly={!!options?.readOnly} value={value} />;
@@ -266,6 +272,15 @@ describe("SqlEditor — completion is scoped to its editor", () => {
 
     // A model no SqlEditor owns (same shape, another object) gets nothing from them.
     expect(suggest(modelOf("someone-else"))).toEqual([]);
+  });
+
+  it("still answers after the editor's model is swapped, and not for the old one", () => {
+    render(<SqlEditor value="" onChange={() => {}} schemaWords={[]} schema={schemaOf("lake.sales")} />);
+    const [oldModel] = monacoStub.models;
+    const newModel = monacoStub.swapModel!();
+
+    expect(suggest(newModel)).toContain("lake.sales");
+    expect(suggest(oldModel)).toEqual([]);
   });
 
   it("disposes its provider when it unmounts", () => {

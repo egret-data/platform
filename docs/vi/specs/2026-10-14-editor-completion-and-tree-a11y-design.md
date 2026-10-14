@@ -42,6 +42,10 @@ Danh sách giữ bảng của nó (FE-PAGE-4) và trở thành một **treegrid*
 - Phím trên một hàng: Down và Up sang hàng hiện kế tiếp và trước đó; Home và End tới hàng đầu và cuối; Right mở một hàng đang gập, và trên một hàng đang mở thì sang con đầu tiên; Left gập một hàng đang mở, và nếu không thì sang hàng cha; Enter mở namespace.
 - **Gập là tính năng mới.** Một hàng có con hiện một nút mũi tên để gập và mở nó, cho chuột; nút không nhận điểm dừng Tab, vì phím mũi tên làm cùng việc. Mọi thứ bắt đầu ở trạng thái mở, như hiện nay. Tập đã gập chỉ sống trong bộ nhớ: đó không phải một lựa chọn ai muốn chia sẻ (FE-PAGE-2) và cũng không phải một tuỳ chọn được lưu. Một hàng đã gập ẩn mọi hàng bên dưới nó; phần tóm tắt vẫn đếm các namespace đã lọc.
 
+- Phím có Alt, Cmd hoặc Ctrl được để cho trình duyệt (Alt/Cmd+Left là Back; Cmd/Ctrl+Enter mở link ở nơi khác qua link của hàng).
+- Một lần di chuyển focus hàng đích ngay. Nếu một lần refetch hay bộ lọc xoá hàng đang có focus trong lúc focus ở trong grid, focus sang hàng gần nhất phía trên nó, nếu không thì hàng đầu.
+- Bảng được phép nhận `role="treegrid"` dưới lint: `jsx-a11y/no-noninteractive-element-to-interactive-role` cho phép `treegrid` trên `<table>` (`frontend/eslint-rules/plugins.js`, FE-A11Y-1).
+
 Chỉ focus theo hàng: các ô chứa số, nên di chuyển giữa các ô chỉ thêm phím mà không thêm gì để đọc.
 
 **Test** (`frontend/src/routes/workflows/__tests__/NamespacesList.test.tsx`): role, level, set size, vị trí và `aria-expanded` trên fixture chưa sắp xếp; một điểm dừng Tab; Down, Up, Home, End; Right mở rồi đi vào, Left gập rồi về cha; Enter điều hướng; nút mũi tên gập cho chuột.

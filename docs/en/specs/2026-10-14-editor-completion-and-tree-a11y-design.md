@@ -40,6 +40,10 @@ The list keeps its table (FE-PAGE-4) and becomes a WAI-ARIA **treegrid**, the pa
 - Keys on a row: Down and Up move to the next and previous visible row; Home and End to the first and last; Right expands a collapsed row, and on an expanded row moves to its first child; Left collapses an expanded row, and otherwise moves to the parent row; Enter opens the namespace.
 - **Collapsing is new.** A row with children shows a chevron button that collapses and expands it, for the mouse; it takes no Tab stop, as the arrows do the same. Everything starts expanded, as today. The folded set lives in memory only: it is not a selection anyone would share (FE-PAGE-2) and not a stored preference. A collapsed row hides every row beneath it; the summary still counts the filtered namespaces.
 
+- A key with Alt, Cmd or Ctrl is left to the browser (Alt/Cmd+Left is Back; Cmd/Ctrl+Enter opens the link elsewhere through the row's link).
+- A move focuses the target row at once. If a refetch or filter removes the focused row while focus was in the grid, focus goes to the nearest row above it, else the first.
+- The table may take `role="treegrid"` under lint: `jsx-a11y/no-noninteractive-element-to-interactive-role` allows `treegrid` on `<table>` (`frontend/eslint-rules/plugins.js`, FE-A11Y-1).
+
 Row focus mode only: the cells hold numbers, so moving between cells would add keys and nothing to read.
 
 **Tests** (`frontend/src/routes/workflows/__tests__/NamespacesList.test.tsx`): the roles, levels, set sizes, positions and `aria-expanded` on the unsorted fixture; one Tab stop; Down, Up, Home, End; Right expanding then entering, Left collapsing then going to the parent; Enter navigating; the chevron collapsing for the mouse.

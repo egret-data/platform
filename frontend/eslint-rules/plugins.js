@@ -45,4 +45,16 @@ export const a11yRules = {
       roles: [...jsxA11yX.configs.recommended.rules["jsx-a11y-x/no-noninteractive-tabindex"][1].roles, "log"],
     },
   ],
+  // Still an error, with the fork's own options, plus `treegrid` on a
+  // `<table>`: WAI-ARIA's treegrid pattern is a table whose rows form a tree,
+  // and the namespaces list is one (FE-A11Y-1; spec
+  // 2026-10-14-editor-completion-and-tree-a11y-design.md §3). The fork maps
+  // `table` only to `grid`.
+  "jsx-a11y/no-noninteractive-element-to-interactive-role": [
+    "error",
+    {
+      ...jsxA11yX.configs.recommended.rules["jsx-a11y-x/no-noninteractive-element-to-interactive-role"][1],
+      table: ["grid", "treegrid"],
+    },
+  ],
 };

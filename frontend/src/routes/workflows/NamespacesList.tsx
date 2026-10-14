@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ChevronDown, ChevronRight, FolderTree } from "lucide-react";
 import { useWorkflowListNamespaces } from "@/api/generated/workflow/workflow";
@@ -106,20 +106,46 @@ export default function NamespacesList() {
   const [focus, setFocus] = useState<string | null>(null);
   const tabStop = lines.some((l) => l.node.path === focus) ? focus : (lines[0]?.node.path ?? null);
   const refs = useRef(new Map<string, HTMLTableRowElement>());
-  const wantFocus = useRef(false);
-  useEffect(() => {
-    if (wantFocus.current && focus) {
-      wantFocus.current = false;
-      refs.current.get(focus)?.focus();
-    }
-  }, [focus, lines]);
+  // Every move targets a row already on screen, so it is focused at once: no
+  // deferred "focus later" flag that could outlive the move and pull focus
+  // back from wherever the user went on the next re-render.
   const moveFocus = (path: string | null | undefined) => {
     if (!path) return;
-    wantFocus.current = true;
     setFocus(path);
+    refs.current.get(path)?.focus();
   };
+  // Whether keyboard focus is in the grid: set when a row takes focus, cleared
+  // when focus moves to something outside it. A removed row fires no blur, or
+  // one with no `relatedTarget`, so the flag survives its row disappearing.
+  const focusInGrid = useRef(false);
+  const prevLines = useRef(lines);
+  // A refetch or a filter can remove the focused row, which drops focus to
+  // `<body>`. If focus was in the grid, it goes to the nearest row above the
+  // one that vanished, else the first.
+  useEffect(() => {
+    const before = prevLines.current;
+    prevLines.current = lines;
+    if (!focus || !focusInGrid.current || lines.some((l) => l.node.path === focus)) return;
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    const shown = new Set(lines.map((l) => l.node.path));
+    const was = before.findIndex((l) => l.node.path === focus);
+    let target = lines[0]?.node.path;
+    for (let k = was - 1; k >= 0; k--) {
+      if (shown.has(before[k].node.path)) {
+        target = before[k].node.path;
+        break;
+      }
+    }
+    if (!target) return;
+    setFocus(target);
+    refs.current.get(target)?.focus();
+  }, [lines, focus]);
   const navigate = useNavigate();
   const onRowKeyDown = (e: KeyboardEvent<HTMLTableRowElement>, i: number) => {
+    // A modified key is someone else's: Alt/Cmd+Left is the browser's Back,
+    // Cmd/Ctrl+Enter opens a link elsewhere (the row's link takes the click).
+    if (e.altKey || e.metaKey || e.ctrlKey) return;
     const { node, parent } = lines[i];
     const hasChildren = node.children.length > 0;
     const open = hasChildren && !collapsed.has(node.path);
@@ -206,49 +232,59 @@ export default function NamespacesList() {
             </Button>
           </div>
         ) : (
-          <Table
-            data-testid="namespaces-table"
-            role="treegrid"
-            aria-label="Namespaces"
-            aria-describedby={`${captionId} ${helpId}`}
-          >
-            {/* A parent's row is not its subtree's total, as the Overview says too. */}
-            <TableCaption id={captionId} className="mt-0 mb-2 caption-top text-left">
-              {OWN_COUNTS_NOTE}
-              <span id={helpId} className="sr-only">
-                Arrow keys move through the namespaces. Right expands, Left collapses, and Enter opens a namespace.
-              </span>
-            </TableCaption>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Namespace</TableHead>
-                <TableHead className="text-right">Flows</TableHead>
-                <TableHead className="text-right">Files</TableHead>
-                <TableHead className="text-right">KV keys</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {lines.map((line, i) => (
-                <NamespaceRow
-                  key={line.node.path}
-                  line={line}
-                  ws={ws}
-                  open={!collapsed.has(line.node.path)}
-                  tabStop={tabStop === line.node.path}
-                  rowRef={(el) => {
-                    if (el) refs.current.set(line.node.path, el);
-                    else refs.current.delete(line.node.path);
-                  }}
-                  onFocus={() => setFocus(line.node.path)}
-                  onKeyDown={(e) => onRowKeyDown(e, i)}
-                  onToggle={() => {
-                    setOpen(line.node.path, collapsed.has(line.node.path));
-                    moveFocus(line.node.path);
-                  }}
-                />
-              ))}
-            </TableBody>
-          </Table>
+          <>
+            <p id={helpId} className="sr-only">
+              Arrow keys move through the namespaces. Right expands, Left collapses, and Enter opens a namespace.
+            </p>
+            <Table
+              data-testid="namespaces-table"
+              role="treegrid"
+              aria-label="Namespaces"
+              aria-describedby={`${captionId} ${helpId}`}
+            >
+              {/* A parent's row is not its subtree's total, as the Overview says too. */}
+              <TableCaption id={captionId} className="mt-0 mb-2 caption-top text-left">
+                {OWN_COUNTS_NOTE}
+              </TableCaption>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Namespace</TableHead>
+                  <TableHead className="text-right">Flows</TableHead>
+                  <TableHead className="text-right">Files</TableHead>
+                  <TableHead className="text-right">KV keys</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {lines.map((line, i) => (
+                  <NamespaceRow
+                    key={line.node.path}
+                    line={line}
+                    ws={ws}
+                    open={!collapsed.has(line.node.path)}
+                    tabStop={tabStop === line.node.path}
+                    rowRef={(el) => {
+                      if (el) refs.current.set(line.node.path, el);
+                      else refs.current.delete(line.node.path);
+                    }}
+                    onFocus={() => {
+                      focusInGrid.current = true;
+                      setFocus(line.node.path);
+                    }}
+                    onBlur={(e) => {
+                      // Focus left for something outside the grid's body.
+                      const to = e.relatedTarget;
+                      if (to && !e.currentTarget.parentElement?.contains(to)) focusInGrid.current = false;
+                    }}
+                    onKeyDown={(e) => onRowKeyDown(e, i)}
+                    onToggle={() => {
+                      setOpen(line.node.path, collapsed.has(line.node.path));
+                      moveFocus(line.node.path);
+                    }}
+                  />
+                ))}
+              </TableBody>
+            </Table>
+          </>
         )}
       </ListStates>
     </ListPageShell>
@@ -275,6 +311,7 @@ function NamespaceRow({
   tabStop,
   rowRef,
   onFocus,
+  onBlur,
   onKeyDown,
   onToggle,
 }: {
@@ -284,6 +321,7 @@ function NamespaceRow({
   tabStop: boolean;
   rowRef: (el: HTMLTableRowElement | null) => void;
   onFocus: () => void;
+  onBlur: (e: FocusEvent<HTMLTableRowElement>) => void;
   onKeyDown: (e: KeyboardEvent<HTMLTableRowElement>) => void;
   onToggle: () => void;
 }) {
@@ -307,6 +345,7 @@ function NamespaceRow({
       aria-expanded={hasChildren ? open : undefined}
       tabIndex={tabStop ? 0 : -1}
       onFocus={onFocus}
+      onBlur={onBlur}
       onKeyDown={onKeyDown}
       className="outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
     >
@@ -318,12 +357,11 @@ function NamespaceRow({
               tabIndex={-1}
               aria-label={`${open ? "Collapse" : "Expand"} ${node.path}`}
               onClick={onToggle}
-              className="size-5"
             >
               <Chevron aria-hidden className="size-4" />
             </IconButton>
           ) : (
-            <span aria-hidden className="size-5 shrink-0" />
+            <span aria-hidden className="size-6 shrink-0" />
           )}
           <span className="inline-flex flex-wrap items-center gap-2">
             <Link

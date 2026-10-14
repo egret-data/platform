@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -20,6 +20,9 @@ const ROWS = [
   nsRow("company", { own: false }),
 ];
 
+/** The last `renderList`'s client, to make the page refetch. */
+let lastClient: QueryClient;
+
 function Where() {
   const l = useLocation();
   return <output data-testid="where">{`${l.pathname}${l.search}`}</output>;
@@ -27,6 +30,7 @@ function Where() {
 
 function renderList(search = "") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  lastClient = client;
   return render(
     <QueryClientProvider client={client}>
       <TooltipProvider>
@@ -79,7 +83,11 @@ describe("NamespacesList: the tree", () => {
     await screen.findByTestId("namespaces-table");
     const grid = screen.getByRole("treegrid", { name: "Namespaces" });
     expect(grid).toBe(table());
-    expect(grid).toHaveAccessibleDescription(/^Counted in this namespace only; each child namespace counts its own\./);
+    // The caption, then the key help, each once.
+    expect(grid).toHaveAccessibleDescription(
+      "Counted in this namespace only; each child namespace counts its own. " +
+        "Arrow keys move through the namespaces. Right expands, Left collapses, and Enter opens a namespace.",
+    );
   });
 
   it("indents a child deeper than its parent", async () => {
@@ -321,8 +329,78 @@ describe("NamespacesList: treegrid semantics and keys", () => {
     expect(within(rowOf("companyx")).queryByRole("button")).toBeNull();
     await user.click(toggle);
     expect(rowOf("company.team")).toHaveAttribute("aria-expanded", "false");
+    // Focus lands on the row, not the chevron, so the arrows work next.
+    expect(rowOf("company.team")).toHaveFocus();
     expect(shown()).not.toContain("company.team.etl");
     await user.click(within(rowOf("company.team")).getByRole("button", { name: "Expand company.team" }));
     expect(shown()).toContain("company.team.etl");
+  });
+});
+
+describe("NamespacesList: focus survives re-renders", () => {
+  it("does not pull focus back after a move to the row already focused (Home on the first row)", async () => {
+    const world = { namespaces: [...ROWS] };
+    serveNamespaces(world);
+    const user = userEvent.setup();
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    rowOf("company").focus();
+    await user.keyboard("{Home}");
+    expect(rowOf("company")).toHaveFocus();
+
+    // The user leaves the grid, then the list refetches with a new namespace.
+    const picker = screen.getByLabelText("Namespace");
+    picker.focus();
+    world.namespaces.push(nsRow("zeta", { flows: 1 }));
+    await act(() => lastClient.invalidateQueries());
+    await screen.findByRole("link", { name: "zeta" });
+    expect(picker).toHaveFocus();
+  });
+
+  it("moves focus to the row above when a refetch removes the focused row", async () => {
+    const world = { namespaces: [...ROWS] };
+    serveNamespaces(world);
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    rowOf("company.team.etl").focus();
+    world.namespaces = world.namespaces.filter((r) => r.namespace !== "company.team.etl");
+    await act(() => lastClient.invalidateQueries());
+    await waitFor(() => expect(shown()).not.toContain("company.team.etl"));
+    expect(rowOf("company.team")).toHaveFocus();
+    expect(rowOf("company.team").tabIndex).toBe(0);
+  });
+
+  it("leaves focus alone when the removed row was not focused", async () => {
+    const world = { namespaces: [...ROWS] };
+    serveNamespaces(world);
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    rowOf("companyx").focus();
+    const picker = screen.getByLabelText("Namespace");
+    picker.focus();
+    world.namespaces = world.namespaces.filter((r) => r.namespace !== "companyx");
+    await act(() => lastClient.invalidateQueries());
+    await waitFor(() => expect(shown()).not.toContain("companyx"));
+    expect(picker).toHaveFocus();
+  });
+});
+
+describe("NamespacesList: modified keys belong to the browser", () => {
+  it("lets Alt+Left and Cmd+Left through, and Cmd/Ctrl+Enter does not navigate in place", async () => {
+    serveNamespaces({ namespaces: ROWS });
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    const etl = rowOf("company.team.etl");
+    etl.focus();
+    // `fireEvent` answers false when the handler called preventDefault.
+    expect(fireEvent.keyDown(etl, { key: "ArrowLeft", altKey: true })).toBe(true);
+    expect(fireEvent.keyDown(etl, { key: "ArrowLeft", metaKey: true })).toBe(true);
+    expect(etl).toHaveFocus();
+    expect(fireEvent.keyDown(etl, { key: "Enter", metaKey: true })).toBe(true);
+    expect(fireEvent.keyDown(etl, { key: "Enter", ctrlKey: true })).toBe(true);
+    expect(screen.getByTestId("where")).toHaveTextContent(/\/namespaces$/);
+    // Unmodified, the same keys still act.
+    expect(fireEvent.keyDown(etl, { key: "ArrowLeft" })).toBe(false);
+    expect(rowOf("company.team")).toHaveFocus();
   });
 });
