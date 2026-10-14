@@ -163,9 +163,11 @@ fn app_full(
         mv_list_timeout,
         lineage_sweeper,
         Arc::new(egret_catalog_engine::NoViewCatalog),
+        std::time::Duration::from_secs(15),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn app_views(
     f: &Fixture,
     pdp: Arc<dyn egret_core::authz::Pdp>,
@@ -173,6 +175,7 @@ fn app_views(
     mv_list_timeout: std::time::Duration,
     lineage_sweeper: Arc<dyn egret_catalog_engine::LineageSweeper>,
     view_catalog: Arc<dyn egret_catalog_engine::ViewCatalog>,
+    view_audit_timeout: std::time::Duration,
 ) -> axum::Router {
     let crypto = egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").unwrap();
     let secrets = egret_secrets::WorkspaceSecretStore::new(
@@ -202,6 +205,7 @@ fn app_views(
         mv_list_timeout,
         lineage_sweeper,
         view_catalog,
+        view_audit_timeout,
     })
 }
 
@@ -976,6 +980,8 @@ struct FakeViews {
     views: Vec<egret_catalog_engine::CatalogView>,
     failures: Vec<String>,
     unlistable: Option<String>,
+    /// The listing never answers, like a lakekeeper whose metadata reads hang.
+    stall: bool,
     /// View name -> its stored owner (`None` = INVOKER), or a read error.
     owners: BTreeMap<String, Result<Option<String>, String>>,
 }
@@ -999,6 +1005,9 @@ impl FakeViews {
 #[async_trait::async_trait]
 impl egret_catalog_engine::ViewCatalog for FakeViews {
     async fn list_views(&self) -> Result<egret_catalog_engine::CatalogViews, String> {
+        if self.stall {
+            std::future::pending::<()>().await;
+        }
         if let Some(e) = &self.unlistable {
             return Err(e.clone());
         }
@@ -1048,6 +1057,7 @@ async fn trino_exposure(f: &Fixture, views: FakeViews, tag_id: Uuid) -> serde_js
         std::time::Duration::from_secs(15),
         Arc::new(egret_catalog_engine::NoCatalogSweeper),
         Arc::new(views),
+        std::time::Duration::from_secs(15),
     );
     let (status, j) = get(
         router,
@@ -1058,6 +1068,11 @@ async fn trino_exposure(f: &Fixture, views: FakeViews, tag_id: Uuid) -> serde_js
     assert_eq!(status, StatusCode::OK, "body={j}");
     j
 }
+
+/// What `trinoListError` says when egret's views could not all be listed.
+const LIST_ERROR: &str = "egret's views could not all be listed, so this list is withheld \
+                          rather than shown incomplete; check that the catalog is reachable, \
+                          then reload the page";
 
 /// The listed Trino view named `name`, or a panic naming the body.
 fn trino_view<'a>(j: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
@@ -1185,11 +1200,9 @@ async fn the_mode_is_definer_with_the_owner_invoker_without_and_unknown_when_unr
     assert_eq!(unk["securityMode"], "unknown", "never definer; body={j}");
     assert_eq!(unk["owner"], serde_json::Value::Null);
     assert_eq!(unk["ownerCleared"], serde_json::Value::Null);
-    assert!(
-        unk["securityModeError"]
-            .as_str()
-            .is_some_and(|e| e.contains("connection reset")),
-        "body={j}"
+    assert_eq!(
+        unk["securityModeError"], "the view's metadata could not be read",
+        "a short message; the lakekeeper error stays in the server log; body={j}"
     );
 }
 
@@ -1329,12 +1342,7 @@ async fn a_view_listing_that_fails_is_null_with_the_error_never_a_partial_list()
 
     let j = trino_exposure(&f, partial, s.tag_id).await;
     assert_eq!(j["trinoViews"], serde_json::Value::Null, "body={j}");
-    assert!(
-        j["trinoListError"]
-            .as_str()
-            .is_some_and(|e| e.contains("boom")),
-        "body={j}"
-    );
+    assert_eq!(j["trinoListError"], LIST_ERROR, "body={j}");
 
     let none = FakeViews {
         unlistable: Some("the warehouses could not be listed: db down".into()),
@@ -1342,10 +1350,231 @@ async fn a_view_listing_that_fails_is_null_with_the_error_never_a_partial_list()
     };
     let j = trino_exposure(&f, none, s.tag_id).await;
     assert_eq!(j["trinoViews"], serde_json::Value::Null, "body={j}");
-    assert!(
-        j["trinoListError"]
-            .as_str()
-            .is_some_and(|e| e.contains("db down")),
+    assert_eq!(
+        j["trinoListError"], LIST_ERROR,
+        "the internal detail stays in the server log; body={j}"
+    );
+}
+
+/// Fix round 1, I1: the Trino half runs under its own deadline. A listing that
+/// stalls ends as `trinoViews: null` with a timeout message, and the StarRocks
+/// half still comes back.
+#[tokio::test]
+async fn a_stalled_view_listing_times_out_and_the_starrocks_half_still_answers() {
+    let Some(f) = setup().await else {
+        panic!("no test database");
+    };
+    let s = seed(&f).await;
+    let lister = Arc::new(FakeLister::default());
+    let classified = format!("{}.sales.orders", s.catalog);
+    lister.answer(
+        &s.engine_name,
+        Ok(vec![mv("db1", "mv_ssn", &[&classified])]),
+    );
+    let token = session(&f).await;
+    let router = app_views(
+        &f,
+        Arc::new(AllowOnly(&["tag:read"])),
+        lister,
+        std::time::Duration::from_secs(15),
+        Arc::new(egret_catalog_engine::NoCatalogSweeper),
+        Arc::new(FakeViews {
+            stall: true,
+            ..FakeViews::default()
+        }),
+        std::time::Duration::from_millis(300),
+    );
+
+    let started = std::time::Instant::now();
+    let (status, j) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        get(
+            router,
+            &format!("/classifications/{}/view-exposure", s.tag_id),
+            &token,
+        ),
+    )
+    .await
+    .expect("the report answers although the view listing never does");
+
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(j["trinoViews"], serde_json::Value::Null, "body={j}");
+    assert_eq!(
+        j["trinoListError"],
+        "egret's views were not all read within 0.3 s, so this list is withheld rather than \
+         shown incomplete; reload the page to try again",
         "body={j}"
     );
+    assert_eq!(
+        listed(&j),
+        [row(&s.engine_name, "db1", "mv_ssn", "baseTable")],
+        "the StarRocks half is intact; body={j}"
+    );
+}
+
+/// A second gated classification on `sales.<table>` of `catalog`.
+async fn second_gate(f: &Fixture, catalog: &str, table: &str, roles: &[&str], groups: &[Uuid]) {
+    let wh: Uuid = sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE name = $1")
+        .bind(catalog)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    let tag = new_tag(f).await;
+    tag_column(f, tag, wh, "sales", table, "c").await;
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(tag)
+    .bind(roles.iter().map(|r| r.to_string()).collect::<Vec<_>>())
+    .bind(groups)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+}
+
+/// M2: cleared means cleared for EVERY reached gate, and a group-only gate
+/// makes the answer unknown.
+#[tokio::test]
+async fn owner_cleared_needs_every_gate_and_a_group_only_gate_is_unknown() {
+    let Some(f) = setup().await else {
+        panic!("no test database");
+    };
+    let s = seed(&f).await;
+    let role_a = format!("ve-role-a-{}", suffix());
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, '{}')",
+    )
+    .bind(s.tag_id)
+    .bind(vec![role_a.clone()])
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    let role_b = format!("ve-role-b-{}", suffix());
+    second_gate(&f, &s.catalog, "pay", &[&role_b], &[]).await;
+    second_gate(&f, &s.catalog, "hr", &[], &[Uuid::new_v4()]).await;
+    let owner = format!("ve_owner_{}", suffix());
+    user_holding(&f, &owner, Some(&role_a)).await;
+    // Reads orders (gate A, held) and pay (gate B, not held).
+    lineage(
+        &f,
+        &s.catalog,
+        "v_two_gates",
+        &[
+            (&s.catalog, "sales", "orders"),
+            (&s.catalog, "sales", "pay"),
+        ],
+    )
+    .await;
+    // Reads orders (held) and hr (group-only).
+    lineage(
+        &f,
+        &s.catalog,
+        "v_group_gate",
+        &[(&s.catalog, "sales", "orders"), (&s.catalog, "sales", "hr")],
+    )
+    .await;
+    let views = FakeViews::default()
+        .view(&s.catalog, "v_two_gates", Ok(Some(&owner)))
+        .view(&s.catalog, "v_group_gate", Ok(Some(&owner)));
+
+    let j = trino_exposure(&f, views, s.tag_id).await;
+
+    assert_eq!(
+        trino_view(&j, "v_two_gates")["ownerCleared"],
+        false,
+        "one of two gates held is not cleared; body={j}"
+    );
+    assert_eq!(
+        trino_view(&j, "v_group_gate")["ownerCleared"],
+        serde_json::Value::Null,
+        "a group-only gate cannot be answered from roles; body={j}"
+    );
+    sqlx::query("DELETE FROM classification_policies WHERE tag_id = $1")
+        .bind(s.tag_id)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+}
+
+/// M2: the rule matching covers a tag rule, a row filter and a glob path.
+#[tokio::test]
+async fn a_tag_rule_a_row_filter_and_a_glob_path_each_select_their_table() {
+    let Some(f) = setup().await else {
+        panic!("no test database");
+    };
+    let s = seed(&f).await;
+    let pool = &f.db.pool;
+    let (catalog_id, wh): (Uuid, Uuid) =
+        sqlx::query_as("SELECT id, warehouse_id FROM registry.catalogs WHERE name = $1")
+            .bind(&s.catalog)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    // A tag rule: an informational tag on `tagged.email`, masked by tag.
+    let info_key = format!("ve-info-{}", suffix());
+    let info: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $1) RETURNING id")
+            .bind(&info_key)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    tag_column(&f, info, wh, "sales", "tagged", "email").await;
+    sqlx::query(
+        "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, tag_key) \
+         VALUES ($1, 'mask', 'MASK_NULL', 'tag', $2)",
+    )
+    .bind(format!("ve-rule-{}", suffix()))
+    .bind(&info_key)
+    .execute(pool)
+    .await
+    .unwrap();
+    // A row filter on `filtered`.
+    sqlx::query(
+        "INSERT INTO perm.rules (name, kind, filter_expr, selector_kind, catalog_id, \
+         schema_name, table_name) VALUES ($1, 'row_filter', $3, 'path', $2, 'sales', 'filtered')",
+    )
+    .bind(format!("ve-rule-{}", suffix()))
+    .bind(catalog_id)
+    .bind("region = 'eu'")
+    .execute(pool)
+    .await
+    .unwrap();
+    // A glob mask on `glob_*`.
+    sqlx::query(
+        "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, \
+         schema_name, table_name, column_name) \
+         VALUES ($1, 'mask', 'MASK_NULL', 'path', $2, 'sales', 'glob_*', 'x')",
+    )
+    .bind(format!("ve-rule-{}", suffix()))
+    .bind(catalog_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    for (v, t) in [
+        ("v_tag", "tagged"),
+        ("v_filter", "filtered"),
+        ("v_glob", "glob_orders"),
+        ("v_none", "plain"),
+    ] {
+        lineage(&f, &s.catalog, v, &[(&s.catalog, "sales", t)]).await;
+    }
+    let views = FakeViews::default()
+        .view(&s.catalog, "v_tag", Ok(None))
+        .view(&s.catalog, "v_filter", Ok(None))
+        .view(&s.catalog, "v_glob", Ok(None))
+        .view(&s.catalog, "v_none", Ok(None));
+
+    let j = trino_exposure(&f, views, s.tag_id).await;
+
+    assert_eq!(trino_names(&j), ["v_filter", "v_glob", "v_tag"], "body={j}");
+    for v in ["v_filter", "v_glob", "v_tag"] {
+        assert_eq!(
+            trino_view(&j, v)["reason"],
+            "mask_or_row_filter",
+            "{v}; body={j}"
+        );
+    }
 }

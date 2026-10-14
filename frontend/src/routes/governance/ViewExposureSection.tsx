@@ -51,7 +51,8 @@ export default function ViewExposureSection({
   const notChecked = exposure?.enginesNotChecked ?? [];
 
   return (
-    <section className="space-y-3" aria-labelledby="view-exposure-heading">
+    <div className="space-y-6">
+      <section className="space-y-3" aria-labelledby="view-exposure-heading">
       <div>
         <h2 id="view-exposure-heading" className="text-base font-semibold">
           Existing materialized views
@@ -141,8 +142,9 @@ export default function ViewExposureSection({
         </Table>
       )}
 
-      {exposure && <TrinoViews exposure={exposure} />}
-    </section>
+      </section>
+      <TrinoViews exposure={exposure} isLoading={query.isLoading} isError={query.isError} />
+    </div>
   );
 }
 
@@ -156,23 +158,37 @@ export default function ViewExposureSection({
  * `trinoViews` is `null` exactly when egret's catalogs could not all be
  * listed; that is an error, never "none" (FE-STATE-1).
  */
-function TrinoViews({ exposure }: { exposure: ViewExposureDto }) {
-  const views = exposure.trinoViews;
+function TrinoViews({
+  exposure,
+  isLoading,
+  isError,
+}: {
+  exposure: ViewExposureDto | undefined;
+  isLoading: boolean;
+  isError: boolean;
+}) {
+  const views = exposure?.trinoViews;
   return (
-    <section className="space-y-2" aria-labelledby="trino-views-heading">
-      <h3 id="trino-views-heading" className="text-sm font-semibold">
+    <section className="space-y-3" aria-labelledby="trino-views-heading">
+      <h2 id="trino-views-heading" className="text-base font-semibold">
         Trino views
-      </h3>
+      </h2>
       <p className="text-sm text-muted-foreground">
         DEFINER views run as their owner: base masks and row filters apply as the owner, and an
         uncleared owner blocks every reader. INVOKER views run as the reader, so prefer SECURITY
         INVOKER.
       </p>
-      {!Array.isArray(views) ? (
+      {isLoading ? (
+        <ListSkeleton rows={3} cols={6} />
+      ) : isError ? (
         <Alert variant="destructive">
-          <AlertDescription>
-            {exposure.trinoListError ?? "Could not list egret's views."} Reload the page to try
-            again.
+          <AlertDescription>Could not load the Trino views. Reload the page to try again.</AlertDescription>
+        </Alert>
+      ) : !Array.isArray(views) ? (
+        <Alert variant="destructive">
+          <AlertDescription className="break-words">
+            {exposure?.trinoListError ??
+              "egret's views could not all be listed. Reload the page to try again."}
           </AlertDescription>
         </Alert>
       ) : views.length === 0 ? (
@@ -192,12 +208,12 @@ function TrinoViews({ exposure }: { exposure: ViewExposureDto }) {
           <TableBody>
             {views.map((v) => (
               <TableRow key={`${v.catalog}/${v.schema}/${v.name}`}>
-                <TableCell className="font-mono text-xs">{`${v.catalog}.${v.schema}.${v.name}`}</TableCell>
-                <TableCell>{modeText(v)}</TableCell>
-                <TableCell>{v.owner ?? "—"}</TableCell>
+                <TableCell className="break-all font-mono text-xs">{`${v.catalog}.${v.schema}.${v.name}`}</TableCell>
+                <TableCell className="whitespace-normal break-words">{modeText(v)}</TableCell>
+                <TableCell className="break-all">{v.owner ?? "—"}</TableCell>
                 <TableCell>{clearanceText(v)}</TableCell>
-                <TableCell>{reasonText(v)}</TableCell>
-                <TableCell>{lineageText(v)}</TableCell>
+                <TableCell className="whitespace-normal">{reasonText(v)}</TableCell>
+                <TableCell className="whitespace-normal break-words">{lineageText(v)}</TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -210,7 +226,8 @@ function TrinoViews({ exposure }: { exposure: ViewExposureDto }) {
 function modeText(v: TrinoViewItem): string {
   if (v.securityMode === "definer") return "DEFINER";
   if (v.securityMode === "invoker") return "INVOKER";
-  return `unknown: the view's metadata could not be read (${v.securityModeError ?? "no reason given"})`;
+  // `securityModeError` is a short server message; the detail is in egret's log.
+  return `unknown: ${v.securityModeError ?? "the view's metadata could not be read"}`;
 }
 
 function clearanceText(v: TrinoViewItem): string {
@@ -230,7 +247,9 @@ function lineageText(v: TrinoViewItem): string {
   if (v.lineageState === "missing") {
     return "lineage not computed; egret has not judged this view. Run the lineage sweep.";
   }
-  return `lineage failed: ${v.lineageDetail ?? "no reason given"}. Run the lineage sweep.`;
+  // `lineageDetail` can carry an engine's raw error, so it is not shown here;
+  // the lineage sweep's report names the reason.
+  return "lineage could not be computed; egret has not judged this view. Run the lineage sweep, whose report names the reason.";
 }
 
 /** What a not-checked reason means, and what the reader can do about it. */

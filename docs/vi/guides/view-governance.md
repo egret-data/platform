@@ -39,6 +39,10 @@ Thiết kế: `docs/en/specs/2026-10-13-view-governance-design.md`. Phiên bản
 
   Policy viết tay dạng raw trong profile manual không phải là dòng `perm.rules`, nên audit không thấy.
 
+  Owner clearance đọc theo membership role hiện tại; engine áp dụng lần compile gần nhất, nên khi một grant role hết hạn, trang ghi "not cleared" trong khi engine vẫn cho owner qua, tới lần recompile kế tiếp.
+
+  Danh sách Trino có hạn 15 s. Không đọc hết được view trong thời gian đó, hoặc một lần liệt kê lỗi, thì trang hiện lỗi thay cho danh sách, không bao giờ hiện danh sách thiếu.
+
 ### Vì sao liệt kê view DEFINER: khuyến nghị SECURITY INVOKER
 
 View Trino mặc định là DEFINER: nó đọc bảng gốc với quyền của owner. Có tag rồi thì view DEFINER trên dữ liệu phân loại không còn rò rỉ, nhưng còn hai hành vi gây bất ngờ:
@@ -106,6 +110,8 @@ View phải chờ **lịch 15 phút** thay vì sweep ngay trong các trường h
 - **Chạy đua với bước kiểm tra phân loại**: hold đọc profile là chưa phân loại, EXPLAIN best-effort lỗi, và view commit sau khi sweep của lần phân loại đã liệt kê namespace.
 - **Mất notification** trong lúc listener của egret kết nối lại.
 - **Xếp sau một sweep toàn bộ**: sweep giới hạn chỉ bắt đầu khi sweep toàn bộ đang chạy kết thúc, mất tới 5 s mỗi view.
+
+Vì vậy 15 phút là lâu nhất một nhánh bị cắt, hay một view commit khi chưa có cột phân loại, còn thiếu tag, **với điều kiện lần sweep kế tiếp EXPLAIN được view đó.** View có EXPLAIN lỗi liên tục thì ở trạng thái `failed` chừng nào lỗi còn; nó giữ tag đã có, và trang phân loại ghi "lineage could not be computed".
 
 ## Rủi ro đã chấp nhận
 

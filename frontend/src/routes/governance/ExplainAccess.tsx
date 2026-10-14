@@ -886,9 +886,19 @@ function ProfileBlock({
           <li className="text-sm text-muted-foreground">No access type was evaluated.</li>
         )}
         {profile.materialized_view && (
-          <AccessRow verdict={profile.materialized_view} declined={declined} />
+          <AccessRow verdict={profile.materialized_view.verdict} declined={declined} />
         )}
       </ul>
+      {profile.materialized_view && (
+        <p data-testid="explain-mv-scope" className="text-xs text-muted-foreground">
+          The materialized-view row asks about{" "}
+          <span className="font-mono">
+            {profile.materialized_view.catalog}.{profile.materialized_view.database}
+          </span>
+          , because StarRocks creates materialized views only in default_catalog. Only a refusal
+          by the engine-wide materialized-view deny comes from a classification.
+        </p>
+      )}
       {profile.mask && <MaskLine mask={profile.mask} />}
       <ProfileTags profile={profile} declined={declined} />
     </section>
@@ -904,7 +914,12 @@ function MaskLine({ mask }: { mask: NonNullable<ExplainProfile["mask"]> }) {
   return (
     <p data-testid="explain-mask" className="text-xs text-muted-foreground">
       Mask on {mask.access_type}:{" "}
-      {d.kind === "masked" ? (
+      {d.kind === "masked" && d.result.mask_type === "MASK_NONE" ? (
+        <>
+          not transformed (<span className="font-mono">MASK_NONE</span>, Ranger policy{" "}
+          <span className="font-mono">{d.result.policy_name}</span>)
+        </>
+      ) : d.kind === "masked" ? (
         <>
           masked to <span className="font-mono">{d.result.mask_type}</span> by Ranger policy{" "}
           <span className="font-mono">{d.result.policy_name}</span>

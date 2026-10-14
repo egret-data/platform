@@ -1983,14 +1983,18 @@ describe("ExplainAccess — the StarRocks mask and materialized-view verdicts", 
           attribution: null,
         },
         materialized_view: {
-          access_type: "create materialized view",
-          decision: {
-            kind: "denied",
-            policy_id: 3,
-            policy_name: "perm-clearance-mv",
-            reason: "deny_policy_item",
+          catalog: "default_catalog",
+          database: "sales",
+          verdict: {
+            access_type: "create materialized view",
+            decision: {
+              kind: "denied",
+              policy_id: 3,
+              policy_name: "perm-clearance-mv",
+              reason: "deny_policy_item",
+            },
+            attribution: { kind: "materialized_view_deny" },
           },
-          attribution: { kind: "materialized_view_deny" },
         },
       },
     ],
@@ -2014,6 +2018,60 @@ describe("ExplainAccess — the StarRocks mask and materialized-view verdicts", 
     expect(within(mv as HTMLElement).getByTestId("decision-badge")).toHaveTextContent(/refused by a deny item/i);
     expect(mv).toHaveTextContent(/materialized-view deny/i);
     expect(mv).toHaveTextContent(/cleared for every classification/i);
+    expect(within(profile).getByTestId("explain-mv-scope")).toHaveTextContent(
+      "default_catalog.sales",
+    );
+  });
+
+  test("a cleared reader's MASK_NONE is not called masked, and a refusal not caused by the deny says so", async () => {
+    const cleared: ExplainResponse = {
+      outcome: "per_profile",
+      profiles: [
+        {
+          ...WITH_MASK_AND_MV.profiles[0],
+          mask: {
+            access_type: "select",
+            decision: {
+              kind: "masked",
+              result: {
+                policy_id: 1,
+                policy_name: "perm-clearance-t1-mask-sales.public.orders.ssn",
+                mask_type: "MASK_NONE",
+                masked_value: null,
+                mask_condition: null,
+              },
+            },
+            attribution: null,
+          },
+          materialized_view: {
+            catalog: "default_catalog",
+            database: "sales",
+            verdict: {
+              access_type: "create materialized view",
+              decision: {
+                kind: "denied",
+                policy_id: null,
+                policy_name: "",
+                reason: "no_policy_matched",
+              },
+              attribution: null,
+            },
+          },
+        },
+      ],
+    };
+    mutateAsync.mockResolvedValue({ status: 200, data: cleared });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const profile = await screen.findByTestId("explain-profile");
+    const mask = within(profile).getByTestId("explain-mask");
+    expect(mask).not.toHaveTextContent(/masked to/i);
+    expect(mask).toHaveTextContent(/not transformed/i);
+    expect(within(profile).getByTestId("explain-mv-scope")).toHaveTextContent(
+      /only a refusal by the engine-wide materialized-view deny comes from a classification/i,
+    );
   });
 
   test("a profile with no mask verdict shows no mask line", async () => {

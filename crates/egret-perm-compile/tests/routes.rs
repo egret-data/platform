@@ -3804,7 +3804,10 @@ async fn explain_names_the_materialized_view_deny_for_an_uncleared_reader() {
     let (tag_id, _role, _cleared, uncleared) = clearance_readers(&f, &token).await;
 
     let body = explain_column(&f, &token, &uncleared).await;
-    let mv = &profile_for(&body, "starrocks")["materialized_view"];
+    let checked = &profile_for(&body, "starrocks")["materialized_view"];
+    assert_eq!(checked["catalog"], "default_catalog", "body: {body}");
+    assert_eq!(checked["database"], "sales", "body: {body}");
+    let mv = &checked["verdict"];
     assert_eq!(
         mv["access_type"], "create materialized view",
         "body: {body}"
@@ -3816,6 +3819,31 @@ async fn explain_names_the_materialized_view_deny_for_an_uncleared_reader() {
     );
     assert_eq!(
         mv["attribution"]["kind"], "materialized_view_deny",
+        "body: {body}"
+    );
+    lift_gate(&f, tag_id).await;
+}
+
+/// Fix round 1 (review M3): a CLEARED reader is excepted from the A3 deny, so
+/// whatever decides their `create materialized view` row, it is never the
+/// materialized-view deny, and the row names the database it checked.
+#[tokio::test]
+async fn explain_never_attributes_a_cleared_readers_materialized_view_row_to_the_deny() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, cleared, _uncleared) = clearance_readers(&f, &token).await;
+
+    let body = explain_column(&f, &token, &cleared).await;
+    let checked = &profile_for(&body, "starrocks")["materialized_view"];
+    assert_eq!(checked["catalog"], "default_catalog", "body: {body}");
+    assert_eq!(checked["database"], "sales", "body: {body}");
+    assert_ne!(
+        checked["verdict"]["attribution"]["kind"], "materialized_view_deny",
+        "body: {body}"
+    );
+    assert_ne!(
+        checked["verdict"]["decision"]["policy_name"], "perm-clearance-mv",
         "body: {body}"
     );
     lift_gate(&f, tag_id).await;

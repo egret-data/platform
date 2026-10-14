@@ -621,7 +621,21 @@ pub struct ExplainProfile {
     /// Present only for a `read` explain on a StarRocks profile whose target
     /// names a database.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub materialized_view: Option<ExplainAccess>,
+    pub materialized_view: Option<ExplainMaterializedView>,
+}
+
+/// The `create materialized view` verdict of [`ExplainProfile::materialized_view`],
+/// with the resource it was asked for. Only a verdict attributed
+/// `materialized_view_deny` is the clearance's doing; any other refusal (for
+/// example no policy matched, since egret grants nothing on
+/// `default_catalog`) is not caused by a classification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainMaterializedView {
+    /// Always `default_catalog`.
+    pub catalog: String,
+    /// The explain target's database, the one asked about.
+    pub database: String,
+    pub verdict: ExplainAccess,
 }
 
 /// The data-mask verdict for the target column: Ranger's `select` request
@@ -2028,10 +2042,14 @@ async fn explain(
                 let decision =
                     egret_ranger_eval::eval::evaluate(&artifact, &request, &service_def, &config);
                 let attribution = attribution_for(&mut *conn, &decision).await?;
-                Some(ExplainAccess {
-                    access_type: crate::clearance::CREATE_MV_ACCESS.to_string(),
-                    decision: WireDecision::from(&decision),
-                    attribution,
+                Some(ExplainMaterializedView {
+                    catalog: crate::clearance::MV_CATALOG.to_string(),
+                    database: database.to_string(),
+                    verdict: ExplainAccess {
+                        access_type: crate::clearance::CREATE_MV_ACCESS.to_string(),
+                        decision: WireDecision::from(&decision),
+                        attribution,
+                    },
                 })
             }
             _ => None,

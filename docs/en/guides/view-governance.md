@@ -39,6 +39,10 @@ The page for one classification shows two lists.
 
   Rules written by hand as raw policies in a manual profile are not `perm.rules` rows, and the audit does not see them.
 
+  Owner clearance is read from current role membership. The engine enforces the last compiled policy, so when a role grant expires the page says "not cleared" while the engine still lets the owner through, until the next recompile.
+
+  The Trino list has a deadline of 15 s. If egret's views cannot all be read in that time, or a listing fails, the page shows an error instead of the list, never a partial list.
+
 ### Why DEFINER views are listed: recommend SECURITY INVOKER
 
 A Trino view is DEFINER by default: it reads its bases as its owner. With the tags in place a DEFINER view over classified data no longer leaks, but two behaviours still surprise readers:
@@ -109,7 +113,7 @@ A view waits for the **15-minute schedule** instead of the immediate scoped swee
 - **A lost notification.** The write's notification was lost while egret's listener reconnected.
 - **Queuing behind a full sweep.** The scoped sweep starts only when a running full sweep ends, which takes up to 5 s per view.
 
-15 minutes is therefore the longest a pruned branch, or a view committed with no classified column and later read over a classified one, stays untagged.
+15 minutes is therefore the longest a pruned branch, or a view committed with no classified column and later read over a classified one, stays untagged, **provided the next sweep can EXPLAIN the view.** A view whose EXPLAIN keeps failing stays `failed` for as long as that lasts. It keeps any tags it had, and the classification page lists it with "lineage could not be computed"; the sweep's report names the reason.
 
 ## Accepted risks
 

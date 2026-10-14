@@ -185,13 +185,16 @@ pub struct TrinoViewItem {
     pub schema: String,
     pub name: String,
     pub security_mode: SecurityMode,
-    /// Why the mode is `unknown`; `null` otherwise.
+    /// Why the mode is `unknown`, as a short message (the detail is in the
+    /// server log); `null` otherwise.
     pub security_mode_error: Option<String>,
     /// The DEFINER's `trino.run-as-owner`; `null` for any other mode.
     pub owner: Option<String>,
     /// Whether the owner is cleared for every classification the lineage
     /// reaches. `null` when it cannot be said: not DEFINER, lineage not
-    /// computed, or a reached clearance names only groups.
+    /// computed, or a reached clearance names only groups. Read from current
+    /// role membership; the engine enforces the last compile, so after a
+    /// grant expires the two differ until the next recompile.
     pub owner_cleared: Option<bool>,
     pub reason: TrinoViewReason,
     pub lineage_state: LineageState,
@@ -246,8 +249,12 @@ async fn get_view_exposure(
         }
     }
 
-    let (views, failures) = list_all(&*st.mv_lister, &dialled, st.mv_list_timeout).await;
-    let (trino_views, trino_list_error) = trino_views(&st, id).await?;
+    // The two halves run together, each under its own deadline, so a stalled
+    // catalog cannot hold back the StarRocks list, nor the reverse.
+    let ((views, failures), (trino_views, trino_list_error)) = tokio::join!(
+        list_all(&*st.mv_lister, &dialled, st.mv_list_timeout),
+        trino_half(&st, id),
+    );
     Ok(Json(ViewExposureDto {
         starrocks_materialized_views: failures.is_empty().then_some(views),
         starrocks_list_error: (!failures.is_empty()).then(|| failures.join("; ")),
@@ -348,6 +355,53 @@ async fn list_all(
     (views, failures)
 }
 
+/// `trinoListError` when egret's views could not all be listed. The detail
+/// is logged, not returned.
+const TRINO_LIST_ERROR: &str = "egret's views could not all be listed, so this list is withheld \
+                                rather than shown incomplete; check that the catalog is \
+                                reachable, then reload the page";
+
+/// `trinoListError` when a database read of the audit failed.
+const TRINO_READ_ERROR: &str = "egret could not read its views' lineage or clearances, so this \
+                                list is withheld; reload the page to try again";
+
+/// `securityModeError` when the view's metadata could not be read. The
+/// detail is logged, not returned.
+const METADATA_UNREADABLE: &str = "the view's metadata could not be read";
+
+/// Seconds as the page shows them: `15`, or `0.3` below a whole second.
+fn seconds(d: std::time::Duration) -> String {
+    if d.subsec_millis() == 0 {
+        d.as_secs().to_string()
+    } else {
+        format!("{:.1}", d.as_secs_f64())
+    }
+}
+
+/// [`trino_views`] under [`CpState::view_audit_timeout`]. Any failure, and a
+/// missed deadline, withholds the whole Trino list (`None` and a message), and
+/// never fails the report: the StarRocks half still answers.
+async fn trino_half(st: &CpState, tag_id: Uuid) -> (Option<Vec<TrinoViewItem>>, Option<String>) {
+    match tokio::time::timeout(st.view_audit_timeout, trino_views(st, tag_id)).await {
+        Ok(Ok(views)) => (Some(views), None),
+        Ok(Err(message)) => (None, Some(message.to_string())),
+        Err(_) => {
+            tracing::warn!(
+                timeout = ?st.view_audit_timeout,
+                "view-exposure: the Trino views were not all read before the deadline"
+            );
+            (
+                None,
+                Some(format!(
+                    "egret's views were not all read within {} s, so this list is withheld \
+                     rather than shown incomplete; reload the page to try again",
+                    seconds(st.view_audit_timeout)
+                )),
+            )
+        }
+    }
+}
+
 /// The Trino half of the report (spec B5): every view in egret's catalogs
 /// whose recorded lineage reaches a table of the classification `tag_id` or a
 /// table with a mask or row-filter rule, with its security mode, owner and
@@ -355,55 +409,66 @@ async fn list_all(
 ///
 /// **A view whose lineage is missing or failed is listed, fail closed**, with
 /// `reason: classified` and its `lineage_state`: egret cannot say it reads
-/// nothing classified. **A listing that fails withholds the whole list**
-/// (`None` and the error), as the StarRocks half does.
-async fn trino_views(
-    st: &CpState,
-    tag_id: Uuid,
-) -> Result<(Option<Vec<TrinoViewItem>>, Option<String>), CpError> {
+/// nothing classified. **A listing that fails withholds the whole list**, as
+/// the StarRocks half does; the error is the user-facing message, and the
+/// detail goes to the log.
+///
+/// **Cost.** The rules and their catalogs are read once, and every view's
+/// lineage in one batched read. Per listed view: one or two queries to match
+/// it, one metadata load, and for a DEFINER view the clearance reads. The
+/// whole of it runs under [`trino_half`]'s deadline.
+async fn trino_views(st: &CpState, tag_id: Uuid) -> Result<Vec<TrinoViewItem>, &'static str> {
     use egret_perm_compile::lineage::{self, RecordedLineage, ViewRef};
     use egret_perm_compile::view_audit;
 
-    let listing = match st.view_catalog.list_views().await {
-        Ok(l) => l,
-        Err(e) => return Ok((None, Some(format!("could not list egret's views: {e}")))),
-    };
-    if !listing.failures.is_empty() {
-        return Ok((None, Some(listing.failures.join("; "))));
-    }
-    let internal = |what: &'static str| {
+    let db = |what: &'static str| {
         move |e: &dyn std::fmt::Display| {
             tracing::error!(error = %e, "view-exposure: {what}");
-            CpError::Internal
+            TRINO_READ_ERROR
         }
     };
+    let listing = st.view_catalog.list_views().await.map_err(|e| {
+        tracing::error!(error = %e, "view-exposure: listing egret's views");
+        TRINO_LIST_ERROR
+    })?;
+    if !listing.failures.is_empty() {
+        tracing::error!(failures = ?listing.failures, "view-exposure: listing egret's views");
+        return Err(TRINO_LIST_ERROR);
+    }
     let mut conn = st
         .db
         .pool
         .acquire()
         .await
-        .map_err(|e| internal("acquire connection")(&e))?;
+        .map_err(|e| db("acquire connection")(&e))?;
+    let refs: Vec<ViewRef> = listing
+        .views
+        .iter()
+        .map(|v| ViewRef {
+            catalog: v.catalog.clone(),
+            schema: v.schema.clone(),
+            name: v.name.clone(),
+        })
+        .collect();
+    let recorded = lineage::recorded_lineages(&mut conn, &refs)
+        .await
+        .map_err(|e| db("recorded lineages")(&e))?;
+    let rules = view_audit::load_rule_index(&mut conn)
+        .await
+        .map_err(|e| db("mask and row-filter rules")(&e))?;
 
     let mut out = Vec::new();
-    for view in listing.views {
-        let at = ViewRef {
-            catalog: view.catalog.clone(),
-            schema: view.schema.clone(),
-            name: view.name.clone(),
-        };
-        let recorded = lineage::recorded_lineage(&mut conn, &at)
-            .await
-            .map_err(|e| internal("recorded lineage")(&e))?;
+    for (view, recorded) in listing.views.into_iter().zip(recorded) {
         let (reason, lineage_state, lineage_detail, tables) = match recorded {
-            RecordedLineage::Computed(tables) => {
+            RecordedLineage::Computed(tables) if !tables.is_empty() => {
                 let reason = if view_audit::tables_carry_tag(&mut conn, &tables, tag_id)
                     .await
-                    .map_err(|e| internal("classified tables")(&e))?
+                    .map_err(|e| db("classified tables")(&e))?
                 {
                     TrinoViewReason::Classified
-                } else if view_audit::tables_have_rule(&mut conn, &tables)
+                } else if view_audit::tables_have_rule(&mut conn, &rules, &tables)
                     .await
-                    .map_err(|e| internal("mask and row-filter rules")(&e))?
+                    .map_err(|e| db("mask and row-filter rules")(&e))?
                 {
                     TrinoViewReason::MaskOrRowFilter
                 } else {
@@ -411,7 +476,9 @@ async fn trino_views(
                 };
                 (reason, LineageState::Computed, None, Some(tables))
             }
-            RecordedLineage::Missing => (
+            // `write_lineage` never records an empty computed set; one read
+            // here is treated as unknown, fail closed.
+            RecordedLineage::Computed(_) | RecordedLineage::Missing => (
                 TrinoViewReason::Classified,
                 LineageState::Missing,
                 None,
@@ -428,16 +495,27 @@ async fn trino_views(
             match st.view_catalog.run_as_owner(&view).await {
                 Ok(Some(owner)) => (SecurityMode::Definer, Some(owner), None),
                 Ok(None) => (SecurityMode::Invoker, None, None),
-                Err(e) => (SecurityMode::Unknown, None, Some(e)),
+                Err(e) => {
+                    tracing::warn!(
+                        catalog = %view.catalog, schema = %view.schema, view = %view.name,
+                        error = %e,
+                        "view-exposure: the view's metadata could not be read"
+                    );
+                    (
+                        SecurityMode::Unknown,
+                        None,
+                        Some(METADATA_UNREADABLE.to_string()),
+                    )
+                }
             };
         let owner_cleared = match (&owner, &tables) {
             (Some(owner), Some(tables)) => {
                 let reached = lineage::view_tag_set(&mut conn, tables)
                     .await
-                    .map_err(|e| internal("view tag set")(&e))?;
+                    .map_err(|e| db("view tag set")(&e))?;
                 view_audit::owner_cleared(&mut conn, owner, &reached)
                     .await
-                    .map_err(|e| internal("owner clearance")(&e))?
+                    .map_err(|e| db("owner clearance")(&e))?
             }
             _ => None,
         };
@@ -455,7 +533,7 @@ async fn trino_views(
             matched_by: MatchedBy::Lineage,
         });
     }
-    Ok((Some(out), None))
+    Ok(out)
 }
 
 #[derive(utoipa::OpenApi)]

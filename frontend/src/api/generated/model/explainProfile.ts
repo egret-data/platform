@@ -7,6 +7,7 @@
  */
 import type { ExplainAccess } from './explainAccess';
 import type { ExplainMask } from './explainMask';
+import type { ExplainMaterializedView } from './explainMaterializedView';
 import type { ExplainResolvedTag } from './explainResolvedTag';
 import type { WireEngineType } from './wireEngineType';
 
@@ -92,5 +93,5 @@ export interface ExplainProfile {
      */
   tag_policies_in_download: number;
   mask?: null | ExplainMask;
-  materialized_view?: null | ExplainAccess;
+  materialized_view?: null | ExplainMaterializedView;
 }

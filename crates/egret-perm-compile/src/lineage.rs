@@ -420,6 +420,71 @@ pub async fn recorded_lineage(
     Ok(RecordedLineage::Computed(rows.into_iter().collect()))
 }
 
+/// [`recorded_lineage`] for many views at once, in two queries, in the order
+/// of `views`.
+pub async fn recorded_lineages(
+    conn: &mut sqlx::PgConnection,
+    views: &[ViewRef],
+) -> Result<Vec<RecordedLineage>, sqlx::Error> {
+    if views.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (c, (s, n)): (Vec<&str>, (Vec<&str>, Vec<&str>)) = views
+        .iter()
+        .map(|v| (v.catalog.as_str(), (v.schema.as_str(), v.name.as_str())))
+        .unzip();
+    let states: Vec<(String, String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT st.view_catalog, st.view_schema, st.view_name, st.state, st.detail \
+           FROM view_lineage_state st \
+           JOIN unnest($1::text[], $2::text[], $3::text[]) AS v(c, s, n) \
+             ON st.view_catalog = v.c AND st.view_schema = v.s AND st.view_name = v.n",
+    )
+    .bind(&c)
+    .bind(&s)
+    .bind(&n)
+    .fetch_all(&mut *conn)
+    .await?;
+    let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
+        "SELECT l.view_catalog, l.view_schema, l.view_name, \
+                l.base_catalog, l.base_schema, l.base_table \
+           FROM view_lineage l \
+           JOIN unnest($1::text[], $2::text[], $3::text[]) AS v(c, s, n) \
+             ON l.view_catalog = v.c AND l.view_schema = v.s AND l.view_name = v.n",
+    )
+    .bind(&c)
+    .bind(&s)
+    .bind(&n)
+    .fetch_all(&mut *conn)
+    .await?;
+    let key = |c: String, s: String, n: String| ViewRef {
+        catalog: c,
+        schema: s,
+        name: n,
+    };
+    let mut by_view: std::collections::HashMap<ViewRef, RecordedLineage> = states
+        .into_iter()
+        .map(|(c, s, n, state, detail)| {
+            let rec = if state == "computed" {
+                RecordedLineage::Computed(BTreeSet::new())
+            } else {
+                RecordedLineage::Failed {
+                    detail: detail.unwrap_or_default(),
+                }
+            };
+            (key(c, s, n), rec)
+        })
+        .collect();
+    for (c, s, n, bc, bs, bt) in rows {
+        if let Some(RecordedLineage::Computed(tables)) = by_view.get_mut(&key(c, s, n)) {
+            tables.insert((bc, bs, bt));
+        }
+    }
+    Ok(views
+        .iter()
+        .map(|v| by_view.remove(v).unwrap_or(RecordedLineage::Missing))
+        .collect())
+}
+
 async fn delete_lineage_rows(
     conn: &mut sqlx::PgConnection,
     view: &ViewRef,

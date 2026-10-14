@@ -65,7 +65,64 @@ pub async fn tables_carry_tag(
     .await
 }
 
-/// Whether a mask or row-filter rule (`perm.rules`) selects any of `tables`.
+/// Every mask and row-filter rule (`perm.rules`), read once per report and
+/// matched against each view's lineage by [`tables_have_rule`].
+#[derive(Debug, Clone, Default)]
+pub struct RuleIndex {
+    /// Path rules as `(registry catalog name, schema, table)`; `None` is an
+    /// absent level. A rule whose catalog is gone is dropped.
+    paths: Vec<(String, Option<String>, Option<String>)>,
+    /// The `tags.key` of every tag rule.
+    tag_keys: Vec<String>,
+}
+
+/// Read every rule, and the names of the catalogs path rules name, in two
+/// queries.
+pub async fn load_rule_index(conn: &mut sqlx::PgConnection) -> Result<RuleIndex, CompileError> {
+    let db = |e: &dyn std::fmt::Display| CompileError::Db(e.to_string());
+    let rules = egret_perm::store::list_rules_via(conn)
+        .await
+        .map_err(|e| db(&e))?;
+    let ids: Vec<Uuid> = rules
+        .iter()
+        .filter_map(|r| match &r.selector {
+            Selector::Path(scope) => Some(scope.catalog_id),
+            Selector::Tag { .. } => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let names: BTreeMap<Uuid, String> = if ids.is_empty() {
+        BTreeMap::new()
+    } else {
+        sqlx::query_as::<_, (Uuid, String)>(
+            "SELECT id, name FROM registry.catalogs WHERE id = ANY($1)",
+        )
+        .bind(&ids)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| db(&e))?
+        .into_iter()
+        .collect()
+    };
+    let mut index = RuleIndex::default();
+    for rule in rules {
+        match rule.selector {
+            Selector::Path(scope) => {
+                if let Some(catalog) = names.get(&scope.catalog_id) {
+                    index
+                        .paths
+                        .push((catalog.clone(), scope.schema, scope.table));
+                }
+            }
+            Selector::Tag { key } => index.tag_keys.push(key),
+        }
+    }
+    Ok(index)
+}
+
+/// Whether a mask or row-filter rule (`perm.rules`, as `index` read them)
+/// selects any of `tables`.
 ///
 /// - **A path rule** selects a table when its catalog is the table's and its
 ///   schema and table levels are absent or glob-match
@@ -78,45 +135,24 @@ pub async fn tables_carry_tag(
 /// and are not seen here.
 pub async fn tables_have_rule(
     conn: &mut sqlx::PgConnection,
+    index: &RuleIndex,
     tables: &BTreeSet<LineageTable>,
 ) -> Result<bool, CompileError> {
     let db = |e: &dyn std::fmt::Display| CompileError::Db(e.to_string());
-    let rules = egret_perm::store::list_rules_via(conn)
-        .await
-        .map_err(|e| db(&e))?;
-    if rules.is_empty() {
-        return Ok(false);
-    }
-    let names: Vec<&str> = tables.iter().map(|(c, _, _)| c.as_str()).collect();
-    let ids: Vec<(Uuid, String)> =
-        sqlx::query_as("SELECT id, name FROM registry.catalogs WHERE name = ANY($1)")
-            .bind(&names)
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(|e| db(&e))?;
-    let catalog_ids: BTreeMap<Uuid, String> = ids.into_iter().collect();
     let level = |rule: &Option<String>, value: &str| match rule {
         None => true,
         Some(p) => {
             egret_perm::eval::glob_match(&p.to_ascii_lowercase(), &value.to_ascii_lowercase())
         }
     };
-    let mut tag_keys = Vec::new();
-    for rule in &rules {
-        match &rule.selector {
-            Selector::Path(scope) => {
-                let Some(catalog) = catalog_ids.get(&scope.catalog_id) else {
-                    continue;
-                };
-                if tables.iter().any(|(c, s, t)| {
-                    c == catalog && level(&scope.schema, s) && level(&scope.table, t)
-                }) {
-                    return Ok(true);
-                }
-            }
-            Selector::Tag { key } => tag_keys.push(key.as_str()),
-        }
+    if index.paths.iter().any(|(catalog, schema, table)| {
+        tables
+            .iter()
+            .any(|(c, s, t)| c == catalog && level(schema, s) && level(table, t))
+    }) {
+        return Ok(true);
     }
+    let tag_keys: Vec<&str> = index.tag_keys.iter().map(String::as_str).collect();
     if tag_keys.is_empty() {
         return Ok(false);
     }

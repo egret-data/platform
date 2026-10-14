@@ -2275,6 +2275,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         }),
         lineage_sweeper: lineage_sweeper.clone(),
         view_catalog: view_catalog.clone(),
+        // The same budget as the StarRocks half's listings.
+        view_audit_timeout: std::time::Duration::from_secs(15),
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).

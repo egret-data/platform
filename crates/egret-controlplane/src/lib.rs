@@ -96,6 +96,9 @@ pub struct CpState {
     /// `egret_catalog_engine::EmbeddedViewCatalog`, wired in `egret-bin`;
     /// tests pass a fake.
     pub view_catalog: Arc<dyn egret_catalog_engine::ViewCatalog>,
+    /// Deadline for the whole Trino half of one view-exposure report (the
+    /// listing, every lineage read and every metadata load); tests shorten it.
+    pub view_audit_timeout: std::time::Duration,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
