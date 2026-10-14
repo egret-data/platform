@@ -206,7 +206,7 @@ export class FakeWorkflowServer {
           }))
         : [];
       const { scheduler_enabled, worker_enabled, webhooks_enabled } = this.triggers;
-      return { status: 200, body: { rows, total: rows.length, limit: 50, offset: 0, unparsable: 0, scheduler_enabled, worker_enabled, webhooks_enabled } };
+      return { status: 200, body: { rows, total: rows.length, limit: 50, offset: 0, unparsable: 0, scheduler_enabled, worker_enabled, webhooks_enabled, can_manage: true } };
     }
     if (method === "PUT" && path === `${base}/triggers/disabled`) return this.switchBulk(body as SetTriggersDisabledRequest);
     if (!this.flow || !path.startsWith(flowPath)) return { status: 404, body: { error: "not found: flow" } };

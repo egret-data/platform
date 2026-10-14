@@ -24,17 +24,22 @@ export default function GlobalTriggerDrawer({
   ws,
   flowUuid,
   triggerId,
+  flowName: listedName,
   onClose,
 }: {
   ws: string;
   flowUuid: string;
   triggerId: string;
+  /** `namespace.flow_id` from the list's row, shown until the flow's own read names it. */
+  flowName?: string;
   onClose: () => void;
 }) {
   const triggers = useWorkflowListFlowTriggers(ws, flowUuid, { query: { queryKey: workflowsKeys.flowTriggers(flowUuid) } });
   const flow = useWorkflowGetFlow(ws, flowUuid, { query: { queryKey: workflowsKeys.flow(flowUuid) } });
   const page = triggers.data?.status === 200 ? triggers.data.data : undefined;
-  const source = flow.data?.status === 200 ? flow.data.data.source : undefined;
+  const read = flow.data?.status === 200 ? flow.data.data : undefined;
+  const source = read?.source;
+  const flowName = read ? `${read.namespace}.${read.flow_id}` : listedName;
   // The Definition waits for the flow too, so the YAML does not appear after the rest; a flow
   // that cannot be read leaves the Definition saying so, and the rest still shows.
   const pending = !page || (source === undefined && !flow.isError);
@@ -49,6 +54,7 @@ export default function GlobalTriggerDrawer({
       webhooksEnabled={page?.webhooks_enabled ?? true}
       block={source === undefined ? null : triggerBlock(source, triggerId)}
       base={`/explore/${ws}/workflows`}
+      flowName={flowName}
       pending={pending && !triggers.isError}
       failure={triggers.isError && !page ? `${DETAILS_UNREADABLE}${readError(triggers.error)}` : null}
     />

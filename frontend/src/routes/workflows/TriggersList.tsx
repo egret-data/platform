@@ -143,9 +143,8 @@ function readOpen(value: string | null): { flowUuid: string; triggerId: string }
  * of 50 at a time; the flow tab's switches and bulk Enable / Disable over a
  * selection that may span flows; and the details drawer.
  *
- * The page does not learn `workflow:manage` from a flag of its own: a viewer
- * without it gets every switchable row refused `forbidden` (§3.5), and that is
- * what turns selection and bulk off here.
+ * `workflow:manage` is the page's `can_manage`: without it, selection, bulk and
+ * the switches are off with the reason.
  */
 export default function TriggersList() {
   const ws = useParams().workspace!;
@@ -153,8 +152,21 @@ export default function TriggersList() {
   const [params, setParams] = useSearchParams();
   const filters = useMemo(() => readFilters(params), [params]);
   const request = useMemo(() => toParams(filters), [filters]);
+  // Set by a change the user made with a picker, a pager or Clear filters, not by the first load
+  // or the search box: only such a change may move the focus (FE-A11Y-6).
+  const userChanged = useRef(false);
   // A picker pushes an entry, so Back undoes it; the search box replaces its own.
   const setFilters = (patch: Partial<Filters>, replace = false) => setParams((p) => withFilters(p, patch), { replace });
+  const pickFilters = (patch: Partial<Filters>) => {
+    userChanged.current = true;
+    setFilters(patch);
+  };
+  const search = useSearchDraft(filters.q, (q) => setFilters({ q }, true));
+  const clearFilters = () => {
+    // A search still waiting to be written would put `q` back after the clear.
+    search.reset("");
+    pickFilters(CLEARED);
+  };
 
   const query = useWorkflowListTriggers(ws, request, {
     query: { queryKey: workflowsKeys.triggers(ws, request), placeholderData: keepPreviousData },
@@ -162,20 +174,25 @@ export default function TriggersList() {
   const page: TriggerPageDto | undefined = query.data?.status === 200 ? query.data.data : undefined;
   const tooLarge = isTooLarge(query.error);
 
-  // The selection belongs to the page and filters it was made on; another page or filter starts empty.
-  const scope = JSON.stringify(request);
-  const [picked, setPicked] = useState<{ scope: string; keys: Set<string> }>({ scope, keys: new Set() });
-  // Dropped, not set aside: coming back to a page does not bring an old selection back.
-  if (picked.scope !== scope) setPicked({ scope, keys: new Set() });
-  const selection = picked.scope === scope ? picked.keys : new Set<string>();
-  const setSelection = (keys: Set<string>) => setPicked({ scope, keys });
-  const sw = useTriggerSwitch(ws, { onBulkAnswered: () => setPicked({ scope: "", keys: new Set() }) });
+  const [selection, setSelection] = useState<Set<string>>(() => new Set());
+  // A bulk action the server answered clears the selection; its refusals are listed by name.
+  const sw = useTriggerSwitch(ws, { onBulkAnswered: () => setSelection(new Set()) });
   const reasonsId = useId();
+  // The selection and the bulk refusals belong to the page and filters they were made on:
+  // another page or filter drops both, and coming back does not bring them back.
+  const scope = JSON.stringify(request);
+  const [seenScope, setSeenScope] = useState(scope);
+  if (seenScope !== scope) {
+    setSeenScope(scope);
+    setSelection(new Set());
+    if (sw.refusals.length > 0) sw.clearRefusals();
+  }
 
   const namespaceRef = useRef<HTMLDivElement>(null);
-  // D9: the way out of "too many flows" is the namespace filter, so the focus goes there.
+  // D9: the way out of "too many flows" is the namespace filter, so the focus goes there, but only
+  // after a change the user made: never on the page's first load (FE-A11Y-6).
   useEffect(() => {
-    if (tooLarge) namespaceRef.current?.querySelector<HTMLElement>("button")?.focus();
+    if (tooLarge && userChanged.current) namespaceRef.current?.querySelector<HTMLElement>("button")?.focus();
   }, [tooLarge, query.errorUpdatedAt]);
 
   const open = readOpen(params.get("trigger"));
@@ -201,14 +218,23 @@ export default function TriggersList() {
           </Alert>
         );
       }
+      // A 400 is a filter the server refuses (a bad namespace or flow id in a shared link): asking
+      // again would get the same answer, so the way out is to clear the filters.
+      const refused = query.error instanceof ApiError && query.error.status === 400 && isFiltering(filters);
       return (
         <Alert variant="destructive">
           <AlertDescription className="flex flex-wrap items-center gap-3">
             <span>The triggers could not be loaded: {readError(query.error)}</span>
-            <Button variant="outline" size="sm" onClick={() => void query.refetch()}>
-              <RotateCw aria-hidden />
-              Retry
-            </Button>
+            {refused ? (
+              <Button variant="outline" size="sm" onClick={clearFilters}>
+                Clear filters
+              </Button>
+            ) : (
+              <Button variant="outline" size="sm" onClick={() => void query.refetch()}>
+                <RotateCw aria-hidden />
+                Retry
+              </Button>
+            )}
           </AlertDescription>
         </Alert>
       );
@@ -216,7 +242,7 @@ export default function TriggersList() {
     if (!page) return <ListSkeleton cols={11} />;
 
     const rows: TableRowData[] = page.rows;
-    const manage = !rows.some((r) => r.toggle_refusal === "forbidden");
+    const manage = page.can_manage;
     // A trigger id may repeat within a flow (`duplicate_id`); the switch is per id, so it is selected once.
     const selected = rows.filter((r, i) => selection.has(selectionKey(r)) && rows.findIndex((o) => selectionKey(o) === selectionKey(r)) === i);
     const bulk: Enablement = !manage
@@ -224,6 +250,10 @@ export default function TriggersList() {
       : selected.length === 0
         ? { ok: false, reason: "Select triggers first" }
         : { ok: true };
+    // While the next page or filter loads, the rows on screen are the last answer's: nothing may
+    // be selected or switched in bulk on them.
+    const stale = query.isPlaceholderData;
+    const bulkBusy = sw.anyBusy || stale;
     const flowName = new Map(page.rows.map((r) => [r.flow_uuid, `${r.namespace}.${r.flow_id}`]));
     // D18: a flow whose state is disabled fires none of its triggers, though each stays switched on.
     const disabledFlows = new Set(page.rows.filter((r) => r.flow_disabled).map((r) => r.flow_uuid));
@@ -255,7 +285,7 @@ export default function TriggersList() {
         empty = (
           <div className="flex flex-wrap items-center gap-2">
             <p className="text-sm text-muted-foreground">This page is past the end of the list.</p>
-            <Button variant="outline" size="sm" onClick={() => setFilters({ page: 1 })}>
+            <Button variant="outline" size="sm" onClick={() => pickFilters({ page: 1 })}>
               Go to the first page
             </Button>
           </div>
@@ -264,7 +294,7 @@ export default function TriggersList() {
         empty = (
           <div className="flex flex-wrap items-center gap-2">
             <p className="text-sm text-muted-foreground">No triggers match these filters</p>
-            <Button variant="outline" size="sm" onClick={() => setFilters(CLEARED)}>
+            <Button variant="outline" size="sm" onClick={clearFilters}>
               Clear filters
             </Button>
           </div>
@@ -300,11 +330,11 @@ export default function TriggersList() {
         </div>
         <div className="flex flex-col items-start gap-1">
           <div className="flex flex-wrap items-center gap-2">
-            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-enable`} variant="outline" busy={sw.anyBusy} onClick={() => sw.switchMany(selected, true)}>
+            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-enable`} variant="outline" busy={bulkBusy} onClick={() => sw.switchMany(selected, true)}>
               <Power aria-hidden />
               Enable
             </ReasonButton>
-            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-disable`} variant="outline" busy={sw.anyBusy} onClick={() => sw.switchMany(selected, false)}>
+            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-disable`} variant="outline" busy={bulkBusy} onClick={() => sw.switchMany(selected, false)}>
               <PowerOff aria-hidden />
               Disable
             </ReasonButton>
@@ -354,9 +384,10 @@ export default function TriggersList() {
             // The list leaves out flows in the trash (§3.5).
             contextOf={(row) => ({ flowDisabled: disabledFlows.has(row.flow_uuid), flowDeleted: false })}
             detailsHref={detailsHref}
+            selectionBusy={stale}
           />
         </div>
-        <Pager page={page} current={filters.page} onPage={(n) => setFilters({ page: n })} />
+        <Pager page={page} current={filters.page} onPage={(n) => pickFilters({ page: n })} />
       </div>
     );
   }
@@ -366,7 +397,7 @@ export default function TriggersList() {
       title="Triggers"
       toolbar={<ListToolbarButton icon={RotateCw} label="Refresh" onClick={() => void query.refetch()} />}
     >
-      <FilterBar ws={ws} filters={filters} setFilters={setFilters} namespaceRef={namespaceRef} />
+      <FilterBar ws={ws} filters={filters} setFilters={pickFilters} search={search} namespaceRef={namespaceRef} />
       {renderContent()}
       {open ? (
         <Suspense fallback={null}>
@@ -375,6 +406,7 @@ export default function TriggersList() {
             ws={ws}
             flowUuid={open.flowUuid}
             triggerId={open.triggerId}
+            flowName={listedFlowName(page, open.flowUuid)}
             onClose={closeDrawer}
           />
         </Suspense>
@@ -402,11 +434,13 @@ function FilterBar({
   ws,
   filters,
   setFilters,
+  search,
   namespaceRef,
 }: {
   ws: string;
   filters: Filters;
-  setFilters: (patch: Partial<Filters>, replace?: boolean) => void;
+  setFilters: (patch: Partial<Filters>) => void;
+  search: SearchDraft;
   namespaceRef: RefObject<HTMLDivElement | null>;
 }) {
   const id = useId();
@@ -430,27 +464,6 @@ function FilterBar({
     return opts;
   }, [flowsQuery.data, filters.namespace, filters.flow]);
 
-  // The search box writes the URL once the typing stops; the URL wins when it changes otherwise
-  // (Clear filters, Back).
-  const [draft, setDraft] = useState(filters.q);
-  const written = useRef(filters.q);
-  useEffect(() => {
-    if (filters.q !== written.current) {
-      written.current = filters.q;
-      setDraft(filters.q);
-    }
-  }, [filters.q]);
-  useEffect(() => {
-    if (draft === written.current) return;
-    const t = window.setTimeout(() => {
-      written.current = draft;
-      setFilters({ q: draft }, true);
-    }, SEARCH_DEBOUNCE_MS);
-    return () => window.clearTimeout(t);
-    // `setFilters` is a new function each render; the draft alone decides when to write.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft]);
-
   return (
     <div className="mb-3 flex flex-wrap items-center gap-2">
       <div className="relative max-w-xs flex-1">
@@ -465,8 +478,8 @@ function FilterBar({
           id={`${id}-search`}
           className="pl-8"
           placeholder="Search trigger id, flow or namespace…"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          value={search.draft}
+          onChange={(e) => search.setDraft(e.target.value)}
         />
       </div>
       <div ref={namespaceRef} className="contents">
@@ -493,6 +506,60 @@ function FilterBar({
       />
     </div>
   );
+}
+
+type SearchDraft = { draft: string; setDraft: (v: string) => void; reset: (v: string) => void };
+
+/**
+ * The search box's text, written to the URL once the typing stops: each ask
+ * parses every flow in scope, so one request per pause, not per key. A change
+ * of `q` in the URL that this did not write (Back, a shared link) replaces the
+ * text and drops a pending write; `reset` does the same for Clear filters,
+ * where `q` may not have been written yet, so the URL alone cannot tell.
+ */
+function useSearchDraft(urlQ: string, write: (q: string) => void): SearchDraft {
+  const [draft, setDraft] = useState(urlQ);
+  const written = useRef(urlQ);
+  const timer = useRef<number | undefined>(undefined);
+  const writeRef = useRef(write);
+  useEffect(() => {
+    writeRef.current = write;
+  });
+  const cancel = () => {
+    window.clearTimeout(timer.current);
+    timer.current = undefined;
+  };
+  useEffect(() => {
+    if (urlQ !== written.current) {
+      cancel();
+      written.current = urlQ;
+      setDraft(urlQ);
+    }
+  }, [urlQ]);
+  useEffect(() => cancel, []);
+  return {
+    draft,
+    setDraft: (v: string) => {
+      setDraft(v);
+      cancel();
+      if (v === written.current) return;
+      timer.current = window.setTimeout(() => {
+        timer.current = undefined;
+        written.current = v;
+        writeRef.current(v);
+      }, SEARCH_DEBOUNCE_MS);
+    },
+    reset: (v: string) => {
+      cancel();
+      setDraft(v);
+    },
+  };
+}
+
+/** `namespace.flow_id` of `flowUuid` when one of its rows is on the page. */
+function listedFlowName(page: TriggerPageDto | undefined, flowUuid: string): string | undefined {
+  const row = page?.rows.find((r) => r.flow_uuid === flowUuid);
+  return row ? `${row.namespace}.${row.flow_id}` : undefined;
 }
 
 /** Several kinds at once, sent as one comma list. The menu stays open while picking. */

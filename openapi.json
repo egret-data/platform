@@ -46819,7 +46819,8 @@
           "unparsable",
           "scheduler_enabled",
           "worker_enabled",
-          "webhooks_enabled"
+          "webhooks_enabled",
+          "can_manage"
         ],
         "properties": {
           "rows": {
@@ -46855,6 +46856,10 @@
           },
           "webhooks_enabled": {
             "type": "boolean"
+          },
+          "can_manage": {
+            "type": "boolean",
+            "description": "The caller holds `workflow:manage` in this workspace: the switches and\nthe bulk route are theirs to use. Per caller, not per row, so a page\nwhose rows are all refused for another reason still says it."
           }
         }
       },

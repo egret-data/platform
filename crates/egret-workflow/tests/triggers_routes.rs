@@ -1004,6 +1004,7 @@ async fn another_workspace_and_the_permissions() {
         "{page}"
     );
     assert_eq!(page["total"], json!(5));
+    assert_eq!(page["can_manage"], json!(true), "a manager may switch");
     let page = list(&app, ws, user, &format!("?flow_id={theirs}")).await;
     assert_eq!(page["total"], json!(0));
 
@@ -1033,6 +1034,11 @@ async fn another_workspace_and_the_permissions() {
     );
     let page = list(&app, ws, reader, "?kind=schedule").await;
     assert_eq!(page["rows"][0]["toggle_refusal"], json!("forbidden"));
+    assert_eq!(page["can_manage"], json!(false), "a reader may not");
+    // Said per caller, even where no row says `forbidden` (a Leaf comes first).
+    let page = list(&app, ws, reader, "?kind=other").await;
+    assert_eq!(page["rows"][0]["toggle_refusal"], json!("not_supported"));
+    assert_eq!(page["can_manage"], json!(false));
 
     let nobody = egret_core::UserId(
         sqlx::query_scalar(

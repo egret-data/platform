@@ -62,6 +62,7 @@ export function TriggersTable({
   isBusy,
   contextOf,
   detailsHref,
+  selectionBusy = false,
 }: {
   rows: TableRowData[];
   /** `global` adds the Namespace and Flow columns (links), and names each row by its flow too. */
@@ -77,6 +78,12 @@ export function TriggersTable({
   contextOf: (row: TableRowData) => FlowContext;
   /** Where Details and the trigger's id lead: the drawer, through the URL. */
   detailsHref: (row: TableRowData) => string;
+  /**
+   * The rows are a placeholder while the next page or filter loads (the global page): the
+   * selection boxes ignore clicks, so no bulk action is aimed at rows about to be replaced.
+   * `aria-disabled`, not `disabled`, so a focused box keeps the focus.
+   */
+  selectionBusy?: boolean;
 }) {
   const idBase = useId();
   const keys = rows.map(selectionKey);
@@ -102,8 +109,11 @@ export function TriggersTable({
               aria-label="Select all triggers"
               aria-describedby={selectDescribedBy}
               disabled={!manage || rows.length === 0}
+              aria-disabled={manage && selectionBusy ? true : undefined}
               checked={all ? true : selectedCount > 0 ? "indeterminate" : false}
-              onCheckedChange={(c) => onSelectionChange(c === true ? new Set(keys) : new Set())}
+              onCheckedChange={(c) => {
+                if (!selectionBusy) onSelectionChange(c === true ? new Set(keys) : new Set());
+              }}
             />
           </TableHead>
           <TableHead>ID</TableHead>
@@ -159,8 +169,10 @@ export function TriggersTable({
                   aria-label={`Select ${name}`}
                   aria-describedby={selectDescribedBy}
                   disabled={!manage}
+                  aria-disabled={manage && selectionBusy ? true : undefined}
                   checked={selection.has(key)}
                   onCheckedChange={(c) => {
+                    if (selectionBusy) return;
                     const next = new Set(selection);
                     if (c === true) next.add(key);
                     else next.delete(key);

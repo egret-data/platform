@@ -242,6 +242,10 @@ pub struct TriggerPageDto {
     pub scheduler_enabled: bool,
     pub worker_enabled: bool,
     pub webhooks_enabled: bool,
+    /// The caller holds `workflow:manage` in this workspace: the switches and
+    /// the bulk route are theirs to use. Per caller, not per row, so a page
+    /// whose rows are all refused for another reason still says it.
+    pub can_manage: bool,
 }
 
 /// The `code` of the 422 the workspace list answers over
@@ -612,6 +616,7 @@ pub(crate) async fn list_triggers(
         scheduler_enabled: flags.scheduler_enabled,
         worker_enabled: flags.worker_enabled,
         webhooks_enabled: flags.webhooks_enabled,
+        can_manage: may_manage,
     }))
 }
 

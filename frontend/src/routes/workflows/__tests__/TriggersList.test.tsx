@@ -86,6 +86,16 @@ const ROWS = (): TriggerRowDto[] => [
   row(FLOW_B, otherEntry()),
 ];
 
+/**
+ * A row as the list route answers it (W7e spec §3.5): the per-flow entry
+ * without `webhook` and without `depends_on.conditions`. The server holds the
+ * full entries; only the per-flow route (the drawer's read) returns them.
+ */
+function listRow(r: TriggerRowDto): TriggerRowDto {
+  const flow = r.flow?.depends_on ? { ...r.flow, depends_on: { ...r.flow.depends_on, conditions: undefined } } : r.flow;
+  return { ...r, webhook: null, flow };
+}
+
 function flowItem(id: string): FlowListItemDto {
   const f = FLOWS[id];
   return { id, namespace: f.namespace, flow_id: f.flow_id, state: "live", created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-02T00:00:00Z" };
@@ -101,6 +111,8 @@ class Server {
   rows: TriggerRowDto[] = ROWS();
   unparsable = 0;
   flags = { scheduler_enabled: true, worker_enabled: true, webhooks_enabled: true };
+  /** The page's `can_manage`: the caller's `workflow:manage`. */
+  canManage = true;
   listReply: Reply | null = null;
   listGate: Promise<void> | null = null;
   /** Answers `GET …/flows/{id}/triggers` with this instead. */
@@ -150,7 +162,15 @@ class Server {
       const offset = Number(q.get("offset") ?? 0);
       return {
         status: 200,
-        body: { rows: matched.slice(offset, offset + limit), total: matched.length, limit, offset, unparsable: this.unparsable, ...this.flags },
+        body: {
+          rows: matched.slice(offset, offset + limit).map(listRow),
+          total: matched.length,
+          limit,
+          offset,
+          unparsable: this.unparsable,
+          ...this.flags,
+          can_manage: this.canManage,
+        },
       };
     }
     if (method === "PUT" && path === BULK) {
@@ -247,6 +267,10 @@ const bodyRows = () => within(screen.getByTestId("triggers-table")).getAllByRole
 /** A row by its flow's YAML id and the trigger's id: the global labels name both. */
 const who = (flow: string, trigger: string) => `${trigger} of ${FLOWS[flow].namespace}.${FLOWS[flow].flow_id}`;
 const lastList = () => server.lists().at(-1)!;
+const TOO_LARGE: Reply = {
+  status: 422,
+  body: { error: "more than 2000 flows match; narrow by namespace", code: "triggers_too_large" },
+};
 
 describe("TriggersList: the page", () => {
   it("is a list page with the flow tab's columns plus Namespace and Flow, linked", async () => {
@@ -275,6 +299,8 @@ describe("TriggersList: the page", () => {
       "href",
       `/explore/${WS}/workflows/flows/${FLOW_B}/triggers`,
     );
+    // A list row carries no webhook (§3.5), and the page never shows a key.
+    expect(document.body.textContent).not.toContain("s3cr3t-key");
     // Type: the short name only, with no long name on hover.
     const typeCell = within(second).getAllByRole("cell")[4];
     expect(typeCell.textContent).toBe("Schedule: Schedule");
@@ -386,6 +412,67 @@ describe("TriggersList: the filters", () => {
     await waitFor(() => expect(bodyRows()).toHaveLength(1));
   });
 
+  it("asks once per pause in the typing, not once per key", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      // 50 ms between keys: well inside the pause, so the three keys are one search.
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime, delay: 50 });
+      renderPage();
+      await table();
+      const before = server.lists().length;
+      const box = screen.getByLabelText("Search triggers");
+      await user.type(box, "ho");
+      await user.type(box, "o");
+      // Typed, but the pause has not come: nothing asked yet.
+      expect(server.lists().filter((q) => q.get("q") !== null)).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(300);
+      await waitFor(() => expect(server.lists().length).toBe(before + 1));
+      expect(lastList().get("q")).toBe("hoo");
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(server.lists().filter((q) => q.get("q") !== null).map((q) => q.get("q"))).toEqual(["hoo"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let a search still waiting to be written undo Clear filters", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderPage("?q=nomatch");
+      expect(await screen.findByText("No triggers match these filters")).toBeInTheDocument();
+      await user.type(screen.getByLabelText("Search triggers"), "x");
+      // Clear within the pause: the pending write of "nomatchx" must not land afterwards.
+      await user.click(screen.getByRole("button", { name: "Clear filters" }));
+      await vi.advanceTimersByTimeAsync(1000);
+      await waitFor(() => expect(bodyRows()).toHaveLength(4));
+      expect(where()).toBe(`/explore/${WS}/workflows/triggers`);
+      expect(screen.getByLabelText("Search triggers")).toHaveValue("");
+      expect(server.lists().some((q) => q.get("q") === "nomatchx")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let a first search, not yet in the URL, come back after Clear filters", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      // No `q` in the URL before or after the clear, so only Clear itself can drop the pending write.
+      renderPage("?kind=flow");
+      expect(await screen.findByText("No triggers match these filters")).toBeInTheDocument();
+      await user.type(screen.getByLabelText("Search triggers"), "x");
+      await user.click(screen.getByRole("button", { name: "Clear filters" }));
+      await vi.advanceTimersByTimeAsync(1000);
+      await waitFor(() => expect(bodyRows()).toHaveLength(4));
+      expect(where()).toBe(`/explore/${WS}/workflows/triggers`);
+      expect(screen.getByLabelText("Search triggers")).toHaveValue("");
+      expect(server.lists().some((q) => q.get("q") === "x")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("says when the filters match nothing, and Clear filters brings every trigger back", async () => {
     const user = userEvent.setup();
     renderPage(`?q=nomatch&kind=flow&state=disabled&namespace=company&flow=${FLOW_A}&page=1`);
@@ -476,17 +563,40 @@ describe("TriggersList: states", () => {
     await waitFor(() => expect(bodyRows()).toHaveLength(4));
   });
 
-  it("shows the 422 triggers_too_large sentence and moves the focus to the namespace filter", async () => {
-    server.listReply = {
-      status: 422,
-      body: { error: "more than 2000 flows match; narrow by namespace", code: "triggers_too_large" },
-    };
+  it("shows the 422 triggers_too_large sentence, and leaves the focus alone on the first load", async () => {
+    server.listReply = TOO_LARGE;
     renderPage();
     expect(await screen.findByText("The triggers could not be listed: more than 2000 flows match; narrow by namespace.")).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "Namespace" })).toHaveFocus());
+    // FE-A11Y-6: the user has done nothing yet, so nothing moves the focus.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getByRole("combobox", { name: "Namespace" })).not.toHaveFocus();
+    expect(document.body).toHaveFocus();
     // Narrowing is the way out, not Retry.
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
     expect(screen.queryByText("No triggers yet")).toBeNull();
+  });
+
+  it("moves the focus to the namespace filter when a filter the user picked answers 422", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await table();
+    server.listReply = TOO_LARGE;
+    await user.click(screen.getByRole("combobox", { name: "State" }));
+    await user.click(await screen.findByRole("option", { name: "Disabled" }));
+    expect(await screen.findByText("The triggers could not be listed: more than 2000 flows match; narrow by namespace.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Namespace" })).toHaveFocus());
+  });
+
+  it("offers Clear filters, not Retry, when the server refuses a shared link's filters (400)", async () => {
+    const user = userEvent.setup();
+    server.listReply = { status: 400, body: { error: "bad request: flow_id is not a uuid", code: "invalid_query" } };
+    renderPage("?flow=not-a-uuid&namespace=company");
+    expect(await screen.findByText("The triggers could not be loaded: bad request: flow_id is not a uuid.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    server.listReply = null;
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    await waitFor(() => expect(bodyRows()).toHaveLength(4));
+    expect(where()).toBe(`/explore/${WS}/workflows/triggers`);
   });
 
   it.each([
@@ -607,6 +717,7 @@ describe("TriggersList: switching", () => {
   });
 
   it("is read-only for a viewer without workflow:manage, and says why", async () => {
+    server.canManage = false;
     server.rows = ROWS().map((r) => (r.kind === "other" ? r : { ...r, can_toggle: false, toggle_refusal: "forbidden" as const }));
     renderPage();
     await table();
@@ -626,6 +737,82 @@ describe("TriggersList: switching", () => {
   });
 });
 
+describe("TriggersList: switching, continued", () => {
+  it("takes workflow:manage from the page's can_manage, even when no row says forbidden", async () => {
+    // A viewer's page of Leaf triggers only: each row is refused `not_supported`, which comes
+    // before `forbidden` (§3.5), so the rows alone cannot tell a viewer from a manager.
+    server.canManage = false;
+    server.rows = [row(FLOW_B, otherEntry())];
+    renderPage();
+    await table();
+    const all = screen.getByRole("checkbox", { name: "Select all triggers" });
+    expect(all).toBeDisabled();
+    expect(document.getElementById(all.getAttribute("aria-describedby")!)).toHaveTextContent("You need workflow:manage");
+    const disable = screen.getByRole("button", { name: "Disable" });
+    expect(document.getElementById(disable.getAttribute("aria-describedby")!)).toHaveTextContent("You need workflow:manage");
+  });
+
+  it("lets a manager select, whatever the rows say", async () => {
+    const user = userEvent.setup();
+    server.rows = [row(FLOW_B, otherEntry())];
+    renderPage();
+    await table();
+    const all = screen.getByRole("checkbox", { name: "Select all triggers" });
+    expect(all).toBeEnabled();
+    await user.click(all);
+    expect(screen.getByText("1 trigger selected")).toBeInTheDocument();
+  });
+
+  it("ignores selection and holds bulk while the next page loads, keeping the focus", async () => {
+    const user = userEvent.setup();
+    server.rows = Array.from({ length: 60 }, (_, i) => row(FLOW_A, webhookEntry({ trigger_id: `t${String(i).padStart(3, "0")}` })));
+    renderPage();
+    await table();
+    let release!: () => void;
+    server.listGate = new Promise((r) => (release = r));
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    // The rows on screen are page 1's, kept while page 2 is read.
+    const box = screen.getByRole("checkbox", { name: `Select ${who(FLOW_A, "t000")}` });
+    await waitFor(() => expect(box).toHaveAttribute("aria-disabled", "true"));
+    // Not `disabled`: a focused box keeps the focus (jsdom keeps it either way, so the
+    // attribute is what is checked).
+    expect(box).toBeEnabled();
+    box.focus();
+    await user.click(box);
+    expect(box).not.toBeChecked();
+    expect(box).toHaveFocus();
+    const all = screen.getByRole("checkbox", { name: "Select all triggers" });
+    expect(all).toHaveAttribute("aria-disabled", "true");
+    await user.click(all);
+    expect(screen.queryByText(/triggers? selected/)).toBeNull();
+    // Bulk cannot act: the new page's selection is empty, and the bar is held while it loads.
+    for (const name of ["Enable", "Disable"]) {
+      const b = screen.getByRole("button", { name });
+      expect(b.hasAttribute("disabled") || b.getAttribute("aria-disabled") === "true").toBe(true);
+    }
+    release();
+    expect(await screen.findByText("Showing 51–60 of 60")).toBeInTheDocument();
+    const fresh = screen.getByRole("checkbox", { name: `Select ${who(FLOW_A, "t050")}` });
+    expect(fresh).not.toHaveAttribute("aria-disabled");
+    await user.click(fresh);
+    expect(screen.getByText("1 trigger selected")).toBeInTheDocument();
+  });
+
+  it("drops the bulk refusals when the filters or the page change", async () => {
+    const user = userEvent.setup();
+    server.bulkRefusals[`${FLOW_B}/daily`] = { code: "not_found", message: "not found: trigger" };
+    renderPage();
+    await table();
+    await user.click(screen.getByRole("checkbox", { name: `Select ${who(FLOW_B, "daily")}` }));
+    await user.click(screen.getByRole("button", { name: "Disable" }));
+    expect(await screen.findByTestId("bulk-refusals")).toBeInTheDocument();
+    await user.click(screen.getByRole("combobox", { name: "State" }));
+    await user.click(await screen.findByRole("option", { name: "Enabled" }));
+    await waitFor(() => expect(lastList().get("state")).toBe("enabled"));
+    await waitFor(() => expect(screen.queryByTestId("bulk-refusals")).toBeNull());
+  });
+});
+
 describe("TriggersList: the details drawer", () => {
   it("opens from Details with the flow and the trigger in the URL, and reads that flow's trigger", async () => {
     const user = userEvent.setup();
@@ -635,7 +822,7 @@ describe("TriggersList: the details drawer", () => {
     expect(urlParams().get("trigger")).toBe(`${FLOW_B}/daily`);
     // The filters stay as they were.
     expect(urlParams().get("kind")).toBe("webhook,schedule");
-    const dialog = await screen.findByRole("dialog", { name: "Trigger daily" }, { timeout: 4000 });
+    const dialog = await screen.findByRole("dialog", { name: "Trigger daily in company.data.load" }, { timeout: 4000 });
     // FLOW_B's `daily`, not FLOW_A's: the cron of its own YAML.
     expect(await within(dialog).findByText(/cron: "0 \* \* \* \*"/)).toBeInTheDocument();
     expect(server.requests.some((r) => r.method === "GET" && r.path === `${BASE}/flows/${FLOW_B}/triggers`)).toBe(true);
@@ -647,14 +834,14 @@ describe("TriggersList: the details drawer", () => {
 
   it("opens from a shared link, with the webhook's key hidden", async () => {
     renderPage(`?trigger=${FLOW_A}/hook`);
-    const dialog = await screen.findByRole("dialog", { name: "Trigger hook" }, { timeout: 4000 });
+    const dialog = await screen.findByRole("dialog", { name: "Trigger hook in company.team.hello" }, { timeout: 4000 });
     expect(await within(dialog).findByText("The key is hidden; Reveal under Webhook shows it.")).toBeInTheDocument();
     expect(dialog.textContent).not.toContain("s3cr3t-key");
   });
 
   it("says the trigger is gone when the flow no longer declares it", async () => {
     renderPage(`?trigger=${FLOW_A}/vanished`);
-    const dialog = await screen.findByRole("dialog", { name: "Trigger vanished" }, { timeout: 4000 });
+    const dialog = await screen.findByRole("dialog", { name: "Trigger vanished in company.team.hello" }, { timeout: 4000 });
     expect(await within(dialog).findByText("This trigger no longer exists in the flow; reload.")).toBeInTheDocument();
   });
 
@@ -662,20 +849,20 @@ describe("TriggersList: the details drawer", () => {
     let release!: () => void;
     server.flowTriggersGate = new Promise((r) => (release = r));
     renderPage(`?trigger=${FLOW_A}/daily`);
-    const dialog = await screen.findByRole("dialog", { name: "Trigger daily" }, { timeout: 4000 });
+    const dialog = await screen.findByRole("dialog", { name: "Trigger daily in company.team.hello" }, { timeout: 4000 });
     expect(within(dialog).getByTestId("trigger-drawer-loading")).toBeInTheDocument();
     // Not "no longer exists" while the answer is on its way.
     expect(within(dialog).queryByText("This trigger no longer exists in the flow; reload.")).toBeNull();
     release();
     // The drawer that opened is the one that fills: it does not close and open again.
     expect(await within(dialog).findByText(/cron: "\*\/5 \* \* \* \*"/)).toBeInTheDocument();
-    expect(screen.getByRole("dialog", { name: "Trigger daily" })).toBe(dialog);
+    expect(screen.getByRole("dialog", { name: "Trigger daily in company.team.hello" })).toBe(dialog);
   });
 
   it("says why when the flow's triggers cannot be read", async () => {
     server.flowTriggersReply = { status: 503, body: { error: "the database is unavailable" } };
     renderPage(`?trigger=${FLOW_A}/daily`);
-    const dialog = await screen.findByRole("dialog", { name: "Trigger daily" }, { timeout: 4000 });
+    const dialog = await screen.findByRole("dialog", { name: "Trigger daily in company.team.hello" }, { timeout: 4000 });
     expect(
       await within(dialog).findByText("The trigger's details could not be loaded: the database is unavailable."),
     ).toBeInTheDocument();

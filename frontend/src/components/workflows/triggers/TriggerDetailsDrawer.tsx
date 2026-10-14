@@ -224,6 +224,7 @@ export function TriggerDetailsDrawer({
   onEditInEditor,
   pending = false,
   failure = null,
+  flowName,
 }: {
   open: boolean;
   onClose: () => void;
@@ -244,6 +245,11 @@ export function TriggerDetailsDrawer({
   pending?: boolean;
   /** The caller's read failed: this sentence instead of the details. */
   failure?: string | null;
+  /**
+   * `namespace.flow_id`, named in the title where the page lists several flows' triggers (the
+   * global page): two flows can declare the same trigger id.
+   */
+  flowName?: string;
 }) {
   // The webhook's key stays hidden, in its path and in the YAML, until Reveal. The tab keys the
   // drawer by trigger id, so another trigger starts hidden again.
@@ -258,6 +264,12 @@ export function TriggerDetailsDrawer({
         <SheetHeader>
           <SheetTitle>
             Trigger <span className="font-mono">{triggerId}</span>
+            {flowName ? (
+              <>
+                {" "}
+                <span className="font-normal text-muted-foreground">in</span> <span className="font-mono">{flowName}</span>
+              </>
+            ) : null}
           </SheetTitle>
           <SheetDescription>
             {failure ? (

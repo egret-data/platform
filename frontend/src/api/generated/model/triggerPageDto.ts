@@ -25,4 +25,10 @@ export interface TriggerPageDto {
   scheduler_enabled: boolean;
   worker_enabled: boolean;
   webhooks_enabled: boolean;
+  /**
+     * The caller holds `workflow:manage` in this workspace: the switches and
+     * the bulk route are theirs to use. Per caller, not per row, so a page
+     * whose rows are all refused for another reason still says it.
+     */
+  can_manage: boolean;
 }
