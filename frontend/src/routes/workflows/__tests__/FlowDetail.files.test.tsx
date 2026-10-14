@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -17,8 +17,8 @@ import type { Layout } from "@/components/workflows/panels/layout";
 import { serveFiles, type FilesRequest, type FilesStore, type FilesWorld } from "@/components/workflows/namespaces/files/__tests__/fakeFilesServer";
 import { FakeWorkflowServer, FLOW_ID, flowSource, WS } from "./fakeWorkflowServer";
 import { resetMonacoStub, stub } from "./monacoStub";
-import { FLOW_CODE_CONTEXT } from "@/components/workflows/editor/CodeTab";
-import { NS_FILE_CONTEXT } from "@/components/workflows/namespaces/files/NamespaceFileEditor";
+import { FLOW_SAVE_ACTION } from "@/components/workflows/editor/CodeTab";
+import { NS_FILE_SAVE_ACTION } from "@/components/workflows/namespaces/files/NamespaceFileEditor";
 
 /**
  * THE FLOW EDITOR'S FILES (W7d spec §4.3, "In the flow editor"): the Files
@@ -42,6 +42,8 @@ let requests: FilesRequest[] = [];
 let store: FilesStore;
 /** Every request, `METHOD url`, flow and file routes alike, in the order sent. */
 let fetched: string[] = [];
+/** While set, every file upload waits for it. */
+let uploadGate: Promise<void> | null = null;
 
 beforeEach(() => {
   resetMonacoStub();
@@ -71,9 +73,13 @@ function renderFlow({ canManage = true, world = {} }: { canManage?: boolean; wor
   server.install();
   const flowFetch = globalThis.fetch;
   fetched = [];
-  vi.stubGlobal("fetch", (input: string, init?: RequestInit) => {
-    fetched.push(`${(init?.method ?? "GET").toUpperCase()} ${String(input)}`);
-    return String(input).includes("/workflows/namespaces/") ? filesFetch(input, init) : flowFetch(input, init);
+  uploadGate = null;
+  vi.stubGlobal("fetch", async (input: string, init?: RequestInit) => {
+    const method = (init?.method ?? "GET").toUpperCase();
+    fetched.push(`${method} ${String(input)}`);
+    if (!String(input).includes("/workflows/namespaces/")) return flowFetch(input, init);
+    if (method === "POST" && uploadGate) await uploadGate;
+    return filesFetch(input, init);
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false }, mutations: { retry: false } } });
   return render(
@@ -427,45 +433,78 @@ describe("the create page", () => {
   });
 });
 
-describe("Ctrl/Cmd+S inside each editor (fix round 1)", () => {
+describe("Ctrl/Cmd+S inside each editor (fix rounds 1 and 2)", () => {
   /**
-   * Standalone Monaco keeps every editor's `addCommand` in one shared keybinding service, so a
-   * command without a `when` answers in any editor (monaco-editor #2947). jsdom cannot run
-   * Monaco's keybinding service; what it can check is that each editor scopes its command to a
-   * context key only it carries, and that each command saves its own thing. The real-Monaco
-   * proof (Code and a file side by side) is Task 9's browser run.
+   * Standalone Monaco keeps every editor's `addCommand` in one shared keybinding service,
+   * matched newest-first and never removed, so a command answers in whichever editor has focus
+   * (monaco-editor #2947). Each editor's save is therefore an ACTION, whose keybinding Monaco
+   * scopes to the editor that added it. jsdom cannot run Monaco's keybinding service; it checks
+   * that each editor registers its own action, that each runs only its own save, and that an
+   * action goes with its editor. The real-Monaco proof (Code and two file tabs side by side) is
+   * Task 9's browser run.
    */
-  it("Code's command and a file editor's command are each scoped to their own editor's context key", async () => {
-    storeLayout(layoutWith("file:a.py"));
+  const SIDE_BY_SIDE: Layout = {
+    panels: [
+      { id: "p1", size: 40, tabs: ["code"], active: "code" },
+      { id: "p2", size: 30, tabs: ["file:a.py"], active: "file:a.py" },
+      { id: "p3", size: 30, tabs: ["file:scripts/b.py"], active: "file:scripts/b.py" },
+    ],
+  };
+  const saveKey = 2048 | 49; // KeyMod.CtrlCmd | KeyCode.KeyS, as the stub defines them
+  const live = (id: string, name?: string) =>
+    stub.actions.filter((a) => a.id === id && !a.disposed && (name === undefined || a.path.endsWith(`/${name}`)));
+
+  it("each editor binds Ctrl/Cmd+S as its own action; no shared command is bound", async () => {
+    storeLayout(SIDE_BY_SIDE);
     renderFlow();
     await flowBox();
     await fileBox("a.py");
-    const saveKey = 2048 | 49; // KeyMod.CtrlCmd | KeyCode.KeyS, as the stub defines them
-    const code = stub.bindings.filter((b) => b.keybinding === saveKey && b.context === FLOW_CODE_CONTEXT);
-    const file = stub.bindings.filter((b) => b.keybinding === saveKey && b.context === NS_FILE_CONTEXT);
-    expect(code).toHaveLength(1);
-    expect(file).toHaveLength(1);
-    // No save command answers in every editor.
-    expect(stub.bindings.filter((b) => b.keybinding === saveKey && b.context === undefined)).toEqual([]);
-    // Each key lives on the editor whose command names it.
-    expect(stub.contextKeys.find((k) => k.key === FLOW_CODE_CONTEXT)?.path).toBe(code[0].path);
-    expect(stub.contextKeys.find((k) => k.key === NS_FILE_CONTEXT)?.path).toBe(file[0].path);
-    expect(code[0].path).not.toBe(file[0].path);
+    await fileBox("b.py");
+    expect(live(FLOW_SAVE_ACTION)).toHaveLength(1);
+    expect(live(NS_FILE_SAVE_ACTION, "a.py")).toHaveLength(1);
+    expect(live(NS_FILE_SAVE_ACTION, "b.py")).toHaveLength(1);
+    for (const a of stub.actions) expect(a.keybindings).toEqual([saveKey]);
+    const editors = [live(FLOW_SAVE_ACTION)[0], live(NS_FILE_SAVE_ACTION, "a.py")[0], live(NS_FILE_SAVE_ACTION, "b.py")[0]].map((a) => a.editorId);
+    expect(new Set(editors).size).toBe(3);
+    expect(stub.bindings.filter((b) => b.keybinding === saveKey)).toEqual([]);
   });
 
-  it("the file editor's command saves that file only; Code's command saves the flow only", async () => {
-    storeLayout(layoutWith("file:a.py"));
+  it("with two files and Code side by side, each action saves only its own file, and Code's only the flow", async () => {
+    storeLayout(SIDE_BY_SIDE);
     renderFlow();
     type(await flowBox(), flowSource("edited"));
     type(await fileBox("a.py"), "a = 2\n");
-    const fileSave = stub.bindings.find((b) => b.context === NS_FILE_CONTEXT)!;
-    act(() => fileSave.run());
+    type(await fileBox("b.py"), "b = 3\n");
+
+    act(() => live(NS_FILE_SAVE_ACTION, "a.py")[0].run());
     await waitFor(() => expect(uploads()).toHaveLength(1));
+    expect(uploads()[0].query.get("path")).toBe("/a.py");
+    expect(store.text("/scripts/b.py")).toBe("b = 2\n");
     expect(puts()).toHaveLength(0);
-    const codeSave = stub.bindings.find((b) => b.context === FLOW_CODE_CONTEXT)!;
-    act(() => codeSave.run());
+
+    act(() => live(NS_FILE_SAVE_ACTION, "b.py")[0].run());
+    await waitFor(() => expect(uploads()).toHaveLength(2));
+    expect(uploads()[1].query.get("path")).toBe("/scripts/b.py");
+    expect(puts()).toHaveLength(0);
+
+    act(() => live(FLOW_SAVE_ACTION)[0].run());
     await waitFor(() => expect(puts()).toHaveLength(1));
-    expect(uploads()).toHaveLength(1);
+    expect(uploads()).toHaveLength(2);
+  });
+
+  it("a file editor's action is disposed when its tab is hidden, and a fresh one comes with it", async () => {
+    const user = userEvent.setup();
+    storeLayout(layoutWith("file:a.py"));
+    renderFlow();
+    await fileBox("a.py");
+    const first = live(NS_FILE_SAVE_ACTION, "a.py")[0];
+    await user.click(within(strip(2)).getByRole("tab", { name: "Files" }));
+    await waitFor(() => expect(first.disposed).toBe(true));
+    expect(live(NS_FILE_SAVE_ACTION)).toHaveLength(0);
+    await user.click(within(strip(2)).getByRole("tab", { name: "a.py (/a.py)" }));
+    await fileBox("a.py");
+    expect(live(NS_FILE_SAVE_ACTION, "a.py")).toHaveLength(1);
+    expect(live(NS_FILE_SAVE_ACTION, "a.py")[0]).not.toBe(first);
   });
 });
 
@@ -516,6 +555,27 @@ describe("a flow save that changes the namespace (fix round 1)", () => {
     expect(puts()).toHaveLength(0);
     // Behind the modal question, the tab is still open with its edits.
     expect(screen.getByRole("tab", { name: "a.py (/a.py), unsaved", hidden: true })).toBeInTheDocument();
+  });
+
+  it("Save files first, chosen while a Save all runs, waits for it, then saves the flow (fix round 2)", async () => {
+    const user = userEvent.setup();
+    await editFileAndMoveFlow();
+    let release = () => {};
+    uploadGate = new Promise<void>((r) => { release = r; });
+    await user.click(screen.getByRole("button", { name: "Save all files" }));
+    await waitFor(() => expect(fetched.some((r) => r.startsWith("POST ") && r.includes("/files?"))).toBe(true));
+    await user.click(within(screen.getByRole("banner")).getByRole("button", { name: "Save" }));
+    const ask = await screen.findByRole("alertdialog", { name: `Save the open files before the flow moves to ${OTHER}?` });
+    await user.click(within(ask).getByRole("button", { name: "Save files first" }));
+    expect(puts()).toHaveLength(0);
+    act(() => release());
+    await waitFor(() => expect(puts()).toHaveLength(1));
+    // One write of a.py (the running pass); the waiting call found nothing left to save.
+    expect(uploads()).toHaveLength(1);
+    expect(store.text("/a.py")).toBe("a = 2\n");
+    const fileWrite = fetched.findIndex((r) => r.startsWith("POST ") && r.includes("/files?"));
+    const flowWrite = fetched.findIndex((r) => r.startsWith("PUT ") && r.includes(FLOW_PATH));
+    expect(fileWrite).toBeLessThan(flowWrite);
   });
 
   it("Discard file changes saves the flow, sends no file, and closes the file tabs", async () => {
@@ -573,5 +633,80 @@ describe("a flow save that changes the namespace (fix round 1)", () => {
     await waitFor(() => expect(puts()).toHaveLength(1));
     expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(within(strip(2)).getByRole("tab", { name: "a.py (/a.py), unsaved" })).toBeInTheDocument();
+  });
+});
+
+describe("moving between flows (fix round 2)", () => {
+  const Y_ID = "0a7c1d2e-0000-4000-8000-0000000000y2";
+  const Y_NS = "company.other";
+
+  function Nav() {
+    const navigate = useNavigate();
+    return (
+      <>
+        <button type="button" onClick={() => navigate(`/explore/${WS}/workflows/flows/${FLOW_ID}/edit`)}>Go to X</button>
+        <button type="button" onClick={() => navigate(`/explore/${WS}/workflows/flows/${Y_ID}/edit`)}>Go to Y</button>
+      </>
+    );
+  }
+
+  it("going to another flow (cached, another namespace) keeps its file tabs, and nothing is said about the first flow's", async () => {
+    const user = userEvent.setup();
+    storeLayout(layoutWith("file:a.py"));
+    const yLayout: Layout = layoutWith("file:y.py");
+    localStorage.setItem(`${LAYOUT_KEY_PREFIX}${Y_ID}`, JSON.stringify(yLayout));
+    server = new FakeWorkflowServer();
+    ({ requests, store } = serveFiles({ namespace: NS, files: FILES }));
+    const filesFetch = globalThis.fetch;
+    server.install();
+    const flowFetch = globalThis.fetch;
+    const yFlow = {
+      ...server.flow!,
+      id: Y_ID,
+      flow_id: "other",
+      namespace: Y_NS,
+      source: flowSource("y").replace(`namespace: ${NS}`, `namespace: ${Y_NS}`),
+    };
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    vi.stubGlobal("fetch", (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes(`/flows/${Y_ID}/versions`)) return Promise.resolve(json([]));
+      if (url.includes(`/flows/${Y_ID}/validate`)) return Promise.resolve(json({ errors: [], warnings: [] }));
+      if (url.split("?")[0].endsWith(`/flows/${Y_ID}`)) return Promise.resolve(json(yFlow));
+      if (url.includes(`/namespaces/${Y_NS}/`)) return Promise.resolve(new Response(JSON.stringify({ error: "not here" }), { status: 404 }));
+      return url.includes("/workflows/namespaces/") ? filesFetch(input, init) : flowFetch(input, init);
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <TooltipProvider>
+          <MemoryRouter initialEntries={[`/explore/${WS}/workflows/flows/${FLOW_ID}/edit`]}>
+            <Nav />
+            <Routes>
+              <Route path="/explore/:workspace/workflows/flows/:id/:tab" element={<FlowDetail />} />
+            </Routes>
+          </MemoryRouter>
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+    // X, with unsaved edits in a.py.
+    type(await fileBox("a.py"), "a = 2\n");
+    await within(strip(2)).findByRole("tab", { name: "a.py (/a.py), unsaved" });
+    // To Y (loading it once), back to X, and to Y again, now cached.
+    await user.click(screen.getByRole("button", { name: "Go to Y" }));
+    await screen.findByRole("heading", { level: 1, name: "other" });
+    await user.click(screen.getByRole("button", { name: "Go to X" }));
+    await screen.findByRole("heading", { level: 1, name: "hello" });
+    await user.click(screen.getByRole("button", { name: "Go to Y" }));
+    await screen.findByRole("heading", { level: 1, name: "other" });
+
+    expect(tabNames(2)).toEqual(["Files", "y.py (/y.py)"]);
+    await act(async () => { await new Promise((r) => setTimeout(r, 400)); });
+    const stored = JSON.parse(localStorage.getItem(`${LAYOUT_KEY_PREFIX}${Y_ID}`) ?? "{}") as Layout;
+    expect(stored.panels.flatMap((p) => p.tabs)).toEqual(["code", "files", "file:y.py"]);
+    expect(toast.info).not.toHaveBeenCalled();
+    // X's session is not Y's: no unsaved-files badge on Y.
+    expect(screen.queryByText(/^\d+ unsaved files?$/)).toBeNull();
+    expect(screen.getByText("No unsaved files")).toBeInTheDocument();
   });
 });

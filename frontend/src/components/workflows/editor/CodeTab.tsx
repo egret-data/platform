@@ -35,13 +35,15 @@ const toMonaco = (r: YamlRange): MonacoNS.IRange => ({
  * (`disposeFlowModel`).
  */
 /**
- * The context key Code's own editor carries, and the `when` of its Ctrl/Cmd+S. Standalone
- * Monaco keeps every `addCommand` in one keybinding service shared by all its editors, so a
- * command without a `when` fires from whichever editor has focus (monaco-editor #2947): a
- * namespace file's editor beside Code would save the flow and swallow the key. Scoped to this
- * key, the command answers only in Code's editor (W7d Task 7, fix round 1).
+ * The id of Code's save action (Ctrl/Cmd+S). An editor ACTION, not `addCommand`: standalone
+ * Monaco keeps every editor's keybindings in one shared service, and an `addCommand` answers in
+ * whichever editor has focus (monaco-editor #2947), is matched newest-first, and is never
+ * removed, so a namespace file's editor beside Code would save the flow and swallow the key.
+ * `addAction` scopes its keybinding to this editor (`editorId == getId()`, monaco-editor 0.56
+ * `standaloneCodeEditor.js`) and returns a disposable, disposed when the tab unmounts, because
+ * disposing the editor does not remove it (W7d Task 7, fix round 2).
  */
-export const FLOW_CODE_CONTEXT = "egretFlowCode";
+export const FLOW_SAVE_ACTION = "egret.flow.save";
 
 export function CodeTab({ ctx }: { ctx: EditorContext }) {
   const [mounted, setMounted] = useState<Mounted | null>(null);
@@ -50,14 +52,21 @@ export function CodeTab({ ctx }: { ctx: EditorContext }) {
   // Monaco's callbacks are bound once, at mount; they read the latest context through this.
   const latest = useRef(ctx);
   useEffect(() => { latest.current = ctx; });
+  const saveAction = useRef<MonacoNS.IDisposable | null>(null);
+  useEffect(() => () => saveAction.current?.dispose(), []);
 
   const handleMount: OnMount = (editor, monaco) => {
     rememberMonaco(monaco);
     // Registered while read-only too, and inert there: read-only can arrive after mount.
-    editor.createContextKey(FLOW_CODE_CONTEXT, true);
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      if (!latest.current.readOnly) latest.current.save?.();
-    }, FLOW_CODE_CONTEXT);
+    saveAction.current?.dispose();
+    saveAction.current = editor.addAction({
+      id: FLOW_SAVE_ACTION,
+      label: "Save the flow",
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+      run: () => {
+        if (!latest.current.readOnly) latest.current.save?.();
+      },
+    });
     editor.onDidChangeCursorPosition(() => {
       const position = editor.getPosition();
       const model = editor.getModel();

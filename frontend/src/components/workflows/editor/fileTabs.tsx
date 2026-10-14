@@ -148,16 +148,25 @@ export type FilesHostState = {
  */
 export function useFilesHost({
   ws,
+  flowKey,
   namespace,
   readOnly,
   flowLayout,
 }: {
   ws: string;
+  /** The flow's id: another flow is another set of tabs, never a namespace change. */
+  flowKey: string;
   namespace: string;
   readOnly: boolean;
   flowLayout: FlowLayoutHandle;
 }): FilesHostState {
-  const [store] = useState(() => new FileSessionStore());
+  // One store per flow: another flow's sessions are never this flow's (fix round 2).
+  const [stores, setStores] = useState(() => ({ flowKey, store: new FileSessionStore() }));
+  let store = stores.store;
+  if (stores.flowKey !== flowKey) {
+    store = new FileSessionStore();
+    setStores({ flowKey, store });
+  }
   // Re-renders when any open file's state changes; `dirtyKey` below is read fresh each render.
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
   const { layout, setLayout } = flowLayout;
@@ -170,15 +179,19 @@ export function useFilesHost({
   // back): the open file tabs belong to the old one. They are closed in this very render (React's
   // pattern for state that follows a prop: the render is redone before anything commits), so no
   // file session ever starts for the new namespace under an old tab, and nothing re-points.
-  const [owner, setOwner] = useState(namespace);
+  // Another FLOW is not a move: its layout and tabs are its own, so the owner is only reset.
+  // (The page remounts per flow, `FlowDetailLoader key={id}`; this holds without that.)
+  const [owner, setOwner] = useState({ flowKey, namespace });
   const [moveNotice, setMoveNotice] = useState<{ from: string; to: string; lost: string[] } | null>(null);
-  if (owner !== namespace) {
-    setOwner(namespace);
+  if (owner.flowKey !== flowKey) {
+    setOwner({ flowKey, namespace });
+  } else if (owner.namespace !== namespace) {
+    setOwner({ flowKey, namespace });
     const next = withoutFileTabs(layout);
     if (next !== layout) {
       const lost = layout.panels.flatMap((p) => p.tabs).map(filePathOf).filter((p): p is string => p !== null && !!store.get(p)?.dirty);
       setLayout(next);
-      setMoveNotice({ from: owner, to: namespace, lost: lost.map(fileNameOf) });
+      setMoveNotice({ from: owner.namespace, to: namespace, lost: lost.map(fileNameOf) });
     }
   }
   useEffect(() => {
@@ -247,9 +260,14 @@ export function useFilesHost({
   );
 
   const [saving, setSaving] = useState(false);
-  const saveAll = useCallback(async (): Promise<boolean> => {
-    if (readOnly || saving) return false;
-    const dirty = store.entries().filter(([p, f]) => f.dirty && openPaths.includes(p));
+  const openRef = useRef(openPaths);
+  useEffect(() => {
+    openRef.current = openPaths;
+  });
+  /** The pass running now, if any, and the files it saves. */
+  const running = useRef<{ done: Promise<boolean>; paths: ReadonlySet<string> } | null>(null);
+  /** One pass over `dirty` (open files with unsaved edits), each saved with its own revision. */
+  const savePass = useCallback(async (dirty: [string, NamespaceFile][]): Promise<boolean> => {
     if (dirty.length === 0) return true;
     setSaving(true);
     try {
@@ -269,7 +287,33 @@ export function useFilesHost({
     } finally {
       setSaving(false);
     }
-  }, [readOnly, saving, store, openPaths]);
+  }, []);
+  /**
+   * Save every open file with unsaved edits. A call made while a pass runs waits for it, then
+   * saves what is still unsaved, so "Save files first" never ends quietly because a Save all
+   * was already running (fix round 2).
+   */
+  const saveAll = useCallback(async (): Promise<boolean> => {
+    if (readOnly) return false;
+    // A file the running pass saved still reads as unsaved until React publishes its new state,
+    // so it is skipped here rather than saved twice (the second save would carry the old
+    // revision and be refused).
+    const covered = new Set<string>();
+    while (running.current) {
+      const { done, paths } = running.current;
+      if (!(await done.catch(() => false))) return false;
+      for (const p of paths) covered.add(p);
+    }
+    const dirty = store.entries().filter(([p, f]) => f.dirty && openRef.current.includes(p) && !covered.has(p));
+    const done = savePass(dirty);
+    const entry = { done, paths: new Set(dirty.map(([p]) => p)) };
+    running.current = entry;
+    try {
+      return await done;
+    } finally {
+      if (running.current === entry) running.current = null;
+    }
+  }, [readOnly, savePass, store]);
 
   const saveAllState: Enablement = saving
     ? { ok: false, reason: "Saving…" }

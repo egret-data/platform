@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { act, render, renderHook, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
+const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }));
+vi.mock("sonner", () => ({ toast }));
 import { DiscardFileDialog, nameList, useFilesHost } from "@/components/workflows/editor/fileTabs";
 import type { NamespaceFile } from "@/components/workflows/namespaces/files/useNamespaceFile";
 import { CODE_TAB, closeTab, type Layout } from "@/components/workflows/panels/layout";
@@ -22,7 +23,7 @@ const session = (dirty: boolean) => ({ dirty }) as unknown as NamespaceFile;
 
 function useHarness() {
   const [layout, setLayout] = useState(START);
-  const files = useFilesHost({ ws: "eng", namespace: "company.team", readOnly: false, flowLayout: { layout, setLayout, revealCode: () => {} } });
+  const files = useFilesHost({ ws: "eng", flowKey: "f-1", namespace: "company.team", readOnly: false, flowLayout: { layout, setLayout, revealCode: () => {} } });
   return { layout, files };
 }
 
@@ -75,5 +76,34 @@ describe("DiscardFileDialog", () => {
 
   it("nameList joins names in English", () => {
     expect([nameList([]), nameList(["a"]), nameList(["a", "b"]), nameList(["a", "b", "c"])]).toEqual(["", "a", "a and b", "a, b and c"]);
+  });
+});
+
+describe("useFilesHost: another flow is not a namespace change (fix round 2)", () => {
+  const X_LAYOUT: Layout = { panels: [{ id: "p1", size: 100, tabs: [CODE_TAB, "file:a.py"], active: "file:a.py" }] };
+  const Y_LAYOUT: Layout = { panels: [{ id: "p1", size: 100, tabs: [CODE_TAB, "file:y.py"], active: "file:y.py" }] };
+
+  /** As the page does: one layout per flow, swapped in when the flow changes (`usePersistedLayout`). */
+  function usePage({ flowKey, namespace }: { flowKey: string; namespace: string }) {
+    const [layouts, setLayouts] = useState<Record<string, Layout>>({ X: X_LAYOUT, Y: Y_LAYOUT });
+    const layout = layouts[flowKey];
+    const setLayout = (l: Layout) => setLayouts((all) => ({ ...all, [flowKey]: l }));
+    const files = useFilesHost({ ws: "eng", flowKey, namespace, readOnly: false, flowLayout: { layout, setLayout, revealCode: () => {} } });
+    return { layout, files };
+  }
+
+  it("keeps the next flow's file tabs, says nothing, and starts it with a store of its own", () => {
+    toast.info.mockClear();
+    const { result, rerender } = renderHook(usePage, { initialProps: { flowKey: "X", namespace: "company.team" } });
+    const xStore = result.current.files.host.store;
+    act(() => xStore.set("/a.py", session(true)));
+    rerender({ flowKey: "Y", namespace: "company.other" });
+    expect(result.current.layout).toEqual(Y_LAYOUT);
+    expect(result.current.files.host.store).not.toBe(xStore);
+    expect(result.current.files.host.dirtyPaths).toEqual([]);
+    expect(toast.info).not.toHaveBeenCalled();
+    // A real move of Y's own namespace still closes Y's file tabs.
+    rerender({ flowKey: "Y", namespace: "company.third" });
+    expect(result.current.layout.panels[0].tabs).toEqual([CODE_TAB]);
   });
 });

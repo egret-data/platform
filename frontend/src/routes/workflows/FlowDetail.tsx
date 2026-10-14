@@ -218,7 +218,7 @@ function FlowWorkspace({
   const pageLayout = useFlowLayout(id);
   // The flow's namespace files as editor tabs (W7d spec §4.3). Their saves are their own: the
   // flow's Save below never saves a file, and a file's save never saves the flow.
-  const files = useFilesHost({ ws, namespace: flow.namespace, readOnly: !manage, flowLayout: pageLayout });
+  const files = useFilesHost({ ws, flowKey: id, namespace: flow.namespace, readOnly: !manage, flowLayout: pageLayout });
   const flowLayout = files.flowLayout;
   const editor = useFlowEditor({
     workspace: ws,
@@ -528,7 +528,7 @@ function FlowWorkspace({
 
       {files.openPaths.length > 0 && (
         <LazyRouteArea area="Files" fallback={null}>
-          <FileSessions key={flow.namespace} ws={ws} namespace={flow.namespace} paths={files.openPaths} store={files.host.store} />
+          <FileSessions key={`${id}:${flow.namespace}`} ws={ws} namespace={flow.namespace} paths={files.openPaths} store={files.host.store} />
         </LazyRouteArea>
       )}
       <DiscardFileDialog paths={files.closing} onConfirm={files.confirmClose} onCancel={files.cancelClose} />

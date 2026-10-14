@@ -70,12 +70,13 @@ export function NamespaceFileEditor({ ws, namespace, path, readOnly, readOnlyRea
 }
 
 /**
- * The context key a namespace file's editor carries, and the `when` of its own Ctrl/Cmd+S.
- * Monaco's keybindings are shared by all its editors (monaco-editor #2947), so each editor's
- * save is scoped to its own key: in the flow editor, a file's Ctrl/Cmd+S saves that file and
- * Code's saves the flow (`FLOW_CODE_CONTEXT`), whichever panels are showing.
+ * The id of a namespace file editor's save action (Ctrl/Cmd+S). An editor action, scoped by
+ * Monaco to the editor that added it, so with Code and several files side by side each
+ * editor's Ctrl/Cmd+S saves only its own file (Code's saves the flow, `FLOW_SAVE_ACTION`).
+ * `addCommand` would not do: its keybindings are shared by every editor, matched newest
+ * first, and never removed (W7d Task 7, fix round 2).
  */
-export const NS_FILE_CONTEXT = "egretNsFile";
+export const NS_FILE_SAVE_ACTION = "egret.nsFile.save";
 
 const sizeText = (n: number) =>
   n < 1024 ? (n === 1 ? "1 byte" : `${n} bytes`) : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
@@ -152,17 +153,21 @@ export function NamespaceFileView({
     return () => el.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  // Inside Monaco the key is the editor's own command (Monaco consumes the key it binds, so the
-  // pane listener above then sees nothing); outside it, the pane listener saves.
+  // Inside Monaco the key is the editor's own action (Monaco consumes the key it binds, so the
+  // pane listener above then sees nothing); outside it, the pane listener saves. The action is
+  // disposed when this view unmounts or its editor is replaced (a reload remounts it).
+  const saveAction = useRef<{ dispose: () => void } | null>(null);
+  useEffect(() => () => saveAction.current?.dispose(), []);
   const onEditorMount: OnMount = (editor, monaco) => {
-    editor.createContextKey(NS_FILE_CONTEXT, true);
-    editor.addCommand(
-      monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
-      () => {
+    saveAction.current?.dispose();
+    saveAction.current = editor.addAction({
+      id: NS_FILE_SAVE_ACTION,
+      label: `Save ${name}`,
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+      run: () => {
         if (canSaveRef.current) void saveRef.current();
       },
-      NS_FILE_CONTEXT,
-    );
+    });
   };
 
   const revision = file.file?.revision;

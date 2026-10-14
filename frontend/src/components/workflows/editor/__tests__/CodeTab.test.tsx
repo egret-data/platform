@@ -39,6 +39,8 @@ const fake = vi.hoisted(() => {
     commandContexts: {} as Record<number, string | undefined>,
     /** The editor context keys created. */
     contextKeys: [] as string[],
+    /** Every `addAction`: its id, keybindings, and whether it was disposed (W7d Task 7, fix round 2). */
+    actions: [] as { id: string; keybindings: number[]; disposed: boolean }[],
     selection: null as unknown,
     revealed: null as unknown,
     focused: 0,
@@ -90,7 +92,7 @@ const fake = vi.hoisted(() => {
     monaco,
     reset() {
       Object.assign(state, {
-        mounts: 0, props: null, models: new Map(), markers: new Map(), markerListeners: [], commands: {}, commandContexts: {}, contextKeys: [],
+        mounts: 0, props: null, models: new Map(), markers: new Map(), markerListeners: [], commands: {}, commandContexts: {}, contextKeys: [], actions: [],
         selection: null, revealed: null, focused: 0, yamlMarkers: [],
       });
     },
@@ -116,6 +118,13 @@ vi.mock("@/components/monaco/MonacoEditor", () => ({
         addCommand: (k: number, cb: () => void, context?: string) => {
           fake.state.commands[k] = cb;
           fake.state.commandContexts[k] = context;
+        },
+        addAction: (desc: { id: string; keybindings?: number[]; run: () => unknown }) => {
+          const entry = { id: desc.id, keybindings: desc.keybindings ?? [], disposed: false };
+          fake.state.actions.push(entry);
+          // Monaco runs the action on its keybinding: tests press it through `commands`, as before.
+          for (const k of entry.keybindings) fake.state.commands[k] = () => void desc.run();
+          return { dispose: () => { entry.disposed = true; } };
         },
         createContextKey: (key: string, value: unknown) => {
           fake.state.contextKeys.push(key);
@@ -150,7 +159,7 @@ vi.mock("@/components/workflows/editor/monacoYaml", () => ({
   configureFlowYaml: (...a: unknown[]) => configureFlowYaml(...a),
 }));
 
-import { CodeTab, FLOW_CODE_CONTEXT } from "@/components/workflows/editor/CodeTab";
+import { CodeTab, FLOW_SAVE_ACTION } from "@/components/workflows/editor/CodeTab";
 import { registerEditorTabs } from "@/components/workflows/editor/registerEditorTabs";
 import { createEditorBridge, type EditorContext } from "@/components/workflows/editor/EditorContext";
 import { MultiPanel } from "@/components/workflows/panels/MultiPanel";
@@ -299,12 +308,16 @@ describe("CodeTab", () => {
     expect(save).toHaveBeenCalledTimes(1);
   });
 
-  it("scopes its Ctrl/Cmd+S to a context key only its own editor carries", () => {
-    // Monaco shares keybindings across editors: unscoped, this command would also answer in a
-    // namespace file's editor beside Code, and save the flow (W7d Task 7, fix round 1).
-    render(<CodeTab ctx={makeEditorContext({ modelKey: "f-1", save: vi.fn() })} />);
-    expect(fake.state.contextKeys).toContain(FLOW_CODE_CONTEXT);
-    expect(fake.state.commandContexts[fake.monaco.KeyMod.CtrlCmd | fake.monaco.KeyCode.KeyS]).toBe(FLOW_CODE_CONTEXT);
+  it("binds Ctrl/Cmd+S as an action of its own editor, not a shared command, and disposes it on unmount", () => {
+    // An `addCommand` keybinding answers in every editor and is never removed; an action's is
+    // scoped to the editor that added it (W7d Task 7, fix round 2).
+    const save = vi.fn();
+    const { unmount } = render(<CodeTab ctx={makeEditorContext({ modelKey: "f-1", save })} />);
+    const saveKey = fake.monaco.KeyMod.CtrlCmd | fake.monaco.KeyCode.KeyS;
+    expect(fake.state.actions).toEqual([{ id: FLOW_SAVE_ACTION, keybindings: [saveKey], disposed: false }]);
+    expect(saveKey in fake.state.commandContexts).toBe(false);
+    unmount();
+    expect(fake.state.actions[0].disposed).toBe(true);
   });
 
   it("is read-only with a banner that says why for a viewer without workflow:manage", () => {

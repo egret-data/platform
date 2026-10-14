@@ -38,6 +38,11 @@ export const stub = {
   bindings: [] as { keybinding: number; context: string | undefined; path: string; run: () => void }[],
   /** Every `createContextKey`, with the model the editor showed. */
   contextKeys: [] as { key: string; value: unknown; path: string }[],
+  /**
+   * Every `addAction`, with the id of the editor that added it and the model it showed. Monaco
+   * scopes an action's keybindings to its own editor; `disposed` turns true when it is disposed.
+   */
+  actions: [] as { editorId: string; path: string; id: string; keybindings: number[]; run: () => void; disposed: boolean }[],
   /** The editors mounted now, each showing one model (`monaco.editor.getEditors()`). */
   editors: new Set<{ getModel: () => Model }>(),
 };
@@ -50,6 +55,7 @@ export function resetMonacoStub(): void {
   stub.editors.clear();
   stub.bindings = [];
   stub.contextKeys = [];
+  stub.actions = [];
 }
 
 /** Run the editor's own `Ctrl/Cmd+S` binding, as Monaco would on that key. */
@@ -106,6 +112,9 @@ const monaco = {
   },
 };
 
+/** Each mounted editor's id (`editor.getId()`), unique for the test run. */
+let editorSeq = 0;
+
 export default function MonacoStub(props: EditorProps) {
   const model = modelFor(props.path ?? "default", props.defaultValue ?? "");
   const [, repaint] = useState(0);
@@ -118,6 +127,7 @@ export default function MonacoStub(props: EditorProps) {
       latest.current.onChange?.(model.text, undefined as never);
     };
     model.listeners.add(changed);
+    const editorId = `editor-${++editorSeq}`;
     const editor = {
       getModel: () => model,
       // The element Monaco renders into, holding its input (`.inputarea`, here the textarea).
@@ -125,6 +135,21 @@ export default function MonacoStub(props: EditorProps) {
       addCommand: (k: number, cb: () => void, context?: string) => {
         stub.commands.set(k, cb);
         stub.bindings.push({ keybinding: k, context, path: model.uri.toString(), run: cb });
+      },
+      getId: () => editorId,
+      addAction: (desc: { id: string; keybindings?: number[]; run: (e: unknown) => unknown }) => {
+        const entry = {
+          editorId,
+          path: model.uri.toString(),
+          id: desc.id,
+          keybindings: desc.keybindings ?? [],
+          run: () => void desc.run(editor),
+          disposed: false,
+        };
+        stub.actions.push(entry);
+        // The newest editor's binding is what `pressSaveInEditor` presses, as before.
+        for (const k of entry.keybindings) stub.commands.set(k, entry.run);
+        return { dispose: () => { entry.disposed = true; } };
       },
       createContextKey: (key: string, value: unknown) => {
         stub.contextKeys.push({ key, value, path: model.uri.toString() });
