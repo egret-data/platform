@@ -94,6 +94,9 @@ use uuid::Uuid;
 
 /// The reason a view is refused when egret cannot judge what it reads.
 pub const LINEAGE_REFUSAL: &str = "lineage could not be computed";
+/// The reason a view is refused when egret's classification writes stayed
+/// busy past the hold's deadline (fix round 2, N4).
+pub const BUSY_REFUSAL: &str = "egret could not write the view's classification tags";
 /// The reason a view is refused when a plugin did not confirm the tags.
 pub const UNCONFIRMED_REFUSAL: &str = "engines did not confirm the classification tags within";
 
@@ -220,6 +223,13 @@ impl Refusal {
     fn locked(limit: Duration) -> Self {
         Self(format!(
             "another change to this view is being held; retry when it has finished (at most {} s)",
+            seconds(limit)
+        ))
+    }
+    fn busy(limit: Duration) -> Self {
+        Self(format!(
+            "{BUSY_REFUSAL} within the view's deadline ({} s), because other classification \
+             changes were being written; retry",
             seconds(limit)
         ))
     }
@@ -750,6 +760,27 @@ async fn assignments_of(
     .await
 }
 
+/// The shortest lock wait a hold's write allows itself, even past its
+/// deadline (fix round 2, N4).
+const MIN_LOCK_WAIT: Duration = Duration::from_secs(1);
+
+/// A database error in a hold's write. A lock wait that ran past the
+/// deadline (`lock_timeout`, SQLSTATE 55P03) is the busy refusal; anything
+/// else is internal.
+fn db_refusal(limit: Duration, e: sqlx::Error) -> Refusal {
+    if is_lock_timeout(&e) {
+        Refusal::busy(limit)
+    } else {
+        Refusal::internal("database", e)
+    }
+}
+
+fn is_lock_timeout(e: &sqlx::Error) -> bool {
+    e.as_database_error()
+        .and_then(|d| d.code())
+        .is_some_and(|c| c == "55P03")
+}
+
 /// Bump the bound services' tag versions and recompile their profiles, as
 /// every catalog-tag write does (`egret_bi::CatalogTagRepo`).
 async fn bump_and_recompile(
@@ -759,7 +790,16 @@ async fn bump_and_recompile(
 ) -> Result<(), Refusal> {
     egret_catalog_registry::bump_bound_tag_versions(tx, warehouse_id)
         .await
-        .map_err(|e| Refusal::internal("tag version", e))?;
+        .map_err(|e| {
+            if is_lock_timeout(&e) {
+                Refusal(format!(
+                    "{BUSY_REFUSAL} in time, because other classification changes were being \
+                     written; retry"
+                ))
+            } else {
+                Refusal::internal("tag version", e)
+            }
+        })?;
     egret_perm_compile::recompile_services_in_tx(tx, bound)
         .await
         .map_err(Refusal::overlap)?;
@@ -867,16 +907,32 @@ impl ViewHold {
     /// transaction, so a base classification either committed before (and is
     /// read) or waits for this commit (and then re-tags the view from this
     /// lineage).
+    ///
+    /// Fix round 2 (N4): every lock wait in it is bounded by the remaining
+    /// deadline (`lock_timeout`, at least [`MIN_LOCK_WAIT`]). A wait past it
+    /// fails the transaction, which rolls back, and the hold refuses cleanly
+    /// instead of committing late.
+    #[allow(clippy::too_many_arguments)]
     async fn write(
         &self,
+        deadline: Instant,
         warehouse_id: Uuid,
         view: &ViewRef,
         rows: Rows<'_>,
         lineage: &RecordedLineage,
         columns: Option<&[String]>,
     ) -> Result<Written, Refusal> {
-        let db = |e: sqlx::Error| Refusal::internal("database", e);
+        let limit = self.limit;
+        let db = move |e: sqlx::Error| db_refusal(limit, e);
         let mut tx = self.db.pool.begin().await.map_err(db)?;
+        let wait = deadline
+            .saturating_duration_since(Instant::now())
+            .max(MIN_LOCK_WAIT);
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(format!("{}ms", wait.as_millis()))
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
         egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut tx)
             .await
             .map_err(db)?;
@@ -967,8 +1023,9 @@ impl ViewHold {
         })
     }
 
-    /// Step 5's compensation: delete the lineage-derived rows `w` inserted
-    /// (never a row an admin has since made manual, I1(a)), restore the
+    /// Step 5's compensation: delete the rows `w` inserted that still carry
+    /// the provenance they were inserted with (never a row an admin has since
+    /// made manual, I1(a); a rename's own manual copies go, N1), restore the
     /// lineage recorded before it, re-derive that lineage's tags (I1(b): a
     /// base of the previous lineage may have been classified meanwhile, with
     /// a tag whose rows this hold had inserted), and bump again.
@@ -1011,7 +1068,7 @@ impl ViewHold {
         let overlaps_before = egret_perm_compile::overlap::unit_snapshot_via(&mut tx, &bound)
             .await
             .map_err(|e| Refusal::internal("overlap snapshot", e))?;
-        let removed = delete_derived_rows(&mut tx, w.warehouse_id, &w.inserted)
+        let removed = delete_inserted_rows(&mut tx, w.warehouse_id, &w.inserted)
             .await
             .map_err(db)?;
         record(&mut tx, &w.view, &w.previous, w.previous_columns.as_deref())
@@ -1139,7 +1196,7 @@ impl ViewHold {
         // never a refusal; the lineage is recorded best-effort.
         if !r.classified {
             return self
-                .best_effort(loader, deadline, &r, ns, name, change, req, next)
+                .best_effort(loader, deadline, prefix, &r, ns, name, change, req, next)
                 .await;
         }
         if is_multi_level(ns) {
@@ -1240,6 +1297,7 @@ impl ViewHold {
         &self,
         loader: &axum::Router,
         deadline: Instant,
+        prefix: &str,
         r: &Resolved,
         ns: &str,
         name: &str,
@@ -1249,6 +1307,27 @@ impl ViewHold {
     ) -> Response {
         let Some(catalog) = r.catalog.clone().filter(|_| !is_multi_level(ns)) else {
             return next.run(req).await;
+        };
+        let view = view_ref(&catalog, ns, name);
+        // Fix round 2 (N2): the record takes the view's lock, as the hold and
+        // the sweep do, so two writers cannot record out of order. Busy: no
+        // EXPLAIN, the commit passes at once, and a background task records
+        // `failed` once the other writer is done.
+        let key = lock_key(prefix, ns, name);
+        let lock = match try_view_lock(&self.db, &key).await {
+            Ok(Some(conn)) => conn,
+            Ok(None) | Err(_) => {
+                let response = next.run(req).await;
+                if response.status().is_success() {
+                    tokio::spawn(record_failed_when_free(
+                        self.db.clone(),
+                        key,
+                        self.limit,
+                        view,
+                    ));
+                }
+                return response;
+            }
         };
         let outcome: Option<(RecordedLineage, Option<Vec<String>>)> = match change {
             Change::Untouched => None,
@@ -1273,10 +1352,12 @@ impl ViewHold {
         let response = next.run(req).await;
         if response.status().is_success() {
             if let Some((lineage, columns)) = outcome {
-                let view = view_ref(&catalog, ns, name);
                 self.record_after_commit(r.warehouse_id, &view, &lineage, columns.as_deref())
                     .await;
             }
+        }
+        if let Err(e) = lock.close().await {
+            tracing::warn!(error = %e, "view hold: closing the view lock failed");
         }
         response
     }
@@ -1342,6 +1423,7 @@ impl ViewHold {
         // transaction (I2); the one read above only chose step 2 or 3.
         let written = match self
             .write(
+                deadline,
                 warehouse_id,
                 &view,
                 Rows::Derived,
@@ -1639,6 +1721,7 @@ impl ViewHold {
             .collect();
         let written = match self
             .write(
+                deadline,
                 warehouse_id,
                 dst,
                 Rows::Fixed(&rows),
@@ -1691,25 +1774,33 @@ impl ViewHold {
     }
 }
 
-/// Delete those of `rows` in `warehouse_id` that are still lineage-derived;
-/// how many went. A row an admin assigned by hand meanwhile stays (I1(a)).
-async fn delete_derived_rows(
+/// Delete those of `rows` (the rows a hold inserted) in `warehouse_id` that
+/// still carry the provenance they were inserted with; how many went.
+///
+/// - A derived row an admin has since assigned by hand is now manual, so it
+///   stays (I1(a)).
+/// - A manual row the hold inserted itself (a rename copies the source's
+///   manual tags) cannot have been flipped by an admin, since `assign_catalog`
+///   leaves a manual row as it is, so it is still the hold's own and goes
+///   (fix round 2, N1).
+async fn delete_inserted_rows(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     warehouse_id: Uuid,
     rows: &[Assignment],
 ) -> Result<u64, sqlx::Error> {
     let mut removed = 0;
-    for (tag, schema, table, column, _) in rows {
+    for (tag, schema, table, column, from_lineage) in rows {
         removed += sqlx::query(
             "DELETE FROM catalog_tag_assignments \
               WHERE tag_id = $1 AND warehouse_id = $2 AND schema_name = $3 \
-                AND table_name = $4 AND column_name = $5 AND from_lineage",
+                AND table_name = $4 AND column_name = $5 AND from_lineage = $6",
         )
         .bind(tag)
         .bind(warehouse_id)
         .bind(schema)
         .bind(table)
         .bind(column)
+        .bind(from_lineage)
         .execute(&mut **tx)
         .await?
         .rows_affected();
@@ -1738,6 +1829,57 @@ async fn delete_rows(
         .await?;
     }
     Ok(())
+}
+
+/// `pg_try_advisory_lock` on `key`, on a connection detached from the pool:
+/// the connection holding the lock, or `None` when another writer has it.
+async fn try_view_lock(db: &Db, key: &str) -> Result<Option<sqlx::PgConnection>, sqlx::Error> {
+    let mut conn = db.pool.acquire().await?.detach();
+    let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
+        .bind(key)
+        .fetch_one(&mut conn)
+        .await?;
+    if got {
+        Ok(Some(conn))
+    } else {
+        let _ = conn.close().await;
+        Ok(None)
+    }
+}
+
+/// Fix round 2 (N2): a best-effort commit that found the view's lock busy
+/// records the view's lineage `failed` once the lock is free (waiting at most
+/// `wait`), so the sweep a later classification triggers recomputes it. Its
+/// own EXPLAIN was skipped, so any lineage the other writer records may
+/// describe a version older than this commit: `failed` is the honest state.
+/// If the lock stays busy, it records anyway and says so.
+async fn record_failed_when_free(db: Db, key: String, wait: Duration, view: ViewRef) {
+    let detail = "another change to this view was being recorded at the same time; \
+                  the next sweep recomputes its lineage";
+    let result = async {
+        let mut conn = db.pool.acquire().await?.detach();
+        sqlx::query("SELECT set_config('lock_timeout', $1, false)")
+            .bind(format!("{}ms", wait.max(MIN_LOCK_WAIT).as_millis()))
+            .execute(&mut conn)
+            .await?;
+        let locked = sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+            .bind(&key)
+            .execute(&mut conn)
+            .await;
+        if let Err(e) = &locked {
+            tracing::warn!(?view, error = %e, "view hold: the view stayed busy; recording failed anyway");
+        }
+        let mut tx = db.pool.begin().await?;
+        egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut tx).await?;
+        lineage::record_lineage_failure(&mut tx, &view, detail).await?;
+        tx.commit().await?;
+        let _ = conn.close().await;
+        Ok::<(), sqlx::Error>(())
+    }
+    .await;
+    if let Err(e) = result {
+        tracing::warn!(?view, error = %e, "view hold: the failed lineage was not recorded");
+    }
 }
 
 /// The commit's request metadata (the guard put it there), or an internal one.

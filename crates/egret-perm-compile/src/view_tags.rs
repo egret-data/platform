@@ -7,7 +7,8 @@
 //! exactly that set:
 //!
 //! - when a base column is classified, reclassified or declassified, inside
-//!   the transaction of that write ([`retag_dependent_views_in_tx`]);
+//!   the transaction of that write, under [`lock_view_tags_in_tx`]
+//!   ([`dependent_views`], then [`retag_views_in_tx`]);
 //! - when the B3 sweep recomputes a view's lineage
 //!   (`egret_catalog_engine::lineage_sweep`), for that one view
 //!   ([`retag_view_in_tx`]).
@@ -376,27 +377,4 @@ pub async fn retag_views_in_tx(
         }
     }
     Ok(summary)
-}
-
-/// Re-tag every view whose lineage contains one of `changed_tables`, on the
-/// caller's open transaction, after the base write. Returns how many views'
-/// rows changed. Does not bump or recompile: the caller does both once over
-/// the base's warehouse and [`dependent_view_warehouses`] ([module doc](self)).
-pub async fn retag_dependent_views_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    changed_tables: &[(String, String, String)],
-) -> Result<usize, CompileError> {
-    Ok(retag_dependent_views_detailed_in_tx(tx, changed_tables)
-        .await?
-        .changed
-        .len())
-}
-
-/// [`retag_dependent_views_in_tx`], with what it did.
-pub async fn retag_dependent_views_detailed_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    changed_tables: &[(String, String, String)],
-) -> Result<RetagSummary, CompileError> {
-    let views = dependent_views(tx, changed_tables).await.map_err(db_err)?;
-    retag_views_in_tx(tx, &views).await
 }

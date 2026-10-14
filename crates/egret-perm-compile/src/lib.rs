@@ -111,7 +111,4 @@ pub use trigger::{
     merge_service_ids, recompile_service, recompile_service_in_tx, recompile_services_in_tx,
     CompileSummary, SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING, PROFILE_EXPANSION_CEILING,
 };
-pub use view_tags::{
-    dependent_view_warehouses, retag_dependent_views_detailed_in_tx, retag_dependent_views_in_tx,
-    retag_view_in_tx, RetagSummary, ViewRetag,
-};
+pub use view_tags::{dependent_view_warehouses, retag_view_in_tx, RetagSummary, ViewRetag};

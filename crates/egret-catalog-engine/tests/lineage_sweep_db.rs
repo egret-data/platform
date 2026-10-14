@@ -602,6 +602,10 @@ async fn a_classification_sweeps_the_views_with_no_lineage_even_behind_a_running
     env.create_raw(&v, "SELECT id, ssn FROM orders").await;
     assert_eq!(env.lineage(&v).await, RecordedLineage::Missing);
 
+    assert!(
+        !running.is_finished(),
+        "the full sweep must still be running when the classification commits"
+    );
     // A clearance-bearing tag classifies `orders`.
     let y = new_tag(&env.db).await;
     sqlx::query(
@@ -637,6 +641,7 @@ async fn a_classification_sweeps_the_views_with_no_lineage_even_behind_a_running
         env.rows(&v).await
     );
     assert_eq!(env.lineage(&v).await, env.computed(&["orders"]));
-    running.await.unwrap().expect("the full sweep");
+    let full = running.await.unwrap().expect("the full sweep");
+    assert_eq!(full.views, 1, "the full sweep listed only v_slow: {full:?}");
     listener.abort();
 }

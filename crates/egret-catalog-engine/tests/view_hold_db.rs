@@ -109,10 +109,35 @@ impl ExplainRunner for FakeRunner {
 
 type Seen = Arc<Mutex<Vec<(Instant, String)>>>;
 
-/// Records when a request reaches lakekeeper (inside the hold).
-async fn observe(State(seen): State<Seen>, req: Request, next: Next) -> Response {
+/// A base classification to commit the moment the next request reaches
+/// lakekeeper: `(tag, warehouse, table, column)`. It lands after the hold's
+/// first read and before its after-commit record (Task 9 fix round 2, N6).
+type OnReach = Arc<Mutex<Option<(Uuid, Uuid, String, String)>>>;
+
+/// Records when a request reaches lakekeeper (inside the hold), and runs the
+/// pending [`OnReach`] classification, if any.
+async fn observe(
+    State((seen, on_reach, db)): State<(Seen, OnReach, Db)>,
+    req: Request,
+    next: Next,
+) -> Response {
     let what = format!("{} {}", req.method(), req.uri().path());
     seen.lock().unwrap().push((Instant::now(), what));
+    let pending = on_reach.lock().unwrap().take();
+    if let Some((tag, warehouse, table, column)) = pending {
+        sqlx::query(
+            "INSERT INTO catalog_tag_assignments \
+                 (tag_id, warehouse_id, schema_name, table_name, column_name) \
+             VALUES ($1, $2, 's', $3, $4)",
+        )
+        .bind(tag)
+        .bind(warehouse)
+        .bind(table)
+        .bind(column)
+        .execute(&db.pool)
+        .await
+        .expect("classify on reach");
+    }
     next.run(req).await
 }
 
@@ -132,6 +157,7 @@ struct Env {
     policy: PolicyStore,
     runner: Arc<FakeRunner>,
     seen: Seen,
+    on_reach: OnReach,
     /// The clearance-bearing tag on `s.pii.ssn` (when classified).
     clearance: Option<Uuid>,
 }
@@ -302,9 +328,12 @@ async fn env_with(o: Opts) -> Option<Env> {
         calls: AtomicUsize::new(0),
     });
     let seen: Seen = Arc::default();
+    let on_reach: OnReach = Arc::default();
     let raw = front_catalog_router(catalog_engine_router(state.clone()), None, None);
-    let inner = catalog_engine_router(state)
-        .layer(axum::middleware::from_fn_with_state(seen.clone(), observe));
+    let inner = catalog_engine_router(state).layer(axum::middleware::from_fn_with_state(
+        (seen.clone(), on_reach.clone(), db.clone()),
+        observe,
+    ));
     let hold = ViewHold::new(db.clone(), runner.clone())
         .with_limit(limit)
         .with_max_holds(max_holds);
@@ -324,6 +353,7 @@ async fn env_with(o: Opts) -> Option<Env> {
         policy,
         runner,
         seen,
+        on_reach,
         clearance,
     };
     let (status, body) = env
@@ -1644,4 +1674,174 @@ async fn adding_a_version_without_making_it_current_keeps_the_lineage() {
         env.assignments("v1").await,
         env.expected_pii_tags(&["id", "ssn"])
     );
+}
+
+/// Task 9 fix round 2, N1: a rename the hold refuses (here, no plugin
+/// confirms) compensates. The destination keeps none of the rows the hold
+/// copied onto it, the source's manual tag included, and the source keeps
+/// its own.
+#[tokio::test]
+async fn a_refused_rename_leaves_nothing_on_the_destination() {
+    let Some(env) = env(Duration::from_secs(2), true).await else {
+        return;
+    };
+    for name in ["v1", "v2"] {
+        let (status, body) = env
+            .call_raw(
+                "POST",
+                "namespaces/s/views",
+                Some(create_body(name, "SELECT id FROM orders")),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let manual = new_tag(&env.db).await;
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments \
+             (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1, $2, 's', 'v1', 'id')",
+    )
+    .bind(manual)
+    .bind(env.warehouse_id)
+    .execute(&env.db.pool)
+    .await
+    .unwrap();
+
+    let (status, body) = env
+        .call(
+            "POST",
+            "views/rename",
+            Some(json!({"source": {"namespace": ["s"], "name": "v1"},
+                        "destination": {"namespace": ["s"], "name": "v2"}})),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        env.assignments("v2").await.is_empty(),
+        "{:?}",
+        env.assignments("v2").await
+    );
+    assert_eq!(
+        env.assignments("v1").await,
+        BTreeSet::from([(manual, "id".to_string())])
+    );
+    assert_eq!(env.derived_flags("v1").await, vec![false]);
+}
+
+/// Task 9 fix round 2, N2: a best-effort record on an unclassified profile
+/// takes the view's lock. While another writer holds it (here the test), the
+/// hold does not EXPLAIN a version it might record out of order. The commit
+/// goes through at once, with no wait (an unclassified view never waits on a
+/// lock), and once the lock is free the lineage is recorded `failed`, for the
+/// sweep, rather than a lineage that may be stale.
+#[tokio::test]
+async fn a_best_effort_record_under_a_busy_view_lock_is_failed() {
+    let Some(env) = env(LIMIT, false).await else {
+        return;
+    };
+    let mut other = env.db.pool.acquire().await.unwrap().detach();
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(view_lock_key(&env.prefix, "s", "v1"))
+        .execute(&mut other)
+        .await
+        .unwrap();
+
+    let (status, body) = tokio::time::timeout(
+        Duration::from_secs(10),
+        env.create("v1", "SELECT id, ssn FROM pii"),
+    )
+    .await
+    .expect("an unclassified view waited for a lock");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        env.runner.calls.load(Ordering::SeqCst),
+        0,
+        "no EXPLAIN under a busy lock"
+    );
+    assert_eq!(
+        env.lineage("v1").await,
+        RecordedLineage::Missing,
+        "nothing is recorded while the other writer holds the view"
+    );
+    sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(view_lock_key(&env.prefix, "s", "v1"))
+        .execute(&mut other)
+        .await
+        .unwrap();
+
+    let e = &env;
+    eventually("the lineage is recorded failed", || async move {
+        matches!(e.lineage("v1").await, RecordedLineage::Failed { .. })
+    })
+    .await;
+}
+
+/// Task 9 fix round 2, N4: the hold's write waits for the view-tag lock no
+/// longer than its deadline. With the lock held elsewhere for longer, the
+/// hold refuses cleanly, in time, and writes nothing.
+#[tokio::test]
+async fn a_hold_that_cannot_take_the_view_tag_lock_in_time_refuses_cleanly() {
+    let limit = Duration::from_secs(3);
+    let Some(env) = env(limit, true).await else {
+        return;
+    };
+    let before = env.tag_version().await;
+    let mut blocker = env.db.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('egret-view-tags', 0))")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+
+    let start = Instant::now();
+    let got = tokio::time::timeout(
+        limit + Duration::from_secs(3),
+        env.create("v1", "SELECT id, ssn FROM pii"),
+    )
+    .await;
+    let took = start.elapsed();
+    blocker.rollback().await.unwrap();
+
+    let (status, body) = got.expect("the hold waited past its deadline");
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        took < limit + Duration::from_secs(2),
+        "refused after {took:?}"
+    );
+    assert!(env.view("v1").await.is_none());
+    assert!(env.assignments("v1").await.is_empty());
+    assert_eq!(env.lineage("v1").await, RecordedLineage::Missing);
+    assert_eq!(env.tag_version().await, before);
+}
+
+/// Task 9 fix round 2, N6: step 2's race. The hold reads an empty tag set,
+/// then a base of the view is classified before the hold records the
+/// lineage. The after-commit record re-tags under the lock, so the view
+/// carries the tag on every column.
+#[tokio::test]
+async fn a_classification_during_a_step_two_commit_reaches_the_view() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let tag = env.clearance.unwrap();
+    *env.on_reach.lock().unwrap() = Some((
+        tag,
+        env.warehouse_id,
+        "orders".to_string(),
+        "id".to_string(),
+    ));
+
+    let (status, body) = env.create("v1", "SELECT id, name FROM orders").await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        env.on_reach.lock().unwrap().is_none(),
+        "the classification ran"
+    );
+    assert_eq!(env.lineage("v1").await, computed(&["orders"], &env.catalog));
+    assert_eq!(
+        env.assignments("v1").await,
+        env.expected_pii_tags(&["id", "ssn"])
+    );
+    assert_eq!(env.derived_flags("v1").await, vec![true, true]);
 }

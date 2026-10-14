@@ -155,7 +155,13 @@ The Iceberg catalog runs inside egret (embedded lakekeeper), so a view create or
 
 Before step 1: if the profile that governs the view's catalog has no classified column at all, the commit is never held or refused (user ruling, 2026-10-14, Task 8); otherwise a profile with no eligible lineage engine would refuse every view although nothing is classified. **Amended in Task 9 fix round 1:** the hold still runs the lineage EXPLAIN there, best-effort, within the same deadline and with no lock. After lakekeeper answers 2xx it records the computed lineage and the view's columns, or, on any failure, a `failed` lineage with the reason. It never refuses on this path. A later classification then re-tags the view in its own write when the lineage is computed, and its sweep (B3) finds the failed ones.
 
-The view does not exist until step 5, so nobody can read it untagged. Tags are resource paths, so they can be assigned before the resource exists.
+On the held path (step 3), the view does not exist until step 5, so nobody can read it untagged. Tags are resource paths, so they can be assigned before the resource exists.
+
+Two paths commit before the view's tags are on the engines. Both close within one plugin poll after the tags are written, which is the same latency a base table's own new classification has.
+- **Step 2.** A classification lands on a base between the hold's first read of the tag set (empty) and its after-commit record. The record runs under the view-tag lock and re-tags the view from the lineage it writes.
+- **Step 0.** A first classification commits after the hold read the profile as unclassified. The best-effort record re-tags the view when its EXPLAIN succeeded. Otherwise the view waits for the classification's sweep (B3).
+
+A held write waits for the view-tag lock no longer than its deadline (`lock_timeout`, at least 1 s). Past it, the write rolls back and the view is refused with a retry message (fix round 2).
 
 **Throughput (Task 8 fix rounds).** One held request has one deadline of 2 × the poll interval (60 s) from its arrival, covering its lock, its EXPLAIN (at most 5 s) and its wait. At most 8 holds run at once per egret process. Any view change on a catalog with classified columns takes a hold (a create, a replace or a rename, whether or not its own tables are classified). A ninth one at once is refused with a retry message; it does not queue. So a run of many concurrent classified view changes (a dbt run with more than 8 threads, for example) sees some refusals, and they succeed on retry. Task 11 measures the refusal rate.
 
@@ -199,7 +205,15 @@ When the lineage cannot be trusted, the view keeps its old tags. Tags are never 
 - **One writer at a time (fix round 1).** Every writer of view tag rows or lineage takes one transaction-scoped advisory lock first: the base write, a clearance change, the hold's write, its compensation and its after-commit record, the drop and rename cleanups, the sweep and the undrop check. The hold computes its tag set inside that locked transaction, and its after-commit record re-tags from the lineage it writes. So a base classification and a held commit cannot each miss the other.
 - **Compensation (fix round 1).** A refused hold removes only the rows it inserted that are still lineage-derived, never one an admin made manual meanwhile. When it restores a computed previous lineage, it re-derives that lineage's tags.
 - **Clearance changes (fix round 1).** A tag that gains or loses its gate re-tags the views over its tables, with the same overlap snapshot and refusal as a base write.
-- **After a classification commits (fix round 1).** The write notifies (`NOTIFY`, delivered at commit). A listener then sweeps the views with no computed lineage (missing or failed) in every warehouse the write's profiles reach. A sweep that meets another running sweep waits and runs again, so the request is never dropped. The window for those views is therefore the length of that sweep, not the 15-minute schedule. A notification lost while the listener reconnects falls back to the schedule.
+- **After a classification commits (fix round 1).** The write notifies (`NOTIFY`, delivered at commit). A listener then sweeps the views with no computed lineage (missing or failed) in every warehouse the write's profiles reach. A sweep that meets another running sweep waits and runs again, so the request is never dropped. The window for those views is normally the length of that sweep. It extends to the 15-minute schedule in these cases:
+  - **Held skip.** The sweep finds the view's lock taken by a hold in progress, so it reports the view and moves on.
+  - **EXPLAIN failure.** The view's EXPLAIN fails in that sweep.
+  - **The race with `r.classified`.** The hold read the profile as unclassified, the best-effort EXPLAIN failed, and the view is committed after the classification's sweep has listed the namespace.
+  - **A lost notification.** It was lost while the listener reconnected.
+
+  Behind a running full sweep, the scoped sweep starts only when the full one ends, which takes up to 5 s per view.
+- **Best-effort records take the view's lock (fix round 2).** When another writer holds it, the commit still passes at once. No EXPLAIN runs, and the lineage is recorded `failed` once the lock is free, so the next sweep recomputes it. The sweep records under the same lock.
+- **Compensation and provenance (fix round 2).** Compensation deletes a row it inserted only while the row still has the provenance it was inserted with. A rename's copies of the source's manual tags therefore go, and a derived row an admin made manual during the wait stays.
 - **Undrop (fix round 1).** Restoring a dropped view goes through lakekeeper's management API, which the hold cannot hold. On a profile with a classified column, a view undrop is refused (409), under the same lock; re-create the view with `CREATE VIEW` instead. A table undrop, or a view undrop on an unclassified profile, is allowed.
 
 ### B4. Know which tag version each engine holds
