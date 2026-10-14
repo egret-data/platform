@@ -21,13 +21,13 @@ namespace_prefix?: string | null;
 flow_id?: string | null;
 /**
  * One or more kinds, comma-separated: `schedule`, `webhook`, `flow`,
- * `other`. Anything else is a 400.
+ * `other`. Anything else is a 400. Empty (`kind=`) is no filter.
  * @nullable
  */
 kind?: string | null;
 /**
  * `enabled` or `disabled`, on `effective_disabled`. Anything else is a
- * 400.
+ * 400. Empty (`state=`) is no filter.
  * @nullable
  */
 state?: string | null;

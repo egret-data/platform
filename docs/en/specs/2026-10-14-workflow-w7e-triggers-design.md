@@ -34,6 +34,7 @@ The frontend rulebook `docs/en/frontend-rules.md` binds every frontend line.
 - D15. W7d's `off_runtime` (`dependencies.rs:213`) becomes `pub(crate)` with a neutral error message (§3.5).
 - D16. The response carries `disabled_by_name` beside `disabled_by`, because the browser cannot resolve user ids (user listings are admin-gated) (§3.5, §4.1).
 - D17. W7e adds **no** ingress, nginx or Vite routing for webhooks and does not build the webhook URL from `window.location.origin`: the UI shows the webhook path with a copy button and a note (§4.2).
+- D18 (default decision, 2026-10-15). In the read routes, a flow whose `state` column is `disabled` makes every one of its triggers `effective_disabled`, beside the YAML, the runtime switch and the trash: such a flow fires nothing (the schedule claim and the listener select read `state`, `scheduler/start.rs`, `flow_trigger/mod.rs`; the webhook answers 409). `yaml_disabled` and `runtime_disabled` stay false for it and the switch stays usable. The trigger rows' stored `disabled` copy (§3.2) is unchanged (§3.5).
 
 ## 1. Why
 
@@ -168,6 +169,7 @@ And at the top: `flow_disabled` (YAML or `state = 'disabled'`), `flow_deleted`, 
 - **Conditions** are labelled by recomputing `condition_key` (`trigger/depends_on.rs:92`) for each `dependsOn` entry; `met` is `results[key] == true`. A window whose `window_end <= now()` is reported as none (the sweep or the next event removes it).
 - **The webhook key.** It renders against the flow's id and namespace, its `variables` and the trigger's id and type only (`KeyContext::render_context_for`, `trigger/webhook.rs:436-452`), all read from the source that `GET /flows/{id}` already returns to `workflow:read` (`FlowDto.source`, `routes.rs:314-321`). Returning the rendered URL therefore **does not widen** who can learn the key. The UI shows it masked until revealed.
 - **Server flags.** `WorkflowState` (`routes.rs:200-251`) gains `trigger_flags { scheduler_enabled, worker_enabled, webhooks_enabled }`, set from `config.workflow` (`egret-config/src/lib.rs:596, 619, 689`) where the state is built (`egret-bin/src/main.rs:2302`). The deployment sets them once for every replica (`deploy/helm/egret/values.yaml:86-98`).
+- **A flow whose `state` is `disabled`** (D18) answers every trigger `effective_disabled: true`, and the list's `state=disabled` includes them; `yaml_disabled`, `runtime_disabled` and `can_toggle` are unaffected.
 - **A trashed flow** answers its triggers with `flow_deleted: true`, every one effective-disabled and `can_toggle: false` (`get_flow` serves trashed drafts, `routes.rs:695-700`).
 
 **`GET /api/ws/{workspace}/workflows/triggers`**: every trigger of the workspace's flows not in the trash.

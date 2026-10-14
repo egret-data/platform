@@ -28,9 +28,9 @@ pub(crate) struct FlowCtx<'a> {
     /// its path against.
     pub namespace: &'a str,
     pub flow_id: &'a str,
-    /// The `state` column (`draft`, `live`, `disabled`); read by the routes'
-    /// `flow_disabled`, not per entry.
-    #[allow(dead_code)]
+    /// The `state` column (`draft`, `live`, `disabled`). `disabled` stops
+    /// every trigger at fire time (the schedule claim, the listener select,
+    /// the webhook's 409), so it makes every entry effective-disabled.
     pub state: &'a str,
     /// In the trash (`deleted_at IS NOT NULL`).
     pub deleted: bool,
@@ -82,7 +82,8 @@ fn entry(
     let runtime_disabled = switch.is_some();
     let effective_disabled =
         crate::scheduler::effective_disabled(parsed.disabled, t.disabled, runtime_disabled)
-            || flow.deleted;
+            || flow.deleted
+            || flow.state == "disabled";
     // First match wins (§3.5).
     let toggle_refusal = if flow.deleted {
         Some(ToggleRefusal::FlowDeleted)
@@ -292,7 +293,10 @@ pub(crate) fn encode_segment(s: &str) -> String {
 fn wire_name<T: serde::Serialize>(v: &T) -> String {
     match serde_json::to_value(v) {
         Ok(serde_json::Value::String(s)) => s,
-        other => unreachable!("serialises as a string, got {other:?}"),
+        // Every caller passes a unit enum, which serialises as a string; a
+        // name is still better than a panic in a read route.
+        Ok(other) => other.to_string(),
+        Err(e) => format!("<unserialisable: {e}>"),
     }
 }
 
@@ -343,6 +347,22 @@ mod tests {
         );
         assert_eq!(v.len(), 1);
         v.remove(0)
+    }
+
+    /// `state = 'disabled'` fires nothing, so every entry is effective-off;
+    /// neither the YAML nor the switch says so, and the switch stays usable.
+    #[test]
+    fn a_disabled_state_column_is_effective_disabled() {
+        let flow = parse(&format!(
+            "  - id: s\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n"
+        ));
+        let mut c = ctx(Uuid::nil(), false);
+        c.state = "disabled";
+        let e = &entries_for_flow(&c, &flow, &StateRows::empty(now()), true, Detail::Full)[0];
+        assert!(e.effective_disabled && !e.yaml_disabled && !e.runtime_disabled && e.can_toggle);
+        c.state = "live";
+        let e = &entries_for_flow(&c, &flow, &StateRows::empty(now()), true, Detail::Full)[0];
+        assert!(!e.effective_disabled);
     }
 
     #[test]

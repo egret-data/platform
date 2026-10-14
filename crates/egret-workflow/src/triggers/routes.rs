@@ -16,14 +16,14 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::entry::{self, Detail, FlowCtx};
-use super::state::{last_executions, read_state, Key};
+use super::state::{db_err, last_executions, read_state, Key};
 use crate::namespaces::dependencies::{off_runtime, DraftRow, MAX_FLOWS};
 use crate::repo::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
 use crate::routes::{caller_may_manage, WorkflowState, WF_READ};
 
 /// What a trigger is, as egret runs it: one of the three kinds it fires, or
 /// `other` (a `Leaf`: any other type, which egret never fires).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerKindDto {
     Schedule,
@@ -164,8 +164,9 @@ pub struct TriggerEntryDto {
     /// The switcher's display name.
     pub disabled_by_name: Option<String>,
     pub disabled_at: Option<DateTime<Utc>>,
-    /// What the scheduler, the listener and the webhook route honour: YAML
-    /// (flow or trigger) or runtime, or the flow is in the trash.
+    /// What the scheduler, the listener and the webhook route honour: the
+    /// YAML (flow or trigger), the runtime switch, the flow's `state` being
+    /// `disabled`, or the flow being in the trash.
     pub effective_disabled: bool,
     /// Whether the UI's switch is enabled. It is disabled for a trigger the
     /// YAML disables (`toggle_refusal: yaml_disabled`), but the switch route
@@ -275,10 +276,6 @@ impl axum::response::IntoResponse for TriggerRouteError {
     }
 }
 
-fn db_err(e: sqlx::Error) -> Error {
-    Error::Internal(anyhow::anyhow!("{e}"))
-}
-
 /// A read-only transaction with one snapshot, so the state tables and
 /// `now()` are read at one instant.
 async fn snapshot(
@@ -366,10 +363,10 @@ pub struct ListTriggersQuery {
     /// Only this flow (its uuid).
     pub flow_id: Option<Uuid>,
     /// One or more kinds, comma-separated: `schedule`, `webhook`, `flow`,
-    /// `other`. Anything else is a 400.
+    /// `other`. Anything else is a 400. Empty (`kind=`) is no filter.
     pub kind: Option<String>,
     /// `enabled` or `disabled`, on `effective_disabled`. Anything else is a
-    /// 400.
+    /// 400. Empty (`state=`) is no filter.
     pub state: Option<String>,
     /// A case-insensitive substring of the trigger id, the flow id or the
     /// namespace.
@@ -416,9 +413,11 @@ impl RowFilter {
                     })
                     .collect::<egret_core::Result<Vec<_>>>()?,
             ),
-        };
-        let disabled = match q.state.as_deref() {
-            None => None,
+        }
+        // `kind=` (or only commas) names no kind: no filter, as if absent.
+        .filter(|k| !k.is_empty());
+        let disabled = match q.state.as_deref().map(str::trim) {
+            None | Some("") => None,
             Some("enabled") => Some(false),
             Some("disabled") => Some(true),
             Some(other) => {

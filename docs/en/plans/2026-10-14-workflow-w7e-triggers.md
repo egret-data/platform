@@ -347,7 +347,8 @@ pub struct WebhookInfoDto { url_path: Option<String>, key_error: Option<String>,
 pub struct LastExecutionDto { id: Uuid, state: String, created_at: DateTime<Utc> }
 pub struct FlowTriggersDto { flow_disabled: bool, flow_deleted: bool, scheduler_enabled: bool,
     worker_enabled: bool, webhooks_enabled: bool, triggers: Vec<TriggerEntryDto> }
-pub struct TriggerRowDto { flow: Uuid, namespace: String, flow_id: String, #[serde(flatten)] entry: TriggerEntryDto }
+pub struct TriggerRowDto { flow_uuid: Uuid, namespace: String, flow_id: String, #[serde(flatten)] entry: TriggerEntryDto }
+// `flow_uuid`, not `flow` (Task 4): the flattened entry already has `flow` (the Flow-trigger info).
 pub struct TriggerPageDto { rows: Vec<TriggerRowDto>, total: i64, limit: i64, offset: i64, unparsable: i64,
     scheduler_enabled: bool, worker_enabled: bool, webhooks_enabled: bool }
 pub const TRIGGERS_TOO_LARGE_CODE: &str = "triggers_too_large";
@@ -357,7 +358,7 @@ pub enum TriggerRouteError { Core(Error), Coded { status: StatusCode, code: &'st
 
 **What each field is read from** — re-verify each before coding:
 - `kind`: `TriggerKind` (`models/trigger.rs:75-80`); `type`'s short name is the frontend's job.
-- `yaml_disabled` = flow `disabled` OR trigger `disabled`; `runtime_disabled` = a `Switch` row; `effective_disabled` = `scheduler::effective_disabled(..)` OR `flow_deleted` (a trashed flow is effective-disabled, §3.5).
+- `yaml_disabled` = flow `disabled` OR trigger `disabled`; `runtime_disabled` = a `Switch` row; `effective_disabled` = `scheduler::effective_disabled(..)` OR `flow_deleted` (a trashed flow is effective-disabled, §3.5) OR `state = 'disabled'` (D18, fix round 1 of Task 4: such a flow fires nothing).
 - `can_toggle` / `toggle_refusal`, first match wins: `flow_deleted` → `flow_deleted`; `Leaf` → `not_supported`; caller lacks `workflow:manage` → `forbidden`; `yaml_disabled` → `yaml_disabled`; otherwise `can_toggle: true`. `can_toggle` describes the **UI's switch**, which §4.1 disables for a YAML-disabled trigger. The API still accepts switching such a trigger **off** (D4, Task 5); only "on" is refused there. Say this in the `can_toggle` field's OpenAPI description.
 - `duplicate_id`: the id occurs more than once in `parsed.triggers`.
 - `schedule`: the YAML fields; the `workflow.triggers` row; `off_queue = next_evaluation_date IS NULL`; `missed_ticks` = `ScheduleTrigger::resolve(t)?.ticks_through(next_evaluation_date, db_now, 1000)` when on the queue and `next_evaluation_date <= db_now`, else `None` (a switched-off schedule keeps its date, so it is overdue by the same rule).

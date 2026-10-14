@@ -36,6 +36,7 @@ Bộ rule frontend `docs/en/frontend-rules.md` ràng buộc mọi dòng code fro
 - D15. `off_runtime` của W7d (`dependencies.rs:213`) trở thành `pub(crate)` với thông báo lỗi trung tính (§3.5).
 - D16. Phản hồi mang `disabled_by_name` bên cạnh `disabled_by`, vì trình duyệt không phân giải được user id (danh sách user chỉ dành cho admin) (§3.5, §4.1).
 - D17. W7e **không** thêm routing ingress, nginx hay Vite cho webhook và không dựng URL webhook từ `window.location.origin`: UI hiện đường dẫn webhook kèm nút copy và một ghi chú (§4.2).
+- D18 (quyết định mặc định, 2026-10-15). Trong các route đọc, một flow có cột `state` là `disabled` làm mọi trigger của nó `effective_disabled`, bên cạnh YAML, công tắc runtime và thùng rác: flow như vậy không kích hoạt gì (claim của schedule và câu select listener đọc `state`, `scheduler/start.rs`, `flow_trigger/mod.rs`; webhook trả 409). `yaml_disabled` và `runtime_disabled` vẫn là false và công tắc vẫn dùng được. Bản sao `disabled` lưu trong các dòng trigger (§3.2) không đổi (§3.5).
 
 ## 1. Vì sao
 
@@ -170,6 +171,7 @@ Và ở trên cùng: `flow_disabled` (YAML hoặc `state = 'disabled'`), `flow_d
 - **Các điều kiện** được gán nhãn bằng cách tính lại `condition_key` (`trigger/depends_on.rs:92`) cho từng mục `dependsOn`; `met` là `results[key] == true`. Một window có `window_end <= now()` được báo là không có (sweep hoặc event kế tiếp sẽ xoá nó).
 - **Key webhook.** Nó render dựa trên id và namespace của flow, `variables` của flow, và chỉ id cùng kiểu của trigger (`KeyContext::render_context_for`, `trigger/webhook.rs:436-452`), tất cả đọc từ source mà `GET /flows/{id}` đã trả cho `workflow:read` (`FlowDto.source`, `routes.rs:314-321`). Vì vậy việc trả URL đã render **không mở rộng** ai có thể biết key. UI hiện nó dạng che cho tới khi được bấm xem.
 - **Cờ server.** `WorkflowState` (`routes.rs:200-251`) có thêm `trigger_flags { scheduler_enabled, worker_enabled, webhooks_enabled }`, đặt từ `config.workflow` (`egret-config/src/lib.rs:596, 619, 689`) ở nơi state được dựng (`egret-bin/src/main.rs:2302`). Deployment đặt chúng một lần cho mọi replica (`deploy/helm/egret/values.yaml:86-98`).
+- **Một flow có `state` là `disabled`** (D18) trả mọi trigger với `effective_disabled: true`, và `state=disabled` của danh sách gồm chúng; `yaml_disabled`, `runtime_disabled` và `can_toggle` không bị ảnh hưởng.
 - **Một flow trong thùng rác** trả trigger của nó với `flow_deleted: true`, mọi trigger đều effective-disabled và `can_toggle: false` (`get_flow` phục vụ draft trong thùng rác, `routes.rs:695-700`).
 
 **`GET /api/ws/{workspace}/workflows/triggers`**: mọi trigger của các flow trong workspace không nằm trong thùng rác.

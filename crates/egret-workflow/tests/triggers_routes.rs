@@ -592,18 +592,24 @@ async fn the_last_execution_is_the_triggers_newest() {
     let _old = exec(&db, ws, flow, Some("hook"), 7200).await;
     let new = exec(&db, ws, flow, Some("hook"), 3600).await;
     let other = exec(&db, ws, flow, Some("sched"), 60).await;
+    // The flow's newest execution, started from the API: it carries no
+    // trigger, so it is no trigger's last (`hook` still answers `new`).
     let _api = exec(&db, ws, flow, None, 0).await;
     let app = flagged_app(&db).await;
 
     let body = flow_triggers(&app, ws, user, flow).await;
     let last = &entry(&body, "hook")["last_execution"];
-    assert_eq!(last["id"], json!(new));
+    assert_eq!(
+        last["id"],
+        json!(new),
+        "not the older one, nor the newer API start"
+    );
     assert_eq!(last["state"], json!("SUCCESS"));
     assert_eq!(entry(&body, "sched")["last_execution"]["id"], json!(other));
     assert_eq!(
         entry(&body, "poll")["last_execution"],
         json!(null),
-        "an API start is no trigger's"
+        "a trigger that never fired has none"
     );
 
     let page = list(&app, ws, user, "?kind=webhook").await;
@@ -645,12 +651,38 @@ async fn the_top_flags_and_a_trashed_flow() {
         &db,
         ws,
         user,
-        &src("company.a", "soff", &schedule("s")),
+        &src(
+            "company.a",
+            "soff",
+            &format!("{}{}", schedule("s"), webhook("h", "k")),
+        ),
         "disabled",
     )
     .await;
     let body = flow_triggers(&app, ws, user, soff).await;
     assert_eq!(body["flow_disabled"], json!(true), "state = 'disabled'");
+    // `state = 'disabled'` fires nothing (the claim, the listener select and
+    // the webhook's 409 all read it), so every entry is effective-disabled,
+    // though neither the YAML nor the switch says so and the switch stays
+    // usable.
+    for e in body["triggers"].as_array().unwrap() {
+        assert_eq!(e["effective_disabled"], json!(true), "{e}");
+        assert_eq!(e["yaml_disabled"], json!(false), "{e}");
+        assert_eq!(e["runtime_disabled"], json!(false), "{e}");
+        assert_eq!(e["can_toggle"], json!(true), "{e}");
+    }
+    common::seed_flow(
+        &db,
+        ws,
+        user,
+        &src("company.a", "fon", &schedule("s")),
+        "draft",
+    )
+    .await;
+    let off = list(&app, ws, user, "?state=disabled").await;
+    assert_eq!(names(&off), vec!["soff/s", "soff/h", "yoff/s"]);
+    let on = list(&app, ws, user, "?state=enabled").await;
+    assert_eq!(names(&on), vec!["fon/s"]);
 
     let gone = common::seed_flow(&db, ws, user, &every_kind(), "draft").await;
     egret_workflow::FlowRepo::new(db.clone())
@@ -803,6 +835,14 @@ async fn the_list_filters_pages_and_counts_the_unparsable() {
 
     let off = list(&app, ws, user, "?state=disabled").await;
     assert_eq!(names(&off), vec!["f1/h1"]);
+    // Present but empty is no filter, as if absent.
+    for empty in ["?kind=", "?state=", "?kind=,&state="] {
+        assert_eq!(
+            list(&app, ws, user, empty).await["total"],
+            json!(6),
+            "{empty}"
+        );
+    }
     let on = list(&app, ws, user, "?state=enabled").await;
     assert_eq!(on["total"], json!(5));
 
@@ -841,8 +881,10 @@ async fn the_list_filters_pages_and_counts_the_unparsable() {
 async fn list_rows_carry_no_conditions_and_no_webhook() {
     let Some(db) = common::db().await else { return };
     let (ws, user) = manager(&db).await;
-    common::seed_flow(&db, ws, user, &every_kind(), "draft").await;
+    let flow = common::seed_flow(&db, ws, user, &every_kind(), "draft").await;
     let app = flagged_app(&db).await;
+    // A row's schedule counts its missed ticks too (for the page only).
+    common::make_due(&db, flow, "sched", 3).await;
     let page = list(&app, ws, user, "").await;
     let rows = page["rows"].as_array().unwrap();
     let dep = rows
@@ -861,6 +903,11 @@ async fn list_rows_carry_no_conditions_and_no_webhook() {
         .iter()
         .find(|r| r["trigger_id"] == json!("sched"))
         .unwrap();
+    assert_eq!(
+        sched["schedule"]["missed_ticks"],
+        json!({"count": 3, "more": false}),
+        "{sched}"
+    );
     assert!(
         sched["schedule"]["next_evaluation_date"].is_string(),
         "{sched}"
@@ -903,6 +950,16 @@ async fn more_than_two_thousand_flows_in_scope_answer_422() {
         "no triggers, but answered: the bound is after the filters"
     );
     assert_eq!(ten["unparsable"], json!(0), "the minimal source parses");
+
+    // Exactly 2,000 in scope (one trashed) is still answered: the 422 is for
+    // MORE than the bound.
+    sqlx::query("UPDATE workflow.flows SET deleted_at = now() WHERE workspace_id = $1 AND flow_id = 'f2001'")
+        .bind(ws)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let all = list(&app, ws, user, "").await;
+    assert_eq!((&all["total"], &all["unparsable"]), (&json!(0), &json!(0)));
 }
 
 // ── 10. isolation and permissions ─────────────────────────────────────────────

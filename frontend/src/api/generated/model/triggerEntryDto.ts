@@ -34,8 +34,9 @@ export interface TriggerEntryDto {
   /** @nullable */
   disabled_at?: string | null;
   /**
-     * What the scheduler, the listener and the webhook route honour: YAML
-     * (flow or trigger) or runtime, or the flow is in the trash.
+     * What the scheduler, the listener and the webhook route honour: the
+     * YAML (flow or trigger), the runtime switch, the flow's `state` being
+     * `disabled`, or the flow being in the trash.
      */
   effective_disabled: boolean;
   /**

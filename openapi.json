@@ -32833,7 +32833,7 @@
           {
             "name": "kind",
             "in": "query",
-            "description": "One or more kinds, comma-separated: `schedule`, `webhook`, `flow`,\n`other`. Anything else is a 400.",
+            "description": "One or more kinds, comma-separated: `schedule`, `webhook`, `flow`,\n`other`. Anything else is a 400. Empty (`kind=`) is no filter.",
             "required": false,
             "schema": {
               "type": [
@@ -32845,7 +32845,7 @@
           {
             "name": "state",
             "in": "query",
-            "description": "`enabled` or `disabled`, on `effective_disabled`. Anything else is a\n400.",
+            "description": "`enabled` or `disabled`, on `effective_disabled`. Anything else is a\n400. Empty (`state=`) is no filter.",
             "required": false,
             "schema": {
               "type": [
@@ -46376,7 +46376,7 @@
           },
           "effective_disabled": {
             "type": "boolean",
-            "description": "What the scheduler, the listener and the webhook route honour: YAML\n(flow or trigger) or runtime, or the flow is in the trash."
+            "description": "What the scheduler, the listener and the webhook route honour: the\nYAML (flow or trigger), the runtime switch, the flow's `state` being\n`disabled`, or the flow being in the trash."
           },
           "can_toggle": {
             "type": "boolean",

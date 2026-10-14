@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::routes::LastExecutionDto;
 
-fn db_err(e: sqlx::Error) -> Error {
+pub(super) fn db_err(e: sqlx::Error) -> Error {
     Error::Internal(anyhow::anyhow!("{e}"))
 }
 
