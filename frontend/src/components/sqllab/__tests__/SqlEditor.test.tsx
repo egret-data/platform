@@ -25,11 +25,24 @@ const monacoStub = vi.hoisted(() => {
      */
     actions: [] as { editorId: string; id: string; keybindings: number[]; run: () => void; disposed: boolean }[],
     editorSeq: 0,
+    /** Each mounted editor's model, in mount order. */
+    models: [] as unknown[],
+    /**
+     * Every `registerCompletionItemProvider`, as Monaco keeps them: per LANGUAGE,
+     * not per editor. `disposed` turns true when the component disposes it.
+     */
+    providers: [] as {
+      language: string;
+      provide: (model: unknown, position: unknown) => { suggestions: { label: string }[] };
+      disposed: boolean;
+    }[],
     /** Calls the mounted component's `onMount` again, as `@monaco-editor/react` can. */
     remount: undefined as (() => void) | undefined,
     reset() {
       this.commands = {};
       this.actions = [];
+      this.providers = [];
+      this.models = [];
     },
     runCommand(): (() => void) | undefined {
       return this.commands[KeyMod.CtrlCmd | KeyCode.Enter];
@@ -58,16 +71,31 @@ vi.mock("@/components/monaco/MonacoEditor", () => ({
         editor: { defineTheme: () => {} },
         languages: {
           CompletionItemKind: {},
-          registerCompletionItemProvider: () => ({ dispose: () => {} }),
+          registerCompletionItemProvider: (
+            language: string,
+            provider: { provideCompletionItems: (model: unknown, position: unknown) => { suggestions: { label: string }[] } },
+          ) => {
+            const entry = { language, provide: provider.provideCompletionItems, disposed: false };
+            monacoStub.providers.push(entry);
+            return { dispose: () => { entry.disposed = true; } };
+          },
         },
       };
       beforeMount?.(monaco);
       const editorId = `editor-${++monacoStub.editorSeq}`;
+      // Each editor owns its model, as `@monaco-editor/react` gives it one.
+      const model = {
+        editorId,
+        getValue: () => latest.current,
+        getValueInRange: () => latest.current,
+        getWordUntilPosition: () => ({ word: "", startColumn: 1, endColumn: 1 }),
+      };
+      monacoStub.models.push(model);
       const editor = {
         getId: () => editorId,
         getValue: () => latest.current,
         getSelection: () => null,
-        getModel: () => null,
+        getModel: () => model,
         addAction: (desc: { id: string; label: string; keybindings?: number[]; run: (e: unknown) => unknown }) => {
           const entry = {
             editorId,
@@ -188,5 +216,64 @@ describe("SqlEditor — ⌘↵ is scoped to its editor", () => {
     expect(monacoStub.actions).toHaveLength(2);
     expect(monacoStub.actions[0].disposed).toBe(true);
     expect(monacoStub.actions[1].disposed).toBe(false);
+  });
+});
+
+/**
+ * Completion providers are kept per LANGUAGE (`registerCompletionItemProvider`),
+ * and Monaco asks every provider of one score and merges the answers
+ * (`suggest.js` `provideSuggestionItems`). So two mounted `SqlEditor`s would each
+ * answer for BOTH models: each editor would offer the other's schema, and every
+ * keyword twice. `suggest` asks the live `sql` providers as Monaco does.
+ */
+describe("SqlEditor — completion is scoped to its editor", () => {
+  beforeEach(() => monacoStub.reset());
+
+  const schemaOf = (table: string) => ({ identifiers: [table], tables: [table], columnsByTable: {} });
+  const modelOf = (editorId: string) => ({
+    editorId,
+    getValue: () => "",
+    getValueInRange: () => "",
+    getWordUntilPosition: () => ({ word: "", startColumn: 1, endColumn: 1 }),
+  });
+  const position = { lineNumber: 1, column: 1 };
+  const suggest = (model: unknown) =>
+    monacoStub.providers
+      .filter((p) => p.language === "sql" && !p.disposed)
+      .flatMap((p) => p.provide(model, position).suggestions.map((s) => s.label));
+
+  it("offers each editor only its own schema, and each keyword once", () => {
+    render(
+      <>
+        <SqlEditor value="" onChange={() => {}} schemaWords={["only_first"]} schema={schemaOf("lake.sales")} />
+        <SqlEditor value="" onChange={() => {}} schemaWords={["only_second"]} schema={schemaOf("lake.users")} />
+      </>,
+    );
+    expect(monacoStub.providers.filter((p) => !p.disposed)).toHaveLength(2);
+    // Asked through the editors' OWN model objects, as Monaco asks.
+    const [firstModel, secondModel] = monacoStub.models;
+    const first = suggest(firstModel);
+    const second = suggest(secondModel);
+
+    expect(first).toContain("lake.sales");
+    expect(first).toContain("only_first");
+    expect(first).not.toContain("lake.users");
+    expect(first).not.toContain("only_second");
+    expect(second).toContain("lake.users");
+    expect(second).not.toContain("lake.sales");
+    expect(first.filter((l) => l === "SELECT")).toHaveLength(1);
+    expect(second.filter((l) => l === "SELECT")).toHaveLength(1);
+
+    // A model no SqlEditor owns (same shape, another object) gets nothing from them.
+    expect(suggest(modelOf("someone-else"))).toEqual([]);
+  });
+
+  it("disposes its provider when it unmounts", () => {
+    const { unmount } = render(<SqlEditor value="" onChange={() => {}} schemaWords={[]} />);
+    expect(monacoStub.providers).toHaveLength(1);
+    expect(monacoStub.providers[0].disposed).toBe(false);
+
+    unmount();
+    expect(monacoStub.providers[0].disposed).toBe(true);
   });
 });
