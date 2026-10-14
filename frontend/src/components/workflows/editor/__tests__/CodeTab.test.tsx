@@ -35,6 +35,10 @@ const fake = vi.hoisted(() => {
     markers: new Map<string, unknown[]>(),
     markerListeners: [] as Array<() => void>,
     commands: {} as Record<number, () => void>,
+    /** Each command's `when` context key, by keybinding (W7d Task 7, fix round 1). */
+    commandContexts: {} as Record<number, string | undefined>,
+    /** The editor context keys created. */
+    contextKeys: [] as string[],
     selection: null as unknown,
     revealed: null as unknown,
     focused: 0,
@@ -86,7 +90,7 @@ const fake = vi.hoisted(() => {
     monaco,
     reset() {
       Object.assign(state, {
-        mounts: 0, props: null, models: new Map(), markers: new Map(), markerListeners: [], commands: {},
+        mounts: 0, props: null, models: new Map(), markers: new Map(), markerListeners: [], commands: {}, commandContexts: {}, contextKeys: [],
         selection: null, revealed: null, focused: 0, yamlMarkers: [],
       });
     },
@@ -109,7 +113,14 @@ vi.mock("@/components/monaco/MonacoEditor", () => ({
       model.listeners.add(changed);
       const editor = {
         getModel: () => model,
-        addCommand: (k: number, cb: () => void) => { fake.state.commands[k] = cb; },
+        addCommand: (k: number, cb: () => void, context?: string) => {
+          fake.state.commands[k] = cb;
+          fake.state.commandContexts[k] = context;
+        },
+        createContextKey: (key: string, value: unknown) => {
+          fake.state.contextKeys.push(key);
+          return { set: () => {}, get: () => value, reset: () => {} };
+        },
         onDidChangeCursorPosition: () => ({ dispose: () => {} }),
         getPosition: () => null,
         setSelection: (r: unknown) => { fake.state.selection = r; },
@@ -139,7 +150,7 @@ vi.mock("@/components/workflows/editor/monacoYaml", () => ({
   configureFlowYaml: (...a: unknown[]) => configureFlowYaml(...a),
 }));
 
-import { CodeTab } from "@/components/workflows/editor/CodeTab";
+import { CodeTab, FLOW_CODE_CONTEXT } from "@/components/workflows/editor/CodeTab";
 import { registerEditorTabs } from "@/components/workflows/editor/registerEditorTabs";
 import { createEditorBridge, type EditorContext } from "@/components/workflows/editor/EditorContext";
 import { MultiPanel } from "@/components/workflows/panels/MultiPanel";
@@ -286,6 +297,14 @@ describe("CodeTab", () => {
     render(<CodeTab ctx={makeEditorContext({ modelKey: "f-1", save })} />);
     fake.state.commands[fake.monaco.KeyMod.CtrlCmd | fake.monaco.KeyCode.KeyS]();
     expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  it("scopes its Ctrl/Cmd+S to a context key only its own editor carries", () => {
+    // Monaco shares keybindings across editors: unscoped, this command would also answer in a
+    // namespace file's editor beside Code, and save the flow (W7d Task 7, fix round 1).
+    render(<CodeTab ctx={makeEditorContext({ modelKey: "f-1", save: vi.fn() })} />);
+    expect(fake.state.contextKeys).toContain(FLOW_CODE_CONTEXT);
+    expect(fake.state.commandContexts[fake.monaco.KeyMod.CtrlCmd | fake.monaco.KeyCode.KeyS]).toBe(FLOW_CODE_CONTEXT);
   });
 
   it("is read-only with a banner that says why for a viewer without workflow:manage", () => {

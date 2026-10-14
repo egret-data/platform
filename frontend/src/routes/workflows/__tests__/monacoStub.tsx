@@ -31,6 +31,13 @@ export const stub = {
   diffs: [] as DiffEditorProps[],
   /** The path of every model disposed, in order. */
   disposed: [] as string[],
+  /**
+   * Every `addCommand`, in order, with its `when` context key and the model the editor showed:
+   * standalone Monaco shares keybindings across editors, so a command must name its context.
+   */
+  bindings: [] as { keybinding: number; context: string | undefined; path: string; run: () => void }[],
+  /** Every `createContextKey`, with the model the editor showed. */
+  contextKeys: [] as { key: string; value: unknown; path: string }[],
   /** The editors mounted now, each showing one model (`monaco.editor.getEditors()`). */
   editors: new Set<{ getModel: () => Model }>(),
 };
@@ -41,6 +48,8 @@ export function resetMonacoStub(): void {
   stub.diffs = [];
   stub.disposed = [];
   stub.editors.clear();
+  stub.bindings = [];
+  stub.contextKeys = [];
 }
 
 /** Run the editor's own `Ctrl/Cmd+S` binding, as Monaco would on that key. */
@@ -113,7 +122,14 @@ export default function MonacoStub(props: EditorProps) {
       getModel: () => model,
       // The element Monaco renders into, holding its input (`.inputarea`, here the textarea).
       getDomNode: () => area.current?.parentElement ?? null,
-      addCommand: (k: number, cb: () => void) => { stub.commands.set(k, cb); },
+      addCommand: (k: number, cb: () => void, context?: string) => {
+        stub.commands.set(k, cb);
+        stub.bindings.push({ keybinding: k, context, path: model.uri.toString(), run: cb });
+      },
+      createContextKey: (key: string, value: unknown) => {
+        stub.contextKeys.push({ key, value, path: model.uri.toString() });
+        return { set: () => {}, get: () => value, reset: () => {} };
+      },
       onDidChangeCursorPosition: () => ({ dispose: () => {} }),
       getPosition: () => null,
       setSelection: () => {},

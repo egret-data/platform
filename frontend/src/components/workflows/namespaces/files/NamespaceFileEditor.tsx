@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef } from "react";
 import { Download, History, Loader2, Save } from "lucide-react";
 import { getWorkflowDownloadNamespaceFileUrl } from "@/api/generated/workflow/workflow";
+import type { OnMount } from "@monaco-editor/react";
 import MonacoEditor from "@/components/monaco/MonacoEditor";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -67,6 +68,14 @@ export function NamespaceFileEditor({ ws, namespace, path, readOnly, readOnlyRea
     />
   );
 }
+
+/**
+ * The context key a namespace file's editor carries, and the `when` of its own Ctrl/Cmd+S.
+ * Monaco's keybindings are shared by all its editors (monaco-editor #2947), so each editor's
+ * save is scoped to its own key: in the flow editor, a file's Ctrl/Cmd+S saves that file and
+ * Code's saves the flow (`FLOW_CODE_CONTEXT`), whichever panels are showing.
+ */
+export const NS_FILE_CONTEXT = "egretNsFile";
 
 const sizeText = (n: number) =>
   n < 1024 ? (n === 1 ? "1 byte" : `${n} bytes`) : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
@@ -143,6 +152,19 @@ export function NamespaceFileView({
     return () => el.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  // Inside Monaco the key is the editor's own command (Monaco consumes the key it binds, so the
+  // pane listener above then sees nothing); outside it, the pane listener saves.
+  const onEditorMount: OnMount = (editor, monaco) => {
+    editor.createContextKey(NS_FILE_CONTEXT, true);
+    editor.addCommand(
+      monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
+      () => {
+        if (canSaveRef.current) void saveRef.current();
+      },
+      NS_FILE_CONTEXT,
+    );
+  };
+
   const revision = file.file?.revision;
   const download = getWorkflowDownloadNamespaceFileUrl(ws, namespace, revision ? { path, revision } : { path });
 
@@ -187,7 +209,14 @@ export function NamespaceFileView({
         </Alert>
       ) : null}
       <div className="min-h-0 flex-1">
-        <FileBody file={file} name={name} download={download} modelPath={`egret-nsfile-${modelId}-${file.loadId}/${name}`} readOnly={readOnly} />
+        <FileBody
+          file={file}
+          name={name}
+          download={download}
+          modelPath={`egret-nsfile-${modelId}-${file.loadId}/${name}`}
+          readOnly={readOnly}
+          onMount={onEditorMount}
+        />
       </div>
       {staleDialog ? <FileConflictDialog path={path} file={file} /> : null}
     </div>
@@ -218,7 +247,21 @@ export function FileConflictDialog({ path, file }: { path: string; file: Namespa
   );
 }
 
-function FileBody({ file, name, download, modelPath, readOnly }: { file: NamespaceFile; name: string; download: string; modelPath: string; readOnly: boolean }) {
+function FileBody({
+  file,
+  name,
+  download,
+  modelPath,
+  readOnly,
+  onMount,
+}: {
+  file: NamespaceFile;
+  name: string;
+  download: string;
+  modelPath: string;
+  readOnly: boolean;
+  onMount: OnMount;
+}) {
   // Error first (FE-STATE-1).
   if (file.status === "error") {
     return (
@@ -253,6 +296,7 @@ function FileBody({ file, name, download, modelPath, readOnly }: { file: Namespa
         language={loaded.language}
         defaultValue={file.text}
         onChange={(v) => file.setText(v ?? "")}
+        onMount={onMount}
         options={{
           ariaLabel: `Contents of ${name}`,
           readOnly,

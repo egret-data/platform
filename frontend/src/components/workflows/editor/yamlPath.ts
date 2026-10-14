@@ -18,6 +18,16 @@ export function parseYaml(source: string): YamlDoc {
   return { source, contents: doc.contents, ok: doc.errors.length === 0, lineCounter };
 }
 
+/**
+ * The top-level scalar `key` of a parsed flow, as text (a flow's `namespace`), or null when the
+ * document is not a map or has no such scalar.
+ */
+export function topLevelScalar(doc: YamlDoc, key: string): string | null {
+  if (!isMap(doc.contents)) return null;
+  const v = scalarOf(doc.contents, key);
+  return v === undefined || v === null ? null : String(v);
+}
+
 type Ranged = { range?: [number, number, number] | null };
 const rangeOf = (n: unknown) => (n as Ranged | null)?.range ?? null;
 

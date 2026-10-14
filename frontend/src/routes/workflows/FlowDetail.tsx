@@ -33,7 +33,8 @@ import {
   versionSourceOf,
 } from "@/components/workflows/draftState";
 import { useFlowEditor } from "@/components/workflows/editor/EditorContext";
-import { DiscardFileDialog, useFilesHost } from "@/components/workflows/editor/fileTabs";
+import { DiscardFileDialog, NamespaceChangeDialog, useFilesHost } from "@/components/workflows/editor/fileTabs";
+import { parseYaml, topLevelScalar } from "@/components/workflows/editor/yamlPath";
 import { LazyRouteArea } from "@/components/layout/LazyRouteArea";
 import { disposeFlowModel } from "@/components/workflows/editor/flowModel";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
@@ -154,6 +155,11 @@ type SaveRequest = {
   successToast?: string;
   /** What this save writes, as the stale-save dialog names it ("v1's text"); the editor's text when absent. */
   label?: string;
+  /**
+   * The open files' unsaved edits have been dealt with (saved or discarded), so a save that
+   * moves the flow to another namespace goes ahead without asking (W7d Task 7, fix round 1).
+   */
+  filesSettled?: boolean;
 };
 
 const SAVED_TOAST = "Saved. New runs use this version of the flow.";
@@ -232,6 +238,12 @@ function FlowWorkspace({
   // One warning for the page: the flow's draft or any open file with unsaved edits.
   useUnsavedChangesWarning(dirty || unsavedFiles > 0);
 
+  /**
+   * A save that would move the flow to another namespace while open files have unsaved edits,
+   * held for the question: save the files into the old namespace first, discard them, or cancel.
+   */
+  const [namespaceAsk, setNamespaceAsk] = useState<{ request: SaveRequest; overwrite: boolean; to: string; files: string[] } | null>(null);
+  const [namespaceBusy, setNamespaceBusy] = useState(false);
   /** The save the server refused with `draft_changed`, which the stale dialog may overwrite; open while set. */
   const [staleSave, setStaleSave] = useState<SaveRequest | null>(null);
   const [publishOpen, setPublishOpen] = useState(false);
@@ -266,6 +278,16 @@ function FlowWorkspace({
     if (!manage || inFlight.current) return false;
     const source = request.source ?? editor.source;
     if (!overwrite && source === baseline.source) return false;
+    // The open files belong to the flow's namespace: moving the flow orphans their tabs (they
+    // close), so their unsaved edits are dealt with first.
+    if (!request.filesSettled && files.host.dirtyPaths.length > 0) {
+      const to = topLevelScalar(parseYaml(source), "namespace");
+      if (to !== null && to !== flow.namespace) {
+        if (overwrite) setStaleSave(null);
+        setNamespaceAsk({ request, overwrite, to, files: [...files.host.dirtyPaths] });
+        return false;
+      }
+    }
     inFlight.current = true;
     setSaving(true);
     let precondition = baseline.updatedAt;
@@ -509,7 +531,31 @@ function FlowWorkspace({
           <FileSessions key={flow.namespace} ws={ws} namespace={flow.namespace} paths={files.openPaths} store={files.host.store} />
         </LazyRouteArea>
       )}
-      <DiscardFileDialog path={files.closing} onConfirm={files.confirmClose} onCancel={files.cancelClose} />
+      <DiscardFileDialog paths={files.closing} onConfirm={files.confirmClose} onCancel={files.cancelClose} />
+      <NamespaceChangeDialog
+        ask={namespaceAsk && { from: flow.namespace, to: namespaceAsk.to, files: namespaceAsk.files }}
+        busy={namespaceBusy}
+        onCancel={() => setNamespaceAsk(null)}
+        onDiscard={() => {
+          const ask = namespaceAsk;
+          setNamespaceAsk(null);
+          if (ask) void saveFlow({ ...ask.request, filesSettled: true }, ask.overwrite).catch(() => {});
+        }}
+        onSaveFiles={async () => {
+          const ask = namespaceAsk;
+          if (!ask) return;
+          setNamespaceBusy(true);
+          try {
+            // Into the namespace they were read from, before the flow leaves it. A file that is not
+            // saved (its tab or its stale dialog says why) keeps the flow where it is.
+            const saved = await files.saveAll();
+            setNamespaceAsk(null);
+            if (saved) await saveFlow({ ...ask.request, filesSettled: true }, ask.overwrite).catch(() => {});
+          } finally {
+            setNamespaceBusy(false);
+          }
+        }}
+      />
       <StaleSaveDialog
         open={staleSave !== null}
         onOpenChange={(o) => { if (!o) setStaleSave(null); }}

@@ -40,6 +40,19 @@ export const fileNameOf = (path: string) => path.slice(path.lastIndexOf("/") + 1
 
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
+/** "a.py", "a.py and b.py", "a.py, b.py and c.py". */
+export function nameList(names: readonly string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/** `layout` without any file tab. */
+function withoutFileTabs(layout: Layout): Layout {
+  let next = layout;
+  for (const tab of layout.panels.flatMap((p) => p.tabs)) if (filePathOf(tab) !== null) next = closeTab(next, tab);
+  return next;
+}
+
 /**
  * Each open file's state, by stored path: a `useNamespaceFile` per open file
  * tab, kept by `FileSessions` (mounted by the page, not by the tab). The frame
@@ -117,10 +130,11 @@ export type FilesHostState = {
   openPaths: string[];
   /** The page's layout handle, whose `setLayout` asks before closing a file tab with unsaved edits. */
   flowLayout: FlowLayoutHandle;
-  saveAll: () => Promise<void>;
+  /** Resolves true when every file with unsaved edits was saved. */
+  saveAll: () => Promise<boolean>;
   saveAllState: Enablement;
-  /** A close waiting for "Discard and close", by stored path. */
-  closing: string | null;
+  /** The files with unsaved edits a close waits on ("Discard and close"), by stored path; null when none. */
+  closing: string[] | null;
   confirmClose: () => void;
   cancelClose: () => void;
 };
@@ -152,6 +166,29 @@ export function useFilesHost({
     latest.current = layout;
   });
 
+  // The flow moved to another namespace (a save of its `namespace:`, or someone else's, read
+  // back): the open file tabs belong to the old one. They are closed in this very render (React's
+  // pattern for state that follows a prop: the render is redone before anything commits), so no
+  // file session ever starts for the new namespace under an old tab, and nothing re-points.
+  const [owner, setOwner] = useState(namespace);
+  const [moveNotice, setMoveNotice] = useState<{ from: string; to: string; lost: string[] } | null>(null);
+  if (owner !== namespace) {
+    setOwner(namespace);
+    const next = withoutFileTabs(layout);
+    if (next !== layout) {
+      const lost = layout.panels.flatMap((p) => p.tabs).map(filePathOf).filter((p): p is string => p !== null && !!store.get(p)?.dirty);
+      setLayout(next);
+      setMoveNotice({ from: owner, to: namespace, lost: lost.map(fileNameOf) });
+    }
+  }
+  useEffect(() => {
+    if (!moveNotice) return;
+    toast.info(
+      `The flow is now in ${moveNotice.to}, so the file tabs of ${moveNotice.from} were closed.` +
+        (moveNotice.lost.length > 0 ? ` Unsaved edits to ${nameList(moveNotice.lost)} were discarded.` : ""),
+    );
+  }, [moveNotice]);
+
   const openPaths = useMemo(
     () => layout.panels.flatMap((p) => p.tabs).map(filePathOf).filter((p): p is string => p !== null),
     [layout],
@@ -159,21 +196,22 @@ export function useFilesHost({
   const dirtyKey = store.entries().filter(([p, f]) => f.dirty && openPaths.includes(p)).map(([p]) => p).sort().join("\n");
   const dirtyPaths = useMemo(() => (dirtyKey ? dirtyKey.split("\n") : []), [dirtyKey]);
 
-  /** A layout change that would drop a file tab with unsaved edits, held for the question. */
-  const [pending, setPending] = useState<{ next: Layout; path: string } | null>(null);
+  /**
+   * A close that would drop file tabs with unsaved edits, held for the question: every tab it
+   * drops, and which of them hold unsaved edits (all are named).
+   */
+  const [pending, setPending] = useState<{ dropped: TabId[]; dirty: string[] } | null>(null);
   const guardedSetLayout = useCallback(
     (next: Layout) => {
       const kept = new Set(next.panels.flatMap((p) => p.tabs));
-      const dropped = latest.current.panels
-        .flatMap((p) => p.tabs)
-        .filter((t) => !kept.has(t))
-        .map(filePathOf)
-        .find((p) => p !== null && store.get(p)?.dirty);
-      if (dropped) setPending({ next, path: dropped });
+      const dropped = latest.current.panels.flatMap((p) => p.tabs).filter((t) => !kept.has(t));
+      const dirty = dropped.map(filePathOf).filter((p): p is string => p !== null && !!store.get(p)?.dirty);
+      if (dirty.length > 0) setPending({ dropped, dirty });
       else setLayout(next);
     },
     [setLayout, store],
   );
+
 
   const open = useCallback((path: string) => {
     const next = openTab(latest.current, fileTabId(path));
@@ -209,10 +247,10 @@ export function useFilesHost({
   );
 
   const [saving, setSaving] = useState(false);
-  const saveAll = useCallback(async () => {
-    if (readOnly || saving) return;
+  const saveAll = useCallback(async (): Promise<boolean> => {
+    if (readOnly || saving) return false;
     const dirty = store.entries().filter(([p, f]) => f.dirty && openPaths.includes(p));
-    if (dirty.length === 0) return;
+    if (dirty.length === 0) return true;
     setSaving(true);
     try {
       const results = await Promise.all(dirty.map(async ([p, f]) => [p, await f.save()] as const));
@@ -224,9 +262,10 @@ export function useFilesHost({
         toast.error(
           failed.length === 1
             ? `${failed[0]} was not saved. Its tab says why; fix that, then save again.`
-            : `${failed.join(", ")} were not saved. Their tabs say why; fix that, then save again.`,
+            : `${nameList(failed)} were not saved. Their tabs say why; fix that, then save again.`,
         );
       }
+      return failed.length === 0;
     } finally {
       setSaving(false);
     }
@@ -246,28 +285,83 @@ export function useFilesHost({
     flowLayout: guardedLayout,
     saveAll,
     saveAllState,
-    closing: pending?.path ?? null,
+    closing: pending?.dirty ?? null,
+    // Applied to the layout as it is now, not as it was when the question opened.
     confirmClose: () => {
-      if (pending) setLayout(pending.next);
+      if (pending) {
+        let next = latest.current;
+        for (const tab of pending.dropped) next = closeTab(next, tab);
+        if (next !== latest.current) setLayout(next);
+      }
       setPending(null);
     },
     cancelClose: () => setPending(null),
   };
 }
 
-/** "Close a.py without saving?": asked when a file tab with unsaved edits is closed. */
-export function DiscardFileDialog({ path, onConfirm, onCancel }: { path: string | null; onConfirm: () => void; onCancel: () => void }) {
+/** "Close a.py without saving?": asked when file tabs with unsaved edits are closed; names every one. */
+export function DiscardFileDialog({ paths, onConfirm, onCancel }: { paths: readonly string[] | null; onConfirm: () => void; onCancel: () => void }) {
+  const many = (paths?.length ?? 0) > 1;
   return (
-    <AlertDialog open={path !== null} onOpenChange={(o) => (o ? undefined : onCancel())}>
+    <AlertDialog open={paths !== null} onOpenChange={(o) => (o ? undefined : onCancel())}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Close {path ? fileNameOf(path) : ""} without saving?</AlertDialogTitle>
-          <AlertDialogDescription>It has unsaved edits. Closing it discards them; the saved revision is kept.</AlertDialogDescription>
+          <AlertDialogTitle>Close {nameList((paths ?? []).map(fileNameOf))} without saving?</AlertDialogTitle>
+          <AlertDialogDescription>
+            {many
+              ? "They have unsaved edits. Closing them discards those edits; the saved revisions are kept."
+              : "It has unsaved edits. Closing it discards them; the saved revision is kept."}
+          </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Keep editing</AlertDialogCancel>
           <Button type="button" variant="destructive" onClick={onConfirm}>
             Discard and close
+          </Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+/**
+ * Asked before a flow save that moves the flow to another namespace while open files have
+ * unsaved edits: those files belong to the old namespace, and their tabs close when the flow
+ * moves (W7d Task 7, fix round 1).
+ */
+export function NamespaceChangeDialog({
+  ask,
+  busy,
+  onSaveFiles,
+  onDiscard,
+  onCancel,
+}: {
+  ask: { from: string; to: string; files: readonly string[] } | null;
+  busy: boolean;
+  onSaveFiles: () => void;
+  onDiscard: () => void;
+  onCancel: () => void;
+}) {
+  const names = nameList((ask?.files ?? []).map(fileNameOf));
+  const many = (ask?.files.length ?? 0) > 1;
+  return (
+    <AlertDialog open={ask !== null} onOpenChange={(o) => (o || busy ? undefined : onCancel())}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Save the open files before the flow moves to {ask?.to}?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This save moves the flow from namespace {ask?.from} to {ask?.to}. The open files belong to {ask?.from}, and their tabs
+            close when the flow moves. {names} {many ? "have" : "has"} unsaved edits: save {many ? "them" : "it"} into {ask?.from} first, or
+            discard {many ? "those edits" : "the edits"}.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+          <Button type="button" variant="destructive" disabled={busy} onClick={onDiscard}>
+            Discard file changes
+          </Button>
+          <Button type="button" disabled={busy} onClick={onSaveFiles}>
+            Save files first
           </Button>
         </AlertDialogFooter>
       </AlertDialogContent>

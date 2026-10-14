@@ -34,6 +34,15 @@ const toMonaco = (r: YamlRange): MonacoNS.IRange => ({
  * (`saveViewState`). The page disposes the model when it leaves the flow
  * (`disposeFlowModel`).
  */
+/**
+ * The context key Code's own editor carries, and the `when` of its Ctrl/Cmd+S. Standalone
+ * Monaco keeps every `addCommand` in one keybinding service shared by all its editors, so a
+ * command without a `when` fires from whichever editor has focus (monaco-editor #2947): a
+ * namespace file's editor beside Code would save the flow and swallow the key. Scoped to this
+ * key, the command answers only in Code's editor (W7d Task 7, fix round 1).
+ */
+export const FLOW_CODE_CONTEXT = "egretFlowCode";
+
 export function CodeTab({ ctx }: { ctx: EditorContext }) {
   const [mounted, setMounted] = useState<Mounted | null>(null);
   const [yamlFailed, setYamlFailed] = useState(false);
@@ -45,9 +54,10 @@ export function CodeTab({ ctx }: { ctx: EditorContext }) {
   const handleMount: OnMount = (editor, monaco) => {
     rememberMonaco(monaco);
     // Registered while read-only too, and inert there: read-only can arrive after mount.
+    editor.createContextKey(FLOW_CODE_CONTEXT, true);
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       if (!latest.current.readOnly) latest.current.save?.();
-    });
+    }, FLOW_CODE_CONTEXT);
     editor.onDidChangeCursorPosition(() => {
       const position = editor.getPosition();
       const model = editor.getModel();
