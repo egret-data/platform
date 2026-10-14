@@ -129,7 +129,8 @@ pub use flow::{
     DEFAULT_MAX_EXECUTION_DEPTH,
 };
 pub use schedule::{
-    Backfill, Cron, CronError, Field, ScheduleDates, ScheduleError, ScheduleTrigger, SkipReason,
+    Backfill, Cron, CronError, Field, RecoverMissed, ScheduleDates, ScheduleError, ScheduleTrigger,
+    SkipReason,
 };
 pub use webhook::{
     build_output as build_webhook_output, ct_eq, find as find_webhook, keys_match,
