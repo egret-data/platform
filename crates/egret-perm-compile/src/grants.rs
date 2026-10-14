@@ -96,9 +96,10 @@ pub(crate) fn validate_user_ref(r#ref: &str) -> Result<(), CompileError> {
             r#ref: r#ref.to_string(),
         })
     } else if egret_core::engine_principals::is_reserved_engine_username(r#ref) {
-        // View governance R5: `egret-lineage` gets `use` and `select` from the
-        // compiler and nothing from the model, so no grant can widen it to a
-        // write and no rule can mask it (which would corrupt the lineage).
+        // View governance R5: what `egret-lineage` may do is decided where
+        // egret serves a provisioned Trino engine's download
+        // (`egret_policy::lineage_transform`), never by the model, so no grant
+        // can widen it to a write and no rule can mask it.
         Err(CompileError::ReservedEnginePrincipal {
             r#ref: r#ref.to_string(),
         })
@@ -679,11 +680,6 @@ pub fn compile_grant(
             Effect::Allow => allow_exceptions.push(exception),
             Effect::Deny => deny_exceptions.push(exception),
         }
-    }
-    // View governance R5: on Trino the lineage principal is excepted from
-    // every compiled deny, for the read accesses only (`crate::lineage`).
-    if e == EngineType::Trino && g.effect == Effect::Deny {
-        deny_exceptions.extend(crate::lineage::lineage_deny_exception(&accesses));
     }
 
     Ok(AccessPolicyInput {

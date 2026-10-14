@@ -904,19 +904,7 @@ fn principals(policies: &[&RangerPolicy]) -> Vec<Principal> {
     let mut groups = BTreeSet::new();
     let mut roles = BTreeSet::new();
     for item in policies.iter().flat_map(|p| all_items(p)) {
-        // View governance R5: `egret-lineage` is not a principal a migration
-        // can change. The compiler alone decides its access (read on every
-        // governed catalog, excepted from every deny, mask and row filter;
-        // `crate::lineage`), so a profile's first compile adds that access
-        // whatever is migrated, and probing it would refuse every migration on
-        // a Trino profile for a difference the spec requires. Its access is
-        // proved by `lineage_compile_tests` instead.
-        users.extend(
-            item.users
-                .iter()
-                .filter(|u| !is_macro(u) && u.as_str() != crate::lineage::LINEAGE_PRINCIPAL)
-                .cloned(),
-        );
+        users.extend(item.users.iter().filter(|u| !is_macro(u)).cloned());
         groups.extend(item.groups.iter().filter(|g| !is_macro(g)).cloned());
         roles.extend(item.roles.iter().filter(|r| !is_macro(r)).cloned());
     }

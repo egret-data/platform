@@ -17,8 +17,9 @@
 //! [`explain_only`] is **not** the defence and contains no lexer on purpose.
 //! The defences are, first, Trino's statement protocol, which runs exactly one
 //! statement per request, so the wrapped text is an `EXPLAIN` or a parse
-//! error; and second, the principal itself, which the compiler gives `use` and
-//! `select` and nothing else (`crate::trigger`'s lineage policies).
+//! error; and second, the principal itself: on a provisioned Trino engine's
+//! download egret grants it `use` and `select` and denies it everything else
+//! (`egret_policy::lineage_transform`); no stored policy names it.
 //! `explain_only` refuses the one case those two leave open by intent:
 //! `EXPLAIN ANALYZE` executes its statement, so a SQL whose first keyword is
 //! `EXPLAIN` is refused. A comment in front of it is not looked through; the
@@ -67,6 +68,44 @@ pub struct ViewRef {
     pub catalog: String,
     pub schema: String,
     pub name: String,
+}
+
+/// Why a lineage cannot be used to tag a view (spec R6: no empty or untagged
+/// path may reach a commit).
+#[derive(Debug, thiserror::Error)]
+pub enum LineageError {
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+    /// An empty set of base tables, which only R6's refusal can mean.
+    #[error("{EMPTY_LINEAGE_REASON}")]
+    Empty,
+    /// No lineage was ever recorded for the view.
+    #[error("no lineage is recorded for this view; egret refuses views it cannot judge")]
+    Missing,
+    /// The last computation failed.
+    #[error("the view's lineage could not be computed: {0}")]
+    Failed(String),
+}
+
+/// What is recorded for a view. `Computed` is never empty: [`write_lineage`]
+/// refuses an empty set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordedLineage {
+    Missing,
+    Failed { detail: String },
+    Computed(BTreeSet<LineageTable>),
+}
+
+impl RecordedLineage {
+    /// The tables of a `Computed` lineage, or why there are none to use.
+    pub fn tables(&self) -> Result<&BTreeSet<LineageTable>, LineageError> {
+        match self {
+            RecordedLineage::Computed(t) if !t.is_empty() => Ok(t),
+            RecordedLineage::Computed(_) => Err(LineageError::Empty),
+            RecordedLineage::Missing => Err(LineageError::Missing),
+            RecordedLineage::Failed { detail } => Err(LineageError::Failed(detail.clone())),
+        }
+    }
 }
 
 /// Runs `EXPLAIN (TYPE IO, FORMAT JSON) <sql>` as [`LINEAGE_PRINCIPAL`] with
@@ -193,12 +232,16 @@ pub async fn compute_lineage(
 /// A group-only gate is included although the compiler cannot enforce it on an
 /// engine (`crate::clearance`'s skip): the view column carries the same
 /// classification as its base, which is what Cedar enforces for it.
+///
+/// **An empty `tables` is [`LineageError::Empty`], never "no tags"**: a caller
+/// holding an empty set has no lineage, and "no tags" would commit the view
+/// untagged. Use [`recorded_view_tag_set`] to start from what is recorded.
 pub async fn view_tag_set(
     conn: &mut sqlx::PgConnection,
     tables: &BTreeSet<LineageTable>,
-) -> Result<BTreeSet<Uuid>, sqlx::Error> {
+) -> Result<BTreeSet<Uuid>, LineageError> {
     if tables.is_empty() {
-        return Ok(BTreeSet::new());
+        return Err(LineageError::Empty);
     }
     let (catalogs, (schemas, names)): (Vec<&str>, (Vec<&str>, Vec<&str>)) = tables
         .iter()
@@ -223,14 +266,31 @@ pub async fn view_tag_set(
     Ok(ids.into_iter().collect())
 }
 
+/// [`view_tag_set`] over `view`'s RECORDED lineage: an error unless the
+/// lineage is `computed` (missing and failed are refusals, not "no tags").
+pub async fn recorded_view_tag_set(
+    conn: &mut sqlx::PgConnection,
+    view: &ViewRef,
+) -> Result<BTreeSet<Uuid>, LineageError> {
+    let recorded = recorded_lineage(conn, view).await?;
+    let tables = recorded.tables()?.clone();
+    view_tag_set(conn, &tables).await
+}
+
 /// Record `tables` as `view`'s lineage, replacing whatever was recorded, and
 /// mark it `computed`. Runs on the caller's connection, so it joins the
 /// caller's transaction (Task 8 writes it beside the view's tag assignments).
+///
+/// An empty `tables` is refused ([`LineageError::Empty`]) and writes nothing:
+/// "computed" always has at least one row.
 pub async fn write_lineage(
     conn: &mut sqlx::PgConnection,
     view: &ViewRef,
     tables: &BTreeSet<LineageTable>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), LineageError> {
+    if tables.is_empty() {
+        return Err(LineageError::Empty);
+    }
     delete_lineage_rows(conn, view).await?;
     let (catalogs, (schemas, names)): (Vec<&str>, (Vec<&str>, Vec<&str>)) = tables
         .iter()
@@ -250,7 +310,7 @@ pub async fn write_lineage(
     .bind(&names)
     .execute(&mut *conn)
     .await?;
-    set_state(conn, view, "computed", None).await
+    Ok(set_state(conn, view, "computed", None).await?)
 }
 
 /// Mark `view`'s lineage `failed` with `detail`, removing any recorded rows: a
@@ -283,11 +343,29 @@ pub async fn delete_lineage(
     Ok(())
 }
 
-/// `view`'s recorded lineage (empty when none is recorded).
+/// What is recorded for `view`: missing, failed (with why), or computed.
 pub async fn recorded_lineage(
     conn: &mut sqlx::PgConnection,
     view: &ViewRef,
-) -> Result<BTreeSet<LineageTable>, sqlx::Error> {
+) -> Result<RecordedLineage, sqlx::Error> {
+    let state: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT state, detail FROM view_lineage_state \
+          WHERE view_catalog = $1 AND view_schema = $2 AND view_name = $3",
+    )
+    .bind(&view.catalog)
+    .bind(&view.schema)
+    .bind(&view.name)
+    .fetch_optional(&mut *conn)
+    .await?;
+    match state {
+        None => return Ok(RecordedLineage::Missing),
+        Some((s, detail)) if s != "computed" => {
+            return Ok(RecordedLineage::Failed {
+                detail: detail.unwrap_or_default(),
+            })
+        }
+        Some(_) => {}
+    }
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT base_catalog, base_schema, base_table FROM view_lineage \
           WHERE view_catalog = $1 AND view_schema = $2 AND view_name = $3",
@@ -297,7 +375,7 @@ pub async fn recorded_lineage(
     .bind(&view.name)
     .fetch_all(&mut *conn)
     .await?;
-    Ok(rows.into_iter().collect())
+    Ok(RecordedLineage::Computed(rows.into_iter().collect()))
 }
 
 async fn delete_lineage_rows(
@@ -336,113 +414,6 @@ async fn set_state(
     .execute(&mut *conn)
     .await?;
     Ok(())
-}
-
-// ── The compiler's half: what `egret-lineage` is granted (spec R5) ─────────
-//
-// On Trino profiles only. The principal gets `use` and `select` on every
-// catalog the profile governs, is excepted from every compiled deny (clearance
-// tag denies and deny grants), and is excluded from every compiled mask and row
-// filter, because a `1 = 0` filter or a `MASK_NULL` mask on it corrupts the
-// lineage (live result §1 Q3). It never receives any other access type: the
-// deny exceptions are narrowed to `LINEAGE_ACCESSES` as well, so no exception
-// ever lifts a withheld write.
-
-/// The only access types `egret-lineage` is ever granted or excepted for.
-/// Measured minimum for `EXPLAIN (TYPE IO)` on Trino 483: catalog `use` plus
-/// `select` on every referenced column (live result §1 Q3).
-pub const LINEAGE_ACCESSES: [&str; 2] = ["select", "use"];
-
-/// The compiled allow policy's name for `catalog`: under the clearance prefix
-/// (the sweep reaps it, the editor guard refuses a human write to it), with a
-/// `lineage-` locator that is not a uuid, so `attribute_policy_name` reads it
-/// as no model object, like `perm-clearance-mv`.
-pub fn lineage_policy_name(catalog: &str) -> String {
-    format!(
-        "{}lineage-{catalog}",
-        egret_policy::COMPILER_CLEARANCE_PREFIX
-    )
-}
-
-/// `use` and `select` for [`LINEAGE_PRINCIPAL`] on every schema, table and
-/// column of `catalog`, filed under the Trino profile `service`. The full
-/// resource chain with `*` below the catalog, because a policy that stops above
-/// `column` grants no column `select` (`grants::scope_to_resources`).
-pub(crate) fn lineage_allow_input(
-    catalog: &str,
-    service: &str,
-) -> egret_policy::admin::AccessPolicyInput {
-    use crate::grants::{level, resource_level_names, WILDCARD};
-    let names = resource_level_names(egret_perm::EngineType::Trino);
-    let mut resources = std::collections::BTreeMap::new();
-    resources.insert(names[0].to_string(), level(catalog.to_string()));
-    for n in &names[1..] {
-        resources.insert((*n).to_string(), level(WILDCARD.to_string()));
-    }
-    egret_policy::admin::AccessPolicyInput {
-        name: lineage_policy_name(catalog),
-        service: service.to_string(),
-        is_enabled: true,
-        resources,
-        items: vec![egret_policy::admin::AccessItemInput {
-            users: vec![LINEAGE_PRINCIPAL.to_string()],
-            groups: Vec::new(),
-            roles: Vec::new(),
-            accesses: LINEAGE_ACCESSES.iter().map(|a| a.to_string()).collect(),
-            effect: "allow".to_string(),
-        }],
-        allow_exceptions: Vec::new(),
-        deny_exceptions: Vec::new(),
-        is_deny_all_else: false,
-        description: "view governance R5: the lineage principal reads what egret governs, \
-                      for EXPLAIN only"
-            .to_string(),
-        labels: Vec::new(),
-        is_override: false,
-        additional: Vec::new(),
-    }
-}
-
-/// The deny exception for [`LINEAGE_PRINCIPAL`] on a deny withholding
-/// `accesses`: only the read half of them (`LINEAGE_ACCESSES`), so the
-/// exception never lifts a withheld write. `None` when the deny withholds no
-/// read access.
-pub(crate) fn lineage_deny_exception(
-    accesses: &[String],
-) -> Option<egret_policy::admin::AccessItemInput> {
-    let read: Vec<String> = accesses
-        .iter()
-        .filter(|a| LINEAGE_ACCESSES.contains(&a.as_str()))
-        .cloned()
-        .collect();
-    (!read.is_empty()).then(|| egret_policy::admin::AccessItemInput {
-        users: vec![LINEAGE_PRINCIPAL.to_string()],
-        groups: Vec::new(),
-        roles: Vec::new(),
-        accesses: read,
-        effect: "deny".to_string(),
-    })
-}
-
-/// The first item of every compiled Trino mask: `MASK_NONE` for the lineage
-/// principal. Ranger's first matching item wins.
-pub(crate) fn lineage_mask_item() -> egret_policy::admin::MaskItemInput {
-    egret_policy::admin::MaskItemInput {
-        users: vec![LINEAGE_PRINCIPAL.to_string()],
-        groups: Vec::new(),
-        mask_type: "MASK_NONE".to_string(),
-        value_expr: None,
-    }
-}
-
-/// The first item of every compiled Trino row filter: no filter for the
-/// lineage principal.
-pub(crate) fn lineage_rowfilter_item() -> egret_policy::admin::RowFilterItemInput {
-    egret_policy::admin::RowFilterItemInput {
-        users: vec![LINEAGE_PRINCIPAL.to_string()],
-        groups: Vec::new(),
-        filter_expr: String::new(),
-    }
 }
 
 #[cfg(test)]

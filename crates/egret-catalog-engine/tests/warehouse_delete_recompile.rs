@@ -187,12 +187,9 @@ async fn seed_attached_and_compiled(db: &Db) -> Fixture {
     let summary = egret_perm_compile::recompile_service(&perm, &policy, service.id)
         .await
         .expect("initial recompile");
-    // The grant's policy, plus (view governance R5, Trino only) the
-    // `egret-lineage` read policy on the attached catalog.
     assert_eq!(
-        summary.created, 2,
-        "the fixture's one explicit grant must compile to exactly one policy, beside the \
-         lineage principal's"
+        summary.created, 1,
+        "the fixture's one explicit grant must compile to exactly one policy"
     );
 
     Fixture {

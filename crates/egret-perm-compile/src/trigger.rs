@@ -508,34 +508,6 @@ async fn compile_desired(
         }
     }
 
-    // **View governance R5: the lineage principal reads what this profile
-    // governs.** Trino only: `use` and `select` for `egret-lineage` on every
-    // catalog the profile reaches, one policy per catalog, filed under the
-    // profile. Its deny exceptions and its first mask/row-filter items are added
-    // where those policies are built (`crate::lineage`). Sorted by catalog so a
-    // recompile that changed nothing writes nothing.
-    if engine == EngineType::Trino {
-        let mut names: Vec<&String> = catalog_names.values().collect();
-        names.sort();
-        for catalog in names {
-            let input = crate::lineage::lineage_allow_input(catalog, &svc.name);
-            let name = input.name.clone();
-            let body = stamp_service_type(access_to_ranger_json(&input), engine);
-            let target = target_service_id(&body, &writable, &format!("lineage {name}"))?;
-            desired.insert(
-                (target, name),
-                DesiredPolicy {
-                    body,
-                    // No provenance row (the clearance family; see
-                    // `record_compiled`): the name carries what it is for.
-                    source_kind: SourceKind::Clearance,
-                    grant_id: None,
-                    rule_id: None,
-                },
-            );
-        }
-    }
-
     for r in &all_rules {
         compile_one_rule(
             r,

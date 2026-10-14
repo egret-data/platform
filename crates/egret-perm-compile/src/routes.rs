@@ -1856,7 +1856,7 @@ async fn explain(
             continue;
         };
 
-        let artifact = artifact_via(&mut conn, &svc).await?;
+        let artifact = served_artifact_via(&mut conn, &svc).await?;
         // `ServiceDef::parse` of the envelope's OWN `serviceDef`, not of a def
         // looked up separately: the plugin evaluates against the def it was
         // handed, and the tag block's def (which the tag-policy tier check also
@@ -2572,6 +2572,43 @@ pub(crate) async fn artifact_via(
     conn: &mut sqlx::PgConnection,
     svc: &ServiceRow,
 ) -> Result<ServicePolicySet, PermHttpError> {
+    let envelope = envelope_via(conn, svc).await?;
+    to_policy_set(&envelope)
+}
+
+/// [`artifact_via`] as a provisioned JWT-mode Trino engine's plugin receives
+/// it: with the `egret-lineage` download transform applied when the profile's
+/// engines are eligible (`egret_policy::lineage_transform`, view governance R5,
+/// Task 7 fix round 1). The same function the download route calls, so
+/// `explain` evaluates what the engine downloads. The migration gate keeps
+/// [`artifact_via`]: the transform is a function of the envelope, so it adds
+/// the same material before and after a migration and proves nothing there.
+pub(crate) async fn served_artifact_via(
+    conn: &mut sqlx::PgConnection,
+    svc: &ServiceRow,
+) -> Result<ServicePolicySet, PermHttpError> {
+    let mut envelope = envelope_via(conn, svc).await?;
+    if let Some(catalogs) =
+        egret_policy::lineage_transform::lineage_catalogs_for_service_via(conn, svc.id).await?
+    {
+        egret_policy::lineage_transform::apply_lineage_transform(&mut envelope, &catalogs);
+    }
+    to_policy_set(&envelope)
+}
+
+fn to_policy_set(envelope: &ServicePolicies) -> Result<ServicePolicySet, PermHttpError> {
+    // Through JSON on purpose: the plugin reads JSON, and
+    // `ServicePolicySet`'s `Deserialize` is where every `Unmodelled` construct
+    // in the download is detected. Going round the serialiser would skip the
+    // detection pass that makes the refusals possible.
+    let wire = serde_json::to_value(envelope).map_err(PermHttpError::db)?;
+    serde_json::from_value::<ServicePolicySet>(wire).map_err(PermHttpError::db)
+}
+
+async fn envelope_via(
+    conn: &mut sqlx::PgConnection,
+    svc: &ServiceRow,
+) -> Result<ServicePolicies, PermHttpError> {
     let def = get_service_def_via(conn, &svc.r#type).await?.def_jsonb;
     let policies = enabled_policies_for_service_via(conn, svc.id).await?;
     let tag_service = svc
@@ -2609,12 +2646,7 @@ pub(crate) async fn artifact_via(
             )));
         }
     }
-    // Through JSON on purpose: the plugin reads JSON, and
-    // `ServicePolicySet`'s `Deserialize` is where every `Unmodelled` construct
-    // in the download is detected. Going round the serialiser would skip the
-    // detection pass that makes the refusals possible.
-    let wire = serde_json::to_value(&envelope).map_err(PermHttpError::db)?;
-    serde_json::from_value::<ServicePolicySet>(wire).map_err(PermHttpError::db)
+    Ok(envelope)
 }
 
 /// Map the DECIDING policy's Ranger name back to its `perm` model object, if

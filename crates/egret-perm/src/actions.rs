@@ -247,12 +247,13 @@ pub enum CompileError {
     )]
     UnusableUserRef { r#ref: String },
     /// A grant or rule naming a principal egret itself runs as on an engine
-    /// (`egret-lineage`, view governance R5). The compiler alone decides that
-    /// principal's policies: it may read every governed table and nothing
-    /// else, so a model grant naming it (a write grant above all) is refused
-    /// rather than compiled.
+    /// (`egret-lineage`, view governance R5). egret decides that principal's
+    /// access where it serves a provisioned Trino engine's download (read on
+    /// every governed table, nothing else), so a model grant naming it (a write
+    /// grant above all) is refused rather than compiled.
     #[error(
-        "user principal {value:?} is reserved: egret runs as it on the engine, and only the          compiler decides its access",
+        "user principal {value:?} is reserved: egret runs as it on the engine, and only egret \
+         decides its access",
         value = r#ref
     )]
     ReservedEnginePrincipal { r#ref: String },

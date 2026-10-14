@@ -13,7 +13,7 @@
 //!
 //! DB-gated; self-skips only under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use egret_metastore::Db;
 use egret_perm::{
@@ -29,7 +29,9 @@ use egret_ranger_eval::resource::RequestResource;
 use egret_ranger_eval::servicedef::ServiceDef;
 use uuid::Uuid;
 
-use crate::lineage::{self, LineageTable, ViewRef, LINEAGE_PRINCIPAL};
+use crate::lineage::{
+    self, LineageError, LineageTable, RecordedLineage, ViewRef, LINEAGE_PRINCIPAL,
+};
 use crate::recompile_service;
 
 async fn test_db() -> Option<Db> {
@@ -50,6 +52,7 @@ struct Fixture {
     catalog_id: Uuid,
     catalog_name: String,
     warehouse_id: Uuid,
+    engine_id: Uuid,
 }
 
 async fn seed(db: &Db) -> Fixture {
@@ -101,7 +104,8 @@ async fn seed(db: &Db) -> Fixture {
     .expect("warehouse");
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'trino','egret', \
+                 '{\"trinoConfig\": {\"delegationMode\": \"jwt\"}}'::jsonb,$2) RETURNING id",
     )
     .bind(unique("lin-eng"))
     .bind(profile.id)
@@ -136,6 +140,7 @@ async fn seed(db: &Db) -> Fixture {
         catalog_id,
         catalog_name,
         warehouse_id,
+        engine_id,
     }
 }
 
@@ -174,13 +179,6 @@ async fn gate(db: &Db, tag: Uuid, roles: &[String]) {
     .expect("gate");
 }
 
-fn user(r: &str) -> Principal {
-    Principal {
-        kind: PrincipalKind::User,
-        r#ref: r.to_string(),
-    }
-}
-
 fn scope(f: &Fixture, table: Option<&str>, column: Option<&str>) -> Scope {
     Scope {
         catalog_id: f.catalog_id,
@@ -190,19 +188,66 @@ fn scope(f: &Fixture, table: Option<&str>, column: Option<&str>) -> Scope {
     }
 }
 
-/// Seed the classified, masked, filtered and denied `sales.orders.ssn`, then
-/// recompile.
-async fn govern_ssn(db: &Db, f: &Fixture) {
-    let tag = new_tag(db).await;
-    assign(db, tag, f.warehouse_id, "orders", "ssn").await;
-    // A role nobody holds: the clearance deny stands for everyone.
-    gate(db, tag, &[unique("lin-nobody-role")]).await;
+fn group(r: &str) -> Principal {
+    Principal {
+        kind: PrincipalKind::Group,
+        r#ref: r.to_string(),
+    }
+}
+
+async fn tag_key_of(db: &Db, tag: Uuid) -> String {
+    sqlx::query_scalar("SELECT key FROM tags WHERE id = $1")
+        .bind(tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("tag key")
+}
+
+/// A hand-written (operator) policy stored by raw SQL, as a profile the
+/// compiler later claimed can still hold.
+async fn hand_written(db: &Db, f: &Fixture, name: &str, body: serde_json::Value) {
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+         VALUES ($1, $2, $3, true, 'operator')",
+    )
+    .bind(f.profile_id)
+    .bind(name)
+    .bind(body)
+    .execute(&db.pool)
+    .await
+    .expect("hand-written policy");
+}
+
+fn lvl(v: &str) -> serde_json::Value {
+    serde_json::json!({"values": [v], "isExcludes": false, "isRecursive": false})
+}
+
+/// The governed fixture, stored with NOTHING about `egret-lineage`:
+///
+/// - `sales.orders.ssn`: a clearance nobody holds (a tag deny for everyone), a
+///   compiled `MASK_NULL` path mask, a compiled deny grant of `read` to
+///   `public`;
+/// - `sales.orders`: a compiled `1 = 0` path row filter;
+/// - `sales.orders.email`: a compiled TAG mask (`MASK_HASH`);
+/// - `sales.customers`: a compiled TAG row filter (`1 = 0`);
+/// - `sales.orders.notes`: a HAND-WRITTEN `MASK_NULL` mask;
+/// - `sales.items`: a HAND-WRITTEN `1 = 0` row filter;
+/// - the whole catalog: a compiled ALLOW of `read` and `write` to `public`
+///   (review I2: an inherited write allow), and no write deny anywhere.
+async fn govern(db: &Db, f: &Fixture) {
+    let clearance = new_tag(db).await;
+    assign(db, clearance, f.warehouse_id, "orders", "ssn").await;
+    gate(db, clearance, &[unique("lin-nobody-role")]).await;
+    let mask_tag = new_tag(db).await;
+    assign(db, mask_tag, f.warehouse_id, "orders", "email").await;
+    let filter_tag = new_tag(db).await;
+    assign(db, filter_tag, f.warehouse_id, "customers", "").await;
 
     f.perm
         .create_grant(&Grant {
             id: Uuid::nil(),
             effect: Effect::Allow,
-            actions: vec![Action::Read],
+            actions: vec![Action::Read, Action::Write],
             scope: Scope {
                 catalog_id: f.catalog_id,
                 schema: None,
@@ -210,145 +255,217 @@ async fn govern_ssn(db: &Db, f: &Fixture) {
                 column: None,
             },
             principals: PrincipalSet {
-                include: vec![user("alice")],
+                include: vec![group("public")],
                 exclude: Vec::new(),
             },
             origin: GrantOrigin::Explicit,
         })
         .await
-        .expect("allow grant");
+        .expect("public read+write allow");
     f.perm
         .create_grant(&Grant {
             id: Uuid::nil(),
             effect: Effect::Deny,
-            actions: vec![Action::Read, Action::Write],
+            actions: vec![Action::Read],
             scope: scope(f, Some("orders"), Some("ssn")),
             principals: PrincipalSet {
-                include: vec![Principal {
-                    kind: PrincipalKind::Group,
-                    r#ref: "public".into(),
-                }],
+                include: vec![group("public")],
                 exclude: Vec::new(),
             },
             origin: GrantOrigin::Explicit,
         })
         .await
         .expect("deny grant");
-    f.perm
-        .create_rule(&Rule {
-            id: Uuid::nil(),
-            name: unique("lin-mask"),
-            kind: RuleKind::Mask {
+    let rules = [
+        (
+            RuleKind::Mask {
                 mask_type: "MASK_NULL".into(),
                 value_expr: None,
             },
-            selector: Selector::Path(scope(f, Some("orders"), Some("ssn"))),
-            exempt: PrincipalSet::default(),
-        })
-        .await
-        .expect("mask rule");
-    f.perm
-        .create_rule(&Rule {
-            id: Uuid::nil(),
-            name: unique("lin-filter"),
-            kind: RuleKind::RowFilter {
+            Selector::Path(scope(f, Some("orders"), Some("ssn"))),
+        ),
+        (
+            RuleKind::RowFilter {
                 filter_expr: "1 = 0".into(),
             },
-            selector: Selector::Path(scope(f, Some("orders"), None)),
-            exempt: PrincipalSet::default(),
-        })
-        .await
-        .expect("filter rule");
-
+            Selector::Path(scope(f, Some("orders"), None)),
+        ),
+        (
+            RuleKind::Mask {
+                mask_type: "MASK_HASH".into(),
+                value_expr: None,
+            },
+            Selector::Tag {
+                key: tag_key_of(db, mask_tag).await,
+            },
+        ),
+        (
+            RuleKind::RowFilter {
+                filter_expr: "1 = 0".into(),
+            },
+            Selector::Tag {
+                key: tag_key_of(db, filter_tag).await,
+            },
+        ),
+    ];
+    for (kind, selector) in rules {
+        f.perm
+            .create_rule(&Rule {
+                id: Uuid::nil(),
+                name: unique("lin-rule"),
+                kind,
+                selector,
+                exempt: PrincipalSet::default(),
+            })
+            .await
+            .expect("rule");
+    }
     recompile_service(&f.perm, &f.policy, f.profile_id)
         .await
         .expect("recompile");
-}
 
-struct Verdicts {
-    select: Decision,
-    use_catalog: Decision,
-    writes: Vec<(String, Decision)>,
-    mask: MaskDecision,
-    filter: RowFilterDecision,
-}
-
-async fn verdicts(db: &Db, f: &Fixture, who: &str, plugin: PluginVersion) -> Verdicts {
-    let mut conn = db.pool.acquire().await.expect("conn");
-    let svc = egret_policy::get_service_by_id_via(&mut conn, f.profile_id)
-        .await
-        .expect("service");
-    let artifact = crate::routes::artifact_via(&mut conn, &svc)
-        .await
-        .expect("artifact");
-    let def = ServiceDef::parse(&egret_policy::trino_service_def().expect("def"));
-    let config = EngineConfig {
-        engine: Some(egret_ranger_eval::eval::EngineType::Trino),
-        plugin_version: Some(plugin),
-        ..EngineConfig::without_super_users()
-    };
-    let column = scope(f, Some("orders"), Some("ssn"));
-    let tags = crate::routes::resolved_tags_for_target(&mut *conn, &column)
-        .await
-        .expect("tag lookup")
-        .expect("tags resolve");
-    let col_resource = RequestResource::new()
-        .with("catalog", f.catalog_name.clone())
-        .with("schema", "sales")
-        .with("table", "orders")
-        .with("column", "ssn");
-    let table_resource = RequestResource::new()
-        .with("catalog", f.catalog_name.clone())
-        .with("schema", "sales")
-        .with("table", "orders");
-    let req = |access: &str, resource: RequestResource, with_tags: bool| AccessRequest {
-        user: who.to_string(),
-        groups: BTreeSet::new(),
-        roles: BTreeSet::new(),
-        access_type: access.to_string(),
-        resource,
-        owner: None,
-        resolved_tags: Some(if with_tags {
-            tags.clone()
-        } else {
-            egret_ranger_eval::eval::UnenrichedTags::new(Vec::new())
+    hand_written(
+        db,
+        f,
+        "hand mask notes",
+        serde_json::json!({
+            "name": "hand mask notes", "policyType": 1, "isEnabled": true,
+            "resources": {"catalog": lvl(&f.catalog_name), "schema": lvl("sales"),
+                          "table": lvl("orders"), "column": lvl("notes")},
+            "dataMaskPolicyItems": [{"users": [], "groups": ["public"], "roles": [],
+                "accesses": [{"type": "select", "isAllowed": true}],
+                "dataMaskInfo": {"dataMaskType": "MASK_NULL"}}],
+            "policyItems": [], "denyPolicyItems": []
         }),
-    };
-    let catalog_resource = RequestResource::new().with("catalog", f.catalog_name.clone());
-    Verdicts {
-        select: evaluate(
-            &artifact,
-            &req("select", col_resource.clone(), true),
-            &def,
-            &config,
-        ),
-        use_catalog: evaluate(
-            &artifact,
-            &req("use", catalog_resource, false),
-            &def,
-            &config,
-        ),
-        writes: ["insert", "delete", "create", "drop", "alter", "all"]
-            .into_iter()
-            .map(|a| {
-                (
-                    a.to_string(),
-                    evaluate(
-                        &artifact,
-                        &req(a, col_resource.clone(), true),
-                        &def,
-                        &config,
-                    ),
-                )
-            })
-            .collect(),
-        mask: evaluate_data_mask(&artifact, &req("select", col_resource, true), &def, &config),
-        filter: evaluate_row_filter(
-            &artifact,
-            &req("select", table_resource, false),
-            &def,
-            &config,
-        ),
+    )
+    .await;
+    hand_written(
+        db,
+        f,
+        "hand filter items",
+        serde_json::json!({
+            "name": "hand filter items", "policyType": 2, "isEnabled": true,
+            "resources": {"catalog": lvl(&f.catalog_name), "schema": lvl("sales"),
+                          "table": lvl("items")},
+            "rowFilterPolicyItems": [{"users": [], "groups": ["public"], "roles": [],
+                "accesses": [{"type": "select", "isAllowed": true}],
+                "rowFilterInfo": {"filterExpr": "1 = 0"}}],
+            "policyItems": [], "denyPolicyItems": []
+        }),
+    )
+    .await;
+}
+
+struct Asker {
+    artifact: egret_ranger_eval::model::ServicePolicySet,
+    def: ServiceDef,
+    config: EngineConfig,
+    catalog: String,
+    tags: BTreeMap<(String, String), egret_ranger_eval::eval::UnenrichedTags>,
+}
+
+impl Asker {
+    async fn new(db: &Db, f: &Fixture, plugin: PluginVersion) -> Self {
+        let mut conn = db.pool.acquire().await.expect("conn");
+        let svc = egret_policy::get_service_by_id_via(&mut conn, f.profile_id)
+            .await
+            .expect("service");
+        let artifact = crate::routes::served_artifact_via(&mut conn, &svc)
+            .await
+            .expect("artifact");
+        let mut tags = BTreeMap::new();
+        for (table, column) in [
+            ("orders", "ssn"),
+            ("orders", "email"),
+            ("orders", "notes"),
+            ("orders", ""),
+            ("customers", ""),
+            ("items", ""),
+        ] {
+            let target = scope(f, Some(table), (!column.is_empty()).then_some(column));
+            let t = crate::routes::resolved_tags_for_target(&mut *conn, &target)
+                .await
+                .expect("tag lookup")
+                .expect("tags resolve");
+            tags.insert((table.to_string(), column.to_string()), t);
+        }
+        Asker {
+            artifact,
+            def: ServiceDef::parse(&egret_policy::trino_service_def().expect("def")),
+            config: EngineConfig {
+                engine: Some(egret_ranger_eval::eval::EngineType::Trino),
+                plugin_version: Some(plugin),
+                ..EngineConfig::without_super_users()
+            },
+            catalog: f.catalog_name.clone(),
+            tags,
+        }
+    }
+
+    fn request(
+        &self,
+        who: &str,
+        access: &str,
+        table: Option<&str>,
+        column: Option<&str>,
+    ) -> AccessRequest {
+        let mut resource = RequestResource::new().with("catalog", self.catalog.clone());
+        let mut key = (String::new(), String::new());
+        if let Some(t) = table {
+            resource = resource.with("schema", "sales").with("table", t);
+            key.0 = t.to_string();
+        }
+        if let Some(c) = column {
+            resource = resource.with("column", c);
+            key.1 = c.to_string();
+        }
+        AccessRequest {
+            user: who.to_string(),
+            groups: BTreeSet::new(),
+            roles: BTreeSet::new(),
+            access_type: access.to_string(),
+            resource,
+            owner: None,
+            resolved_tags: Some(
+                self.tags
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| egret_ranger_eval::eval::UnenrichedTags::new(Vec::new())),
+            ),
+        }
+    }
+
+    fn access(
+        &self,
+        who: &str,
+        access: &str,
+        table: Option<&str>,
+        column: Option<&str>,
+    ) -> Decision {
+        evaluate(
+            &self.artifact,
+            &self.request(who, access, table, column),
+            &self.def,
+            &self.config,
+        )
+    }
+
+    fn mask(&self, who: &str, table: &str, column: &str) -> MaskDecision {
+        evaluate_data_mask(
+            &self.artifact,
+            &self.request(who, "select", Some(table), Some(column)),
+            &self.def,
+            &self.config,
+        )
+    }
+
+    fn filter(&self, who: &str, table: &str) -> RowFilterDecision {
+        evaluate_row_filter(
+            &self.artifact,
+            &self.request(who, "select", Some(table), None),
+            &self.def,
+            &self.config,
+        )
     }
 }
 
@@ -368,108 +485,149 @@ fn is_unfiltered(r: &RowFilterDecision) -> bool {
     }
 }
 
+const WRITES: [&str; 8] = [
+    "insert", "delete", "create", "drop", "alter", "grant", "revoke", "show",
+];
+
+const PLUGINS: [PluginVersion; 2] = [PluginVersion::Ranger2_5_0, PluginVersion::Ranger2_8_0];
+
+/// The download a provisioned JWT-mode Trino engine receives lets
+/// `egret-lineage` read every governed column unchanged: through the
+/// clearance, the deny grant, compiled path and tag masks and row filters, and
+/// hand-written ones (review I1). The same download denies, masks and filters
+/// `alice`, so the fixture bites.
 #[tokio::test]
-async fn the_lineage_principal_reads_a_classified_masked_filtered_column_unchanged() {
+async fn the_lineage_principal_reads_classified_masked_filtered_data_unchanged() {
     let Some(db) = test_db().await else { return };
     let f = seed(&db).await;
-    govern_ssn(&db, &f).await;
+    govern(&db, &f).await;
 
-    for plugin in [PluginVersion::Ranger2_5_0, PluginVersion::Ranger2_8_0] {
-        // The control: the same download denies, masks and filters a user the
-        // compiler does not except, so the fixture bites.
-        let alice = verdicts(&db, &f, "alice", plugin).await;
+    for plugin in PLUGINS {
+        let a = Asker::new(&db, &f, plugin).await;
+        // The control.
         assert!(
-            matches!(alice.select, Decision::Denied { .. }),
-            "{plugin:?}: alice must be denied the classified column: {:?}",
-            alice.select
+            matches!(
+                a.access("alice", "select", Some("orders"), Some("ssn")),
+                Decision::Denied { .. }
+            ),
+            "{plugin:?}"
         );
-        assert!(
-            matches!(&alice.mask, MaskDecision::Masked(m) if m.mask_type.as_deref() == Some("MASK_NULL")),
-            "{plugin:?}: {:?}",
-            alice.mask
-        );
-        assert!(
-            matches!(&alice.filter, RowFilterDecision::Filtered(r) if r.filter_expr == "1 = 0"),
-            "{plugin:?}: {:?}",
-            alice.filter
-        );
-
-        let lineage = verdicts(&db, &f, LINEAGE_PRINCIPAL, plugin).await;
-        assert!(
-            matches!(lineage.select, Decision::Allowed { .. }),
-            "{plugin:?}: egret-lineage must be allowed `select`: {:?}",
-            lineage.select
-        );
-        assert!(
-            matches!(lineage.use_catalog, Decision::Allowed { .. }),
-            "{plugin:?}: egret-lineage must be allowed `use` on the catalog: {:?}",
-            lineage.use_catalog
-        );
-        assert!(is_unmasked(&lineage.mask), "{plugin:?}: {:?}", lineage.mask);
-        assert!(
-            is_unfiltered(&lineage.filter),
-            "{plugin:?}: {:?}",
-            lineage.filter
-        );
-        for (access, d) in &lineage.writes {
+        for (table, column, want) in [
+            ("orders", "ssn", "MASK_NULL"),
+            ("orders", "email", "MASK_HASH"),
+            ("orders", "notes", "MASK_NULL"),
+        ] {
             assert!(
-                !matches!(d, Decision::Allowed { .. }),
-                "{plugin:?}: egret-lineage must never be allowed `{access}`: {d:?}"
+                matches!(&a.mask("alice", table, column), MaskDecision::Masked(m) if m.mask_type.as_deref() == Some(want)),
+                "{plugin:?} alice {table}.{column}: {:?}",
+                a.mask("alice", table, column)
             );
+        }
+        for table in ["orders", "customers", "items"] {
+            assert!(
+                matches!(&a.filter("alice", table), RowFilterDecision::Filtered(r) if r.filter_expr == "1 = 0"),
+                "{plugin:?} alice {table}: {:?}",
+                a.filter("alice", table)
+            );
+        }
+
+        let l = LINEAGE_PRINCIPAL;
+        for (table, column) in [("orders", "ssn"), ("orders", "email"), ("orders", "notes")] {
+            let d = a.access(l, "select", Some(table), Some(column));
+            assert!(
+                matches!(d, Decision::Allowed { .. }),
+                "{plugin:?} select {table}.{column}: {d:?}"
+            );
+            let m = a.mask(l, table, column);
+            assert!(is_unmasked(&m), "{plugin:?} mask {table}.{column}: {m:?}");
+        }
+        let d = a.access(l, "use", None, None);
+        assert!(
+            matches!(d, Decision::Allowed { .. }),
+            "{plugin:?} use: {d:?}"
+        );
+        for table in ["orders", "customers", "items"] {
+            let r = a.filter(l, table);
+            assert!(is_unfiltered(&r), "{plugin:?} filter {table}: {r:?}");
         }
     }
 }
 
-/// No compiled body ever names `egret-lineage` beside an access type other
-/// than `select` or `use`.
+/// Review I2: `{public}` IS allowed write on the catalog and nothing denies a
+/// write, so `alice` may write; `egret-lineage` may not, at table or column
+/// level, for any non-read access type.
 #[tokio::test]
-async fn no_compiled_policy_gives_the_lineage_principal_a_non_read_access() {
+async fn the_lineage_principal_never_writes_even_where_public_may() {
     let Some(db) = test_db().await else { return };
     let f = seed(&db).await;
-    govern_ssn(&db, &f).await;
+    govern(&db, &f).await;
 
-    let bodies: Vec<serde_json::Value> = sqlx::query_scalar(
-        "SELECT p.policy_jsonb FROM policy.authz_policies p \
-          WHERE p.service_id IN (SELECT id FROM policy.authz_services WHERE name LIKE $1 || '%')",
-    )
-    .bind(
-        egret_policy::get_service_by_id_via(&mut db.pool.acquire().await.unwrap(), f.profile_id)
-            .await
-            .unwrap()
-            .name,
-    )
-    .fetch_all(&db.pool)
-    .await
-    .expect("bodies");
-    let mut seen = 0;
-    for body in &bodies {
-        for bucket in [
-            "policyItems",
-            "denyPolicyItems",
-            "allowExceptions",
-            "denyExceptions",
-        ] {
-            for item in body[bucket].as_array().into_iter().flatten() {
-                let names_it = item["users"]
-                    .as_array()
-                    .is_some_and(|u| u.iter().any(|u| u == LINEAGE_PRINCIPAL));
-                if !names_it {
-                    continue;
-                }
-                seen += 1;
-                for a in item["accesses"].as_array().expect("accesses") {
-                    let t = a["type"].as_str().expect("type");
-                    assert!(
-                        lineage::LINEAGE_ACCESSES.contains(&t),
-                        "`{t}` for egret-lineage in {bucket} of {}",
-                        body["name"]
-                    );
-                }
+    for plugin in PLUGINS {
+        let a = Asker::new(&db, &f, plugin).await;
+        for (table, column) in [(Some("customers"), None), (Some("customers"), Some("id"))] {
+            let d = a.access("alice", "insert", table, column);
+            assert!(
+                matches!(d, Decision::Allowed { .. }),
+                "{plugin:?}: the control must be allowed to write {table:?}.{column:?}: {d:?}"
+            );
+            for w in WRITES {
+                let d = a.access(LINEAGE_PRINCIPAL, w, table, column);
+                assert!(
+                    !matches!(d, Decision::Allowed { .. }),
+                    "{plugin:?}: egret-lineage must never be allowed `{w}` on {table:?}.{column:?}: {d:?}"
+                );
             }
         }
     }
-    // The allow, the clearance exception and the deny-grant exception.
-    assert!(seen >= 3, "expected the lineage items, saw {seen}");
+}
+
+/// Review I4: a profile bound to an engine that is not a provisioned JWT-mode
+/// Trino engine is served the stored policies, so lineage fails closed there.
+/// And nothing about the principal is ever stored.
+#[tokio::test]
+async fn an_ineligible_engine_is_served_nothing_for_the_lineage_principal() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+    govern(&db, &f).await;
+
+    let stored: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT p.policy_jsonb FROM policy.authz_policies p JOIN policy.authz_services s \
+             ON s.id = p.service_id \
+          WHERE p.service_id = $1 OR s.name = (SELECT config_jsonb->>'tagService' \
+                FROM policy.authz_services WHERE id = $1)",
+    )
+    .bind(f.profile_id)
+    .fetch_all(&db.pool)
+    .await
+    .expect("stored");
+    assert!(stored.len() > 4, "{stored:?}");
+    assert!(
+        !stored
+            .iter()
+            .any(|b| b.to_string().contains(LINEAGE_PRINCIPAL)),
+        "a stored policy names the principal"
+    );
+
+    sqlx::query(
+        "UPDATE engine_mgmt.engines SET spec = '{\"trinoConfig\": {\"delegationMode\": \"impersonate\"}}' \
+          WHERE id = $1",
+    )
+    .bind(f.engine_id)
+    .execute(&db.pool)
+    .await
+    .expect("impersonate");
+    let a = Asker::new(&db, &f, PluginVersion::Ranger2_8_0).await;
+    let d = a.access(LINEAGE_PRINCIPAL, "select", Some("customers"), Some("id"));
+    // Only the inherited `{public}` allow reaches it now, and it is masked and
+    // filtered like anyone: the transform is absent.
+    assert!(
+        matches!(&a.filter(LINEAGE_PRINCIPAL, "customers"), RowFilterDecision::Filtered(r) if r.filter_expr == "1 = 0"),
+        "{d:?}"
+    );
+    assert!(matches!(
+        a.access(LINEAGE_PRINCIPAL, "select", Some("orders"), Some("ssn")),
+        Decision::Denied { .. }
+    ));
 }
 
 #[tokio::test]
@@ -511,6 +669,12 @@ async fn view_tag_set_is_the_union_of_clearance_bearing_tags_over_the_lineage() 
         .await
         .unwrap()
         .is_empty());
+
+    // Review I3: no lineage is never "no tags".
+    assert!(matches!(
+        lineage::view_tag_set(&mut conn, &BTreeSet::new()).await,
+        Err(LineageError::Empty)
+    ));
 }
 
 #[tokio::test]
@@ -524,6 +688,22 @@ async fn the_lineage_store_replaces_records_failure_and_deletes() {
     };
     let t = |n: &str| -> LineageTable { ("ice".into(), "s".into(), n.into()) };
 
+    // Review I3: missing is its own answer, and refuses tagging.
+    assert_eq!(
+        lineage::recorded_lineage(&mut conn, &view).await.unwrap(),
+        RecordedLineage::Missing
+    );
+    assert!(matches!(
+        lineage::recorded_view_tag_set(&mut conn, &view).await,
+        Err(LineageError::Missing)
+    ));
+    // An empty lineage is refused and writes nothing.
+    assert!(matches!(
+        lineage::write_lineage(&mut conn, &view, &BTreeSet::new()).await,
+        Err(LineageError::Empty)
+    ));
+    assert_eq!(state(&mut conn, &view).await, None);
+
     lineage::write_lineage(&mut conn, &view, &BTreeSet::from([t("pii"), t("orders")]))
         .await
         .unwrap();
@@ -532,20 +712,32 @@ async fn the_lineage_store_replaces_records_failure_and_deletes() {
         .unwrap();
     assert_eq!(
         lineage::recorded_lineage(&mut conn, &view).await.unwrap(),
-        BTreeSet::from([t("orders")])
+        RecordedLineage::Computed(BTreeSet::from([t("orders")]))
     );
     assert_eq!(
         state(&mut conn, &view).await,
         Some(("computed".to_string(), None))
     );
+    // A computed lineage over tables with no tag is "no tags", the one case
+    // that is.
+    assert!(lineage::recorded_view_tag_set(&mut conn, &view)
+        .await
+        .unwrap()
+        .is_empty());
 
     lineage::record_lineage_failure(&mut conn, &view, "boom")
         .await
         .unwrap();
-    assert!(lineage::recorded_lineage(&mut conn, &view)
-        .await
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        lineage::recorded_lineage(&mut conn, &view).await.unwrap(),
+        RecordedLineage::Failed {
+            detail: "boom".to_string()
+        }
+    );
+    assert!(matches!(
+        lineage::recorded_view_tag_set(&mut conn, &view).await,
+        Err(LineageError::Failed(d)) if d == "boom"
+    ));
     assert_eq!(
         state(&mut conn, &view).await,
         Some(("failed".to_string(), Some("boom".to_string())))

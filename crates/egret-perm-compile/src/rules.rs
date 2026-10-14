@@ -515,7 +515,7 @@ fn build_body(
                 service: service.to_string(),
                 is_enabled: true,
                 resources,
-                items: mask_items(r, mask_type, value_expr, e == EngineType::Trino)?,
+                items: mask_items(r, mask_type, value_expr)?,
                 description: String::new(),
                 labels: Vec::new(),
                 is_override: false,
@@ -529,7 +529,7 @@ fn build_body(
                 service: service.to_string(),
                 is_enabled: true,
                 resources,
-                items: rowfilter_items(r, filter_expr, e == EngineType::Trino)?,
+                items: rowfilter_items(r, filter_expr)?,
                 description: String::new(),
                 labels: Vec::new(),
                 is_override: false,
@@ -561,8 +561,7 @@ fn build_tag_body(
                 service: service.to_string(),
                 is_enabled: true,
                 resources: BTreeMap::new(),
-                // A tag body is Trino's (StarRocks has no tag service).
-                items: mask_items(r, mask_type, value_expr, true)?,
+                items: mask_items(r, mask_type, value_expr)?,
                 description: String::new(),
                 labels: Vec::new(),
                 is_override: false,
@@ -576,7 +575,7 @@ fn build_tag_body(
                 service: service.to_string(),
                 is_enabled: true,
                 resources: BTreeMap::new(),
-                items: rowfilter_items(r, filter_expr, true)?,
+                items: rowfilter_items(r, filter_expr)?,
                 description: String::new(),
                 labels: Vec::new(),
                 is_override: false,
@@ -761,22 +760,13 @@ fn exempt_principals(rule: &Rule) -> Result<(Vec<String>, Vec<String>), CompileE
 /// `MASK_NONE`) when `rule.exempt` names any, then the general `public`-group
 /// item carrying the rule's real mask. See the module doc comment for the
 /// Ranger idiom this follows.
-///
-/// `lineage_first` (Trino only, view governance R5): an item exempting
-/// `egret-lineage` goes FIRST, because Ranger's first matching item wins and a
-/// mask on the lineage principal corrupts the lineage (a `MASK_NULL` join key
-/// made the optimizer prune a whole input, live result §1 Q3).
 fn mask_items(
     rule: &Rule,
     mask_type: &str,
     value_expr: &Option<String>,
-    lineage_first: bool,
 ) -> Result<Vec<MaskItemInput>, CompileError> {
     let (users, groups) = exempt_principals(rule)?;
     let mut items = Vec::new();
-    if lineage_first {
-        items.push(crate::lineage::lineage_mask_item());
-    }
     if !users.is_empty() || !groups.is_empty() {
         items.push(MaskItemInput {
             users,
@@ -798,19 +788,12 @@ fn mask_items(
 /// principals, an empty `filterExpr` — "no filtering", the same idiom the
 /// cited Ranger wiki page uses), then the general `public`-group item
 /// carrying the rule's real filter.
-///
-/// `lineage_first`: as for [`mask_items`]; a `1 = 0` filter on the lineage
-/// principal reports no input at all (live result §1 Q3).
 fn rowfilter_items(
     rule: &Rule,
     filter_expr: &str,
-    lineage_first: bool,
 ) -> Result<Vec<RowFilterItemInput>, CompileError> {
     let (users, groups) = exempt_principals(rule)?;
     let mut items = Vec::new();
-    if lineage_first {
-        items.push(crate::lineage::lineage_rowfilter_item());
-    }
     if !users.is_empty() || !groups.is_empty() {
         items.push(RowFilterItemInput {
             users,

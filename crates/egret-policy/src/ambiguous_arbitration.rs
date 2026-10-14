@@ -278,58 +278,6 @@ use serde_json::Value;
 
 use crate::admin::item_key;
 
-/// The decisive items a policy of `policy_type` is ARBITRATED on: its item
-/// bucket, less a LEADING item that exempts exactly the lineage principal
-/// (`egret_core::engine_principals::LINEAGE_PRINCIPAL`) with no transform.
-///
-/// **Why that item is not part of the arbitration (view governance R5).** The
-/// compiler puts it first in every Trino mask and row filter it emits, so it
-/// decides `egret-lineage` and nobody else, and identically in every compiled
-/// body: two compiled policies cannot disagree through it. Comparing it would
-/// make every pair stored before the item existed look "created" at the first
-/// recompile after it, and every compiled policy look DIFFERENT from a
-/// hand-written one that agreed with it, both of which refuse writes nobody
-/// changed. The cost, stated: a hand-written mask that masks `egret-lineage`
-/// beside a compiled one that does not is not reported for that principal
-/// alone; a hand-written mask is outside what the compiler excepts anyway.
-pub(crate) fn decisive_items(body: &Value, policy_type: i64) -> Value {
-    let mut items = body
-        .get(item_key(policy_type))
-        .cloned()
-        .unwrap_or(Value::Null);
-    if let Some(arr) = items.as_array_mut() {
-        if arr.first().is_some_and(is_lineage_exemption) {
-            arr.remove(0);
-        }
-    }
-    items
-}
-
-/// An item naming only the lineage principal, with `MASK_NONE` (no value
-/// expression) or an empty row filter, and no condition.
-fn is_lineage_exemption(item: &Value) -> bool {
-    let empty = |k: &str| {
-        item.get(k)
-            .is_none_or(|v| v.is_null() || v.as_array().is_some_and(Vec::is_empty))
-    };
-    let only_lineage = item
-        .get("users")
-        .and_then(Value::as_array)
-        .is_some_and(|u| u.len() == 1 && u[0] == egret_core::engine_principals::LINEAGE_PRINCIPAL);
-    let no_transform = match (item.get("dataMaskInfo"), item.get("rowFilterInfo")) {
-        (Some(m), None) => {
-            m.get("dataMaskType").and_then(Value::as_str) == Some("MASK_NONE")
-                && m.get("valueExpr")
-                    .is_none_or(|v| v.is_null() || v.as_str() == Some(""))
-        }
-        (None, Some(f)) => f
-            .get("filterExpr")
-            .is_none_or(|v| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty())),
-        _ => false,
-    };
-    only_lineage && no_transform && empty("groups") && empty("roles") && empty("conditions")
-}
-
 /// Which of the two sub-decisions a colliding pair would arbitrate — the noun
 /// the refusal uses, and the thing the steward has to go and edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -928,7 +876,11 @@ pub fn ambiguous_arbitrations_in<'a>(
         // The decisive bucket, named by the ONE function that maps a policy
         // type to its item key (`admin::item_key`) rather than by a second
         // copy of the two literals.
-        let items = decisive_items(p.body, arbitrated.policy_type());
+        let items = p
+            .body
+            .get(item_key(arbitrated.policy_type()))
+            .cloned()
+            .unwrap_or(Value::Null);
         bands
             .entry((
                 p.service,
@@ -1356,43 +1308,6 @@ mod tests {
             mask("perm-rule-d48f048a", "item", "MASK"),
         ];
         assert_eq!(check(&set), None, "an agreeing tie is not undetermined");
-    }
-
-    fn with_lineage_first((name, mut body): (String, Value), mask_type: &str) -> (String, Value) {
-        let lineage = json!({
-            "users": ["egret-lineage"], "groups": [], "roles": [],
-            "accesses": [{"type": "select", "isAllowed": true}],
-            "dataMaskInfo": {"dataMaskType": mask_type},
-        });
-        body["dataMaskPolicyItems"]
-            .as_array_mut()
-            .unwrap()
-            .insert(0, lineage);
-        (name, body)
-    }
-
-    /// View governance R5: the compiler's leading `egret-lineage` `MASK_NONE`
-    /// item decides that principal alone, so it does not make an agreeing
-    /// pair differ (a compiled mask beside a hand-written twin, or beside one
-    /// compiled before the item existed).
-    #[test]
-    fn the_lineage_exemption_does_not_make_an_agreeing_pair_differ() {
-        let set = [
-            with_lineage_first(mask("perm-rule-47ab3a6a", "item", "MASK"), "MASK_NONE"),
-            mask("hand-written", "item", "MASK"),
-        ];
-        assert_eq!(check(&set), None);
-    }
-
-    /// A leading item for `egret-lineage` that TRANSFORMS is a real decision
-    /// and stays in the comparison.
-    #[test]
-    fn a_lineage_item_that_masks_is_still_compared() {
-        let set = [
-            with_lineage_first(mask("perm-rule-47ab3a6a", "item", "MASK"), "MASK_NULL"),
-            mask("hand-written", "item", "MASK"),
-        ];
-        assert!(check(&set).is_some());
     }
 
     /// The same two masks with different mask TYPES: refused.

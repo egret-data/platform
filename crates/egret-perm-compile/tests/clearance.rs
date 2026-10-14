@@ -312,23 +312,11 @@ async fn a_gated_tag_compiles_to_a_deny_excepting_its_cleared_members() {
 
     // …except the cleared, named by their STORED username.
     let exceptions = body["denyExceptions"].as_array().expect("denyExceptions");
-    // View governance R5: a second item excepts the lineage principal, for
-    // `select` alone, so EXPLAIN can read through the clearance.
-    assert_eq!(
-        exceptions.len(),
-        2,
-        "the cleared item and the lineage item: {body:#}"
-    );
+    assert_eq!(exceptions.len(), 1, "one exception item: {body:#}");
     assert_eq!(
         users_of(&exceptions[0]),
         vec!["clr-cleared".to_string()],
         "the clearing role's members are enumerated, and nobody else is"
-    );
-    assert_eq!(users_of(&exceptions[1]), vec!["egret-lineage".to_string()]);
-    assert_eq!(
-        access_types(&exceptions[1]),
-        vec!["select".to_string()],
-        "the lineage exception never lifts the withheld writes: {body:#}"
     );
     assert_eq!(
         access_types(&exceptions[0]),
@@ -752,8 +740,6 @@ async fn deleting_a_clearing_role_reaps_the_ex_holders_from_deny_exceptions() {
         .expect("denyExceptions")
         .iter()
         .flat_map(users_of)
-        // View governance R5's lineage exception is not a clearance holder.
-        .filter(|u| u != "egret-lineage")
         .collect();
     assert!(
         !excepted.contains(&"clr-exholder".to_string()),

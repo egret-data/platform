@@ -131,34 +131,11 @@ fn a_deny_grants_subtract_compiles_to_deny_exceptions() {
     g.effect = Effect::Deny;
     let out = compile_grant(&g, "warehouse", "trino-1", EngineType::Trino).unwrap();
     assert_eq!(out.items[0].effect, "deny");
-    // The subtract, then (Trino only, view governance R5) the lineage
-    // principal, for the read accesses alone.
-    assert_eq!(out.deny_exceptions.len(), 2);
-    assert_eq!(out.deny_exceptions[0].groups, vec!["contractors"]);
-    assert_eq!(out.deny_exceptions[1].users, vec!["egret-lineage"]);
-    assert_eq!(out.deny_exceptions[1].accesses, vec!["select"]);
+    assert_eq!(out.deny_exceptions.len(), 1);
     assert!(out.allow_exceptions.is_empty());
-
-    let sr = compile_grant(&g, "warehouse", "sr-1", EngineType::StarRocks).unwrap();
-    assert_eq!(
-        sr.deny_exceptions.len(),
-        1,
-        "StarRocks gets no lineage item"
-    );
 }
 
-/// A deny of `write` alone withholds no read access, so the lineage principal
-/// gets no exception from it.
-#[test]
-fn a_write_only_deny_excepts_no_lineage_principal() {
-    let mut g = grant_allow_read(&["finance"], &[]);
-    g.effect = Effect::Deny;
-    g.actions = vec![egret_perm::Action::Write];
-    let out = compile_grant(&g, "warehouse", "trino-1", EngineType::Trino).unwrap();
-    assert!(out.deny_exceptions.is_empty(), "{:?}", out.deny_exceptions);
-}
-
-/// A grant naming the lineage principal is refused: only the compiler decides
+/// A grant naming the lineage principal is refused: only the download transform decides
 /// its access (view governance R5).
 #[test]
 fn a_grant_naming_the_lineage_principal_is_refused() {

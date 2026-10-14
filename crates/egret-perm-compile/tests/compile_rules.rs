@@ -579,15 +579,11 @@ fn an_exempt_user_gets_a_mask_none_item_ahead_of_the_public_item() {
     )
     .unwrap();
     let items = out[0]["dataMaskPolicyItems"].as_array().unwrap();
-    // View governance R5: on Trino the lineage principal's `MASK_NONE` comes
-    // first of all, then the exempt user, then everyone.
-    assert_eq!(items.len(), 3);
-    assert_eq!(items[0]["users"], serde_json::json!(["egret-lineage"]));
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["users"][0], "alice");
     assert_eq!(items[0]["dataMaskInfo"]["dataMaskType"], "MASK_NONE");
-    assert_eq!(items[1]["users"][0], "alice");
-    assert_eq!(items[1]["dataMaskInfo"]["dataMaskType"], "MASK_NONE");
-    assert_eq!(items[2]["groups"][0], "public");
-    assert_eq!(items[2]["dataMaskInfo"]["dataMaskType"], "MASK_HASH");
+    assert_eq!(items[1]["groups"][0], "public");
+    assert_eq!(items[1]["dataMaskInfo"]["dataMaskType"], "MASK_HASH");
 }
 
 #[test]

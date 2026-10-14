@@ -8,9 +8,10 @@
 /// The principal egret runs `EXPLAIN (TYPE IO, FORMAT JSON)` as on Trino to
 /// learn a view's input tables (view governance B1, spec R5).
 ///
-/// The compiler gives it `use` and `select` on every governed catalog and
-/// excepts it from every compiled deny, mask and row filter, so it reads
-/// governed data. Only egret mints a token for it, and egret's lineage client
+/// On the download served to a Trino engine egret provisions in JWT mode
+/// (`egret_policy::lineage_transform`), it gets `use` and `select` on every
+/// governed catalog, is excepted from every deny, mask and row filter, and is
+/// denied everything else, so it reads governed data. Only egret mints a token for it, and egret's lineage client
 /// sends nothing but `EXPLAIN` as it.
 pub const LINEAGE_PRINCIPAL: &str = "egret-lineage";
 

@@ -359,7 +359,14 @@ Each is a design question for the user.
 
 **Files:**
 - Create: `migrations/0187_view_lineage.sql`, `crates/egret-perm-compile/src/lineage.rs`.
-- Modify: the compiler, to emit the `egret-lineage` principal's policy (spec R5, revised 2026-10-14). On Trino profiles it gets `use` and `select` on every governed catalog, and it joins the exceptions of every compiled deny. It is excluded from every compiled mask and row filter: a test asserts that its EXPLAIN outcome on a classified, masked and filtered column is unmasked and unfiltered. Also modify the engine connection code that runs statements on Trino (`git grep -n "fn run_query" crates/egret-query/src`).
+- Modify: the policy DOWNLOAD, not the compiler (spec R5, revised 2026-10-14 in Task 7 fix round 1). `crates/egret-policy/src/lineage_transform.rs` transforms what `download_policies` serves, and `explain` evaluates the same result through `served_artifact_via`. Stored policies never name `egret-lineage`. The transform applies only to a plugin whose `pluginId` names the polled service, on a profile where every bound engine is a Trino engine egret provisions in JWT mode. It does five things:
+  - a leading no-transform `egret-lineage` item in every served mask and row filter, hand-written and tag-based included;
+  - an `egret-lineage` exception, for the reads, from every served deny;
+  - an allow exception for every non-read access type any served allow grants;
+  - `use` and `select` on every attached catalog;
+  - an override deny of every other access type except what EXPLAIN needs.
+
+  Evaluator tests over the transformed download show the principal is allowed, unmasked and unfiltered on classified, masked and filtered columns, compiled and hand-written. They also show it never writes where `{public}` may. An ineligible engine is served the stored policies. Also modify the engine connection code that runs statements on Trino (`git grep -n "fn run_query" crates/egret-query/src`).
 - Test: unit tests in `lineage.rs`, and a DB test.
 
 **Interfaces:**
@@ -371,10 +378,11 @@ Each is a design question for the user.
   - `pub struct ViewRef { catalog: String, schema: String, name: String }`;
   - `pub trait ExplainRunner { async fn explain_io(&self, default_catalog: &str, default_schema: &str, sql: &str) -> Result<serde_json::Value, String>; }`;
   - `pub fn lineage_tables(explain_json: &Value) -> Result<BTreeSet<(String,String,String)>, String>`;
-  - `pub async fn view_tag_set(conn, tables: &BTreeSet<…>) -> Result<BTreeSet<Uuid /*tag id*/>, sqlx::Error>`: the union of the clearance-bearing tags on any column of those tables;
+  - `pub async fn view_tag_set(conn, tables: &BTreeSet<…>) -> Result<BTreeSet<Uuid /*tag id*/>, LineageError>`: the union of the clearance-bearing tags on any column of those tables. An empty set is `Err(Empty)`, never "no tags". `recorded_view_tag_set(conn, view)` errors on a missing or failed lineage;
+  - `write_lineage` refuses an empty set; `recorded_lineage` returns `RecordedLineage::{Missing, Failed{detail}, Computed(set)}`;
   - `pub fn explain_only(sql: &str) -> Result<String, String>`: wraps the statement as `EXPLAIN (TYPE IO, FORMAT JSON) <sql>`.
     - Do not write a lexer: a lexer-based gate has been bypassed four times in this repo.
-    - The defences are, first, Trino's statement protocol, which runs exactly one statement per request, so the wrapped text is an EXPLAIN or a parse error. Second, the principal holds only `use` and `select`.
+    - The defences are, first, Trino's statement protocol, which runs exactly one statement per request, so the wrapped text is an EXPLAIN or a parse error. Second, the principal holds only `use` and `select` (enforced by the download transform's allow exceptions and its override deny).
     - `explain_only` refuses an empty `sql`, and a `sql` whose first keyword after whitespace is `EXPLAIN`, because `EXPLAIN ANALYZE` executes.
     - The runner checks that the response parses as the IO-plan shape.
 
