@@ -2,7 +2,7 @@ import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
   Activity, ChevronDown, ChevronRight, Compass, EyeOff,
-  FolderKanban, Gauge, HardDrive, History, KeyRound, Library, ListChecks, type LucideIcon,
+  FolderKanban, FolderTree, Gauge, HardDrive, History, KeyRound, Library, ListChecks, type LucideIcon,
   PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Search, Server, Settings, Share2, ShieldCheck,
   Tags, UserCheck, UserCog, Users, UsersRound, Workflow,
 } from "lucide-react";
@@ -55,6 +55,7 @@ const EXPLORE_GROUPS: NavGroup[] = [
     items: [
       { label: "Flows", icon: Workflow, to: "workflows/flows", feature: "workflows" },
       { label: "Executions", icon: History, to: "workflows/executions", feature: "workflows" },
+      { label: "Namespaces", icon: FolderTree, to: "workflows/namespaces", feature: "workflows" },
     ],
   },
   {

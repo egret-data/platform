@@ -62,13 +62,25 @@ interface Section {
  * namespace picker is built from the whole list, and "the workspace has no
  * flows" (`EmptyState`) must stay distinguishable from "the filters match
  * none" — both need the unfiltered collection.
+ *
+ * With `pinnedNamespace`, as a namespace's Flows tab (W7d spec §4.2), the list
+ * is that namespace's flows and its children's (`namespaceContains`, the
+ * dot-anchored rule the server's `namespace_prefix` uses), with no page frame
+ * (the namespace page owns the `h1`) and no namespace picker. `GET …/flows`
+ * filters only by an exact namespace, so the subtree is cut here, from the
+ * same cached list the flow page reads.
  */
-export default function FlowsList() {
+export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: string } = {}) {
   const ws = useParams().workspace!;
   const base = `/explore/${ws}/workflows`;
+  const pinned = pinnedNamespace !== undefined;
 
   const query = useWorkflowListFlows(ws, undefined, { query: { queryKey: workflowsKeys.flows(ws) } });
-  const flows: FlowListItemDto[] | undefined = query.data?.status === 200 ? query.data.data : undefined;
+  const allFlows: FlowListItemDto[] | undefined = query.data?.status === 200 ? query.data.data : undefined;
+  const flows = useMemo(
+    () => (pinnedNamespace === undefined ? allFlows : allFlows?.filter((f) => namespaceContains(pinnedNamespace, f.namespace))),
+    [allFlows, pinnedNamespace],
+  );
   const hasData = !!flows && flows.length > 0;
 
   // Filters live in the URL (FE-PAGE-2): a filtered list can be shared and
@@ -76,7 +88,8 @@ export default function FlowsList() {
   // picker pushes one, so Back undoes it.
   const [params, setParams] = useSearchParams();
   const q = params.get("q") ?? "";
-  const nsFilter = params.get("namespace") ?? "";
+  // On a namespace's tab the namespace is fixed; a `namespace` left in the URL is read as absent.
+  const nsFilter = pinned ? "" : (params.get("namespace") ?? "");
   const stateFilter = params.get("state") ?? "";
   const setParam = (key: string, value: string, replace: boolean) =>
     setParams(
@@ -154,15 +167,7 @@ export default function FlowsList() {
 
   const count = (activity: FlowActivity) => filtered.filter((f) => flowActivity(f.state) === activity).length;
 
-  return (
-    <ListPageShell
-      title="Flows"
-      action={
-        <Button asChild>
-          <Link to={`${base}/flows/new`}>New flow</Link>
-        </Button>
-      }
-    >
+  const content = (
       <ListStates
         isLoading={query.isLoading}
         isError={query.isError}
@@ -171,6 +176,19 @@ export default function FlowsList() {
         hasData={hasData}
         skeletonCols={COLS}
         empty={
+          pinned ? (
+            <EmptyState
+              variant="dashed"
+              icon={Workflow}
+              title="No flows in this namespace yet"
+              description="A flow belongs to the namespace its YAML names. Flows of the namespaces below this one are listed here too."
+              action={
+                <Button asChild>
+                  <Link to={`${base}/flows/new`}>New flow</Link>
+                </Button>
+              }
+            />
+          ) : (
           <EmptyState
             variant="dashed"
             icon={Workflow}
@@ -182,6 +200,7 @@ export default function FlowsList() {
               </Button>
             }
           />
+          )
         }
       >
         <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -201,12 +220,14 @@ export default function FlowsList() {
               onChange={(e) => setParam("q", e.target.value, true)}
             />
           </div>
-          <FacetSelect
-            label="Namespace"
-            value={nsFilter || FACET_ALL}
-            onChange={(v) => setParam("namespace", v === FACET_ALL ? "" : v, false)}
-            options={namespaceOptions}
-          />
+          {pinned ? null : (
+            <FacetSelect
+              label="Namespace"
+              value={nsFilter || FACET_ALL}
+              onChange={(v) => setParam("namespace", v === FACET_ALL ? "" : v, false)}
+              options={namespaceOptions}
+            />
+          )}
           <FacetSelect
             label="State"
             value={stateFilter || FACET_ALL}
@@ -292,6 +313,19 @@ export default function FlowsList() {
           </div>
         )}
       </ListStates>
+  );
+
+  if (pinned) return content;
+  return (
+    <ListPageShell
+      title="Flows"
+      action={
+        <Button asChild>
+          <Link to={`${base}/flows/new`}>New flow</Link>
+        </Button>
+      }
+    >
+      {content}
     </ListPageShell>
   );
 }

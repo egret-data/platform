@@ -498,6 +498,16 @@ describe("Sidebar – Workflows group", () => {
     );
   });
 
+  test("lists Namespaces after Executions in the Workflows group (W7d)", async () => {
+    renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () => wsResponse(["sql_lab", "workflows"]));
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Datasets" })).not.toBeInTheDocument());
+    const group = screen.getByRole("button", { name: /^Workflows$/i }).parentElement as HTMLElement;
+    const namespaces = within(group).getByRole("link", { name: "Namespaces" });
+    expect(namespaces).toHaveAttribute("href", "/explore/eng/workflows/namespaces");
+    const executions = within(group).getByRole("link", { name: "Executions" });
+    expect(executions.compareDocumentPosition(namespaces) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   test("hides the whole Workflows group when the workspace lacks workflows", async () => {
     renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () => wsResponse(["sql_lab", "data_api"]));
     await waitFor(() => expect(screen.queryByRole("link", { name: "Flows" })).not.toBeInTheDocument());

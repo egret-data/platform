@@ -49,6 +49,16 @@
  * `ExecutionDetail.tsx` reaches through `lazy()` only. Each
  * `topology` marker was proven by scratch builds (W7c task-4-report.md, "Chunk proof";
  * task-5-report.md for `TopologyTab.tsx`; task-6-report.md for the execution's tab).
+ *
+ * THE NAMESPACE PAGES (W7d Task 4). The namespaces list (`NamespacesList.tsx`) is in the area's
+ * chunk with the flow list. The namespace detail (`NamespaceDetail.tsx`, with its Overview) is a
+ * `lazy()` split like the flow pages: markers flagged `namespace` stay out of the entry and out of
+ * the flow list's chunk. Its Dependencies, Files and KV tabs are slots it reaches through `lazy()`
+ * only (Tasks 5–8 fill them with xyflow, Monaco and the KV forms): markers flagged `namespace-tab`
+ * must also stay out of what loads with the namespace detail's chunk (found by its marker,
+ * `NAMESPACE_HOST`). `namespaceTabs.ts` has no literal worth a marker (its strings are tab ids and
+ * labels other pages spell too) and is NOT guarded here. Each marker was proven by a scratch static
+ * import (W7d task-4-report.md, "Bundle guard").
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -58,6 +68,8 @@ const DIST = "dist";
 const LIST_MARKER = "egret.wf.ns-collapsed.";
 /** The pages whose chunks must not carry a `topology` marker: their markers below. */
 const TOPOLOGY_HOSTS = ["Changes since v", "Edits made to the flow since it ran are not used."];
+/** The namespace detail's marker: the chunk whose loads must not carry a `namespace-tab` marker. */
+const NAMESPACE_HOST = "Nothing lives in it any more, or the link points to another workspace.";
 const ASSETS = join(DIST, "assets");
 /**
  * `[module, marker, flag?]`: the module the marker proves stayed lazy. `editor` modules must also
@@ -155,6 +167,17 @@ const MARKERS = [
   // also stands for `layout.ts`, see above).
   ["node_modules/@xyflow/react (via TopologyView.tsx)", "react-flow__viewport-portal", "topology"],
   ["node_modules/@dagrejs/dagre (via layout.ts)", "network-simplex", "topology"],
+  // The namespaces list (W7d Task 4), in the area's chunk: `PARENT_ONLY_TITLE`.
+  ["src/routes/workflows/NamespacesList.tsx", "it is listed because a namespace below it holds flows, files or keys."],
+  // The namespace detail and its Overview, a lazy chunk of their own: the not-found sentence and
+  // the counts' note.
+  ["src/routes/workflows/NamespaceDetail.tsx", NAMESPACE_HOST, "namespace"],
+  ["src/components/workflows/namespaces/NamespaceOverview.tsx", "Counted in this namespace only; each child namespace counts its own.", "namespace"],
+  // The three tab slots, each its own lazy chunk. Placeholders until Tasks 5–8: a task that
+  // replaces a slot's body replaces its marker here too (a stale marker fails below).
+  ["src/components/workflows/namespaces/NamespaceDependenciesTab.tsx", "the flows they call is not available yet.", "namespace-tab"],
+  ["src/components/workflows/namespaces/NamespaceFilesTab.tsx", "files cannot be browsed here yet.", "namespace-tab"],
+  ["src/components/workflows/namespaces/NamespaceKvTab.tsx", "KV keys cannot be managed here yet.", "namespace-tab"],
 ];
 
 const entry = entryChunkName(DIST);
@@ -208,6 +231,13 @@ const hostChunks = TOPOLOGY_HOSTS.map((marker) => {
 });
 const hostLoads = hostChunks.map((host) => (host ? loadedWith(host) : []));
 
+const namespaceHosts = others.filter((f) => readFileSync(join(ASSETS, f), "utf8").includes(NAMESPACE_HOST));
+if (namespaceHosts.length !== 1) {
+  console.error(`✗ ${NAMESPACE_HOST} is in ${namespaceHosts.length} non-entry chunks (${namespaceHosts.join(", ") || "none"}); the namespace tabs' own-chunk check cannot run.`);
+  failed = true;
+}
+const namespaceLoads = namespaceHosts.length === 1 ? loadedWith(namespaceHosts[0]) : [];
+
 for (const [module, marker, flag] of MARKERS) {
   const carriers = others.filter((f) => readFileSync(join(ASSETS, f), "utf8").includes(marker));
   if (flag === "topology") {
@@ -222,12 +252,23 @@ for (const [module, marker, flag] of MARKERS) {
       }
     }
   }
+  if (flag === "namespace-tab") {
+    const loaded = carriers.filter((f) => namespaceLoads.includes(f));
+    if (loaded.length > 0) {
+      console.error(
+        `✗ ${marker} (${module}) loads with the namespace detail (${namespaceHosts[0]}, in ${loaded.join(", ")}).\n` +
+          `  A namespace tab's slot is its own chunk: NamespaceDetail.tsx reaches it through lazy(), never a static import.`,
+      );
+      failed = true;
+    }
+  }
   const withList = carriers.filter((f) => listLoads.includes(f));
   if (flag && withList.length > 0) {
     console.error(
       `✗ ${marker} (${module}) loads with the flow list's chunk (${listChunk}, in ${withList.join(", ")}).\n` +
-        `  The flow editor now loads with the flow list. Look for a static import of it from\n` +
-        `  FlowsList.tsx or WorkflowsRoutes.tsx; the flow pages are reached through lazy().`,
+        `  A lazy page (the flow editor, the execution or namespace detail) now loads with the flow\n` +
+        `  list. Look for a static import of it from FlowsList.tsx, NamespacesList.tsx or\n` +
+        `  WorkflowsRoutes.tsx; those pages are reached through lazy().`,
     );
     failed = true;
   }
@@ -259,5 +300,7 @@ console.log(
     `${MARKERS.length} module markers found in lazy chunks.\n` +
     `✓ The flow editor stays out of the flow list's chunk (${listChunk}); ` +
     `${MARKERS.filter((m) => m[2] === "editor").length} editor markers checked.\n` +
-    `✓ The topology stays in its own chunk: ${topologyCount} topology markers checked.`,
+    `✓ The topology stays in its own chunk: ${topologyCount} topology markers checked.\n` +
+    `✓ The namespace tabs' slots stay out of the namespace detail's chunk (${namespaceHosts[0]}); ` +
+    `${MARKERS.filter((m) => m[2] === "namespace-tab").length} slot markers checked.`,
 );

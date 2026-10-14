@@ -52,6 +52,23 @@ export const workflowsKeys = {
    * the request: a time preset is turned into `since` at fetch time, so the key
    * stays the same between polls. Without `params` it reaches every page.
    */
+  /**
+   * The namespaces list (`GET …/namespaces`, W7d spec §3.1), and with
+   * `prefix` one subtree of it (the Overview's child namespaces). Without
+   * `prefix` the key is a prefix of every subtree's, so invalidating it
+   * reaches them all.
+   */
+  namespaces: (ws: string, prefix?: string) =>
+    prefix === undefined
+      ? (["workflows", "ws", ws, "namespaces"] as const)
+      : (["workflows", "ws", ws, "namespaces", { prefix }] as const),
+  /**
+   * One namespace (`GET …/namespaces/{ns}`). Under `ws`: a namespace is a name,
+   * not a UUID, and repeats across workspaces. Placed beside the list rather
+   * than under it, so a subtree's key never collides with a namespace called
+   * like a filter.
+   */
+  namespace: (ws: string, namespace: string) => ["workflows", "ws", ws, "namespace", namespace] as const,
   executions: (ws: string, params?: object) =>
     params
       ? (["workflows", "ws", ws, "executions", params] as const)
