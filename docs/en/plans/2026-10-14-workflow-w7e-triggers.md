@@ -157,7 +157,7 @@ pub fn ticks_through(&self, from: DateTime<Utc>, at: DateTime<Utc>, cap: u32) ->
 - [ ] **Step 1: Write the tests (red).**
   1. `models`: a `Schedule` with `recoverMissedSchedules: LAST` parses to `Some(json!("LAST"))` and re-serialises byte-for-byte to the same key; absent stays absent on re-serialisation (extend the round-trip test that covers `lateMaximumDelay`; find it with `grep -n late_maximum_delay crates/egret-workflow/src/models`).
   2. `RecoverMissed::from_model`: `None` → `All`; `"ALL"`, `"NONE"`, `"LAST"` → their variants; `"all"`, `true`, `1`, `"SOME"` → `Err`.
-  3. `last_tick_at_or_before` with `*/15 * * * *`: at `10:07` → `10:00`; at exactly `10:15:00` → `10:15` (the case `last_before` alone gets wrong); with `timezone: Asia/Ho_Chi_Minh` and `0 2 * * *` at `2026-06-15T20:00Z` → `2026-06-14T19:00Z`.
+  3. `last_tick_at_or_before` with `*/15 * * * *`: at `10:07` → `10:00`; at exactly `10:15:00` → `10:15` (the case `last_before` alone gets wrong); with `timezone: Asia/Ho_Chi_Minh` and `0 2 * * *` at `2026-06-15T20:00Z` → `2026-06-15T19:00Z` (03:00 local on 06-16; corrected after Task 1).
   4. `ticks_through` with `*/1 * * * *`: `from = 10:00`, `at = 10:04:30` → `(5, false)`; `from > at` → `(0, false)`; `from = 10:00`, `at = 10:00` → `(1, false)`; with `cap = 3` over 5 ticks → `(3, true)`.
   5. `validate`: two triggers with id `t` (one `Schedule`, one `Webhook`) give exactly one `duplicate_trigger_id` error at `triggers.t`; distinct ids give none; `validate_for_run` on the same flow does **not** report it (the save-only placement is pinned).
   6. Mutation: move the check into `validate_for_run`; test 5's last assertion fails. Record it.
