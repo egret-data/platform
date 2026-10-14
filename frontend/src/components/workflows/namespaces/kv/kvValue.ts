@@ -230,26 +230,88 @@ export function checkKey(key: string): string | null {
 /** The longest TTL the server takes: 365,250 days (W9c `MAX_TTL_DAYS`). */
 const MAX_TTL_SECONDS = 365_250 * 86_400;
 
+/** Rust's `f64::from_str`: a decimal with an optional exponent, or `inf`/`infinity`/`nan`, signed. */
+function rustF64(text: string): number | null {
+  if (!/^[+-]?(?:inf|infinity|nan|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)$/i.test(text)) return null;
+  const unsigned = text.replace(/^[+-]/, "").toLowerCase();
+  const sign = text.startsWith("-") ? -1 : 1;
+  if (unsigned === "nan") return Number.NaN;
+  if (unsigned === "inf" || unsigned === "infinity") return sign * Number.POSITIVE_INFINITY;
+  return Number(text);
+}
+
 /**
- * A custom TTL, judged as the `ttl` header is (`parse_ttl`, `Ttl::Header`):
- * `java.time.Duration` text of whole days, hours and minutes and of seconds, not
- * negative, at most 1,000 years. Zero is refused here although the server
+ * egret's TTL grammar, `executor::parse_duration`
+ * (`crates/egret-workflow/src/executor/retry.rs:518`), which `parse_ttl`
+ * (`storage/kv/value.rs:1490`) applies to the `ttl` header: the seconds it
+ * reads, or null where it answers `None`.
+ *
+ * Its rules, as written there: the text is trimmed; a leading `-` is refused
+ * and a `+` dropped; then `P`/`p`; the part before the first `T`/`t` holds
+ * days only (`<n>D`); after it, hours, minutes and seconds in that order,
+ * each found at the first occurrence of its letter (either case). Each number
+ * is an `f64` as Rust reads one, so EVERY unit takes a fraction or an
+ * exponent (`P1.5D`, `PT1e3S`; Java's `Duration.parse` takes a fraction on
+ * seconds only). At least one unit; nothing left over; and a total that
+ * `Duration::try_from_secs_f64` and `TimeDelta::from_std` hold.
+ */
+export function egretTtlSeconds(source: string): number | null {
+  let s = source.trim();
+  if (s.startsWith("-")) return null;
+  if (s.startsWith("+")) s = s.slice(1);
+  if (!/^[Pp]/.test(s)) return null;
+  s = s.slice(1);
+  const at = s.search(/[Tt]/);
+  const days = at >= 0 ? s.slice(0, at) : s;
+  let rest = at >= 0 ? s.slice(at + 1) : "";
+  let total = 0;
+  let fields = 0;
+  // `take_unit`: `<number><unit>` up to the unit's first occurrence, when it occurs.
+  const take = (text: string, unit: RegExp): { value: number; left: string } | null => {
+    const i = text.search(unit);
+    if (i < 0) return { value: 0, left: text };
+    const value = rustF64(text.slice(0, i));
+    if (value === null || !(value >= 0)) return null;
+    fields += 1;
+    return { value, left: text.slice(i + 1) };
+  };
+  if (days) {
+    const d = take(days, /[Dd]/);
+    if (!d || d.left) return null;
+    total += d.value * 86_400;
+  }
+  for (const [unit, per] of [[/[Hh]/, 3_600], [/[Mm]/, 60], [/[Ss]/, 1]] as const) {
+    const u = take(rest, unit);
+    if (!u) return null;
+    total += u.value * per;
+    rest = u.left;
+  }
+  if (rest || fields === 0) return null;
+  // `try_from_secs_f64` (finite, within u64 seconds), then `TimeDelta::from_std` (i64 milliseconds).
+  if (!Number.isFinite(total) || total >= 2 ** 64 || total * 1000 > 2 ** 63) return null;
+  return total;
+}
+
+/**
+ * A custom TTL, judged as the `ttl` header is (`parse_ttl` with
+ * `Ttl::Header`, `storage/kv/value.rs:1490`): a leading `-` makes it
+ * negative, which is refused; the rest is {@link egretTtlSeconds}; at most
+ * 365,250 days (`MAX_TTL_DAYS`). Zero is refused here although the server
  * takes it: the key would expire as it is written.
  */
 export function checkTtl(text: string): string | null {
-  const t = text.trim();
-  if (t.startsWith("-")) return "A TTL cannot be negative. Enter how long the key lives, such as PT1H.";
-  // Whole days, hours and minutes; only seconds take a fraction, as in
-  // `java.time.Duration.parse` (Kestra's reading of a TTL). egret's own
-  // `parse_duration` also takes `P1.5D`; the form keeps to Java's grammar.
-  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/i.exec(t);
-  if (!m || !m.slice(1).some((x) => x !== undefined)) {
-    return "Enter an ISO-8601 duration of whole days, hours or minutes, or of seconds, such as PT30M, PT1H, P7D or PT1.5S.";
+  // `fetch` trims a header value, so the server reads it trimmed.
+  const raw = text.trim();
+  const negative = raw.startsWith("-") && !/^-[-+]/.test(raw);
+  const seconds = egretTtlSeconds(negative ? raw.slice(1) : raw);
+  if (seconds === null) {
+    return "Enter a duration such as PT30M, PT12H, P7D or P1.5D: P, then days, then T and hours, minutes or seconds.";
   }
-  const [, d = "0", h = "0", min = "0", s = "0"] = m;
-  const seconds = Number(d) * 86_400 + Number(h) * 3_600 + Number(min) * 60 + Number(s);
+  if (!negative && seconds > MAX_TTL_SECONDS) {
+    return "A TTL is at most 365,250 days (1,000 years). Choose a shorter one, or Never.";
+  }
+  if (negative && seconds > 0) return "A TTL cannot be negative. Enter how long the key lives, such as PT1H.";
   if (seconds === 0) return "A TTL of zero expires the key at once. Choose Never, or a longer TTL.";
-  if (seconds > MAX_TTL_SECONDS) return "A TTL is at most 365,250 days (1,000 years). Choose a shorter one, or Never.";
   return null;
 }
 

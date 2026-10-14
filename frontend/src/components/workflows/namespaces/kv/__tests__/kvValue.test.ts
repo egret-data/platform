@@ -199,19 +199,34 @@ describe("checkKey: W9c's key rule", () => {
 });
 
 describe("checkTtl: the `ttl` header's rules", () => {
-  it("accepts an ISO-8601 duration of days, hours, minutes and seconds", () => {
-    for (const text of ["PT1H", "P1D", "PT30M", "PT1.5S", "P1DT12H", "pt5m"]) expect(checkTtl(text), text).toBeNull();
+  // egret's own grammar: `executor::parse_duration` (crates/egret-workflow/src/executor/retry.rs:518)
+  // under `parse_ttl` (storage/kv/value.rs:1490). Each number is a Rust f64, so every unit takes a
+  // fraction or an exponent (Java's `Duration.parse` would refuse `P1.5D`; egret does not).
+  it("accepts what egret's parser accepts", () => {
+    for (const text of [
+      "PT1H", "P1D", "PT30M", "P1DT12H", "pt5m", "P2dT3h",
+      "P1.5D", "PT1.5H", "PT1.5M", "PT1.5S", "P0.5DT1H", "P.5D", "PT5.S", "PT1e3S",
+      "P1DT", "+PT1H", " PT1H ",
+    ]) {
+      expect(checkTtl(text), text).toBeNull();
+    }
   });
 
-  it("refuses a negative one, a malformed one, zero and over 1,000 years", () => {
+  it("refuses what egret's parser refuses", () => {
+    for (const text of [
+      "", "1h", "P", "PT", "P1W", "P1M", "PTH", "PT1S2", "PT1X", "PT30S1M", "P1H",
+      "PT-1S", "PTinfS", "PTnanS", "--PT1H", "PT1e20S", "P1,5D",
+    ]) {
+      expect(checkTtl(text), text).toMatch(/Enter a duration/);
+    }
+  });
+
+  it("refuses a negative one, zero and over 1,000 years", () => {
     expect(checkTtl("-PT1H")).toMatch(/cannot be negative/);
-    for (const text of ["", "1h", "P1W", "P1M", "PT", "P", "PTxS"]) expect(checkTtl(text), text).toMatch(/ISO-8601/);
-    // A fraction only on seconds, as Java's Duration.parse reads a TTL.
-    for (const text of ["P1.5D", "PT1.5H", "PT1.5M", "P0.5DT1H"]) expect(checkTtl(text), text).toMatch(/ISO-8601/);
-    expect(checkTtl("PT1.5S")).toBeNull();
-    expect(checkTtl("P1DT1H1M0.25S")).toBeNull();
     expect(checkTtl("PT0S")).toMatch(/expires the key at once/);
+    expect(checkTtl("-PT0S")).toMatch(/expires the key at once/);
     expect(checkTtl("P365250D")).toBeNull();
+    expect(checkTtl("P365250DT0.5S")).toMatch(/1,000 years/);
     expect(checkTtl("P365251D")).toMatch(/1,000 years/);
   });
 

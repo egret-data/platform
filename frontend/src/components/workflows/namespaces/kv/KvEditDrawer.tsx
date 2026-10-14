@@ -380,7 +380,7 @@ function KvForm({
                 onChange={(e) => update({ ttlCustom: e.target.value })}
               />
               <p id="kv-ttl-custom-help" className="text-xs text-muted-foreground">
-                An ISO-8601 duration: PT30M, PT12H, P7D, P1DT12H.
+                A duration: PT30M, PT12H, P7D, P1DT12H, P1.5D.
               </p>
               {show(ttlError) ? (
                 <p id="kv-ttl-error" className="text-sm text-destructive">
