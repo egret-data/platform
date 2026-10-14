@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -20,6 +20,9 @@ const ROWS = [
   nsRow("company", { own: false }),
 ];
 
+/** The last `renderList`'s client, to make the page refetch. */
+let lastClient: QueryClient;
+
 function Where() {
   const l = useLocation();
   return <output data-testid="where">{`${l.pathname}${l.search}`}</output>;
@@ -27,6 +30,7 @@ function Where() {
 
 function renderList(search = "") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  lastClient = client;
   return render(
     <QueryClientProvider client={client}>
       <TooltipProvider>
@@ -52,7 +56,7 @@ function renderList(search = "") {
 const table = () => screen.getByTestId("namespaces-table");
 const bodyRows = () => within(table()).getAllByRole("row").slice(1);
 /** A row's cells as text: name cell first, then the counts. */
-const rowText = (row: HTMLElement) => within(row).getAllByRole("cell").map((c) => c.textContent);
+const rowText = (row: HTMLElement) => within(row).getAllByRole("gridcell").map((c) => c.textContent);
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -77,7 +81,13 @@ describe("NamespacesList: the tree", () => {
     serveNamespaces({ namespaces: ROWS });
     renderList();
     await screen.findByTestId("namespaces-table");
-    expect(screen.getByRole("table", { name: "Counted in this namespace only; each child namespace counts its own." })).toBe(table());
+    const grid = screen.getByRole("treegrid", { name: "Namespaces" });
+    expect(grid).toBe(table());
+    // The caption, then the key help, each once.
+    expect(grid).toHaveAccessibleDescription(
+      "Counted in this namespace only; each child namespace counts its own. " +
+        "Arrow keys move through the namespaces. Right expands, Left collapses, and Enter opens a namespace.",
+    );
   });
 
   it("indents a child deeper than its parent", async () => {
@@ -188,5 +198,225 @@ describe("NamespacesList: states", () => {
     renderList();
     expect(await screen.findByText(/the database is unavailable/)).toBeInTheDocument();
     expect(screen.queryByText("No namespaces yet")).toBeNull();
+  });
+});
+
+/** The body row whose link names `ns`. */
+const rowOf = (ns: string) => {
+  const row = bodyRows().find((r) => within(r).getByRole("link").getAttribute("aria-label") === ns);
+  if (!row) throw new Error(`no row for ${ns}`);
+  return row;
+};
+/** The namespaces of the rows on screen, in order. */
+const shown = () => bodyRows().map((r) => within(r).getByRole("link").getAttribute("aria-label"));
+
+/**
+ * WAI-ARIA's treegrid pattern: a table whose rows form a tree. One row takes
+ * Tab; the arrows walk the rows; Right expands or enters, Left collapses or
+ * goes to the parent.
+ */
+describe("NamespacesList: treegrid semantics and keys", () => {
+  it("gives every row its level, its place among its siblings, and expanded only when it has children", async () => {
+    serveNamespaces({ namespaces: ROWS });
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    const attrs = (ns: string) => {
+      const r = rowOf(ns);
+      return [r.getAttribute("aria-level"), r.getAttribute("aria-posinset"), r.getAttribute("aria-setsize"), r.getAttribute("aria-expanded")];
+    };
+    expect(attrs("company")).toEqual(["1", "1", "2", "true"]);
+    expect(attrs("company.data")).toEqual(["2", "1", "2", null]);
+    expect(attrs("company.team")).toEqual(["2", "2", "2", "true"]);
+    expect(attrs("company.team.etl")).toEqual(["3", "1", "1", null]);
+    expect(attrs("companyx")).toEqual(["1", "2", "2", null]);
+    // The header row is not a tree node.
+    expect(within(table()).getAllByRole("row")[0]).not.toHaveAttribute("aria-level");
+  });
+
+  it("takes one Tab stop: the first row, and no link inside the grid", async () => {
+    serveNamespaces({ namespaces: ROWS });
+    const user = userEvent.setup();
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    expect(bodyRows().map((r) => r.tabIndex)).toEqual([0, -1, -1, -1, -1]);
+    for (const r of bodyRows()) expect(within(r).getByRole("link")).toHaveAttribute("tabindex", "-1");
+
+    screen.getByLabelText("Namespace").focus();
+    await user.tab();
+    expect(rowOf("company")).toHaveFocus();
+    await user.tab();
+    expect(table()).not.toContainElement(document.activeElement as HTMLElement);
+  });
+
+  it("walks the rows with Down, Up, Home and End, and the Tab stop follows", async () => {
+    serveNamespaces({ namespaces: ROWS });
+    const user = userEvent.setup();
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    rowOf("company").focus();
+    await user.keyboard("{ArrowDown}");
+    expect(rowOf("company.data")).toHaveFocus();
+    await user.keyboard("{ArrowDown}{ArrowDown}");
+    expect(rowOf("company.team.etl")).toHaveFocus();
+    await user.keyboard("{ArrowUp}");
+    expect(rowOf("company.team")).toHaveFocus();
+    expect(bodyRows().map((r) => r.tabIndex)).toEqual([-1, -1, 0, -1, -1]);
+    await user.keyboard("{End}");
+    expect(rowOf("companyx")).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+    expect(rowOf("companyx")).toHaveFocus();
+    await user.keyboard("{Home}");
+    expect(rowOf("company")).toHaveFocus();
+    await user.keyboard("{ArrowUp}");
+    expect(rowOf("company")).toHaveFocus();
+  });
+
+  it("Right enters an expanded row; Left goes to the parent, then collapses; Right expands again", async () => {
+    serveNamespaces({ namespaces: ROWS });
+    const user = userEvent.setup();
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    rowOf("company.team").focus();
+    await user.keyboard("{ArrowRight}");
+    expect(rowOf("company.team.etl")).toHaveFocus();
+    // A leaf: Right does nothing.
+    await user.keyboard("{ArrowRight}");
+    expect(rowOf("company.team.etl")).toHaveFocus();
+
+    await user.keyboard("{ArrowLeft}");
+    expect(rowOf("company.team")).toHaveFocus();
+    await user.keyboard("{ArrowLeft}");
+    expect(rowOf("company.team")).toHaveAttribute("aria-expanded", "false");
+    expect(rowOf("company.team")).toHaveFocus();
+    expect(shown()).toEqual(["company", "company.data", "company.team", "companyx"]);
+    await user.keyboard("{ArrowLeft}");
+    expect(rowOf("company")).toHaveFocus();
+    await user.keyboard("{ArrowLeft}");
+    expect(rowOf("company")).toHaveAttribute("aria-expanded", "false");
+    expect(shown()).toEqual(["company", "companyx"]);
+    // A collapsed row's Down skips what it hides.
+    await user.keyboard("{ArrowDown}");
+    expect(rowOf("companyx")).toHaveFocus();
+    // A root leaf: Left does nothing.
+    await user.keyboard("{ArrowLeft}");
+    expect(rowOf("companyx")).toHaveFocus();
+
+    await user.keyboard("{ArrowUp}{ArrowRight}");
+    expect(rowOf("company")).toHaveAttribute("aria-expanded", "true");
+    expect(rowOf("company")).toHaveFocus();
+    // company.team was folded on its own and stays folded.
+    expect(shown()).toEqual(["company", "company.data", "company.team", "companyx"]);
+  });
+
+  it("opens the focused row's namespace with Enter", async () => {
+    serveNamespaces({ namespaces: ROWS });
+    const user = userEvent.setup();
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    rowOf("company.data").focus();
+    await user.keyboard("{Enter}");
+    expect(screen.getByTestId("where")).toHaveTextContent(`/explore/${NS_WS}/workflows/namespaces/company.data/overview`);
+  });
+
+  it("collapses and expands from the chevron, for the mouse, without a Tab stop", async () => {
+    serveNamespaces({ namespaces: ROWS });
+    const user = userEvent.setup();
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    const toggle = within(rowOf("company.team")).getByRole("button", { name: "Collapse company.team" });
+    expect(toggle).toHaveAttribute("tabindex", "-1");
+    // Leaves have no chevron.
+    expect(within(rowOf("companyx")).queryByRole("button")).toBeNull();
+    await user.click(toggle);
+    expect(rowOf("company.team")).toHaveAttribute("aria-expanded", "false");
+    // Focus lands on the row, not the chevron, so the arrows work next.
+    expect(rowOf("company.team")).toHaveFocus();
+    expect(shown()).not.toContain("company.team.etl");
+    await user.click(within(rowOf("company.team")).getByRole("button", { name: "Expand company.team" }));
+    expect(shown()).toContain("company.team.etl");
+  });
+});
+
+describe("NamespacesList: focus survives re-renders", () => {
+  it("does not pull focus back after a move to the row already focused (Home on the first row)", async () => {
+    const world = { namespaces: [...ROWS] };
+    serveNamespaces(world);
+    const user = userEvent.setup();
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    rowOf("company").focus();
+    await user.keyboard("{Home}");
+    expect(rowOf("company")).toHaveFocus();
+
+    // The user leaves the grid, then the list refetches with a new namespace.
+    const picker = screen.getByLabelText("Namespace");
+    picker.focus();
+    world.namespaces.push(nsRow("zeta", { flows: 1 }));
+    await act(() => lastClient.invalidateQueries());
+    await screen.findByRole("link", { name: "zeta" });
+    expect(picker).toHaveFocus();
+  });
+
+  it("moves focus to the row above when a refetch removes the focused row", async () => {
+    const world = { namespaces: [...ROWS] };
+    serveNamespaces(world);
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    rowOf("company.team.etl").focus();
+    world.namespaces = world.namespaces.filter((r) => r.namespace !== "company.team.etl");
+    await act(() => lastClient.invalidateQueries());
+    await waitFor(() => expect(shown()).not.toContain("company.team.etl"));
+    expect(rowOf("company.team")).toHaveFocus();
+    expect(rowOf("company.team").tabIndex).toBe(0);
+  });
+
+  it("leaves focus on the page when the user left the grid before the row went", async () => {
+    const world = { namespaces: [...ROWS] };
+    serveNamespaces(world);
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    const etl = rowOf("company.team.etl");
+    etl.focus();
+    // Tab past the last stop, or a click on blank page: a blur with no relatedTarget.
+    etl.blur();
+    expect(document.body).toHaveFocus();
+    world.namespaces = world.namespaces.filter((r) => r.namespace !== "company.team.etl");
+    await act(() => lastClient.invalidateQueries());
+    await waitFor(() => expect(shown()).not.toContain("company.team.etl"));
+    expect(document.body).toHaveFocus();
+  });
+
+  it("leaves focus alone when the removed row was not focused", async () => {
+    const world = { namespaces: [...ROWS] };
+    serveNamespaces(world);
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    rowOf("companyx").focus();
+    const picker = screen.getByLabelText("Namespace");
+    picker.focus();
+    world.namespaces = world.namespaces.filter((r) => r.namespace !== "companyx");
+    await act(() => lastClient.invalidateQueries());
+    await waitFor(() => expect(shown()).not.toContain("companyx"));
+    expect(picker).toHaveFocus();
+  });
+});
+
+describe("NamespacesList: modified keys belong to the browser", () => {
+  it("lets Alt+Left and Cmd+Left through, and Cmd/Ctrl+Enter does not navigate in place", async () => {
+    serveNamespaces({ namespaces: ROWS });
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    const etl = rowOf("company.team.etl");
+    etl.focus();
+    // `fireEvent` answers false when the handler called preventDefault.
+    expect(fireEvent.keyDown(etl, { key: "ArrowLeft", altKey: true })).toBe(true);
+    expect(fireEvent.keyDown(etl, { key: "ArrowLeft", metaKey: true })).toBe(true);
+    expect(etl).toHaveFocus();
+    expect(fireEvent.keyDown(etl, { key: "Enter", metaKey: true })).toBe(true);
+    expect(fireEvent.keyDown(etl, { key: "Enter", ctrlKey: true })).toBe(true);
+    expect(screen.getByTestId("where")).toHaveTextContent(/\/namespaces$/);
+    // Unmodified, the same keys still act.
+    expect(fireEvent.keyDown(etl, { key: "ArrowLeft" })).toBe(false);
+    expect(rowOf("company.team")).toHaveFocus();
   });
 });

@@ -153,7 +153,7 @@ URL viết kebab-case và thuộc workspace, dưới `/explore/:workspace/…`.
 ## 8. Truy cập (FE-A11Y)
 
 #### FE-A11Y-1 — Qua bộ rule recommended của jsx-a11y · PHẢI
-Code qua được bộ rule recommended của `eslint-plugin-jsx-a11y-x` (bản fork được bảo trì của `eslint-plugin-jsx-a11y`; mã rule viết là `jsx-a11y/…`). `jsx-a11y/no-autofocus` tắt; xem FE-A11Y-6. `jsx-a11y/no-redundant-roles` cho phép `role="list"` trên `<ul>` và `<ol>`: Safari với VoiceOver bỏ role list của một danh sách khi CSS bỏ kiểu danh sách của nó, như bộ reset của Tailwind làm. `jsx-a11y/no-noninteractive-tabindex` cũng cho phép `tabIndex` trên `role="log"`, cho vùng log cuộn được của FE-A11Y-3.
+Code qua được bộ rule recommended của `eslint-plugin-jsx-a11y-x` (bản fork được bảo trì của `eslint-plugin-jsx-a11y`; mã rule viết là `jsx-a11y/…`). `jsx-a11y/no-autofocus` tắt; xem FE-A11Y-6. `jsx-a11y/no-redundant-roles` cho phép `role="list"` trên `<ul>` và `<ol>`: Safari với VoiceOver bỏ role list của một danh sách khi CSS bỏ kiểu danh sách của nó, như bộ reset của Tailwind làm. `jsx-a11y/no-noninteractive-tabindex` cũng cho phép `tabIndex` trên `role="log"`, cho vùng log cuộn được của FE-A11Y-3. `jsx-a11y/no-noninteractive-element-to-interactive-role` cũng cho phép `role="treegrid"` trên `<table>`: treegrid là một bảng có các hàng tạo thành cây, như danh sách namespace.
 **Làm thế này:** sửa những gì lint báo; cấu hình nằm ở `frontend/eslint-rules/plugins.js`. **Kiểm bằng:** lint (jsx-a11y).
 
 #### FE-A11Y-2 — Ring focus dùng chung, đạt 3:1 · PHẢI

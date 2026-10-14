@@ -133,11 +133,19 @@ export function SqlEditor({ value, onChange, schemaWords, schema, onRun, onSelec
     // A second mount replaces the editor: what the first registered goes first.
     disposables.current.forEach((d) => d.dispose());
     disposables.current = [];
+    // **Answers only for this editor's model.** Monaco keeps completion
+    // providers per LANGUAGE and asks every `sql` provider for every SQL model,
+    // merging the answers (`suggest.js` `provideSuggestionItems`), so with two
+    // SqlEditors mounted each would offer the other's schema and every keyword
+    // twice. The model is read at call time, not captured, so a model swapped
+    // under the editor is still answered.
     disposables.current.push(
       monaco.languages.registerCompletionItemProvider("sql", {
         triggerCharacters: ["."],
         provideCompletionItems: (model: MonacoNS.editor.ITextModel, position: MonacoNS.Position) =>
-          completionsFor(monaco, model, position, schemaRef.current, wordsRef.current),
+          model === editor.getModel()
+            ? completionsFor(monaco, model, position, schemaRef.current, wordsRef.current)
+            : { suggestions: [] },
       }),
     );
     // Cmd/Ctrl+Enter → run the selection (if any) else the whole editor.
