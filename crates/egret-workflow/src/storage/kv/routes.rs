@@ -489,6 +489,44 @@ fn header_text(headers: &axum::http::HeaderMap, name: &str) -> Result<Option<Str
         .transpose()
 }
 
+/// The `code` of the 409 a create-only PUT (`If-None-Match: *`) answers when
+/// the key is live (follow-up to W7d).
+pub const KV_EXISTS_CODE: &str = "kv_exists";
+
+/// Whether the PUT is create-only: `If-None-Match: *`. KV keys have no entity
+/// tags, so any other value (a tag, a list, an empty one) could only be
+/// misread and is 400. Absent: the PUT overwrites, as it always did.
+fn create_only(headers: &axum::http::HeaderMap) -> Result<bool, Response> {
+    let mut any = false;
+    for v in headers.get_all(axum::http::header::IF_NONE_MATCH) {
+        if v.as_bytes().trim_ascii() != b"*" {
+            return Err(bad_request(
+                "If-None-Match on a KV write takes only \"*\"".into(),
+            ));
+        }
+        any = true;
+    }
+    Ok(any)
+}
+
+/// The 409 `kv_exists` of a create-only PUT refused by a live key.
+fn kv_exists(grant: &Grant, key: &KvKey, live: &KvEntry) -> Response {
+    use axum::response::IntoResponse as _;
+    (
+        StatusCode::CONFLICT,
+        Json(egret_core::http::ErrorBody {
+            error: Error::Conflict(format!(
+                "key '{key}' already exists in namespace '{}' (revision {}); nothing was written",
+                grant.namespace(),
+                live.revision
+            ))
+            .to_string(),
+            code: Some(KV_EXISTS_CODE.to_string()),
+        }),
+    )
+        .into_response()
+}
+
 /// A body over `max_read_bytes`: the request's refusal, naming the cap.
 fn body_too_large(cap: u64) -> Response {
     refuse(
@@ -578,18 +616,19 @@ fn body_refusal(e: ApiBodyError) -> Response {
         ("key" = String, Path, description = "The key: `[a-zA-Z0-9][a-zA-Z0-9._-]*`, at most 350 bytes (`inheritance` included)"),
         ("description" = Option<String>, Header, description = "The key's description, stored with this revision (`\"\"` is kept as given)."),
         ("ttl" = Option<String>, Header, description = "An ISO-8601 duration (`PT1H`, `P1D`): the key expires that long after the write. `PT0S` is accepted (expired at once); a negative one, a malformed one, or one over 1,000 years is 400."),
+        ("If-None-Match" = Option<String>, Header, description = "`*` makes the write a create: it is refused (409 `kv_exists`) when the key exists, that is when its latest revision is live (neither deleted nor expired, judged under the key's lock). A key whose latest revision is deleted or expired does not exist, and the create writes its next revision. Absent, the write overwrites. Only `*` is accepted (KV keys have no entity tags); any other value is 400."),
     ),
     request_body(
         description = "`text/plain` (or no `Content-Type`), at most `workflow.storage.max_read_bytes`. A body that is exactly ONE Ion value is stored as that value's type: an int, decimal or float a NUMBER (every digit kept), `true`/`false` a BOOLEAN, a list or struct JSON, a string or symbol a STRING -- a DURATION when it reads as one (`PT1H`, `\"P1D\"`) --, a timestamp with a time a DATETIME in UTC (even at midnight), a day-precision timestamp a DATE, `null` a STRING null. Anything else is stored whole as the raw text, typed STRING: two or more values (`hello world`, `1 2`), text that is not Ion (`{a:`), an annotated value at any depth (`x::1`), a year- or month-precision timestamp (`2025T`). Whitespace around the one value is not a second value. A body that stops arriving for 30 seconds, or takes longer than 12 hours in all, is refused (408).",
         content((String = "text/plain")),
     ),
     responses(
-        (status = 200, description = "Stored as the key's next revision (it always overwrites). No content and no content type (Kestra's answer)."),
-        (status = 400, description = "The key rule, a refused namespace, a malformed or negative `ttl` (`Cannot convert value 'x' to Duration`, `ttl cannot be negative`), an empty or whitespace-only body (`empty body`), a body that is a single Ion value containing a blob, clob or s-expression at any depth (named; even under an annotation; a body of several values is the raw text whatever they hold), a timestamp whose offset carries it outside the years 1-9999 in UTC (named), a raw-text body that is not UTF-8 (`not UTF-8 text`), or one nesting deeper than 100 levels", body = egret_core::http::ErrorBody),
+        (status = 200, description = "Stored as the key's next revision (it overwrites unless `If-None-Match: *`). No content and no content type (Kestra's answer)."),
+        (status = 400, description = "The key rule, a refused namespace, an `If-None-Match` other than `*`, a malformed or negative `ttl` (`Cannot convert value 'x' to Duration`, `ttl cannot be negative`), an empty or whitespace-only body (`empty body`), a body that is a single Ion value containing a blob, clob or s-expression at any depth (named; even under an annotation; a body of several values is the raw text whatever they hold), a timestamp whose offset carries it outside the years 1-9999 in UTC (named), a raw-text body that is not UTF-8 (`not UTF-8 text`), or one nesting deeper than 100 levels", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 408, description = "No byte of the body arrived for 30 seconds, or the body took longer than 12 hours in all; nothing was stored.", body = egret_core::http::ErrorBody),
-        (status = 409, description = "The key is busy: another write holds its lock for longer than the API waits (5 s); nothing was written, try again.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "`code` `kv_exists`: `If-None-Match: *` was sent and the key exists (its latest revision is live); nothing was written. Without a `code`: the key is busy, another write holds its lock for longer than the API waits (5 s); nothing was written, try again.", body = egret_core::http::ErrorBody),
         (status = 413, description = "The body, or the value as stored, is over `workflow.storage.max_read_bytes`; or the value holds more values than the dense-value limit (`max_read_bytes`/64), or a number of more than 1,000 digits (each named). Nothing was stored.", body = egret_core::http::ErrorBody),
         (status = 415, description = "A `Content-Type` other than `text/plain`", body = egret_core::http::ErrorBody),
         (status = 503, description = "Internal storage or the database is unavailable or not configured; nothing was stored and the request can be retried.", body = egret_core::http::ErrorBody),
@@ -633,6 +672,7 @@ async fn put_value(
             "a KV value is sent as text/plain: one Ion value, or any text".into(),
         ));
     }
+    let only_if_absent = create_only(&parts.headers)?;
     let ttl = header_text(&parts.headers, "ttl")?
         .map(|raw| parse_ttl(&raw, Ttl::Header).map_err(bad_request))
         .transpose()?;
@@ -653,11 +693,12 @@ async fn put_value(
         value,
         description,
         ttl,
-        overwrite: true,
+        overwrite: !only_if_absent,
     };
-    let e = match store::set(&st.db.pool, &fs, &grant, &key, new, by).await {
-        Ok(KvWritten::Written(e)) => e,
-        Ok(KvWritten::Already(_)) => {
+    let e = match store::try_set(&st.db.pool, &fs, &grant, &key, new, by).await {
+        Ok(Ok(KvWritten::Written(e))) => e,
+        Ok(Err(live)) => return Err(kv_exists(&grant, &key, &live)),
+        Ok(Ok(KvWritten::Already(_))) => {
             return Err(core_refusal(Error::Internal(anyhow::anyhow!(
                 "a user's KV write of '{key}' was taken for a task run's re-claim"
             ))))

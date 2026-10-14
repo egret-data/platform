@@ -53,9 +53,14 @@ export async function readKvValue(ws: string, namespace: string, key: string): P
   };
 }
 
+/** The `code` of the 409 a create-only PUT answers when the key exists (live). */
+export const KV_EXISTS = "kv_exists";
+
 /**
  * `PUT …/kv/{key}`: `body` as `text/plain`, and the `description` and `ttl`
- * headers, each left out when there is none. The generated fetcher, called
+ * headers, each left out when there is none. `onlyIfAbsent` adds
+ * `If-None-Match: *`: the server then refuses to overwrite a live key (409
+ * `kv_exists`) instead of replacing it. The generated fetcher, called
  * directly (FE-DATA-2 exception): the headers differ per request, and the
  * generated mutation fixes its request options when the hook is created.
  */
@@ -64,12 +69,18 @@ export async function putKvValue(
   namespace: string,
   key: string,
   body: string,
-  meta: { description: string; ttl: string | null },
+  meta: { description: string; ttl: string | null; onlyIfAbsent?: boolean },
 ): Promise<void> {
   const headers: Record<string, string> = {};
   if (meta.description) headers.description = headerText(meta.description);
   if (meta.ttl) headers.ttl = meta.ttl;
+  if (meta.onlyIfAbsent) headers["If-None-Match"] = "*";
   await workflowPutKvValue(ws, namespace, key, body, { headers });
+}
+
+/** A create-only PUT refused because the key was created meanwhile. */
+export function isKvExists(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 409 && e.code === KV_EXISTS;
 }
 
 /**

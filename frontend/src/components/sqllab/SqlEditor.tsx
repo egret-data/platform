@@ -88,6 +88,9 @@ function completionsFor(
   return { suggestions };
 }
 
+/** The id of the editor's ⌘↵ action (run the selection, else the whole text). */
+export const SQL_RUN_ACTION = "egret.sql.run";
+
 export function SqlEditor({ value, onChange, schemaWords, schema, onRun, onSelectionChange, readOnly, ariaLabel }: {
   value: string;
   onChange: (v: string) => void;
@@ -127,6 +130,9 @@ export function SqlEditor({ value, onChange, schemaWords, schema, onRun, onSelec
   }
 
   function handleMount(editor: MonacoNS.editor.IStandaloneCodeEditor, monaco: Monaco) {
+    // A second mount replaces the editor: what the first registered goes first.
+    disposables.current.forEach((d) => d.dispose());
+    disposables.current = [];
     disposables.current.push(
       monaco.languages.registerCompletionItemProvider("sql", {
         triggerCharacters: ["."],
@@ -146,10 +152,24 @@ export function SqlEditor({ value, onChange, schemaWords, schema, onRun, onSelec
     // safety as something every future caller has to remember. The `onRunRef`
     // assignment above is what makes the unsafe pair unrepresentable at the
     // point of use. Registered-but-inert rather than not registered: the
-    // command binds once at mount, and read-only can arrive after that.
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
-      onRunRef.current?.(pickRunSql(editor.getValue(), selectedText(editor)));
-    });
+    // action binds once at mount, and read-only can arrive after that.
+    //
+    // **An editor ACTION, not `addCommand`.** Standalone Monaco keeps every
+    // editor's `addCommand` keybinding in one shared service: it answers in
+    // whichever editor has focus, the newest registration wins, and it is never
+    // removed, so ⌘↵ in one SQL Lab tab ran another tab's query, even one since
+    // closed. An action's keybinding is scoped to this editor
+    // (`editorId == getId()`) and its disposable is disposed with the rest.
+    disposables.current.push(
+      editor.addAction({
+        id: SQL_RUN_ACTION,
+        label: "Run SQL",
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
+        run: () => {
+          onRunRef.current?.(pickRunSql(editor.getValue(), selectedText(editor)));
+        },
+      }),
+    );
     // Report the current selection text so the toolbar can show "Run selection".
     disposables.current.push(
       editor.onDidChangeCursorSelection(() => onSelRef.current?.(selectedText(editor))),

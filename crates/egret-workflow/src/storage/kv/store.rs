@@ -1109,6 +1109,29 @@ pub async fn set(
     new: NewValue,
     by: CreatedBy,
 ) -> Result<KvWritten, NsError> {
+    try_set(pool, fs, grant, key, new, by).await?.map_err(|_| {
+        NsError::Conflict(format!(
+            "Cannot set value for key '{key}'. Key already exists and `overwrite` is set to \
+             `false`."
+        ))
+    })
+}
+
+/// [`set`], but the write `overwrite: false` refuses is answered as
+/// `Ok(Err(latest))`, the LIVE latest row that refused it, rather than as
+/// Kestra's `Conflict`: the API names it (`kv_exists`, its revision), which
+/// it could not do from a `Conflict` it shares with [`busy`]. Live is
+/// [`KvEntry::live`], judged under the key's lock at `clock_timestamp()`: a
+/// latest row soft-deleted or expired does not refuse, and the write is its
+/// next revision.
+pub async fn try_set(
+    pool: &PgPool,
+    fs: &FileStore,
+    grant: &Grant,
+    key: &KvKey,
+    new: NewValue,
+    by: CreatedBy,
+) -> Result<Result<KvWritten, KvEntry>, NsError> {
     need(grant, Access::Write)?;
     // Task 3 re-review 2, H1: before anything clones or encodes the value
     // (each recursive per level), with an O(1)-stack walk. A value from
@@ -1140,13 +1163,10 @@ pub async fn set(
             lock_key(&mut tx, &grant, &key).await?;
             let latest = latest_row(&mut tx, &grant, &key).await?;
             if let Some(e) = reclaimed(latest.as_ref(), by) {
-                return Ok(KvWritten::Already(e));
+                return Ok(Ok(KvWritten::Already(e)));
             }
-            if !overwrite && latest.as_ref().is_some_and(KvEntry::live) {
-                return Err(NsError::Conflict(format!(
-                    "Cannot set value for key '{key}'. Key already exists and `overwrite` is \
-                     set to `false`."
-                )));
+            if let Some(live) = latest.as_ref().filter(|l| !overwrite && l.live()) {
+                return Ok(Err(live.clone()));
             }
             let revision = latest.map_or(1, |l| l.revision + 1);
             let object = fs.namespace_kv_uri(&grant, &key, revision);
@@ -1168,7 +1188,7 @@ pub async fn set(
             )
             .await?;
             tx.commit().await.map_err(db_err)?;
-            Ok(KvWritten::Written(e))
+            Ok(Ok(KvWritten::Written(e)))
         }
         .await;
         staging::forget(&pool, &fs, &staged).await;

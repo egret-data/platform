@@ -89,8 +89,14 @@ vi.mock("@/components/monaco/MonacoEditor", () => ({
           getValue: () => latest.current,
           getSelection: () => null,
           getModel: () => null,
-          addCommand: (binding: number, cb: () => void) => {
-            monacoStub.commands[binding] = cb;
+          // `addAction` only, no `addCommand`: an `addCommand` shortcut is not
+          // scoped to its editor and is never removed (see `SqlEditor`), so a
+          // regression to it throws here.
+          getId: () => "stub-editor",
+          addAction: (desc: { id: string; keybindings?: number[]; run: (e: unknown) => unknown }) => {
+            const entry = { id: desc.id, keybindings: desc.keybindings ?? [], run: () => void desc.run(undefined), disposed: false };
+            for (const k of entry.keybindings) monacoStub.commands[k] = entry.run;
+            return { dispose: () => { entry.disposed = true; } };
           },
           onDidChangeCursorSelection: () => ({ dispose: () => {} }),
         },

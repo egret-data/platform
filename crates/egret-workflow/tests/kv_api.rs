@@ -1962,3 +1962,178 @@ async fn api_written_values_read_back_through_kv_and_get() {
         );
     }
 }
+
+/// The status, then the whole `ErrorBody` (`error` and `code`).
+async fn refusal_body(res: axum::response::Response, status: u16) -> Value {
+    let got = res.status();
+    let body = text(res).await;
+    assert_eq!(got, status, "{body}");
+    serde_json::from_str(&body).unwrap_or_else(|_| panic!("not JSON: {body}"))
+}
+
+const CREATE_ONLY: (&str, &[u8]) = ("if-none-match", b"*");
+
+/// `If-None-Match: *` makes the PUT a create (follow-up to W7d): a key that
+/// does not exist is written as revision 1.
+#[tokio::test]
+async fn a_create_only_put_writes_a_key_that_does_not_exist() {
+    let Some(fx) = fx().await else { return };
+    let res = fx
+        .put_as(fx.user, NS, "c-new", "\"v1\"", &[TEXT, CREATE_ONLY])
+        .await;
+    assert_eq!(res.status(), 200, "{}", text(res).await);
+    assert_eq!(fx.latest(NS, "c-new").await, Some((1, false)));
+    let detail = ok_json(fx.get(NS, "/c-new").await).await;
+    assert_eq!(detail["value"], json!("v1"));
+}
+
+/// A live key is not overwritten: 409 `kv_exists`, naming the key and its
+/// revision, and nothing is written (rows hashed, objects listed, staging
+/// emptied).
+#[tokio::test]
+async fn a_create_only_put_over_a_live_key_is_409_kv_exists_and_writes_nothing() {
+    let Some(fx) = fx().await else { return };
+    fx.ok_put(NS, "c-live", "\"old\"").await;
+    let (before, objects) = (fx.table_state().await, fx.objects().await);
+    let res = fx
+        .put_as(fx.user, NS, "c-live", "\"new\"", &[TEXT, CREATE_ONLY])
+        .await;
+    let body = refusal_body(res, 409).await;
+    assert_eq!(body["code"], json!("kv_exists"), "{body}");
+    assert_eq!(
+        body["error"],
+        json!(format!(
+            "conflict: key 'c-live' already exists in namespace '{NS}' (revision 1); \
+             nothing was written"
+        ))
+    );
+    assert_eq!(
+        fx.table_state().await,
+        before,
+        "a refused create wrote a row"
+    );
+    assert_eq!(
+        fx.objects().await,
+        objects,
+        "a refused create left an object"
+    );
+    assert_eq!(
+        fx.staging_rows().await,
+        0,
+        "a refused create left its staging row"
+    );
+    let detail = ok_json(fx.get(NS, "/c-live").await).await;
+    assert_eq!(detail["value"], json!("old"));
+}
+
+/// The store's liveness rule: a key whose latest revision is soft-deleted or
+/// expired does not exist, so a create succeeds -- as the next revision, the
+/// history kept.
+#[tokio::test]
+async fn a_create_only_put_over_a_deleted_or_expired_key_writes_the_next_revision() {
+    let Some(fx) = fx().await else { return };
+    fx.ok_put(NS, "c-del", "\"v1\"").await;
+    assert_eq!(ok_json(fx.del(NS, "c-del").await).await, json!(true));
+    let res = fx
+        .put_as(fx.user, NS, "c-del", "\"v2\"", &[TEXT, CREATE_ONLY])
+        .await;
+    assert_eq!(res.status(), 200, "{}", text(res).await);
+    assert_eq!(fx.latest(NS, "c-del").await, Some((2, false)));
+    assert_eq!(
+        ok_json(fx.get(NS, "/c-del").await).await["value"],
+        json!("v2")
+    );
+
+    let res = fx
+        .put_as(fx.user, NS, "c-exp", "\"v1\"", &[TEXT, ("ttl", b"PT0S")])
+        .await;
+    assert_eq!(res.status(), 200);
+    let res = fx
+        .put_as(fx.user, NS, "c-exp", "\"v2\"", &[TEXT, CREATE_ONLY])
+        .await;
+    assert_eq!(res.status(), 200, "{}", text(res).await);
+    assert_eq!(fx.latest(NS, "c-exp").await, Some((2, false)));
+    assert_eq!(
+        ok_json(fx.get(NS, "/c-exp").await).await["value"],
+        json!("v2")
+    );
+}
+
+/// Two creates of one new key race: the liveness check and the write are one
+/// step under the key's lock, so exactly one commits (revision 1) and the other
+/// is told `kv_exists`. A check read before the lock lets both through, the
+/// loser as revision 2.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_concurrent_create_only_puts_of_a_new_key_commit_exactly_one() {
+    let Some(fx) = fx().await else { return };
+    for round in 0..8 {
+        let key = format!("c-race{round}");
+        let (a, b) = tokio::join!(
+            fx.put_as(fx.user, NS, &key, "\"a\"", &[TEXT, CREATE_ONLY]),
+            fx.put_as(fx.user, NS, &key, "\"b\"", &[TEXT, CREATE_ONLY]),
+        );
+        let mut statuses = [a.status().as_u16(), b.status().as_u16()];
+        statuses.sort();
+        assert_eq!(statuses, [200, 409], "round {round}");
+        let loser = if a.status() == 409 { a } else { b };
+        let body = refusal_body(loser, 409).await;
+        assert_eq!(body["code"], json!("kv_exists"), "round {round}: {body}");
+        let revisions: Vec<i32> = sqlx::query_scalar(
+            "SELECT revision FROM workflow.kv_entries \
+             WHERE workspace_id = $1 AND namespace = $2 AND key = $3 ORDER BY revision",
+        )
+        .bind(fx.ws)
+        .bind(NS)
+        .bind(&key)
+        .fetch_all(&fx.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(revisions, vec![1], "round {round}");
+    }
+    assert_eq!(fx.staging_rows().await, 0, "a staging row was left");
+}
+
+/// `PUT …/kv/inheritance` is routed apart from `PUT …/kv/{key}`; its create-only
+/// guard is the same.
+#[tokio::test]
+async fn a_create_only_put_over_a_live_key_named_inheritance_is_409_kv_exists() {
+    let Some(fx) = fx().await else { return };
+    fx.ok_put(NS, "inheritance", "\"old\"").await;
+    let res = fx
+        .put_as(fx.user, NS, "inheritance", "\"new\"", &[TEXT, CREATE_ONLY])
+        .await;
+    let body = refusal_body(res, 409).await;
+    assert_eq!(body["code"], json!("kv_exists"), "{body}");
+    assert_eq!(fx.latest(NS, "inheritance").await, Some((1, false)));
+}
+
+/// Without the header nothing changes: a live key is overwritten.
+#[tokio::test]
+async fn a_put_without_if_none_match_still_overwrites() {
+    let Some(fx) = fx().await else { return };
+    fx.ok_put(NS, "c-over", "\"old\"").await;
+    fx.ok_put(NS, "c-over", "\"new\"").await;
+    assert_eq!(fx.latest(NS, "c-over").await, Some((2, false)));
+    assert_eq!(
+        ok_json(fx.get(NS, "/c-over").await).await["value"],
+        json!("new")
+    );
+}
+
+/// KV has no entity tags: any `If-None-Match` but `*` is 400 and writes nothing.
+#[tokio::test]
+async fn an_if_none_match_other_than_a_star_is_400_and_writes_nothing() {
+    let Some(fx) = fx().await else { return };
+    for bad in [&b"\"abc\""[..], b"W/\"1\"", b"*, \"x\"", b""] {
+        let res = fx
+            .put_as(fx.user, NS, "c-bad", "1", &[TEXT, ("if-none-match", bad)])
+            .await;
+        assert_eq!(
+            refusal(res, 400).await,
+            "If-None-Match on a KV write takes only \"*\"",
+            "{}",
+            String::from_utf8_lossy(bad)
+        );
+    }
+    assert_eq!(fx.latest(NS, "c-bad").await, None);
+}

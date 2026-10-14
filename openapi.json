@@ -32293,6 +32293,18 @@
             }
           },
           {
+            "name": "If-None-Match",
+            "in": "header",
+            "description": "`*` makes the write a create: it is refused (409 `kv_exists`) when the key exists, that is when its latest revision is live (neither deleted nor expired, judged under the key's lock). A key whose latest revision is deleted or expired does not exist, and the create writes its next revision. Absent, the write overwrites. Only `*` is accepted (KV keys have no entity tags); any other value is 400.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "workspace",
             "in": "path",
             "required": true,
@@ -32314,10 +32326,10 @@
         },
         "responses": {
           "200": {
-            "description": "Stored as the key's next revision (it always overwrites). No content and no content type (Kestra's answer)."
+            "description": "Stored as the key's next revision (it overwrites unless `If-None-Match: *`). No content and no content type (Kestra's answer)."
           },
           "400": {
-            "description": "The key rule, a refused namespace, a malformed or negative `ttl` (`Cannot convert value 'x' to Duration`, `ttl cannot be negative`), an empty or whitespace-only body (`empty body`), a body that is a single Ion value containing a blob, clob or s-expression at any depth (named; even under an annotation; a body of several values is the raw text whatever they hold), a timestamp whose offset carries it outside the years 1-9999 in UTC (named), a raw-text body that is not UTF-8 (`not UTF-8 text`), or one nesting deeper than 100 levels",
+            "description": "The key rule, a refused namespace, an `If-None-Match` other than `*`, a malformed or negative `ttl` (`Cannot convert value 'x' to Duration`, `ttl cannot be negative`), an empty or whitespace-only body (`empty body`), a body that is a single Ion value containing a blob, clob or s-expression at any depth (named; even under an annotation; a body of several values is the raw text whatever they hold), a timestamp whose offset carries it outside the years 1-9999 in UTC (named), a raw-text body that is not UTF-8 (`not UTF-8 text`), or one nesting deeper than 100 levels",
             "content": {
               "application/json": {
                 "schema": {
@@ -32357,7 +32369,7 @@
             }
           },
           "409": {
-            "description": "The key is busy: another write holds its lock for longer than the API waits (5 s); nothing was written, try again.",
+            "description": "`code` `kv_exists`: `If-None-Match: *` was sent and the key exists (its latest revision is live); nothing was written. Without a `code`: the key is busy, another write holds its lock for longer than the API waits (5 s); nothing was written, try again.",
             "content": {
               "application/json": {
                 "schema": {

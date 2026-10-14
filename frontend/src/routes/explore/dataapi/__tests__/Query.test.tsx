@@ -26,8 +26,13 @@ const monacoStub = vi.hoisted(() => {
     KeyMod,
     KeyCode,
     commands: {} as Record<number, () => void>,
+    /** Every `addAction`, in order; `disposed` turns true when it is disposed. */
+    actions: [] as { id: string; keybindings: number[]; run: () => void; disposed: boolean }[],
+    /** Calls the mounted component's `onMount` again, as `@monaco-editor/react` can. */
+    remount: undefined as (() => void) | undefined,
     reset() {
       this.commands = {};
+      this.actions = [];
     },
     /** The callback registered for ⌘/Ctrl+↵, or `undefined` if none was. */
     runCommand(): (() => void) | undefined {
@@ -107,18 +112,24 @@ vi.mock("@/components/monaco/MonacoEditor", () => ({
         },
       };
       beforeMount?.(monaco);
-      onMount?.(
-        {
-          getValue: () => latest.current,
-          getSelection: () => null,
-          getModel: () => null,
-          addCommand: (binding: number, cb: () => void) => {
-            monacoStub.commands[binding] = cb;
-          },
-          onDidChangeCursorSelection: () => ({ dispose: () => {} }),
+      const editor = {
+        getValue: () => latest.current,
+        getSelection: () => null,
+        getModel: () => null,
+        // `addAction` only, no `addCommand`: an `addCommand` shortcut is not
+        // scoped to its editor and is never removed (see `SqlEditor`), so a
+        // regression to it throws here.
+        getId: () => "stub-editor",
+        addAction: (desc: { id: string; keybindings?: number[]; run: (e: unknown) => unknown }) => {
+          const entry = { id: desc.id, keybindings: desc.keybindings ?? [], run: () => void desc.run(undefined), disposed: false };
+          monacoStub.actions.push(entry);
+          for (const k of entry.keybindings) monacoStub.commands[k] = entry.run;
+          return { dispose: () => { entry.disposed = true; } };
         },
-        monaco,
-      );
+        onDidChangeCursorSelection: () => ({ dispose: () => {} }),
+      };
+      onMount?.(editor, monaco);
+      monacoStub.remount = () => onMount?.(editor, monaco);
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
     return (
@@ -2002,6 +2013,41 @@ describe("Query section — a statement's SQL from a script", () => {
     });
     await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
     expect(previewMutateAsync.mock.calls[0][0].data.script).toBe(BRANCHING);
+  });
+
+  it("binds the script editor's ⌘↵ as its own action, disposed when the script editor goes", async () => {
+    // An `addCommand` would outlive the script editor: switching back to SQL
+    // removes it, and its ⌘↵ would still answer in the SQL editor that replaced
+    // it (the newest registration wins only until then; it is never removed).
+    show(makeEndpoint({ statements: [{ name: "main", script: BRANCHING }] } as Partial<DataApiEndpointDto>));
+
+    await screen.findByLabelText("SQL script");
+    const runKey = monacoStub.KeyMod.CtrlCmd | monacoStub.KeyCode.Enter;
+    const script = monacoStub.actions.filter((a) => a.id === "egret.dataapi.preview");
+    expect(script).toHaveLength(1);
+    expect(script[0].keybindings).toEqual([runKey]);
+    expect(script[0].disposed).toBe(false);
+
+    await userEvent.click(screen.getByRole("checkbox", { name: /build this statement.s sql with a script/i }));
+    await screen.findByLabelText("SQL");
+    expect(script[0].disposed).toBe(true);
+    // The SQL editor that replaced it binds its own, live.
+    const sql = monacoStub.actions.filter((a) => a.id === "egret.sql.run");
+    expect(sql.at(-1)?.disposed).toBe(false);
+  });
+
+  it("disposes the script editor's first action when onMount runs a second time", async () => {
+    show(makeEndpoint({ statements: [{ name: "main", script: BRANCHING }] } as Partial<DataApiEndpointDto>));
+
+    await screen.findByLabelText("SQL script");
+    const script = () => monacoStub.actions.filter((a) => a.id === "egret.dataapi.preview");
+    expect(script()).toHaveLength(1);
+
+    act(() => monacoStub.remount!());
+
+    expect(script()).toHaveLength(2);
+    expect(script()[0].disposed).toBe(true);
+    expect(script()[1].disposed).toBe(false);
   });
 
   it("makes the script editor read-only for a trashed endpoint, and ⌘↵ runs nothing", async () => {
