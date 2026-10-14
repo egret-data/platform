@@ -8788,7 +8788,11 @@ fn editor_shaped_levels_on_the_real_ranger_jars() {
 //
 //   * a priority-1 data mask on each classified column whose cleared-user items
 //     are FOLDED, through `egret-ranger-eval`, from the profile's other masks;
-//   * a per-database deny of `create materialized view`.
+//   * one engine-wide deny of `create materialized view` on
+//     `{catalog: default_catalog, database: *}` (A3 revised 2026-10-14: StarRocks
+//     creates a materialized view only in `default_catalog` and checks the
+//     privilege on the TARGET database, so the probes ask there, including in a
+//     database that holds no classified column).
 //
 // Both bodies come from the compiler's own functions (`harness_support`), not a
 // hand-copied JSON. The real jars are asked, at the plugin versions StarRocks
@@ -8804,6 +8808,18 @@ fn vg_column() -> egret_perm_compile::TaggedColumn {
         schema: "sales".into(),
         table: "orders".into(),
         column: "email".into(),
+    }
+}
+
+/// A second classification's column, in another database of `wh`, cleared for
+/// `bob` alone: the MV deny excepts only the users cleared for BOTH.
+const VG_CLEARED_FOR_ALL: &str = "bob";
+fn vg_second_column() -> egret_perm_compile::TaggedColumn {
+    egret_perm_compile::TaggedColumn {
+        catalog: "wh".into(),
+        schema: "hr".into(),
+        table: "staff".into(),
+        column: "salary".into(),
     }
 }
 
@@ -8881,9 +8897,17 @@ fn the_clearance_mask_and_the_materialized_view_deny_decide_as_designed_on_the_r
         .expect("the fold decides every cleared user");
         let mv = egret_perm_compile::harness_support::starrocks_mv_denies(
             profile.service_name,
-            &[(vg_column(), cleared.clone())],
+            &[
+                (vg_column(), cleared.clone()),
+                (vg_second_column(), vec![VG_CLEARED_FOR_ALL.to_string()]),
+            ],
         );
-        assert_eq!(mv.len(), 1, "one deny for the one database");
+        assert_eq!(mv.len(), 1, "one deny for the profile: {mv:?}");
+        assert_eq!(
+            mv[0]["resources"]["catalog"]["values"],
+            json!(["default_catalog"])
+        );
+        assert_eq!(mv[0]["resources"]["database"]["values"], json!(["*"]));
         // The fold's shape, pinned so a drifting compiler cannot make the jars
         // answer a different question than the one this test names.
         assert_eq!(mask["policyPriority"], json!(1));
@@ -8899,11 +8923,12 @@ fn the_clearance_mask_and_the_materialized_view_deny_decide_as_designed_on_the_r
             body
         };
         // An allow that makes the MV deny the thing that decides: everyone named
-        // may create a materialized view in every database of `wh`.
+        // may create a materialized view in every database of `default_catalog`,
+        // the only catalog StarRocks creates one in.
         let allow_mv = json!({
             "id": 20, "name": "allow-mv", "service": profile.service_name, "policyType": 0,
             "isEnabled": true, "policyPriority": 0,
-            "resources": lv_resources(&profile, &[(0, "wh"), (1, "*")]),
+            "resources": lv_resources(&profile, &[(0, "default_catalog"), (1, "*")]),
             "policyItems": [mig_item(
                 &["ann", "bob", VG_UNCLEARED, "eve"], &[], &["create materialized view"],
             )],
@@ -8950,18 +8975,29 @@ fn the_clearance_mask_and_the_materialized_view_deny_decide_as_designed_on_the_r
             probes.push(Probe {
                 label: format!("{label}: {user} creates a materialized view in {db}"),
                 policy_type: 0,
-                request: vg_request(&profile, user, "create materialized view", &["wh", db]),
+                request: vg_request(
+                    &profile,
+                    user,
+                    "create materialized view",
+                    &["default_catalog", db],
+                ),
                 want_mask: None,
                 want_allowed: Some(want),
             });
         };
-        mv_probe("cleared", "ann", "sales", true);
-        mv_probe("cleared", "bob", "sales", true);
-        mv_probe("uncleared", VG_UNCLEARED, "sales", false);
-        mv_probe("unnamed in the allow list", "eve", "sales", false);
-        // A database that holds no classified column is untouched.
-        mv_probe("other database", VG_UNCLEARED, "hr", true);
-        mv_probe("other database", "eve", "hr", true);
+        // The target database is any `default_catalog` database: one named like
+        // the classified one, and one that holds no classified column at all.
+        for db in ["sales", "scratch"] {
+            mv_probe(
+                "cleared for every classification",
+                VG_CLEARED_FOR_ALL,
+                db,
+                true,
+            );
+            mv_probe("cleared for one classification only", "ann", db, false);
+            mv_probe("uncleared", VG_UNCLEARED, db, false);
+            mv_probe("named by no exception", "eve", db, false);
+        }
 
         let payload: Vec<Value> = probes
             .iter()
@@ -9047,7 +9083,7 @@ fn the_clearance_mask_and_the_materialized_view_deny_decide_as_designed_on_the_r
         "view-governance differential: {asked} probes, {errors} errors, {} failures, {elapsed:.2} s",
         failures.len()
     );
-    assert_eq!(asked, 26, "every probe was asked: {asked}");
+    assert_eq!(asked, 30, "every probe was asked: {asked}");
     assert!(
         elapsed > 1.0,
         "a real-jar run takes seconds, not {elapsed:.2} s — vacuous"

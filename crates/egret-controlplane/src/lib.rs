@@ -21,7 +21,8 @@ mod view_exposure;
 
 pub use error::CpError;
 pub use view_exposure::{
-    ExposureEngine, MaterializedViewLister, ViewExposureDto, ViewExposureItem,
+    EngineNotChecked, ExposureEngine, MatchedBy, MaterializedViewLister, MvRow, ViewExposureDto,
+    ViewExposureItem,
 };
 
 use axum::extract::FromRef;

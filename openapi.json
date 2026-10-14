@@ -3639,7 +3639,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The materialized views already present in the databases that hold this classification's columns",
+            "description": "The materialized views that already exist and read a table of this classification",
             "content": {
               "application/json": {
                 "schema": {
@@ -39165,6 +39165,23 @@
           }
         }
       },
+      "EngineNotChecked": {
+        "type": "object",
+        "description": "An engine that reaches the classification but was not asked, because it is\nnot running.",
+        "required": [
+          "engine",
+          "status"
+        ],
+        "properties": {
+          "engine": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "`engine_mgmt.engines.status`: `provisioning`, `failed` or `deleting`."
+          }
+        }
+      },
       "EnginePodDto": {
         "type": "object",
         "required": [
@@ -41191,6 +41208,14 @@
             "type": "boolean"
           }
         }
+      },
+      "MatchedBy": {
+        "type": "string",
+        "description": "How a view was matched to the classification.",
+        "enum": [
+          "baseTable",
+          "text"
+        ]
       },
       "MeResponse": {
         "type": "object",
@@ -47897,6 +47922,7 @@
       "ViewExposureDto": {
         "type": "object",
         "required": [
+          "enginesNotChecked",
           "trinoViews"
         ],
         "properties": {
@@ -47915,7 +47941,14 @@
               "string",
               "null"
             ],
-            "description": "Set exactly when `starrocks_materialized_views` is `null`; names each\nfailing engine and database."
+            "description": "Set exactly when `starrocks_materialized_views` is `null`; names each\nfailing engine."
+          },
+          "enginesNotChecked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EngineNotChecked"
+            },
+            "description": "Engines that reach the classification but are not running, so were not\nasked. Their views are unknown, not absent."
           },
           "trinoViews": {
             "type": "array",
@@ -47928,25 +47961,30 @@
       },
       "ViewExposureItem": {
         "type": "object",
-        "description": "One view that exists in a classified database. Shared by the StarRocks list\nand the Trino list (filled by a later task).",
+        "description": "One view that reads a classified table. Shared by the StarRocks list and the\nTrino list (filled by a later task).",
         "required": [
           "engine",
           "catalog",
           "database",
-          "name"
+          "name",
+          "matchedBy"
         ],
         "properties": {
           "engine": {
             "type": "string"
           },
           "catalog": {
-            "type": "string"
+            "type": "string",
+            "description": "Where the view lives: `default_catalog` for every StarRocks view."
           },
           "database": {
             "type": "string"
           },
           "name": {
             "type": "string"
+          },
+          "matchedBy": {
+            "$ref": "#/components/schemas/MatchedBy"
           }
         }
       },

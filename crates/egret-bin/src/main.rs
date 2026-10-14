@@ -2751,10 +2751,18 @@ impl egret_controlplane::MaterializedViewLister for EngineMaterializedViewLister
     async fn list(
         &self,
         engine: &egret_controlplane::ExposureEngine,
-        catalog: &str,
-        database: &str,
-    ) -> Result<Vec<String>, String> {
-        egret_engine_mgmt::list_materialized_views(&self.engine_mgmt, engine.id, catalog, database)
-            .await
+    ) -> Result<Vec<egret_controlplane::MvRow>, String> {
+        Ok(
+            egret_engine_mgmt::list_materialized_views(&self.engine_mgmt, engine.id)
+                .await?
+                .into_iter()
+                .map(|r| egret_controlplane::MvRow {
+                    database: r.database,
+                    name: r.name,
+                    base_tables: r.base_tables,
+                    definition: r.definition,
+                })
+                .collect(),
+        )
     }
 }

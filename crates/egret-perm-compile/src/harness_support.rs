@@ -37,8 +37,9 @@ pub fn starrocks_clearance_mask(
     )
 }
 
-/// The per-database `create materialized view` deny bodies for the given
-/// (column, cleared) pairs, stamped as `compile_clearance` stamps them.
+/// The `create materialized view` deny bodies for the given (column, cleared)
+/// pairs, stamped as `compile_clearance` stamps them: at most one, on
+/// `default_catalog`/`*` (A3 revised 2026-10-14).
 pub fn starrocks_mv_denies(service: &str, pending: &[(TaggedColumn, Vec<String>)]) -> Vec<Value> {
     let pending: Vec<PendingMask> = pending
         .iter()

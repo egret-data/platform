@@ -418,7 +418,7 @@ export default function TagDetail() {
       </section>
       </div>
 
-      <ViewExposureSection tagId={id} />
+      <ViewExposureSection tagId={id} engineGated={engineGated} />
 
       <ConfirmDeleteDialog
         open={deleteOpen}

@@ -3067,7 +3067,7 @@ async fn deleting_a_content_owner_nulls_attribution_and_succeeds() {
 }
 
 /// These tests never reach the materialized-view report; a lister that is asked
-/// anyway fails loudly instead of reporting an empty database.
+/// anyway fails loudly instead of reporting an empty engine.
 struct NoListing;
 
 #[async_trait::async_trait]
@@ -3075,9 +3075,7 @@ impl egret_controlplane::MaterializedViewLister for NoListing {
     async fn list(
         &self,
         _engine: &egret_controlplane::ExposureEngine,
-        _catalog: &str,
-        _database: &str,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<egret_controlplane::MvRow>, String> {
         Err("no StarRocks in this test".to_string())
     }
 }

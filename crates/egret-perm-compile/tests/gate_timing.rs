@@ -243,7 +243,7 @@ fn gate_time_by_profile_size() {
 //
 // A StarRocks clearance now emits TWO policies per classified column (the
 // per-column access deny and the priority-1 mask) plus ONE `create materialized
-// view` deny per database. This times the migration gate over a StarRocks
+// view` deny per profile (on `default_catalog`/`*`, A3 revised 2026-10-14). This times the migration gate over a StarRocks
 // profile of N single-user allow policies (distinct tables) and C classified
 // columns, so the profile serves `N + 2C + 1` policies, with one policy changed
 // by the migration:
@@ -275,8 +275,8 @@ fn sr_policy(i: usize, users: &[&str]) -> Value {
 }
 
 fn sr_column(c: usize) -> egret_perm_compile::TaggedColumn {
-    // Spread over databases so the MV deny count grows too: 4 columns a table,
-    // 4 tables a database.
+    // Spread over databases: 4 columns a table, 4 tables a database. The MV
+    // deny is one per profile whatever the spread (A3 revised 2026-10-14).
     egret_perm_compile::TaggedColumn {
         catalog: "wh".into(),
         schema: format!("d{}", c / 16),
@@ -327,7 +327,7 @@ fn sr_rule_mask(c: usize, mask_type: &str) -> Value {
 
 /// The whole StarRocks download: N allow policies, C classified columns each
 /// with a deny, a folded mask and one rule mask (so the fold has work to do),
-/// and the per-database MV deny.
+/// and the profile's one MV deny.
 fn sr_policies(n: usize, c: usize, first_mask: &str) -> Vec<Value> {
     let cleared: Vec<String> = vec!["ann".into(), "bob".into()];
     let mut out: Vec<Value> = (0..n)

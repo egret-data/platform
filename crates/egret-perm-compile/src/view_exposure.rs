@@ -1,74 +1,103 @@
-//! View governance A4: which StarRocks databases hold a classification's
-//! columns, per engine, so the control plane can list the materialized views
-//! that already exist there.
+//! View governance A4 (revised 2026-10-14): which classified tables each
+//! StarRocks engine reaches, so the control plane can find the materialized
+//! views that already read one of them.
 //!
-//! The A3 deny (`crate::clearance::mv_deny_inputs`) stops NEW materialized views
-//! in these databases. It cannot remove an existing one, and an existing one may
-//! hold a copy of the classified values. This module answers "where could such a
-//! copy be" from the same two sources the deny uses: the engine-to-profile
-//! binding and `tagged_columns_for_service_via`, grouped by
-//! `crate::clearance::database_of`.
-
-use std::collections::BTreeSet;
+//! The A3 deny (`crate::clearance::mv_deny_inputs`) stops NEW materialized
+//! views. It cannot remove an existing one, and an existing one may hold a copy
+//! of the classified values. StarRocks keeps every materialized view in
+//! [`MV_CATALOG`] (measured, `docs/en/plans/2026-10-14-starrocks-mv-placement-
+//! measurement.md`), whatever catalog its base tables live in, so the control
+//! plane lists `information_schema.materialized_views` once per engine and
+//! matches each view's base tables against the set this module returns.
+//!
+//! **Per engine, from that engine's OWN catalog attachments.** Two engines may
+//! share one policy profile, and the profile-wide query
+//! (`egret_policy::tagged_columns_for_service_via`) returns every column
+//! reachable through ANY engine on the profile. A view on engine B can only
+//! read a catalog attached to B, so each engine is matched against the
+//! classified tables of its own attachments (Task 4 review I-3).
 
 use sqlx::PgConnection;
 use uuid::Uuid;
 
 use egret_perm::CompileError;
-use egret_policy::tagged_columns_for_service_via;
 
-use crate::clearance::database_of;
-use crate::rules::TaggedColumn;
+/// The only catalog StarRocks creates a materialized view in.
+pub use crate::clearance::MV_CATALOG;
 
-/// A StarRocks database that holds at least one column of the classification,
-/// as reached through one engine.
+/// A table with at least one column of the classification, as the engine names
+/// it: `catalog` is the registry catalog name the engine attaches it under.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ClassifiedDatabase {
-    pub engine_id: Uuid,
-    pub engine_name: String,
+pub struct ClassifiedTable {
     pub catalog: String,
     pub database: String,
+    pub table: String,
 }
 
-/// Every `(engine, catalog, database)` on a StarRocks engine bound to a policy
-/// profile that holds a column tagged `tag_key`, sorted and without
-/// duplicates. Two classified columns in one database are one entry.
-pub async fn classified_starrocks_databases(
+/// A StarRocks engine bound to a policy profile that reaches at least one
+/// table of the classification through its own catalog attachments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassifiedEngine {
+    pub engine_id: Uuid,
+    pub engine_name: String,
+    /// `engine_mgmt.engines.status`: only a `running` engine is dialled.
+    pub status: String,
+    /// Sorted, without duplicates.
+    pub tables: Vec<ClassifiedTable>,
+}
+
+#[derive(sqlx::FromRow)]
+struct Row {
+    engine_id: Uuid,
+    engine_name: String,
+    status: String,
+    catalog: String,
+    schema_name: String,
+    table_name: String,
+}
+
+/// Every StarRocks engine bound to a policy profile, with the tables tagged
+/// `tag_key` in the catalogs attached to THAT engine, ordered by engine name.
+/// An engine that reaches none is absent. Column-level assignments only, as the
+/// clearance compiles them (`a.column_name <> ''`, the same filter as
+/// `tagged_columns_for_service_via`).
+pub async fn classified_starrocks_engines(
     conn: &mut PgConnection,
     tag_key: &str,
-) -> Result<Vec<ClassifiedDatabase>, CompileError> {
-    let engines: Vec<(Uuid, String, i64)> = sqlx::query_as(
-        "SELECT id, name, authz_service_id FROM engine_mgmt.engines \
-          WHERE type = 'starrocks' AND authz_service_id IS NOT NULL \
-          ORDER BY name",
+) -> Result<Vec<ClassifiedEngine>, CompileError> {
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT DISTINCT e.id AS engine_id, e.name AS engine_name, e.status, \
+                c.name AS catalog, a.schema_name, a.table_name \
+           FROM engine_mgmt.engines e \
+           JOIN registry.engine_catalog_attachments ea ON ea.engine_id = e.id \
+           JOIN registry.catalogs c ON c.id = ea.catalog_id \
+           JOIN catalog_tag_assignments a ON a.warehouse_id = c.warehouse_id \
+           JOIN tags t ON t.id = a.tag_id \
+          WHERE e.type = 'starrocks' AND e.authz_service_id IS NOT NULL \
+            AND t.key = $1 AND a.column_name <> '' \
+          ORDER BY e.name, e.id, c.name, a.schema_name, a.table_name",
     )
+    .bind(tag_key)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| CompileError::Db(e.to_string()))?;
 
-    let mut out = BTreeSet::new();
-    for (engine_id, engine_name, service_id) in engines {
-        let columns: Vec<TaggedColumn> =
-            tagged_columns_for_service_via(&mut *conn, service_id, tag_key)
-                .await
-                .map_err(|e| CompileError::Db(e.to_string()))?
-                .into_iter()
-                .map(|row| TaggedColumn {
-                    catalog: row.catalog,
-                    schema: row.schema_name,
-                    table: row.table_name,
-                    column: row.column_name,
-                })
-                .collect();
-        for col in &columns {
-            let (catalog, database) = database_of(col);
-            out.insert(ClassifiedDatabase {
-                engine_id,
-                engine_name: engine_name.clone(),
-                catalog: catalog.to_string(),
-                database: database.to_string(),
-            });
+    let mut out: Vec<ClassifiedEngine> = Vec::new();
+    for r in rows {
+        let table = ClassifiedTable {
+            catalog: r.catalog,
+            database: r.schema_name,
+            table: r.table_name,
+        };
+        match out.last_mut() {
+            Some(e) if e.engine_id == r.engine_id => e.tables.push(table),
+            _ => out.push(ClassifiedEngine {
+                engine_id: r.engine_id,
+                engine_name: r.engine_name,
+                status: r.status,
+                tables: vec![table],
+            }),
         }
     }
-    Ok(out.into_iter().collect())
+    Ok(out)
 }

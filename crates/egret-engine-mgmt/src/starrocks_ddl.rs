@@ -564,18 +564,25 @@ pub struct MysqlDdlRunner;
 
 impl MysqlDdlRunner {
     async fn connect(fe: &FeTarget) -> Result<mysql_async::Conn, FeError> {
+        Self::connect_within(fe, FE_CONNECT_TIMEOUT).await
+    }
+
+    async fn connect_within(fe: &FeTarget, limit: Duration) -> Result<mysql_async::Conn, FeError> {
         let opts = crate::engines::starrocks_root_conn_opts(
             &fe.host,
             fe.port,
             fe.root_password.as_deref(),
             fe.tls_cert_pem.as_deref(),
         );
-        match tokio::time::timeout(FE_CONNECT_TIMEOUT, mysql_async::Conn::new(opts)).await {
+        match tokio::time::timeout(limit, mysql_async::Conn::new(opts)).await {
             Ok(Ok(conn)) => Ok(conn),
             Ok(Err(e)) => Err(fe_error(e)),
             Err(_) => Err(fe_error(format!(
-                "connect to {}:{} timed out after {FE_CONNECT_TIMEOUT:?}",
-                fe.host, fe.port
+                // No `host:port` (Task 4 review M-7): this text reaches the
+                // classification page through `list_materialized_views`, and the
+                // FE address is internal service DNS. Every caller already names
+                // the engine.
+                "connect to the FE timed out after {limit:?}"
             ))),
         }
     }
@@ -710,36 +717,87 @@ pub async fn show_create_catalog(
     }
 }
 
-/// `SHOW MATERIALIZED VIEWS FROM <catalog>.<database>` → column 2 (`name`; the
-/// reply's columns lead `id, database_name, name, refresh_type, …`). View
-/// governance A4 reports these: they may already hold copies of classified
-/// values, and egret does not drop them.
+/// View governance A4 (revised 2026-10-14): every materialized view on the
+/// engine, one statement per engine.
 ///
-/// Both identifiers go through [`escape_ident`] inside backticks. Inside a
-/// backtick-quoted identifier a backslash is an ordinary character in
-/// StarRocks, so the only character that can close the quote is the backtick,
-/// and that is the one `escape_ident` doubles — the identifier is
-/// admin-controlled but a catalog or schema name is free text end to end.
-pub async fn show_materialized_views(
-    ddl: &dyn StarRocksDdl,
-    fe: &FeTarget,
-    catalog: &str,
-    database: &str,
-) -> Result<Vec<String>, FeError> {
-    let sql = format!(
-        "SHOW MATERIALIZED VIEWS FROM `{}`.`{}`",
-        escape_ident(catalog),
-        escape_ident(database)
-    );
-    Ok(ddl
-        .query(fe, &sql)
-        .await?
-        .into_iter()
-        .filter_map(|row| row.into_iter().nth(2).flatten())
-        .collect())
+/// StarRocks creates a materialized view only in `default_catalog`, whatever
+/// catalog its base tables are in, and `SHOW MATERIALIZED VIEWS FROM
+/// <external catalog>.<db>` answers an empty set even when one reads that
+/// database (both measured on 4.1.6,
+/// `docs/en/plans/2026-10-14-starrocks-mv-placement-measurement.md`). So the
+/// listing reads `information_schema.materialized_views`, which covers every
+/// database of `default_catalog`, and the caller matches the base tables.
+///
+/// The columns are NAMED, so their positions in the reply are the ones this
+/// statement chooses rather than the FE's column order (Task 4 review M-2). The
+/// statement carries no identifier, so there is nothing to quote.
+pub const MATERIALIZED_VIEWS_SQL: &str = "SELECT TABLE_SCHEMA, TABLE_NAME, \
+     BASE_TABLE_REFRESH_VERSION_TIMES, MATERIALIZED_VIEW_DEFINITION FROM \
+     information_schema.materialized_views";
+
+/// One row of [`MATERIALIZED_VIEWS_SQL`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializedViewRow {
+    /// The `default_catalog` database the view lives in.
+    pub database: String,
+    pub name: String,
+    /// The keys of `BASE_TABLE_REFRESH_VERSION_TIMES`, normalised
+    /// `catalog.db.table` names, sorted. `None` when the column is missing,
+    /// not a JSON object, or an empty one (for example a view never
+    /// refreshed): the caller then falls back to matching the definition text.
+    pub base_tables: Option<Vec<String>>,
+    /// `MATERIALIZED_VIEW_DEFINITION`, as the user wrote it (not normalised).
+    pub definition: String,
 }
 
-/// [`show_materialized_views`] on a stored engine, for the classification
+/// The base tables out of `BASE_TABLE_REFRESH_VERSION_TIMES`, read defensively:
+/// only a non-empty JSON object yields any, and its keys are the names. Anything
+/// else is `None`, never an error, because the text match still applies.
+pub fn parse_base_tables(raw: Option<&str>) -> Option<Vec<String>> {
+    let value: serde_json::Value = serde_json::from_str(raw?).ok()?;
+    let map = value.as_object()?;
+    if map.is_empty() {
+        return None;
+    }
+    let mut keys: Vec<String> = map.keys().cloned().collect();
+    keys.sort();
+    Some(keys)
+}
+
+/// [`MATERIALIZED_VIEWS_SQL`] on one FE. A row whose shape is not the four
+/// selected columns, or that has no database or name, is an error rather than a
+/// guess: a listing that silently drops rows would read as "none".
+pub async fn select_materialized_views(
+    ddl: &dyn StarRocksDdl,
+    fe: &FeTarget,
+) -> Result<Vec<MaterializedViewRow>, FeError> {
+    ddl.query(fe, MATERIALIZED_VIEWS_SQL)
+        .await?
+        .into_iter()
+        .map(|row| {
+            let [Some(database), Some(name), base, definition]: [Option<String>; 4] =
+                row.try_into().map_err(|r: Vec<Option<String>>| {
+                    fe_error(format!(
+                        "information_schema.materialized_views answered {} columns, not 4",
+                        r.len()
+                    ))
+                })?
+            else {
+                return Err(fe_error(
+                    "information_schema.materialized_views answered a view with no database or name",
+                ));
+            };
+            Ok(MaterializedViewRow {
+                database,
+                name,
+                base_tables: parse_base_tables(base.as_deref()),
+                definition: definition.unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// [`select_materialized_views`] on a stored engine, for the classification
 /// page's exposure report. Every failure — an unknown or non-StarRocks engine,
 /// an unresolvable FE target, an unreachable FE — is a message, because the
 /// caller must tell "could not list" apart from "none exist" and never render
@@ -748,9 +806,7 @@ pub async fn show_materialized_views(
 pub async fn list_materialized_views(
     st: &CpState,
     engine_id: uuid::Uuid,
-    catalog: &str,
-    database: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<MaterializedViewRow>, String> {
     let engine = st
         .engine_mgmt
         .get_engine(engine_id)
@@ -761,7 +817,7 @@ pub async fn list_materialized_views(
         return Err("engine is not a StarRocks engine".to_string());
     }
     let fe = fe_target(st, &engine).await.map_err(|e| e.to_string())?;
-    show_materialized_views(&*st.starrocks_ddl, &fe, catalog, database)
+    select_materialized_views(&*st.starrocks_ddl, &fe)
         .await
         .map_err(|e| e.scrubbed(&fe, &BTreeMap::new()))
 }
@@ -909,8 +965,9 @@ pub fn compare_to_fe(rendered: &StarRocksCatalogDdl, fe: &BTreeMap<String, Strin
     Drift::Matching
 }
 
-/// `(catalog, database)` → the materialized view names the fake FE reports.
-type MaterializedViewsByDatabase = BTreeMap<(String, String), Vec<String>>;
+/// The rows the fake FE answers [`MATERIALIZED_VIEWS_SQL`] with, as the real
+/// runner returns them: one `Option<String>` per selected column.
+type MaterializedViewRows = Vec<Vec<Option<String>>>;
 
 /// A StarRocks FE that lives in memory. Public because the route tests are an
 /// external crate; it is the whole of design D8 — without it, every statement
@@ -935,9 +992,9 @@ pub struct FakeStarRocksDdl {
     /// staying green (fix round 1, F1).
     queried: Arc<Mutex<Vec<String>>>,
     catalogs: Arc<Mutex<BTreeMap<String, BTreeMap<String, String>>>>,
-    /// `(catalog, database)` → materialized view names, for
-    /// `SHOW MATERIALIZED VIEWS FROM`.
-    materialized_views: Arc<Mutex<MaterializedViewsByDatabase>>,
+    /// The rows of `information_schema.materialized_views`, for
+    /// [`MATERIALIZED_VIEWS_SQL`].
+    materialized_views: Arc<Mutex<MaterializedViewRows>>,
     /// When set, every `execute`/`query` fails with this message.
     fail: Arc<Mutex<Option<String>>>,
     /// `(needle, message)`: fail only the statements containing `needle` —
@@ -1055,13 +1112,26 @@ impl FakeStarRocksDdl {
         );
     }
 
-    /// Seed the materialized views `SHOW MATERIALIZED VIEWS FROM` reports for a
-    /// database. A database never seeded reports none, like an FE with none.
-    pub fn seed_materialized_views(&self, catalog: &str, database: &str, names: &[&str]) {
-        self.materialized_views.lock().unwrap().insert(
-            (catalog.to_string(), database.to_string()),
-            names.iter().map(|n| n.to_string()).collect(),
-        );
+    /// Seed one row of `information_schema.materialized_views`, in the column
+    /// order [`MATERIALIZED_VIEWS_SQL`] selects. An FE never seeded has none.
+    pub fn seed_materialized_view(
+        &self,
+        database: &str,
+        name: &str,
+        base_table_refresh_version_times: Option<&str>,
+        definition: &str,
+    ) {
+        self.seed_raw_materialized_view_row(vec![
+            Some(database.to_string()),
+            Some(name.to_string()),
+            base_table_refresh_version_times.map(str::to_string),
+            Some(definition.to_string()),
+        ]);
+    }
+
+    /// Seed a row exactly as given, for the shape-check tests.
+    pub fn seed_raw_materialized_view_row(&self, row: Vec<Option<String>>) {
+        self.materialized_views.lock().unwrap().push(row);
     }
 
     /// Remove a catalog WITHOUT recording a statement — an FE that lost it to
@@ -1153,18 +1223,8 @@ impl StarRocksDdl for FakeStarRocksDdl {
                 .map(|n| vec![Some(n.clone()), Some("External".into()), None])
                 .collect());
         }
-        if let Some(rest) = sql.strip_prefix("SHOW MATERIALIZED VIEWS FROM") {
-            let names = statement_targets(rest.trim_start());
-            if let [catalog, database] = names.as_slice() {
-                let views = self.materialized_views.lock().unwrap();
-                return Ok(views
-                    .get(&(catalog.clone(), database.clone()))
-                    .into_iter()
-                    .flatten()
-                    // `id, database_name, name, …` — name is column 2.
-                    .map(|n| vec![Some("1".into()), Some(database.clone()), Some(n.clone())])
-                    .collect());
-            }
+        if sql == MATERIALIZED_VIEWS_SQL {
+            return Ok(self.materialized_views.lock().unwrap().clone());
         }
         if let Some(name) = statement_target("SHOW CREATE CATALOG", sql) {
             let Some(props) = self.catalogs.lock().unwrap().get(&name).cloned() else {
@@ -1177,35 +1237,6 @@ impl StarRocksDdl for FakeStarRocksDdl {
         }
         Ok(vec![])
     }
-}
-
-/// Every backtick-quoted identifier in `text`, in order, with doubled backticks
-/// undone — `` `a`.`b` `` → `["a", "b"]`.
-fn statement_targets(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find('`') {
-        let mut name = String::new();
-        let mut chars = rest[start + 1..].char_indices().peekable();
-        let mut end = None;
-        while let Some((i, c)) = chars.next() {
-            if c == '`' {
-                if matches!(chars.peek(), Some((_, '`'))) {
-                    chars.next();
-                    name.push('`');
-                } else {
-                    end = Some(start + 1 + i + 1);
-                    break;
-                }
-            } else {
-                name.push(c);
-            }
-        }
-        let Some(end) = end else { break };
-        out.push(name);
-        rest = &rest[end..];
-    }
-    out
 }
 
 /// The backtick-quoted name out of a statement that starts with `prefix`,
@@ -1289,51 +1320,109 @@ mod tests {
         }
     }
 
-    // ---- show_materialized_views (view governance A4) ----
+    // ---- select_materialized_views (view governance A4, revised 2026-10-14) ----
 
     #[tokio::test]
-    async fn show_materialized_views_reads_the_name_column_of_the_qualified_database() {
+    async fn select_materialized_views_reads_the_named_columns_of_information_schema() {
         let ddl = FakeStarRocksDdl::default();
-        ddl.seed_materialized_views("lake", "sales", &["mv_a", "mv_b"]);
-        ddl.seed_materialized_views("lake", "other", &["mv_elsewhere"]);
+        ddl.seed_materialized_view(
+            "db1",
+            "mv_def",
+            Some(r#"{"ice.db1.t":"2026-10-13 18:37:36","ice.db1.u":"2026-10-13 18:37:36"}"#),
+            "CREATE MATERIALIZED VIEW mv_def AS SELECT id, v FROM ice.db1.t",
+        );
 
-        let got = show_materialized_views(&ddl, &fe(), "lake", "sales")
-            .await
-            .unwrap();
+        let got = select_materialized_views(&ddl, &fe()).await.unwrap();
 
-        assert_eq!(got, ["mv_a", "mv_b"]);
         assert_eq!(
             ddl.queried(),
-            ["SHOW MATERIALIZED VIEWS FROM `lake`.`sales`"]
+            [MATERIALIZED_VIEWS_SQL],
+            "one statement, naming its columns"
+        );
+        assert_eq!(
+            MATERIALIZED_VIEWS_SQL,
+            "SELECT TABLE_SCHEMA, TABLE_NAME, BASE_TABLE_REFRESH_VERSION_TIMES, \
+             MATERIALIZED_VIEW_DEFINITION FROM information_schema.materialized_views"
+        );
+        assert_eq!(
+            got,
+            [MaterializedViewRow {
+                database: "db1".into(),
+                name: "mv_def".into(),
+                base_tables: Some(vec!["ice.db1.t".into(), "ice.db1.u".into()]),
+                definition: "CREATE MATERIALIZED VIEW mv_def AS SELECT id, v FROM ice.db1.t".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn base_tables_are_the_keys_of_a_non_empty_json_object_and_nothing_else() {
+        assert_eq!(
+            parse_base_tables(Some(r#"{"b.d.t":"x","a.d.t":null}"#)),
+            Some(vec!["a.d.t".to_string(), "b.d.t".to_string()])
+        );
+        for raw in [
+            None,
+            Some(""),
+            Some("{}"),
+            Some("null"),
+            Some(r#"["a.d.t"]"#),
+            Some(r#""a.d.t""#),
+            Some("not json {"),
+        ] {
+            assert_eq!(parse_base_tables(raw), None, "{raw:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_row_of_the_wrong_shape_is_an_error_not_a_guess() {
+        let ddl = FakeStarRocksDdl::default();
+        ddl.seed_raw_materialized_view_row(vec![Some("db1".into()), Some("mv".into())]);
+        assert!(select_materialized_views(&ddl, &fe()).await.is_err());
+
+        let ddl = FakeStarRocksDdl::default();
+        ddl.seed_raw_materialized_view_row(vec![None, Some("mv".into()), None, None]);
+        assert!(
+            select_materialized_views(&ddl, &fe()).await.is_err(),
+            "a view with no database cannot be reported"
         );
     }
 
     #[tokio::test]
-    async fn show_materialized_views_cannot_be_closed_early_by_a_backtick_in_a_name() {
-        let ddl = FakeStarRocksDdl::default();
-        let hostile = "sales`; DROP DATABASE x; --";
-        ddl.seed_materialized_views("lake", hostile, &["mv_a"]);
-
-        let got = show_materialized_views(&ddl, &fe(), "lake", hostile)
-            .await
-            .unwrap();
-
-        assert_eq!(got, ["mv_a"], "the doubled backtick round-trips");
-        assert_eq!(
-            ddl.queried(),
-            ["SHOW MATERIALIZED VIEWS FROM `lake`.`sales``; DROP DATABASE x; --`"],
-            "the backtick is doubled, so the statement stays one identifier"
-        );
-    }
-
-    #[tokio::test]
-    async fn show_materialized_views_surfaces_an_fe_failure_instead_of_an_empty_list() {
+    async fn select_materialized_views_surfaces_an_fe_failure_instead_of_an_empty_list() {
         let ddl = FakeStarRocksDdl::default();
         ddl.set_fail(Some("connect timed out"));
 
-        let got = show_materialized_views(&ddl, &fe(), "lake", "sales").await;
+        let got = select_materialized_views(&ddl, &fe()).await;
 
         assert!(got.is_err(), "a failed listing is an Err, never Ok(vec![])");
+    }
+
+    /// Task 4 review M-7: the connect-timeout text reaches the classification
+    /// page, so it must not carry the FE's internal `host:port`. A listener
+    /// that accepts and never speaks is an FE that never sends its greeting.
+    #[tokio::test]
+    async fn a_connect_timeout_does_not_name_the_fe_address() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let target = FeTarget {
+            host: "127.0.0.1".into(),
+            port,
+            root_password: None,
+            tls_cert_pem: None,
+        };
+
+        let err = MysqlDdlRunner::connect_within(&target, Duration::from_millis(200))
+            .await
+            .expect_err("nothing answers");
+        let text = err.scrubbed(&target, &BTreeMap::new());
+
+        assert!(text.contains("timed out"), "{text}");
+        assert!(
+            !text.contains("127.0.0.1") && !text.contains(&port.to_string()),
+            "{text}"
+        );
+        drop(listener);
     }
 
     // ---- fe_error / redact_quoted (fix round 2 review, F-14) ----

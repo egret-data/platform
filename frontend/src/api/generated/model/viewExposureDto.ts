@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { EngineNotChecked } from './engineNotChecked';
 import type { ViewExposureItem } from './viewExposureItem';
 
 export interface ViewExposureDto {
@@ -15,10 +16,15 @@ export interface ViewExposureDto {
   starrocksMaterializedViews?: ViewExposureItem[] | null;
   /**
      * Set exactly when `starrocks_materialized_views` is `null`; names each
-     * failing engine and database.
+     * failing engine.
      * @nullable
      */
   starrocksListError?: string | null;
+  /**
+     * Engines that reach the classification but are not running, so were not
+     * asked. Their views are unknown, not absent.
+     */
+  enginesNotChecked: EngineNotChecked[];
   /** Always empty until Trino views are reported. */
   trinoViews: ViewExposureItem[];
 }

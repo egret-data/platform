@@ -5,14 +5,17 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { MatchedBy } from './matchedBy';
 
 /**
- * One view that exists in a classified database. Shared by the StarRocks list
- * and the Trino list (filled by a later task).
+ * One view that reads a classified table. Shared by the StarRocks list and the
+ * Trino list (filled by a later task).
  */
 export interface ViewExposureItem {
   engine: string;
+  /** Where the view lives: `default_catalog` for every StarRocks view. */
   catalog: string;
   database: string;
   name: string;
+  matchedBy: MatchedBy;
 }

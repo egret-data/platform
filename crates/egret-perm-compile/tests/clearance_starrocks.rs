@@ -919,24 +919,24 @@ async fn a_hand_written_mask_is_folded_like_a_rule_mask() {
     );
 }
 
-/// The A3 database-level `create materialized view` deny for `sales`, if any.
+/// The A3 `create materialized view` deny of this test's profile, if any. One
+/// per StarRocks profile (revised 2026-10-14): StarRocks creates a materialized
+/// view only in `default_catalog` and checks the privilege on the target
+/// database, so the deny cannot be tied to the database a column lives in.
 async fn mv_deny(db: &Db, f: &Fixture) -> Option<Value> {
     sqlx::query_scalar(
         "SELECT policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
     )
     .bind(f.service_id)
-    .bind(format!(
-        "{COMPILER_CLEARANCE_PREFIX}mv-{}.sales",
-        f.catalog_name
-    ))
+    .bind(format!("{COMPILER_CLEARANCE_PREFIX}mv"))
     .fetch_optional(&db.pool)
     .await
     .expect("policy read")
 }
 
-/// A second classification in the same database narrows the exceptions to the
-/// users cleared for BOTH; untagging every column of the database deletes the
-/// policy on the next recompile.
+/// A second classification in another database narrows the exceptions of the
+/// ONE engine-wide deny to the users cleared for BOTH; untagging every column
+/// on the profile deletes the policy on the next recompile.
 #[tokio::test]
 async fn the_mv_deny_narrows_with_a_second_classification_and_goes_with_the_last_column() {
     let Some(db) = test_db().await else { return };
@@ -954,8 +954,12 @@ async fn the_mv_deny_narrows_with_a_second_classification_and_goes_with_the_last
     assert_eq!(body["serviceType"], serde_json::json!("starrocks"));
     assert_eq!(body["policyType"], serde_json::json!(0));
     assert_eq!(
+        strings_of(&body["resources"]["catalog"]["values"]),
+        vec!["default_catalog"]
+    );
+    assert_eq!(
         strings_of(&body["resources"]["database"]["values"]),
-        vec!["sales"]
+        vec!["*"]
     );
     assert!(body["resources"].get("table").is_none());
     let deny = &body["denyPolicyItems"][0];
@@ -965,10 +969,18 @@ async fn the_mv_deny_narrows_with_a_second_classification_and_goes_with_the_last
     both.sort();
     assert_eq!(users_of(&body["denyExceptions"][0]), both);
 
-    // A second classification on another table of the same database, cleared
-    // for bob only.
+    // A second classification in ANOTHER database, cleared for bob only: the
+    // deny is still one policy, and its exceptions narrow.
     let (tag_y, _) = new_tag(&db).await;
-    tag_column(&db, tag_y, f.warehouse_id, "customers", "email").await;
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) VALUES ($1,$2,'hr','staff','salary')",
+    )
+    .bind(tag_y)
+    .bind(f.warehouse_id)
+    .execute(&db.pool)
+    .await
+    .expect("tag a column in hr");
     let bob_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
         .bind(&bob)
         .fetch_one(&db.pool)
@@ -983,6 +995,15 @@ async fn the_mv_deny_narrows_with_a_second_classification_and_goes_with_the_last
         .expect("recompile with the second classification");
     let body = mv_deny(&db, &f).await.expect("still one policy");
     assert_eq!(users_of(&body["denyExceptions"][0]), vec![bob.clone()]);
+    let mv_policies: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM policy.authz_policies WHERE service_id = $1 AND name LIKE $2 || '%'",
+    )
+    .bind(f.service_id)
+    .bind(format!("{COMPILER_CLEARANCE_PREFIX}mv"))
+    .fetch_one(&db.pool)
+    .await
+    .expect("count");
+    assert_eq!(mv_policies, 1, "two databases, still one engine-wide deny");
 
     // Untag every column: the database holds no classified column any more.
     sqlx::query("DELETE FROM catalog_tag_assignments WHERE tag_id = ANY($1)")
@@ -1038,5 +1059,57 @@ async fn binding_an_unmodelled_engine_after_a_modelled_one_removes_the_mask_only
             .any(|s| s.id == tag_id && s.source_kind == egret_perm_compile::SourceKind::Clearance),
         "{:?}",
         summary.skipped
+    );
+}
+
+/// The first draft filed one deny per `(catalog, database)`, named
+/// `…mv-{catalog}.{database}`. Such a stored policy matches no real `CREATE
+/// MATERIALIZED VIEW` (StarRocks creates one only in `default_catalog`), so a
+/// recompile must sweep it by the compiler prefix and file the engine-wide one.
+#[tokio::test]
+async fn a_stored_per_database_mv_deny_from_the_first_draft_is_swept_on_recompile() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, _) = new_tag(&db).await;
+    tag_column(&db, tag_id, f.warehouse_id, "orders", "ssn").await;
+    cleared_pair(&db, tag_id).await;
+    let old_name = format!("{COMPILER_CLEARANCE_PREFIX}mv-{}.sales", f.catalog_name);
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+         VALUES ($1, $2, $3, true, 'compiler')",
+    )
+    .bind(f.service_id)
+    .bind(&old_name)
+    .bind(serde_json::json!({
+        "name": old_name, "service": "x", "serviceType": "starrocks",
+        "policyType": 0, "isEnabled": true,
+        "resources": {"catalog": {"values": [f.catalog_name], "isExcludes": false, "isRecursive": false},
+                      "database": {"values": ["sales"], "isExcludes": false, "isRecursive": false}},
+        "denyPolicyItems": [{"groups": ["public"],
+                             "accesses": [{"type": "create materialized view", "isAllowed": true}]}],
+    }))
+    .execute(&db.pool)
+    .await
+    .expect("store the first-draft deny");
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let left: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(f.service_id)
+    .bind(&old_name)
+    .fetch_optional(&db.pool)
+    .await
+    .expect("read");
+    assert!(
+        left.is_none(),
+        "the first-draft per-database deny must be swept"
+    );
+    assert!(
+        mv_deny(&db, &f).await.is_some(),
+        "the engine-wide deny replaces it"
     );
 }

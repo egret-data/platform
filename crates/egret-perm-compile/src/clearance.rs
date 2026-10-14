@@ -410,57 +410,65 @@ pub(crate) async fn compile_clearance(
     Ok(out)
 }
 
-/// The StarRocks database a classified column lives in, as `(catalog,
-/// database)`. The ONE place that answers "which database holds this column":
-/// the A3 deny ([`mv_deny_inputs`]) and the A4 exposure report
-/// ([`crate::view_exposure`]) both group by it, so the databases the page lists
-/// can never differ from the databases the deny covers.
-pub(crate) fn database_of(col: &TaggedColumn) -> (&str, &str) {
-    (col.catalog.as_str(), col.schema.as_str())
-}
-
 /// The access type that lets a user store a query result as a materialized
-/// view. Spelled as in `service-defs/starrocks.json`.
+/// view. Spelled as in `service-defs/starrocks.json`, where it is an access type
+/// of the `database` resource.
 const CREATE_MV_ACCESS: &str = "create materialized view";
 
-/// A3: one deny per database that holds a classified column. Denying `create
-/// materialized view` to `{public}` keeps an uncleared user from building a view
-/// that STORES real values (a mask does not follow stored data). The exceptions
-/// are the users cleared for EVERY classification with a column in that
-/// database: the intersection across every pending (gate, column) pair there.
+/// The only catalog StarRocks creates a materialized view in.
+pub const MV_CATALOG: &str = "default_catalog";
+
+/// A3 (revised 2026-10-14): at most ONE deny per StarRocks profile. Denying
+/// `create materialized view` to `{public}` keeps an uncleared user from
+/// building a view that STORES real values (a mask does not follow stored data).
+///
+/// **Why engine-wide.** Measured on StarRocks 4.1.6
+/// (`docs/en/plans/2026-10-14-starrocks-mv-placement-measurement.md`): a
+/// materialized view can only be created in `default_catalog`, and the privilege
+/// is checked on the TARGET database `default_catalog.<db>`, never on the base
+/// table's catalog or database. The first draft's deny on `{<external catalog>,
+/// <database>}` therefore matched no real `CREATE MATERIALIZED VIEW`, and the
+/// target database is any one the builder may write to, so the resource is
+/// `{catalog: default_catalog, database: *}`. The first draft's
+/// `…mv-{catalog}.{database}` policies are swept by the compiler prefix.
+///
+/// The exceptions are the users cleared for EVERY classification with a column
+/// on the profile: the intersection across every pending (gate, column) pair.
 /// An empty intersection leaves no exception, so the deny holds for everyone.
+/// **Cost (accepted by the user):** a user not cleared for every classification
+/// on the engine cannot create any materialized view there, including over
+/// unclassified data.
 ///
 /// `pending` is one entry per (gate, column), as `compile_clearance` records
-/// them, so a database with no classified column never appears.
+/// them. A group-only gate is skipped before it records any, so it neither
+/// creates the deny nor narrows its exceptions (the same skip as the column
+/// deny). A profile with no classified column gets no policy.
 pub(crate) fn mv_deny_inputs(
     pending: &[PendingMask],
     service: &str,
 ) -> Vec<(String, AccessPolicyInput)> {
-    let mut by_db: BTreeMap<(&str, &str), Option<Vec<String>>> = BTreeMap::new();
+    let mut cleared: Option<Vec<String>> = None;
     for p in pending {
-        let slot = by_db.entry(database_of(&p.column)).or_insert(None);
-        *slot = Some(match slot.take() {
+        cleared = Some(match cleared.take() {
             None => p.cleared.clone(),
             Some(have) => have.into_iter().filter(|u| p.cleared.contains(u)).collect(),
         });
     }
-    by_db
-        .into_iter()
-        .map(|((catalog, database), cleared)| {
-            let name = format!("{COMPILER_CLEARANCE_PREFIX}mv-{catalog}.{database}");
-            let mut resources = BTreeMap::new();
-            resources.insert("catalog".to_string(), level(catalog.to_string()));
-            resources.insert("database".to_string(), level(database.to_string()));
-            let input = clearance_input(
-                name.clone(),
-                service.to_string(),
-                resources,
-                &[CREATE_MV_ACCESS.to_string()],
-                cleared.unwrap_or_default(),
-            );
-            (name, input)
-        })
-        .collect()
+    let Some(cleared) = cleared else {
+        return Vec::new();
+    };
+    let name = format!("{COMPILER_CLEARANCE_PREFIX}mv");
+    let mut resources = BTreeMap::new();
+    resources.insert("catalog".to_string(), level(MV_CATALOG.to_string()));
+    resources.insert("database".to_string(), level("*".to_string()));
+    let input = clearance_input(
+        name.clone(),
+        service.to_string(),
+        resources,
+        &[CREATE_MV_ACCESS.to_string()],
+        cleared,
+    );
+    vec![(name, input)]
 }
 
 /// The one clearance policy shape, built once for both engines: deny `{public}`
@@ -593,13 +601,13 @@ fn withheld_accesses(engine: EngineType) -> Result<Vec<String>, CompileError> {
 mod tests {
     use super::*;
 
-    fn pending(tag: u128, db: &str, table: &str, cleared: &[&str]) -> PendingMask {
+    fn pending(tag: u128, catalog: &str, db: &str, cleared: &[&str]) -> PendingMask {
         PendingMask {
             tag_id: Uuid::from_u128(tag),
             column: TaggedColumn {
-                catalog: "lake".into(),
+                catalog: catalog.into(),
                 schema: db.into(),
-                table: table.into(),
+                table: "t".into(),
                 column: "c".into(),
             },
             cleared: cleared.iter().map(|s| s.to_string()).collect(),
@@ -610,21 +618,29 @@ mod tests {
         i.deny_exceptions[0].users.clone()
     }
 
+    /// A3 (revised 2026-10-14): StarRocks creates a materialized view only in
+    /// `default_catalog` and checks the privilege on the TARGET database, so the
+    /// deny is one policy on `default_catalog`/`*` whatever databases the
+    /// classified columns live in, excepting the users cleared for every
+    /// classification on the service.
     #[test]
-    fn a_database_with_two_classifications_gets_one_deny_excepting_the_intersection() {
+    fn a_service_with_two_classifications_gets_one_engine_wide_deny_excepting_the_intersection() {
         let got = mv_deny_inputs(
             &[
-                pending(1, "sales", "t1", &["ann", "bob"]),
-                pending(2, "sales", "t2", &["bob", "cy"]),
+                pending(1, "lake", "sales", &["ann", "bob"]),
+                pending(1, "lake", "sales", &["ann", "bob"]),
+                pending(2, "ice", "hr", &["bob", "cy"]),
             ],
             "sr",
         );
-        assert_eq!(got.len(), 1);
+        assert_eq!(got.len(), 1, "{got:?}");
         let (name, i) = &got[0];
-        assert_eq!(name, &format!("{COMPILER_CLEARANCE_PREFIX}mv-lake.sales"));
+        assert_eq!(name, &format!("{COMPILER_CLEARANCE_PREFIX}mv"));
+        assert_eq!(i.name, *name);
+        assert_eq!(i.service, "sr");
         assert_eq!(i.resources.len(), 2);
-        assert_eq!(i.resources["catalog"].values, vec!["lake"]);
-        assert_eq!(i.resources["database"].values, vec!["sales"]);
+        assert_eq!(i.resources["catalog"].values, vec!["default_catalog"]);
+        assert_eq!(i.resources["database"].values, vec!["*"]);
         assert_eq!(i.items[0].groups, vec!["public"]);
         assert_eq!(i.items[0].accesses, vec!["create materialized view"]);
         assert_eq!(i.items[0].effect, "deny");
@@ -632,17 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn databases_are_independent_and_unclassified_ones_get_nothing() {
-        let got = mv_deny_inputs(
-            &[
-                pending(1, "sales", "t", &["ann"]),
-                pending(2, "hr", "t", &["bob"]),
-            ],
-            "sr",
-        );
-        assert_eq!(got.len(), 2);
-        assert_eq!(exceptions(&got[0].1), vec!["bob"], "hr");
-        assert_eq!(exceptions(&got[1].1), vec!["ann"], "sales");
+    fn a_service_with_no_classified_column_gets_no_deny() {
         assert!(mv_deny_inputs(&[], "sr").is_empty());
     }
 
@@ -650,8 +656,8 @@ mod tests {
     fn an_empty_intersection_denies_everyone() {
         let got = mv_deny_inputs(
             &[
-                pending(1, "sales", "t1", &["ann"]),
-                pending(2, "sales", "t2", &["bob"]),
+                pending(1, "lake", "sales", &["ann"]),
+                pending(2, "lake", "hr", &["bob"]),
             ],
             "sr",
         );

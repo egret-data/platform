@@ -186,10 +186,10 @@ use crate::trigger::{
 /// The `sr-` rows (view governance Task 3, `gate_time_for_the_starrocks_clearance_shape*`
 /// in `tests/gate_timing.rs`, release) are a StarRocks profile of N single-user allow
 /// policies plus C classified columns. Each classified column serves a deny, a folded
-/// priority-1 clearance mask and a rule mask, and each database holds one `create
-/// materialized view` deny, so the profile serves about N + 3C + 1 policies. `sr-access`
-/// changes one allow policy (pruning works, 0.95-1.15 us per unit). `sr-mask` changes the
-/// rule mask on a classified column: the folded mask changes with it, a non-zero priority
+/// priority-1 clearance mask and a rule mask, and the profile holds one `create
+/// materialized view` deny (on `default_catalog`/`*`), so the profile serves about
+/// N + 3C + 1 policies. `sr-access` changes one allow policy (pruning works, 0.95-1.15 us
+/// per unit). `sr-mask` changes the rule mask on a classified column: the folded mask changes with it, a non-zero priority
 /// in the delta turns pruning off (`NonZeroPriorityInDelta`), and the full probe set is
 /// compared (1.0-1.26 us per unit). The cap is unchanged: 1 259 712 units took 1.48 s.
 /// Migrations that are equivalent still prune; a non-equivalent rule-mask change on a

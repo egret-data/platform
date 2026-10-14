@@ -16,21 +16,36 @@ import {
 
 /**
  * Governance → Classifications → a tag: the materialized views that already
- * exist in the databases holding this classification's columns (view
- * governance A4).
+ * exist and read a table of this classification (view governance A4, revised
+ * 2026-10-14).
  *
- * egret denies CREATING a materialized view there, but cannot remove one that
- * exists, and an existing one may hold copies of the classified values. The
- * list is read-only: egret reports these views and does not drop them.
+ * StarRocks keeps every materialized view in `default_catalog`, so each running
+ * engine is asked once and its views are matched by base table, or, for a view
+ * with no base-table map, by the text of its definition ("matched by text").
+ * egret denies CREATING a materialized view on an engine with classified
+ * columns (A3), but cannot remove one that exists, and an existing one may hold
+ * copies of the classified values. The list is read-only.
  *
- * Three outcomes, never conflated (FE-STATE-1): the request failed, the engine
+ * Three outcomes, never conflated (FE-STATE-1): the request failed, an engine
  * could not be listed (`starrocksMaterializedViews` is `null`), or the list is
- * genuinely empty. Only the last may say "none".
+ * genuinely empty. Only the last may say "none". Engines that are not running
+ * are named as not checked whichever of the three it is.
+ *
+ * `engineGated`: the tag has a role clearance, so it compiles to the A3 deny.
+ * Only then does the cost sentence apply; a group-only or informational tag
+ * contributes no deny (Task 4 review M-4).
  */
-export default function ViewExposureSection({ tagId }: { tagId: string }) {
+export default function ViewExposureSection({
+  tagId,
+  engineGated,
+}: {
+  tagId: string;
+  engineGated: boolean;
+}) {
   const query = useControlPlaneTagsGetViewExposure(tagId, { query: { retry: false } });
   const exposure = query.data?.status === 200 ? query.data.data : undefined;
   const views = exposure?.starrocksMaterializedViews;
+  const notChecked = exposure?.enginesNotChecked ?? [];
 
   return (
     <section className="space-y-3" aria-labelledby="view-exposure-heading">
@@ -39,8 +54,8 @@ export default function ViewExposureSection({ tagId }: { tagId: string }) {
           Existing materialized views
         </h2>
         <p className="text-sm text-muted-foreground">
-          StarRocks materialized views already in the databases that hold this classification&apos;s
-          columns.
+          StarRocks materialized views that read a table of this classification. StarRocks keeps
+          every materialized view in default_catalog.
         </p>
       </div>
 
@@ -49,27 +64,49 @@ export default function ViewExposureSection({ tagId }: { tagId: string }) {
         className="w-fit items-start gap-1.5 whitespace-normal text-left font-normal"
       >
         <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-        These views may hold real classified values; egret does not drop them. Denying new
-        materialized views does not clean up the ones that exist.
+        <span>
+          These views may hold real classified values; egret does not drop them.{" "}
+          {engineGated
+            ? "Because of this clearance, users not cleared for every classification on an engine cannot create any materialized view on that engine, even over unclassified data."
+            : "This classification has no role clearance, so it does not stop anyone creating materialized views."}
+        </span>
       </Badge>
+
+      {notChecked.length > 0 && (
+        <div className="text-sm">
+          <p className="text-muted-foreground">
+            Not checked: these engines are not running, so their materialized views are unknown.
+            Start the engine, then reload the page.
+          </p>
+          <ul className="list-disc pl-5">
+            {notChecked.map((e) => (
+              <li key={e.engine}>
+                {e.engine} ({e.status})
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {query.isLoading ? (
         <ListSkeleton rows={3} cols={3} />
       ) : query.isError ? (
         <Alert variant="destructive">
           <AlertDescription>
-            {(query.error as { message?: string } | null)?.message ??
-              "Could not load the materialized views."}
+            Could not load the materialized views:{" "}
+            {(query.error as { message?: string } | null)?.message ?? "unknown error"}. Reload the
+            page to try again.
           </AlertDescription>
         </Alert>
       ) : !Array.isArray(views) ? (
         <Alert variant="destructive">
           <AlertDescription>
-            {exposure?.starrocksListError ?? "Could not list the materialized views."}
+            {exposure?.starrocksListError ?? "Could not list the materialized views."} Check that
+            the engine is reachable, then reload the page.
           </AlertDescription>
         </Alert>
       ) : views.length === 0 ? (
-        <EmptyState title="No materialized views found in these databases." />
+        <EmptyState title="No materialized views read this classification's tables." />
       ) : (
         <Table>
           <TableHeader>
@@ -82,7 +119,18 @@ export default function ViewExposureSection({ tagId }: { tagId: string }) {
           <TableBody>
             {views.map((v) => (
               <TableRow key={`${v.engine}/${v.catalog}/${v.database}/${v.name}`}>
-                <TableCell className="font-mono text-xs">{v.name}</TableCell>
+                <TableCell className="font-mono text-xs">
+                  {v.name}
+                  {v.matchedBy === "text" && (
+                    <Badge
+                      variant="outline"
+                      className="ml-2 font-sans font-normal"
+                      title="This view has no base-table record, so it was matched because its definition names the classified catalog and database."
+                    >
+                      matched by text
+                    </Badge>
+                  )}
+                </TableCell>
                 <TableCell className="font-mono text-xs">{`${v.catalog}.${v.database}`}</TableCell>
                 <TableCell>{v.engine}</TableCell>
               </TableRow>
