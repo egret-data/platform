@@ -1,6 +1,6 @@
 # W7d — Workflows UI, part 4: namespaces (list, detail, files, KV, dependencies)
 
-**Status:** design, 2026-10-14.
+**Status:** implemented, 2026-10-14. Measured live on a private stack (a fresh database, a private RustFS, `serve` and Vite on their own ports): the namespace list and detail, the Files tab with a real drag and drop and a real `webkitdirectory` folder import, Ctrl/Cmd+S per editor with Code and two file tabs side by side (proved by the requests sent), the 409 `file_changed` dialog from a second session, the namespace-change question, KV (JSON, DATE, an exponent NUMBER read back with every digit, inherited keys) and the `subflow` edge, with the editors measured in light and dark mode (`frontend/tests/e2e/workflows-namespaces.spec.ts`). The differences from a running Kestra are in §2.
 
 **Depends on:**
 - W7a (#659): the Workflows area, the multi-panel editor and its tab registry, the stale-save dialog pattern (`if_updated_at`, 409 `draft_changed`).
@@ -25,15 +25,24 @@ W9b and W9c gave egret namespace files and a KV store, but they can be reached o
 
 ## 2. Divergences from Kestra
 
-| Kestra (OSS) | egret | Why |
-|---|---|---|
-| Namespaces are derived from flows only (`GET /namespaces/search`) | From flows, live namespace files and live KV keys, plus parents | A namespace can hold files or keys without a flow (user's ruling) |
-| Overview is the executions dashboard, or a "no executions" screen | Counts (flows, files, keys), recent executions, child namespaces | egret has no dashboard charts |
-| Saving a namespace file is last-write-wins | Compare-and-write on the file's revision; 409 opens Reload or Overwrite | Two editors of one file must not silently overwrite each other (W7a's rule for flows) |
-| Dependencies graph via `GET /namespaces/{ns}/dependencies` | The same idea, built from drafts (§3.4) | No stored dependency index in egret |
-| Namespace creation (EE) | None: a namespace exists when something lives in it | OSS parity |
+**Measured against a running Kestra, 2026-10-14 (Task 9, §9).** The local image `kestra/kestra` `28f59bf175e1` (Kestra 2.0 nightly, `server local`, in a throwaway container) ran §6's scenario: `company.team.child`, `company.other.caller` calling it through a `Subflow`, a `Flow` trigger on `child`, a namespace file, KV keys of each type. The same requests went to egret. Each row says whether it was **observed** on the running image (its API or its UI) or **read** in Kestra's source.
 
-The comparison of §9 adds measured differences.
+| Kestra | egret | Why |
+|---|---|---|
+| Observed: `GET /namespaces/search` lists namespaces with flows and their parents (`company`, `company.other`, `company.team`); a namespace holding only a file (`w7d.filesonly`) or only a KV key (`w7d.kvonly`) is not listed | Listed, with `own: true` and its counts; a namespace holding only a live folder is listed too (`own: true`, `files: 0`) | A namespace can hold files or keys without a flow (user's ruling) |
+| Observed: `GET /namespaces/nope.nothing` answers 200 `{"id":"nope.nothing"}` | 404, and the page says "Namespace not found" with a link back | A link to nothing should say so |
+| Observed: the namespace page's tabs are Overview, Edit (EE), Flows, Executions, Dependencies, Secrets, Assets, Variables, Policies (EE), **KV Store, Namespace Files**, Revisions, Audit logs (EE); read: `ORDER` in `ui/src/components/namespaces/utils/useHelpers.ts` puts `kv` before `files` | Overview, Flows, Executions, Dependencies, **Files, KV** | The order the user decided (2026-10-14); this nightly image puts KV first |
+| Overview is the executions dashboard, or a "no executions" screen | Counts (flows, files, keys), recent executions, child namespaces | egret has no dashboard charts |
+| Observed: two writes of one file answer 200 and 200, the second wins; an `if_revision` parameter is ignored (200); `files/stats` carries no revision | Compare-and-write: `if_revision` (`0` = must not exist); a stale one answers 409 `file_changed` naming the revision ("it is at revision 2, not 1; nothing was written"); the editor opens Reload or Overwrite | Two editors of one file must not silently overwrite each other (W7a's rule for flows) |
+| Observed: uploading `bundle.zip` to `?path=/bundle.zip` extracts it, at the namespace root (the path is ignored): `/inner/x.txt`, `/y.sql` | Stored as one file, `/bundle.zip`. Import is files and folders (`webkitdirectory`, one upload per file) | USER RULING 2026-10-14: no zip extraction |
+| Observed: a file under `/_flows/` is imported as a flow (`viafile` created in the file's namespace) | 400: "'/_flows' and everything under it is reserved for flow sources" | W9b's rule; flows are edited in the flow editor |
+| Observed: `GET /namespaces/company.team/dependencies` has no edge for `caller` → `child` (a `Subflow` into the namespace), while `company.other`'s graph has it; `company.other`'s graph has no edge for the `Flow` trigger into `listener`, while `company.team`'s has it | Every edge into or out of the namespace, in both graphs (`company.other.caller → company.team.child`, `subflow`; `company.team.child → company.other.listener`, `flow_trigger`) | One graph per namespace that is the same from either end |
+| Observed: a `Flow` trigger whose `dependsOn` names only `namespace: company.team` draws an edge from every flow of `company.team` | No edge: only a `dependsOn` entry naming both `namespace` and `flowId` draws one (§3.4) | An edge says "this flow starts that one"; a namespace-wide condition is not that |
+| Dependencies from a stored index | Built from the drafts on each request (§3.4) | No stored dependency index in egret |
+| Observed: a KV `PUT` of `1.2345678901234567890123e5` reads back `123456.78901234567` (an Ion float); `…d5` reads back every digit. Read: the UI's NUMBER field is `type="number"` and sends `String(value)` (`KVTable.vue`) | The API is the same (W9c parity); the UI sends an exponent as an Ion decimal (`d`), so `1.2345678901234567890123e5` reads back `123456.78901234567890123`, measured in the browser | A key's number is not rounded by the form |
+| Read: the UI sends JSON as typed text (`KVTable.vue`) | The same: JSON is sent as typed, its numbers kept as written | Parity |
+| Observed: `ttl: PT0S` is accepted (200) and the key reads back 410 at once | The API is the same (200); the form refuses `PT0S` before a request is sent | A key that expires as it is written is a typo |
+| Namespace creation (EE) | None: a namespace exists when something lives in it | OSS parity |
 
 ## 3. Backend
 
@@ -50,8 +59,9 @@ The comparison of §9 adds measured differences.
 - **Each row:** `{namespace, flows, files, kv_keys, own}`. `own` is false for a namespace present only as a parent.
 - **Order and filter:** rows are sorted by namespace. `prefix` filters with the dot-anchored rule W7b uses for `namespace_prefix`.
 - **Query:** one SQL statement over the existing tables; there are no migrations.
+- **Folders:** a namespace holding only a live folder (no file below it) is listed, `own: true` and `files: 0`. Empty folders are not counted as files.
 
-`GET /api/ws/{workspace}/workflows/namespaces/{ns}` returns the same row for one namespace, or 404 when no source knows it and it is not a parent of one. Overview uses it.
+`GET /api/ws/{workspace}/workflows/namespaces/{ns}` returns a `WorkflowNamespaceDetailDto` for one namespace: the same row plus `can_manage`, whether the caller holds `workflow:manage` there (the page disables writes from it). It answers 404 when no source knows the namespace and it is not a parent of one. Overview uses it.
 
 ### 3.2 File writes with a revision check
 
@@ -60,6 +70,9 @@ The comparison of §9 adds measured differences.
 - **With it:** the write commits only if the path's current revision equals it. Otherwise it answers 409 with `code: "file_changed"`, as W7a's `draft_changed` does. `if_revision=0` means "the path must not exist".
 - **Without it:** the behaviour is unchanged, so existing callers and tasks are not affected.
 - **Atomicity:** the check and the write are one statement under W9b's existing per-path lock.
+- **Deleted paths:** the current revision is the latest live one. A soft-deleted path, like one that never existed, is at revision 0: `if_revision=0` writes it again, and the revision an editor read before the delete answers 409 `file_changed` ("was deleted").
+- **Other 409s:** a 409 without `code: "file_changed"` (for example a folder at that path) is a plain error, not the stale dialog.
+- **Zips:** a `.zip` is a file like any other here (W9b stores it as one file), so `if_revision` applies to it. The idea of refusing `if_revision` on a `.zip` is dropped: its premise, that the server extracts zips, is false.
 
 ### 3.3 Unchanged
 
@@ -72,10 +85,12 @@ Every W9b file route and W9c KV route keeps its permission: read needs `workflow
 - **Nodes:** the flows of the namespace and its children (dot-anchored), plus every flow elsewhere in the workspace with a direct edge to or from one of them. Each node is `{id, namespace, flow_id, disabled, in_namespace}`.
 - **Edges:** `{source, target, kind}`, where `kind` is:
   - `subflow`: a `Subflow` task anywhere in the flow's task tree, `errors:` included, whose `namespace` and `flowId` are literals naming an existing flow;
-  - `flow_trigger`: a `Flow` trigger whose conditions name the source flow, from `workflow.flow_listeners` and the trigger's conditions.
+  - `flow_trigger`: a `Flow` trigger whose `dependsOn` has an entry naming both the source flow's `namespace` and its `flowId`. It is derived from the drafts, not from `workflow.flow_listeners`, which has no upstream list. An entry naming only a namespace draws no edge (§2).
 - **Dynamic targets:** a `Subflow` whose target is an expression draws no edge, and its node carries `dynamic_subflows: n`.
+- **Broken drafts:** a draft that does not parse stays a node, flagged `unparsable: true`, when it is in the namespace or an edge reaches it; its incoming edges are kept and it has no outgoing ones. The top-level `unparsable` counts every broken draft in the workspace, since one outside the namespace can hide an edge into it.
 - **Source of truth:** built from the flows' saved drafts, which is what every execution runs (W7a ruling). There is no stored index.
-- **Limit:** reading more than 2,000 flows answers 422 with a message.
+- **Where it runs:** the drafts are parsed off the async workers (`spawn_blocking`).
+- **Limit:** the bound counts every flow of the workspace, not only the namespace's. More than 2,000 answers 422 with `code: "dependencies_too_large"` and a message.
 
 ## 4. Frontend
 
@@ -110,20 +125,21 @@ The page is `/explore/:workspace/workflows/namespaces/:namespace/:tab`, with ver
 
 **The file tree**
 - Create a file or a folder.
-- Import a file, a folder or a `.zip` (extracted by the server, as W9b does). Export the namespace as a zip.
+- Import files, or a folder through the browser's folder picker (`webkitdirectory`): one upload per file, each with its path below the folder, each with `if_revision=0`, and existing paths listed for an Overwrite question. **USER RULING 2026-10-14: no zip extraction.** A `.zip` is imported as one file, as W9b stores it. Export the namespace as a zip.
 - Rename, and move by drag and drop. Every drag has a keyboard equivalent ("Move to…").
 - Delete, with a confirmation that names how many files go.
 - Search, through W9b's search route.
-- See a file's revisions and restore one. Restoring writes that revision's content as a new revision.
+- See a file's revisions and restore one. Restoring writes that revision's content as a new revision, with `if_revision`; a 409 asks whether to restore over the newer revision.
 
 **Opening a file**
 - A text file opens in Monaco, with the language taken from its extension.
 - An image shows a preview.
-- Any other binary file offers download only.
+- Any other binary file, and any file over 5 MB, offers download only.
 
 **Saving**
 - A save sends `if_revision`.
 - A 409 `file_changed` opens W7a's stale-save dialog: Reload or Overwrite. Overwrite resends without `if_revision`.
+- Ctrl/Cmd+S belongs to the editor that has focus: each file editor registers its own Monaco action (`addAction`, disposed with the editor), so the key saves that file only, never the flow or another file.
 - An unsaved file shows a dot on its tab, and closing it asks first.
 
 **On the namespace page**
@@ -136,6 +152,8 @@ The page is `/explore/:workspace/workflows/namespaces/:namespace/:tab`, with ver
 - A file tab saves with Ctrl/Cmd+S. "Save all files" saves every unsaved file tab.
 - File tabs are restored from the stored layout.
 - The flow's own Save does not save files, and saving a file does not save the flow.
+- A flow save that moves the flow to another namespace while a file tab has unsaved edits asks first: **Save files first** (into the old namespace, then the flow), **Discard file changes**, or **Cancel**. The file tabs of the old namespace close when the flow moves.
+- When someone else's save moves the flow to another namespace, the file tabs close and their unsaved edits are lost, with a notice that says so.
 
 ### 4.4 KV
 
@@ -153,6 +171,9 @@ The page is `/explore/:workspace/workflows/namespaces/:namespace/:tab`, with ver
 - Fields: key (locked on edit), type, value, description, and expiration as a TTL.
 - Types: STRING, NUMBER, BOOLEAN, DATETIME, DATE, DURATION, JSON. Each has its own control; JSON uses Monaco.
 - The value is checked in the form with the same rules the server applies.
+- JSON is sent as typed, so its numbers keep every digit. A NUMBER with an exponent is sent as an Ion decimal (`6.02e23` as `6.02d23`), so every digit is kept; an Ion float would round it.
+- The TTL check follows egret's own duration parser (fractions are accepted). `PT0S` is refused in the form: the key would expire as it is written.
+- Editing a key keeps its remaining TTL unless the expiration is changed.
 - Creating a key that already exists asks before overwriting.
 
 **Inherited keys**
@@ -247,9 +268,10 @@ DOM measurements cover light and dark mode.
 
 ## 9. Comparing with Kestra
 
-The scenario of §6 runs on the local Kestra image. Every deliberate difference is recorded in §2.
+The scenario of §6 ran on the local Kestra image on 2026-10-14 (Task 9). Every difference found is recorded in §2, each labelled observed or read in source.
 
 ## 10. Known limits
 
 - Dependencies reads every flow's draft on each request, bounded at 2,000 flows. A workspace with more flows gets the 422.
 - A `Subflow` whose target is an expression has no edge.
+- Every draft of the workspace is loaded for the request, and their size is not bounded, only their count.

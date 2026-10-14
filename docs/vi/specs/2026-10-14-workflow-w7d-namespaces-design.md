@@ -2,7 +2,7 @@
 
 > Bản tham khảo tiếng Việt. Bản chính là `docs/en/specs/2026-10-14-workflow-w7d-namespaces-design.md`; khi hai bản khác nhau, bản tiếng Anh thắng.
 
-**Trạng thái:** thiết kế, 2026-10-14.
+**Trạng thái:** đã hiện thực, 2026-10-14. Đã đo sống trên một stack riêng (database mới, RustFS riêng, `serve` và Vite trên cổng riêng): danh sách và chi tiết namespace, tab Files với kéo thả thật và import thư mục thật qua `webkitdirectory`, Ctrl/Cmd+S theo từng editor với Code và hai tab file đặt cạnh nhau (chứng minh bằng các request được gửi), dialog 409 `file_changed` từ một phiên thứ hai, câu hỏi khi đổi namespace, KV (JSON, DATE, một NUMBER có số mũ đọc lại đủ mọi chữ số, key kế thừa) và cạnh `subflow`, với các editor được đo ở chế độ sáng và tối (`frontend/tests/e2e/workflows-namespaces.spec.ts`). Các khác biệt so với một Kestra đang chạy nằm ở §2.
 
 **Phụ thuộc:**
 - W7a (#659): khu vực Workflows, editor nhiều panel và sổ đăng ký tab của nó, mẫu dialog lưu bị cũ (`if_updated_at`, 409 `draft_changed`).
@@ -27,15 +27,24 @@ W9b và W9c đã cho egret file namespace và kho KV, nhưng chỉ chạm tới 
 
 ## 2. Khác biệt so với Kestra
 
-| Kestra (OSS) | egret | Vì sao |
-|---|---|---|
-| Namespace chỉ suy ra từ flow (`GET /namespaces/search`) | Từ flow, file namespace còn sống và key KV còn sống, cộng các namespace cha | Một namespace có thể chứa file hoặc key mà không có flow (phán quyết của người dùng) |
-| Overview là dashboard execution, hoặc màn hình "no executions" | Số đếm (flow, file, key), execution gần đây, namespace con | egret không có biểu đồ dashboard |
-| Lưu file namespace là last-write-wins | So sánh rồi ghi theo revision của file; 409 mở Reload hoặc Overwrite | Hai người cùng sửa một file không được ghi đè nhau trong im lặng (rule của W7a cho flow) |
-| Đồ thị dependencies qua `GET /namespaces/{ns}/dependencies` | Cùng ý tưởng, dựng từ draft (§3.4) | egret không có chỉ mục dependency được lưu |
-| Tạo namespace (EE) | Không: một namespace tồn tại khi có thứ gì đó nằm trong nó | Ngang bằng OSS |
+**Đã đo trên một Kestra đang chạy, 2026-10-14 (Task 9, §9).** Image cục bộ `kestra/kestra` `28f59bf175e1` (Kestra 2.0 nightly, `server local`, trong một container dùng một lần) chạy kịch bản của §6: `company.team.child`, `company.other.caller` gọi nó qua một `Subflow`, một trigger `Flow` trên `child`, một file namespace, các key KV của từng kiểu. Cùng các request đó được gửi tới egret. Mỗi dòng nói rõ nó được **quan sát** trên image đang chạy (API hoặc UI của nó) hay được **đọc** trong mã nguồn Kestra.
 
-Phần so sánh ở §9 bổ sung các khác biệt đo được.
+| Kestra | egret | Vì sao |
+|---|---|---|
+| Quan sát: `GET /namespaces/search` liệt kê namespace có flow và các cha của chúng (`company`, `company.other`, `company.team`); một namespace chỉ chứa một file (`w7d.filesonly`) hoặc chỉ một key KV (`w7d.kvonly`) không được liệt kê | Được liệt kê, với `own: true` và số đếm của nó; một namespace chỉ chứa một thư mục còn sống cũng được liệt kê (`own: true`, `files: 0`) | Một namespace có thể chứa file hoặc key mà không có flow (phán quyết của người dùng) |
+| Quan sát: `GET /namespaces/nope.nothing` trả 200 `{"id":"nope.nothing"}` | 404, và trang nói "Namespace not found" kèm liên kết quay lại | Một liên kết tới thứ không có thì phải nói vậy |
+| Quan sát: các tab của trang namespace là Overview, Edit (EE), Flows, Executions, Dependencies, Secrets, Assets, Variables, Policies (EE), **KV Store, Namespace Files**, Revisions, Audit logs (EE); đọc: `ORDER` trong `ui/src/components/namespaces/utils/useHelpers.ts` đặt `kv` trước `files` | Overview, Flows, Executions, Dependencies, **Files, KV** | Thứ tự người dùng đã chốt (2026-10-14); image nightly này đặt KV trước |
+| Overview là dashboard execution, hoặc màn hình "no executions" | Số đếm (flow, file, key), execution gần đây, namespace con | egret không có biểu đồ dashboard |
+| Quan sát: hai lần ghi một file trả 200 và 200, lần thứ hai thắng; tham số `if_revision` bị bỏ qua (200); `files/stats` không mang revision | So sánh rồi ghi: `if_revision` (`0` = không được tồn tại); một revision cũ trả 409 `file_changed` nêu tên revision ("it is at revision 2, not 1; nothing was written"); editor mở Reload hoặc Overwrite | Hai người cùng sửa một file không được ghi đè nhau trong im lặng (rule của W7a cho flow) |
+| Quan sát: tải `bundle.zip` lên `?path=/bundle.zip` thì nó được giải nén, ở gốc namespace (path bị bỏ qua): `/inner/x.txt`, `/y.sql` | Lưu thành một file, `/bundle.zip`. Import là file và thư mục (`webkitdirectory`, mỗi file một lần tải lên) | PHÁN QUYẾT CỦA NGƯỜI DÙNG 2026-10-14: không giải nén zip |
+| Quan sát: một file dưới `/_flows/` được import thành một flow (`viafile` được tạo trong namespace của file) | 400: "'/_flows' and everything under it is reserved for flow sources" | Rule của W9b; flow được sửa trong editor flow |
+| Quan sát: `GET /namespaces/company.team/dependencies` không có cạnh `caller` → `child` (một `Subflow` đi vào namespace), trong khi đồ thị của `company.other` có; đồ thị của `company.other` không có cạnh cho trigger `Flow` đi vào `listener`, trong khi đồ thị của `company.team` có | Mọi cạnh vào hoặc ra khỏi namespace, trong cả hai đồ thị (`company.other.caller → company.team.child`, `subflow`; `company.team.child → company.other.listener`, `flow_trigger`) | Đồ thị của một namespace phải giống nhau khi nhìn từ đầu nào |
+| Quan sát: một trigger `Flow` có `dependsOn` chỉ nêu `namespace: company.team` vẽ một cạnh từ mọi flow của `company.team` | Không có cạnh: chỉ một mục `dependsOn` nêu cả `namespace` lẫn `flowId` mới vẽ cạnh (§3.4) | Một cạnh nói "flow này khởi động flow kia"; một điều kiện cho cả namespace không phải vậy |
+| Dependencies từ một chỉ mục được lưu | Dựng từ draft trên mỗi request (§3.4) | egret không có chỉ mục dependency được lưu |
+| Quan sát: `PUT` KV giá trị `1.2345678901234567890123e5` đọc lại `123456.78901234567` (một float Ion); `…d5` đọc lại đủ mọi chữ số. Đọc: trường NUMBER của UI là `type="number"` và gửi `String(value)` (`KVTable.vue`) | API giống hệt (ngang bằng W9c); UI gửi số mũ dưới dạng decimal Ion (`d`), nên `1.2345678901234567890123e5` đọc lại `123456.78901234567890123`, đo trong trình duyệt | Số của một key không bị form làm tròn |
+| Đọc: UI gửi JSON dưới dạng văn bản đã gõ (`KVTable.vue`) | Như vậy: JSON được gửi như đã gõ, các số giữ nguyên như đã viết | Ngang bằng |
+| Quan sát: `ttl: PT0S` được nhận (200) và key đọc lại 410 ngay lập tức | API giống hệt (200); form từ chối `PT0S` trước khi gửi request | Một key hết hạn ngay khi được ghi là một lỗi gõ |
+| Tạo namespace (EE) | Không: một namespace tồn tại khi có thứ gì đó nằm trong nó | Ngang bằng OSS |
 
 ## 3. Backend
 
@@ -52,8 +61,9 @@ Phần so sánh ở §9 bổ sung các khác biệt đo được.
 - **Mỗi dòng:** `{namespace, flows, files, kv_keys, own}`. `own` là false với một namespace chỉ hiện diện vì là cha.
 - **Thứ tự và bộ lọc:** các dòng được sắp theo namespace. `prefix` lọc bằng rule neo theo dấu chấm mà W7b dùng cho `namespace_prefix`.
 - **Truy vấn:** một câu SQL trên các bảng hiện có; không có migration.
+- **Thư mục:** một namespace chỉ chứa một thư mục còn sống (không có file nào bên dưới) được liệt kê, `own: true` và `files: 0`. Thư mục rỗng không được đếm là file.
 
-`GET /api/ws/{workspace}/workflows/namespaces/{ns}` trả về cùng dòng đó cho một namespace, hoặc 404 khi không nguồn nào biết nó và nó không phải cha của namespace nào. Overview dùng route này.
+`GET /api/ws/{workspace}/workflows/namespaces/{ns}` trả về một `WorkflowNamespaceDetailDto` cho một namespace: cùng dòng đó cộng `can_manage`, cho biết caller có `workflow:manage` ở đó hay không (trang dựa vào nó để vô hiệu các thao tác ghi). Nó trả 404 khi không nguồn nào biết namespace và nó không phải cha của namespace nào. Overview dùng route này.
 
 ### 3.2 Ghi file có kiểm tra revision
 
@@ -62,6 +72,9 @@ Phần so sánh ở §9 bổ sung các khác biệt đo được.
 - **Khi có nó:** lần ghi chỉ commit nếu revision hiện tại của path bằng giá trị đó. Nếu không, nó trả 409 với `code: "file_changed"`, như `draft_changed` của W7a. `if_revision=0` nghĩa là "path không được tồn tại".
 - **Khi không có:** hành vi không đổi, nên các caller và task hiện có không bị ảnh hưởng.
 - **Tính nguyên tử:** việc kiểm tra và việc ghi là một câu lệnh dưới khoá theo path sẵn có của W9b.
+- **Path đã xoá:** revision hiện tại là revision còn sống mới nhất. Một path đã bị xoá mềm, như một path chưa từng tồn tại, ở revision 0: `if_revision=0` ghi lại nó, và revision mà một editor đã đọc trước lần xoá trả 409 `file_changed` ("was deleted").
+- **Các 409 khác:** một 409 không có `code: "file_changed"` (ví dụ một thư mục ở path đó) là một lỗi thường, không phải dialog lưu bị cũ.
+- **Zip:** ở đây một `.zip` là một file như mọi file khác (W9b lưu nó thành một file), nên `if_revision` áp dụng cho nó. Ý tưởng từ chối `if_revision` trên một `.zip` bị bỏ: tiền đề của nó, rằng server giải nén zip, là sai.
 
 ### 3.3 Không đổi
 
@@ -74,10 +87,12 @@ Mọi route file của W9b và route KV của W9c giữ nguyên quyền của ch
 - **Node:** các flow của namespace và của các namespace con (neo theo dấu chấm), cộng mọi flow ở nơi khác trong workspace có cạnh trực tiếp tới hoặc từ một trong số đó. Mỗi node là `{id, namespace, flow_id, disabled, in_namespace}`.
 - **Cạnh:** `{source, target, kind}`, trong đó `kind` là:
   - `subflow`: một task `Subflow` ở bất kỳ đâu trong cây task của flow, kể cả `errors:`, có `namespace` và `flowId` là literal gọi tên một flow có thật;
-  - `flow_trigger`: một trigger `Flow` có điều kiện gọi tên flow nguồn, từ `workflow.flow_listeners` và các điều kiện của trigger.
+  - `flow_trigger`: một trigger `Flow` có `dependsOn` chứa một mục nêu cả `namespace` lẫn `flowId` của flow nguồn. Nó được suy ra từ draft, không từ `workflow.flow_listeners`, vốn không có danh sách upstream. Một mục chỉ nêu namespace không vẽ cạnh (§2).
 - **Đích động:** một `Subflow` có đích là biểu thức không vẽ cạnh, và node của nó mang `dynamic_subflows: n`.
+- **Draft hỏng:** một draft không parse được vẫn là một node, gắn cờ `unparsable: true`, khi nó nằm trong namespace hoặc có cạnh tới nó; các cạnh đi vào nó được giữ và nó không có cạnh đi ra. `unparsable` ở cấp trên cùng đếm mọi draft hỏng trong workspace, vì một draft hỏng ngoài namespace có thể che một cạnh đi vào nó.
 - **Nguồn sự thật:** dựng từ các draft đã lưu của flow, thứ mà mọi execution chạy (phán quyết W7a). Không có chỉ mục được lưu.
-- **Giới hạn:** đọc hơn 2.000 flow thì trả 422 kèm một thông báo.
+- **Chạy ở đâu:** các draft được parse ngoài các worker async (`spawn_blocking`).
+- **Giới hạn:** giới hạn đếm mọi flow của workspace, không chỉ của namespace. Hơn 2.000 thì trả 422 với `code: "dependencies_too_large"` kèm một thông báo.
 
 ## 4. Frontend
 
@@ -112,20 +127,21 @@ Trang là `/explore/:workspace/workflows/namespaces/:namespace/:tab`, với các
 
 **Cây file**
 - Tạo một file hoặc một thư mục.
-- Import một file, một thư mục hoặc một `.zip` (server giải nén, như W9b làm). Export namespace thành zip.
+- Import file, hoặc một thư mục qua bộ chọn thư mục của trình duyệt (`webkitdirectory`): mỗi file một lần tải lên, mỗi file với path của nó bên dưới thư mục, mỗi file với `if_revision=0`, và các path đã tồn tại được liệt kê trong một câu hỏi Overwrite. **PHÁN QUYẾT CỦA NGƯỜI DÙNG 2026-10-14: không giải nén zip.** Một `.zip` được import thành một file, như W9b lưu nó. Export namespace thành zip.
 - Đổi tên, và di chuyển bằng kéo thả. Mọi thao tác kéo đều có tương đương bàn phím ("Move to…").
 - Xoá, kèm xác nhận nêu rõ bao nhiêu file sẽ mất.
 - Tìm kiếm, qua route tìm kiếm của W9b.
-- Xem các revision của một file và khôi phục một revision. Khôi phục ghi nội dung của revision đó thành một revision mới.
+- Xem các revision của một file và khôi phục một revision. Khôi phục ghi nội dung của revision đó thành một revision mới, kèm `if_revision`; một 409 hỏi có khôi phục đè lên revision mới hơn hay không.
 
 **Mở một file**
 - File văn bản mở trong Monaco, với ngôn ngữ lấy từ phần mở rộng.
 - Ảnh hiện bản xem trước.
-- File nhị phân khác chỉ cho tải xuống.
+- File nhị phân khác, và mọi file lớn hơn 5 MB, chỉ cho tải xuống.
 
 **Lưu**
 - Một lần lưu gửi `if_revision`.
 - Một 409 `file_changed` mở dialog lưu bị cũ của W7a: Reload hoặc Overwrite. Overwrite gửi lại không kèm `if_revision`.
+- Ctrl/Cmd+S thuộc về editor đang có focus: mỗi editor file đăng ký một action Monaco của riêng nó (`addAction`, dispose cùng editor), nên phím này chỉ lưu file đó, không bao giờ lưu flow hay file khác.
 - File chưa lưu hiện một chấm trên tab, và đóng nó thì hỏi trước.
 
 **Trên trang namespace**
@@ -138,6 +154,8 @@ Trang là `/explore/:workspace/workflows/namespaces/:namespace/:tab`, với các
 - Một tab file lưu bằng Ctrl/Cmd+S. "Save all files" lưu mọi tab file chưa lưu.
 - Các tab file được khôi phục từ layout đã lưu.
 - Nút Save của chính flow không lưu file, và lưu một file không lưu flow.
+- Một lần lưu flow chuyển flow sang namespace khác trong khi một tab file có sửa đổi chưa lưu thì hỏi trước: **Save files first** (vào namespace cũ, rồi mới lưu flow), **Discard file changes**, hoặc **Cancel**. Các tab file của namespace cũ đóng lại khi flow chuyển đi.
+- Khi lần lưu của người khác chuyển flow sang namespace khác, các tab file đóng lại và sửa đổi chưa lưu của chúng mất, kèm một thông báo nói rõ điều đó.
 
 ### 4.4 KV
 
@@ -155,6 +173,9 @@ Trang là `/explore/:workspace/workflows/namespaces/:namespace/:tab`, với các
 - Trường: key (khoá khi sửa), type, value, description, và expiration dưới dạng TTL.
 - Kiểu: STRING, NUMBER, BOOLEAN, DATETIME, DATE, DURATION, JSON. Mỗi kiểu có control riêng; JSON dùng Monaco.
 - Giá trị được kiểm trong form bằng cùng các rule mà server áp dụng.
+- JSON được gửi như đã gõ, nên các số của nó giữ đủ mọi chữ số. Một NUMBER có số mũ được gửi dưới dạng decimal Ion (`6.02e23` thành `6.02d23`), nên mọi chữ số được giữ; một float Ion sẽ làm tròn nó.
+- Kiểm tra TTL theo chính bộ parse duration của egret (chấp nhận phần thập phân). Form từ chối `PT0S`: key sẽ hết hạn ngay khi được ghi.
+- Sửa một key giữ TTL còn lại của nó trừ khi expiration được đổi.
 - Tạo một key đã tồn tại thì hỏi trước khi ghi đè.
 
 **Key kế thừa**
@@ -249,9 +270,10 @@ Các phép đo DOM bao gồm chế độ sáng và tối.
 
 ## 9. So sánh với Kestra
 
-Kịch bản ở §6 chạy trên image Kestra cục bộ. Mọi khác biệt có chủ ý được ghi ở §2.
+Kịch bản ở §6 đã chạy trên image Kestra cục bộ ngày 2026-10-14 (Task 9). Mọi khác biệt tìm thấy được ghi ở §2, mỗi dòng ghi rõ là quan sát hay đọc trong mã nguồn.
 
 ## 10. Giới hạn đã biết
 
 - Dependencies đọc draft của mọi flow trong mỗi request, chặn ở 2.000 flow. Workspace có nhiều flow hơn sẽ nhận 422.
 - Một `Subflow` có đích là biểu thức không có cạnh.
+- Mọi draft của workspace được nạp cho mỗi request, và kích thước của chúng không bị giới hạn, chỉ số lượng.
