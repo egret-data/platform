@@ -110,6 +110,14 @@ fn row(ns: &str, flows: i64, files: i64, kv_keys: i64, own: bool) -> Value {
     json!({ "namespace": ns, "flows": flows, "files": files, "kv_keys": kv_keys, "own": own })
 }
 
+/// The detail's answer: the row plus `can_manage`, false for [`reader`]'s
+/// `workflow:read` alone.
+fn detail(ns: &str, flows: i64, files: i64, kv_keys: i64, own: bool) -> Value {
+    let mut v = row(ns, flows, files, kv_keys, own);
+    v["can_manage"] = json!(false);
+    v
+}
+
 /// A flow alone, a file alone and a key alone each make their namespace
 /// appear, with only that source's count.
 #[tokio::test]
@@ -303,10 +311,10 @@ async fn one_namespace() {
 
     let res = one("a.b").await;
     assert_eq!(res.status(), StatusCode::OK);
-    assert_eq!(common::json(res).await, row("a.b", 1, 0, 1, true));
+    assert_eq!(common::json(res).await, detail("a.b", 1, 0, 1, true));
     let res = one("a").await;
     assert_eq!(res.status(), StatusCode::OK);
-    assert_eq!(common::json(res).await, row("a", 0, 0, 0, false));
+    assert_eq!(common::json(res).await, detail("a", 0, 0, 0, false));
     for absent in ["dead", "ab", "a.b.c", "b", "a.bc"] {
         assert_eq!(
             one(absent).await.status(),
@@ -357,6 +365,45 @@ async fn permissions() {
     }
 }
 
+/// The detail says whether the viewer may manage the namespace: the same PDP
+/// decision as the write routes (`workflow:manage`), `false` with
+/// `workflow:read` alone. The listing carries no such field.
+#[tokio::test]
+async fn the_detail_says_whether_the_viewer_may_manage() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = reader(&db).await;
+    seed_flow(&db, ws, user, "a", "f").await;
+    let app = common::app(&db).await;
+    let path = format!("/api/ws/{ws}/workflows/namespaces/a");
+
+    let res = common::get(&app, &path, user).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(common::json(res).await["can_manage"], json!(false));
+    assert_eq!(
+        list(&app, ws, user, "").await,
+        vec![row("a", 1, 0, 0, true)]
+    );
+
+    // A manager: another workspace, its user granted read and manage.
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    seed_flow(&db, ws, user, "a", "f").await;
+    let app = common::app(&db).await;
+    let path = format!("/api/ws/{ws}/workflows/namespaces/a");
+    let res = common::get(&app, &path, user).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        common::json(res).await,
+        json!({
+            "namespace": "a", "flows": 1, "files": 0, "kv_keys": 0, "own": true, "can_manage": true,
+        })
+    );
+    assert_eq!(
+        list(&app, ws, user, "").await,
+        vec![row("a", 1, 0, 0, true)]
+    );
+}
+
 /// The bare `namespaces/{namespace}` route neither shadows nor is shadowed
 /// by W9b's `/files` and W9c's `/kv` routes beneath it.
 #[tokio::test]
@@ -391,7 +438,7 @@ async fn the_detail_route_does_not_clash_with_files_and_kv() {
     assert!(common::json(res).await.is_array());
     let res = common::get(&app, &format!("/api/ws/{ws}/workflows/namespaces/a"), user).await;
     assert_eq!(res.status(), StatusCode::OK);
-    assert_eq!(common::json(res).await, row("a", 0, 0, 1, true));
+    assert_eq!(common::json(res).await, detail("a", 0, 0, 1, true));
 }
 
 /// A live directory, even an empty one, makes its namespace a source
@@ -419,7 +466,10 @@ async fn a_live_folder_alone_makes_a_namespace() {
     )
     .await;
     assert_eq!(res.status(), StatusCode::OK);
-    assert_eq!(common::json(res).await, row("folder.only", 0, 0, 0, true));
+    assert_eq!(
+        common::json(res).await,
+        detail("folder.only", 0, 0, 0, true)
+    );
     let res = common::get(
         &app,
         &format!("/api/ws/{ws}/workflows/namespaces/folder.gone"),

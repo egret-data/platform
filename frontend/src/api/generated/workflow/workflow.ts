@@ -70,6 +70,7 @@ import type {
   WorkflowListNamespaceDirectoryParams,
   WorkflowListNamespacesParams,
   WorkflowMoveNamespaceFileParams,
+  WorkflowNamespaceDetailDto,
   WorkflowNamespaceDto,
   WorkflowNamespaceFileRevisionsParams,
   WorkflowNamespaceFileStatsParams,
@@ -3231,7 +3232,7 @@ export function useWorkflowListNamespaces<TData = Awaited<ReturnType<typeof work
 
 
 export type workflowGetNamespaceResponse200 = {
-  data: WorkflowNamespaceDto
+  data: WorkflowNamespaceDetailDto
   status: 200
 }
 

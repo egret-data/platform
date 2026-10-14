@@ -549,6 +549,7 @@ export * from './workflowListFlowsParams';
 export * from './workflowListNamespaceDirectoryParams';
 export * from './workflowListNamespacesParams';
 export * from './workflowMoveNamespaceFileParams';
+export * from './workflowNamespaceDetailDto';
 export * from './workflowNamespaceDto';
 export * from './workflowNamespaceFileRevisionsParams';
 export * from './workflowNamespaceFileStatsParams';

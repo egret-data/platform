@@ -30483,11 +30483,11 @@
         ],
         "responses": {
           "200": {
-            "description": "The namespace's own counts; `own: false` when it is only a parent by dots of another",
+            "description": "The namespace's own counts; `own: false` when it is only a parent by dots of another; `can_manage` whether the caller holds workflow:manage",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/WorkflowNamespaceDto"
+                  "$ref": "#/components/schemas/WorkflowNamespaceDetailDto"
                 }
               }
             }
@@ -48331,6 +48331,46 @@
           }
         ],
         "description": "Wire mirror of [`Unmodelled`] — the construct a policy or envelope body\ncarries that this reader detected but does not model. See the module\ndoc for why this is mirrored exhaustively rather than rendered as a\n`Debug` string."
+      },
+      "WorkflowNamespaceDetailDto": {
+        "type": "object",
+        "description": "One namespace as its detail route answers it (W7d spec §4.5): the\nlisting's row ([`WorkflowNamespaceDto`]) and whether the caller may\nmanage it. The listing carries no `can_manage`; this is a type of its own\nso that the client's type of each answer is exact.",
+        "required": [
+          "namespace",
+          "flows",
+          "files",
+          "kv_keys",
+          "own",
+          "can_manage"
+        ],
+        "properties": {
+          "namespace": {
+            "type": "string"
+          },
+          "flows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Flows in exactly this namespace that are not deleted."
+          },
+          "files": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Live namespace files (directories are not counted)."
+          },
+          "kv_keys": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Live KV keys (the latest revision neither deleted nor expired)."
+          },
+          "own": {
+            "type": "boolean",
+            "description": "False when the namespace is present only as a parent by dots of\nanother."
+          },
+          "can_manage": {
+            "type": "boolean",
+            "description": "The caller holds `workflow:manage` in this workspace: the same PDP\ndecision as the namespace file and KV write routes, which still check\nfor themselves. The UI disables its writes when this is false."
+          }
+        }
       },
       "WorkflowNamespaceDto": {
         "type": "object",

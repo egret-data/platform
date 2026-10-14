@@ -2994,6 +2994,28 @@ impl From<crate::repo::NamespaceRow> for WorkflowNamespaceDto {
     }
 }
 
+/// One namespace as its detail route answers it (W7d spec §4.5): the
+/// listing's row ([`WorkflowNamespaceDto`]) and whether the caller may
+/// manage it. The listing carries no `can_manage`; this is a type of its own
+/// so that the client's type of each answer is exact.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct WorkflowNamespaceDetailDto {
+    pub namespace: String,
+    /// Flows in exactly this namespace that are not deleted.
+    pub flows: i64,
+    /// Live namespace files (directories are not counted).
+    pub files: i64,
+    /// Live KV keys (the latest revision neither deleted nor expired).
+    pub kv_keys: i64,
+    /// False when the namespace is present only as a parent by dots of
+    /// another.
+    pub own: bool,
+    /// The caller holds `workflow:manage` in this workspace: the same PDP
+    /// decision as the namespace file and KV write routes, which still check
+    /// for themselves. The UI disables its writes when this is false.
+    pub can_manage: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ListNamespacesQuery {
     pub prefix: Option<String>,
@@ -3036,7 +3058,7 @@ async fn list_namespaces(
         ("namespace" = String, Path, description = "The namespace"),
     ),
     responses(
-        (status = 200, description = "The namespace's own counts; `own: false` when it is only a parent by dots of another", body = WorkflowNamespaceDto),
+        (status = 200, description = "The namespace's own counts; `own: false` when it is only a parent by dots of another; `can_manage` whether the caller holds workflow:manage", body = WorkflowNamespaceDetailDto),
         (status = 400, description = "Not a valid namespace name (`^[a-z0-9][a-z0-9._-]*`, 1-150 characters)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
@@ -3048,7 +3070,7 @@ async fn get_namespace(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, namespace)): Path<(String, String)>,
-) -> EgretResult<Json<WorkflowNamespaceDto>> {
+) -> EgretResult<Json<WorkflowNamespaceDetailDto>> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
     // The flow grammar, not W9b's `check_namespace`: every namespace a flow
     // can have (an empty segment or a `_files` one included) must be
@@ -3058,11 +3080,20 @@ async fn get_namespace(
             "namespace '{namespace}' must match ^[a-z0-9][a-z0-9._-]* and be 1-150 characters long"
         )));
     }
-    st.repo
+    let row = st
+        .repo
         .namespace(ctx.workspace_id.0, &namespace)
         .await?
-        .map(|r| Json(WorkflowNamespaceDto::from(r)))
-        .ok_or_else(|| Error::NotFound(format!("namespace '{namespace}'")))
+        .ok_or_else(|| Error::NotFound(format!("namespace '{namespace}'")))?;
+    let can_manage = caller_may_manage(&st, &ctx).await?;
+    Ok(Json(WorkflowNamespaceDetailDto {
+        namespace: row.namespace,
+        flows: row.flows,
+        files: row.files,
+        kv_keys: row.kv_keys,
+        own: row.own,
+        can_manage,
+    }))
 }
 
 /// One flow of a namespace's dependencies graph (W7d spec §3.4).
@@ -3464,6 +3495,7 @@ pub fn management_router() -> Router<WorkflowState> {
         LogLineDto,
         LogPageDto,
         WorkflowNamespaceDto,
+        WorkflowNamespaceDetailDto,
         NamespaceDependenciesDto,
         NamespaceDependencyNodeDto,
         NamespaceDependencyEdgeDto,
