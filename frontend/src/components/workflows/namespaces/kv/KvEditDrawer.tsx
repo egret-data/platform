@@ -89,6 +89,15 @@ export function KvEditDrawer({
     gcTime: 0,
   });
 
+  // The value the form is filled from: the FIRST read completed since the
+  // drawer opened (not a value the view drawer cached earlier), then latched.
+  // A later fetch (the refresh after Save, a reconnect) never remounts the
+  // form: that would throw away what was typed (FE-ACTION-3).
+  const [filledFrom, setFilledFrom] = useState<KvValueDetail | null>(null);
+  if (!filledFrom && detail.data && detail.isFetchedAfterMount && !detail.isFetching && !detail.isError) {
+    setFilledFrom(detail.data);
+  }
+
   const [askDiscard, setAskDiscard] = useState(false);
   const [dirty, setDirty] = useState(false);
   const requestClose = () => (dirty ? setAskDiscard(true) : onClose());
@@ -96,6 +105,19 @@ export function KvEditDrawer({
   let body;
   if (!entry) {
     body = <KvForm ws={ws} namespace={namespace} existingKeys={existingKeys} onSaved={onSaved} onClose={onClose} onDirty={setDirty} />;
+  } else if (filledFrom) {
+    body = (
+      <KvForm
+        ws={ws}
+        namespace={namespace}
+        entry={entry}
+        stored={filledFrom}
+        existingKeys={existingKeys}
+        onSaved={onSaved}
+        onClose={onClose}
+        onDirty={setDirty}
+      />
+    );
   } else if (detail.isError) {
     body = (
       <Alert variant="destructive">
@@ -108,28 +130,14 @@ export function KvEditDrawer({
         </AlertDescription>
       </Alert>
     );
-  } else if (!detail.data || !detail.isFetchedAfterMount || detail.isFetching) {
-    // Filled only from a read made since the drawer opened: a value the view
-    // drawer cached a minute ago may have changed since.
+  } else {
+    // Waiting for the first read since the drawer opened.
     body = (
       <div className="grid gap-3" aria-hidden>
         <Skeleton className="h-10 w-full" />
         <Skeleton className="h-10 w-48" />
         <Skeleton className="h-24 w-full" />
       </div>
-    );
-  } else {
-    body = (
-      <KvForm
-        ws={ws}
-        namespace={namespace}
-        entry={entry}
-        stored={detail.data}
-        existingKeys={existingKeys}
-        onSaved={onSaved}
-        onClose={onClose}
-        onDirty={setDirty}
-      />
     );
   }
 

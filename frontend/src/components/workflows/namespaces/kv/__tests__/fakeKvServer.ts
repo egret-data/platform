@@ -36,6 +36,8 @@ export interface KvWorld {
   putReply?: KvReply | Error | null;
   /** Answers every DELETE with this instead. */
   deleteReply?: KvReply | null;
+  /** While set, every `GET …/kv/{key}` waits for it (a slow read, so its fetching state paints). */
+  valueGate?: Promise<void> | null;
 }
 
 export function kvEntry(key: string, over: Partial<KvEntryDto> = {}): KvEntryDto {
@@ -89,6 +91,7 @@ export function serveKv(world: KvWorld): KvRequest[] {
       if (path.startsWith(`${base}/`)) {
         const key = decodeURIComponent(path.slice(base.length + 1));
         if (method === "GET") {
+          if (world.valueGate) await world.valueGate;
           const text = world.values?.[key];
           return text === undefined
             ? json({ status: 404, body: { error: `No value found for key '${key}' in namespace '${world.namespace}'` } })

@@ -50,7 +50,13 @@ const at = (search = "") => `/explore/${KV_WS}/workflows/namespaces/${NS}/kv${se
 let requests: KvRequest[] = [];
 
 function renderTab({ search = "", canManage = true, world = {} }: { search?: string; canManage?: boolean; world?: Partial<KvWorld> } = {}) {
-  requests = serveKv({ namespace: NS, keys: KEYS.map((k) => ({ ...k })), values: VALUES, ...world });
+  // The test's own `world` object is served, so a test can change it (a gate, a value) mid-run.
+  const served = Object.assign(world, {
+    namespace: NS,
+    keys: world.keys ?? KEYS.map((k) => ({ ...k })),
+    values: world.values ?? VALUES,
+  }) as KvWorld;
+  requests = serveKv(served);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } } });
   render(
     <QueryClientProvider client={client}>
@@ -76,6 +82,7 @@ function renderTab({ search = "", canManage = true, world = {} }: { search?: str
       </TooltipProvider>
     </QueryClientProvider>,
   );
+  return client;
 }
 
 const where = () => screen.getByTestId("where").textContent;
@@ -247,6 +254,74 @@ describe("row actions", () => {
     await user.click(screen.getByRole("menuitem", { name: "Edit" }));
     const sheet = await screen.findByRole("dialog", { name: "Edit zeta" });
     expect(await within(sheet).findByLabelText("Value")).toHaveValue("changed elsewhere");
+  });
+
+  it("keeps what was typed when the value is fetched again while editing", async () => {
+    const values = { ...VALUES };
+    const world: Partial<KvWorld> = { values };
+    const client = renderTab({ world });
+    const user = await openRowMenu("zeta");
+    await user.click(screen.getByRole("menuitem", { name: "Edit" }));
+    const sheet = await screen.findByRole("dialog", { name: "Edit zeta" });
+    const field = await within(sheet).findByLabelText("Value");
+    await user.clear(field);
+    await user.type(field, "typed here");
+
+    // A background refetch (a reconnect, another write's refresh) brings a newer
+    // value, slowly enough that its fetching state paints.
+    values.zeta = kvDetail("STRING", '"newer on the server"');
+    let release = () => {};
+    world.valueGate = new Promise<void>((r) => (release = r));
+    const reads = () => requests.filter((r) => r.method === "GET" && r.path.endsWith("/kv/zeta")).length;
+    const before = reads();
+    const refetch = client.invalidateQueries({ queryKey: ["workflows"], refetchType: "all" });
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    // While it is in flight, the form stays, as typed.
+    expect(within(sheet).getByLabelText("Value")).toHaveValue("typed here");
+    release();
+    world.valueGate = null;
+    await refetch;
+    expect(within(sheet).getByLabelText("Value")).toHaveValue("typed here");
+    expect(within(sheet).getByRole("button", { name: "Save" })).toBeInTheDocument();
+  });
+
+  it("saves without the form turning into a skeleton or an error while the list refreshes", async () => {
+    const values: Record<string, string> = { ...VALUES };
+    const world: Partial<KvWorld> = { values };
+    renderTab({ world });
+    const user = await openRowMenu("zeta");
+    await user.click(screen.getByRole("menuitem", { name: "Edit" }));
+    const sheet = await screen.findByRole("dialog", { name: "Edit zeta" });
+    await within(sheet).findByLabelText("Value");
+
+    // Everything painted from here on: a skeleton or an error would show up in it.
+    const seen: string[] = [];
+    let skeleton = false;
+    const observer = new MutationObserver(() => {
+      seen.push(document.body.textContent ?? "");
+      if (sheet.querySelector('[data-slot="skeleton"]')) skeleton = true;
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    // The refresh after Save re-reads the value: slowly, and failing.
+    delete values.zeta;
+    let release = () => {};
+    world.valueGate = new Promise<void>((r) => (release = r));
+    const reads = () => requests.filter((r) => r.method === "GET" && r.path.endsWith("/kv/zeta")).length;
+    const before = reads();
+    try {
+      await user.click(within(sheet).getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(reads()).toBeGreaterThan(before));
+      expect(within(sheet).getByRole("button", { name: "Save" })).toBeInTheDocument();
+      release();
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "Edit zeta" })).not.toBeInTheDocument());
+    } finally {
+      release();
+      observer.disconnect();
+    }
+    expect(puts()).toHaveLength(1);
+    expect(seen.some((t) => t.includes("could not be read"))).toBe(false);
+    expect(skeleton).toBe(false);
+    expect(toast.success).toHaveBeenCalledWith("Saved the key “zeta”.");
   });
 
   it("edits a JSON value without rounding its numbers", async () => {
