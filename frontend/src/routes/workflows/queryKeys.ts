@@ -100,6 +100,11 @@ export const workflowsKeys = {
   /** One revision's bytes (`GET …/files?path&revision`): immutable, so cached as is. */
   nsFileRevision: (ws: string, namespace: string, path: string, revision: number) =>
     ["workflows", "ws", ws, "namespace", namespace, "files", "revisions", path, revision] as const,
+  /**
+   * A namespace's dependencies graph (`GET …/namespaces/{ns}/dependencies`, W7d spec §3.4), under
+   * `namespace(ws, ns)`: built from every flow's saved draft on each request, nothing stored.
+   */
+  nsDependencies: (ws: string, namespace: string) => ["workflows", "ws", ws, "namespace", namespace, "dependencies"] as const,
   executions: (ws: string, params?: object) =>
     params
       ? (["workflows", "ws", ws, "executions", params] as const)

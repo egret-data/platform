@@ -41,7 +41,8 @@
  * execution pages need: its two tabs (the editor's, W7c Task 5; the execution's, Task 6) reach it
  * through `lazy()` only. Markers flagged `topology` must therefore stay out of the entry, out of
  * the flow list's chunk, AND out of the chunks that carry the flow page (`FlowDetail.tsx`) and the
- * execution detail (`ExecutionDetail.tsx`), found by their own markers below.
+ * execution detail (`ExecutionDetail.tsx`), found by their own markers below, and (W7d Task 8)
+ * out of what loads with the namespace detail, whose Dependencies tab draws with them.
  *
  * The editor's Topology tab (W7c Task 5) is registered with the other editor tabs
  * (`registerEditorTabs.tsx`, in the flow pages' chunk), but its body, `TopologyTab.tsx`, is reached
@@ -184,9 +185,18 @@ const MARKERS = [
   // the counts' note.
   ["src/routes/workflows/NamespaceDetail.tsx", NAMESPACE_HOST, "namespace"],
   ["src/components/workflows/namespaces/NamespaceOverview.tsx", "Counted in this namespace only; each child namespace counts its own.", "namespace"],
-  // The three tab slots, each its own lazy chunk. Dependencies is a placeholder until Task 8: a
-  // task that replaces a slot's body replaces its marker here too (a stale marker fails below).
-  ["src/components/workflows/namespaces/NamespaceDependenciesTab.tsx", "the flows they call is not available yet.", "namespace-tab"],
+  // The three tab slots, each its own lazy chunk. A task that replaces a slot's body replaces its
+  // marker here too (a stale marker fails below).
+  // The Dependencies tab (W7d Task 8) and its `dependencies/` modules, in the tab's lazy chunk: the
+  // 422's sentence; the canvas's name; the card's context guard; the list view's table name; the
+  // outside-flow badge. They bring `@xyflow/react` and dagre through W7c's topology modules, whose
+  // `topology` markers below must therefore stay out of the namespace detail's loads too. Each was
+  // proven by a scratch static import (W7d task-8-report.md, "Bundle proof").
+  ["src/components/workflows/namespaces/NamespaceDependenciesTab.tsx", "The dependencies graph cannot be drawn: ", "namespace-tab"],
+  ["src/components/workflows/namespaces/dependencies/DependenciesView.tsx", "Dependencies of the namespace", "namespace-tab"],
+  ["src/components/workflows/namespaces/dependencies/DependencyNode.tsx", "A dependency card is drawn outside the dependencies graph.", "namespace-tab"],
+  ["src/components/workflows/namespaces/dependencies/DependenciesList.tsx", "Flows of the namespace and their dependencies", "namespace-tab"],
+  ["src/components/workflows/namespaces/dependencies/dependenciesModel.ts", "Outside this namespace", "namespace-tab"],
   // The Files tab (W7d Task 6) and its `files/` modules, in the tab's lazy chunk: the tab's
   // heading id; the explorer's import note; the tree's keyboard help; Save's non-text reason; the
   // restore conflict's title; the overwrite question's Keep button; `FILES_MANAGE_REASON`; the
@@ -311,6 +321,15 @@ for (const [module, marker, flag] of MARKERS) {
         );
         failed = true;
       }
+    }
+    // W7d Task 8: the namespace Dependencies tab draws with the topology; the namespace detail does not.
+    const withNamespace = carriers.filter((f) => namespaceLoads.includes(f));
+    if (withNamespace.length > 0) {
+      console.error(
+        `✗ ${marker} (${module}) loads with the namespace detail (${namespaceHosts[0]}, in ${withNamespace.join(", ")}).\n` +
+          `  The topology is its own chunk: the Dependencies tab reaches it through lazy(), never a static import.`,
+      );
+      failed = true;
     }
   }
   if (flag === "files") {

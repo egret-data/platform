@@ -236,12 +236,14 @@ describe("NamespaceDetail: Flows and Executions, pinned to the namespace", () =>
   });
 });
 
-describe("NamespaceDetail: the slots later tasks fill", () => {
-  it.each([["dependencies", "Dependencies"]])("renders the %s tab's slot", async (tab, label) => {
-    renderAt(at("company.team", tab));
+describe("NamespaceDetail: the Dependencies tab", () => {
+  it("asks for this namespace's graph and draws its state", async () => {
+    const requests = renderAt(at("company.team", "dependencies"));
     const list = await screen.findByRole("tablist", {}, LAZY);
-    expect(within(list).getByRole("tab", { name: label })).toHaveAttribute("aria-selected", "true");
-    expect(await screen.findByTestId(`namespace-tab-${tab}`, {}, LAZY)).toBeInTheDocument();
+    expect(within(list).getByRole("tab", { name: "Dependencies" })).toHaveAttribute("aria-selected", "true");
+    const tab = await screen.findByTestId("namespace-tab-dependencies", {}, LAZY);
+    expect(await within(tab).findByText("No flows in this namespace", {}, LAZY)).toBeInTheDocument();
+    expect(requests.map((r) => r.path)).toContain(`/api/ws/${NS_WS}/workflows/namespaces/company.team/dependencies`);
   });
 });
 

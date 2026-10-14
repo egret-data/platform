@@ -88,6 +88,9 @@ export function serveNamespaces(world: NamespaceWorld): Request[] {
       } else if (/^\/api\/ws\/[^/]+\/workflows\/namespaces\/[^/]+\/files\/directory$/.test(rawPath)) {
         // The Files tab's root listing (W9b): an empty namespace.
         reply = { status: 200, body: [] };
+      } else if (/^\/api\/ws\/[^/]+\/workflows\/namespaces\/[^/]+\/dependencies$/.test(rawPath)) {
+        // The Dependencies tab's graph (W7d §3.4): an empty namespace.
+        reply = { status: 200, body: { nodes: [], edges: [], unparsable: 0 } };
       } else if (rawPath.startsWith(`${base}/namespaces/`)) {
         const ns = decodeURIComponent(rawPath.slice(`${base}/namespaces/`.length));
         const found = world.namespaces.find((r) => r.namespace === ns);

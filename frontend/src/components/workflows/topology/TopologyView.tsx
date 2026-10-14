@@ -1,6 +1,6 @@
 import "@xyflow/react/dist/base.css";
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
-import { ReactFlow, ReactFlowProvider, ViewportPortal, getViewportForBounds, useReactFlow, useStore, useStoreApi, type Node as FlowNode, type Viewport } from "@xyflow/react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { ReactFlow, ReactFlowProvider, ViewportPortal, getViewportForBounds, useReactFlow, useStore, type Node as FlowNode, type Viewport } from "@xyflow/react";
 import { ChevronsDownUp, ChevronsUpDown, GitFork, List, Maximize, ZoomIn, ZoomOut } from "lucide-react";
 import type { FlowGraph, NodeState } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
@@ -8,6 +8,7 @@ import { isTerminalState } from "@/components/workflows/executionState";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { FIT, MAX_ZOOM, MIN_ZOOM, XY_THEME, rovingTarget, useKeepInView, type CanvasBox } from "@/components/workflows/topology/canvas";
 import { layout, type LayoutOptions, type Orientation, type Positioned } from "@/components/workflows/topology/layout";
 import { NODE_TYPES, TopologyContext, type TopologyContextValue, type TopologyFlowNode } from "@/components/workflows/topology/TopologyNodes";
 import { CARD_Z, TopologyEdges } from "@/components/workflows/topology/TopologyEdges";
@@ -101,18 +102,7 @@ export interface TopologyViewProps {
   viewKey?: string;
 }
 
-/**
- * xyflow's stylesheet is unlayered, so it beats Tailwind's utilities; its own variables are the way
- * in. Its attribution's background defaults to a light wash, which shows as a pale box on dark.
- */
-const XY_THEME = { "--xy-attribution-background-color": "var(--background)" } as CSSProperties;
-
 const FOCUSABLE = new Set<Positioned["kind"]>(["task", "trigger", "collapsed"]);
-/** Fit: room around the graph, and never blown up past life size. */
-const FIT = { padding: 0.12, maxZoom: 1 } as const;
-/** The canvas's zoom range; Fit may go as low as `MIN_ZOOM` on a large graph. */
-const MIN_ZOOM = 0.1;
-const MAX_ZOOM = 2;
 
 /**
  * The FIRST view's least zoom. A card's task id is `text-sm` in the mono font, 13 px as the
@@ -128,6 +118,13 @@ const LEAD = 24;
 const BEFORE_START = 16;
 
 /**
+ * What `firstView` reads of a node: its box, its id (`start:flow` is the flow's start) and, for a
+ * flow graph, its graph node (the first task is a `tasks:` task). A graph of another shape (W7d's
+ * namespace dependencies) passes boxes without `node`: the first view then anchors on `nodes[0]`.
+ */
+export type ViewNode = CanvasBox & Pick<Positioned, "id" | "node">;
+
+/**
  * Where the first view of a graph looks: the fit, when it is readable; else `READABLE_ZOOM`,
  * anchored on the flow's start (`start:flow`) and its first task, the first card of the flow's
  * `tasks:` list along the layout. Along the main axis (x when horizontal, y when vertical) the
@@ -135,7 +132,7 @@ const BEFORE_START = 16;
  * which keeps a trigger chain on screen; otherwise just before `start:flow`, so the triggers are
  * off-screen and the start and the first task are not. Across, it centres the two.
  */
-export function firstView(nodes: readonly Positioned[], orientation: Orientation, width: number, height: number): Viewport {
+export function firstView(nodes: readonly ViewNode[], orientation: Orientation, width: number, height: number): Viewport {
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -152,12 +149,12 @@ export function firstView(nodes: readonly Positioned[], orientation: Orientation
   const z = READABLE_ZOOM;
   const lr = orientation === "LR";
   // Main axis position and length, and cross axis, of a box.
-  const main = (n: Positioned) => (lr ? n.x : n.y);
-  const mainLen = (n: Positioned) => (lr ? n.width : n.height);
-  const cross = (n: Positioned) => (lr ? n.y : n.x);
-  const crossLen = (n: Positioned) => (lr ? n.height : n.width);
+  const main = (n: ViewNode) => (lr ? n.x : n.y);
+  const mainLen = (n: ViewNode) => (lr ? n.width : n.height);
+  const cross = (n: ViewNode) => (lr ? n.y : n.x);
+  const crossLen = (n: ViewNode) => (lr ? n.height : n.width);
   const start = nodes.find((n) => n.id === "start:flow") ?? nodes[0];
-  let first: Positioned | undefined;
+  let first: ViewNode | undefined;
   for (const n of nodes) {
     if (n.node?.node !== "task" || n.node.branch !== "tasks" || main(n) < main(start)) continue;
     if (!first || main(n) < main(first)) first = n;
@@ -190,7 +187,7 @@ function Topology({ graph, states, selectedUid = null, onSelect, onExpandSubflow
   const [focusId, setFocusId] = useState<string | null>(null);
   const buttons = useRef(new Map<string, HTMLButtonElement>());
   const rf = useReactFlow();
-  const store = useStoreApi();
+  const keepInView = useKeepInView();
   const now = useClock(!!states && Object.values(states).some((s) => !!s.started_at && !s.ended_at && !isTerminalState(s.state)));
 
   const drawn = useMemo(() => (graph ? tryLayout(graph, { orientation, collapsed, states }) : null), [graph, orientation, collapsed, states]);
@@ -222,40 +219,17 @@ function Topology({ graph, states, selectedUid = null, onSelect, onExpandSubflow
       setFocusId(item.id);
       buttons.current.get(item.id)?.focus();
       // Keep the focused node on screen: centre it when it is outside the visible canvas.
-      const { width, height } = store.getState();
-      const { x, y, zoom } = rf.getViewport();
-      const left = item.x * zoom + x;
-      const top = item.y * zoom + y;
-      if (width > 0 && (left < 0 || top < 0 || left + item.width * zoom > width || top + item.height * zoom > height)) {
-        void rf.setCenter(item.x + item.width / 2, item.y + item.height / 2, { zoom });
-      }
+      keepInView(item);
     },
-    [rf, store],
+    [keepInView],
   );
 
   const onNodeKeyDown = useCallback(
     (e: KeyboardEvent<HTMLButtonElement>, id: string) => {
       const i = focusable.findIndex((n) => n.id === id);
-      let target: Positioned | undefined;
-      switch (e.key) {
-        case "ArrowRight":
-        case "ArrowDown":
-          target = focusable[i + 1];
-          break;
-        case "ArrowLeft":
-        case "ArrowUp":
-          target = focusable[i - 1];
-          break;
-        case "Home":
-          target = focusable[0];
-          break;
-        case "End":
-          target = focusable[focusable.length - 1];
-          break;
-        default:
-          // Enter and Space reach the button's own click.
-          return;
-      }
+      const target = rovingTarget(e.key, focusable, i);
+      // Enter and Space reach the button's own click.
+      if (target === null) return;
       e.preventDefault();
       if (target) moveTo(target);
     },
