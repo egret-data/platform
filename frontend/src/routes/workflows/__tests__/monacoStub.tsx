@@ -100,6 +100,7 @@ const monaco = {
 export default function MonacoStub(props: EditorProps) {
   const model = modelFor(props.path ?? "default", props.defaultValue ?? "");
   const [, repaint] = useState(0);
+  const area = useRef<HTMLTextAreaElement>(null);
   const latest = useRef(props);
   useEffect(() => { latest.current = props; });
   useEffect(() => {
@@ -110,6 +111,8 @@ export default function MonacoStub(props: EditorProps) {
     model.listeners.add(changed);
     const editor = {
       getModel: () => model,
+      // The element Monaco renders into, holding its input (`.inputarea`, here the textarea).
+      getDomNode: () => area.current?.parentElement ?? null,
       addCommand: (k: number, cb: () => void) => { stub.commands.set(k, cb); },
       onDidChangeCursorPosition: () => ({ dispose: () => {} }),
       getPosition: () => null,
@@ -133,6 +136,7 @@ export default function MonacoStub(props: EditorProps) {
   }, []);
   return (
     <textarea
+      ref={area}
       aria-label={props.options?.ariaLabel ?? "Flow source"}
       readOnly={!!props.options?.readOnly}
       value={model.text}

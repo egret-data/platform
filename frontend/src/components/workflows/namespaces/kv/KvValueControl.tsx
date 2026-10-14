@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useEffect, useId, useState } from "react";
 import MonacoEditor from "@/components/monaco/MonacoEditor";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -27,8 +27,14 @@ export function KvValueControl({
 }) {
   const isDark = useIsDark();
   const modelId = useId().replace(/:/g, "");
+  // Monaco's own input (a textarea inside its node) is what a screen reader is
+  // on while editing JSON, so the help and the error are tied to it there.
+  const [editorNode, setEditorNode] = useState<HTMLElement | null>(null);
   const describedBy = `kv-value-help${error ? " kv-value-error" : ""}`;
   const common = { id: "kv-value", "aria-invalid": error ? true : undefined, "aria-describedby": describedBy };
+  useEffect(() => {
+    editorNode?.querySelector("textarea")?.setAttribute("aria-describedby", describedBy);
+  });
 
   let control;
   switch (type) {
@@ -72,7 +78,7 @@ export function KvValueControl({
       break;
     case "JSON":
       control = (
-        <div className="h-60 overflow-hidden rounded-md border" aria-describedby={describedBy}>
+        <div className="h-60 overflow-hidden rounded-md border">
           <MonacoEditor
             height="100%"
             language="json"
@@ -81,6 +87,7 @@ export function KvValueControl({
             defaultValue={value}
             theme={isDark ? "vs-dark" : "vs"}
             onChange={(v) => onChange(v ?? "")}
+            onMount={(editor) => setEditorNode(editor.getDomNode())}
             options={{ ariaLabel: "Value", minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: 13, tabSize: 2 }}
           />
         </div>
@@ -100,11 +107,14 @@ export function KvValueControl({
       <p id="kv-value-help" className="text-xs text-muted-foreground">
         {KV_TYPE_HELP[type]}
       </p>
-      {error ? (
-        <p id="kv-value-error" className="text-sm text-destructive">
-          {error}
-        </p>
-      ) : null}
+      {/* Live: an error that appears on Save is announced, whichever control has focus. */}
+      <div aria-live="polite">
+        {error ? (
+          <p id="kv-value-error" className="text-sm text-destructive">
+            {error}
+          </p>
+        ) : null}
+      </div>
     </div>
   );
 }

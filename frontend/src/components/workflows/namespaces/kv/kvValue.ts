@@ -1,4 +1,4 @@
-import { JsonNumber, stringifyLossless, type LosslessJson } from "./losslessJson";
+import { JsonNumber, parseLossless, stringifyLossless, type LosslessJson } from "./losslessJson";
 
 /**
  * THE KV FORM'S RULES (W7d spec §4.4), the server's own (W9c).
@@ -12,15 +12,16 @@ import { JsonNumber, stringifyLossless, type LosslessJson } from "./losslessJson
  * | type     | body                         | refused here                                   |
  * |----------|------------------------------|------------------------------------------------|
  * | STRING   | `"…"` (a quoted string)      | text shaped like a duration (stored DURATION)  |
- * | NUMBER   | the digits as typed          | not a JSON number; over 1,000 digits           |
+ * | NUMBER   | an Ion int or decimal (`d`)  | not a JSON number; over 1,000 plain digits     |
  * | BOOLEAN  | `true` / `false`             | anything else                                  |
  * | DATETIME | `2026-10-14T02:30:00.000Z`   | no value; a year outside 1-9999 in UTC         |
  * | DATE     | `2026-10-14`                 | not a real day of years 1-9999                 |
  * | DURATION | `"PT1H30M"` (quoted)         | outside Kestra's pattern (stored STRING)       |
- * | JSON     | the JSON text as typed       | malformed; a scalar (stored as its own type)   |
+ * | JSON     | the JSON, numbers as NUMBER  | malformed; a scalar; a number too long         |
  *
- * A JSON value goes as typed, not re-serialised: `JSON.parse` rounds numbers
- * past 2^53, and the server keeps every digit. JSON text is Ion text.
+ * Numbers never pass through a JS number (`JSON.parse` rounds past 2^53), and
+ * an exponent is sent as an Ion decimal (`6.02d23`), never a float, so the
+ * server keeps every digit (`ionNumber`).
  */
 export const KV_TYPES = ["STRING", "NUMBER", "BOOLEAN", "DATETIME", "DATE", "DURATION", "JSON"] as const;
 export type KvType = (typeof KV_TYPES)[number];
@@ -30,7 +31,7 @@ export const isKvType = (t: string): t is KvType => (KV_TYPES as readonly string
 /** What each type holds, shown under the type picker (FE-FORM-3). */
 export const KV_TYPE_HELP: Record<KvType, string> = {
   STRING: "Any text.",
-  NUMBER: "An integer or a decimal, every digit kept: 42, -1.5, 6.02e23.",
+  NUMBER: "An integer or a decimal, kept exactly, never rounded: 42, -1.5, 6.02e23 (stored written out in full).",
   BOOLEAN: "true or false.",
   DATETIME: "A date and a time, entered in your time zone and stored in UTC.",
   DATE: "A calendar day.",
@@ -59,17 +60,45 @@ export function isKestraDuration(text: string): boolean {
   return total <= 9223372036854775807n;
 }
 
+/**
+ * A JSON number as the Ion number that keeps every digit, and how many digits
+ * the server counts in it (`KvNumber`, `within_digit_limit`): null when the
+ * text is not a JSON number.
+ *
+ * - No point, no exponent: an Ion int, as written.
+ * - Otherwise an Ion DECIMAL. A point alone already is one (`1.50`); an
+ *   exponent is written `d`, not `e` (`6.02e23` -> `6.02d23`), since Ion reads
+ *   `e` as a float, a double that drops digits (`KvNumber::Float`) and turns
+ *   `1e400` into an infinity. The server keeps a decimal in plain notation
+ *   (`6.02d23` is `602000000000000000000000`), and counts its digits there.
+ */
+export function ionNumber(text: string): { ion: string; digits: number } | null {
+  const m = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(text);
+  if (!m || /^-?0\d/.test(text)) return null;
+  const [, , int, frac, exp] = m;
+  if (frac === undefined && exp === undefined) return { ion: text, digits: int.length };
+  const fraction = frac ?? "";
+  // The decimal's coefficient and exponent, as Ion holds them.
+  const coefficient = (int + fraction).replace(/^0+/, "") || "0";
+  const exponent = Number(exp ?? "0") - fraction.length;
+  const len = coefficient.length;
+  const shift = Math.abs(exponent);
+  // The plain notation's digits (`of_ion_decimal`'s length without sign and point).
+  const digits =
+    coefficient === "0" && exponent >= 0 ? 1 : exponent >= 0 ? len + shift : len > shift ? len : shift + 1;
+  return { ion: text.replace(/[eE]/, "d"), digits };
+}
+
+const TOO_MANY_DIGITS = "A number has at most 1,000 digits written out in full. Shorten it, or store it as a STRING.";
+
 function encodeNumber(raw: string): Encoded {
   const text = raw.trim();
-  const m = /^-?(\d+)(?:\.(\d+))?(?:[eE][+-]?(\d+))?$/.exec(text);
-  if (!m || /^-?0\d/.test(text)) {
+  const n = ionNumber(text);
+  if (!n) {
     return { ok: false, error: "Enter a number, such as 42, -1.5 or 6.02e23 (digits, an optional point and exponent; no spaces or separators)." };
   }
-  const [, int, frac = "", exp = ""] = m;
-  if (int.length + frac.length > MAX_DIGITS || exp.length > MAX_DIGITS) {
-    return { ok: false, error: "A number has at most 1,000 digits. Shorten it, or store it as a STRING." };
-  }
-  return { ok: true, body: text };
+  if (!(n.digits <= MAX_DIGITS)) return { ok: false, error: TOO_MANY_DIGITS };
+  return { ok: true, body: n.ion };
 }
 
 /** Years 1-9999, as the server's DATETIME and DATE hold them. */
@@ -98,21 +127,34 @@ function encodeDate(text: string): Encoded {
   return { ok: true, body: text };
 }
 
+/**
+ * A JSON object or array, sent as Ion text: the same JSON with each number
+ * written as {@link ionNumber} writes it, so a number inside keeps every digit
+ * as a NUMBER does (the server reads the body as Ion, `parse_api_body`, and a
+ * number with `e` would be a float there).
+ */
 function encodeJson(raw: string): Encoded {
   const text = raw.trim();
-  let parsed: unknown;
+  let parsed: LosslessJson;
   try {
-    parsed = JSON.parse(text);
+    parsed = parseLossless(text);
   } catch (e) {
     return { ok: false, error: `This is not valid JSON (${e instanceof Error ? e.message : "it could not be read"}). Fix it and save again.` };
   }
-  if (parsed === null || typeof parsed !== "object") {
+  if (parsed === null || typeof parsed !== "object" || parsed instanceof JsonNumber) {
     return {
       ok: false,
       error: "A JSON value here is an object ({…}) or an array ([…]). For a single number, text, true or false, choose that type.",
     };
   }
-  return { ok: true, body: text };
+  let tooLong = false;
+  const body = stringifyLossless(parsed, 0, (n) => {
+    const ion = ionNumber(n.text);
+    if (!ion || !(ion.digits <= MAX_DIGITS)) tooLong = true;
+    return ion?.ion ?? n.text;
+  });
+  if (tooLong) return { ok: false, error: `A number in this JSON is too long. ${TOO_MANY_DIGITS}` };
+  return { ok: true, body };
 }
 
 /** The `PUT` body for `text` entered as `type`, or why the form refuses it. */
@@ -190,17 +232,19 @@ const MAX_TTL_SECONDS = 365_250 * 86_400;
 
 /**
  * A custom TTL, judged as the `ttl` header is (`parse_ttl`, `Ttl::Header`):
- * `java.time.Duration` text of days, hours, minutes and seconds, not
+ * `java.time.Duration` text of whole days, hours and minutes and of seconds, not
  * negative, at most 1,000 years. Zero is refused here although the server
  * takes it: the key would expire as it is written.
  */
 export function checkTtl(text: string): string | null {
   const t = text.trim();
   if (t.startsWith("-")) return "A TTL cannot be negative. Enter how long the key lives, such as PT1H.";
-  const n = "(\\d+(?:\\.\\d+)?)";
-  const m = new RegExp(`^P(?:${n}D)?(?:T(?:${n}H)?(?:${n}M)?(?:${n}S)?)?$`, "i").exec(t);
+  // Whole days, hours and minutes; only seconds take a fraction, as in
+  // `java.time.Duration.parse` (Kestra's reading of a TTL). egret's own
+  // `parse_duration` also takes `P1.5D`; the form keeps to Java's grammar.
+  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/i.exec(t);
   if (!m || !m.slice(1).some((x) => x !== undefined)) {
-    return "Enter an ISO-8601 duration of days, hours, minutes or seconds, such as PT30M, PT1H or P7D.";
+    return "Enter an ISO-8601 duration of whole days, hours or minutes, or of seconds, such as PT30M, PT1H, P7D or PT1.5S.";
   }
   const [, d = "0", h = "0", min = "0", s = "0"] = m;
   const seconds = Number(d) * 86_400 + Number(h) * 3_600 + Number(min) * 60 + Number(s);

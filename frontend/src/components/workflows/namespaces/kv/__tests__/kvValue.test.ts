@@ -48,11 +48,28 @@ describe("encodeValue: the body each type sends", () => {
     }
   });
 
-  it("NUMBER is its digits as typed, every one kept", () => {
+  it("NUMBER is an Ion int or decimal, every digit kept", () => {
     expect(encodeValue("NUMBER", "42")).toEqual(ok("42"));
     expect(encodeValue("NUMBER", " -1.50 ")).toEqual(ok("-1.50"));
     expect(encodeValue("NUMBER", "12345678901234567890.123456789")).toEqual(ok("12345678901234567890.123456789"));
-    expect(encodeValue("NUMBER", "6.02e23")).toEqual(ok("6.02e23"));
+  });
+
+  it("NUMBER with an exponent is an Ion decimal (`d`), never a float (`e`), which would round it", () => {
+    expect(encodeValue("NUMBER", "6.02e23")).toEqual(ok("6.02d23"));
+    expect(encodeValue("NUMBER", "1E5")).toEqual(ok("1d5"));
+    expect(encodeValue("NUMBER", "-2.5e-3")).toEqual(ok("-2.5d-3"));
+    // A 20-digit mantissa: as a float it would keep about 17 of them.
+    expect(encodeValue("NUMBER", "1.2345678901234567890e5")).toEqual(ok("1.2345678901234567890d5"));
+    // As a float, an infinity; as a decimal, 401 digits written out.
+    expect(encodeValue("NUMBER", "1e400")).toEqual(ok("1d400"));
+  });
+
+  it("NUMBER counts digits as the server writes the decimal out: 1,000 at most", () => {
+    expect(encodeValue("NUMBER", "1e999")).toEqual(ok("1d999"));
+    expect(refused(encodeValue("NUMBER", "1e1000"))).toMatch(/1,000 digits/);
+    expect(encodeValue("NUMBER", "-1e-999")).toEqual(ok("-1d-999"));
+    expect(refused(encodeValue("NUMBER", "1e-1000"))).toMatch(/1,000 digits/);
+    expect(refused(encodeValue("NUMBER", "1e99999999999"))).toMatch(/1,000 digits/);
   });
 
   it("NUMBER refuses what is not a JSON number, and more than 1,000 digits", () => {
@@ -107,10 +124,12 @@ describe("encodeValue: the body each type sends", () => {
     }
   });
 
-  it("JSON is an object or an array, sent as typed so no digit is lost", () => {
-    expect(encodeValue("JSON", '{"a": 12345678901234567890}')).toEqual(ok('{"a": 12345678901234567890}'));
-    expect(encodeValue("JSON", " [1, 2.50] ")).toEqual(ok("[1, 2.50]"));
+  it("JSON is an object or an array, its numbers sent as NUMBER sends them", () => {
+    expect(encodeValue("JSON", '{"a": 12345678901234567890}')).toEqual(ok('{"a":12345678901234567890}'));
+    expect(encodeValue("JSON", " [1, 2.50] ")).toEqual(ok("[1,2.50]"));
+    expect(encodeValue("JSON", '{"x": [6.02e23, "6.02e23"]}')).toEqual(ok('{"x":[6.02d23,"6.02e23"]}'));
     expect(encodeValue("JSON", "{}")).toEqual(ok("{}"));
+    expect(refused(encodeValue("JSON", "[1e1000]"))).toMatch(/1,000 digits/);
   });
 
   it("JSON refuses malformed text and a scalar, and names the type to use", () => {
@@ -187,6 +206,10 @@ describe("checkTtl: the `ttl` header's rules", () => {
   it("refuses a negative one, a malformed one, zero and over 1,000 years", () => {
     expect(checkTtl("-PT1H")).toMatch(/cannot be negative/);
     for (const text of ["", "1h", "P1W", "P1M", "PT", "P", "PTxS"]) expect(checkTtl(text), text).toMatch(/ISO-8601/);
+    // A fraction only on seconds, as Java's Duration.parse reads a TTL.
+    for (const text of ["P1.5D", "PT1.5H", "PT1.5M", "P0.5DT1H"]) expect(checkTtl(text), text).toMatch(/ISO-8601/);
+    expect(checkTtl("PT1.5S")).toBeNull();
+    expect(checkTtl("P1DT1H1M0.25S")).toBeNull();
     expect(checkTtl("PT0S")).toMatch(/expires the key at once/);
     expect(checkTtl("P365250D")).toBeNull();
     expect(checkTtl("P365251D")).toMatch(/1,000 years/);

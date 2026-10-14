@@ -35,11 +35,38 @@ export interface FetchResponse<T> {
   headers: Headers;
 }
 
+/**
+ * The mutator's own request options, beside `RequestInit`. Every generated
+ * fetcher takes `Parameters<typeof customInstance>[1]`, so a caller passes
+ * them to the generated function itself.
+ */
+export interface CustomRequestOptions extends RequestInit {
+  /**
+   * Answer the success body as its raw text in `data`, never parsed, whatever
+   * its type. For a caller that must read the JSON itself: `JSON.parse` rounds
+   * a number past 2^53, and the KV routes send numbers with every digit
+   * (`components/workflows/namespaces/kv/kvApi.ts`, which reads them with
+   * `parseLossless`). The generated response type still names the parsed
+   * body; read `data` through `rawText()`. Errors are thrown as always.
+   */
+  rawText?: boolean;
+}
+
+/**
+ * The raw body of a response requested with `rawText: true`. The generated
+ * type says the parsed body; at runtime `data` is the text.
+ */
+export function rawText(response: { data: unknown }): string {
+  if (typeof response.data !== "string") throw new Error("the response was not read as text (pass rawText: true)");
+  return response.data;
+}
+
 export const customInstance = async <T>(
   url: string,
-  options?: RequestInit,
+  requestOptions?: CustomRequestOptions,
 ): Promise<T> => {
-  const method = (options?.method ?? "GET").toUpperCase();
+  const { rawText: asText = false, ...options } = requestOptions ?? {};
+  const method = (options.method ?? "GET").toUpperCase();
   // Reconcile the spec's `/api`-prefixed paths with apiFetch's own `/api` prefix.
   // Segment-anchored so a hypothetical `/apiXxx` path is never mangled.
   const path = url.replace(/^\/api(?=\/|$)/, "");
@@ -49,15 +76,17 @@ export const customInstance = async <T>(
   // such a route refuses with 415 (W7a Task 8: every Run of a flow failed so).
   // Every generated body that is a string is `JSON.stringify`'d, so a string
   // with no type is JSON; FormData, URLSearchParams and Blob carry their own.
-  const headers = new Headers(options?.headers);
-  if (typeof options?.body === "string" && !headers.has("Content-Type")) {
+  const headers = new Headers(options.headers);
+  if (typeof options.body === "string" && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
   const res = await apiFetch(path, { ...options, method, headers });
 
   let data: unknown = undefined;
-  if (res.status !== 204 && res.headers.get("content-length") !== "0") {
+  if (asText) {
+    data = await res.text();
+  } else if (res.status !== 204 && res.headers.get("content-length") !== "0") {
     const contentType = res.headers.get("content-type") ?? "";
     data = contentType.includes("application/json")
       ? await res.json()

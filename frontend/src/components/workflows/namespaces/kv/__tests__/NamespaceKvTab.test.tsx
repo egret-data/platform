@@ -231,6 +231,24 @@ describe("row actions", () => {
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
+  it("fills the edit form from a read made when it opens, not from the view's cached one", async () => {
+    const values = { ...VALUES };
+    renderTab({ world: { values } });
+    let user = await openRowMenu("zeta");
+    await user.click(screen.getByRole("menuitem", { name: "View value" }));
+    const view = await screen.findByRole("dialog", { name: "zeta" });
+    expect(await within(view).findByLabelText("Value")).toHaveTextContent("hello");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    // Someone else rewrites the key meanwhile.
+    values.zeta = kvDetail("STRING", '"changed elsewhere"', { description: "Last one" });
+    user = await openRowMenu("zeta");
+    await user.click(screen.getByRole("menuitem", { name: "Edit" }));
+    const sheet = await screen.findByRole("dialog", { name: "Edit zeta" });
+    expect(await within(sheet).findByLabelText("Value")).toHaveValue("changed elsewhere");
+  });
+
   it("edits a JSON value without rounding its numbers", async () => {
     renderTab();
     const user = await openRowMenu("mid");
@@ -348,7 +366,8 @@ describe("the create drawer, for each type", () => {
     ["DATETIME", typeValue("2026-10-14T09:30"), "2026-10-14T02:30:00.000Z"],
     ["DATE", typeValue("2026-10-14"), "2026-10-14"],
     ["DURATION", typeValue("PT1H30M"), '"PT1H30M"'],
-    ["JSON", typeValue('{"a": [1, 2.50]}'), '{"a": [1, 2.50]}'],
+    ["NUMBER", typeValue("6.02e23"), "6.02d23"],
+    ["JSON", typeValue('{"a": [1, 2.50, 1.2345678901234567890e5]}'), '{"a":[1,2.50,1.2345678901234567890d5]}'],
   ])("sends a valid %s as its exact body, text/plain, with no TTL", async (type, fill, body) => {
     renderTab();
     const { user, sheet } = await addKey("fresh", type, fill);
@@ -379,6 +398,15 @@ describe("the create drawer, for each type", () => {
     const error = await within(sheet).findByText(message);
     expect(error).toHaveAttribute("id", "kv-value-error");
     expect(puts()).toHaveLength(0);
+  });
+
+  it("ties a JSON value's error to Monaco's own input, and announces it", async () => {
+    renderTab();
+    const { user, sheet } = await addKey("fresh", "JSON", typeValue("42"));
+    await user.click(within(sheet).getByRole("button", { name: "Save" }));
+    const error = await within(sheet).findByText(/object.*or an array/);
+    expect(within(sheet).getByLabelText("Value")).toHaveAccessibleDescription(expect.stringContaining(error.textContent!));
+    expect(error.closest("[aria-live]")).toHaveAttribute("aria-live", "polite");
   });
 
   it("refuses a key that breaks the key rule", async () => {

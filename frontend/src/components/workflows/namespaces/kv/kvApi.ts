@@ -1,5 +1,6 @@
-import { ApiError, apiFetch } from "@/api/client";
-import { getWorkflowGetKvValueUrl, workflowPutKvValue } from "@/api/generated/workflow/workflow";
+import { ApiError } from "@/api/client";
+import { getWorkflowGetKvValueUrl, workflowGetKvValue, workflowPutKvValue } from "@/api/generated/workflow/workflow";
+import { customInstance, rawText } from "@/api/mutator";
 import { isKvType, type KvType } from "./kvValue";
 import { JsonNumber, parseLossless, type LosslessJson } from "./losslessJson";
 import { headerText } from "./kvValue";
@@ -15,22 +16,27 @@ export interface KvValueDetail {
 }
 
 /**
- * `GET …/kv/{key}` read losslessly.
+ * `GET …/kv/{key}` read losslessly: the generated `workflowGetKvValue`, asked
+ * for the raw body (`rawText`, the mutator's option), which `parseLossless`
+ * reads. `JSON.parse` would round a number past 2^53, and W9c sends a
+ * NUMBER with every digit.
  *
- * FE-DATA-2 exception: the generated fetcher parses the body with
- * `JSON.parse`, which rounds a number past 2^53, and W9c sends a NUMBER with
- * every digit; the generated URL is fetched through `apiFetch` and read with
- * `parseLossless` instead.
- *
- * A key named `inheritance` is read at `…/kv/inheritanc%65`: the path as
- * written is the inheritance listing (W9c spec §9), and the server decodes the
- * key after matching the route.
+ * A key named `inheritance` cannot be read at the path the generated fetcher
+ * builds: `…/kv/inheritance` is the inheritance listing (W9c spec §9). The
+ * server matches the route on the path as sent and decodes the key
+ * afterwards, so that one key is read at `…/kv/inheritanc%65`: the generated
+ * URL with its last letter encoded, through the same mutator (FE-DATA-2's
+ * generated client; no `fetch` of its own).
  */
 export async function readKvValue(ws: string, namespace: string, key: string): Promise<KvValueDetail> {
-  let url = getWorkflowGetKvValueUrl(ws, namespace, key);
-  if (key === "inheritance") url = url.replace(/\/kv\/inheritance$/, "/kv/inheritanc%65");
-  const res = await apiFetch(url.replace(/^\/api(?=\/)/, ""));
-  const body = parseLossless(await res.text());
+  const res =
+    key === "inheritance"
+      ? await customInstance<{ data: unknown }>(
+          getWorkflowGetKvValueUrl(ws, namespace, key).replace(/\/kv\/inheritance$/, "/kv/inheritanc%65"),
+          { method: "GET", rawText: true },
+        )
+      : await workflowGetKvValue(ws, namespace, key, undefined, { rawText: true });
+  const body = parseLossless(rawText(res));
   if (body === null || typeof body !== "object" || Array.isArray(body) || body instanceof JsonNumber) {
     throw new Error("the server's answer was not a KV value");
   }

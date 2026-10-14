@@ -111,11 +111,14 @@ export function parseLossless(text: string): LosslessJson {
   return out;
 }
 
-/** `JSON.stringify` of a {@link LosslessJson}, every number written as it was read. */
-export function stringifyLossless(v: LosslessJson, indent = 0): string {
+/**
+ * `JSON.stringify` of a {@link LosslessJson}, every number written as it was
+ * read, or as `number` writes it when given (the KV form writes Ion text).
+ */
+export function stringifyLossless(v: LosslessJson, indent = 0, number: (n: JsonNumber) => string = (n) => n.text): string {
   const pad = (depth: number) => (indent ? `\n${" ".repeat(indent * depth)}` : "");
   const walk = (x: LosslessJson, depth: number): string => {
-    if (x instanceof JsonNumber) return x.text;
+    if (x instanceof JsonNumber) return number(x);
     if (Array.isArray(x)) {
       if (x.length === 0) return "[]";
       return `[${x.map((e) => pad(depth + 1) + walk(e, depth + 1)).join(",")}${pad(depth)}]`;

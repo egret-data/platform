@@ -108,7 +108,9 @@ export function KvEditDrawer({
         </AlertDescription>
       </Alert>
     );
-  } else if (!detail.data) {
+  } else if (!detail.data || !detail.isFetchedAfterMount || detail.isFetching) {
+    // Filled only from a read made since the drawer opened: a value the view
+    // drawer cached a minute ago may have changed since.
     body = (
       <div className="grid gap-3" aria-hidden>
         <Skeleton className="h-10 w-full" />
