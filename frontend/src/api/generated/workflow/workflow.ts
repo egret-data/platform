@@ -2885,6 +2885,11 @@ export type workflowSetTriggerDisabledResponse409 = {
   status: 409
 }
 
+export type workflowSetTriggerDisabledResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
 export type workflowSetTriggerDisabledResponse500 = {
   data: ErrorBody
   status: 500
@@ -2893,7 +2898,7 @@ export type workflowSetTriggerDisabledResponse500 = {
 export type workflowSetTriggerDisabledResponseSuccess = (workflowSetTriggerDisabledResponse200) & {
   headers: Headers;
 };
-export type workflowSetTriggerDisabledResponseError = (workflowSetTriggerDisabledResponse400 | workflowSetTriggerDisabledResponse401 | workflowSetTriggerDisabledResponse403 | workflowSetTriggerDisabledResponse404 | workflowSetTriggerDisabledResponse409 | workflowSetTriggerDisabledResponse500) & {
+export type workflowSetTriggerDisabledResponseError = (workflowSetTriggerDisabledResponse400 | workflowSetTriggerDisabledResponse401 | workflowSetTriggerDisabledResponse403 | workflowSetTriggerDisabledResponse404 | workflowSetTriggerDisabledResponse409 | workflowSetTriggerDisabledResponse413 | workflowSetTriggerDisabledResponse500) & {
   headers: Headers;
 };
 

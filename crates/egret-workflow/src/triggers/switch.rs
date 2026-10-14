@@ -29,7 +29,7 @@ use uuid::Uuid;
 use super::state::db_err;
 use crate::models::{Flow, TriggerKind};
 use crate::repo::{flow_cols, FlowRow};
-use crate::scheduler::effective_disabled;
+use crate::scheduler::{effective_disabled, never_fires};
 use crate::trigger::{FixedClock, RecoverMissed, ScheduleTrigger, TriggerState};
 
 /// A switch that was applied (not yet committed).
@@ -41,6 +41,10 @@ pub(crate) struct Switched {
     pub parsed: Flow,
     /// The schedule's new `next_evaluation_date`, when a re-enable moved it.
     pub moved_to: Option<DateTime<Utc>>,
+    /// The switch row was inserted (off) or deleted (on). `false`: the
+    /// trigger already was in the asked state, nothing was written, and no
+    /// audit event is due.
+    pub changed: bool,
 }
 
 /// Why a switch was refused; nothing was written.
@@ -65,6 +69,15 @@ pub(crate) enum SwitchRefusal {
 /// reads as `(None, None)`.
 type Dates = (Option<DateTime<Utc>>, Option<DateTime<Utc>>);
 
+/// Step 7's outcome for a re-enabled overdue schedule.
+enum Target {
+    /// Keep the stored dates (`ALL`, or a `LAST` with nothing newer).
+    Keep,
+    /// Move `next_evaluation_date` here; `None`: the cron has no tick after
+    /// now, so the row goes off the queue.
+    Date(Option<DateTime<Utc>>),
+}
+
 /// What [`set_disabled`] locks on the trigger's side.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StateTable {
@@ -74,8 +87,10 @@ enum StateTable {
 }
 
 /// Switch `trigger_id` of `flow` (in workspace `ws`) on or off, in the
-/// caller's transaction. The caller commits on `Ok(Ok(_))`; on a refusal
-/// nothing was written and the caller rolls back.
+/// caller's transaction. The caller commits on `Ok(Ok(_))` and MUST roll
+/// back on a refusal: `RecoverUnknown` is found after the switch row's
+/// `DELETE` (it applies only when there was a row to delete), every other
+/// refusal before any write.
 pub(crate) async fn set_disabled(
     conn: &mut PgConnection,
     ws: Uuid,
@@ -122,18 +137,6 @@ pub(crate) async fn set_disabled(
             flow: parsed.disabled,
         }));
     }
-    // Checked before any write, for every re-enable of a schedule that asks
-    // to recover, overdue or not: the answer does not depend on the clock.
-    let recover = match &t.kind {
-        TriggerKind::Schedule(s) if !disabled && recover_missed => {
-            match RecoverMissed::from_model(s.recover_missed_schedules.as_ref()) {
-                Ok(r) => Some(r),
-                Err(raw) => return Ok(Err(SwitchRefusal::RecoverUnknown(raw))),
-            }
-        }
-        _ => None,
-    };
-
     // 4. The state row, after the flow.
     let state_row: Option<Dates> = match table {
         StateTable::Schedule => sqlx::query_as(
@@ -158,8 +161,9 @@ pub(crate) async fn set_disabled(
         StateTable::None => None,
     };
 
-    // 5. The switch row.
-    if disabled {
+    // 5. The switch row. `changed`: it was there to delete, or not there to
+    //    insert -- the trigger really changes state.
+    let changed = if disabled {
         sqlx::query(
             "INSERT INTO workflow.disabled_triggers (flow_id, trigger_id, workspace_id, disabled_by) \
              VALUES ($1, $2, $3, $4) ON CONFLICT (flow_id, trigger_id) DO NOTHING",
@@ -170,17 +174,37 @@ pub(crate) async fn set_disabled(
         .bind(by)
         .execute(&mut *conn)
         .await
-        .map_err(db_err)?;
+        .map_err(db_err)?
+        .rows_affected()
+            == 1
     } else {
-        sqlx::query(
-            "DELETE FROM workflow.disabled_triggers WHERE flow_id = $1 AND trigger_id = $2",
-        )
-        .bind(flow)
-        .bind(trigger_id)
-        .execute(&mut *conn)
-        .await
-        .map_err(db_err)?;
-    }
+        sqlx::query("DELETE FROM workflow.disabled_triggers WHERE flow_id = $1 AND trigger_id = $2")
+            .bind(flow)
+            .bind(trigger_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?
+            .rows_affected()
+            == 1
+    };
+    // Re-enable outcomes (step 7) apply only to a trigger that WAS switched
+    // off (default decision, 2026-10-15): an already-on overdue schedule is
+    // catching up after downtime or replaying an `ALL` backlog one tick per
+    // pass, and an enable -- a bulk Enable over a mixed selection included --
+    // must not discard that backlog.
+    let re_enabled = !disabled && changed;
+    // Only where recovery can apply. The DELETE above is this transaction's
+    // only write so far, and a refusal is rolled back by the caller, so
+    // nothing is written.
+    let recover = match &t.kind {
+        TriggerKind::Schedule(s) if re_enabled && recover_missed => {
+            match RecoverMissed::from_model(s.recover_missed_schedules.as_ref()) {
+                Ok(r) => Some(r),
+                Err(raw) => return Ok(Err(SwitchRefusal::RecoverUnknown(raw))),
+            }
+        }
+        _ => None,
+    };
 
     // 6. The effective copy, on the row locked above (none: nothing to write).
     let copy = effective_disabled(parsed.disabled, t.disabled, disabled);
@@ -205,13 +229,14 @@ pub(crate) async fn set_disabled(
             .map_err(db_err)?;
     }
 
-    // 7. A re-enabled schedule on the queue whose next date has passed: skip
-    //    or recover the ticks missed while it was off. `evaluated_at` and
-    //    `last_error` are never written; a row off the queue stays off (the
-    //    next save re-queues it).
+    // 7. A re-enabled schedule (it had a switch row) on the queue whose next
+    //    date has passed: skip or recover the ticks missed while it was off.
+    //    `evaluated_at` is never written, nor is `last_error` except as `sync`
+    //    writes it for a cron with no tick left; a row off the queue stays off
+    //    (the next save re-queues it).
     let mut moved_to = None;
-    if let (false, StateTable::Schedule, Some((Some(next), evaluated_at))) =
-        (disabled, table, state_row)
+    if let (true, StateTable::Schedule, Some((Some(next), evaluated_at))) =
+        (re_enabled, table, state_row)
     {
         let db_now: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
             .fetch_one(&mut *conn)
@@ -223,30 +248,56 @@ pub(crate) async fn set_disabled(
         if next <= db_now {
             if let Ok(st) = ScheduleTrigger::resolve(t) {
                 let skip = || {
-                    TriggerState::initialise(&st, "", "", &FixedClock(db_now)).next_evaluation_date
+                    Target::Date(
+                        TriggerState::initialise(&st, "", "", &FixedClock(db_now))
+                            .next_evaluation_date,
+                    )
                 };
                 let target = match recover {
                     None | Some(RecoverMissed::None) => skip(),
-                    Some(RecoverMissed::All) => None,
+                    Some(RecoverMissed::All) => Target::Keep,
                     Some(RecoverMissed::Last) => match evaluated_at {
                         None => skip(),
-                        Some(ev) => st.last_tick_at_or_before(db_now).filter(|l| *l > ev),
+                        Some(ev) => match st.last_tick_at_or_before(db_now) {
+                            Some(l) if l > ev => Target::Date(Some(l)),
+                            _ => Target::Keep,
+                        },
                     },
                 };
-                // `None`: keep the dates (`ALL`, a `LAST` with nothing newer,
-                // or a cron with no tick after now, which `fire_due` reports).
-                if let Some(target) = target {
-                    sqlx::query(
-                        "UPDATE workflow.triggers SET next_evaluation_date = $3, updated_at = now() \
-                          WHERE flow_id = $1 AND trigger_id = $2",
-                    )
-                    .bind(flow)
-                    .bind(trigger_id)
-                    .bind(target)
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(db_err)?;
-                    moved_to = Some(target);
+                match target {
+                    Target::Keep => {}
+                    Target::Date(Some(date)) => {
+                        sqlx::query(
+                            "UPDATE workflow.triggers SET next_evaluation_date = $3, updated_at = now() \
+                              WHERE flow_id = $1 AND trigger_id = $2",
+                        )
+                        .bind(flow)
+                        .bind(trigger_id)
+                        .bind(date)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(db_err)?;
+                        moved_to = Some(date);
+                    }
+                    // A skip with no tick after now (`0 0 30 2 *`): off the
+                    // queue with `sync`'s reason, as `sync` stores it.
+                    Target::Date(None) => {
+                        let cron = match &t.kind {
+                            TriggerKind::Schedule(s) => s.cron.as_deref(),
+                            _ => None,
+                        };
+                        sqlx::query(
+                            "UPDATE workflow.triggers SET next_evaluation_date = NULL, \
+                                    last_error = $3, updated_at = now() \
+                              WHERE flow_id = $1 AND trigger_id = $2",
+                        )
+                        .bind(flow)
+                        .bind(trigger_id)
+                        .bind(never_fires(cron, db_now))
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(db_err)?;
+                    }
                 }
             }
         }
@@ -256,5 +307,6 @@ pub(crate) async fn set_disabled(
         flow: row,
         parsed,
         moved_to,
+        changed,
     }))
 }

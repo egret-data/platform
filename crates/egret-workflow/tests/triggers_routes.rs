@@ -1710,12 +1710,22 @@ async fn switching_is_idempotent() {
     .await;
     let app = flagged_app(&db).await;
     switch(&app, ws, user, flow, "s", true, false).await;
+    assert_eq!(common::audit_mutations(&app).len(), 1);
     let e = switch(&app, ws, user, flow, "s", true, false).await;
     assert_eq!(e["runtime_disabled"], json!(true));
     assert_eq!(common::switched_off(&db, flow).await, vec!["s"], "one row");
+    assert!(
+        common::audit_mutations(&app).is_empty(),
+        "off when already off changed nothing: no audit event"
+    );
     switch(&app, ws, user, flow, "s", false, false).await;
+    assert_eq!(common::audit_mutations(&app).len(), 1);
     let e = switch(&app, ws, user, flow, "s", false, false).await;
     assert_eq!(e["runtime_disabled"], json!(false), "on with no row");
+    assert!(
+        common::audit_mutations(&app).is_empty(),
+        "on when already on changed nothing: no audit event"
+    );
     assert!(common::switched_off(&db, flow).await.is_empty());
     assert!(!schedule_copy(&db, flow, "s").await);
 }
@@ -1910,4 +1920,158 @@ async fn a_duplicate_id_switches_the_id() {
     assert_eq!(e["runtime_disabled"], json!(true), "{e}");
     assert_eq!(common::switched_off(&db, flow).await, vec!["t"]);
     assert!(schedule_copy(&db, flow, "t").await);
+}
+
+/// Enabling a trigger that is already on changes nothing (fix round 1, I1):
+/// an overdue schedule that was never switched off is catching up after
+/// downtime, or replaying an `ALL` backlog one tick per pass, and a default
+/// `recover_missed: false` enable -- a bulk Enable over a mixed selection
+/// included -- must not discard that backlog. Nor is an unknown
+/// `recoverMissedSchedules` refused there, since no recovery applies (M2).
+#[tokio::test]
+async fn enabling_an_already_on_schedule_keeps_its_backlog() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = manager(&db).await;
+    let flow = common::seed_flow(
+        &db,
+        ws,
+        user,
+        &src(
+            "company.a",
+            "on",
+            &format!(
+                "{}{}",
+                schedule("s"),
+                schedule_recovering("odd", Some("SOME"))
+            ),
+        ),
+        "draft",
+    )
+    .await;
+    let app = flagged_app(&db).await;
+    common::make_due(&db, flow, "s", 5).await;
+    common::make_due(&db, flow, "odd", 5).await;
+    let s = schedule_row(&db, flow, "s").await;
+    let odd = schedule_row(&db, flow, "odd").await;
+
+    switch(&app, ws, user, flow, "s", false, false).await;
+    assert_eq!(
+        schedule_row(&db, flow, "s").await,
+        s,
+        "the backlog stays owed"
+    );
+    let (status, body) = answer(
+        common::put(
+            &app,
+            &bulk_path(ws),
+            user,
+            json!({"triggers": [{"flow_id": flow, "trigger_id": "s"}], "disabled": false}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["results"][0]["ok"], json!(true), "{body}");
+    assert_eq!(schedule_row(&db, flow, "s").await, s, "bulk: the same");
+    let e = switch(&app, ws, user, flow, "odd", false, true).await;
+    assert_eq!(e["runtime_disabled"], json!(false), "{e}");
+    assert_eq!(schedule_row(&db, flow, "odd").await, odd);
+    assert!(
+        common::audit_mutations(&app).is_empty(),
+        "nothing changed, nothing audited"
+    );
+}
+
+/// A skip whose cron has no tick after now goes off the queue with `sync`'s
+/// reason (fix round 1, M3). `sync` itself stores such a row off the queue,
+/// so the overdue date is staged by SQL, as a row queued before its cron
+/// was edited by hand would be.
+#[tokio::test]
+async fn a_skip_with_no_tick_left_goes_off_the_queue() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = manager(&db).await;
+    let flow = common::seed_flow(
+        &db,
+        ws,
+        user,
+        &src(
+            "company.a",
+            "never",
+            &format!("  - id: s\n    type: {SCHEDULE}\n    cron: \"0 0 30 2 *\"\n"),
+        ),
+        "draft",
+    )
+    .await;
+    let app = flagged_app(&db).await;
+    let (next, _, err) = schedule_row(&db, flow, "s").await;
+    assert_eq!(next, None, "sync stores it off the queue");
+    let reason = err.expect("with sync's reason");
+    sql(
+        &db,
+        "UPDATE workflow.triggers SET next_evaluation_date = now() - interval '1 minute', \
+                last_error = NULL WHERE flow_id = $1",
+        flow,
+    )
+    .await;
+    switch(&app, ws, user, flow, "s", true, false).await;
+    let e = switch(&app, ws, user, flow, "s", false, false).await;
+    let (next, _, err) = schedule_row(&db, flow, "s").await;
+    assert_eq!(next, None, "off the queue");
+    let err = err.expect("a reason");
+    let prefix = "the schedule never fires: `0 0 30 2 *` has no tick after ";
+    assert!(
+        err.starts_with(prefix) && reason.starts_with(prefix),
+        "sync's sentence: {err} / {reason}"
+    );
+    assert_eq!(e["schedule"]["off_queue"], json!(true), "{e}");
+    assert_eq!(e["schedule"]["last_error"], json!(err));
+}
+
+/// The body is read after the permission check (the KV bulk delete's
+/// pattern), and a refused body answers an `ErrorBody` with its code (fix
+/// round 1, M1).
+#[tokio::test]
+async fn a_bad_body_is_coded_after_the_permission_check() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = manager(&db).await;
+    let flow = common::seed_flow(
+        &db,
+        ws,
+        user,
+        &src("company.a", "body", &schedule("s")),
+        "draft",
+    )
+    .await;
+    let reader = user_with(&db, ws, &["workflow:read"]).await;
+    let app = flagged_app(&db).await;
+    let bad = json!({"disabled": "yes"});
+
+    for (path, body) in [
+        (switch_path(ws, flow, "s"), bad.clone()),
+        (bulk_path(ws), json!({"triggers": "s", "disabled": true})),
+    ] {
+        assert_eq!(
+            common::put(&app, &path, reader, body.clone())
+                .await
+                .status(),
+            StatusCode::FORBIDDEN,
+            "{path}: the permission comes first, even with a bad body"
+        );
+        let (status, got) = answer(common::put(&app, &path, user, body).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {got}");
+        assert_eq!(got["code"], json!("invalid_body"), "{got}");
+        assert!(
+            got["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("the body is not `"),
+            "{got}"
+        );
+        assert_eq!(got.as_object().unwrap().len(), 2, "ErrorBody: {got}");
+    }
+    let huge = json!({"triggers": [{"flow_id": flow, "trigger_id": "x".repeat(70_000)}], "disabled": true});
+    let (status, got) = answer(common::put(&app, &bulk_path(ws), user, huge).await).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(got["code"], json!("body_too_large"), "{got}");
+    assert!(common::switched_off(&db, flow).await.is_empty());
 }

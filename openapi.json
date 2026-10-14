@@ -30229,7 +30229,7 @@
         },
         "responses": {
           "200": {
-            "description": "Switched (idempotent: off twice, or on with no switch, is a 200). The answer is the trigger's entry as `GET .../triggers` returns it. Off stops the trigger's schedule claim, Flow-trigger listener and webhook; a fire already claimed commits first, and no new schedule fire starts after the answer. A Flow-trigger pass or a webhook request that read the switch before it changed may still fire once more after the answer. A re-enabled `Schedule` whose next date has passed skips the missed ticks, or with `recover_missed: true` follows its `recoverMissedSchedules`.",
+            "description": "Switched (idempotent: off twice, or on with no switch, is a 200). The answer is the trigger's entry as `GET .../triggers` returns it. Off stops the trigger's schedule claim, Flow-trigger listener and webhook; a fire already claimed commits first, and no new schedule fire starts after the answer. A Flow-trigger pass or a webhook request that read the switch before it changed may still fire once more after the answer. A re-enabled `Schedule` (one that was switched off) whose next date has passed skips the missed ticks, or with `recover_missed: true` follows its `recoverMissedSchedules`; enabling a trigger that is already on changes nothing and is not audited.",
             "content": {
               "application/json": {
                 "schema": {
@@ -30239,7 +30239,7 @@
             }
           },
           "400": {
-            "description": "The flow's saved source does not parse (`code: source_does_not_parse`), or the body is not a switch request",
+            "description": "The flow's saved source does not parse (`code: source_does_not_parse`), or the body is not a switch request: bad JSON, a missing or mistyped field, or no JSON content type (`code: invalid_body`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -30279,7 +30279,17 @@
             }
           },
           "409": {
-            "description": "`code: trigger_disabled_in_source` (switching on a trigger whose flow or trigger YAML says `disabled: true`; switching it off is accepted), `trigger_not_supported` (a trigger type egret does not run), or `recover_missed_unknown` (`recover_missed: true` and `recoverMissedSchedules` is not ALL, NONE or LAST)",
+            "description": "`code: trigger_disabled_in_source` (switching on a trigger whose flow or trigger YAML says `disabled: true`; switching it off is accepted), `trigger_not_supported` (a trigger type egret does not run), or `recover_missed_unknown` (re-enabling a switched-off `Schedule` with `recover_missed: true` and its `recoverMissedSchedules` is not ALL, NONE or LAST)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 2 MiB (`code: body_too_large`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -33126,7 +33136,7 @@
             }
           },
           "400": {
-            "description": "More than 100 entries (nothing is switched), or the body is not a bulk switch request",
+            "description": "More than 100 entries (nothing is switched), or the body is not a bulk switch request: bad JSON, a missing or mistyped field, or no JSON content type (`code: invalid_body`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -33156,7 +33166,7 @@
             }
           },
           "413": {
-            "description": "The body is over 64 KiB",
+            "description": "The body is over 64 KiB (`code: body_too_large`); nothing is switched",
             "content": {
               "application/json": {
                 "schema": {
@@ -45336,7 +45346,7 @@
           },
           "recover_missed": {
             "type": "boolean",
-            "description": "On a re-enable of an overdue `Schedule` only: `false` (the default)\nskips the missed ticks (the next date becomes the first tick after\nnow); `true` follows the trigger's `recoverMissedSchedules` (absent or\n`ALL`: every missed tick runs; `NONE`: skip; `LAST`: the latest one\nruns). Ignored otherwise."
+            "description": "On a re-enable of a switched-off, overdue `Schedule` only (an already-on\ntrigger keeps its dates): `false` (the default)\nskips the missed ticks (the next date becomes the first tick after\nnow); `true` follows the trigger's `recoverMissedSchedules` (absent or\n`ALL`: every missed tick runs; `NONE`: skip; `LAST`: the latest one\nruns). Ignored otherwise."
           }
         }
       },

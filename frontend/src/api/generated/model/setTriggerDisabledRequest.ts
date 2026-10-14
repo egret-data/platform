@@ -13,7 +13,8 @@ export interface SetTriggerDisabledRequest {
   /** `true`: off; `false`: on. */
   disabled: boolean;
   /**
-     * On a re-enable of an overdue `Schedule` only: `false` (the default)
+     * On a re-enable of a switched-off, overdue `Schedule` only (an already-on
+     * trigger keeps its dates): `false` (the default)
      * skips the missed ticks (the next date becomes the first tick after
      * now); `true` follows the trigger's `recoverMissedSchedules` (absent or
      * `ALL`: every missed tick runs; `NONE`: skip; `LAST`: the latest one

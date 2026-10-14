@@ -9,6 +9,7 @@
 //! PUT /api/ws/{workspace}/workflows/triggers/disabled
 //! ```
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -639,7 +640,8 @@ pub const MAX_BULK_TRIGGERS_BODY_BYTES: usize = 64 * 1024;
 pub struct SetTriggerDisabledRequest {
     /// `true`: off; `false`: on.
     pub disabled: bool,
-    /// On a re-enable of an overdue `Schedule` only: `false` (the default)
+    /// On a re-enable of a switched-off, overdue `Schedule` only (an already-on
+    /// trigger keeps its dates): `false` (the default)
     /// skips the missed ticks (the next date becomes the first tick after
     /// now); `true` follows the trigger's `recoverMissedSchedules` (absent or
     /// `ALL`: every missed tick runs; `NONE`: skip; `LAST`: the latest one
@@ -688,6 +690,30 @@ pub struct BulkResultDto {
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct BulkResultsDto {
     pub results: Vec<BulkResultDto>,
+}
+
+/// 400: the body is not the route's request (bad JSON, a missing or mistyped
+/// field, no JSON content type).
+pub const TRIGGER_BODY_INVALID: &str = "invalid_body";
+/// 413: the body is over the route's cap.
+pub const TRIGGER_BODY_TOO_LARGE: &str = "body_too_large";
+
+/// A body the extractor refused, after the permission check (as the KV bulk
+/// delete does): over the cap is a 413, anything else a 400, each with its
+/// code and `ErrorBody`.
+fn body_refusal(r: JsonRejection, shape: &str) -> TriggerRouteError {
+    match r.status() {
+        StatusCode::PAYLOAD_TOO_LARGE => TriggerRouteError::Coded {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: TRIGGER_BODY_TOO_LARGE,
+            message: "the body is over this route's size cap; nothing was switched".to_string(),
+        },
+        _ => TriggerRouteError::Coded {
+            status: StatusCode::BAD_REQUEST,
+            code: TRIGGER_BODY_INVALID,
+            message: format!("the body is not `{shape}`: {}", r.body_text()),
+        },
+    }
 }
 
 const TRIGGER_GONE: &str = "This trigger no longer exists in the flow; reload";
@@ -794,21 +820,25 @@ async fn switch_one(
         .await?
         .remove(&key);
     tx.commit().await.map_err(db_err)?;
-    st.audit.emit(egret_audit::mutation_for(
-        &ctx.principal,
-        Some(ws),
-        if disabled {
-            "workflow_trigger:disable"
-        } else {
-            "workflow_trigger:enable"
-        },
-        "workflow_trigger",
-        Some(format!("{flow}/{trigger_id}")),
-        serde_json::json!({
-            "recover_missed": recover_missed,
-            "next_evaluation_date": sw.moved_to,
-        }),
-    ));
+    // Only a real change is audited: off when already off, or on when
+    // already on, wrote nothing.
+    if sw.changed {
+        st.audit.emit(egret_audit::mutation_for(
+            &ctx.principal,
+            Some(ws),
+            if disabled {
+                "workflow_trigger:disable"
+            } else {
+                "workflow_trigger:enable"
+            },
+            "workflow_trigger",
+            Some(format!("{flow}/{trigger_id}")),
+            serde_json::json!({
+                "recover_missed": recover_missed,
+                "next_evaluation_date": sw.moved_to,
+            }),
+        ));
+    }
     Ok(Ok(e))
 }
 
@@ -823,12 +853,13 @@ async fn switch_one(
     ),
     request_body = SetTriggerDisabledRequest,
     responses(
-        (status = 200, description = "Switched (idempotent: off twice, or on with no switch, is a 200). The answer is the trigger's entry as `GET .../triggers` returns it. Off stops the trigger's schedule claim, Flow-trigger listener and webhook; a fire already claimed commits first, and no new schedule fire starts after the answer. A Flow-trigger pass or a webhook request that read the switch before it changed may still fire once more after the answer. A re-enabled `Schedule` whose next date has passed skips the missed ticks, or with `recover_missed: true` follows its `recoverMissedSchedules`.", body = TriggerEntryDto),
-        (status = 400, description = "The flow's saved source does not parse (`code: source_does_not_parse`), or the body is not a switch request", body = egret_core::http::ErrorBody),
+        (status = 200, description = "Switched (idempotent: off twice, or on with no switch, is a 200). The answer is the trigger's entry as `GET .../triggers` returns it. Off stops the trigger's schedule claim, Flow-trigger listener and webhook; a fire already claimed commits first, and no new schedule fire starts after the answer. A Flow-trigger pass or a webhook request that read the switch before it changed may still fire once more after the answer. A re-enabled `Schedule` (one that was switched off) whose next date has passed skips the missed ticks, or with `recover_missed: true` follows its `recoverMissedSchedules`; enabling a trigger that is already on changes nothing and is not audited.", body = TriggerEntryDto),
+        (status = 400, description = "The flow's saved source does not parse (`code: source_does_not_parse`), or the body is not a switch request: bad JSON, a missing or mistyped field, or no JSON content type (`code: invalid_body`)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such flow in this workspace, the flow is in the trash, or its source declares no trigger with this id (`code: not_found`)", body = egret_core::http::ErrorBody),
-        (status = 409, description = "`code: trigger_disabled_in_source` (switching on a trigger whose flow or trigger YAML says `disabled: true`; switching it off is accepted), `trigger_not_supported` (a trigger type egret does not run), or `recover_missed_unknown` (`recover_missed: true` and `recoverMissedSchedules` is not ALL, NONE or LAST)", body = egret_core::http::ErrorBody),
+        (status = 413, description = "The body is over 2 MiB (`code: body_too_large`)", body = egret_core::http::ErrorBody),
+        (status = 409, description = "`code: trigger_disabled_in_source` (switching on a trigger whose flow or trigger YAML says `disabled: true`; switching it off is accepted), `trigger_not_supported` (a trigger type egret does not run), or `recover_missed_unknown` (re-enabling a switched-off `Schedule` with `recover_missed: true` and its `recoverMissedSchedules` is not ALL, NONE or LAST)", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -836,9 +867,11 @@ pub(crate) async fn set_trigger_disabled(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((ws_slug, id, trigger_id)): Path<(String, Uuid, String)>,
-    Json(body): Json<SetTriggerDisabledRequest>,
+    body: Result<Json<SetTriggerDisabledRequest>, JsonRejection>,
 ) -> Result<Json<TriggerEntryDto>, TriggerRouteError> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let Json(body) =
+        body.map_err(|r| body_refusal(r, "{\"disabled\": bool, \"recover_missed\"?: bool}"))?;
     let e = switch_one(
         &st,
         &ctx,
@@ -860,10 +893,10 @@ pub(crate) async fn set_trigger_disabled(
     request_body = SetTriggersDisabledRequest,
     responses(
         (status = 200, description = "A result per entry, in the order given. Each entry is switched in its own transaction, as the per-trigger route does, and a refusal (`ok: false` with its `code`: a flow outside this workspace is `not_found`, never a 403) does not stop the next. A Flow-trigger pass or a webhook request that read a switch before it changed may still fire once more after the answer.", body = BulkResultsDto),
-        (status = 400, description = "More than 100 entries (nothing is switched), or the body is not a bulk switch request", body = egret_core::http::ErrorBody),
+        (status = 400, description = "More than 100 entries (nothing is switched), or the body is not a bulk switch request: bad JSON, a missing or mistyped field, or no JSON content type (`code: invalid_body`)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
-        (status = 413, description = "The body is over 64 KiB", body = egret_core::http::ErrorBody),
+        (status = 413, description = "The body is over 64 KiB (`code: body_too_large`); nothing is switched", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error; entries before the failing one may be switched", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -871,9 +904,15 @@ pub(crate) async fn set_triggers_disabled(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path(ws_slug): Path<String>,
-    Json(body): Json<SetTriggersDisabledRequest>,
+    body: Result<Json<SetTriggersDisabledRequest>, JsonRejection>,
 ) -> Result<Json<BulkResultsDto>, TriggerRouteError> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let Json(body) = body.map_err(|r| {
+        body_refusal(
+            r,
+            "{\"triggers\": [{\"flow_id\", \"trigger_id\"}], \"disabled\": bool, \"recover_missed\"?: bool}",
+        )
+    })?;
     if body.triggers.len() > MAX_BULK_TRIGGERS {
         return Err(Error::InvalidInput(format!(
             "{} triggers: a bulk switch takes at most {MAX_BULK_TRIGGERS}; nothing was switched",

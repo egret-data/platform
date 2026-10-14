@@ -27,6 +27,16 @@ pub(crate) fn effective_disabled(flow_yaml: bool, trigger_yaml: bool, runtime: b
     flow_yaml || trigger_yaml || runtime
 }
 
+/// The `last_error` of a schedule that resolves but has no tick after `now`
+/// (`0 0 30 2 *`): written by `sync` and by the switch route's skip, which
+/// take the row off the queue for it.
+pub(crate) fn never_fires(cron: Option<&str>, now: DateTime<Utc>) -> String {
+    format!(
+        "the schedule never fires: `{}` has no tick after {now}",
+        cron.unwrap_or("")
+    )
+}
+
 /// Bring `workflow.triggers`, `workflow.flow_listeners` and
 /// `workflow.disabled_triggers` in line with `flow.source`. Called inside the
 /// transaction that wrote `flow`; `gone = true` for a delete.
@@ -124,13 +134,7 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
                     // Off the queue like a refusal, and for the same reason it
                     // must say so: otherwise the author sees a schedule that
                     // is simply never due (final review I4).
-                    None => (
-                        None,
-                        Some(format!(
-                            "the schedule never fires: `{}` has no tick after {now}",
-                            s.cron.as_deref().unwrap_or("")
-                        )),
-                    ),
+                    None => (None, Some(never_fires(s.cron.as_deref(), now))),
                 }
             }
             Err(e) => (None, Some(e.to_string())),

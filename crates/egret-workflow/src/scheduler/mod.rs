@@ -175,5 +175,5 @@ mod sync;
 pub use fire::{fire_due, PassReport};
 // The switch route (`triggers::switch`) writes the same effective value `sync`
 // does; the read routes report it.
-pub(crate) use sync::effective_disabled;
+pub(crate) use sync::{effective_disabled, never_fires};
 pub use sync::{reconcile, sync, Reconciled};
