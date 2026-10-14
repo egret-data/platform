@@ -550,3 +550,44 @@ async fn the_runtime_switch_disables_the_listener_row() {
         assert!(!disabled, "{label}: switched back on");
     }
 }
+
+/// `flow_or_trigger_disabled_sets_the_flag` covers a window-free listener; the
+/// same two YAML causes, each alone, on a `dependsOn` listener (whose row is
+/// written before `resolve` is ever called, so it takes its own path through
+/// `sync_flow_listeners`).
+#[tokio::test]
+async fn flow_or_trigger_disabled_sets_the_flag_on_a_depends_on_listener() {
+    let depends = |extra: &str| {
+        format!(
+            "  - id: on_done\n    type: io.kestra.plugin.core.trigger.Flow\n{extra}    \
+             dependsOn:\n      - namespace: t\n        flowId: other\n"
+        )
+    };
+    for (label, prelude, extra) in [
+        ("flow-level", "disabled: true\n", ""),
+        ("trigger-level", "", "    disabled: true\n"),
+    ] {
+        let Some(fx) = fx().await else { return };
+        let on = flow_yaml("", &depends(""), "hi");
+        let flow = fx.create(&on).await;
+        let (_, depends_on, disabled) = listener_row(&fx.db, flow.id, "on_done")
+            .await
+            .unwrap_or_else(|| panic!("{label}: control: a row"));
+        assert!(depends_on, "{label}: control: a dependsOn row");
+        assert!(!disabled, "{label}: control: not disabled yet");
+
+        let off = flow_yaml(prelude, &depends(extra), "hi");
+        let parsed = parses(&off);
+        assert_eq!(
+            (parsed.disabled, parsed.triggers[0].disabled),
+            (label == "flow-level", label == "trigger-level"),
+            "{label}: control: only this cause parsed"
+        );
+        fx.update(flow.id, &off).await;
+        let (_, depends_on, disabled) = listener_row(&fx.db, flow.id, "on_done")
+            .await
+            .unwrap_or_else(|| panic!("{label}: row kept"));
+        assert!(depends_on, "{label}: still a dependsOn row");
+        assert!(disabled, "{label}: disabled must set the flag");
+    }
+}

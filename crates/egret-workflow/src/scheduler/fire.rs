@@ -44,7 +44,8 @@ pub struct PassReport {
     pub errored: usize,
     /// Nothing fired and nothing moved. Either the source disagrees with the
     /// row -- the trigger is off, no longer declared, or its `spec_key` is not
-    /// the row's -- and `sync` re-ran for the flow; or `tick` declined a row
+    /// the row's -- and `sync` re-ran for the flow (unless a writer held the
+    /// flow row, which then puts the copy right itself); or `tick` declined a row
     /// the claim found due (`NotDue`/`NotSchedulable`), which should not
     /// happen and is logged at warn.
     pub frozen: usize,
@@ -200,7 +201,8 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
     // stay, and `sync` puts the copy right. The last case is the stale-`f`
     // race (final review I2): firing would evaluate the old cron against the
     // new row and store its dates under the new key for good. `resync` is a
-    // fresh statement, so it reads the committed source.
+    // fresh statement, so it reads the committed source; it skips the `sync`
+    // when a writer holds the flow row (see `resync`).
     let declared = trigger
         .filter(|t| !flow.disabled && !t.disabled)
         .and_then(|t| match &t.kind {
@@ -377,17 +379,49 @@ async fn take_off_queue(conn: &mut PgConnection, c: &Claimed, why: &str) -> Resu
     Ok(())
 }
 
+/// Run `sync` for the claimed trigger's flow, inside the pass's transaction --
+/// **only if the flow row is free**, read `FOR SHARE SKIP LOCKED`.
+///
+/// Every other `sync` caller holds the flow row (a save `FOR NO KEY UPDATE`
+/// or `FOR UPDATE`, `reconcile` `FOR SHARE`), and so does the W7e switch route
+/// while it writes `workflow.disabled_triggers` and a trigger's copy. Without
+/// the lock, `sync` could read the switch rows before a concurrent route
+/// commits, wait on the trigger row the route holds, and then write the stale
+/// `disabled` over the route's value -- a lost update that leaves a
+/// switched-off trigger firing (W7e review I1, pinned by
+/// `tests/disabled_triggers.rs`'s
+/// `a_resync_does_not_undo_a_concurrent_switch_on_another_trigger`).
+///
+/// `SKIP LOCKED`, not a waiting `FOR SHARE`: the pass already holds the
+/// claimed trigger's row, and a writer holding the flow may want that same
+/// row next (the route switching the claimed trigger, a save upserting it),
+/// so waiting would be a deadlock. Not `NOWAIT` either: its error would abort
+/// the pass's transaction and count as a failure. When the flow is held, this
+/// does nothing: the trigger stays frozen (nothing fires, its dates stay), the
+/// holder's own write -- a save's `sync`, or the route's copy -- runs after
+/// this transaction commits, and a later pass that finds the row still
+/// disagreeing resyncs it then. `FOR SHARE` does not conflict with the `KEY
+/// SHARE` a fire's execution insert takes, nor with `reconcile`'s `FOR SHARE`.
 async fn resync(conn: &mut PgConnection, flow_id: Uuid) -> Result<()> {
-    let flow: FlowRow = sqlx::query_as(concat!(
+    let flow: Option<FlowRow> = sqlx::query_as(concat!(
         "SELECT ",
         flow_cols!(),
-        " FROM workflow.flows WHERE id = $1"
+        " FROM workflow.flows WHERE id = $1 FOR SHARE SKIP LOCKED"
     ))
     .bind(flow_id)
-    .fetch_one(&mut *conn)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(db_err)?;
-    super::sync(conn, &flow, false).await
+    match flow {
+        Some(flow) => super::sync(conn, &flow, false).await,
+        None => {
+            tracing::debug!(
+                flow_id = %flow_id,
+                "flow row held by a writer; resync left to it or to a later pass"
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Spec §5: `Schedule.inputs` are passed verbatim, because this seam has no

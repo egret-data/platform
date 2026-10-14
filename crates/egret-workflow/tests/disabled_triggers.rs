@@ -256,6 +256,209 @@ async fn the_listener_select_skips_a_switched_off_listener() {
     assert_eq!(fired, vec![on], "only the listener that is on fires");
 }
 
+// ── `fire::resync` against a concurrent switch (review I1) ─────────────────
+
+/// A flow `id` with two schedules: `x` (`0 2 * * *`, never due here) and `y`
+/// (`*/1 * * * *`, the one a pass claims).
+fn two_schedules(id: &str) -> String {
+    parsed(format!(
+        "id: {id}\nnamespace: w7e\ntriggers:\n  - id: x\n    type: {SCHEDULE}\n    cron: \"0 2 * * *\"\n  - id: y\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    ))
+}
+
+async fn disabled_of(db: &Db, flow: Uuid, trig: &str) -> bool {
+    sqlx::query_scalar(
+        "SELECT disabled FROM workflow.triggers WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap()
+}
+
+async fn spec_key_of(db: &Db, flow: Uuid, trig: &str) -> String {
+    sqlx::query_scalar(
+        "SELECT spec_key FROM workflow.triggers WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap()
+}
+
+/// Make `y` due and its row disagree with the source (a stale `spec_key`), so
+/// the pass that claims it takes `fire_one`'s Frozen path and calls `resync`.
+async fn stage_a_resync_of_y(db: &Db, flow: Uuid) {
+    common::make_due(db, flow, "y", 1).await;
+    sqlx::query(
+        "UPDATE workflow.triggers SET spec_key = '0 3 * * *|false|' \
+         WHERE flow_id = $1 AND trigger_id = 'y'",
+    )
+    .bind(flow)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+}
+
+/// The switch route's first half (W7e spec §3.2 "Concurrency"; the route
+/// itself is Task 5): in one open transaction, the flow row `FOR NO KEY
+/// UPDATE`, then the switch row for `trig`.
+async fn route_holds_the_flow(
+    db: &Db,
+    flow: Uuid,
+    trig: &str,
+) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut tx = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM workflow.flows WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(flow)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO workflow.disabled_triggers (flow_id, trigger_id, workspace_id) \
+         SELECT id, $2, workspace_id FROM workflow.flows WHERE id = $1",
+    )
+    .bind(flow)
+    .bind(trig)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx
+}
+
+/// The route's second half: the effective copy on the trigger's row.
+async fn route_writes_the_copy(
+    tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+    flow: Uuid,
+    trig: &str,
+) {
+    sqlx::query(
+        "UPDATE workflow.triggers SET disabled = true WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .execute(&mut **tx)
+    .await
+    .expect("the route's write of the copy");
+}
+
+/// Wait until `pass` has finished (`false`) or some backend of this database
+/// is waiting on a lock (`true`).
+async fn finished_or_blocked(
+    db: &Db,
+    pass: &tokio::task::JoinHandle<egret_core::Result<PassReport>>,
+) -> bool {
+    for _ in 0..200 {
+        if pass.is_finished() {
+            return false;
+        }
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+              WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the pass neither finished nor blocked within 10 s");
+}
+
+/// Review I1: a pass that resyncs `y` while the switch route holds the flow
+/// and switches `x` off must not write a stale `x.disabled = false` over the
+/// route's `true` once the route commits. Before the fix `resync` read the
+/// switch rows without the flow lock (the route's insert invisible), then
+/// blocked on `x`'s row and applied its stale value after the route
+/// committed: switch row off, copy on, and the claim would fire `x`.
+///
+/// `resync` now reads the flow `FOR SHARE SKIP LOCKED`: it finds the flow held,
+/// leaves `y` frozen (nothing fires, the dates stay) and commits at once, so
+/// it never waits on the route. The control: once the route has committed, the
+/// next pass resyncs `y` and still leaves `x` off.
+#[tokio::test]
+async fn a_resync_does_not_undo_a_concurrent_switch_on_another_trigger() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.flow(&two_schedules("raced")).await;
+    let own_key = spec_key_of(&fx.db, flow, "y").await;
+    stage_a_resync_of_y(&fx.db, flow).await;
+
+    let mut route = route_holds_the_flow(&fx.db, flow, "x").await;
+    route_writes_the_copy(&mut route, flow, "x").await;
+    let pool = fx.db.pool.clone();
+    let pass = tokio::spawn(async move { fire_due(&pool).await });
+    let blocked = finished_or_blocked(&fx.db, &pass).await;
+    route.commit().await.unwrap();
+    let report = pass.await.unwrap().expect("a pass");
+
+    assert!(
+        disabled_of(&fx.db, flow, "x").await,
+        "the route's switch must survive the concurrent resync (lost update)"
+    );
+    assert!(!blocked, "the pass must not wait on the route's flow lock");
+    assert_eq!(
+        report,
+        PassReport {
+            frozen: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(executions_of(&fx.db, flow).await, 0, "nothing fired");
+
+    // Control: with the flow free, the next pass resyncs `y`.
+    let report = fire_due(&fx.db.pool).await.expect("a pass");
+    assert_eq!(
+        report,
+        PassReport {
+            frozen: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(spec_key_of(&fx.db, flow, "y").await, own_key, "y resynced");
+    assert!(disabled_of(&fx.db, flow, "x").await, "x still off");
+}
+
+/// The same race on the claimed trigger itself: the route holds the flow and
+/// wants `y`'s row, the pass holds `y`'s row and resyncs. A `resync` that
+/// WAITED for the flow (plain `FOR SHARE`) would deadlock here; `SKIP LOCKED`
+/// lets the pass finish frozen and the route then writes its copy.
+#[tokio::test]
+async fn a_resync_of_the_trigger_being_switched_does_not_deadlock() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.flow(&two_schedules("same")).await;
+    stage_a_resync_of_y(&fx.db, flow).await;
+
+    let mut route = route_holds_the_flow(&fx.db, flow, "y").await;
+    let pool = fx.db.pool.clone();
+    let pass = tokio::spawn(async move { fire_due(&pool).await });
+    let blocked = finished_or_blocked(&fx.db, &pass).await;
+    route_writes_the_copy(&mut route, flow, "y").await;
+    route.commit().await.expect("the route commits");
+    let report = pass.await.unwrap().expect("a pass");
+
+    assert!(!blocked, "the pass must not wait on the route's flow lock");
+    assert_eq!(
+        report,
+        PassReport {
+            frozen: 1,
+            ..Default::default()
+        }
+    );
+    assert!(
+        disabled_of(&fx.db, flow, "y").await,
+        "the route's copy stands"
+    );
+    assert_eq!(
+        common::switched_off(&fx.db, flow).await,
+        vec!["y".to_string()]
+    );
+    assert_eq!(executions_of(&fx.db, flow).await, 0, "nothing fired");
+}
+
 // ── §3.6: the last execution per trigger ─────────────────────────────────────
 
 /// §3.6's statement, verbatim. The read route (a later task) must use this
@@ -285,14 +488,15 @@ async fn the_last_execution_per_trigger_is_served_by_its_index(pool: sqlx::PgPoo
     let db = Db { pool: pool.clone() };
     let (ws, user) = common::seed_workspace(&db).await;
     let flow = common::seed_flow(&db, ws, user, &plain("busy"), "draft").await;
-    // 3,000 executions of `busy`, spread over five webhook trigger ids, one
-    // second apart, so a probe by `flow_id` alone reads 3,000 rows and sorts.
+    // 3,000 executions of `busy`, spread over fifty webhook trigger ids (60
+    // each), one second apart, so a probe by `flow_id` alone reads 3,000 rows
+    // and sorts.
     sqlx::query(
         "INSERT INTO workflow.executions \
            (workspace_id, flow_id, namespace, flow_key, source, state, history, \
             execution_trigger, created_at) \
          SELECT $1, $2, 'w7e', 'busy', 's', 'SUCCESS', '[\"CREATED\",\"RUNNING\",\"SUCCESS\"]', \
-                jsonb_build_object('id', 'hook' || (i % 5), \
+                jsonb_build_object('id', 'hook' || (i % 50), \
                                    'type', 'io.kestra.plugin.core.trigger.Webhook', \
                                    'variables', '{}'::jsonb), \
                 now() - make_interval(secs => i) \
@@ -315,6 +519,15 @@ async fn the_last_execution_per_trigger_is_served_by_its_index(pool: sqlx::PgPoo
         .unwrap();
     let explain =
         format!("EXPLAIN EXECUTE last_q(ARRAY['{flow}']::uuid[], ARRAY['hook3']::text[])");
+    // A page's worth of probes (the route's page is 50 by default, 200 at
+    // most): every one of the fifty ids, one flow repeated.
+    let ids: Vec<String> = (0..50).map(|i| format!("'hook{i}'")).collect();
+    let flows: Vec<String> = (0..50).map(|_| format!("'{flow}'")).collect();
+    let explain_page = format!(
+        "EXPLAIN EXECUTE last_q(ARRAY[{}]::uuid[], ARRAY[{}]::text[])",
+        flows.join(","),
+        ids.join(",")
+    );
 
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "PREPARE last_q(uuid[], text[]) AS {LAST_EXECUTION_SQL}"
@@ -333,6 +546,18 @@ async fn the_last_execution_per_trigger_is_served_by_its_index(pool: sqlx::PgPoo
         "{plan}"
     );
     assert!(!plan.contains("Seq Scan"), "{plan}");
+
+    let page: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(explain_page.clone()))
+        .fetch_all(&mut *conn)
+        .await
+        .unwrap();
+    let page = page.join("\n");
+    println!("{page}");
+    assert!(
+        page.contains("workflow_executions_last_by_trigger"),
+        "fifty probes keep the index: {page}"
+    );
+    assert!(!page.contains("Seq Scan"), "{page}");
 
     // Control: without the index the same statement is not served by it.
     for sql in [
@@ -354,6 +579,11 @@ async fn the_last_execution_per_trigger_is_served_by_its_index(pool: sqlx::PgPoo
         .unwrap();
     let control = control.join("\n");
     println!("{control}");
+    let control_page: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(explain_page))
+        .fetch_all(&mut *conn)
+        .await
+        .unwrap();
+    println!("{}", control_page.join("\n"));
     assert!(
         !control.contains("workflow_executions_last_by_trigger"),
         "{control}"

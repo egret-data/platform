@@ -39,6 +39,13 @@ COMMENT ON COLUMN workflow.flow_listeners.disabled IS
 -- chooses this index and no scan.
 -- `tests/disabled_triggers.rs::the_last_execution_per_trigger_is_served_by_its_index`
 -- pins the plan, so a change that loses it fails there.
+--
+-- **Not `CONCURRENTLY`, so the build blocks writes to `workflow.executions`
+-- for its duration during the deploy** (as 0138's rebuild does). sqlx runs
+-- this file in one transaction, and `CREATE INDEX CONCURRENTLY` cannot run in
+-- a transaction block; opting the file out would make the table and comments
+-- above non-atomic with it. The window is one pass over the triggered
+-- executions, the only rows the partial index holds.
 CREATE INDEX workflow_executions_last_by_trigger
   ON workflow.executions (flow_id, (execution_trigger->>'id'), created_at DESC)
   WHERE execution_trigger IS NOT NULL;
