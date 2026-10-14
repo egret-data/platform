@@ -14,6 +14,7 @@
 mod access;
 pub mod audit;
 mod error;
+mod lineage_sweep;
 mod secrets;
 mod storage;
 mod tags;
@@ -85,6 +86,11 @@ pub struct CpState {
     pub mv_lister: std::sync::Arc<dyn MaterializedViewLister>,
     /// Deadline for ALL of one report's listings together; tests shorten it.
     pub mv_list_timeout: std::time::Duration,
+    /// The view-governance lineage sweep (B3), run on demand by
+    /// `POST /classifications/lineage-sweep`. The real one is
+    /// `egret_catalog_engine::LineageSweep`, wired in `egret-bin`; tests pass a
+    /// fake.
+    pub lineage_sweeper: Arc<dyn egret_catalog_engine::LineageSweeper>,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
@@ -104,6 +110,7 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(audit::audit_router())
         .merge(tags::router())
         .merge(view_exposure::router())
+        .merge(lineage_sweep::router())
 }
 
 /// The control-plane seam's OpenAPI document (E0·P4b-3): the access, storage,
@@ -118,5 +125,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     doc.merge(audit::ControlPlaneAuditApi::openapi());
     doc.merge(tags::ControlPlaneTagsApi::openapi());
     doc.merge(view_exposure::ControlPlaneViewExposureApi::openapi());
+    doc.merge(lineage_sweep::ControlPlaneLineageSweepApi::openapi());
     doc
 }

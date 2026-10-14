@@ -29,6 +29,7 @@ import type {
   CreateTag,
   ErrorBody,
   SetAccessPolicy,
+  SweepReport,
   TagDto,
   UpdateTag,
   ViewExposureDto
@@ -56,7 +57,105 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   return result;
 };
 
-export type controlPlaneTagsGetViewExposureResponse200 = {
+export type controlPlaneTagsRunLineageSweepResponse200 = {
+  data: SweepReport
+  status: 200
+}
+
+export type controlPlaneTagsRunLineageSweepResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneTagsRunLineageSweepResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneTagsRunLineageSweepResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneTagsRunLineageSweepResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneTagsRunLineageSweepResponseSuccess = (controlPlaneTagsRunLineageSweepResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneTagsRunLineageSweepResponseError = (controlPlaneTagsRunLineageSweepResponse401 | controlPlaneTagsRunLineageSweepResponse403 | controlPlaneTagsRunLineageSweepResponse409 | controlPlaneTagsRunLineageSweepResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneTagsRunLineageSweepResponse = (controlPlaneTagsRunLineageSweepResponseSuccess | controlPlaneTagsRunLineageSweepResponseError)
+
+export const getControlPlaneTagsRunLineageSweepUrl = () => {
+
+
+
+
+  return `/api/control-plane/classifications/lineage-sweep`
+}
+
+export const controlPlaneTagsRunLineageSweep = async ( options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneTagsRunLineageSweepResponse> => {
+
+  return customInstance<controlPlaneTagsRunLineageSweepResponse>(getControlPlaneTagsRunLineageSweepUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneTagsRunLineageSweepMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneTagsRunLineageSweep>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneTagsRunLineageSweep>>, TError,void, TContext> => {
+
+const mutationKey = ['controlPlaneTagsRunLineageSweep'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneTagsRunLineageSweep>>, void> = () => {
+
+
+          return  controlPlaneTagsRunLineageSweep(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneTagsRunLineageSweepMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneTagsRunLineageSweep>>>
+
+    export type ControlPlaneTagsRunLineageSweepMutationError = ErrorBody
+
+    export const useControlPlaneTagsRunLineageSweep = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneTagsRunLineageSweep>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneTagsRunLineageSweep>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getControlPlaneTagsRunLineageSweepMutationOptions(options), queryClient);
+    }
+    export type controlPlaneTagsGetViewExposureResponse200 = {
   data: ViewExposureDto
   status: 200
 }

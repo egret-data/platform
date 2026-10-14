@@ -523,6 +523,7 @@ impl ClassificationPolicyRepo {
         .bind(by)
         .execute(&mut *tx)
         .await?;
+        Self::retag_views_for_tag_in_tx(&mut tx, tag_id).await?;
         let skipped = Self::recompile_for_clearance_in_tx(&mut tx).await?;
         tx.commit().await?;
         self.bus.publish(RolesChanged);
@@ -542,10 +543,30 @@ impl ClassificationPolicyRepo {
             .bind(tag_id)
             .execute(&mut *tx)
             .await?;
+        Self::retag_views_for_tag_in_tx(&mut tx, tag_id).await?;
         let skipped = Self::recompile_for_clearance_in_tx(&mut tx).await?;
         tx.commit().await?;
         self.bus.publish(RolesChanged);
         Ok(skipped)
+    }
+
+    /// View governance B3 (Task 9): a tag that gains or loses its gate changes
+    /// which tags a view's lineage carries to it ([`egret_perm_compile::lineage::view_tag_set`]
+    /// counts only clearance-bearing tags). Re-tag every view that reads a table
+    /// carrying `tag_id`, on the caller's transaction, and bump the tag version
+    /// of the warehouses whose view rows changed, once each. The recompile that
+    /// follows covers every compiler-targeted profile already.
+    async fn retag_views_for_tag_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        tag_id: Uuid,
+    ) -> Result<(), BiError> {
+        let tables = egret_perm_compile::view_tags::tables_carrying_tag(tx, tag_id).await?;
+        let summary = egret_perm_compile::retag_dependent_views_detailed_in_tx(tx, &tables).await?;
+        if !summary.warehouses.is_empty() {
+            let warehouses: Vec<Uuid> = summary.warehouses.into_iter().collect();
+            egret_catalog_registry::bump_tag_versions_for_warehouses(tx, &warehouses).await?;
+        }
+        Ok(())
     }
 
     /// **SP4c Task 3, input 1 of three: the tag's own GATE.** Recompile every

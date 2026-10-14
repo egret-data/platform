@@ -3619,6 +3619,66 @@
         }
       }
     },
+    "/api/control-plane/classifications/lineage-sweep": {
+      "post": {
+        "tags": [
+          "control-plane-tags"
+        ],
+        "operationId": "run_lineage_sweep",
+        "responses": {
+          "200": {
+            "description": "The sweep ran. `failures` names every view (or listing) whose lineage could not be computed; those views keep their tags",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SweepReport"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing tag:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A sweep is already running, or the embedded catalog is not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/classifications/{id}/view-exposure": {
       "get": {
         "tags": [
@@ -46348,6 +46408,72 @@
               "$ref": "#/components/schemas/QueryParam"
             },
             "description": "Template parameters substituted into `{{name}}` placeholders before the\nquery is sent to the engine."
+          }
+        }
+      },
+      "SweepFailure": {
+        "type": "object",
+        "description": "One view (or one catalog listing) the sweep could not judge.",
+        "required": [
+          "catalog",
+          "reason"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "string",
+            "description": "The registry catalog name."
+          },
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The namespace, or `None` when the catalog's namespaces could not be\nlisted."
+          },
+          "view": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The view, or `None` when its namespace could not be listed."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why. The view's tags are unchanged."
+          }
+        }
+      },
+      "SweepReport": {
+        "type": "object",
+        "description": "What one sweep did.",
+        "required": [
+          "views",
+          "computed",
+          "retagged",
+          "failures"
+        ],
+        "properties": {
+          "views": {
+            "type": "integer",
+            "description": "Views the sweep tried.",
+            "minimum": 0
+          },
+          "computed": {
+            "type": "integer",
+            "description": "Views whose lineage it computed.",
+            "minimum": 0
+          },
+          "retagged": {
+            "type": "integer",
+            "description": "Views whose lineage-derived tags it changed.",
+            "minimum": 0
+          },
+          "failures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SweepFailure"
+            },
+            "description": "Views (or listings) it could not judge. Their tags are unchanged."
           }
         }
       },

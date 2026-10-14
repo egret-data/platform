@@ -140,6 +140,22 @@ fn app_with_timeout(
     lister: Arc<dyn MaterializedViewLister>,
     mv_list_timeout: std::time::Duration,
 ) -> axum::Router {
+    app_full(
+        f,
+        pdp,
+        lister,
+        mv_list_timeout,
+        Arc::new(egret_catalog_engine::NoCatalogSweeper),
+    )
+}
+
+fn app_full(
+    f: &Fixture,
+    pdp: Arc<dyn egret_core::authz::Pdp>,
+    lister: Arc<dyn MaterializedViewLister>,
+    mv_list_timeout: std::time::Duration,
+    lineage_sweeper: Arc<dyn egret_catalog_engine::LineageSweeper>,
+) -> axum::Router {
     let crypto = egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").unwrap();
     let secrets = egret_secrets::WorkspaceSecretStore::new(
         f.db.clone(),
@@ -166,6 +182,7 @@ fn app_with_timeout(
         db: f.db.clone(),
         mv_lister: lister,
         mv_list_timeout,
+        lineage_sweeper,
     })
 }
 
@@ -802,4 +819,129 @@ async fn a_listing_that_never_answers_ends_at_the_deadline_as_a_named_failure() 
         !err.contains(&other),
         "the listing that answered is not named; got {err}"
     );
+}
+
+// ── View governance B3: POST /classifications/lineage-sweep ──────────────────
+
+/// Answers each sweep with `answer`, counting the calls.
+struct FakeSweeper {
+    answer: Result<egret_catalog_engine::SweepReport, egret_catalog_engine::SweepError>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl egret_catalog_engine::LineageSweeper for FakeSweeper {
+    async fn sweep(
+        &self,
+    ) -> Result<egret_catalog_engine::SweepReport, egret_catalog_engine::SweepError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.answer.clone()
+    }
+}
+
+async fn post_sweep(app: axum::Router, token: &str) -> (StatusCode, serde_json::Value) {
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/classifications/lineage-sweep")
+                .header("Cookie", format!("egret_session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+fn sweeper(
+    answer: Result<egret_catalog_engine::SweepReport, egret_catalog_engine::SweepError>,
+) -> Arc<FakeSweeper> {
+    Arc::new(FakeSweeper {
+        answer,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    })
+}
+
+/// The sweep runs on demand for `tag:manage`, the classification write
+/// permission, and its report names each view it could not judge.
+#[tokio::test]
+async fn the_lineage_sweep_runs_for_tag_manage_and_reports_failures() {
+    let Some(f) = setup().await else { return };
+    let token = session(&f).await;
+    let report = egret_catalog_engine::SweepReport {
+        views: 2,
+        computed: 1,
+        retagged: 1,
+        failures: vec![egret_catalog_engine::SweepFailure {
+            catalog: "ice".into(),
+            schema: Some("s".into()),
+            view: Some("v_bad".into()),
+            reason: "engine trino-1: boom".into(),
+        }],
+    };
+    let fake = sweeper(Ok(report));
+
+    // `tag:read` reads a classification; it does not run the sweep.
+    let app = app_full(
+        &f,
+        Arc::new(AllowOnly(&["tag:read"])),
+        Arc::new(FakeLister::default()),
+        std::time::Duration::from_secs(15),
+        fake.clone(),
+    );
+    let (status, _) = post_sweep(app, &token).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(fake.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let app = app_full(
+        &f,
+        Arc::new(AllowOnly(&["tag:manage"])),
+        Arc::new(FakeLister::default()),
+        std::time::Duration::from_secs(15),
+        fake.clone(),
+    );
+    let (status, body) = post_sweep(app, &token).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(fake.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "views": 2, "computed": 1, "retagged": 1,
+            "failures": [{"catalog": "ice", "schema": "s", "view": "v_bad",
+                          "reason": "engine trino-1: boom"}]
+        })
+    );
+}
+
+/// A sweep already running, or no embedded catalog, is a 409 that says so.
+#[tokio::test]
+async fn the_lineage_sweep_says_when_it_cannot_run() {
+    let Some(f) = setup().await else { return };
+    let token = session(&f).await;
+    for (answer, says) in [
+        (egret_catalog_engine::SweepError::Busy, "already running"),
+        (
+            egret_catalog_engine::SweepError::Unavailable(
+                "the embedded catalog is not enabled".into(),
+            ),
+            "not enabled",
+        ),
+    ] {
+        let app = app_full(
+            &f,
+            Arc::new(AllowOnly(&["tag:manage"])),
+            Arc::new(FakeLister::default()),
+            std::time::Duration::from_secs(15),
+            sweeper(Err(answer)),
+        );
+        let (status, body) = post_sweep(app, &token).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.to_string().contains(says), "{body}");
+    }
 }

@@ -92,6 +92,9 @@ pub mod routes;
 pub mod rules;
 pub mod trigger;
 pub mod view_exposure;
+// View governance B3 (Task 9): a view's lineage-derived column tags follow
+// its base tables' classifications.
+pub mod view_tags;
 
 pub use attribution::{attribute_policy_name, PolicyAttribution};
 pub use grants::{compile_grant, validate_grant_shape};
@@ -107,4 +110,8 @@ pub use trigger::{
     affected_services_for_tag_rename, affected_services_for_workspace_members, lock_services_in_tx,
     merge_service_ids, recompile_service, recompile_service_in_tx, recompile_services_in_tx,
     CompileSummary, SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING, PROFILE_EXPANSION_CEILING,
+};
+pub use view_tags::{
+    dependent_view_warehouses, retag_dependent_views_detailed_in_tx, retag_dependent_views_in_tx,
+    retag_view_in_tx, RetagSummary, ViewRetag,
 };

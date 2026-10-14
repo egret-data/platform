@@ -1965,6 +1965,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     > = None;
     let mut catalog_browser: Option<std::sync::Arc<dyn egret_catalog_engine::WarehouseBrowser>> =
         None;
+    // View governance B3: the lineage sweep, run on a schedule here and on
+    // demand from the classification page. With no embedded catalog there is
+    // nothing to sweep, and the route says so.
+    let mut lineage_sweeper: std::sync::Arc<dyn egret_catalog_engine::LineageSweeper> =
+        std::sync::Arc::new(egret_catalog_engine::NoCatalogSweeper);
     let catalog_engine: Option<axum::Router> = if config.catalog.enabled {
         let dsn = config.database.url.as_str();
         egret_catalog_engine::run_lakekeeper_migrations(dsn)
@@ -2017,8 +2022,36 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             ));
         let view_hold = std::sync::Arc::new(egret_catalog_engine::ViewHold::new(
             db.clone(),
+            lineage_runner.clone(),
+        ));
+        let sweep = std::sync::Arc::new(egret_catalog_engine::LineageSweep::new(
+            db.clone(),
+            engine_state.clone(),
+            config.catalog.system_user.clone(),
             lineage_runner,
         ));
+        lineage_sweeper = sweep.clone();
+        // The scheduled sweep (spec B3, R6). The first run waits one period,
+        // so a boot does not EXPLAIN every view before the engines are up. A
+        // run that overlaps an on-demand one is skipped (`SweepError::Busy`).
+        tokio::spawn(async move {
+            use egret_catalog_engine::LineageSweeper as _;
+            let period = egret_catalog_engine::LINEAGE_SWEEP_INTERVAL;
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            loop {
+                tick.tick().await;
+                match sweep.sweep().await {
+                    Ok(report) if !report.failures.is_empty() => tracing::warn!(
+                        failures = report.failures.len(),
+                        first = ?report.failures.first(),
+                        "lineage sweep: some views' lineage could not be computed; their tags \
+                         are unchanged"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "lineage sweep did not run"),
+                }
+            }
+        });
         Some(egret_catalog_engine::mount_catalog_engine(
             engine_state,
             Some(guard),
@@ -2226,6 +2259,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 .clone()
                 .expect("engine-mgmt state is built just above"),
         }),
+        lineage_sweeper: lineage_sweeper.clone(),
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).

@@ -18,7 +18,14 @@
 //!   through lakekeeper's own router and judged like a new one; a version
 //!   that cannot be resolved or loaded is refused on a classified profile;
 //! - rename, `POST /{prefix}/views/rename`, which moves the view's lineage and
-//!   tag assignments to the new name under the same hold.
+//!   tag assignments to the new name under the same hold;
+//! - drop, `DELETE /{prefix}/namespaces/{ns}/views/{view}` (spec B3): after
+//!   lakekeeper answers 2xx, the view's lineage and its lineage-derived tag
+//!   rows are deleted. A tag an admin put on the view by hand stays.
+//!
+//! Every tag row the hold derives is marked `from_lineage` (migration 0188),
+//! and it records the view's columns beside the lineage, so that B3
+//! (`egret_perm_compile::view_tags`) can re-tag the view when a base changes.
 //!
 //! A multi-level namespace on any of these is refused on a classified profile
 //! (the Ranger resource has one schema level), and passes otherwise.
@@ -155,8 +162,10 @@ impl ViewHold {
     }
 }
 
-/// One `catalog_tag_assignments` row: tag, schema, table, column.
-type Assignment = (Uuid, String, String, String);
+/// One `catalog_tag_assignments` row: tag, schema, table, column, and
+/// whether the lineage derived it (`from_lineage`, migration 0188). Every row
+/// the hold derives is `true`; a rename carries each row's own flag.
+type Assignment = (Uuid, String, String, String, bool);
 
 /// What a hold wrote in step 3, so that compensation removes exactly it.
 struct Written {
@@ -166,6 +175,8 @@ struct Written {
     inserted: Vec<Assignment>,
     /// The view's lineage before this hold wrote its own.
     previous: RecordedLineage,
+    /// The view's recorded columns before this hold wrote its own.
+    previous_columns: Option<Vec<String>>,
     /// `(Trino profile id, its tag version)` to wait for.
     required: Vec<(i64, i64)>,
 }
@@ -258,21 +269,43 @@ impl IntoResponse for Refusal {
 /// `\u{1f}` level separator kept ([`is_multi_level`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Target {
-    Create { ns: String },
-    Commit { ns: String, view: String },
+    Create {
+        ns: String,
+    },
+    Commit {
+        ns: String,
+        view: String,
+    },
     Rename,
+    /// `DELETE …/namespaces/{ns}/views/{view}` (spec B3).
+    Drop {
+        ns: String,
+        view: String,
+    },
 }
 
-/// `(prefix, target)` for a `POST` the hold handles, else `None`.
+/// `(prefix, target)` for a request the hold handles, else `None`.
 fn classify(method: &Method, path: &str) -> Option<(String, Target)> {
-    if method != Method::POST {
-        return None;
-    }
     let segs: Vec<&str> = path
         .trim_start_matches('/')
         .split('/')
         .filter(|s| !s.is_empty())
         .collect();
+    if method == Method::DELETE {
+        return match segs.as_slice() {
+            [prefix, "namespaces", ns, "views", view] => Some((
+                decode_segment(prefix)?,
+                Target::Drop {
+                    ns: decode_segment(ns)?,
+                    view: decode_segment(view)?,
+                },
+            )),
+            _ => None,
+        };
+    }
+    if method != Method::POST {
+        return None;
+    }
     match segs.as_slice() {
         [prefix, "namespaces", ns, "views"] => Some((
             decode_segment(prefix)?,
@@ -319,11 +352,11 @@ fn is_multi_level(ns: &str) -> bool {
 
 /// What the hold needs from a new view version.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Definition {
-    sql: String,
-    default_catalog: Option<String>,
-    default_schema: Option<String>,
-    columns: Vec<String>,
+pub(crate) struct Definition {
+    pub(crate) sql: String,
+    pub(crate) default_catalog: Option<String>,
+    pub(crate) default_schema: Option<String>,
+    pub(crate) columns: Vec<String>,
 }
 
 /// The Trino SQL, defaults and columns of `version`, with `schema` the
@@ -575,6 +608,16 @@ fn resolve_pending(pending: Pending, stored: Option<&Value>) -> Result<Definitio
     }
 }
 
+/// The definition of the version that is current in a view's stored
+/// metadata (`ViewMetadata` JSON). The B3 sweep reads it.
+pub(crate) fn current_definition(metadata: &Value) -> Result<Definition, String> {
+    let id = metadata
+        .get("current-version-id")
+        .and_then(Value::as_i64)
+        .ok_or("the view's metadata names no current version")?;
+    resolve_pending(Pending::Stored(id), Some(metadata))
+}
+
 /// `{source, destination}` of a rename, each `(namespace, name)`, the
 /// namespace's levels joined with `\u{1f}`. `None` for a body of another
 /// shape, which lakekeeper refuses.
@@ -669,19 +712,23 @@ async fn trino_tag_versions(
 }
 
 /// Record `lineage` as `view`'s, through the lineage API only: computed,
-/// failed, or (for `Missing`) nothing at all.
+/// failed, or (for `Missing`) nothing at all. `columns` are the view's columns
+/// (B3 re-tags every column of the view when a base changes); a missing
+/// lineage has none.
 async fn record(
     conn: &mut sqlx::PgConnection,
     view: &ViewRef,
     lineage: &RecordedLineage,
+    columns: Option<&[String]>,
 ) -> Result<(), LineageError> {
     match lineage {
-        RecordedLineage::Missing => Ok(lineage::delete_lineage(conn, view).await?),
+        RecordedLineage::Missing => return Ok(lineage::delete_lineage(conn, view).await?),
         RecordedLineage::Failed { detail } => {
-            Ok(lineage::record_lineage_failure(conn, view, detail).await?)
+            lineage::record_lineage_failure(conn, view, detail).await?
         }
-        RecordedLineage::Computed(tables) => lineage::write_lineage(conn, view, tables).await,
+        RecordedLineage::Computed(tables) => lineage::write_lineage(conn, view, tables).await?,
     }
+    Ok(lineage::set_view_columns(conn, view, columns).await?)
 }
 
 /// The assignment rows `view` holds in `warehouse_id`.
@@ -691,7 +738,8 @@ async fn assignments_of(
     view: &ViewRef,
 ) -> Result<Vec<Assignment>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT tag_id, schema_name, table_name, column_name FROM catalog_tag_assignments \
+        "SELECT tag_id, schema_name, table_name, column_name, from_lineage \
+           FROM catalog_tag_assignments \
           WHERE warehouse_id = $1 AND schema_name = $2 AND table_name = $3 \
           ORDER BY tag_id, column_name",
     )
@@ -716,6 +764,14 @@ async fn bump_and_recompile(
         .await
         .map_err(Refusal::overlap)?;
     Ok(())
+}
+
+/// What a view carries in egret: its lineage, its tag rows and its recorded
+/// columns.
+struct ViewState {
+    lineage: RecordedLineage,
+    rows: Vec<Assignment>,
+    columns: Option<Vec<String>>,
 }
 
 /// The view request's state before any hold work: which egret warehouse and
@@ -802,6 +858,7 @@ impl ViewHold {
         view: &ViewRef,
         rows: &[Assignment],
         lineage: &RecordedLineage,
+        columns: Option<&[String]>,
     ) -> Result<Written, Refusal> {
         let db = |e: sqlx::Error| Refusal::internal("database", e);
         let mut tx = self.db.pool.begin().await.map_err(db)?;
@@ -812,13 +869,18 @@ impl ViewHold {
             .await
             .map_err(|e| Refusal::internal("overlap snapshot", e))?;
         let previous = lineage::recorded_lineage(&mut tx, view).await.map_err(db)?;
+        let previous_columns = lineage::recorded_view_columns(&mut tx, view)
+            .await
+            .map_err(db)?;
         let mut inserted = Vec::new();
         for row in rows {
-            let (tag, schema, table, column) = row;
+            let (tag, schema, table, column, from_lineage) = row;
+            // A row that exists already keeps its provenance: an admin's
+            // manual tag stays manual.
             let new: Option<Uuid> = sqlx::query_scalar(
                 "INSERT INTO catalog_tag_assignments \
-                     (tag_id, warehouse_id, schema_name, table_name, column_name) \
-                 VALUES ($1, $2, $3, $4, $5) \
+                     (tag_id, warehouse_id, schema_name, table_name, column_name, from_lineage) \
+                 VALUES ($1, $2, $3, $4, $5, $6) \
                  ON CONFLICT (tag_id, warehouse_id, schema_name, table_name, column_name) \
                  DO NOTHING RETURNING tag_id",
             )
@@ -827,6 +889,7 @@ impl ViewHold {
             .bind(schema)
             .bind(table)
             .bind(column)
+            .bind(from_lineage)
             .fetch_optional(&mut *tx)
             .await
             .map_err(db)?;
@@ -834,7 +897,7 @@ impl ViewHold {
                 inserted.push(row.clone());
             }
         }
-        record(&mut tx, view, lineage)
+        record(&mut tx, view, lineage, columns)
             .await
             .map_err(|e| Refusal::internal("lineage", e))?;
         if !inserted.is_empty() {
@@ -854,6 +917,7 @@ impl ViewHold {
             view: view.clone(),
             inserted,
             previous,
+            previous_columns,
             required,
         })
     }
@@ -880,7 +944,7 @@ impl ViewHold {
         delete_rows(&mut tx, w.warehouse_id, &w.inserted)
             .await
             .map_err(db)?;
-        record(&mut tx, &w.view, &w.previous)
+        record(&mut tx, &w.view, &w.previous, w.previous_columns.as_deref())
             .await
             .map_err(|e| Refusal::internal("lineage", e))?;
         if !w.inserted.is_empty() {
@@ -994,7 +1058,7 @@ impl ViewHold {
             if response.status().is_success() && !is_multi_level(ns) {
                 if let Some(catalog) = &r.catalog {
                     let view = view_ref(catalog, ns, name);
-                    self.record_after_commit(&view, &RecordedLineage::Missing)
+                    self.record_after_commit(&view, &RecordedLineage::Missing, None)
                         .await;
                 }
             }
@@ -1123,8 +1187,12 @@ impl ViewHold {
         if tags.is_empty() {
             let response = next.run(req).await;
             if response.status().is_success() {
-                self.record_after_commit(&view, &RecordedLineage::Computed(tables))
-                    .await;
+                self.record_after_commit(
+                    &view,
+                    &RecordedLineage::Computed(tables),
+                    Some(&def.columns),
+                )
+                .await;
             }
             return response;
         }
@@ -1146,7 +1214,7 @@ impl ViewHold {
             .flat_map(|tag| {
                 def.columns
                     .iter()
-                    .map(move |c| (*tag, ns.to_string(), name.to_string(), c.clone()))
+                    .map(move |c| (*tag, ns.to_string(), name.to_string(), c.clone(), true))
             })
             .collect();
         let written = match self
@@ -1155,6 +1223,7 @@ impl ViewHold {
                 &view,
                 &rows,
                 &RecordedLineage::Computed(tables),
+                Some(&def.columns),
             )
             .await
         {
@@ -1167,10 +1236,15 @@ impl ViewHold {
     /// Record a lineage for a view lakekeeper has committed. A failure leaves
     /// the lineage missing or stale, which the B3 sweep repairs; it never
     /// removes a tag.
-    async fn record_after_commit(&self, view: &ViewRef, lineage: &RecordedLineage) {
+    async fn record_after_commit(
+        &self,
+        view: &ViewRef,
+        lineage: &RecordedLineage,
+        columns: Option<&[String]>,
+    ) {
         let result = async {
             let mut tx = self.db.pool.begin().await?;
-            record(&mut tx, view, lineage).await?;
+            record(&mut tx, view, lineage, columns).await?;
             tx.commit().await?;
             Ok::<(), LineageError>(())
         }
@@ -1180,12 +1254,9 @@ impl ViewHold {
         }
     }
 
-    /// What `view` carries now: its lineage and its assignment rows.
-    async fn state_of(
-        &self,
-        warehouse_id: Uuid,
-        view: &ViewRef,
-    ) -> Result<(RecordedLineage, Vec<Assignment>), Refusal> {
+    /// What `view` carries now: its lineage, its assignment rows and its
+    /// recorded columns.
+    async fn state_of(&self, warehouse_id: Uuid, view: &ViewRef) -> Result<ViewState, Refusal> {
         let db = |e: sqlx::Error| Refusal::internal("database", e);
         let mut conn = self.db.pool.acquire().await.map_err(db)?;
         let lineage = lineage::recorded_lineage(&mut conn, view)
@@ -1194,7 +1265,98 @@ impl ViewHold {
         let rows = assignments_of(&mut conn, warehouse_id, view)
             .await
             .map_err(db)?;
-        Ok((lineage, rows))
+        let columns = lineage::recorded_view_columns(&mut conn, view)
+            .await
+            .map_err(db)?;
+        Ok(ViewState {
+            lineage,
+            rows,
+            columns,
+        })
+    }
+
+    /// Drop (spec B3): once lakekeeper has answered 2xx, delete the view's
+    /// lineage and the tag rows its lineage derived, and bump when a row went.
+    /// An admin's manual tag on the view stays (migration 0188). A view that
+    /// carries nothing passes with no lock; otherwise the view's lock is held
+    /// across the drop, so a create of the same name cannot write rows this
+    /// cleanup would then remove.
+    async fn hold_drop(
+        &self,
+        prefix: &str,
+        ns: &str,
+        name: &str,
+        req: Request,
+        next: Next,
+    ) -> Response {
+        let r = match self.resolve(prefix).await {
+            Ok(Some(r)) => r,
+            Ok(None) => return next.run(req).await,
+            Err(refusal) => return refusal.into_response(),
+        };
+        // Nothing is recorded under a multi-level name or without a catalog.
+        let Some(catalog) = r.catalog.as_deref() else {
+            return next.run(req).await;
+        };
+        if is_multi_level(ns) {
+            return next.run(req).await;
+        }
+        let view = view_ref(catalog, ns, name);
+        let carries = match self.state_of(r.warehouse_id, &view).await {
+            Ok(st) => st.lineage != RecordedLineage::Missing || st.rows.iter().any(|row| row.4),
+            Err(refusal) => return refusal.into_response(),
+        };
+        if !carries {
+            return next.run(req).await;
+        }
+        let held = match self.hold(prefix, &[(ns, name)]).await {
+            Ok(h) => h,
+            Err(refusal) => return refusal.into_response(),
+        };
+        let response = next.run(req).await;
+        if response.status().is_success() {
+            self.forget_dropped(r.warehouse_id, &view).await;
+        }
+        held.release().await;
+        response
+    }
+
+    /// The drop's cleanup, in one transaction. A failure is logged: what it
+    /// leaves behind is a lineage and derived tags of a view that no longer
+    /// exists, which over-tag a later view of the same name until it is
+    /// judged or swept, and never under-tag one.
+    async fn forget_dropped(&self, warehouse_id: Uuid, view: &ViewRef) {
+        let result = async {
+            let mut tx = self.db.pool.begin().await.map_err(|e| e.to_string())?;
+            let bound = egret_catalog_registry::services_bound_to_warehouse(&mut *tx, warehouse_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            let removed = sqlx::query(
+                "DELETE FROM catalog_tag_assignments \
+                  WHERE warehouse_id = $1 AND schema_name = $2 AND table_name = $3 \
+                    AND from_lineage",
+            )
+            .bind(warehouse_id)
+            .bind(&view.schema)
+            .bind(&view.name)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?
+            .rows_affected();
+            lineage::delete_lineage(&mut tx, view)
+                .await
+                .map_err(|e| e.to_string())?;
+            if removed > 0 {
+                bump_and_recompile(&mut tx, warehouse_id, &bound)
+                    .await
+                    .map_err(|r| r.0)?;
+            }
+            tx.commit().await.map_err(|e| e.to_string())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!(?view, error = %e, "view hold: the dropped view's lineage and tags remain");
+        }
     }
 
     /// Rename: copy the source's lineage and tag assignments to the
@@ -1231,7 +1393,7 @@ impl ViewHold {
             return next.run(req).await;
         }
         let carries = match self.state_of(warehouse_id, &src).await {
-            Ok((l, rows)) => l != RecordedLineage::Missing || !rows.is_empty(),
+            Ok(st) => st.lineage != RecordedLineage::Missing || !st.rows.is_empty(),
             Err(refusal) => return refusal.into_response(),
         };
         if !carries {
@@ -1269,15 +1431,36 @@ impl ViewHold {
         next: Next,
     ) -> Response {
         // Re-read under the lock.
-        let (src_lineage, src_rows) = match self.state_of(warehouse_id, src).await {
+        let ViewState {
+            lineage: src_lineage,
+            rows: src_rows,
+            columns: src_columns,
+        } = match self.state_of(warehouse_id, src).await {
             Ok(s) => s,
             Err(refusal) => return refusal.into_response(),
         };
         let rows: Vec<Assignment> = src_rows
             .iter()
-            .map(|(tag, _, _, column)| (*tag, dst.schema.clone(), dst.name.clone(), column.clone()))
+            .map(|(tag, _, _, column, from_lineage)| {
+                (
+                    *tag,
+                    dst.schema.clone(),
+                    dst.name.clone(),
+                    column.clone(),
+                    *from_lineage,
+                )
+            })
             .collect();
-        let written = match self.write(warehouse_id, dst, &rows, &src_lineage).await {
+        let written = match self
+            .write(
+                warehouse_id,
+                dst,
+                &rows,
+                &src_lineage,
+                src_columns.as_deref(),
+            )
+            .await
+        {
             Ok(w) => w,
             Err(r) => return r.into_response(),
         };
@@ -1325,7 +1508,7 @@ async fn delete_rows(
     warehouse_id: Uuid,
     rows: &[Assignment],
 ) -> Result<(), sqlx::Error> {
-    for (tag, schema, table, column) in rows {
+    for (tag, schema, table, column, _) in rows {
         sqlx::query(
             "DELETE FROM catalog_tag_assignments \
               WHERE tag_id = $1 AND warehouse_id = $2 AND schema_name = $3 \
@@ -1372,6 +1555,10 @@ pub async fn hold_view_commits(
     let Some((prefix, target)) = classify(req.method(), req.uri().path()) else {
         return next.run(req).await;
     };
+    // A drop carries no body.
+    if let Target::Drop { ns, view } = &target {
+        return hold.hold_drop(&prefix, ns, view, req, next).await;
+    }
     // The one deadline of this request (module doc), from its arrival.
     let deadline = Instant::now() + hold.limit;
     let (parts, body) = req.into_parts();
@@ -1413,6 +1600,7 @@ pub async fn hold_view_commits(
             // No name: lakekeeper refuses it, and nothing can be recorded.
             Err(_) => next.run(req).await,
         },
+        Target::Drop { .. } => unreachable!("a drop is handled before its body is read"),
         Target::Rename => match rename_of(&json) {
             Some((source, destination)) => {
                 hold.hold_rename(deadline, &prefix, source, destination, req, next)
@@ -1428,7 +1616,7 @@ pub fn view_lock_key(prefix: &str, ns: &str, name: &str) -> String {
     lock_key(prefix, ns, name)
 }
 
-fn lock_key(prefix: &str, ns: &str, name: &str) -> String {
+pub(crate) fn lock_key(prefix: &str, ns: &str, name: &str) -> String {
     // A NUL cannot be sent as Postgres text; `\u{1e}` occurs in no name Trino
     // sends.
     format!("egret-view-hold\u{1e}{prefix}\u{1e}{ns}\u{1e}{name}")
@@ -1461,10 +1649,22 @@ mod tests {
             Some(("wh1".into(), Target::Rename))
         );
         assert_eq!(classify(&Method::GET, "/wh1/namespaces/s/views/v1"), None);
+        // A view drop is classified (spec B3); a table drop is not.
         assert_eq!(
             classify(&Method::DELETE, "/wh1/namespaces/s/views/v1"),
+            Some((
+                "wh1".into(),
+                Target::Drop {
+                    ns: "s".into(),
+                    view: "v1".into()
+                }
+            ))
+        );
+        assert_eq!(
+            classify(&Method::DELETE, "/wh1/namespaces/s/tables/t1"),
             None
         );
+        assert_eq!(classify(&Method::DELETE, "/wh1/namespaces/s/views"), None);
         assert_eq!(classify(&post, "/wh1/namespaces/s/tables"), None);
         // A multi-level namespace is classified, and recognised as one.
         let Some((_, Target::Create { ns })) = classify(&post, "/wh1/namespaces/a%1Fb/views")

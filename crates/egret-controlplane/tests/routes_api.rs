@@ -91,6 +91,7 @@ fn build_app(
         db: db.clone(),
         mv_lister: std::sync::Arc::new(NoListing),
         mv_list_timeout: std::time::Duration::from_secs(15),
+        lineage_sweeper: std::sync::Arc::new(egret_catalog_engine::NoCatalogSweeper),
     })
 }
 
@@ -695,6 +696,7 @@ async fn setup_isolated_schema(iso_db: &str) -> Option<Fixture> {
         db: db.clone(),
         mv_lister: std::sync::Arc::new(NoListing),
         mv_list_timeout: std::time::Duration::from_secs(15),
+        lineage_sweeper: std::sync::Arc::new(egret_catalog_engine::NoCatalogSweeper),
     });
 
     Some(Fixture {

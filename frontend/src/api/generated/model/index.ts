@@ -480,6 +480,8 @@ export * from './storedMember';
 export * from './storedOverlap';
 export * from './submitAck';
 export * from './submitQuery';
+export * from './sweepFailure';
+export * from './sweepReport';
 export * from './tabularDto';
 export * from './tabularResult';
 export * from './tabularResultRowsItemItem';

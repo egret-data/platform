@@ -189,6 +189,14 @@ Dropping a view deletes its lineage and its tag assignments. Renaming a base tab
 
 When the lineage cannot be trusted, the view keeps its old tags. Tags are never removed on uncertainty. A **sweep** recomputes every view's lineage on a schedule, and on demand from the classification page. It reports views whose lineage could not be computed.
 
+**How it is kept (Task 9).**
+- **Provenance.** A view column's tag row carries `from_lineage` (migration 0188). The hold and the re-tag write `true`. Only those rows are ever removed: by a re-tag, a drop or the sweep. An admin's assignment is manual, and assigning a coordinate the lineage already derived makes it manual.
+- **Columns.** The hold and the sweep record the view's columns beside its lineage (`view_lineage_state.columns`). The re-tag in the base write's transaction needs them, and no catalog metadata can be loaded there.
+- **Exactly the derived set.** For a view whose lineage is computed, the derived rows become `view_tag_set(lineage)` × its columns, removals included. This also removes the tags a narrowing `CREATE OR REPLACE` left behind, because the hold only adds rows. A missing or failed lineage leaves the rows as they are.
+- **One bump.** The base write, the re-tag and the bump share one transaction. The base's warehouse and the dependent views' warehouses are bumped together, so each service moves by one version. A tag that gains or loses its clearance re-tags the same way.
+- **The sweep** runs every 15 minutes, and on `POST /api/control-plane/classifications/lineage-sweep` (`tag:manage`). Each view is swept under the hold's lock, in one transaction of its own, after its EXPLAIN. A view whose EXPLAIN fails keeps its tags. A computed lineage it already had is kept too, so the re-tag keeps following its bases. A view with no computed lineage is marked failed. 15 minutes is therefore the longest a pruned branch (R6), or a view committed with no classified column and later read over a classified one, stays untagged.
+- **Drop.** After lakekeeper answers 2xx, the hold deletes the view's lineage and its `from_lineage` rows. An admin's tag stays.
+
 ### B4. Know which tag version each engine holds
 
 egret serves `download_tags` (`egret-policy/src/ranger/api/download.rs`), so it can record what each plugin last fetched. Each tag download records:

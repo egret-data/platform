@@ -145,17 +145,25 @@ impl CatalogTagRepo {
         // across the whole stored unit (a profile and its tag service) —
         // compiled, hand-written, or one of each — without refusing a pair
         // that was already stored. One rule, `egret_policy::unit_overlaps`.
-        let bound = egret_catalog_registry::services_bound_to_warehouse(&mut *tx, warehouse_id)
-            .await
-            .map_err(crate::error::BiError::from)?;
-        let overlaps_before = egret_perm_compile::overlap::unit_snapshot_via(&mut tx, &bound)
-            .await
-            .map_err(crate::error::BiError::from)?;
+        //
+        // View governance B3: the views that read this table are re-tagged in
+        // this same transaction, and their warehouses join the bump and the
+        // recompile, so the base and its views move in ONE tag version.
+        let reach = ViewReach::of(&mut tx, warehouse_id, schema, table).await?;
+        let overlaps_before =
+            egret_perm_compile::overlap::unit_snapshot_via(&mut tx, &reach.services)
+                .await
+                .map_err(crate::error::BiError::from)?;
+        // An admin's assignment of a coordinate the lineage already derived
+        // makes it a manual one (migration 0188), so no retag removes it.
         sqlx::query(
             "INSERT INTO catalog_tag_assignments \
                  (tag_id, warehouse_id, schema_name, table_name, column_name, assigned_by) \
              VALUES ($1, $2, $3, $4, $5, $6) \
-             ON CONFLICT (tag_id, warehouse_id, schema_name, table_name, column_name) DO NOTHING",
+             ON CONFLICT (tag_id, warehouse_id, schema_name, table_name, column_name) \
+             DO UPDATE SET from_lineage = false, assigned_by = EXCLUDED.assigned_by, \
+                           assigned_at = now() \
+             WHERE catalog_tag_assignments.from_lineage",
         )
         .bind(tag_id)
         .bind(warehouse_id)
@@ -166,8 +174,7 @@ impl CatalogTagRepo {
         .execute(&mut *tx)
         .await
         .map_err(crate::error::BiError::from)?;
-        Self::bump_bound_tag_versions(&mut tx, warehouse_id).await?;
-        Self::recompile_bound_services_in_tx(&mut tx, warehouse_id).await?;
+        reach.retag_bump_and_recompile(&mut tx).await?;
         egret_perm_compile::overlap::refuse_created_overlaps_via(&mut tx, &overlaps_before)
             .await
             .map_err(|e| {
@@ -205,6 +212,7 @@ impl CatalogTagRepo {
             .begin()
             .await
             .map_err(crate::error::BiError::from)?;
+        let reach = ViewReach::of(&mut tx, warehouse_id, schema, table).await?;
         sqlx::query(
             "DELETE FROM catalog_tag_assignments \
              WHERE tag_id = $1 AND warehouse_id = $2 AND schema_name = $3 \
@@ -218,8 +226,7 @@ impl CatalogTagRepo {
         .execute(&mut *tx)
         .await
         .map_err(crate::error::BiError::from)?;
-        Self::bump_bound_tag_versions(&mut tx, warehouse_id).await?;
-        Self::recompile_bound_services_in_tx(&mut tx, warehouse_id).await?;
+        reach.retag_bump_and_recompile(&mut tx).await?;
         tx.commit().await.map_err(crate::error::BiError::from)?;
         Ok(())
     }
@@ -257,30 +264,31 @@ impl CatalogTagRepo {
     /// and this call site logs once more per service with the affected
     /// `warehouse_id`, since `CatalogTagRepo` is the one place that knows
     /// which tag write triggered it.
+    ///
+    /// View governance B3 (Task 9): `warehouse_ids` is the written warehouse
+    /// and the warehouses of the views that read the written table
+    /// ([`ViewReach`]); `service_ids` is the union of their bound services.
     async fn recompile_bound_services_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        warehouse_id: Uuid,
+        warehouse_ids: &[Uuid],
+        service_ids: &[i64],
     ) -> Result<(), BiApiError> {
-        let service_ids =
-            egret_catalog_registry::services_bound_to_warehouse(&mut **tx, warehouse_id)
-                .await
-                .map_err(crate::error::BiError::from)?;
         // SP4a Task 11, defect 2: a recompile now also locks and writes the
         // profile's TAG service, whose id can be lower than the profile's. Take
         // the whole expanded lock set ascending up front rather than letting
         // service N's tag service be locked after service N+1's profile —
         // `lock_services_in_tx` documents why that ordering is what keeps two
         // overlapping recompiles queueing instead of deadlocking.
-        egret_perm_compile::lock_services_in_tx(tx, &service_ids)
+        egret_perm_compile::lock_services_in_tx(tx, service_ids)
             .await
             .map_err(crate::error::BiError::from)?;
-        for service_id in service_ids {
+        for &service_id in service_ids {
             let summary = egret_perm_compile::recompile_service_in_tx(tx, service_id)
                 .await
                 .map_err(crate::error::BiError::from)?;
             if !summary.skipped.is_empty() {
                 tracing::warn!(
-                    warehouse_id = %warehouse_id,
+                    warehouse_ids = ?warehouse_ids,
                     service_id,
                     skipped_count = summary.skipped.len(),
                     "catalog-tag write's recompile skipped some grants/rules for this service"
@@ -300,11 +308,14 @@ impl CatalogTagRepo {
     /// catalog-registry review C1/I1/N1/F-1). One implementation, two
     /// callers (assign and unassign), no drift: read that function for why
     /// each branch is there.
+    ///
+    /// View governance B3 (Task 9): over the written warehouse and the
+    /// dependent views' warehouses together, each service bumped once.
     async fn bump_bound_tag_versions(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        warehouse_id: Uuid,
+        warehouse_ids: &[Uuid],
     ) -> Result<(), BiApiError> {
-        egret_catalog_registry::bump_bound_tag_versions(tx, warehouse_id)
+        egret_catalog_registry::bump_tag_versions_for_warehouses(tx, warehouse_ids)
             .await
             .map_err(crate::error::BiError::from)?;
         Ok(())
@@ -372,6 +383,57 @@ impl CatalogTagRepo {
                 .await
                 .map_err(crate::error::BiError::from)?,
         )
+    }
+}
+
+/// What a catalog-tag write on `schema.table` reaches (view governance B3):
+/// the written warehouse plus the warehouses of the views whose lineage reads
+/// that table, and the services bound to any of them. Computed BEFORE the
+/// write, so the overlap snapshot covers every profile the write recompiles.
+struct ViewReach {
+    tables: Vec<egret_perm_compile::lineage::LineageTable>,
+    warehouses: Vec<Uuid>,
+    services: Vec<i64>,
+}
+
+impl ViewReach {
+    async fn of(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        warehouse_id: Uuid,
+        schema: &str,
+        table: &str,
+    ) -> Result<Self, BiApiError> {
+        let tables =
+            egret_perm_compile::view_tags::tables_of_warehouse(tx, warehouse_id, schema, table)
+                .await
+                .map_err(crate::error::BiError::from)?;
+        let mut warehouses = egret_perm_compile::dependent_view_warehouses(tx, &tables)
+            .await
+            .map_err(crate::error::BiError::from)?;
+        warehouses.push(warehouse_id);
+        warehouses.sort();
+        warehouses.dedup();
+        let services = egret_catalog_registry::services_bound_to_warehouses(&mut **tx, &warehouses)
+            .await
+            .map_err(crate::error::BiError::from)?;
+        Ok(Self {
+            tables,
+            warehouses,
+            services,
+        })
+    }
+
+    /// After the base write: re-tag the dependent views, then ONE bump over
+    /// every reached warehouse and one recompile of every reached service.
+    async fn retag_bump_and_recompile(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), BiApiError> {
+        egret_perm_compile::retag_dependent_views_in_tx(tx, &self.tables)
+            .await
+            .map_err(crate::error::BiError::from)?;
+        CatalogTagRepo::bump_bound_tag_versions(tx, &self.warehouses).await?;
+        CatalogTagRepo::recompile_bound_services_in_tx(tx, &self.warehouses, &self.services).await
     }
 }
 

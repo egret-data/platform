@@ -410,6 +410,27 @@ impl Env {
         rows.into_iter().collect()
     }
 
+    /// `from_lineage` of each row on view `name`, by column.
+    async fn derived_flags(&self, name: &str) -> Vec<bool> {
+        sqlx::query_scalar(
+            "SELECT from_lineage FROM catalog_tag_assignments \
+              WHERE warehouse_id = $1 AND schema_name = 's' AND table_name = $2 \
+              ORDER BY column_name",
+        )
+        .bind(self.warehouse_id)
+        .bind(name)
+        .fetch_all(&self.db.pool)
+        .await
+        .unwrap()
+    }
+
+    async fn columns(&self, name: &str) -> Option<Vec<String>> {
+        let mut conn = self.db.pool.acquire().await.unwrap();
+        egret_perm_compile::lineage::recorded_view_columns(&mut conn, &self.view_ref(name))
+            .await
+            .unwrap()
+    }
+
     async fn tag_version(&self) -> i64 {
         sqlx::query_scalar("SELECT tag_version FROM policy.authz_services WHERE id = $1")
             .bind(self.profile_id)
@@ -621,6 +642,13 @@ async fn a_classified_view_commits_only_after_the_plugin_holds_its_tags() {
         env.expected_pii_tags(&["id", "ssn"])
     );
     assert_eq!(env.lineage("v1").await, computed(&["pii"], &env.catalog));
+    // Task 9: the rows are marked lineage-derived, and the columns are
+    // recorded beside the lineage, so B3 can re-tag the view.
+    assert_eq!(env.derived_flags("v1").await, vec![true, true]);
+    assert_eq!(
+        env.columns("v1").await,
+        Some(vec!["id".into(), "ssn".into()])
+    );
 }
 
 /// Test 2: no plugin ever polls. The request is refused within the limit plus
@@ -684,6 +712,11 @@ async fn a_view_over_unclassified_tables_commits_with_no_wait() {
     assert!(env.view("v1").await.is_some());
     assert!(env.assignments("v1").await.is_empty());
     assert_eq!(env.lineage("v1").await, computed(&["orders"], &env.catalog));
+    // Task 9: a later classification of `orders` re-tags these columns.
+    assert_eq!(
+        env.columns("v1").await,
+        Some(vec!["id".into(), "ssn".into()])
+    );
     assert_eq!(env.tag_version().await, before);
     assert_eq!(env.runner.calls.load(Ordering::SeqCst), 1);
 }

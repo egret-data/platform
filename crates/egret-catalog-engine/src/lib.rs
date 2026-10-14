@@ -16,6 +16,9 @@ pub mod browse;
 /// Crate-level engine domain error ([`CatalogEngineError`]) for the per-request
 /// warehouse/browse operations — distinct from the store's [`CatalogError`].
 pub mod error;
+/// The view-governance lineage sweep (spec B3): recompute every view's
+/// lineage and re-tag it, on a schedule and on demand.
+pub mod lineage_sweep;
 pub mod mount;
 pub mod pool;
 pub mod recovery;
@@ -54,6 +57,10 @@ pub use lakekeeper::api::ApiContext;
 /// permissive authorizer; EB-3 replaces it with the real egret authorizer.
 pub use lakekeeper::service::authz::AllowAllAuthorizer;
 pub use lakekeeper::CancellationToken;
+pub use lineage_sweep::{
+    LineageSweep, LineageSweeper, NoCatalogSweeper, SweepError, SweepFailure, SweepReport,
+    LINEAGE_SWEEP_INTERVAL,
+};
 /// Test-only [`build_state`] variant that takes the task-queue poll interval, so
 /// integration tests can register the built-in GC queues with a short cadence.
 /// Gated behind `test-utils`; `build_state`'s public signature is unchanged.

@@ -343,6 +343,48 @@ pub async fn delete_lineage(
     Ok(())
 }
 
+/// Record `view`'s columns beside its lineage state (migration 0188), or
+/// forget them (`None`). Needs a recorded state (computed or failed): with
+/// none, nothing is written, because a missing lineage has nothing to tag.
+/// An empty slice is stored as `None`: a view always has a column, so an
+/// empty list can only mean "not known".
+pub async fn set_view_columns(
+    conn: &mut sqlx::PgConnection,
+    view: &ViewRef,
+    columns: Option<&[String]>,
+) -> Result<(), sqlx::Error> {
+    let columns = columns.filter(|c| !c.is_empty());
+    sqlx::query(
+        "UPDATE view_lineage_state SET columns = $4 \
+          WHERE view_catalog = $1 AND view_schema = $2 AND view_name = $3",
+    )
+    .bind(&view.catalog)
+    .bind(&view.schema)
+    .bind(&view.name)
+    .bind(columns)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// The columns recorded for `view` ([`set_view_columns`]), or `None` when
+/// none are known.
+pub async fn recorded_view_columns(
+    conn: &mut sqlx::PgConnection,
+    view: &ViewRef,
+) -> Result<Option<Vec<String>>, sqlx::Error> {
+    let columns: Option<Option<Vec<String>>> = sqlx::query_scalar(
+        "SELECT columns FROM view_lineage_state \
+          WHERE view_catalog = $1 AND view_schema = $2 AND view_name = $3",
+    )
+    .bind(&view.catalog)
+    .bind(&view.schema)
+    .bind(&view.name)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(columns.flatten())
+}
+
 /// What is recorded for `view`: missing, failed (with why), or computed.
 pub async fn recorded_lineage(
     conn: &mut sqlx::PgConnection,
