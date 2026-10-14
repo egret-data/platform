@@ -89,6 +89,7 @@ export function NamespaceFileView({
   readOnly,
   readOnlyReason = FILES_MANAGE_REASON,
   onOpenRevisions,
+  staleDialog = true,
 }: {
   ws: string;
   namespace: string;
@@ -97,6 +98,12 @@ export function NamespaceFileView({
   readOnly: boolean;
   readOnlyReason?: string;
   onOpenRevisions?: () => void;
+  /**
+   * `false` when the host asks the 409 question itself ({@link FileConflictDialog}), as
+   * the flow editor does: its file's state outlives this view, and "Save all files"
+   * saves files whose view is not mounted.
+   */
+  staleDialog?: boolean;
 }) {
   const name = baseName(path);
   const reasonId = useId();
@@ -114,7 +121,7 @@ export function NamespaceFileView({
           : { ok: true };
 
   // Ctrl/Cmd+S anywhere in the pane, the editor included: Monaco binds no command to it, so the
-  // key comes up to the pane. A listener rather than a prop: the pane is not itself a control.
+  // key comes up to the pane, which keeps it. A listener rather than a prop: the pane is not itself a control.
   const pane = useRef<HTMLDivElement>(null);
   const canSaveRef = useRef(canSave.ok);
   useEffect(() => {
@@ -127,6 +134,8 @@ export function NamespaceFileView({
     const onKeyDown = (e: globalThis.KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "s") {
         e.preventDefault();
+        // The key saves this file only: a page-wide Ctrl/Cmd+S (the flow editor's) must not see it.
+        e.stopPropagation();
         if (canSaveRef.current) void saveRef.current();
       }
     };
@@ -180,20 +189,32 @@ export function NamespaceFileView({
       <div className="min-h-0 flex-1">
         <FileBody file={file} name={name} download={download} modelPath={`egret-nsfile-${modelId}-${file.loadId}/${name}`} readOnly={readOnly} />
       </div>
-      <StaleSaveDialog
-        open={file.conflict !== null}
-        onOpenChange={(o) => (o ? undefined : file.dismissConflict())}
-        title={`${name} changed since you opened it`}
-        description={
-          <>
-            {serverSentence(file.conflict ?? "")} Reload the latest revision, or overwrite it with your text.
-          </>
-        }
-        reloadDescription="Reloading replaces the text in the editor with the latest saved revision. Your unsaved edits are lost."
-        onReload={file.reload}
-        onOverwrite={file.overwrite}
-      />
+      {staleDialog ? <FileConflictDialog path={path} file={file} /> : null}
     </div>
+  );
+}
+
+/**
+ * W7a's stale-save dialog for a file whose save was refused with 409
+ * `file_changed`: open while `file.conflict` is set. Reload reads the latest
+ * revision; Overwrite writes the text without `if_revision`.
+ */
+export function FileConflictDialog({ path, file }: { path: string; file: NamespaceFile }) {
+  const name = baseName(path);
+  return (
+    <StaleSaveDialog
+      open={file.conflict !== null}
+      onOpenChange={(o) => (o ? undefined : file.dismissConflict())}
+      title={`${name} changed since you opened it`}
+      description={
+        <>
+          {serverSentence(file.conflict ?? "")} Reload the latest revision, or overwrite it with your text.
+        </>
+      }
+      reloadDescription="Reloading replaces the text in the editor with the latest saved revision. Your unsaved edits are lost."
+      onReload={file.reload}
+      onOverwrite={file.overwrite}
+    />
   );
 }
 

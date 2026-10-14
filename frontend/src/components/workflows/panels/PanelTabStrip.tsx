@@ -53,10 +53,12 @@ const isClosable = (defs: Map<TabId, TabDefinition<never>>, tab: TabId) =>
  * already selected by then — selection follows focus).
  */
 function TabButton({
-  tab, title, badge, badgeLabel, icon: Icon, panelId, selected, closable, domId, controls, onSelect, onClose, onKeyDown,
+  tab, title, label, badge, badgeLabel, icon: Icon, panelId, selected, closable, domId, controls, onSelect, onClose, onKeyDown,
 }: {
   tab: TabId;
   title: string;
+  /** The accessible name when the title says too little (`TabDefinition.label`). */
+  label?: string;
   badge?: ReactNode;
   badgeLabel?: string;
   icon: LucideIcon | undefined;
@@ -81,7 +83,8 @@ function TabButton({
       role="tab"
       id={domId}
       aria-selected={selected}
-      aria-label={badgeLabel ? `${title}, ${badgeLabel}` : undefined}
+      aria-label={badgeLabel ? `${label ?? title}, ${badgeLabel}` : label}
+      title={label}
       aria-controls={selected ? controls : undefined}
       aria-describedby={drag.attributes["aria-describedby"]}
       aria-keyshortcuts={closable ? "Delete" : undefined}
@@ -203,6 +206,7 @@ export function PanelTabStrip({
             key={tab}
             tab={tab}
             title={tabTitle(defs, tab)}
+            label={defs.get(tab)?.label}
             badge={badgeOf?.(tab)}
             badgeLabel={badgeLabelOf?.(tab)}
             icon={defs.get(tab)?.icon}

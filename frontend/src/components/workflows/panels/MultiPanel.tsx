@@ -31,7 +31,7 @@ import {
   type DropData,
 } from "@/components/workflows/panels/dnd";
 import { PanelTabStrip, tabTitle } from "@/components/workflows/panels/PanelTabStrip";
-import { getTabs, useTabsVersion, type TabDefinition } from "@/components/workflows/panels/registry";
+import { getTabs, resolveTab, useTabsVersion, type TabDefinition } from "@/components/workflows/panels/registry";
 import { cn } from "@/lib/utils";
 
 /**
@@ -95,6 +95,12 @@ export function MultiPanel<C>({ layout, onChange, context }: Props<C>) {
   // A tab registered after the first render (a lazily loaded package) re-renders the frame.
   useTabsVersion();
   const defs = new Map(getTabs<C>().map((d) => [d.id, d as unknown as TabDefinition<never>]));
+  // A family's tabs (W7d's `file:<path>`) are resolved for the ids the layout names.
+  for (const tab of layout.panels.flatMap((p) => p.tabs)) {
+    if (defs.has(tab)) continue;
+    const def = resolveTab<C>(tab);
+    if (def) defs.set(tab, def as unknown as TabDefinition<never>);
+  }
   const badgeOf = (tab: TabId) => defs.get(tab)?.badge?.(context as never);
   const badgeLabelOf = (tab: TabId) => defs.get(tab)?.badgeLabel?.(context as never);
   const baseId = useId();

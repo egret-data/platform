@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { FilesHost } from "@/components/workflows/editor/fileTabs";
 import type { FlowSchemaState } from "@/components/workflows/editor/useFlowSchema";
 import { useFlowSchema } from "@/components/workflows/editor/useFlowSchema";
 import type { ServerValidation } from "@/components/workflows/editor/useServerValidation";
@@ -80,6 +81,11 @@ export type EditorContext = {
   bridge: EditorBridge;
   /** Ctrl/Cmd+S. Ignored while read-only. */
   save?: () => void;
+  /**
+   * The flow's namespace files (W7d spec §4.3): the Files tab and the
+   * `file:<path>` tabs. Absent on the create page, which has no namespace yet.
+   */
+  files?: FilesHost;
 };
 
 export const CURSOR_DEBOUNCE_MS = 150;
@@ -91,6 +97,8 @@ type Options = {
   initialSource: string;
   readOnly: boolean;
   save?: () => void;
+  /** The flow's namespace files, from `useFilesHost`; the create page has none. */
+  files?: FilesHost;
   /**
    * Called when a tab asks for the editor (a Problems item was selected), so
    * the page can select the Code tab if another tab of its panel is showing.
@@ -103,7 +111,7 @@ type Options = {
  * hands the result to `<MultiPanel context>`; the page also disposes the
  * flow's model when it leaves the flow (`disposeFlowModel`).
  */
-export function useFlowEditor({ workspace, flowId, initialSource, readOnly, save, onRevealCode }: Options): EditorContext {
+export function useFlowEditor({ workspace, flowId, initialSource, readOnly, save, files, onRevealCode }: Options): EditorContext {
   const [source, setSource] = useState(initialSource);
   const [schemaMarkers, setSchemaMarkers] = useState<SchemaMarker[]>([]);
   const [cursorOffset, setCursorNow] = useState<number | null>(null);
@@ -135,9 +143,9 @@ export function useFlowEditor({ workspace, flowId, initialSource, readOnly, save
   return useMemo(
     () => ({
       workspace, modelKey, source, setSource, readOnly, validation, schema, yaml, problems,
-      schemaMarkers, setSchemaMarkers, cursorOffset, setCursorOffset, focusRange, bridge, save,
+      schemaMarkers, setSchemaMarkers, cursorOffset, setCursorOffset, focusRange, bridge, save, files,
     }),
-    [workspace, modelKey, source, readOnly, validation, schema, yaml, problems, schemaMarkers, cursorOffset, setCursorOffset, focusRange, bridge, save],
+    [workspace, modelKey, source, readOnly, validation, schema, yaml, problems, schemaMarkers, cursorOffset, setCursorOffset, focusRange, bridge, save, files],
   );
 }
 

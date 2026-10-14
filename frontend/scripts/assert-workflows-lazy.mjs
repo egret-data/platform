@@ -59,6 +59,15 @@
  * `NAMESPACE_HOST`). `namespaceTabs.ts` has no literal worth a marker (its strings are tab ids and
  * labels other pages spell too) and is NOT guarded here. Each marker was proven by a scratch static
  * import (W7d task-4-report.md, "Bundle guard").
+ *
+ * THE FLOW EDITOR'S FILES (W7d Task 7). The editor registers a Files tab and a `file:<path>` tab
+ * family with its other tabs (`registerEditorTabs.tsx`, in the flow pages' chunk), and keeps the
+ * open files' state through `FileSessions.tsx` (`FlowDetail.tsx`); all three bodies are reached
+ * through `lazy()` only. Markers flagged `files` must therefore stay out of what loads with the flow
+ * pages (`FlowDetail.tsx`, `FlowNew.tsx`, found by their markers in `FLOW_PAGE_HOSTS`), and, being
+ * Task 6's Files slot modules too, out of what loads with the namespace detail, like `namespace-tab`.
+ * Each was proven by a scratch static import of `FilesTab.tsx` from `registerEditorTabs.tsx`
+ * (W7d task-7-report.md, "Bundle proof").
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -68,6 +77,8 @@ const DIST = "dist";
 const LIST_MARKER = "egret.wf.ns-collapsed.";
 /** The pages whose chunks must not carry a `topology` marker: their markers below. */
 const TOPOLOGY_HOSTS = ["Changes since v", "Edits made to the flow since it ran are not used."];
+/** The flow pages' markers (`FlowDetail.tsx`, `FlowNew.tsx`): their loads must not carry a `files` marker. */
+const FLOW_PAGE_HOSTS = ["Changes since v", "Hello from egret"];
 /** The namespace detail's marker: the chunk whose loads must not carry a `namespace-tab` marker. */
 const NAMESPACE_HOST = "Nothing lives in it any more, or the link points to another workspace.";
 const ASSETS = join(DIST, "assets");
@@ -181,17 +192,28 @@ const MARKERS = [
   // restore conflict's title; the overwrite question's Keep button; `FILES_MANAGE_REASON`; the
   // name check's empty-segment sentence; the hook's overwrite failure; `OPEN_TABS_KEY_PREFIX`.
   // Monaco itself stays behind `MonacoEditor`'s own `lazy()` (`assert-monaco-lazy.mjs`). Each
-  // marker was proven by a scratch static import (W7d task-6-report.md).
+  // marker was proven by a scratch static import (W7d task-6-report.md). The `files/` modules are
+  // flagged `files` since W7d Task 7: the flow editor shows them too, so they also stay out of the
+  // flow pages' loads.
   ["src/components/workflows/namespaces/NamespaceFilesTab.tsx", "files-heading", "namespace-tab"],
-  ["src/components/workflows/namespaces/files/NamespaceFiles.tsx", "New files and imports go into", "namespace-tab"],
-  ["src/components/workflows/namespaces/files/FileTree.tsx", "F2 renames, Delete deletes", "namespace-tab"],
-  ["src/components/workflows/namespaces/files/NamespaceFileEditor.tsx", "Only a text file is edited here", "namespace-tab"],
-  ["src/components/workflows/namespaces/files/RevisionsDrawer.tsx", "changed since its revisions were listed", "namespace-tab"],
-  ["src/components/workflows/namespaces/files/FileDialogs.tsx", "Keep the existing files", "namespace-tab"],
-  ["src/components/workflows/namespaces/files/nsFilesApi.ts", "Changing namespace files needs the workflow:manage permission", "namespace-tab"],
-  ["src/components/workflows/namespaces/files/nsFilePaths.ts", "The name has an empty folder name between two slashes", "namespace-tab"],
-  ["src/components/workflows/namespaces/files/useNamespaceFile.ts", "The file was not overwritten", "namespace-tab"],
-  ["src/components/workflows/namespaces/files/openTabs.ts", "egret.wf.ns-files.tabs.", "namespace-tab"],
+  ["src/components/workflows/namespaces/files/NamespaceFiles.tsx", "New files and imports go into", "files"],
+  ["src/components/workflows/namespaces/files/FileTree.tsx", "F2 renames, Delete deletes", "files"],
+  ["src/components/workflows/namespaces/files/NamespaceFileEditor.tsx", "Only a text file is edited here", "files"],
+  ["src/components/workflows/namespaces/files/RevisionsDrawer.tsx", "changed since its revisions were listed", "files"],
+  ["src/components/workflows/namespaces/files/FileDialogs.tsx", "Keep the existing files", "files"],
+  ["src/components/workflows/namespaces/files/nsFilesApi.ts", "Changing namespace files needs the workflow:manage permission", "files"],
+  ["src/components/workflows/namespaces/files/nsFilePaths.ts", "The name has an empty folder name between two slashes", "files"],
+  ["src/components/workflows/namespaces/files/useNamespaceFile.ts", "The file was not overwritten", "files"],
+  ["src/components/workflows/namespaces/files/openTabs.ts", "egret.wf.ns-files.tabs.", "files"],
+  // The flow editor's Files (W7d Task 7). The two tab bodies, through `lazy()` from
+  // `registerEditorTabs.tsx`: the Files tab's test id, and a file tab's gone-file note.
+  // `FileSessions.tsx`, which `FlowDetail.tsx` reaches through `lazy()`, has no literal of its own;
+  // it is the importer of `useNamespaceFile.ts`, whose marker above goes where it goes. The light
+  // half, `editor/fileTabs.tsx`, belongs to the flow pages: Save all's failure sentence, which
+  // must stay out of the list's chunk like the other editor modules.
+  ["src/components/workflows/editor/files/FilesTab.tsx", "editor-files-tab", "files"],
+  ["src/components/workflows/editor/files/FileTab.tsx", "It was deleted or moved after this tab was opened.", "files"],
+  ["src/components/workflows/editor/fileTabs.tsx", "Its tab says why; fix that, then save again.", "editor"],
   // The KV tab (W7d Task 5) and its `kv/` modules, in the tab's lazy chunk: the bulk-delete
   // button's reason; the STRING refusal; the read's malformed-answer refusal; the lossless JSON
   // reader's trailing-text refusal; the edit drawer's locked-key help; the JSON value's Monaco
@@ -267,6 +289,16 @@ if (namespaceHosts.length !== 1) {
 }
 const namespaceLoads = namespaceHosts.length === 1 ? loadedWith(namespaceHosts[0]) : [];
 
+const flowPageChunks = FLOW_PAGE_HOSTS.map((marker) => {
+  const found = others.filter((f) => readFileSync(join(ASSETS, f), "utf8").includes(marker));
+  if (found.length !== 1) {
+    console.error(`✗ ${marker} is in ${found.length} non-entry chunks (${found.join(", ") || "none"}); the editor files' own-chunk check cannot run.`);
+    failed = true;
+  }
+  return found[0];
+});
+const flowPageLoads = flowPageChunks.map((host) => (host ? loadedWith(host) : []));
+
 for (const [module, marker, flag] of MARKERS) {
   const carriers = others.filter((f) => readFileSync(join(ASSETS, f), "utf8").includes(marker));
   if (flag === "topology") {
@@ -281,7 +313,19 @@ for (const [module, marker, flag] of MARKERS) {
       }
     }
   }
-  if (flag === "namespace-tab") {
+  if (flag === "files") {
+    for (const [i, host] of flowPageChunks.entries()) {
+      const loaded = carriers.filter((f) => flowPageLoads[i].includes(f));
+      if (loaded.length > 0) {
+        console.error(
+          `✗ ${marker} (${module}) loads with a flow page (${host}, in ${loaded.join(", ")}).\n` +
+            `  The editor's Files and file tabs load their bodies through lazy(), never a static import.`,
+        );
+        failed = true;
+      }
+    }
+  }
+  if (flag === "namespace-tab" || flag === "files") {
     const loaded = carriers.filter((f) => namespaceLoads.includes(f));
     if (loaded.length > 0) {
       console.error(
@@ -331,5 +375,7 @@ console.log(
     `${MARKERS.filter((m) => m[2] === "editor").length} editor markers checked.\n` +
     `✓ The topology stays in its own chunk: ${topologyCount} topology markers checked.\n` +
     `✓ The namespace tabs' slots stay out of the namespace detail's chunk (${namespaceHosts[0]}); ` +
-    `${MARKERS.filter((m) => m[2] === "namespace-tab").length} slot markers checked.`,
+    `${MARKERS.filter((m) => m[2] === "namespace-tab" || m[2] === "files").length} slot markers checked.\n` +
+    `✓ The editor's files stay out of the flow pages' chunks (${flowPageChunks.join(", ")}); ` +
+    `${MARKERS.filter((m) => m[2] === "files").length} files markers checked.`,
 );
