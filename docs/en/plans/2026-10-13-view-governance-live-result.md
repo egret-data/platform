@@ -285,3 +285,76 @@ Gate: **not hit.** `pluginId` maps to an engine through the service name.
   Task 11 can drop and recreate it.
 - **Never touched:** DB `egret`, `egret-dev-*` (beyond creating the DB), `egret-w7d-postgres`,
   `egret-s4-postgres`, and ports 5173, 5000 and 8080.
+
+## 2. The live re-run on Trino 483 and StarRocks 4.1.6 (Task 11)
+
+### 2.0 Predictions (committed before anything was observed)
+
+Written from the spec, the guide, the Task 4–10 reports and the earlier measurements, before any engine of this
+run was started. A wrong prediction is a finding; nothing here is edited after observing.
+
+**Setup the predictions are about.**
+- egret built from `e39476a4c` (no scratch instrumentation), DB `egret_viewgov_live` dropped and recreated.
+- Warehouse and registry catalog `ice` (so the Trino catalog name, the StarRocks external catalog name and the
+  registry name are one string), namespace `s`, Iceberg tables `s.pii(id, ssn, name)`, `s.orders(cust_id, amount)`
+  and `s.pub(id, v)`.
+- Classification `vgsecret` on `s.pii.ssn`, cleared by one role whose members are `vcadmin`, `vccleared` and
+  `vcownerc`. Uncleared: `vcplain`, `vcowneru`; StarRocks also `vcnobody` (no grant at all).
+- Trino engine `vgtr`: one coordinator and one worker, rendered by the provisioner for JWT delegation (TLS 8443,
+  poll interval as rendered, 30 s), pod-shaped host names `vgtr-coordinator-<hash>-<id>` and
+  `vgtr-worker-<hash>-<id>`. StarRocks engine `vgsr`, external catalog `ice`, views and materialized views in
+  `default_catalog.vgdb`.
+
+**StarRocks 4.1.6 (brief step 2).**
+
+| id | cell | prediction |
+|---|---|---|
+| S1a | `vcplain` reads `ssn` through a plain view `vgdb.v_plain` over `ice.s.pii` | `NULL` in every row; `id`, `name` real |
+| S1b | through a nested view `v_nest` (over `v_plain`) | `NULL` |
+| S1c | through an expression view `v_expr` (`upper(ssn)`, `concat(ssn,'x')`, `substr(ssn,1,3)`) | `NULL` in all three columns |
+| S1d | through an INVOKER view `vi_inv` | **refused**, `ERROR 5204 … SELECT privilege(s) on COLUMN ssn`: 4.1.6 re-checks an INVOKER view as the reader, so the base deny (A1) applies before the mask (engine-upgrade §2.5 B "deny only / vi_inv / vc_plain"). The guide says "`NULL` through … INVOKER" — if observed as predicted, that is a guide finding (Minor) |
+| S2 | `vcplain` `select id, ssn from ice.s.pii` | `ERROR 5204 … COLUMN ssn`; `select id, name` returns rows |
+| S3 | cleared `vccleared` with a rule mask (`MASK`) on `pii.ssn` that names `vccleared`; cleared `vcownerc` without one | `vccleared` gets the rule mask (`xxx-0000`-shaped) directly and through `v_plain`; `vcownerc` gets real values; `vcplain` still `NULL` |
+| S4 | `create materialized view vgdb.mv_x …` as `vcplain` | `ERROR 5204 … CREATE MATERIALIZED VIEW privilege(s) on DATABASE vgdb`; `create view vgdb.v_y` and `create table vgdb.t_y` as `vcplain` succeed. `vccleared` (cleared for every classification on the profile) creates a materialized view |
+| S5 | the classification page lists `vgdb.mv_pre`, created and refreshed by an admin before the classification | listed, matched by base table (`ice.s.pii` in `BASE_TABLE_REFRESH_VERSION_TIMES`); an un-refreshed MV, if any, matched by text and flagged |
+| S6 | what the FE asks the plugin for `create materialized view` | one `evaluatePolicies` request `resource=[catalog=default_catalog database=vgdb] access=create materialized view`, denied by the compiled policy for `vcplain` |
+| S7 | admin/root and `information_schema.materialized_views` under Ranger | root sees **only what a Ranger policy grants it**. With no policy for root it gets an **empty set, not an error**, and the page would then say "none" while an MV exists (Critical if observed). With an all-access policy for root it sees every MV |
+
+**Trino 483 (brief step 3).**
+
+| id | cell | prediction |
+|---|---|---|
+| T1 | `vcownerc` (cleared) `CREATE VIEW ice.s.vd_c AS SELECT id, ssn FROM ice.s.pii` (DEFINER), then in the same script at once `vcplain` reads it | refused on the **first** read: `Access Denied: Cannot select from columns [id, ssn] in table or view vd_c` (every view column carries the tag); also `select id from vd_c` refused (table-level over-tagging) |
+| T2 | `vccleared` reads `vd_c` | rows with real `ssn` |
+| T3 | duration of `CREATE VIEW` over a classified table | returns after the plugins' next tag polls: between 0 and 30 s (one interval), mean ≈ 20 s with two pollers (max of two uniform), never above 31 s. A view over `s.pub` only (unclassified, profile classified) returns in under 2 s |
+| T4 | the worker container paused (it stops polling), then `CREATE VIEW` over `pii` | refused after ≈ 60 s with `egret refused the view: engines did not confirm the classification tags within 60 s: trino@vgtr-worker-…-vgtr; …`; the view does not exist afterwards; no client timeout |
+| T5 | `v_late` over `s.orders` created while `orders` is unclassified, then `orders.amount` classified `vgsecret` | `v_late` returns at once (no wait); after the classification write and one plugin poll (≤ 30 s), `vcplain` is refused on `v_late`; `vccleared` reads it |
+| T6 | do Trino workers poll tags, and does the hold wait for them | yes: the ledger holds a `tags` row for `trino@vgtr-worker-…-vgtr` beside the coordinator's; a hold ends only after both report `lastKnownVersion ≥ V` |
+| T7 | `CREATE VIEW ice.s.v_empty AS SELECT id, ssn FROM ice.s.pii WHERE false` | refused at once (no wait): `… lineage could not be computed: … the engine reports no input table; egret refuses views it cannot judge …` |
+
+**Explain and the page against the engine (brief step 4).** For every reader and object above, `POST /perm/explain`
+and the classification page agree with the engine: 0 differences. Explain names `vgsecret` and base `ice.s.pii`
+for a Trino view column denied by the propagated tag, and `MASK_NULL` for a masked StarRocks read.
+
+**MUST items (task-11-must.md).**
+
+| # | prediction |
+|---|---|
+| M1 | EXPLAIN as `egret-lineage` (through real holds) succeeds over a table with a hand-written `{public}` mask, over one with a tag mask and over one with a row filter; a join view's recorded lineage holds both `pii` and `orders` (not shortened) |
+| M2 | `egret-lineage` `INSERT INTO ice.s.pub …` and `CREATE TABLE ice.s.x …` are refused (`Access Denied: Cannot insert into table …` / `Cannot create table …`); a hand-written `show` deny for `vcplain` still applies to `vcplain` |
+| M3 | `egret-lineage` cannot kill `vcplain`'s query: refused, either as `Cannot kill query owned by vcplain` or earlier as `Cannot access catalog system` |
+| M4 | `CREATE OR REPLACE VIEW` with changed SQL is held (the commit body ends `set-current-view-version -1`); `COMMENT ON COLUMN` sends `add-schema` (with `doc`) + `add-view-version` (same SQL) + `set-current-view-version -1` and is held too, then succeeds |
+| M5 | A → B → A (`CREATE`, `OR REPLACE` B, `OR REPLACE` A) all succeed; the final `SHOW CREATE VIEW` is A |
+| M6 | 32 sequential holds: 0 refusals; hold time 0–30 s, mean ≈ 20 s; the measured plugin poll period is 30 s (± 1 s). A burst of 12 concurrent holds: 4 refused at once with the "8 classified view changes" message, 8 succeed. No hold exceeds the 60 s deadline, so "a hold longer than 65 s" cannot be produced without instrumentation; the paused-worker refusal (T4) lands at ≈ 60 s and Trino prints it |
+| M7 | as T7 |
+| M8 | `POST /classifications/lineage-sweep` answers 200 with a report naming no failure for healthy views. A view whose best-effort lineage failed (created before the engine had a workspace connection) is `failed`; after the engine is assigned and a base column is classified, the scoped sweep makes it `computed` and tags it within seconds, with no manual sweep |
+| M9 | as T6 |
+| M10 | lakekeeper's stored view properties: DEFINER `{"trino.run-as-owner": "<owner>"}`, INVOKER `{}`; the page shows DEFINER with owner and INVOKER |
+| M11 | as S6 |
+| M12 | as S7; the lister's statement (`SELECT … FROM information_schema.materialized_views`) runs and returns its 4 columns |
+| M13 | the page's Trino table is its own section and wraps long names; with the Trino half failing it shows an error line, not an empty table; the MV list names `vgdb.mv_pre`; the explain page prints "not transformed" for a `MASK_NONE` cleared user and names `default_catalog.vgdb` on the MV row. Expected cosmetic only: the MV-section indent (Task 10 N1) and a red "denied" badge for a cleared reader's MV row (Task 10 N2) |
+
+**Eligibility (how I expect to make the Trino half run).** egret cannot provision without Kubernetes, so a
+provisioned JWT Trino engine has to be represented by database rows that equal what the provisioner writes; the
+container runs the provisioner's rendered configuration. If that cannot be done honestly, the Trino half is
+BLOCKED, not faked.
