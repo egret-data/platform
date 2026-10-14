@@ -309,7 +309,8 @@ pub const FEATURES: &[Feature] = &[
         // `Schedule` trigger in the workspace: the scheduler's claim reads this
         // key's `workspace_features` row directly (see the module doc). The
         // webhook is now the only workflow surface this key does not stop;
-        // stopping webhook traffic is `state = 'disabled'` on the flow, which
+        // stopping webhook traffic is the trigger's runtime switch
+        // (`workflow.disabled_triggers`) or `disabled: true` in the YAML, which
         // `webhook_routes` answers with a 409.
         rules: &[prefix("workflows")],
         default_enabled: true,

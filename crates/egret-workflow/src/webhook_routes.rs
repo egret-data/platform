@@ -32,8 +32,9 @@
 //! `egret-workspace`'s `features.rs` records the exemption beside the
 //! `workflows` entry, as it already did beside `data_api`. **Turning the
 //! `workflows` module off does not stop webhook traffic**; `state = 'disabled'`
-//! on the flow does — and so does `disabled: true` in its YAML — which is the
-//! same answer the Data API gives for its own serving path.
+//! on the flow does — and so does `disabled: true` in its YAML, and so does
+//! the trigger's runtime switch (a `workflow.disabled_triggers` row) — which is
+//! the same answer the Data API gives for its own serving path.
 //!
 //! # This surface is OFF by default, and here is the switch
 //!
@@ -113,6 +114,7 @@
 //! | no trigger whose key matches | **404** `Webhook not found` | **404** `not found: webhook` |
 //! | flow `disabled` | **409**, *before* the key check | **409**, *after* it |
 //! | matched trigger `disabled: true` | **409** `…the trigger 'x' is disabled.` | **409**, same sentence |
+//! | matched trigger switched off at runtime (`workflow.disabled_triggers`) | n/a | **409**, same sentence |
 //! | trigger declares something egret cannot do | n/a | **409**, naming it |
 //! | trigger `inputs:` will not render | **422** | **400** (`InvalidInput`) |
 //!
@@ -564,10 +566,31 @@ async fn handle(
             trigger.id
         )));
     }
+    // The runtime switch (W7e, spec §3.2). A webhook has no `workflow.triggers`
+    // row, so this reads `workflow.disabled_triggers` directly -- and only now,
+    // after the key matched, so a wrong key or a missing flow still gets the
+    // one shared 404. Same sentence as the YAML switch above.
+    let switched_off: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM workflow.disabled_triggers \
+          WHERE flow_id = $1 AND trigger_id = $2)",
+    )
+    .bind(flow_uuid)
+    .bind(&trigger.id)
+    .fetch_one(&st.db.pool)
+    .await
+    .map_err(|e| Error::Internal(anyhow::anyhow!("webhook switch lookup: {e}")))?;
+    if switched_off {
+        return Err(Error::Conflict(format!(
+            "Cannot execute webhook: the trigger '{}' is disabled.",
+            trigger.id
+        )));
+    }
     // **Both ways a flow can be switched off, and the YAML one was missing.**
     //
-    // Fix round 1, Critical 1. egret has two: the `state` column, which the
-    // management UI writes, and the YAML's own `disabled: true`, which is
+    // Fix round 1, Critical 1. egret has two: the `state` column, which is
+    // honoured here though nothing writes it yet (the runtime switch is per
+    // trigger, `workflow.disabled_triggers`, checked above), and the YAML's own
+    // `disabled: true`, which is
     // Kestra's `Flow.isDisabled()` and therefore the one the artifact answers
     // 409 for. The first version of this handler read only the column, so a
     // flow whose source said `disabled: true` FIRED -- over-acceptance, the one

@@ -460,7 +460,9 @@ async fn the_four_absences_are_indistinguishable() {
     let Some(db) = common::db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let ns = fresh_namespace();
-    common::seed_flow(&db, ws, user, &hook_flow(&ns), "draft").await;
+    let flow = common::seed_flow(&db, ws, user, &hook_flow(&ns), "draft").await;
+    // Switched off at runtime: a caller without the key must still see the 404.
+    switch_off(&db, ws, flow, "fx-trigger").await;
     let app = common::webhook_app(&db).await;
 
     let mut seen = Vec::new();
@@ -475,6 +477,10 @@ async fn the_four_absences_are_indistinguishable() {
         ),
         ("no such flow", url(ws, &ns, "fx-other", "fx-key")),
         ("no such key", hook_url(ws, &ns, "fx-other-key")),
+        (
+            "wrong key on a switched-off trigger",
+            hook_url(ws, &ns, "fx-other-key"),
+        ),
     ] {
         let res = common::anon(&app, "POST", &path, Some("application/json"), b"{}").await;
         let status = res.status();
@@ -493,7 +499,8 @@ async fn the_four_absences_are_indistinguishable() {
     }
     assert_eq!(common::execution_count(&db, ws).await, 0);
 
-    // The control: the response they must all differ from.
+    // The control: the response they must all differ from. The right key on
+    // the switched-off trigger explains itself with a 409.
     let res = common::anon(
         &app,
         "POST",
@@ -502,7 +509,7 @@ async fn the_four_absences_are_indistinguishable() {
         b"{}",
     )
     .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::CONFLICT);
 }
 
 /// **The operand test.** The four path segments carry four different facts, and
@@ -708,6 +715,105 @@ async fn a_disabled_trigger_is_refused_by_name() {
     )
     .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+/// Stage the runtime switch (spec 2026-10-14 §3.2): a row in
+/// `workflow.disabled_triggers`, which a webhook has no `triggers` row to carry.
+async fn switch_off(db: &egret_metastore::Db, ws: Uuid, flow: Uuid, trigger: &str) {
+    sqlx::query(
+        "INSERT INTO workflow.disabled_triggers (flow_id, trigger_id, workspace_id) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(flow)
+    .bind(trigger)
+    .bind(ws)
+    .execute(&db.pool)
+    .await
+    .expect("switch off");
+}
+
+/// W7e Task 3: the runtime switch answers the YAML switch's 409, byte for byte,
+/// starts nothing, and switching back on restores the 200.
+#[tokio::test]
+async fn a_switched_off_webhook_trigger_answers_409_like_the_yaml_one() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    let flow = common::seed_flow(&db, ws, user, &hook_flow(&ns), "draft").await;
+
+    // The reference: the same trigger, disabled in its YAML.
+    let (ws_y, user_y) = common::seed_workspace(&db).await;
+    let yaml = hook_flow(&ns).replace("    key: fx-key\n", "    key: fx-key\n    disabled: true\n");
+    common::seed_flow(&db, ws_y, user_y, &yaml, "draft").await;
+
+    let app = common::webhook_app(&db).await;
+    let fire = |w: Uuid| {
+        let (app, ns) = (&app, &ns);
+        async move {
+            let res = common::anon(
+                app,
+                "POST",
+                &hook_url(w, ns, "fx-key"),
+                Some("application/json"),
+                b"{}",
+            )
+            .await;
+            let status = res.status();
+            (status, common::body_text(res).await)
+        }
+    };
+    let (y_status, y_body) = fire(ws_y).await;
+    assert_eq!(y_status, StatusCode::CONFLICT);
+
+    switch_off(&db, ws, flow, "fx-trigger").await;
+    let (status, body) = fire(ws).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body, y_body, "the runtime 409 must read as the YAML one");
+    assert_eq!(common::execution_count(&db, ws).await, 0);
+
+    sqlx::query("DELETE FROM workflow.disabled_triggers WHERE flow_id = $1")
+        .bind(flow)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let (status, _) = fire(ws).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(common::execution_count(&db, ws).await, 1);
+}
+
+/// A switch in workspace A does not touch the byte-identical flow in B.
+#[tokio::test]
+async fn a_switched_off_trigger_does_not_reach_the_same_flow_in_another_workspace() {
+    let Some(db) = common::db().await else { return };
+    let (ws_a, user_a) = common::seed_workspace(&db).await;
+    let (ws_b, user_b) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    let flow_a = common::seed_flow(&db, ws_a, user_a, &hook_flow(&ns), "draft").await;
+    common::seed_flow(&db, ws_b, user_b, &hook_flow(&ns), "draft").await;
+    switch_off(&db, ws_a, flow_a, "fx-trigger").await;
+    let app = common::webhook_app(&db).await;
+
+    let res = common::anon(
+        &app,
+        "POST",
+        &hook_url(ws_a, &ns, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert_eq!(common::execution_count(&db, ws_a).await, 0);
+
+    let res = common::anon(
+        &app,
+        "POST",
+        &hook_url(ws_b, &ns, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(common::execution_count(&db, ws_b).await, 1);
 }
 
 /// A disabled flow is 409 for a key-holder, and the control is the same flow

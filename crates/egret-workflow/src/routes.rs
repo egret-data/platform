@@ -2268,10 +2268,10 @@ async fn startable_flow(
     if flow.deleted_at.is_some() {
         return Err(Error::NotFound("flow".into()));
     }
-    // **Both doors a flow can be switched off by.** The `state` column is the
-    // one the management UI writes and `disabled: true` is the one the YAML
-    // does; reading only the column let a disabled flow fire through the
-    // webhook, which was that route's fix round 1 Critical 1.
+    // **Both doors a flow can be switched off by.** The `state` column is
+    // honoured here, though nothing writes it yet; `disabled: true` is the
+    // YAML's. The runtime switch is per trigger, not per flow
+    // (`workflow.disabled_triggers`).
     let parsed = parse(&flow.source)
         .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
     if parsed.disabled || flow.state == "disabled" {

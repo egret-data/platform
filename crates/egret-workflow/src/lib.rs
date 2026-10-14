@@ -90,10 +90,10 @@ pub mod spec;
 /// `tests/storage_index.rs` drives the index.
 pub mod storage;
 // W6 Tasks 5 and 6: the schedule trigger, its backfill, and the flow
-// trigger's window-free arm. `pub` because the routes
-// that create a backfill and the loop that drives the clock both live outside
-// this module -- and because NOTHING in `oracle-exec/` can reach it, so its own
-// tests are the whole instrument (see the module doc).
+// trigger's window-free arm. `pub` because the loop that drives the clock
+// lives in `scheduler`, not here, and backfill has no route yet (W7f) -- and
+// because NOTHING in `oracle-exec/` can reach it, so its own tests are the
+// whole instrument (see the module doc).
 pub mod trigger;
 
 /// The anonymous webhook surface (W6 Task 7). Mounted OUTSIDE `/api` and
