@@ -37,16 +37,18 @@ Mã, đã kiểm:
 | Test | Ngưỡng hiện nay | Hồi quy nó canh | Cách đo mới |
 |---|---|---|---|
 | `a_dotted_key_deeper_than_max_depth_is_refused_at_once` (`merge.rs:847`) | `< 250 ms` | việc từ chối xảy ra sau khi đã dựng một thứ gì đó | (a) công việc: một bộ đếm bước đường đi chỉ có khi test, riêng từng thread (mỗi lần tra `child` trong trie một bước, mỗi bước arena một bước), phải bằng **0** sau một lần merge bị từ chối |
-| `many_keys_near_the_depth_limit_merge_fast` (`merge.rs:892`) | `< 2 s` | merge bậc hai theo độ sâu của đường đi (C1: băm mọi tiền tố thành một vector) | (a) tối đa 2 bước mỗi segment, **và** (c) hai patch sâu tốn tối đa 6 lần một mốc: cùng số segment nhưng dưới dạng key một segment, đo ngay bên cạnh |
+| `many_keys_near_the_depth_limit_merge_fast` (`merge.rs:892`) | `< 2 s` | merge bậc hai theo độ sâu của đường đi (C1: băm mọi tiền tố thành một vector) | (a) tối đa 2 bước mỗi segment, **và** (c) hai patch sâu tốn tối đa 1,5 lần một mốc: cùng số segment nhưng dưới dạng key một segment, đo ngay bên cạnh |
 | `a_large_merge_is_linear` (`merge.rs:943`) | `< 5 s` | merge bậc hai theo bề rộng map hay độ dài list | (c) ba lần merge ở cỡ `n` tốn tối đa 30 lần chính ba lần merge ấy ở cỡ `n / 10`. Tuyến tính thì tỉ số khoảng 10; bậc hai thì khoảng 100 |
 
 Bộ đếm có `#[cfg(test)]`. Ở các bản build khác, nó là một hàm inline rỗng.
 
 Ngưỡng tương đối được đo bằng helper `least_times`:
 
-- Nó lấy giá trị nhỏ nhất của 3 lần chạy mốc và giá trị nhỏ nhất của các lần chạy ca lớn.
-- Nó chạy tối đa 5 vòng và dừng ở vòng đầu tiên lọt ngưỡng.
+- Nó lấy giá trị nhỏ nhất của 3 lần chạy mốc và giá trị nhỏ nhất của 2 lần chạy ca lớn.
+- Nó chạy tối đa 5 vòng và dừng ở vòng đầu tiên lọt ngưỡng. Nó cũng dừng sớm khi ca lớn vượt một tỉ số bỏ cuộc (60 với `a_large_merge_is_linear`), nên một bản merge hồi quy đỏ sau một vòng chậm, không phải năm vòng.
 - Tải làm giãn cả hai số đo thì triệt tiêu nhau. Một đợt tải dồn trong một vòng thì vòng sau sống qua được. Chỉ một chi phí tăng nhanh hơn mốc mới đỏ ở mọi vòng.
+
+Số đo ngày 2026-10-14: các patch sâu tốn 0,5–0,7 lần mốc, dù máy tải hay không. Khi đặt lại lỗi C1 (băm mọi tiền tố thành một vector, ở cả bước kiểm lẫn bước lồng), chúng tốn 2,1–2,3 lần; đặt lại một nửa lỗi thì 1,6–1,8 lần. Vì độ sâu bị chặn ở `MAX_DEPTH`, bậc hai theo độ sâu chỉ tốn một hệ số có giới hạn, nên khoảng phân biệt này hẹp. Ngưỡng tuyệt đối 2 s có khoảng còn hẹp hơn: 1,1 s khi chạy riêng và 2,8 s khi máy tải. Số bước là dụng cụ đo sắc hơn. `a_large_merge_is_linear` đo được 10–15 lần khi tuyến tính, và 108 lần khi `deep_merge` dò tuần tự.
 
 Với các test độ phức tạp, chỉ có bộ đếm thì không đủ. Bộ đếm chỉ thấy những vòng lặp có đặt nó, và một lần viết lại (lỗi C1 chính là một lần viết lại) có thể đi vòng qua nó. Thời gian tương đối thì thấy mọi đoạn mã.
 

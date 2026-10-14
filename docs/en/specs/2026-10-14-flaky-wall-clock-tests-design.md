@@ -35,16 +35,18 @@ The code, verified:
 | Test | Bound today | Regression it guards | New measure |
 |---|---|---|---|
 | `a_dotted_key_deeper_than_max_depth_is_refused_at_once` (`merge.rs:847`) | `< 250 ms` | the refusal comes after something is built | (a) work: a test-only per-thread counter of path steps (one per `child` lookup in the trie, one per arena step) must read **0** after a refused merge |
-| `many_keys_near_the_depth_limit_merge_fast` (`merge.rs:892`) | `< 2 s` | a merge quadratic in a path's depth (C1: every prefix hashed as a vector) | (a) at most 2 steps per segment, **and** (c) the two deep patches take at most 6 times a baseline: the same number of segments as one-segment keys, timed beside them |
+| `many_keys_near_the_depth_limit_merge_fast` (`merge.rs:892`) | `< 2 s` | a merge quadratic in a path's depth (C1: every prefix hashed as a vector) | (a) at most 2 steps per segment, **and** (c) the two deep patches take at most 1.5 times a baseline: the same number of segments as one-segment keys, timed beside them |
 | `a_large_merge_is_linear` (`merge.rs:943`) | `< 5 s` | a merge quadratic in a map's width or a list's length | (c) the three merges at size `n` take at most 30 times the same merges at `n / 10`. Linear, that ratio is about 10; quadratic, about 100 |
 
 The counter is `#[cfg(test)]`. In other builds it compiles to an empty inline function.
 
 A relative bound is measured with the `least_times` helper:
 
-- It takes the least of 3 runs of the baseline and the least of the big case's runs.
-- It runs up to 5 rounds and stops at the first round within the bound.
+- It takes the least of 3 runs of the baseline and the least of 2 runs of the big case.
+- It runs up to 5 rounds and stops at the first round within the bound. It also stops early when the big case is over a give-up ratio (60 for `a_large_merge_is_linear`), so a regressed merge fails after one slow round, not five.
 - Load that stretches both measures cancels out. A burst of load in one round is outlasted by the next. Only a cost that grows faster than the baseline's fails every round.
+
+Measured on 2026-10-14: the deep patches cost 0.5–0.7 times the baseline, loaded or not. With the C1 defect put back (every prefix hashed as a vector, in the check and in the nesting), they cost 2.1–2.3 times; with half of it, 1.6–1.8 times. Because the depth is capped at `MAX_DEPTH`, being quadratic in it costs a bounded factor, so this window is narrow. The absolute 2 s bound had a narrower one: 1.1 s alone and 2.8 s under load. The step count is the sharper instrument. `a_large_merge_is_linear` measured 10–15 times linear, and 108 times with a scanning `deep_merge`.
 
 The counter alone would not suffice for the complexity tests. It sees only the loops it is placed in, and a rewrite (the C1 defect was a rewrite) can bypass it. The relative time sees any code.
 
