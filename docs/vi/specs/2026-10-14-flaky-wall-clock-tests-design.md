@@ -22,7 +22,7 @@ Test đã sửa vẫn bắt được lỗi hồi quy mà nó được viết ra 
 - (c) dùng ngưỡng tương đối so với một mốc được đo trong cùng lần chạy;
 - (d) cùng lắm mới nới một ngưỡng tuyệt đối thật rộng.
 
-Mỗi test đã sửa phải được cho thấy là đỏ trên một bản cài đặt cố tình làm hỏng, và qua 5/5 lần khi CPU bị vắt kiệt.
+Mỗi test đã sửa (§3.1–§3.3) phải được cho thấy là đỏ trên một bản cài đặt cố tình làm hỏng, và qua 5/5 lần khi CPU bị vắt kiệt.
 
 ## 3. Các test trong gói này
 
@@ -78,20 +78,28 @@ Test vẫn bắt được:
 - reaper không thu hồi gì (lần reap lúc đã chết trả về 0);
 - worker vẫn gia hạn sau khi bị abort (lease nhích đi).
 
-## 4. Các test khác tìm thấy
+### 3.3 Thêm ba test từ đợt rà soát (HIGH)
 
-Các test khác trong `egret-workflow` và `egret-server` có đo hoặc chạy đua với đồng hồ thật được liệt kê trong báo cáo, mỗi test kèm một nhận định. Gói này không sửa chúng. Những test rủi ro nhất:
+| Test | Chạy đua hiện nay | Cách đo mới | Vẫn bắt được |
+|---|---|---|---|
+| `tests/runtime.rs:1398` `a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance` | Việc giữ là một `pg_sleep(1)` trong trigger `BEFORE UPDATE`. Hai lần poll `pg_stat_activity` và một lần save được spawn phải lọt trong một giây ấy. | **Không đo thời gian nào cả.** Trigger chờ `pg_advisory_xact_lock_shared(1386)`, trong khi test giữ `pg_advisory_lock(1386)` trên một connection riêng. Lượt pass được thấy đang chờ (`wait_event = 'advisory'`), rồi lần save được thấy đang chờ (`transactionid` / `tuple`). Chỉ khi đó test mới thả lượt pass. | Một lần save tua ngược bước tiến: nó đọc ngày mà không giữ khoá dòng rồi ghi lại ngày ấy. |
+| `tests/task_logs.rs:821` `lines_reach_postgres_in_order_within_a_flush` | `count == 0` phải được đọc trước khi timer flush 300 ms nổ. | (a) Writer chạy trên inserter `Rigged` có đếm: đúng **một** lần gọi lưu ba dòng. Thêm một cận **dưới**, mà tải chỉ làm nó đúng hơn: lần gọi ấy bắt đầu sau lần ghi đầu tiên ít nhất `flush_every`. | Flush mỗi dòng (3 lần gọi); flush không chờ timer (nó bắt đầu khoảng 2 ms sau lần ghi). |
+| `tests/task_logs.rs:973` `an_execution_deleted_batch_is_rerun_once_not_retried` | `< 400 ms` qua các lượt đi về Postgres, rồi `sleep(500)` trước khi kiểm `calls == 4`. | (a) "Ngay lập tức" được đo thành "không task nào khác chạy giữa lỗi 23503 và lần chạy lại". Mỗi lần gọi `Rigged` spawn một task dò, task này bật một cờ. Trên runtime một luồng của test, task dò chỉ chạy được khi writer nhường, và một lần `sleep` backoff thì có nhường. Lần gọi thứ 4 được chờ như một điều kiện. "Bị bỏ" được cho thấy bằng việc batch kế tiếp được lưu bởi lần gọi thứ 5, và các dòng bị bỏ không bao giờ được lưu. | Một lần backoff trước khi chạy lại; lỗi 23503 thứ hai bị thử lại như một lỗi thường. |
 
-- `tests/runtime.rs:1386` `a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance`: nhiều lần poll Postgres phải lọt trong một `pg_sleep(1)`.
-- `tests/task_logs.rs:973` `an_execution_deleted_batch_is_rerun_once_not_retried`: `< 400 ms` qua các lượt đi về Postgres.
-- `tests/task_logs.rs:821` `lines_reach_postgres_in_order_within_a_flush`: điều kiện "chưa flush" phải đúng trước khi một timer 300 ms nổ.
-- Khoảng dư lease từ 1,3 s trở xuống:
-  - `tests/runtime.rs:2025` `a_run_longer_than_working_timeout_is_not_reaped_while_its_worker_lives`;
-  - `worker/claim.rs:4089` `succeeding_renewals_keep_the_run_past_the_deadline`;
-  - `tests/prefetch_hold.rs:1752` `the_lease_is_renewed_while_a_long_fetch_downloads`.
-- Các test cần một ticker 2 ms nhảy ít nhất một nhịp mỗi 10 ms:
-  - `tests/kv_store.rs:1408` `a_large_decode_runs_off_the_async_runtime_and_a_ticker_keeps_ticking`;
-  - `storage/nsfiles/stage.rs:1148` `matching_runs_off_the_async_runtime_and_a_ticker_keeps_ticking`.
+Task dò trong test thứ ba dựa vào runtime một luồng mặc định của `#[tokio::test]`. Trên runtime nhiều luồng, task dò có thể chạy song song với writer.
+
+## 4. Không sửa trong gói này
+
+Các test nhạy thời gian sau được đánh giá MEDIUM-HIGH. Chúng được để lại như việc tiếp theo đã biết.
+
+- `tests/runtime.rs:2025` `a_run_longer_than_working_timeout_is_not_reaped_while_its_worker_lives`: `working_timeout` 2 s, gia hạn sau mỗi 667 ms, trong khi reaper nhịp mỗi 100 ms. Một lần gia hạn kẹt quá khoảng 1,3 s làm run bị thu hồi và chạy hai lần.
+- `src/worker/claim.rs:4101` `succeeding_renewals_keep_the_run_past_the_deadline`: chạy trên đồng hồ thật với `EVERY` 60 ms và `FENCE` 200 ms. Một runtime bị bỏ đói sẽ tự rào. Đồng hồ dừng (paused) dùng được ở đây, vì `under_lease_with` vốn đã nhận một hàm gia hạn tiêm vào và dùng đồng hồ tokio.
+- `tests/prefetch_hold.rs:1752` `the_lease_is_renewed_while_a_long_fetch_downloads`: lease 1,5 s và `sleep(3s)`, rồi `reap == 0`. Đây là đúng mẫu mà §3.2 đã thay; có thể dùng lại `until_db_clock_passes`.
+- `tests/kv_store.rs:1408` `a_large_decode_runs_off_the_async_runtime_and_a_ticker_keeps_ticking`: một ticker 2 ms phải nhịp mỗi 10 ms của lần decode. Khi tải cao, riêng độ trễ đánh thức của hệ điều hành đã vượt mức ấy.
+- `src/storage/nsfiles/stage.rs:1148` `matching_runs_off_the_async_runtime_and_a_ticker_keeps_ticking`: cùng mức sàn ticker ấy, thêm một phép kiểm trên pool 1 connection.
+- `tests/container_docker_live.rs` 795, 986 và 1853 (test live, phải bật mới chạy): mỗi test drop `run()` sau 1,5–2,5 s rồi khẳng định container đang chạy, nên một lần `docker run` chậm thì chưa kịp khởi động nó.
+
+**Về phép kiểm tương đối ở §3.1.** Trong `many_keys_near_the_depth_limit_merge_fast`, khoảng phân biệt của nó hẹp: ngưỡng 1,5, tuyến tính 0,53–0,69, một nửa lỗi C1 là 1,64. Bộ đếm bước là cái canh chính, còn thời gian tương đối là chốt chặn sau cho một lần viết lại đi vòng qua bộ đếm.
 
 ## 5. Bằng chứng cần có
 
