@@ -93,6 +93,32 @@ impl egret_analytics_api::engine_token::EngineTokenMinter for MachineIdpEngineMi
     }
 }
 
+/// View governance B1 (spec R5): the engine JWT for `egret-lineage`, the
+/// principal the lineage EXPLAIN runs as. Same signer, issuer, audience and
+/// lifetime as a user's token, and no groups; the username is the constant, not
+/// an argument, so this mints for that one principal only. Nothing is stored:
+/// the credential is egret's signing key (`egret_query::execution::lineage`).
+#[async_trait::async_trait]
+impl egret_query::execution::lineage::LineageTokenMinter for MachineIdpEngineMinter {
+    async fn mint_lineage_token(&self) -> Result<String, String> {
+        use egret_machine_idp::SigningKeyStore as _;
+        let km = self.keys.active().await.map_err(|e| e.to_string())?;
+        let claims = lineage_claims(&self.issuer, chrono::Utc::now().timestamp(), self.ttl_secs);
+        egret_machine_idp::sign_claims(&km, &claims).map_err(|e| e.to_string())
+    }
+}
+
+/// The `egret-lineage` claim set (pure, for the test below).
+pub(crate) fn lineage_claims(issuer: &str, iat_ts: i64, ttl_secs: i64) -> serde_json::Value {
+    engine_claims(
+        egret_core::engine_principals::LINEAGE_PRINCIPAL,
+        &[],
+        issuer,
+        iat_ts,
+        ttl_secs,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +138,16 @@ mod tests {
         assert_eq!(c["aud"], "engine");
         assert_eq!(c["groups"], serde_json::json!(["data-team"]));
         assert_eq!(c["iat"], 1_000);
+        assert_eq!(c["exp"], 1_900);
+    }
+
+    #[test]
+    fn the_lineage_token_names_the_lineage_principal_and_no_group() {
+        let c = lineage_claims("https://egret.example/", 1_000, 900);
+        assert_eq!(c["sub"], "egret-lineage");
+        assert_eq!(c["preferred_username"], "egret-lineage");
+        assert_eq!(c["aud"], "engine");
+        assert_eq!(c["groups"], serde_json::json!([]));
         assert_eq!(c["exp"], 1_900);
     }
 

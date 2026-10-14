@@ -320,7 +320,7 @@ pub(crate) async fn compile_clearance(
                     continue;
                 };
                 let name = format!("{COMPILER_CLEARANCE_PREFIX}{}", g.tag_id);
-                let input = clearance_input(
+                let mut input = clearance_input(
                     name.clone(),
                     tag_service.to_string(),
                     // `tagify` replaces the resources map with the single `tag`
@@ -329,6 +329,14 @@ pub(crate) async fn compile_clearance(
                     &accesses,
                     cleared,
                 );
+                // View governance R5: the lineage principal is excepted from the
+                // tag deny (its `select` only), or EXPLAIN of any view over a
+                // classified column fails and the view cannot be judged. A
+                // separate exception item, so the cleared users' item stays
+                // exactly the clearing roles' members.
+                input
+                    .deny_exceptions
+                    .extend(crate::lineage::lineage_deny_exception(&accesses));
                 out.policies.push((
                     name,
                     tag_access_to_ranger_json(&input, &g.tag_name, tag_service),

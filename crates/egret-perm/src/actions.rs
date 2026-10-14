@@ -246,6 +246,16 @@ pub enum CompileError {
         value = r#ref
     )]
     UnusableUserRef { r#ref: String },
+    /// A grant or rule naming a principal egret itself runs as on an engine
+    /// (`egret-lineage`, view governance R5). The compiler alone decides that
+    /// principal's policies: it may read every governed table and nothing
+    /// else, so a model grant naming it (a write grant above all) is refused
+    /// rather than compiled.
+    #[error(
+        "user principal {value:?} is reserved: egret runs as it on the engine, and only the          compiler decides its access",
+        value = r#ref
+    )]
+    ReservedEnginePrincipal { r#ref: String },
     /// A principal kind this compiler cannot yet turn into Ranger users/
     /// groups/roles (`WorkspaceMembers` today — Task 6 expands it into the
     /// member list enumerated at compile time). Dropping it silently on an

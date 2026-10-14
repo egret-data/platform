@@ -2804,7 +2804,7 @@ impl ClearanceLookups for sqlx::PgConnection {
 /// | `tag_keys_for_resource_via`'s result | **no** | the attribution list: `tags.key`, exact-match only. Reusing it here is the fail-open D3 names |
 /// | `catalog_tag_assignments.warehouse_id`, `tags.id`, `tags.key` | **no** | not on the tag wire the plugin matches against |
 /// | the profile, its service def, its `tagService` | **no** | one resolution per TARGET answers every profile; nothing about a profile changes what the enricher would resolve for a resource. The def-dependent half — the enricher's DROP — is the evaluator's `enriched_tags`, which holds the resource def this function does not |
-async fn resolved_tags_for_target<L: TagLookups + Send>(
+pub(crate) async fn resolved_tags_for_target<L: TagLookups + Send>(
     conn: &mut L,
     target: &Scope,
 ) -> Result<Result<UnenrichedTags, ExplainTagDecline>, PermHttpError> {
@@ -3264,7 +3264,7 @@ fn tags_for_profile(
 ///
 /// Both methods are `-> impl Future + Send` rather than `async fn` for the reason
 /// on [`ClearanceLookups`]: the caller is an axum handler.
-trait TagLookups {
+pub(crate) trait TagLookups {
     /// `tag_assignment_coordinates_via` — every distinct
     /// `(schema_name, table_name, column_name)` this catalog's tag assignments
     /// carry. The RULING on them is [`stored_coordinate_is_fold_divergent`]'s, in

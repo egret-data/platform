@@ -77,6 +77,11 @@ pub mod grammar;
 // SP4d-3 Task 7: the migration transaction (re-classify, write, recompile,
 // switch off, provenance, re-gate every affected profile) and its undo.
 pub mod grants;
+// View governance B1 (Task 7): a view's table-level lineage from Trino's
+// `EXPLAIN (TYPE IO, FORMAT JSON)`, and the tags it carries to the view.
+pub mod lineage;
+#[cfg(test)]
+mod lineage_compile_tests;
 pub(crate) mod members;
 pub mod migrate;
 // SP4d-4 Task 3: overlapping mask/row-filter rules across the tag/resource

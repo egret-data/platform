@@ -146,6 +146,13 @@ pub struct TrinoConnector {
     /// the transport is not TLS — sending the bearer would leak it in the clear.
     /// Enforced in `execute` (fail closed). `None` = safe or explicit opt-out.
     insecure_bearer: Option<String>,
+    /// Session catalog and schema (`X-Trino-Catalog` / `X-Trino-Schema`), so
+    /// unqualified names in the statement resolve as they did for its author.
+    /// `None` on every connection except the view-lineage EXPLAIN
+    /// ([`super::run_lineage_explain`]), which needs a view's default catalog
+    /// and namespace.
+    session_catalog: Option<String>,
+    session_schema: Option<String>,
 }
 
 impl TrinoConnector {
@@ -180,7 +187,18 @@ impl TrinoConnector {
                 secure,
                 super::tls_insecure_optout(),
             ),
+            session_catalog: None,
+            session_schema: None,
         }
+    }
+
+    /// The same connection with a session catalog and, when `schema` is not
+    /// empty, a session schema. Trino refuses a schema without a catalog, so a
+    /// schema is only ever sent beside one.
+    pub(super) fn with_session(mut self, catalog: &str, schema: &str) -> Self {
+        self.session_catalog = Some(catalog.to_string());
+        self.session_schema = (!schema.is_empty()).then(|| schema.to_string());
+        self
     }
 
     /// This connection's cache key in [`super::http_pool`] — the coordinator's
@@ -273,6 +291,14 @@ impl TrinoConnector {
     /// redundant and is omitted.
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let req = req.header("X-Trino-User", self.x_trino_user());
+        let req = match &self.session_catalog {
+            Some(catalog) => req.header("X-Trino-Catalog", catalog),
+            None => req,
+        };
+        let req = match &self.session_schema {
+            Some(schema) => req.header("X-Trino-Schema", schema),
+            None => req,
+        };
         // Only spoof forwarded-https over plain HTTP: it's the insecure-auth
         // workaround. Over genuine TLS the request already is secure, so the
         // header is redundant (and misleading on a non-forwarding target).
@@ -1384,6 +1410,45 @@ mod tests {
         // Present the connection as forwarded-https so a process-forwarded
         // coordinator accepts auth (required for the basic-auth impersonate path).
         assert_eq!(h.get("X-Forwarded-Proto").unwrap(), "https");
+    }
+
+    // View governance B1: the lineage EXPLAIN resolves a view's unqualified names
+    // against the view's default catalog and namespace, so they travel as the
+    // session catalog and schema. No other connection sends either header.
+    #[test]
+    fn a_session_catalog_and_schema_are_sent_only_when_set() {
+        let spec = ConnSpec {
+            engine: Engine::Trino,
+            host: "h".into(),
+            port: 8080,
+            options: ConnOptions::default(),
+            secret: None,
+            session_user: Some("egret-lineage".into()),
+            bearer_token: None,
+        };
+        let client = reqwest::Client::new();
+        let plain = TrinoConnector::new(&spec)
+            .auth(client.post("http://h:8080/v1/statement"))
+            .build()
+            .unwrap();
+        assert!(plain.headers().get("X-Trino-Catalog").is_none());
+        assert!(plain.headers().get("X-Trino-Schema").is_none());
+
+        let with = TrinoConnector::new(&spec)
+            .with_session("ice", "s")
+            .auth(client.post("http://h:8080/v1/statement"))
+            .build()
+            .unwrap();
+        assert_eq!(with.headers().get("X-Trino-Catalog").unwrap(), "ice");
+        assert_eq!(with.headers().get("X-Trino-Schema").unwrap(), "s");
+
+        let no_schema = TrinoConnector::new(&spec)
+            .with_session("ice", "")
+            .auth(client.post("http://h:8080/v1/statement"))
+            .build()
+            .unwrap();
+        assert_eq!(no_schema.headers().get("X-Trino-Catalog").unwrap(), "ice");
+        assert!(no_schema.headers().get("X-Trino-Schema").is_none());
     }
 
     // The basic-auth (impersonate) path must also carry X-Forwarded-Proto so the

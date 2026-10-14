@@ -81,7 +81,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Value};
 
-use crate::admin::item_key;
 use crate::ambiguous_arbitration::{
     ambiguous_arbitrations_in, canonical_resource_map, has_deny, int_field, is_enabled, quoted,
     resources_may_intersect, values_may_intersect, AmbiguousArbitration, Arbitrated,
@@ -436,11 +435,7 @@ pub fn unit_overlaps(policies: &[UnitPolicy<'_>], assignments: &[AssignedTag]) -
                 is_tag: p.is_tag_service,
                 priority: int_field(p.body, "policyPriority"),
                 deny: has_deny(p.body),
-                items: p
-                    .body
-                    .get(item_key(kind.policy_type()))
-                    .cloned()
-                    .unwrap_or(Value::Null),
+                items: crate::ambiguous_arbitration::decisive_items(p.body, kind.policy_type()),
             })
         })
         .collect();

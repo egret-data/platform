@@ -1,0 +1,624 @@
+//! View governance B1: a view's **lineage** (the base tables Trino reports it
+//! reads) and the classification tags those tables carry to the view.
+//!
+//! # Where the lineage comes from (spec R3, R5)
+//!
+//! From the engine, never from parsing the SQL: four sqlparser-based gates in
+//! this repository were bypassed through lexer differences. egret runs
+//! `EXPLAIN (TYPE IO, FORMAT JSON) <view sql>` on a Trino engine bound to the
+//! view's catalog, as the principal [`LINEAGE_PRINCIPAL`], with the view's
+//! default catalog and namespace as the session defaults. The plan lists only
+//! BASE tables, for nested views and joins alike (live result §1 Q3), so the
+//! lineage is table-level: every column of the view is tagged with the union
+//! of those tables' clearance-bearing tags, which over-tags by design.
+//!
+//! # What keeps the principal read-only, and what does not
+//!
+//! [`explain_only`] is **not** the defence and contains no lexer on purpose.
+//! The defences are, first, Trino's statement protocol, which runs exactly one
+//! statement per request, so the wrapped text is an `EXPLAIN` or a parse
+//! error; and second, the principal itself, which the compiler gives `use` and
+//! `select` and nothing else (`crate::trigger`'s lineage policies).
+//! `explain_only` refuses the one case those two leave open by intent:
+//! `EXPLAIN ANALYZE` executes its statement, so a SQL whose first keyword is
+//! `EXPLAIN` is refused. A comment in front of it is not looked through; the
+//! principal's grants are what bound that case.
+//!
+//! # An empty lineage is a refusal (spec R6)
+//!
+//! EXPLAIN reports inputs after optimization: `WHERE false`, `LIMIT 0` and a
+//! planning-time-constant predicate all report none (live result §1 Q3), and
+//! such a view would otherwise commit untagged and read the column the day
+//! the predicate turns true. [`lineage_tables`] therefore never returns an
+//! empty set: no input is [`EMPTY_LINEAGE_REASON`], and a plan of any other
+//! shape is an error naming the IO plan.
+//!
+//! # Catalog names
+//!
+//! The plan names a table by the ENGINE's catalog name. On an engine egret
+//! provisions, a catalog is rendered under its `registry.catalogs.name`, which
+//! is "the catalog's SQL name on every engine" (migration 0147, D5) — so the
+//! two are the same string, and [`view_tag_set`] joins on it. The runner in
+//! `egret-query` only uses provisioned engines for this reason.
+
+use std::collections::BTreeSet;
+
+use serde_json::Value;
+use uuid::Uuid;
+
+pub use egret_core::engine_principals::LINEAGE_PRINCIPAL;
+
+/// What the lineage client prepends to a view's SQL; the only statement shape
+/// it sends as [`LINEAGE_PRINCIPAL`].
+pub const EXPLAIN_IO_PREFIX: &str = "EXPLAIN (TYPE IO, FORMAT JSON) ";
+
+/// Spec R6's refusal, verbatim: the reason a view with an empty lineage is
+/// refused.
+pub const EMPTY_LINEAGE_REASON: &str =
+    "the engine reports no input table; egret refuses views it cannot judge";
+
+/// One base table, fully qualified as `(catalog, schema, table)`, with the
+/// catalog as the engine (and therefore egret's registry) names it.
+pub type LineageTable = (String, String, String);
+
+/// A view, fully qualified the same way as a [`LineageTable`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ViewRef {
+    pub catalog: String,
+    pub schema: String,
+    pub name: String,
+}
+
+/// Runs `EXPLAIN (TYPE IO, FORMAT JSON) <sql>` as [`LINEAGE_PRINCIPAL`] with
+/// `default_catalog` / `default_schema` as the session defaults, and returns
+/// the plan JSON. The production runner is
+/// `egret_query::execution::lineage::TrinoLineageRunner`; tests fake it.
+///
+/// `sql` is the view's SQL, NOT yet wrapped: an implementation wraps it with
+/// [`explain_only`], and checks that the answer is the IO-plan shape
+/// ([`io_plan_inputs`]) before returning it.
+#[async_trait::async_trait]
+pub trait ExplainRunner: Send + Sync {
+    async fn explain_io(
+        &self,
+        default_catalog: &str,
+        default_schema: &str,
+        sql: &str,
+    ) -> Result<Value, String>;
+}
+
+/// Wrap `sql` as `EXPLAIN (TYPE IO, FORMAT JSON) <sql>`.
+///
+/// Refuses an empty (or all-whitespace) `sql`, and a `sql` whose first keyword
+/// after whitespace is `EXPLAIN`, case-insensitively: `EXPLAIN ANALYZE`
+/// executes. No lexer, deliberately — see the module doc for what the real
+/// defences are.
+pub fn explain_only(sql: &str) -> Result<String, String> {
+    let rest = sql.trim_start();
+    if rest.is_empty() {
+        return Err("the view has no SQL to explain".to_string());
+    }
+    let keyword: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if keyword.eq_ignore_ascii_case("explain") {
+        return Err(
+            "a view's SQL may not itself be an EXPLAIN: EXPLAIN ANALYZE executes its statement"
+                .to_string(),
+        );
+    }
+    Ok(format!("{EXPLAIN_IO_PREFIX}{sql}"))
+}
+
+fn unreadable(what: impl std::fmt::Display) -> String {
+    format!("the engine's answer is not the IO plan egret reads: {what}")
+}
+
+/// The plan's `inputTableColumnInfos` array, or why the plan is not the IO
+/// shape. The runner calls this on every answer before returning it, so a
+/// non-plan never reaches [`lineage_tables`] looking like one.
+pub fn io_plan_inputs(plan: &Value) -> Result<&Vec<Value>, String> {
+    plan.as_object()
+        .ok_or_else(|| unreadable("not a JSON object"))?
+        .get("inputTableColumnInfos")
+        .ok_or_else(|| unreadable("no `inputTableColumnInfos`"))?
+        .as_array()
+        .ok_or_else(|| unreadable("`inputTableColumnInfos` is not an array"))
+}
+
+/// The base tables of a `EXPLAIN (TYPE IO, FORMAT JSON)` plan: each
+/// `inputTableColumnInfos[].table = {catalog, schemaTable: {schema, table}}`.
+///
+/// **Never `Ok(empty)`.** An input list with no entry is spec R6's refusal
+/// ([`EMPTY_LINEAGE_REASON`]); any other shape, or any one entry this cannot
+/// read, is an error naming the IO plan. Both mean "egret cannot judge this
+/// view", and an empty set would mean "this view reads nothing classified".
+pub fn lineage_tables(explain_json: &Value) -> Result<BTreeSet<LineageTable>, String> {
+    let inputs = io_plan_inputs(explain_json)?;
+    if inputs.is_empty() {
+        return Err(EMPTY_LINEAGE_REASON.to_string());
+    }
+    let mut out = BTreeSet::new();
+    for (i, info) in inputs.iter().enumerate() {
+        let table = info
+            .get("table")
+            .and_then(Value::as_object)
+            .ok_or_else(|| unreadable(format!("input {i} has no `table` object")))?;
+        let name = |v: Option<&Value>, field: &str| -> Result<String, String> {
+            match v.and_then(Value::as_str) {
+                Some(s) if !s.is_empty() => Ok(s.to_string()),
+                _ => Err(unreadable(format!(
+                    "input {i} has no non-empty string `{field}`"
+                ))),
+            }
+        };
+        let catalog = name(table.get("catalog"), "catalog")?;
+        let schema_table = table
+            .get("schemaTable")
+            .and_then(Value::as_object)
+            .ok_or_else(|| unreadable(format!("input {i} has no `schemaTable` object")))?;
+        let schema = name(schema_table.get("schema"), "schemaTable.schema")?;
+        let table_name = name(schema_table.get("table"), "schemaTable.table")?;
+        out.insert((catalog, schema, table_name));
+    }
+    Ok(out)
+}
+
+/// Run the EXPLAIN through `runner` and read the plan: the view's lineage, or
+/// why egret cannot judge the view (an engine error, an unreadable plan, or
+/// R6's empty lineage).
+pub async fn compute_lineage(
+    runner: &dyn ExplainRunner,
+    default_catalog: &str,
+    default_schema: &str,
+    sql: &str,
+) -> Result<BTreeSet<LineageTable>, String> {
+    let plan = runner
+        .explain_io(default_catalog, default_schema, sql)
+        .await?;
+    lineage_tables(&plan)
+}
+
+/// The union of the **clearance-bearing** tags on any column of `tables`: the
+/// tags with a `classification_policies` row that names at least one required
+/// role or group (SP4c's gate; both lists empty is an informational tag and
+/// carries no clearance).
+///
+/// A table-level assignment (`column_name = ''`) counts: Ranger's tag enricher
+/// applies it to every column of the table. Matching is case-folded on the
+/// schema and table, as `egret_policy::resolved_tags_for_resource_via`
+/// matches; the catalog joins on `registry.catalogs.name` (module doc).
+///
+/// A group-only gate is included although the compiler cannot enforce it on an
+/// engine (`crate::clearance`'s skip): the view column carries the same
+/// classification as its base, which is what Cedar enforces for it.
+pub async fn view_tag_set(
+    conn: &mut sqlx::PgConnection,
+    tables: &BTreeSet<LineageTable>,
+) -> Result<BTreeSet<Uuid>, sqlx::Error> {
+    if tables.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let (catalogs, (schemas, names)): (Vec<&str>, (Vec<&str>, Vec<&str>)) = tables
+        .iter()
+        .map(|(c, s, t)| (c.as_str(), (s.as_str(), t.as_str())))
+        .unzip();
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT a.tag_id \
+           FROM unnest($1::text[], $2::text[], $3::text[]) AS l(catalog, schema_name, table_name) \
+           JOIN registry.catalogs c ON c.name = l.catalog \
+           JOIN catalog_tag_assignments a \
+             ON a.warehouse_id = c.warehouse_id \
+            AND lower(a.schema_name) = lower(l.schema_name) \
+            AND lower(a.table_name) = lower(l.table_name) \
+           JOIN classification_policies cp ON cp.tag_id = a.tag_id \
+          WHERE cardinality(cp.required_roles) > 0 OR cardinality(cp.required_groups) > 0",
+    )
+    .bind(&catalogs)
+    .bind(&schemas)
+    .bind(&names)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(ids.into_iter().collect())
+}
+
+/// Record `tables` as `view`'s lineage, replacing whatever was recorded, and
+/// mark it `computed`. Runs on the caller's connection, so it joins the
+/// caller's transaction (Task 8 writes it beside the view's tag assignments).
+pub async fn write_lineage(
+    conn: &mut sqlx::PgConnection,
+    view: &ViewRef,
+    tables: &BTreeSet<LineageTable>,
+) -> Result<(), sqlx::Error> {
+    delete_lineage_rows(conn, view).await?;
+    let (catalogs, (schemas, names)): (Vec<&str>, (Vec<&str>, Vec<&str>)) = tables
+        .iter()
+        .map(|(c, s, t)| (c.as_str(), (s.as_str(), t.as_str())))
+        .unzip();
+    sqlx::query(
+        "INSERT INTO view_lineage \
+           (view_catalog, view_schema, view_name, base_catalog, base_schema, base_table) \
+         SELECT $1, $2, $3, l.c, l.s, l.t \
+           FROM unnest($4::text[], $5::text[], $6::text[]) AS l(c, s, t)",
+    )
+    .bind(&view.catalog)
+    .bind(&view.schema)
+    .bind(&view.name)
+    .bind(&catalogs)
+    .bind(&schemas)
+    .bind(&names)
+    .execute(&mut *conn)
+    .await?;
+    set_state(conn, view, "computed", None).await
+}
+
+/// Mark `view`'s lineage `failed` with `detail`, removing any recorded rows: a
+/// failed computation leaves no lineage that a sweep could mistake for current.
+pub async fn record_lineage_failure(
+    conn: &mut sqlx::PgConnection,
+    view: &ViewRef,
+    detail: &str,
+) -> Result<(), sqlx::Error> {
+    delete_lineage_rows(conn, view).await?;
+    set_state(conn, view, "failed", Some(detail)).await
+}
+
+/// Remove `view`'s lineage rows and state (view dropped, or a held commit
+/// compensated).
+pub async fn delete_lineage(
+    conn: &mut sqlx::PgConnection,
+    view: &ViewRef,
+) -> Result<(), sqlx::Error> {
+    delete_lineage_rows(conn, view).await?;
+    sqlx::query(
+        "DELETE FROM view_lineage_state \
+          WHERE view_catalog = $1 AND view_schema = $2 AND view_name = $3",
+    )
+    .bind(&view.catalog)
+    .bind(&view.schema)
+    .bind(&view.name)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// `view`'s recorded lineage (empty when none is recorded).
+pub async fn recorded_lineage(
+    conn: &mut sqlx::PgConnection,
+    view: &ViewRef,
+) -> Result<BTreeSet<LineageTable>, sqlx::Error> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT base_catalog, base_schema, base_table FROM view_lineage \
+          WHERE view_catalog = $1 AND view_schema = $2 AND view_name = $3",
+    )
+    .bind(&view.catalog)
+    .bind(&view.schema)
+    .bind(&view.name)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
+async fn delete_lineage_rows(
+    conn: &mut sqlx::PgConnection,
+    view: &ViewRef,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "DELETE FROM view_lineage \
+          WHERE view_catalog = $1 AND view_schema = $2 AND view_name = $3",
+    )
+    .bind(&view.catalog)
+    .bind(&view.schema)
+    .bind(&view.name)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+async fn set_state(
+    conn: &mut sqlx::PgConnection,
+    view: &ViewRef,
+    state: &str,
+    detail: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO view_lineage_state (view_catalog, view_schema, view_name, state, detail, at) \
+         VALUES ($1, $2, $3, $4, $5, now()) \
+         ON CONFLICT (view_catalog, view_schema, view_name) \
+         DO UPDATE SET state = EXCLUDED.state, detail = EXCLUDED.detail, at = EXCLUDED.at",
+    )
+    .bind(&view.catalog)
+    .bind(&view.schema)
+    .bind(&view.name)
+    .bind(state)
+    .bind(detail)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+// ── The compiler's half: what `egret-lineage` is granted (spec R5) ─────────
+//
+// On Trino profiles only. The principal gets `use` and `select` on every
+// catalog the profile governs, is excepted from every compiled deny (clearance
+// tag denies and deny grants), and is excluded from every compiled mask and row
+// filter, because a `1 = 0` filter or a `MASK_NULL` mask on it corrupts the
+// lineage (live result §1 Q3). It never receives any other access type: the
+// deny exceptions are narrowed to `LINEAGE_ACCESSES` as well, so no exception
+// ever lifts a withheld write.
+
+/// The only access types `egret-lineage` is ever granted or excepted for.
+/// Measured minimum for `EXPLAIN (TYPE IO)` on Trino 483: catalog `use` plus
+/// `select` on every referenced column (live result §1 Q3).
+pub const LINEAGE_ACCESSES: [&str; 2] = ["select", "use"];
+
+/// The compiled allow policy's name for `catalog`: under the clearance prefix
+/// (the sweep reaps it, the editor guard refuses a human write to it), with a
+/// `lineage-` locator that is not a uuid, so `attribute_policy_name` reads it
+/// as no model object, like `perm-clearance-mv`.
+pub fn lineage_policy_name(catalog: &str) -> String {
+    format!(
+        "{}lineage-{catalog}",
+        egret_policy::COMPILER_CLEARANCE_PREFIX
+    )
+}
+
+/// `use` and `select` for [`LINEAGE_PRINCIPAL`] on every schema, table and
+/// column of `catalog`, filed under the Trino profile `service`. The full
+/// resource chain with `*` below the catalog, because a policy that stops above
+/// `column` grants no column `select` (`grants::scope_to_resources`).
+pub(crate) fn lineage_allow_input(
+    catalog: &str,
+    service: &str,
+) -> egret_policy::admin::AccessPolicyInput {
+    use crate::grants::{level, resource_level_names, WILDCARD};
+    let names = resource_level_names(egret_perm::EngineType::Trino);
+    let mut resources = std::collections::BTreeMap::new();
+    resources.insert(names[0].to_string(), level(catalog.to_string()));
+    for n in &names[1..] {
+        resources.insert((*n).to_string(), level(WILDCARD.to_string()));
+    }
+    egret_policy::admin::AccessPolicyInput {
+        name: lineage_policy_name(catalog),
+        service: service.to_string(),
+        is_enabled: true,
+        resources,
+        items: vec![egret_policy::admin::AccessItemInput {
+            users: vec![LINEAGE_PRINCIPAL.to_string()],
+            groups: Vec::new(),
+            roles: Vec::new(),
+            accesses: LINEAGE_ACCESSES.iter().map(|a| a.to_string()).collect(),
+            effect: "allow".to_string(),
+        }],
+        allow_exceptions: Vec::new(),
+        deny_exceptions: Vec::new(),
+        is_deny_all_else: false,
+        description: "view governance R5: the lineage principal reads what egret governs, \
+                      for EXPLAIN only"
+            .to_string(),
+        labels: Vec::new(),
+        is_override: false,
+        additional: Vec::new(),
+    }
+}
+
+/// The deny exception for [`LINEAGE_PRINCIPAL`] on a deny withholding
+/// `accesses`: only the read half of them (`LINEAGE_ACCESSES`), so the
+/// exception never lifts a withheld write. `None` when the deny withholds no
+/// read access.
+pub(crate) fn lineage_deny_exception(
+    accesses: &[String],
+) -> Option<egret_policy::admin::AccessItemInput> {
+    let read: Vec<String> = accesses
+        .iter()
+        .filter(|a| LINEAGE_ACCESSES.contains(&a.as_str()))
+        .cloned()
+        .collect();
+    (!read.is_empty()).then(|| egret_policy::admin::AccessItemInput {
+        users: vec![LINEAGE_PRINCIPAL.to_string()],
+        groups: Vec::new(),
+        roles: Vec::new(),
+        accesses: read,
+        effect: "deny".to_string(),
+    })
+}
+
+/// The first item of every compiled Trino mask: `MASK_NONE` for the lineage
+/// principal. Ranger's first matching item wins.
+pub(crate) fn lineage_mask_item() -> egret_policy::admin::MaskItemInput {
+    egret_policy::admin::MaskItemInput {
+        users: vec![LINEAGE_PRINCIPAL.to_string()],
+        groups: Vec::new(),
+        mask_type: "MASK_NONE".to_string(),
+        value_expr: None,
+    }
+}
+
+/// The first item of every compiled Trino row filter: no filter for the
+/// lineage principal.
+pub(crate) fn lineage_rowfilter_item() -> egret_policy::admin::RowFilterItemInput {
+    egret_policy::admin::RowFilterItemInput {
+        users: vec![LINEAGE_PRINCIPAL.to_string()],
+        groups: Vec::new(),
+        filter_expr: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn t(c: &str, s: &str, n: &str) -> LineageTable {
+        (c.to_string(), s.to_string(), n.to_string())
+    }
+
+    /// Live result §1 Q3, the join of `ice.s.pii` and `ice.s.orders`, verbatim
+    /// except that the recorded `"estimate":{…}` elisions are written `{}`.
+    fn join_plan() -> Value {
+        serde_json::from_str(
+            r#"{"inputTableColumnInfos":[
+    {"table":{"catalog":"ice","schemaTable":{"schema":"s","table":"orders"}},"constraint":{"none":false,"columnConstraints":[]},"estimate":{}},
+    {"table":{"catalog":"ice","schemaTable":{"schema":"s","table":"pii"}},"constraint":{"none":false,"columnConstraints":[]},"estimate":{}}],
+   "estimate":{}}"#,
+        )
+        .expect("recorded join plan")
+    }
+
+    /// Live result §1 Q3, the nested view `SELECT id, amount FROM
+    /// ice.s.v_nest_inv` (INVOKER over DEFINER over the join): the recorded
+    /// inputs, under the recorded top-level keys.
+    fn nested_view_plan() -> Value {
+        let inputs: Value = serde_json::from_str(
+            r#"[{"catalog":"ice","schemaTable":{"schema":"s","table":"orders"}},{"catalog":"ice","schemaTable":{"schema":"s","table":"pii"}}]"#,
+        )
+        .expect("recorded inputs");
+        let infos: Vec<Value> = inputs
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|table| {
+                json!({
+                    "table": table,
+                    "constraint": {"none": false, "columnConstraints": []},
+                    "estimate": {}
+                })
+            })
+            .collect();
+        json!({ "inputTableColumnInfos": infos, "estimate": {} })
+    }
+
+    #[test]
+    fn the_join_gives_exactly_its_two_base_tables() {
+        assert_eq!(
+            lineage_tables(&join_plan()).unwrap(),
+            BTreeSet::from([t("ice", "s", "orders"), t("ice", "s", "pii")])
+        );
+    }
+
+    #[test]
+    fn the_nested_view_gives_its_base_tables_and_never_a_view() {
+        assert_eq!(
+            lineage_tables(&nested_view_plan()).unwrap(),
+            BTreeSet::from([t("ice", "s", "orders"), t("ice", "s", "pii")])
+        );
+    }
+
+    /// Live result §1 Q3, unqualified SQL with session `ice`/`s`.
+    #[test]
+    fn unqualified_sql_resolves_to_the_session_catalog_and_schema() {
+        let plan: Value = json!({
+            "inputTableColumnInfos": [{
+                "table": {"catalog":"ice","schemaTable":{"schema":"s","table":"pii"}},
+                "constraint": {"none": false, "columnConstraints": []},
+                "estimate": {}
+            }],
+            "estimate": {}
+        });
+        assert_eq!(
+            lineage_tables(&plan).unwrap(),
+            BTreeSet::from([t("ice", "s", "pii")])
+        );
+    }
+
+    /// Every way the plan can fail to be the IO shape is an error that says
+    /// so, never an empty set: an empty set would read as "reads no
+    /// classified table" and the view would commit untagged.
+    #[test]
+    fn an_unexpected_shape_is_an_error_never_an_empty_set() {
+        let cases = [
+            json!(null),
+            json!([]),
+            json!("plan"),
+            json!({}),
+            json!({"estimate": {}}),
+            json!({"inputTableColumnInfos": {}}),
+            json!({"inputTableColumnInfos": [{}]}),
+            json!({"inputTableColumnInfos": [{"table": "ice.s.pii"}]}),
+            json!({"inputTableColumnInfos": [{"table": {"catalog": "ice"}}]}),
+            json!({"inputTableColumnInfos": [{"table": {"catalog": "ice", "schemaTable": {"schema": "s"}}}]}),
+            json!({"inputTableColumnInfos": [{"table": {"catalog": 1, "schemaTable": {"schema": "s", "table": "t"}}}]}),
+            json!({"inputTableColumnInfos": [{"table": {"catalog": "", "schemaTable": {"schema": "s", "table": "t"}}}]}),
+            // One good input does not excuse an unreadable one.
+            json!({"inputTableColumnInfos": [
+                {"table": {"catalog": "ice", "schemaTable": {"schema": "s", "table": "pii"}}},
+                {"table": {"catalog": "ice", "schemaTable": {"schema": "s"}}}
+            ]}),
+        ];
+        for plan in cases {
+            let err = lineage_tables(&plan).expect_err(&plan.to_string());
+            assert!(
+                err.contains("IO plan"),
+                "the refusal must say the plan was unreadable, for {plan}: {err}"
+            );
+        }
+    }
+
+    /// Spec R6: `WHERE false`, `LIMIT 0` and a planning-time-constant
+    /// predicate all report no input. An empty lineage is a refusal.
+    #[test]
+    fn an_empty_input_list_is_the_r6_refusal() {
+        let err = lineage_tables(&json!({"inputTableColumnInfos": [], "estimate": {}}))
+            .expect_err("empty");
+        assert_eq!(err, EMPTY_LINEAGE_REASON);
+    }
+
+    #[test]
+    fn explain_only_wraps_the_statement() {
+        assert_eq!(
+            explain_only("SELECT id, ssn FROM pii").unwrap(),
+            "EXPLAIN (TYPE IO, FORMAT JSON) SELECT id, ssn FROM pii"
+        );
+    }
+
+    #[test]
+    fn explain_only_refuses_empty_sql_and_a_nested_explain() {
+        for sql in [
+            "",
+            "   \n\t",
+            "explain analyze select 1",
+            "EXPLAIN ANALYZE SELECT 1",
+            "  Explain select 1",
+            "\nEXPLAIN(TYPE IO) select 1",
+        ] {
+            assert!(explain_only(sql).is_err(), "{sql:?} must be refused");
+        }
+        // A keyword that merely starts with the letters is not EXPLAIN.
+        assert!(explain_only("explainer_view").is_ok());
+        assert!(explain_only("SELECT 'explain' AS x").is_ok());
+    }
+
+    struct Fake(Value);
+
+    #[async_trait::async_trait]
+    impl ExplainRunner for Fake {
+        async fn explain_io(&self, _: &str, _: &str, _: &str) -> Result<Value, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_runner_reporting_no_input_is_refused_with_the_r6_reason() {
+        let err = compute_lineage(
+            &Fake(json!({"inputTableColumnInfos": [], "estimate": {}})),
+            "ice",
+            "s",
+            "SELECT id FROM pii WHERE false",
+        )
+        .await
+        .expect_err("empty lineage");
+        assert_eq!(err, EMPTY_LINEAGE_REASON);
+    }
+
+    #[tokio::test]
+    async fn a_runner_reporting_the_join_gives_its_tables() {
+        let got = compute_lineage(&Fake(join_plan()), "ice", "s", "SELECT 1")
+            .await
+            .expect("lineage");
+        assert_eq!(
+            got,
+            BTreeSet::from([t("ice", "s", "orders"), t("ice", "s", "pii")])
+        );
+    }
+}

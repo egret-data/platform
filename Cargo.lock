@@ -3616,6 +3616,7 @@ dependencies = [
  "egret-core",
  "egret-events",
  "egret-metastore",
+ "egret-perm-compile",
  "egret-query-api",
  "egret-secrets",
  "egret-storage",

@@ -658,6 +658,73 @@ async fn a_stored_compiled_pair_does_not_block_unrelated_writes_but_an_edit_into
     assert_eq!(path_rules(&e, &p).await, vec![a_name]);
 }
 
+/// View governance R5: every compiled Trino mask now carries an `egret-lineage`
+/// `MASK_NONE` item FIRST. A pair stored by the compiler BEFORE that item
+/// existed must not turn into a "created" pair at the first recompile after
+/// it: the lineage item decides only the lineage principal, and identically in
+/// every compiled body, so it is not part of the arbitration.
+#[tokio::test]
+async fn a_stored_pair_compiled_before_the_lineage_item_does_not_block_an_unrelated_write() {
+    let _serial = SERIAL.lock().await;
+    let Some(e) = env().await else { return };
+    let p = profile(&e, "trino").await;
+    let (a_name, b_name) = (unique("pre a"), unique("pre b"));
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/rules",
+        Some(path_mask(&a_name, &p, "orders", "email", "MASK")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let a = body["id"].as_str().expect("id").to_string();
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/rules",
+        Some(path_mask(&b_name, &p, "orders", "phone", "MASK_NULL")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let b = body["id"].as_str().expect("id").to_string();
+    move_rule_column_unchecked(&e, &b, "email").await;
+    // Strip the lineage item from both stored bodies: what the compiler
+    // stored before Task 7.
+    for id in [&a, &b] {
+        let stripped = sqlx::query(
+            "UPDATE policy.authz_policies \
+                SET policy_jsonb = jsonb_set(policy_jsonb, '{dataMaskPolicyItems}', \
+                                             (policy_jsonb->'dataMaskPolicyItems') - 0) \
+              WHERE name = $1 AND policy_jsonb->'dataMaskPolicyItems'->0->'users' = '[\"egret-lineage\"]'",
+        )
+        .bind(format!("perm-rule-{id}"))
+        .execute(&e.db.pool)
+        .await
+        .expect("strip")
+        .rows_affected();
+        assert_eq!(
+            stripped, 1,
+            "the compiled body carried the lineage item first"
+        );
+    }
+
+    let grant = json!({
+        "effect": "allow",
+        "actions": ["read"],
+        "scope": { "catalog_id": p.catalog_id, "schema": "sales", "table": "orders", "column": null },
+        "principals": { "include": [{ "kind": "user", "ref": "analyst" }], "exclude": [] }
+    });
+    let (status, body) = send(&e, "POST", "/perm/grants", Some(grant)).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a pair stored before the lineage item blocks nothing: {body}"
+    );
+    // The profile is shared by this file's tests: break the stored pair.
+    let (status, body) = send(&e, "DELETE", &format!("/perm/rules/{b}"), None).await;
+    assert!(status.is_success(), "{status} {body}");
+}
+
 /// (a) A stored compiled × HAND-WRITTEN pair does not block an unrelated rule
 /// write on that profile (round 1 refused it: the wedge).
 #[tokio::test]
@@ -1363,10 +1430,15 @@ async fn the_report_lists_every_pair_and_writes_nothing() {
         o["howToFix"].as_str().unwrap().contains("/enabled"),
         "a hand-written member offers the switch-off: {o}"
     );
-    assert_eq!(
-        o["servedToday"]["name"],
-        compiled.as_str(),
-        "the table-wide rule has more match-any levels, so Ranger serves it: {o}"
+    // View governance R5: the compiled Trino mask now carries an
+    // `egret-lineage` item the hand-written one does not, so their principal
+    // discounts are no longer known to be equal and `servedToday` declines
+    // rather than names a winner (`served_today`'s same-shape precondition).
+    // The match-any comparison it rests on is still asserted by egret-policy's
+    // unit tests on same-shape pairs.
+    assert!(
+        o["servedToday"].is_null(),
+        "a compiled Trino mask and a hand-written one differ in principals: {o}"
     );
 }
 

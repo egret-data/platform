@@ -1209,7 +1209,17 @@ fn every_accepted_body_compiles_back_to_what_it_came_from() {
             );
             for bucket in ["dataMaskPolicyItems", "rowFilterPolicyItems"] {
                 let want = body[bucket].as_array().cloned().unwrap_or_default();
-                let have = back[bucket].as_array().cloned().unwrap_or_default();
+                let mut have = back[bucket].as_array().cloned().unwrap_or_default();
+                // View governance R5: on Trino the compiler adds the lineage
+                // principal's no-transform item FIRST; the rest is the body's.
+                if engine == EngineType::Trino && !have.is_empty() {
+                    let lineage = have.remove(0);
+                    assert_eq!(
+                        lineage["users"],
+                        serde_json::json!(["egret-lineage"]),
+                        "{what}: {bucket} starts with the lineage item"
+                    );
+                }
                 assert_eq!(want.len(), have.len(), "{what}: {bucket} length");
                 for (w, h) in want.iter().zip(&have) {
                     assert!(same_item(w, h), "{what}: {bucket}\n want {w}\n have {h}");

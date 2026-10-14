@@ -2,6 +2,7 @@
 
 pub mod authz;
 pub mod context;
+pub mod engine_principals;
 pub mod error;
 #[cfg(feature = "http")]
 pub mod http;

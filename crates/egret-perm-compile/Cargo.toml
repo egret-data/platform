@@ -22,6 +22,9 @@ license.workspace = true
 # regular dependencies.
 [dependencies]
 egret-perm.workspace = true
+# View governance Task 7: `lineage::ExplainRunner` is implemented by a runner in
+# `egret-query` and faked in tests, and is held as `dyn` by the commit hold.
+async-trait.workspace = true
 egret-policy.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
