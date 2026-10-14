@@ -1,6 +1,6 @@
 # W7d — Workflows UI, part 4: namespaces (list, detail, files, KV, dependencies)
 
-**Status:** implemented, 2026-10-14. Measured live on a private stack (a fresh database, a private RustFS, `serve` and Vite on their own ports): the namespace list and detail, the Files tab with a real drag and drop and a real `webkitdirectory` folder import, Ctrl/Cmd+S per editor with Code and two file tabs side by side (proved by the requests sent), the 409 `file_changed` dialog from a second session, the namespace-change question, KV (JSON, DATE, an exponent NUMBER read back with every digit, inherited keys) and the `subflow` edge, with the editors measured in light and dark mode (`frontend/tests/e2e/workflows-namespaces.spec.ts`). The differences from a running Kestra are in §2.
+**Status:** implemented, 2026-10-14. Measured live on a private stack (a fresh database, a private RustFS, `serve` and Vite on their own ports): the namespace list and detail, the Files tab with a real drag and drop and a real `webkitdirectory` folder import, Ctrl/Cmd+S per editor with Code and two file tabs side by side (proved by the requests sent), the 409 `file_changed` dialog from a second session, the namespace-change question, KV (JSON, DATE, an exponent NUMBER read back with every digit, inherited keys) and the `subflow` edge, with the editors measured in light and dark mode (`frontend/tests/e2e/workflows-namespaces.spec.ts`). Dark mode had a defect, found by that run and fixed in the final review: Monaco's theme is global and a theme-less editor set it light, so a file tab turned the flow's Code beside it light. Every editor now takes the app's mode (`MonacoEditor` defaults it), and the run asserts a dark editor background on the namespace page, for Code beside two file tabs, and after a revision opens in the drawer. The differences from a running Kestra are in §2.
 
 **Depends on:**
 - W7a (#659): the Workflows area, the multi-panel editor and its tab registry, the stale-save dialog pattern (`if_updated_at`, 409 `draft_changed`).
@@ -32,17 +32,17 @@ W9b and W9c gave egret namespace files and a KV store, but they can be reached o
 | Observed: `GET /namespaces/search` lists namespaces with flows and their parents (`company`, `company.other`, `company.team`); a namespace holding only a file (`w7d.filesonly`) or only a KV key (`w7d.kvonly`) is not listed | Listed, with `own: true` and its counts; a namespace holding only a live folder is listed too (`own: true`, `files: 0`) | A namespace can hold files or keys without a flow (user's ruling) |
 | Observed: `GET /namespaces/nope.nothing` answers 200 `{"id":"nope.nothing"}` | 404, and the page says "Namespace not found" with a link back | A link to nothing should say so |
 | Observed: the namespace page's tabs are Overview, Edit (EE), Flows, Executions, Dependencies, Secrets, Assets, Variables, Policies (EE), **KV Store, Namespace Files**, Revisions, Audit logs (EE); read: `ORDER` in `ui/src/components/namespaces/utils/useHelpers.ts` puts `kv` before `files` | Overview, Flows, Executions, Dependencies, **Files, KV** | The order the user decided (2026-10-14); this nightly image puts KV first |
-| Overview is the executions dashboard, or a "no executions" screen | Counts (flows, files, keys), recent executions, child namespaces | egret has no dashboard charts |
+| Read: the Overview tab is the executions `Dashboard`, or `NoExecutions` when the namespace has none (`ui/src/components/namespaces/components/NamespaceOverview.vue`) | Counts (flows, files, keys), recent executions, child namespaces | egret has no dashboard charts |
 | Observed: two writes of one file answer 200 and 200, the second wins; an `if_revision` parameter is ignored (200); `files/stats` carries no revision | Compare-and-write: `if_revision` (`0` = must not exist); a stale one answers 409 `file_changed` naming the revision ("it is at revision 2, not 1; nothing was written"); the editor opens Reload or Overwrite | Two editors of one file must not silently overwrite each other (W7a's rule for flows) |
 | Observed: uploading `bundle.zip` to `?path=/bundle.zip` extracts it, at the namespace root (the path is ignored): `/inner/x.txt`, `/y.sql` | Stored as one file, `/bundle.zip`. Import is files and folders (`webkitdirectory`, one upload per file) | USER RULING 2026-10-14: no zip extraction |
 | Observed: a file under `/_flows/` is imported as a flow (`viafile` created in the file's namespace) | 400: "'/_flows' and everything under it is reserved for flow sources" | W9b's rule; flows are edited in the flow editor |
 | Observed: `GET /namespaces/company.team/dependencies` has no edge for `caller` → `child` (a `Subflow` into the namespace), while `company.other`'s graph has it; `company.other`'s graph has no edge for the `Flow` trigger into `listener`, while `company.team`'s has it | Every edge into or out of the namespace, in both graphs (`company.other.caller → company.team.child`, `subflow`; `company.team.child → company.other.listener`, `flow_trigger`) | One graph per namespace that is the same from either end |
 | Observed: a `Flow` trigger whose `dependsOn` names only `namespace: company.team` draws an edge from every flow of `company.team` | No edge: only a `dependsOn` entry naming both `namespace` and `flowId` draws one (§3.4) | An edge says "this flow starts that one"; a namespace-wide condition is not that |
-| Dependencies from a stored index | Built from the drafts on each request (§3.4) | No stored dependency index in egret |
+| Read: `GET /namespaces/{ns}/dependencies` answers `flowTopologyService.namespaceGraph` (`NamespaceController.java`), a graph kept in the stored flow topology (`FlowTopologyRepository`) | Built from the drafts on each request (§3.4) | No stored dependency index in egret |
 | Observed: a KV `PUT` of `1.2345678901234567890123e5` reads back `123456.78901234567` (an Ion float); `…d5` reads back every digit. Read: the UI's NUMBER field is `type="number"` and sends `String(value)` (`KVTable.vue`) | The API is the same (W9c parity); the UI sends an exponent as an Ion decimal (`d`), so `1.2345678901234567890123e5` reads back `123456.78901234567890123`, measured in the browser | A key's number is not rounded by the form |
 | Read: the UI sends JSON as typed text (`KVTable.vue`) | The same: JSON is sent as typed, its numbers kept as written | Parity |
 | Observed: `ttl: PT0S` is accepted (200) and the key reads back 410 at once | The API is the same (200); the form refuses `PT0S` before a request is sent | A key that expires as it is written is a typo |
-| Namespace creation (EE) | None: a namespace exists when something lives in it | OSS parity |
+| Read: the namespace list's Create action is shown only outside OSS (`v-if="!isOSS && canCreate"`, `ui/src/override/components/namespaces/Namespaces.vue`) | None: a namespace exists when something lives in it | OSS parity |
 
 ## 3. Backend
 
@@ -69,7 +69,7 @@ W9b and W9c gave egret namespace files and a KV store, but they can be reached o
 
 - **With it:** the write commits only if the path's current revision equals it. Otherwise it answers 409 with `code: "file_changed"`, as W7a's `draft_changed` does. `if_revision=0` means "the path must not exist".
 - **Without it:** the behaviour is unchanged, so existing callers and tasks are not affected.
-- **Atomicity:** the check and the write are one statement under W9b's existing per-path lock.
+- **Atomicity:** the check and the write are one transaction (`commit_staged` in `storage/nsfiles/store.rs`), which takes W9b's existing per-path lock (`xact_lock`) before it reads the current revision, so no write commits between the check and the insert.
 - **Deleted paths:** the current revision is the latest live one. A soft-deleted path, like one that never existed, is at revision 0: `if_revision=0` writes it again, and the revision an editor read before the delete answers 409 `file_changed` ("was deleted").
 - **Other 409s:** a 409 without `code: "file_changed"` (for example a folder at that path) is a plain error, not the stale dialog.
 - **Zips:** a `.zip` is a file like any other here (W9b stores it as one file), so `if_revision` applies to it. The idea of refusing `if_revision` on a `.zip` is dropped: its premise, that the server extracts zips, is false.
@@ -100,7 +100,7 @@ Everything lives inside W7a's lazy Workflows area. A Workflows nav entry "Namesp
 
 The page is `/explore/:workspace/workflows/namespaces`.
 
-- **Tree:** namespaces are drawn as a tree by dots, with each node's flows, files and keys counts. A parent-only node is muted.
+- **Tree:** namespaces are drawn as a tree by dots, with each node's flows, files and keys counts. A parent-only node is muted. The table's caption says the counts are each namespace's own, as the Overview does ("Counted in this namespace only; each child namespace counts its own.").
 - **Filter:** a prefix filter, kept in the URL (FE-PAGE-2).
 - **States:** a skeleton while loading (FE-STATE-2) and an empty state.
 - **Navigation:** selecting a node opens its detail.
@@ -110,7 +110,7 @@ The page is `/explore/:workspace/workflows/namespaces`.
 The page is `/explore/:workspace/workflows/namespaces/:namespace/:tab`, with vertical tabs in Kestra's order: Overview, Flows, Executions, Dependencies, Files, KV. The tab is part of the URL, and an unknown tab redirects to Overview. A breadcrumb shows each segment of the namespace.
 
 - **Overview:** counts, the 10 most recent executions (W7b's list with `namespace_prefix`), and the direct child namespaces.
-- **Flows** and **Executions:** W7a's flow list and W7b's executions list, with the namespace filter fixed to this namespace and its children.
+- **Flows** and **Executions:** W7a's flow list and W7b's executions list, with the namespace filter fixed to this namespace and its children. The Flows tab's tree folds in memory, starting open: the workspace list's stored collapse state is not read there, so a collapsed ancestor cannot hide the tab.
 - **Dependencies:** a graph of flows drawn with W7c's xyflow and dagre pieces.
   - `subflow` edges are solid and `flow_trigger` edges are dashed.
   - Flows outside the namespace are muted.
@@ -131,10 +131,13 @@ The page is `/explore/:workspace/workflows/namespaces/:namespace/:tab`, with ver
 - Search, through W9b's search route.
 - See a file's revisions and restore one. Restoring writes that revision's content as a new revision, with `if_revision`; a 409 asks whether to restore over the newer revision.
 
+- An import of more than 100 files asks first. While an import runs, every write (new file or folder, another import, rename, move, delete, drag and drop) is disabled with "Wait for the import to finish."
+- The tree's keyboard help offers F2 and Delete only when writes are on.
+
 **Opening a file**
-- A text file opens in Monaco, with the language taken from its extension.
+- A text file opens in Monaco, with the language taken from its extension, in the app's light or dark theme.
 - An image shows a preview.
-- Any other binary file, and any file over 5 MB, offers download only.
+- Any other binary file, and any file over 5 MB, offers download only. A revision over 5 MB, viewed from Revisions, is a download only as well.
 
 **Saving**
 - A save sends `if_revision`.
@@ -145,6 +148,8 @@ The page is `/explore/:workspace/workflows/namespaces/:namespace/:tab`, with ver
 **On the namespace page**
 - The tree is on the left and the open files are tabs on the right.
 - The open tabs are remembered per namespace in `localStorage`.
+- The Files tab stays mounted, hidden, once it has been shown, so a visit to another tab of the namespace keeps unsaved edits. The tabs use manual activation: arrows move focus, Enter or Space selects.
+- **Deviation (FE-PAGE-2):** the open file and the search text are not in the URL here. `NamespaceFiles` is one component for this page and the flow editor, whose open files are the layout's tabs; they are kept in component state (and the open tabs in `localStorage`).
 
 **In the flow editor**
 - A Files tab is registered through `registerTab`, the same way W7c registered Topology: a stub whose body loads lazily. It shows the tree of the flow's namespace.
@@ -153,6 +158,7 @@ The page is `/explore/:workspace/workflows/namespaces/:namespace/:tab`, with ver
 - File tabs are restored from the stored layout.
 - The flow's own Save does not save files, and saving a file does not save the flow.
 - A flow save that moves the flow to another namespace while a file tab has unsaved edits asks first: **Save files first** (into the old namespace, then the flow), **Discard file changes**, or **Cancel**. The file tabs of the old namespace close when the flow moves.
+- A restore from the Files tree's Revisions reloads an open file tab that has no unsaved edits; one with edits keeps them, and its save meets the stale-save question.
 - When someone else's save moves the flow to another namespace, the file tabs close and their unsaved edits are lost, with a notice that says so.
 
 ### 4.4 KV
@@ -173,11 +179,13 @@ The page is `/explore/:workspace/workflows/namespaces/:namespace/:tab`, with ver
 - The value is checked in the form with the same rules the server applies.
 - JSON is sent as typed, so its numbers keep every digit. A NUMBER with an exponent is sent as an Ion decimal (`6.02e23` as `6.02d23`), so every digit is kept; an Ion float would round it.
 - The TTL check follows egret's own duration parser (fractions are accepted). `PT0S` is refused in the form: the key would expire as it is written.
-- Editing a key keeps its remaining TTL unless the expiration is changed.
+- Editing a key keeps its remaining TTL unless the expiration is changed. The time left is read when Save is pressed; if the key expired while the drawer was open, the form refuses ("This key expired while you were editing; choose an expiration") and sends nothing, rather than a PUT without `ttl`, which would make the key permanent.
+- An edit sends a DATETIME whose text is unchanged exactly as the server sent it, so a stored value's micro- or nanoseconds survive an edit of only the description (the form's `datetime-local` text holds milliseconds at most).
 - Creating a key that already exists asks before overwriting.
 
 **Inherited keys**
 - An "Inherited KV" drawer lists the keys inherited from parent namespaces, through W9c's inheritance route. The nearest parent wins.
+- **Deviation (FE-DATA-2):** a key named `inheritance` cannot be read at the path the generated fetcher builds, because `…/kv/inheritance` is the inheritance listing. That one key is read through the same mutator (`customInstance`) at the generated URL with its last letter percent-encoded (`…/kv/inheritanc%65`), which the server decodes back to the key (`kvApi.ts`).
 
 ### 4.5 Permissions
 
@@ -243,15 +251,14 @@ A viewer with `workflow:read` but not `workflow:manage` sees everything. Every w
 - The KV form for every type, bulk delete and inherited keys.
 - The read-only viewer.
 
-**Playwright,** on a private stack, never the shared dev stack:
-1. Create a flow in `company.team`, and a flow in `company.other` that calls it through a `Subflow`.
-2. On the namespace page, create `scripts/a.py`, edit and save it, rename it, export the zip.
-3. Create a JSON key and a DATE key, and see inherited keys from `company`.
-4. In the flow editor, open `a.py` in the Files tab next to Code, edit it, Ctrl/Cmd+S.
-5. Make a second save from another session, and see the 409 dialog.
-6. Open Dependencies and see the `subflow` edge.
-
-DOM measurements cover light and dark mode.
+**Playwright** (`frontend/tests/e2e/workflows-namespaces.spec.ts`), on a private stack, never the shared dev stack:
+1. Create a flow in `company.team`, a flow in `company.other` that calls it through a `Subflow`, and a key in `company`; the namespace list shows them as a tree.
+2. On the namespace page: create files with `if_revision=0`; edit one, leave for the KV tab and come back (the text and its unsaved dot are still there), save it with Ctrl/Cmd+S (one POST with `if_revision`); rename; move by a real drag and drop; import a folder through `webkitdirectory`; export the zip. The tree and the editor are measured in light and dark mode, the editor's background asserted dark in dark mode.
+3. KV: create a JSON key and a DATE key, read back an exponent NUMBER with every digit, and see the keys inherited from `company`.
+4. In the flow editor: Code beside TWO file tabs, side by side; Ctrl/Cmd+S in each file saves only that file, and in Code only the flow. In dark mode the two file editors and Code have a dark background, and still do after a revision opens, dark, in the Revisions drawer.
+5. A second session saves a file: this session's save answers 409 `file_changed`, the stale dialog opens, and Overwrite resends without `if_revision`.
+6. A flow saved into another namespace while a file has unsaved edits asks first; "Save files first" writes into the old namespace.
+7. Dependencies draws the `subflow` edge.
 
 ## 7. What W7d does not do
 
