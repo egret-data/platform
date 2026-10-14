@@ -153,6 +153,8 @@ The Iceberg catalog runs inside egret (embedded lakekeeper), so a view create or
 4. Wait until every engine bound to that tag service has downloaded a tag version at or above the new one (B4).
 5. Then commit the view.
 
+Before step 1: if the profile that governs the view's catalog has no classified column at all, the commit passes through with no EXPLAIN, and the lineage is left missing for the B3 sweep to compute (user ruling, 2026-10-14, Task 8); otherwise a profile with no eligible lineage engine would refuse every view although nothing is classified.
+
 The view does not exist until step 5, so nobody can read it untagged. Tags are resource paths, so they can be assigned before the resource exists.
 
 **Refusal.** egret refuses the create or replace, rolls back the tag assignments and the lineage, and answers with an error the engine shows the user, in each of these cases:

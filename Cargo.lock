@@ -3206,6 +3206,7 @@ dependencies = [
  "egret-catalog-registry",
  "egret-config",
  "egret-core",
+ "egret-engine-mgmt-api",
  "egret-events",
  "egret-machine-idp",
  "egret-metastore",

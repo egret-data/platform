@@ -115,6 +115,14 @@ url = { workspace = true }
 # semver-incompatible majors. The workspace is on 0.9 now, so both sides of that
 # seam are the same type and the alias is gone.
 sqlx = { workspace = true }
+# The view-governance hold (`view_hold`, spec B2): the lineage API and the
+# per-warehouse recompile and overlap checks live in `egret-perm-compile`, the
+# plugin download ledger's `wait_for_tag_version` in `egret-policy`, and the
+# poll interval the hold limit derives from in `egret-engine-mgmt-api`. None of
+# them depends on this crate.
+egret-perm-compile = { workspace = true }
+egret-policy = { workspace = true }
+egret-engine-mgmt-api = { workspace = true }
 
 [dev-dependencies]
 # One private, already-migrated database per test process, cloned from a
@@ -148,10 +156,6 @@ egret-metastore = { workspace = true }
 egret-events = { workspace = true }
 # (`chrono` — used by the browse tests' `SessionService::new` TTLs — is now a
 # regular dependency for the catalog-token DTO, so it's available to tests too.)
-# SP4a Task 16 (D3 defect 3): `warehouse_delete_recompile.rs` needs a REAL
-# `CatalogAssignmentCompiler` (not a recording fake) to assert the compiled
-# effect itself, in `policy.authz_policies` — dev-only, so this crate's own
-# production dependency graph stays free of the compiler (`egret-perm` alone
-# is a regular dependency, for the RBAC store's grant-sync error mapping).
-egret-perm-compile = { workspace = true }
-egret-policy = { workspace = true }
+# (`egret-perm-compile` and `egret-policy` were dev-only for SP4a Task 16's
+# `warehouse_delete_recompile.rs`; the view hold made them regular
+# dependencies, see above.)

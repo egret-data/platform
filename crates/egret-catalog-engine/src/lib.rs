@@ -23,6 +23,9 @@ pub mod recovery;
 /// merged in from the former `egret-catalog` crate (E3d-1). Runs on the
 /// egret-side pool, which is now the same sqlx major lakekeeper uses.
 pub mod store;
+/// The view-governance hold (spec B2): a classified view's commit waits until
+/// every Ranger plugin holds its classification tags.
+pub mod view_hold;
 pub mod warehouse;
 /// The control-plane catalog admin router (warehouses / roles / grants /
 /// clients / browse), moved out of `egret-controlplane` into this seam (E3d-3).
@@ -57,14 +60,17 @@ pub use lakekeeper::CancellationToken;
 #[cfg(feature = "test-utils")]
 pub use mount::build_state_with_gc_poll;
 pub use mount::{
-    build_state, catalog_engine_router, mount_catalog_engine, spawn_gc_workers, CatalogGuard,
-    EngineServer, EngineState,
+    build_state, catalog_engine_router, front_catalog_router, mount_catalog_engine,
+    spawn_gc_workers, CatalogGuard, EngineServer, EngineState,
 };
 pub use pool::{build_isolated_pool, LAKEKEEPER_SCHEMA};
 pub use recovery::{
     list_deleted_tabulars, set_protection, undrop_tabular, DeletedTabular, ProtectTarget,
     TabularKindName,
 };
+pub use view_hold::{default_hold_limit, ViewHold, LINEAGE_REFUSAL, UNCONFIRMED_REFUSAL};
+#[cfg(feature = "test-utils")]
+pub use warehouse::create_memory_warehouse;
 pub use warehouse::{create_lakekeeper_warehouse, S3StorageConfig};
 pub use warehouse_admin::{
     catalog_admin_router, BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition,

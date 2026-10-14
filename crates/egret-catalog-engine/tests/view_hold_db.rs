@@ -1,0 +1,816 @@
+//! View governance B2: the hold that keeps a classified view's Iceberg commit
+//! back until every Ranger plugin holds the view's classification tags.
+//!
+//! Each test drives the REAL embedded lakekeeper (on its in-memory storage)
+//! through [`front_catalog_router`] with the hold installed, a fake
+//! [`ExplainRunner`], and a fake Trino plugin: a task that polls
+//! `download_tags` through egret's real Ranger router with an advancing
+//! `lastKnownVersion`, or never polls. An observer layer between the hold and
+//! lakekeeper records when each request reaches lakekeeper.
+//!
+//! DB-gated; self-skips only under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS:
+//!   DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test \
+//!     cargo test -p egret-catalog-engine --test view_hold_db
+
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use axum::body::Body;
+use axum::extract::{Request, State};
+use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::Response;
+use egret_catalog_engine::{
+    build_state, catalog_engine_router, create_memory_warehouse, ensure_bootstrapped,
+    front_catalog_router, run_lakekeeper_migrations, ViewHold, LINEAGE_REFUSAL,
+    UNCONFIRMED_REFUSAL,
+};
+use egret_metastore::Db;
+use egret_perm_compile::lineage::{
+    recorded_lineage, ExplainRunner, RecordedLineage, ViewRef, EMPTY_LINEAGE_REASON,
+};
+use egret_policy::{ranger_router, PolicyStore, RangerState, NO_PLUGIN_POLLED};
+use http_body_util::BodyExt as _;
+use serde_json::{json, Value};
+use tower::ServiceExt as _;
+use uuid::Uuid;
+
+const SYSTEM_USER: &str = "egret-system";
+const RANGER_TOKEN: &str = "devtoken";
+/// The hold limit of every test that expects a confirmation.
+const LIMIT: Duration = Duration::from_secs(20);
+/// How often the fake plugin polls. Long enough that a commit that did not
+/// wait lands before the plugin reports the new version.
+const POLL: Duration = Duration::from_millis(300);
+
+fn unique(prefix: &str) -> String {
+    format!("{prefix}_{}", &Uuid::new_v4().simple().to_string()[..12])
+}
+
+static LAKEKEEPER: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+/// lakekeeper's schema and default project, once per test process.
+async fn lakekeeper_ready(dsn: &str) {
+    LAKEKEEPER
+        .get_or_init(|| async {
+            run_lakekeeper_migrations(dsn)
+                .await
+                .expect("lakekeeper migrations");
+            let (state, _registry) = build_state(dsn, SYSTEM_USER).await.expect("state");
+            ensure_bootstrapped(state, SYSTEM_USER)
+                .await
+                .expect("bootstrap");
+        })
+        .await;
+}
+
+/// Answers the EXPLAIN by the table names the SQL mentions: `pii`, `orders`.
+/// A SQL containing `FAIL` is an engine error, and one containing
+/// `WHERE false` reports no input (spec R6).
+struct FakeRunner {
+    catalog: String,
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl ExplainRunner for FakeRunner {
+    async fn explain_io(&self, catalog: &str, schema: &str, sql: &str) -> Result<Value, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            catalog, self.catalog,
+            "the default catalog is the registry's"
+        );
+        assert_eq!(schema, "s");
+        if sql.contains("FAIL") {
+            return Err("engine trino-1: Access Denied: boom".into());
+        }
+        let inputs: Vec<Value> = if sql.contains("WHERE false") {
+            Vec::new()
+        } else {
+            ["orders", "pii"]
+                .iter()
+                .filter(|t| sql.contains(*t))
+                .map(|t| {
+                    json!({"table": {"catalog": self.catalog, "schemaTable": {"schema": "s", "table": t}},
+                           "constraint": {"none": false, "columnConstraints": []}, "estimate": {}})
+                })
+                .collect()
+        };
+        Ok(json!({"inputTableColumnInfos": inputs, "estimate": {}}))
+    }
+}
+
+type Seen = Arc<Mutex<Vec<(Instant, String)>>>;
+
+/// Records when a request reaches lakekeeper (inside the hold).
+async fn observe(State(seen): State<Seen>, req: Request, next: Next) -> Response {
+    let what = format!("{} {}", req.method(), req.uri().path());
+    seen.lock().unwrap().push((Instant::now(), what));
+    next.run(req).await
+}
+
+struct Env {
+    db: Db,
+    app: axum::Router,
+    prefix: String,
+    warehouse_id: Uuid,
+    catalog: String,
+    profile_id: i64,
+    profile_name: String,
+    policy: PolicyStore,
+    runner: Arc<FakeRunner>,
+    seen: Seen,
+    /// The clearance-bearing tag on `s.pii.ssn` (when classified).
+    clearance: Option<Uuid>,
+}
+
+async fn new_tag(db: &Db) -> Uuid {
+    sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+        .bind(unique("vh-tag"))
+        .bind(unique("VhTag"))
+        .fetch_one(&db.pool)
+        .await
+        .expect("tag")
+}
+
+/// A clearance-bearing tag on `s.{table}.{column}`.
+async fn classify(db: &Db, warehouse_id: Uuid, table: &str, column: &str) -> Uuid {
+    let tag = new_tag(db).await;
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) VALUES ($1,$2,'s',$3,$4)",
+    )
+    .bind(tag)
+    .bind(warehouse_id)
+    .bind(table)
+    .bind(column)
+    .execute(&db.pool)
+    .await
+    .expect("assign");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, '{}')",
+    )
+    .bind(tag)
+    .bind(vec![unique("vh-role")])
+    .execute(&db.pool)
+    .await
+    .expect("gate");
+    tag
+}
+
+/// One governed warehouse: a lakekeeper warehouse with namespace `s`, the
+/// egret warehouse and registry catalog over it, one Trino engine attached
+/// through a fresh profile (with its tag service). `classified` puts a
+/// clearance on `s.pii.ssn`; `s.orders` is never classified here.
+async fn env(limit: Duration, classified: bool) -> Option<Env> {
+    let dsn = egret_test_db::url().await?;
+    let db = Db::connect(&dsn, 10).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    lakekeeper_ready(&dsn).await;
+    let (state, _registry) = build_state(&dsn, SYSTEM_USER).await.expect("state");
+    let prefix = create_memory_warehouse(state.clone(), SYSTEM_USER, &unique("vhwh"))
+        .await
+        .expect("lakekeeper warehouse");
+
+    let pool = &db.pool;
+    let policy = PolicyStore::new(db.clone());
+    egret_policy::seed_trino(&policy).await.expect("seed trino");
+    egret_policy::seed_tag(&policy).await.expect("seed tag");
+    let profile_name = unique("trino_vh");
+    let tag_service = format!("{profile_name}_tag");
+    let profile = policy
+        .create_service(&profile_name, "trino", &json!({"tagService": tag_service}))
+        .await
+        .expect("profile");
+    policy
+        .create_service(&tag_service, "tag", &json!({}))
+        .await
+        .expect("tag service");
+
+    let ws: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,'VH') RETURNING id")
+            .bind(unique("vh-ws"))
+            .fetch_one(pool)
+            .await
+            .expect("workspace");
+    let sc: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','egret-vh-test','AKIATEST') RETURNING id",
+    )
+    .bind(unique("vh-sc"))
+    .fetch_one(pool)
+    .await
+    .expect("storage connection");
+    let warehouse_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id, \
+         lakekeeper_warehouse_id) VALUES ($1,$2,$3,$4) RETURNING id",
+    )
+    .bind(unique("vh_wh"))
+    .bind(ws)
+    .bind(sc)
+    .bind(&prefix)
+    .fetch_one(pool)
+    .await
+    .expect("warehouse");
+    let engine: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret', \
+                 '{\"trinoConfig\": {\"delegationMode\": \"jwt\"}}'::jsonb,$2) RETURNING id",
+    )
+    .bind(unique("vh-eng"))
+    .bind(profile.id)
+    .fetch_one(pool)
+    .await
+    .expect("engine");
+    let catalog = unique("vh_cat");
+    let catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+         RETURNING id",
+    )
+    .bind(&catalog)
+    .bind(warehouse_id)
+    .fetch_one(pool)
+    .await
+    .expect("catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine)
+    .bind(catalog_id)
+    .execute(pool)
+    .await
+    .expect("attach");
+    let clearance = if classified {
+        Some(classify(&db, warehouse_id, "pii", "ssn").await)
+    } else {
+        None
+    };
+
+    let runner = Arc::new(FakeRunner {
+        catalog: catalog.clone(),
+        calls: AtomicUsize::new(0),
+    });
+    let seen: Seen = Arc::default();
+    let inner = catalog_engine_router(state)
+        .layer(axum::middleware::from_fn_with_state(seen.clone(), observe));
+    let hold = ViewHold::new(db.clone(), runner.clone()).with_limit(limit);
+    let app = front_catalog_router(inner, None, Some(Arc::new(hold)));
+
+    let env = Env {
+        db,
+        app,
+        prefix,
+        warehouse_id,
+        catalog,
+        profile_id: profile.id,
+        profile_name,
+        policy,
+        runner,
+        seen,
+        clearance,
+    };
+    let (status, body) = env
+        .call("POST", "namespaces", Some(json!({"namespace": ["s"]})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "create namespace: {body}");
+    Some(env)
+}
+
+impl Env {
+    async fn call(&self, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+        let req = axum::http::Request::builder()
+            .method(method)
+            .uri(format!("/{}/{path}", self.prefix))
+            .header("content-type", "application/json")
+            .body(match body {
+                Some(b) => Body::from(b.to_string()),
+                None => Body::empty(),
+            })
+            .unwrap();
+        let resp = self.app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, json)
+    }
+
+    async fn create(&self, name: &str, sql: &str) -> (StatusCode, Value) {
+        self.call("POST", "namespaces/s/views", Some(create_body(name, sql)))
+            .await
+    }
+
+    async fn view(&self, name: &str) -> Option<Value> {
+        let (status, body) = self
+            .call("GET", &format!("namespaces/s/views/{name}"), None)
+            .await;
+        match status {
+            StatusCode::OK => Some(body),
+            StatusCode::NOT_FOUND => None,
+            other => panic!("load view {name}: {other} {body}"),
+        }
+    }
+
+    fn view_ref(&self, name: &str) -> ViewRef {
+        ViewRef {
+            catalog: self.catalog.clone(),
+            schema: "s".into(),
+            name: name.into(),
+        }
+    }
+
+    async fn lineage(&self, name: &str) -> RecordedLineage {
+        let mut conn = self.db.pool.acquire().await.unwrap();
+        recorded_lineage(&mut conn, &self.view_ref(name))
+            .await
+            .unwrap()
+    }
+
+    async fn assignments(&self, name: &str) -> BTreeSet<(Uuid, String)> {
+        let rows: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT tag_id, column_name FROM catalog_tag_assignments \
+              WHERE warehouse_id = $1 AND schema_name = 's' AND table_name = $2",
+        )
+        .bind(self.warehouse_id)
+        .bind(name)
+        .fetch_all(&self.db.pool)
+        .await
+        .unwrap();
+        rows.into_iter().collect()
+    }
+
+    async fn tag_version(&self) -> i64 {
+        sqlx::query_scalar("SELECT tag_version FROM policy.authz_services WHERE id = $1")
+            .bind(self.profile_id)
+            .fetch_one(&self.db.pool)
+            .await
+            .unwrap()
+    }
+
+    /// When the view request reached lakekeeper, if it did. `what` is
+    /// `"<METHOD> /<path after the prefix>"`.
+    fn reached(&self, what: &str) -> Vec<Instant> {
+        let (method, path) = what.split_once(' ').unwrap();
+        let what = format!("{method} /{}{path}", self.prefix);
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, w)| *w == what)
+            .map(|(t, _)| *t)
+            .collect()
+    }
+
+    fn expected_pii_tags(&self, columns: &[&str]) -> BTreeSet<(Uuid, String)> {
+        let tag = self.clearance.expect("classified");
+        columns.iter().map(|c| (tag, c.to_string())).collect()
+    }
+
+    /// The fake Trino plugin: polls `download_tags` every [`POLL`], reporting
+    /// the version its last 200 carried. Each poll is recorded as (when, the
+    /// `lastKnownVersion` it reported).
+    fn start_plugin(&self) -> Plugin {
+        let polls: Arc<Mutex<Vec<(Instant, i64)>>> = Arc::default();
+        let router = ranger_router(RangerState {
+            store: self.policy.clone(),
+            auth_token: Arc::from(RANGER_TOKEN),
+        });
+        let service = self.profile_name.clone();
+        let log = polls.clone();
+        let task = tokio::spawn(async move {
+            let mut held: i64 = -1;
+            loop {
+                let uri = format!(
+                    "/tags/download/{service}?pluginId=trino@vh-coordinator-abc12-x9z8q-{service}\
+                     &lastKnownVersion={held}"
+                );
+                let req = axum::http::Request::builder()
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {RANGER_TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap();
+                let at = Instant::now();
+                let resp = router.clone().oneshot(req).await.unwrap();
+                log.lock().unwrap().push((at, held));
+                if resp.status() == StatusCode::OK {
+                    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                    let tags: Value = serde_json::from_slice(&bytes).unwrap();
+                    held = tags["tagVersion"].as_i64().expect("tagVersion");
+                }
+                tokio::time::sleep(POLL).await;
+            }
+        });
+        Plugin { polls, task }
+    }
+}
+
+struct Plugin {
+    polls: Arc<Mutex<Vec<(Instant, i64)>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Plugin {
+    /// The first poll that reported at least `version`.
+    fn first_report_of(&self, version: i64) -> Option<Instant> {
+        self.polls
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, held)| *held >= version)
+            .map(|(t, _)| *t)
+    }
+
+    /// The first poll that reported at least `version`, waiting up to 5 s for
+    /// it: a commit that did not wait reaches lakekeeper before it exists.
+    async fn report_of(&self, version: i64) -> Instant {
+        for _ in 0..250 {
+            if let Some(t) = self.first_report_of(version) {
+                return t;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the plugin never reported version {version}");
+    }
+
+    /// Wait until the plugin has polled once, so the ledger knows it.
+    async fn polled(&self) {
+        for _ in 0..100 {
+            if !self.polls.lock().unwrap().is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the fake plugin never polled");
+    }
+}
+
+impl Drop for Plugin {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+fn schema(id: i64, columns: &[&str]) -> Value {
+    let fields: Vec<Value> = columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| json!({"id": i + 1, "name": c, "type": "string", "required": false}))
+        .collect();
+    json!({"type": "struct", "schema-id": id, "fields": fields})
+}
+
+fn version(id: i64, schema_id: i64, sql: &str) -> Value {
+    json!({
+        "version-id": id,
+        "schema-id": schema_id,
+        "timestamp-ms": chrono::Utc::now().timestamp_millis(),
+        "summary": {"engine-name": "trino", "engine-version": "483"},
+        "default-namespace": ["s"],
+        "representations": [{"type": "sql", "sql": sql, "dialect": "trino"}]
+    })
+}
+
+/// Live result §1 Q1's create body, in its shape.
+fn create_body(name: &str, sql: &str) -> Value {
+    json!({
+        "name": name,
+        "schema": schema(0, &["id", "ssn"]),
+        "view-version": version(1, 0, sql),
+        "properties": {"trino.run-as-owner": "vgadmin"}
+    })
+}
+
+/// Live result §1 Q1's `CREATE OR REPLACE` commit body, in its shape.
+fn replace_body(view: &Value, sql: &str) -> Value {
+    let uuid = view["metadata"]["view-uuid"].as_str().expect("view-uuid");
+    json!({
+        "requirements": [{"type": "assert-view-uuid", "uuid": uuid}],
+        "updates": [
+            {"action": "set-properties", "updates": {"trino.run-as-owner": "vgadmin"}},
+            {"action": "add-schema", "schema": schema(1, &["id", "ssn", "name"])},
+            {"action": "add-view-version", "view-version": version(2, -1, sql)},
+            {"action": "set-current-view-version", "view-version-id": -1}
+        ]
+    })
+}
+
+fn current_sql(view: &Value) -> String {
+    let m = &view["metadata"];
+    let current = m["current-version-id"].as_i64().unwrap();
+    let v = m["versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["version-id"].as_i64() == Some(current))
+        .unwrap();
+    v["representations"][0]["sql"].as_str().unwrap().to_string()
+}
+
+fn message(body: &Value) -> String {
+    body["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn computed(tables: &[&str], catalog: &str) -> RecordedLineage {
+    RecordedLineage::Computed(
+        tables
+            .iter()
+            .map(|t| (catalog.to_string(), "s".to_string(), t.to_string()))
+            .collect(),
+    )
+}
+
+/// Test 1: the view reaches lakekeeper only after the plugin's download
+/// reports the new tag version.
+#[tokio::test]
+async fn a_classified_view_commits_only_after_the_plugin_holds_its_tags() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let plugin = env.start_plugin();
+    plugin.polled().await;
+
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let version = env.tag_version().await;
+    let reached = env.reached("POST /namespaces/s/views");
+    assert_eq!(reached.len(), 1, "one create reached lakekeeper");
+    let confirmed = plugin.report_of(version).await;
+    assert!(
+        confirmed <= reached[0],
+        "the commit reached lakekeeper {:?} before the plugin reported version {version}",
+        confirmed.duration_since(reached[0])
+    );
+    assert!(env.view("v1").await.is_some());
+    assert_eq!(
+        env.assignments("v1").await,
+        env.expected_pii_tags(&["id", "ssn"])
+    );
+    assert_eq!(env.lineage("v1").await, computed(&["pii"], &env.catalog));
+}
+
+/// Test 2: no plugin ever polls. The request is refused within the limit plus
+/// a margin, and nothing remains.
+#[tokio::test]
+async fn a_view_no_plugin_confirms_is_refused_and_nothing_remains() {
+    let limit = Duration::from_secs(2);
+    let Some(env) = env(limit, true).await else {
+        return;
+    };
+    let before = env.tag_version().await;
+
+    let start = Instant::now();
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
+    let took = start.elapsed();
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"]["type"], "CommitFailedException");
+    let msg = message(&body);
+    assert!(msg.contains(&format!("{UNCONFIRMED_REFUSAL} 2 s")), "{msg}");
+    assert!(msg.contains(NO_PLUGIN_POLLED), "{msg}");
+    assert!(took >= limit, "refused after {took:?}, before the limit");
+    assert!(
+        took < limit + Duration::from_secs(5),
+        "refused after {took:?}"
+    );
+
+    assert!(env.reached("POST /namespaces/s/views").is_empty());
+    assert!(env.view("v1").await.is_none(), "no view exists");
+    assert!(
+        env.assignments("v1").await.is_empty(),
+        "no assignment remains"
+    );
+    assert_eq!(env.lineage("v1").await, RecordedLineage::Missing);
+    assert_eq!(
+        env.tag_version().await,
+        before + 2,
+        "bumped, then bumped back"
+    );
+}
+
+/// Test 3: a view over unclassified tables commits with no wait, and its
+/// lineage is recorded.
+#[tokio::test]
+async fn a_view_over_unclassified_tables_commits_with_no_wait() {
+    // No plugin polls: a hold would time out at the limit.
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let before = env.tag_version().await;
+
+    let start = Instant::now();
+    let (status, body) = env.create("v1", "SELECT id, name FROM orders").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+
+    assert!(env.view("v1").await.is_some());
+    assert!(env.assignments("v1").await.is_empty());
+    assert_eq!(env.lineage("v1").await, computed(&["orders"], &env.catalog));
+    assert_eq!(env.tag_version().await, before);
+    assert_eq!(env.runner.calls.load(Ordering::SeqCst), 1);
+}
+
+/// Test 4: an EXPLAIN failure refuses, and so does an empty lineage (R6).
+/// Nothing is written either way.
+#[tokio::test]
+async fn a_lineage_that_cannot_be_computed_refuses_and_writes_nothing() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let before = env.tag_version().await;
+
+    for (sql, reason) in [
+        ("SELECT id, ssn FROM pii -- FAIL", "Access Denied: boom"),
+        ("SELECT id, ssn FROM pii WHERE false", EMPTY_LINEAGE_REASON),
+    ] {
+        let (status, body) = env.create("v1", sql).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let msg = message(&body);
+        assert!(msg.contains(&format!("{LINEAGE_REFUSAL}: ")), "{msg}");
+        assert!(msg.contains(reason), "{msg}");
+    }
+
+    assert!(env.reached("POST /namespaces/s/views").is_empty());
+    assert!(env.view("v1").await.is_none());
+    assert!(env.assignments("v1").await.is_empty());
+    assert_eq!(env.lineage("v1").await, RecordedLineage::Missing);
+    assert_eq!(env.tag_version().await, before);
+}
+
+/// Test 5: `CREATE OR REPLACE` (a commit carrying `add-view-version`) goes
+/// through the same hold.
+#[tokio::test]
+async fn create_or_replace_goes_through_the_same_hold() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let (status, body) = env.create("v1", "SELECT id, name FROM orders").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let plugin = env.start_plugin();
+    plugin.polled().await;
+
+    let view = env.view("v1").await.unwrap();
+    let sql = "SELECT id, ssn, name FROM pii";
+    let (status, body) = env
+        .call(
+            "POST",
+            "namespaces/s/views/v1",
+            Some(replace_body(&view, sql)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let version = env.tag_version().await;
+    let reached = env.reached("POST /namespaces/s/views/v1");
+    assert_eq!(reached.len(), 1);
+    let confirmed = plugin.report_of(version).await;
+    assert!(confirmed <= reached[0], "the replace did not wait");
+    assert_eq!(current_sql(&env.view("v1").await.unwrap()), sql);
+    assert_eq!(
+        env.assignments("v1").await,
+        env.expected_pii_tags(&["id", "name", "ssn"])
+    );
+    assert_eq!(env.lineage("v1").await, computed(&["pii"], &env.catalog));
+}
+
+/// Test 6: a commit with no new view version passes untouched.
+#[tokio::test]
+async fn a_commit_with_no_new_view_version_passes_untouched() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let (status, body) = env.create("v1", "SELECT id, name FROM orders").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before = env.tag_version().await;
+    let calls = env.runner.calls.load(Ordering::SeqCst);
+
+    // `COMMENT ON VIEW`, then a replace with the same SQL and schema.
+    for body in [
+        json!({"updates": [{"action": "set-properties", "updates": {"comment": "hello"}}]}),
+        json!({"requirements": [], "updates": []}),
+    ] {
+        let start = Instant::now();
+        let (status, resp) = env.call("POST", "namespaces/s/views/v1", Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+    assert_eq!(env.reached("POST /namespaces/s/views/v1").len(), 2);
+    assert_eq!(env.runner.calls.load(Ordering::SeqCst), calls, "no EXPLAIN");
+    assert_eq!(env.tag_version().await, before);
+    assert!(env.assignments("v1").await.is_empty());
+    let view = env.view("v1").await.unwrap();
+    assert_eq!(view["metadata"]["properties"]["comment"], "hello");
+}
+
+/// Test 7: lakekeeper answers non-2xx after the hold. Nothing written by
+/// that hold remains, and what was there before it does.
+#[tokio::test]
+async fn a_commit_lakekeeper_refuses_after_the_hold_leaves_nothing_behind() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let plugin = env.start_plugin();
+    plugin.polled().await;
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let tags_before = env.assignments("v1").await;
+    let lineage_before = env.lineage("v1").await;
+
+    // A second create of the same name, reading a newly classified table:
+    // the hold writes the new tag and lineage, then lakekeeper refuses.
+    let second = classify(&env.db, env.warehouse_id, "orders", "name").await;
+    let (status, body) = env
+        .create("v1", "SELECT id, ssn FROM pii JOIN orders USING (id)")
+        .await;
+    assert!(
+        !status.is_success(),
+        "lakekeeper must refuse: {status} {body}"
+    );
+    assert_eq!(
+        env.reached("POST /namespaces/s/views").len(),
+        2,
+        "the hold let it through"
+    );
+
+    assert_eq!(env.assignments("v1").await, tags_before);
+    assert!(env
+        .assignments("v1")
+        .await
+        .iter()
+        .all(|(t, _)| *t != second));
+    assert_eq!(env.lineage("v1").await, lineage_before);
+    assert_eq!(env.lineage("v1").await, computed(&["pii"], &env.catalog));
+    assert_eq!(
+        current_sql(&env.view("v1").await.unwrap()),
+        "SELECT id, ssn FROM pii"
+    );
+}
+
+/// Test 8: a rename moves the lineage and the tag assignments.
+#[tokio::test]
+async fn a_rename_moves_the_lineage_and_the_tags() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let plugin = env.start_plugin();
+    plugin.polled().await;
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let tags = env.assignments("v1").await;
+    assert!(!tags.is_empty());
+
+    let (status, body) = env
+        .call(
+            "POST",
+            "views/rename",
+            Some(json!({"source": {"namespace": ["s"], "name": "v1"},
+                        "destination": {"namespace": ["s"], "name": "v2"}})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    assert!(env.view("v1").await.is_none());
+    assert!(env.view("v2").await.is_some());
+    assert_eq!(env.assignments("v2").await, tags);
+    assert!(env.assignments("v1").await.is_empty());
+    assert_eq!(env.lineage("v2").await, computed(&["pii"], &env.catalog));
+    assert_eq!(env.lineage("v1").await, RecordedLineage::Missing);
+    let version = env.tag_version().await;
+    let reached = env.reached("POST /views/rename");
+    assert_eq!(reached.len(), 1);
+    // The rename reached lakekeeper after the plugin held the version that
+    // carries v2's tags (the source's removal comes after, one bump later).
+    let confirmed = plugin.report_of(version - 1).await;
+    assert!(confirmed <= reached[0], "the rename did not wait");
+}
+
+/// The user's ruling on the brief: when the profile governing the view's
+/// catalog has no classified column at all, the commit passes with no
+/// EXPLAIN, and the lineage stays missing for the B3 sweep.
+#[tokio::test]
+async fn a_profile_with_no_classified_column_commits_without_explain() {
+    let Some(env) = env(LIMIT, false).await else {
+        return;
+    };
+    let before = env.tag_version().await;
+
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    assert_eq!(env.runner.calls.load(Ordering::SeqCst), 0, "no EXPLAIN");
+    assert!(env.view("v1").await.is_some());
+    assert!(env.assignments("v1").await.is_empty());
+    assert_eq!(env.lineage("v1").await, RecordedLineage::Missing);
+    assert_eq!(env.tag_version().await, before);
+}

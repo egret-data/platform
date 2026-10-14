@@ -1995,9 +1995,32 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
                 catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
             });
+        // View governance B2: a classified view's commit waits until every
+        // Ranger plugin holds its tags. The lineage EXPLAIN runs as
+        // `egret-lineage` on a provisioned JWT-mode Trino engine
+        // (`egret_query::execution::lineage`), with a token only egret mints.
+        let lineage_minter =
+            std::sync::Arc::new(egret_bin::engine_minter::MachineIdpEngineMinter::new(
+                egret_machine_idp::PgSigningKeyStore::new(db.clone()),
+                egret_auth::users::UserRepo::new(db.clone()),
+                egret_auth::groups::GroupRepo::new(db.clone()),
+                identity.issuer().to_string(),
+                900,
+            ));
+        let lineage_runner =
+            std::sync::Arc::new(egret_query::execution::lineage::TrinoLineageRunner::new(
+                db.pool.clone(),
+                lineage_minter,
+                std::time::Duration::from_secs(30),
+            ));
+        let view_hold = std::sync::Arc::new(egret_catalog_engine::ViewHold::new(
+            db.clone(),
+            lineage_runner,
+        ));
         Some(egret_catalog_engine::mount_catalog_engine(
             engine_state,
             Some(guard),
+            Some(view_hold),
         ))
     } else {
         None
