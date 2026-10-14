@@ -3201,6 +3201,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "egret-auth",
+ "egret-bi",
  "egret-catalog-api",
  "egret-catalog-engine",
  "egret-catalog-registry",

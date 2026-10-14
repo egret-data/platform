@@ -173,10 +173,32 @@ impl LineageSweep {
         &self,
         warehouse_ids: &[Uuid],
     ) -> Result<SweepReport, SweepError> {
-        self.run(Some(warehouse_ids)).await
+        self.run(Some(warehouse_ids), false).await
     }
 
-    async fn run(&self, only: Option<&[Uuid]>) -> Result<SweepReport, SweepError> {
+    /// The sweep a classification write asks for (Task 9 fix round 1): the
+    /// views with no computed lineage (missing or failed) in every warehouse
+    /// the profiles of `base_warehouses` reach, `None` for all warehouses. A
+    /// view with a computed lineage is re-tagged by the write itself.
+    pub async fn sweep_unjudged(
+        &self,
+        base_warehouses: Option<&[Uuid]>,
+    ) -> Result<SweepReport, SweepError> {
+        let reach =
+            match base_warehouses {
+                None => None,
+                Some(base) => Some(profile_warehouses(&self.db.pool, base).await.map_err(|e| {
+                    SweepError::Unavailable(format!("listing the warehouses: {e}"))
+                })?),
+            };
+        self.run(reach.as_deref(), true).await
+    }
+
+    async fn run(
+        &self,
+        only: Option<&[Uuid]>,
+        unjudged_only: bool,
+    ) -> Result<SweepReport, SweepError> {
         let _running = self.running.try_lock().map_err(|_| SweepError::Busy)?;
         let warehouses = self
             .warehouses(only)
@@ -191,7 +213,8 @@ impl LineageSweep {
             .detach();
         let mut report = SweepReport::default();
         for w in &warehouses {
-            self.sweep_warehouse(&mut lock, w, &mut report).await;
+            self.sweep_warehouse(&mut lock, w, unjudged_only, &mut report)
+                .await;
         }
         if let Err(e) = lock.close().await {
             tracing::warn!(error = %e, "lineage sweep: closing the lock connection failed");
@@ -238,6 +261,7 @@ impl LineageSweep {
         &self,
         lock: &mut sqlx::PgConnection,
         w: &Swept,
+        unjudged_only: bool,
         report: &mut SweepReport,
     ) {
         let failure = |schema: Option<&str>, view: Option<&str>, reason: String| SweepFailure {
@@ -287,6 +311,9 @@ impl LineageSweep {
                 .iter()
                 .filter(|t| matches!(t.kind, TabularKind::View))
             {
+                if unjudged_only && self.has_computed_lineage(w, schema, &view.name).await {
+                    continue;
+                }
                 report.views += 1;
                 match self.sweep_view(lock, w, schema, &view.name).await {
                     Ok(changed) => {
@@ -303,6 +330,23 @@ impl LineageSweep {
                 }
             }
         }
+    }
+
+    /// Whether `schema.name` already has a computed lineage. A read error
+    /// counts as "no", so the view is swept rather than skipped.
+    async fn has_computed_lineage(&self, w: &Swept, schema: &str, name: &str) -> bool {
+        let view = ViewRef {
+            catalog: w.catalog.clone(),
+            schema: schema.to_string(),
+            name: name.to_string(),
+        };
+        let Ok(mut conn) = self.db.pool.acquire().await else {
+            return false;
+        };
+        matches!(
+            lineage::recorded_lineage(&mut conn, &view).await,
+            Ok(RecordedLineage::Computed(_))
+        )
     }
 
     /// One view under its lock: `Ok(true)` when its derived tags changed,
@@ -431,6 +475,9 @@ impl LineageSweep {
     ) -> Result<bool, String> {
         let s = |e: &dyn std::fmt::Display| e.to_string();
         let mut tx = self.db.pool.begin().await.map_err(|e| s(&e))?;
+        egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut tx)
+            .await
+            .map_err(|e| s(&e))?;
         lineage::write_lineage(&mut tx, view, tables)
             .await
             .map_err(|e| s(&e))?;
@@ -476,6 +523,7 @@ impl LineageSweep {
     /// lineage is kept too (module doc); otherwise the failure is recorded.
     async fn record_failure(&self, view: &ViewRef, reason: &str) -> Result<(), sqlx::Error> {
         let mut tx = self.db.pool.begin().await?;
+        egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut tx).await?;
         match lineage::recorded_lineage(&mut tx, view).await? {
             RecordedLineage::Computed(_) => {}
             RecordedLineage::Missing | RecordedLineage::Failed { .. } => {
@@ -489,6 +537,123 @@ impl LineageSweep {
 #[async_trait::async_trait]
 impl LineageSweeper for LineageSweep {
     async fn sweep(&self) -> Result<SweepReport, SweepError> {
-        self.run(None).await
+        self.run(None, false).await
     }
+}
+
+/// Every warehouse the profiles of `base` reach: the warehouses whose
+/// registry catalog is attached to an engine bound to a profile that serves
+/// one of `base`, plus `base` itself. A view reading a base table lives on an
+/// engine that attaches the base's catalog, so it is in one of these.
+async fn profile_warehouses(pool: &sqlx::PgPool, base: &[Uuid]) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "WITH profiles AS ( \
+             SELECT DISTINCT e.authz_service_id AS id \
+               FROM registry.catalogs c \
+               JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
+               JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
+              WHERE c.warehouse_id = ANY($1) AND e.authz_service_id IS NOT NULL) \
+         SELECT c.warehouse_id \
+           FROM registry.catalogs c \
+           JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
+           JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
+          WHERE e.authz_service_id IN (SELECT id FROM profiles) AND c.warehouse_id IS NOT NULL \
+         UNION \
+         SELECT unnest($1::uuid[]) \
+         ORDER BY 1",
+    )
+    .bind(base)
+    .fetch_all(pool)
+    .await
+}
+
+/// How long the classification sweeper waits before it tries again after a
+/// sweep that could not run (one already running, or the database).
+const RETRY_AFTER: Duration = Duration::from_secs(1);
+
+/// Run, after every classification write commits, a sweep of the views with
+/// no computed lineage that the write's profiles reach (Task 9 fix round 1,
+/// amended ruling). Without it, a view committed while its profile had no
+/// classified column, and whose lineage then could not be computed, would
+/// stay untagged until the scheduled sweep.
+///
+/// The writes ask through `NOTIFY` (`egret_perm_compile::view_tags::
+/// notify_classification_in_tx`), which Postgres delivers only at commit, so
+/// the sweep always reads the committed classification. Requests that arrive
+/// while one sweep runs are merged into the next. A sweep that meets
+/// [`SweepError::Busy`] (another sweep is running) is not dropped: it waits
+/// [`RETRY_AFTER`] and runs again, until it has run.
+///
+/// A notification lost while the listener reconnects is caught by the
+/// scheduled sweep ([`LINEAGE_SWEEP_INTERVAL`]).
+pub fn spawn_classification_sweeps(
+    sweep: Arc<LineageSweep>,
+    db: Db,
+) -> tokio::task::JoinHandle<()> {
+    use egret_perm_compile::view_tags::{CLASSIFICATION_ALL, CLASSIFICATION_CHANNEL};
+    tokio::spawn(async move {
+        let mut listener = loop {
+            match sqlx::postgres::PgListener::connect_with(&db.pool).await {
+                Ok(mut l) => match l.listen(CLASSIFICATION_CHANNEL).await {
+                    Ok(()) => break l,
+                    Err(e) => tracing::warn!(error = %e, "classification sweeps: LISTEN failed"),
+                },
+                Err(e) => tracing::warn!(error = %e, "classification sweeps: cannot connect"),
+            }
+            tokio::time::sleep(RETRY_AFTER * 5).await;
+        };
+        // `None` inside: every warehouse.
+        let mut pending: Option<Option<BTreeSet<Uuid>>> = None;
+        let merge = |pending: &mut Option<Option<BTreeSet<Uuid>>>, payload: &str| {
+            let ids: Option<BTreeSet<Uuid>> = if payload == CLASSIFICATION_ALL {
+                None
+            } else {
+                Some(payload.split(',').filter_map(|p| p.parse().ok()).collect())
+            };
+            *pending = Some(match (pending.take(), ids) {
+                (None, ids) => ids,
+                (Some(None), _) | (Some(Some(_)), None) => None,
+                (Some(Some(mut a)), Some(b)) => {
+                    a.extend(b);
+                    Some(a)
+                }
+            });
+        };
+        loop {
+            if pending.is_none() {
+                match listener.recv().await {
+                    Ok(n) => merge(&mut pending, n.payload()),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "classification sweeps: listener error");
+                        tokio::time::sleep(RETRY_AFTER).await;
+                        continue;
+                    }
+                }
+            }
+            // Fold in what else has arrived.
+            while let Some(n) = listener.next_buffered() {
+                merge(&mut pending, n.payload());
+            }
+            let Some(scope) = pending.clone() else {
+                continue;
+            };
+            let base: Option<Vec<Uuid>> = scope.map(|s| s.into_iter().collect());
+            match sweep.sweep_unjudged(base.as_deref()).await {
+                Ok(report) => {
+                    pending = None;
+                    if !report.failures.is_empty() {
+                        tracing::warn!(
+                            failures = report.failures.len(),
+                            first = ?report.failures.first(),
+                            "classification sweep: some views' lineage could not be computed"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::info!(error = %e, "classification sweep postponed; retrying");
+                    tokio::time::sleep(RETRY_AFTER).await;
+                }
+            }
+        }
+    })
 }

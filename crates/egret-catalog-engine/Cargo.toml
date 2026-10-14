@@ -138,6 +138,9 @@ egret-test-db.workspace = true
 # roundtrip test calls. The prod (non-test) `cargo build` leaves the feature off,
 # so `RequestMetadata::test_user` is never referenced outside test/dev builds.
 egret-catalog-engine = { path = ".", features = ["test-utils"] }
+# Task 9 fix round 1: the race tests drive the real base classification write
+# (`CatalogTagRepo`). egret-bi does not depend on this crate.
+egret-bi.workspace = true
 tokio.workspace = true
 # oneshot harness: drive the mounted router with no socket (mirrors
 # egret-catalog/tests/http_roundtrip.rs's pattern). `tower::ServiceExt::oneshot`

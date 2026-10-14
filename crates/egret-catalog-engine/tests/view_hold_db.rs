@@ -908,11 +908,254 @@ async fn a_profile_with_no_classified_column_commits_without_explain() {
     let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
-    assert_eq!(env.runner.calls.load(Ordering::SeqCst), 0, "no EXPLAIN");
+    // Task 9 fix round 1 (amended ruling): the EXPLAIN runs best-effort, and
+    // its lineage and columns are recorded, so a later classification of
+    // `pii` re-tags the view in the base write itself.
+    assert_eq!(
+        env.runner.calls.load(Ordering::SeqCst),
+        1,
+        "one best-effort EXPLAIN"
+    );
     assert!(env.view("v1").await.is_some());
     assert!(env.assignments("v1").await.is_empty());
-    assert_eq!(env.lineage("v1").await, RecordedLineage::Missing);
+    assert_eq!(env.lineage("v1").await, computed(&["pii"], &env.catalog));
+    assert_eq!(
+        env.columns("v1").await,
+        Some(vec!["id".into(), "ssn".into()])
+    );
     assert_eq!(env.tag_version().await, before);
+}
+
+/// Task 9 fix round 1 (amended ruling): on a profile with no classified
+/// column, a lineage that cannot be computed never refuses the commit; it is
+/// recorded `failed`, so the sweep a later classification triggers finds it.
+#[tokio::test]
+async fn a_profile_with_no_classified_column_never_refuses_and_records_a_failed_lineage() {
+    let Some(env) = env(LIMIT, false).await else {
+        return;
+    };
+    for (name, sql) in [
+        ("vf", "SELECT id, ssn FROM pii WHERE FAIL"),
+        ("ve", "SELECT id, ssn FROM pii WHERE false"),
+    ] {
+        let (status, body) = env.create(name, sql).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+        assert!(env.view(name).await.is_some());
+        assert!(
+            matches!(env.lineage(name).await, RecordedLineage::Failed { .. }),
+            "{name}: {:?}",
+            env.lineage(name).await
+        );
+    }
+}
+
+/// Wait until `check` holds, up to 10 s.
+async fn eventually<F, Fut>(what: &str, check: F)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    for _ in 0..500 {
+        if check().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("never happened: {what}");
+}
+
+/// Backends of this database waiting on a lock.
+async fn lock_waiters(db: &Db) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity \
+          WHERE datname = current_database() AND wait_event_type = 'Lock'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap()
+}
+
+/// Task 9 fix round 1, I1(a): an admin assigns, by hand, a coordinate the hold
+/// derived while the hold waits for the plugins. The hold is then refused and
+/// compensates: it removes its own derived rows, never the admin's.
+#[tokio::test]
+async fn compensation_never_removes_a_tag_an_admin_assigned_during_the_wait() {
+    let Some(env) = env(Duration::from_secs(3), true).await else {
+        return;
+    };
+    let tag = env.clearance.unwrap();
+    let (app, prefix) = (env.app.clone(), env.prefix.clone());
+    let create = tokio::spawn(async move {
+        Env::send(
+            &app,
+            &prefix,
+            "POST",
+            "namespaces/s/views",
+            Some(create_body("v1", "SELECT id, ssn FROM pii")),
+        )
+        .await
+    });
+    let e = &env;
+    eventually("the hold's rows are committed", || async move {
+        e.assignments("v1").await.len() == 2
+    })
+    .await;
+    // `assign_catalog`'s upsert: a derived coordinate becomes manual.
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments \
+             (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1, $2, 's', 'v1', 'ssn') \
+         ON CONFLICT (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         DO UPDATE SET from_lineage = false WHERE catalog_tag_assignments.from_lineage",
+    )
+    .bind(tag)
+    .bind(env.warehouse_id)
+    .execute(&env.db.pool)
+    .await
+    .unwrap();
+
+    let (status, body) = create.await.unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(message(&body).contains(UNCONFIRMED_REFUSAL), "{body}");
+    assert_eq!(
+        env.assignments("v1").await,
+        BTreeSet::from([(tag, "ssn".to_string())]),
+        "the admin's tag stays"
+    );
+    assert_eq!(env.derived_flags("v1").await, vec![false]);
+}
+
+/// Task 9 fix round 1, I1(b): while a replace waits, a base of the view's
+/// PREVIOUS lineage is classified with the tag the hold inserted. The base
+/// write's retag finds the rows present and adds none. When the replace is
+/// refused, compensation restores the previous lineage AND its derived tags.
+#[tokio::test]
+async fn compensation_rederives_the_tags_the_previous_lineage_carries() {
+    let Some(env) = env(Duration::from_secs(3), true).await else {
+        return;
+    };
+    let tag = env.clearance.unwrap();
+    let (status, body) = env.create("v1", "SELECT id, name FROM orders").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(env.assignments("v1").await.is_empty());
+    let view = env.view("v1").await.unwrap();
+    let (app, prefix) = (env.app.clone(), env.prefix.clone());
+    let replace = tokio::spawn(async move {
+        Env::send(
+            &app,
+            &prefix,
+            "POST",
+            "namespaces/s/views/v1",
+            Some(replace_body(&view, "SELECT id, ssn FROM pii")),
+        )
+        .await
+    });
+    let e = &env;
+    eventually("the replace's rows are committed", || async move {
+        e.assignments("v1").await.len() == 3
+    })
+    .await;
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments \
+             (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1, $2, 's', 'orders', 'id')",
+    )
+    .bind(tag)
+    .bind(env.warehouse_id)
+    .execute(&env.db.pool)
+    .await
+    .unwrap();
+
+    let (status, body) = replace.await.unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(env.lineage("v1").await, computed(&["orders"], &env.catalog));
+    assert_eq!(
+        env.assignments("v1").await,
+        env.expected_pii_tags(&["id", "ssn"]),
+        "the restored lineage derives the tag on every column of the old version"
+    );
+    assert_eq!(env.derived_flags("v1").await, vec![true, true]);
+}
+
+/// Task 9 fix round 1, I2: a base classification that commits after the hold
+/// has read the view's tag set, but before the hold's lineage commits, must
+/// still reach the view. Here the hold's write is stalled on a row lock the
+/// test holds, the base write runs, then the stall is released.
+#[tokio::test]
+async fn a_base_classification_racing_a_held_commit_reaches_the_view() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let plugin = env.start_plugin();
+    plugin.polled().await;
+    let x = env.clearance.unwrap();
+    // A clearance-bearing tag not yet on any column.
+    let y = new_tag(&env.db).await;
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, '{}')",
+    )
+    .bind(y)
+    .bind(vec![unique("vh-role")])
+    .execute(&env.db.pool)
+    .await
+    .unwrap();
+    // Stall: an uncommitted row on a coordinate the hold will insert.
+    let mut stall = env.db.pool.begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments \
+             (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1, $2, 's', 'v1', 'id')",
+    )
+    .bind(x)
+    .bind(env.warehouse_id)
+    .execute(&mut *stall)
+    .await
+    .unwrap();
+
+    let (app, prefix) = (env.app.clone(), env.prefix.clone());
+    let create = tokio::spawn(async move {
+        Env::send(
+            &app,
+            &prefix,
+            "POST",
+            "namespaces/s/views",
+            Some(create_body(
+                "v1",
+                "SELECT p.id, p.ssn FROM pii p JOIN orders o ON p.id = o.id",
+            )),
+        )
+        .await
+    });
+    let db = &env.db;
+    eventually("the hold's write waits on the stall", || async move {
+        lock_waiters(db).await >= 1
+    })
+    .await;
+    let repo = egret_bi::catalog_tags::CatalogTagRepo::new(env.db.clone());
+    let wh = env.warehouse_id;
+    let base =
+        tokio::spawn(async move { repo.assign_catalog(y, wh, "s", "orders", "id", None).await });
+    // The base write either completes, or waits behind the hold.
+    let b = &base;
+    eventually("the base write finished or waits", || async move {
+        b.is_finished() || lock_waiters(db).await >= 2
+    })
+    .await;
+    stall.rollback().await.unwrap();
+
+    let (status, body) = create.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    base.await.unwrap().expect("the base write");
+    let rows = env.assignments("v1").await;
+    for tag in [x, y] {
+        for column in ["id", "ssn"] {
+            assert!(
+                rows.contains(&(tag, column.to_string())),
+                "{column} lacks {tag}: {rows:?}"
+            );
+        }
+    }
 }
 
 // ── fix round 1 ─────────────────────────────────────────────────────────────

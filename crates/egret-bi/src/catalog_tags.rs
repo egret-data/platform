@@ -387,27 +387,37 @@ impl CatalogTagRepo {
 }
 
 /// What a catalog-tag write on `schema.table` reaches (view governance B3):
-/// the written warehouse plus the warehouses of the views whose lineage reads
-/// that table, and the services bound to any of them. Computed BEFORE the
-/// write, so the overlap snapshot covers every profile the write recompiles.
+/// the written warehouse, the views whose lineage reads that table and their
+/// warehouses, and the services bound to any of them. Computed ONCE, before the
+/// write and after [`egret_perm_compile::view_tags::lock_view_tags_in_tx`], so
+/// no lineage can commit in between (Task 9 fix round 1, I2), and the overlap
+/// snapshot covers every profile the write can recompile.
 struct ViewReach {
-    tables: Vec<egret_perm_compile::lineage::LineageTable>,
+    warehouse_id: Uuid,
+    views: Vec<egret_perm_compile::lineage::ViewRef>,
     warehouses: Vec<Uuid>,
     services: Vec<i64>,
 }
 
 impl ViewReach {
+    /// Takes the view-tag lock, so call it FIRST in the transaction.
     async fn of(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         warehouse_id: Uuid,
         schema: &str,
         table: &str,
     ) -> Result<Self, BiApiError> {
+        egret_perm_compile::view_tags::lock_view_tags_in_tx(tx)
+            .await
+            .map_err(crate::error::BiError::from)?;
         let tables =
             egret_perm_compile::view_tags::tables_of_warehouse(tx, warehouse_id, schema, table)
                 .await
                 .map_err(crate::error::BiError::from)?;
-        let mut warehouses = egret_perm_compile::dependent_view_warehouses(tx, &tables)
+        let views = egret_perm_compile::view_tags::dependent_views(tx, &tables)
+            .await
+            .map_err(crate::error::BiError::from)?;
+        let mut warehouses = egret_perm_compile::view_tags::warehouses_of_views(tx, &views)
             .await
             .map_err(crate::error::BiError::from)?;
         warehouses.push(warehouse_id);
@@ -417,23 +427,46 @@ impl ViewReach {
             .await
             .map_err(crate::error::BiError::from)?;
         Ok(Self {
-            tables,
+            warehouse_id,
+            views,
             warehouses,
             services,
         })
     }
 
     /// After the base write: re-tag the dependent views, then ONE bump over
-    /// every reached warehouse and one recompile of every reached service.
+    /// the written warehouse and the warehouses the re-tag actually changed,
+    /// one recompile of their services, and a request, delivered at commit,
+    /// for the sweep of the views that have no computed lineage yet.
     async fn retag_bump_and_recompile(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> Result<(), BiApiError> {
-        egret_perm_compile::retag_dependent_views_in_tx(tx, &self.tables)
+        let summary = egret_perm_compile::view_tags::retag_views_in_tx(tx, &self.views)
             .await
             .map_err(crate::error::BiError::from)?;
-        CatalogTagRepo::bump_bound_tag_versions(tx, &self.warehouses).await?;
-        CatalogTagRepo::recompile_bound_services_in_tx(tx, &self.warehouses, &self.services).await
+        let mut touched: Vec<Uuid> = summary.warehouses.into_iter().collect();
+        // The lock keeps the views from changing since `of`, so the re-tag
+        // stays inside the snapshot. Refuse rather than leave a write the
+        // snapshot and the bump did not cover.
+        if let Some(outside) = touched.iter().find(|w| !self.warehouses.contains(w)) {
+            return Err(crate::error::BiError::Conflict(format!(
+                "a view in warehouse {outside} changed while this tag write ran; retry"
+            ))
+            .into());
+        }
+        touched.push(self.warehouse_id);
+        touched.sort();
+        touched.dedup();
+        let services = egret_catalog_registry::services_bound_to_warehouses(&mut **tx, &touched)
+            .await
+            .map_err(crate::error::BiError::from)?;
+        CatalogTagRepo::bump_bound_tag_versions(tx, &touched).await?;
+        CatalogTagRepo::recompile_bound_services_in_tx(tx, &touched, &services).await?;
+        egret_perm_compile::view_tags::notify_classification_in_tx(tx, &[self.warehouse_id])
+            .await
+            .map_err(crate::error::BiError::from)?;
+        Ok(())
     }
 }
 

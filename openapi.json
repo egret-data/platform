@@ -12903,6 +12903,16 @@
               }
             }
           },
+          "409": {
+            "description": "A view on a catalog whose profile has classified columns: a restored view would bypass the classification hold, so it is refused; re-create it with CREATE VIEW",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {

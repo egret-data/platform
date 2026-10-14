@@ -364,3 +364,78 @@ async fn a_tag_gaining_or_losing_its_clearance_retags_the_views() {
     assert_eq!(fx.rows(fx.w1, &v.name).await, derived(fx.pii, &["id"]));
     assert_eq!(fx.tag_version().await, before + 2);
 }
+
+/// Task 9 fix round 1, M4: the base and a dependent view are served by two
+/// profiles, each with its own tag service (the Trino profile / tag service
+/// split). A classification moves each of the four services by exactly one.
+#[tokio::test]
+async fn one_classification_moves_each_affected_service_by_exactly_one() {
+    let Some(fx) = setup().await else { return };
+    let pool = &fx.db.pool;
+    let policy = egret_policy::PolicyStore::new(fx.db.clone());
+    egret_policy::seed_trino(&policy).await.expect("seed trino");
+    egret_policy::seed_tag(&policy).await.expect("seed tag");
+    // Two profiles, each with a tag service; one engine each.
+    let mut services = Vec::new();
+    let mut engines = Vec::new();
+    for _ in 0..2 {
+        let tag_service = unique("vr_tag");
+        let tag_id = policy
+            .create_service(&tag_service, "tag", &serde_json::json!({}))
+            .await
+            .expect("tag service")
+            .id;
+        let profile = policy
+            .create_service(
+                &unique("trino_vr"),
+                "trino",
+                &serde_json::json!({ "tagService": tag_service }),
+            )
+            .await
+            .expect("profile")
+            .id;
+        let engine: Uuid = sqlx::query_scalar(
+            "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+             VALUES ($1, 'trino', 'egret', '{}'::jsonb, $2) RETURNING id",
+        )
+        .bind(unique("vr-eng"))
+        .bind(profile)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        services.extend([profile, tag_id]);
+        engines.push(engine);
+    }
+    // The base's warehouse on engine 0, the view's on engine 1.
+    let wb = warehouse(pool).await;
+    let wv = warehouse(pool).await;
+    let cb = catalog(pool, wb, engines[0]).await;
+    let cv = catalog(pool, wv, engines[1]).await;
+    let v = fx.view(&cv, &unique("v_two"));
+    fx.lineage(&v, &[(&cb, "pii")], &["id"]).await;
+    let version = |id: i64| async move {
+        sqlx::query_scalar::<_, i64>("SELECT tag_version FROM policy.authz_services WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    };
+    let mut before = Vec::new();
+    for &s in &services {
+        before.push(version(s).await);
+    }
+
+    fx.repo
+        .assign_catalog(fx.pii, wb, "s", "pii", "ssn", None)
+        .await
+        .expect("classify the base");
+
+    assert_eq!(fx.rows(wv, &v.name).await, derived(fx.pii, &["id"]));
+    for (i, &s) in services.iter().enumerate() {
+        assert_eq!(
+            version(s).await,
+            before[i] + 1,
+            "service {s} (index {i}) moves by exactly one"
+        );
+    }
+}

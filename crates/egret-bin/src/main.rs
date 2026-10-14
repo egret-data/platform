@@ -2031,6 +2031,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             lineage_runner,
         ));
         lineage_sweeper = sweep.clone();
+        // Task 9 fix round 1: after each classification write commits, sweep
+        // the views with no computed lineage that its profiles reach.
+        egret_catalog_engine::spawn_classification_sweeps(sweep.clone(), db.clone());
         // The scheduled sweep (spec B3, R6). The first run waits one period,
         // so a boot does not EXPLAIN every view before the engines are up. A
         // run that overlaps an on-demand one is skipped (`SweepError::Busy`).
@@ -2038,6 +2041,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             use egret_catalog_engine::LineageSweeper as _;
             let period = egret_catalog_engine::LINEAGE_SWEEP_INTERVAL;
             let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            // M6: a sweep longer than the period does not trigger a burst.
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
                 match sweep.sweep().await {

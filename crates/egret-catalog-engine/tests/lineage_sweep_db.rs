@@ -20,7 +20,8 @@ use axum::body::Body;
 use axum::http::StatusCode;
 use egret_catalog_engine::{
     build_state, catalog_engine_router, create_memory_warehouse, ensure_bootstrapped,
-    front_catalog_router, run_lakekeeper_migrations, LineageSweep, SweepReport, ViewHold,
+    front_catalog_router, run_lakekeeper_migrations, spawn_classification_sweeps, LineageSweep,
+    SweepReport, ViewHold,
 };
 use egret_metastore::Db;
 use egret_perm_compile::lineage::{self, ExplainRunner, RecordedLineage, ViewRef};
@@ -66,6 +67,9 @@ impl ExplainRunner for FakeRunner {
     async fn explain_io(&self, catalog: &str, schema: &str, sql: &str) -> Result<Value, String> {
         assert_eq!(catalog, self.catalog);
         assert_eq!(schema, "s");
+        if sql.contains("SLOW") {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
         if self.failing.lock().unwrap().iter().any(|m| sql.contains(m)) {
             return Err("engine trino-1: Access Denied: boom".into());
         }
@@ -93,7 +97,7 @@ struct Env {
     catalog: String,
     profile_id: i64,
     runner: Arc<FakeRunner>,
-    sweep: LineageSweep,
+    sweep: Arc<LineageSweep>,
     /// The clearance-bearing tag on `s.pii.ssn`.
     clearance: Uuid,
 }
@@ -218,7 +222,12 @@ async fn env() -> Option<Env> {
         None,
         Some(Arc::new(hold)),
     );
-    let sweep = LineageSweep::new(db.clone(), state, SYSTEM_USER, runner.clone());
+    let sweep = Arc::new(LineageSweep::new(
+        db.clone(),
+        state,
+        SYSTEM_USER,
+        runner.clone(),
+    ));
     let env = Env {
         db,
         app,
@@ -568,4 +577,66 @@ async fn dropping_a_view_deletes_its_lineage_and_its_derived_tags() {
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(env.lineage(&ghost).await, env.computed(&["pii"]));
+}
+
+/// Task 9 fix round 1 (amended ruling): after a classification write commits,
+/// a sweep scoped to the affected profiles' views with no computed lineage
+/// runs, so a view committed before the profile had any classified column is
+/// tagged without waiting for the schedule. Here a full sweep is still running
+/// when the classification commits, so the scoped one first meets `Busy` and
+/// must run again rather than be dropped.
+#[tokio::test]
+async fn a_classification_sweeps_the_views_with_no_lineage_even_behind_a_running_sweep() {
+    let Some(env) = env().await else { return };
+    let listener = spawn_classification_sweeps(env.sweep.clone(), env.db.clone());
+    env.create_raw(&unique("v_slow"), "SELECT id, ssn FROM orders WHERE SLOW")
+        .await;
+    let running = {
+        let sweep = env.sweep.clone();
+        let wh = env.warehouse_id;
+        tokio::spawn(async move { sweep.sweep_warehouses(&[wh]).await })
+    };
+    // The running sweep has listed its views and is in the slow EXPLAIN.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let v = unique("v_missing");
+    env.create_raw(&v, "SELECT id, ssn FROM orders").await;
+    assert_eq!(env.lineage(&v).await, RecordedLineage::Missing);
+
+    // A clearance-bearing tag classifies `orders`.
+    let y = new_tag(&env.db).await;
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, '{}')",
+    )
+    .bind(y)
+    .bind(vec![unique("ls-role")])
+    .execute(&env.db.pool)
+    .await
+    .unwrap();
+    egret_bi::catalog_tags::CatalogTagRepo::new(env.db.clone())
+        .assign_catalog(y, env.warehouse_id, "s", "orders", "id", None)
+        .await
+        .expect("classify orders");
+
+    let want: BTreeSet<(Uuid, String, bool)> = ["id", "ssn"]
+        .iter()
+        .map(|c| (y, c.to_string(), true))
+        .collect();
+    let mut tagged = false;
+    for _ in 0..150 {
+        if env.rows(&v).await == want {
+            tagged = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        tagged,
+        "the view was never swept: lineage {:?}, rows {:?}",
+        env.lineage(&v).await,
+        env.rows(&v).await
+    );
+    assert_eq!(env.lineage(&v).await, env.computed(&["orders"]));
+    running.await.unwrap().expect("the full sweep");
+    listener.abort();
 }

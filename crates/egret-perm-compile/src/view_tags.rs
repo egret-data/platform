@@ -44,6 +44,82 @@ fn db_err<E: std::fmt::Display>(e: E) -> CompileError {
     CompileError::Db(e.to_string())
 }
 
+/// The one lock every writer of view tag rows or view lineage takes as the
+/// FIRST statement of its transaction (Task 9 fix round 1, I2): the base
+/// classification write (`egret_bi::CatalogTagRepo`, `ClassificationPolicyRepo`),
+/// the commit hold's write, its compensation and its after-commit record, the
+/// drop and rename cleanups, the sweep's record, and the undrop check.
+///
+/// Without it two transactions skew under READ COMMITTED: the hold reads the
+/// view's tag set before a base classification commits, while the base write
+/// reads the dependent views before the hold's lineage commits. Each sees
+/// neither change, and the view commits without the new tag. With it the
+/// writers serialise, and each reads the other's committed result.
+///
+/// A transaction-scoped advisory lock, taken first and released at commit or
+/// rollback. No writer holds a row lock when it waits on it, and nothing
+/// that waits on a row lock a writer holds ever takes it, so it adds no
+/// deadlock cycle. Tag writes are admin operations and holds are capped (8),
+/// so serialising them costs little.
+pub async fn lock_view_tags_in_tx(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('egret-view-tags', 0))")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// The `LISTEN` channel a classification write notifies after it commits
+/// (`egret_catalog_engine::spawn_classification_sweeps`).
+pub const CLASSIFICATION_CHANNEL: &str = "egret_view_lineage_sweep";
+
+/// The payload that asks for every warehouse.
+pub const CLASSIFICATION_ALL: &str = "*";
+
+/// Ask, on the caller's transaction, for a sweep of the views with no
+/// computed lineage that `warehouse_ids`' profiles reach. Postgres delivers a
+/// `NOTIFY` only when the transaction commits, so the sweep runs after the
+/// classification is visible, and never for a write that rolled back. A list
+/// too long for one payload asks for every warehouse instead.
+pub async fn notify_classification_in_tx(
+    conn: &mut sqlx::PgConnection,
+    warehouse_ids: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    if warehouse_ids.is_empty() {
+        return Ok(());
+    }
+    // A NOTIFY payload must stay under 8000 bytes; 37 bytes per id.
+    let payload = if warehouse_ids.len() > 200 {
+        CLASSIFICATION_ALL.to_string()
+    } else {
+        warehouse_ids
+            .iter()
+            .map(Uuid::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(CLASSIFICATION_CHANNEL)
+        .bind(payload)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// The warehouses of `views`, ascending.
+pub async fn warehouses_of_views(
+    conn: &mut sqlx::PgConnection,
+    views: &[ViewRef],
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let catalogs: BTreeSet<&str> = views.iter().map(|v| v.catalog.as_str()).collect();
+    let mut out = BTreeSet::new();
+    for catalog in catalogs {
+        if let Some(w) = warehouse_of(conn, catalog).await? {
+            out.insert(w);
+        }
+    }
+    Ok(out.into_iter().collect())
+}
+
 /// What a retag did to one view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewRetag {
@@ -168,14 +244,7 @@ pub async fn dependent_view_warehouses(
     changed: &[LineageTable],
 ) -> Result<Vec<Uuid>, CompileError> {
     let views = dependent_views(conn, changed).await.map_err(db_err)?;
-    let catalogs: BTreeSet<&str> = views.iter().map(|v| v.catalog.as_str()).collect();
-    let mut out = BTreeSet::new();
-    for catalog in catalogs {
-        if let Some(w) = warehouse_of(conn, catalog).await.map_err(db_err)? {
-            out.insert(w);
-        }
-    }
-    Ok(out.into_iter().collect())
+    warehouses_of_views(conn, &views).await.map_err(db_err)
 }
 
 /// Rewrite `view`'s lineage-derived rows to exactly its derived set
@@ -245,6 +314,9 @@ pub async fn retag_view_in_tx(
         });
     }
 
+    // M2: rows are written in one order, (tag, column) ascending, here and in
+    // the hold, so two writers on the same coordinates take their row locks
+    // in the same order. (The lock above serialises them anyway.)
     let removed = sqlx::query(
         "DELETE FROM catalog_tag_assignments a \
           WHERE a.warehouse_id = $1 AND a.schema_name = $2 AND a.table_name = $3 \
@@ -265,6 +337,7 @@ pub async fn retag_view_in_tx(
              (tag_id, warehouse_id, schema_name, table_name, column_name, from_lineage) \
          SELECT t.id, $1, $2, $3, c.name, true \
            FROM unnest($4::uuid[]) AS t(id) CROSS JOIN unnest($5::text[]) AS c(name) \
+          ORDER BY t.id, c.name \
          ON CONFLICT (tag_id, warehouse_id, schema_name, table_name, column_name) DO NOTHING",
     )
     .bind(warehouse_id)

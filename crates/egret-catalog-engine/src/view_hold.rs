@@ -660,7 +660,7 @@ async fn resolve(
 /// attached to an engine that attaches it or shares a profile with one that
 /// does. "Classified" is [`lineage::view_tag_set`]'s rule: a tag with a
 /// clearance-bearing `classification_policies` row.
-async fn profile_has_classified_column(
+pub(crate) async fn profile_has_classified_column(
     conn: &mut sqlx::PgConnection,
     warehouse_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
@@ -766,6 +766,15 @@ async fn bump_and_recompile(
     Ok(())
 }
 
+/// The rows a hold's step-3 write puts on the view.
+enum Rows<'a> {
+    /// These rows, as they are (a rename carries the source's).
+    Fixed(&'a [Assignment]),
+    /// The judged lineage's tag set, computed inside the write, on every
+    /// column.
+    Derived,
+}
+
 /// What a view carries in egret: its lineage, its tag rows and its recorded
 /// columns.
 struct ViewState {
@@ -850,18 +859,54 @@ impl ViewHold {
         })
     }
 
-    /// Step 3: one transaction that writes `rows`, records `lineage` for
+    /// Step 3: one transaction that writes the rows, records `lineage` for
     /// `view`, and bumps the tag version when a row is new.
+    ///
+    /// Task 9 fix round 1 (I2): it takes the view-tag lock first, and for a
+    /// judged view it computes the tag set HERE, inside the locked
+    /// transaction, so a base classification either committed before (and is
+    /// read) or waits for this commit (and then re-tags the view from this
+    /// lineage).
     async fn write(
         &self,
         warehouse_id: Uuid,
         view: &ViewRef,
-        rows: &[Assignment],
+        rows: Rows<'_>,
         lineage: &RecordedLineage,
         columns: Option<&[String]>,
     ) -> Result<Written, Refusal> {
         let db = |e: sqlx::Error| Refusal::internal("database", e);
         let mut tx = self.db.pool.begin().await.map_err(db)?;
+        egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut tx)
+            .await
+            .map_err(db)?;
+        let mut rows: Vec<Assignment> = match rows {
+            Rows::Fixed(rows) => rows.to_vec(),
+            Rows::Derived => {
+                let tables = lineage
+                    .tables()
+                    .map_err(|e| Refusal::internal("lineage", e))?
+                    .clone();
+                let tags = lineage::view_tag_set(&mut tx, &tables)
+                    .await
+                    .map_err(Refusal::lineage)?;
+                tags.iter()
+                    .flat_map(|tag| {
+                        columns.unwrap_or_default().iter().map(move |c| {
+                            (
+                                *tag,
+                                view.schema.clone(),
+                                view.name.clone(),
+                                c.clone(),
+                                true,
+                            )
+                        })
+                    })
+                    .collect()
+            }
+        };
+        // M2: one row order, (tag, column), as the B3 retag writes.
+        rows.sort_by(|a, b| (a.0, &a.3).cmp(&(b.0, &b.3)));
         let bound = egret_catalog_registry::services_bound_to_warehouse(&mut *tx, warehouse_id)
             .await
             .map_err(db)?;
@@ -873,7 +918,7 @@ impl ViewHold {
             .await
             .map_err(db)?;
         let mut inserted = Vec::new();
-        for row in rows {
+        for row in &rows {
             let (tag, schema, table, column, from_lineage) = row;
             // A row that exists already keeps its provenance: an admin's
             // manual tag stays manual.
@@ -922,11 +967,30 @@ impl ViewHold {
         })
     }
 
-    /// Step 5's compensation: delete exactly the rows `w` inserted, restore
-    /// the lineage recorded before it, and bump again. A failure is logged;
-    /// what it leaves behind over-tags a view that was not committed.
+    /// Step 5's compensation: delete the lineage-derived rows `w` inserted
+    /// (never a row an admin has since made manual, I1(a)), restore the
+    /// lineage recorded before it, re-derive that lineage's tags (I1(b): a
+    /// base of the previous lineage may have been classified meanwhile, with
+    /// a tag whose rows this hold had inserted), and bump again.
+    ///
+    /// If the re-derivation is refused (it would complete an overlapping mask
+    /// pair), compensation runs again without it, so the hold's own rows
+    /// still go; the next base write or sweep re-derives. A failure is
+    /// logged; what it leaves behind over-tags a view that was not committed.
     async fn compensate(&self, w: &Written) {
-        if let Err(e) = self.try_compensate(w).await {
+        let result = match self.try_compensate(w, true).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    view = ?w.view,
+                    error = %e.0,
+                    "view hold: compensation could not re-derive the previous lineage's tags; \
+                     compensating without"
+                );
+                self.try_compensate(w, false).await
+            }
+        };
+        if let Err(e) = result {
             tracing::error!(
                 view = ?w.view,
                 error = %e.0,
@@ -935,20 +999,39 @@ impl ViewHold {
         }
     }
 
-    async fn try_compensate(&self, w: &Written) -> Result<(), Refusal> {
+    async fn try_compensate(&self, w: &Written, rederive: bool) -> Result<(), Refusal> {
         let db = |e: sqlx::Error| Refusal::internal("database", e);
         let mut tx = self.db.pool.begin().await.map_err(db)?;
+        egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut tx)
+            .await
+            .map_err(db)?;
         let bound = egret_catalog_registry::services_bound_to_warehouse(&mut *tx, w.warehouse_id)
             .await
             .map_err(db)?;
-        delete_rows(&mut tx, w.warehouse_id, &w.inserted)
+        let overlaps_before = egret_perm_compile::overlap::unit_snapshot_via(&mut tx, &bound)
+            .await
+            .map_err(|e| Refusal::internal("overlap snapshot", e))?;
+        let removed = delete_derived_rows(&mut tx, w.warehouse_id, &w.inserted)
             .await
             .map_err(db)?;
         record(&mut tx, &w.view, &w.previous, w.previous_columns.as_deref())
             .await
             .map_err(|e| Refusal::internal("lineage", e))?;
-        if !w.inserted.is_empty() {
+        let rederived = if rederive && matches!(w.previous, RecordedLineage::Computed(_)) {
+            matches!(
+                egret_perm_compile::retag_view_in_tx(&mut tx, &w.view)
+                    .await
+                    .map_err(|e| Refusal::internal("re-tag", e))?,
+                egret_perm_compile::ViewRetag::Changed { .. }
+            )
+        } else {
+            false
+        };
+        if removed > 0 || rederived {
             bump_and_recompile(&mut tx, w.warehouse_id, &bound).await?;
+            egret_perm_compile::overlap::refuse_created_overlaps_via(&mut tx, &overlaps_before)
+                .await
+                .map_err(Refusal::overlap)?;
         }
         tx.commit().await.map_err(db)?;
         Ok(())
@@ -1052,17 +1135,12 @@ impl ViewHold {
             Err(refusal) => return refusal.into_response(),
         };
 
-        // Step 0: nothing classified anywhere this view could read. No lock.
+        // Step 0: nothing classified anywhere this view could read. No lock,
+        // never a refusal; the lineage is recorded best-effort.
         if !r.classified {
-            let response = next.run(req).await;
-            if response.status().is_success() && !is_multi_level(ns) {
-                if let Some(catalog) = &r.catalog {
-                    let view = view_ref(catalog, ns, name);
-                    self.record_after_commit(&view, &RecordedLineage::Missing, None)
-                        .await;
-                }
-            }
-            return response;
+            return self
+                .best_effort(loader, deadline, &r, ns, name, change, req, next)
+                .await;
         }
         if is_multi_level(ns) {
             return Refusal::multi_level().into_response();
@@ -1092,13 +1170,7 @@ impl ViewHold {
         // own path and request metadata (the guard put it there) are taken
         // out first, since a `Body` is not `Sync`.
         let path = req.uri().path().to_string();
-        let metadata = req
-            .extensions()
-            .get::<lakekeeper::api::RequestMetadata>()
-            .cloned()
-            .unwrap_or_else(|| {
-                lakekeeper::api::RequestMetadata::new_lakekeeper_internal(Uuid::now_v7())
-            });
+        let metadata = request_metadata(&req);
         let response = match self
             .definition_of(loader, pending, path, metadata, deadline)
             .await
@@ -1132,6 +1204,83 @@ impl ViewHold {
         resolve_pending(pending, stored.as_ref())
     }
 
+    /// The lineage EXPLAIN of `def`, bounded by [`EXPLAIN_BUDGET`] and the
+    /// deadline, with no connection held.
+    async fn explain(
+        &self,
+        def: &Definition,
+        catalog: &str,
+        ns: &str,
+        deadline: Instant,
+    ) -> Result<std::collections::BTreeSet<lineage::LineageTable>, String> {
+        let budget = EXPLAIN_BUDGET.min(deadline.saturating_duration_since(Instant::now()));
+        let default_catalog = def.default_catalog.as_deref().unwrap_or(catalog);
+        let default_schema = def.default_schema.as_deref().unwrap_or(ns);
+        tokio::time::timeout(
+            budget,
+            lineage::compute_lineage(
+                self.runner.as_ref(),
+                default_catalog,
+                default_schema,
+                &def.sql,
+            ),
+        )
+        .await
+        .map_err(|_| format!("the EXPLAIN did not answer within {} s", seconds(budget)))?
+    }
+
+    /// Step 0 (Task 9 fix round 1, amended ruling): on a profile with no
+    /// classified column, the lineage is computed best-effort and recorded
+    /// after lakekeeper answers 2xx: computed (with the columns) on success,
+    /// `failed` with the reason on any failure. It NEVER refuses, and takes
+    /// no view lock: what it records only lets a later classification find
+    /// the view.
+    #[allow(clippy::too_many_arguments)]
+    async fn best_effort(
+        &self,
+        loader: &axum::Router,
+        deadline: Instant,
+        r: &Resolved,
+        ns: &str,
+        name: &str,
+        change: Change,
+        req: Request,
+        next: Next,
+    ) -> Response {
+        let Some(catalog) = r.catalog.clone().filter(|_| !is_multi_level(ns)) else {
+            return next.run(req).await;
+        };
+        let outcome: Option<(RecordedLineage, Option<Vec<String>>)> = match change {
+            Change::Untouched => None,
+            Change::Judge(Err(detail)) => Some((RecordedLineage::Failed { detail }, None)),
+            Change::Judge(Ok(pending)) => {
+                let path = req.uri().path().to_string();
+                let metadata = request_metadata(&req);
+                match self
+                    .definition_of(loader, pending, path, metadata, deadline)
+                    .await
+                {
+                    Err(detail) => Some((RecordedLineage::Failed { detail }, None)),
+                    Ok(def) => match self.explain(&def, &catalog, ns, deadline).await {
+                        Ok(tables) => Some((RecordedLineage::Computed(tables), Some(def.columns))),
+                        Err(detail) => {
+                            Some((RecordedLineage::Failed { detail }, Some(def.columns)))
+                        }
+                    },
+                }
+            }
+        };
+        let response = next.run(req).await;
+        if response.status().is_success() {
+            if let Some((lineage, columns)) = outcome {
+                let view = view_ref(&catalog, ns, name);
+                self.record_after_commit(r.warehouse_id, &view, &lineage, columns.as_deref())
+                    .await;
+            }
+        }
+        response
+    }
+
     /// Steps 1 to 5 for one definition, under the hold's lock.
     #[allow(clippy::too_many_arguments)]
     async fn judge(
@@ -1148,29 +1297,9 @@ impl ViewHold {
         let view = view_ref(catalog, ns, name);
 
         // Step 1, bounded, with no connection held across the EXPLAIN.
-        let budget = EXPLAIN_BUDGET.min(deadline.saturating_duration_since(Instant::now()));
-        let default_catalog = def.default_catalog.as_deref().unwrap_or(catalog);
-        let default_schema = def.default_schema.as_deref().unwrap_or(ns);
-        let explained = tokio::time::timeout(
-            budget,
-            lineage::compute_lineage(
-                self.runner.as_ref(),
-                default_catalog,
-                default_schema,
-                &def.sql,
-            ),
-        )
-        .await;
-        let tables = match explained {
-            Ok(Ok(t)) => t,
-            Ok(Err(e)) => return Refusal::lineage(e).into_response(),
-            Err(_) => {
-                return Refusal::lineage(format!(
-                    "the EXPLAIN did not answer within {} s",
-                    seconds(budget)
-                ))
-                .into_response()
-            }
+        let tables = match self.explain(&def, catalog, ns, deadline).await {
+            Ok(t) => t,
+            Err(e) => return Refusal::lineage(e).into_response(),
         };
         let tags = {
             let mut conn = match self.db.pool.acquire().await {
@@ -1188,6 +1317,7 @@ impl ViewHold {
             let response = next.run(req).await;
             if response.status().is_success() {
                 self.record_after_commit(
+                    warehouse_id,
                     &view,
                     &RecordedLineage::Computed(tables),
                     Some(&def.columns),
@@ -1208,20 +1338,13 @@ impl ViewHold {
             Err(e) => return Refusal::internal("database", e).into_response(),
         }
 
-        // Step 3.
-        let rows: Vec<Assignment> = tags
-            .iter()
-            .flat_map(|tag| {
-                def.columns
-                    .iter()
-                    .map(move |c| (*tag, ns.to_string(), name.to_string(), c.clone(), true))
-            })
-            .collect();
+        // Step 3. The tag set is computed again inside the write's locked
+        // transaction (I2); the one read above only chose step 2 or 3.
         let written = match self
             .write(
                 warehouse_id,
                 &view,
-                &rows,
+                Rows::Derived,
                 &RecordedLineage::Computed(tables),
                 Some(&def.columns),
             )
@@ -1233,25 +1356,85 @@ impl ViewHold {
         self.wait_then_commit(written, deadline, req, next).await
     }
 
-    /// Record a lineage for a view lakekeeper has committed. A failure leaves
-    /// the lineage missing or stale, which the B3 sweep repairs; it never
-    /// removes a tag.
+    /// Record a lineage for a view lakekeeper has committed, under the
+    /// view-tag lock, and re-tag the view from a computed one (Task 9 fix
+    /// round 1, I2): a base classification that committed after the hold's
+    /// first read is seen here, and one that commits later sees this lineage.
+    /// When the re-tag cannot be written (it would complete an overlapping
+    /// mask pair), the lineage is still recorded, so the next base write or
+    /// sweep tries again and reports it. A failure leaves the lineage missing
+    /// or stale, which the B3 sweep repairs; it never removes a tag.
     async fn record_after_commit(
         &self,
+        warehouse_id: Uuid,
         view: &ViewRef,
         lineage: &RecordedLineage,
         columns: Option<&[String]>,
     ) {
-        let result = async {
-            let mut tx = self.db.pool.begin().await?;
-            record(&mut tx, view, lineage, columns).await?;
-            tx.commit().await?;
-            Ok::<(), LineageError>(())
+        let retag = matches!(lineage, RecordedLineage::Computed(_));
+        let mut result = self
+            .try_record_after_commit(warehouse_id, view, lineage, columns, retag)
+            .await;
+        if retag {
+            if let Err(e) = &result {
+                tracing::error!(
+                    ?view,
+                    error = %e,
+                    "view hold: the committed view could not be re-tagged; recording its lineage only"
+                );
+                result = self
+                    .try_record_after_commit(warehouse_id, view, lineage, columns, false)
+                    .await;
+            }
         }
-        .await;
         if let Err(e) = result {
             tracing::warn!(?view, error = %e, "view hold: lineage not recorded after commit");
         }
+    }
+
+    async fn try_record_after_commit(
+        &self,
+        warehouse_id: Uuid,
+        view: &ViewRef,
+        lineage: &RecordedLineage,
+        columns: Option<&[String]>,
+        retag: bool,
+    ) -> Result<(), String> {
+        let s = |e: &dyn std::fmt::Display| e.to_string();
+        let mut tx = self.db.pool.begin().await.map_err(|e| s(&e))?;
+        egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut tx)
+            .await
+            .map_err(|e| s(&e))?;
+        let bound = egret_catalog_registry::services_bound_to_warehouse(&mut *tx, warehouse_id)
+            .await
+            .map_err(|e| s(&e))?;
+        let before = if retag {
+            Some(
+                egret_perm_compile::overlap::unit_snapshot_via(&mut tx, &bound)
+                    .await
+                    .map_err(|e| s(&e))?,
+            )
+        } else {
+            None
+        };
+        record(&mut tx, view, lineage, columns)
+            .await
+            .map_err(|e| s(&e))?;
+        if let Some(before) = before {
+            if let egret_perm_compile::ViewRetag::Changed { .. } =
+                egret_perm_compile::retag_view_in_tx(&mut tx, view)
+                    .await
+                    .map_err(|e| s(&e))?
+            {
+                bump_and_recompile(&mut tx, warehouse_id, &bound)
+                    .await
+                    .map_err(|r| r.0)?;
+                egret_perm_compile::overlap::refuse_created_overlaps_via(&mut tx, &before)
+                    .await
+                    .map_err(|e| s(&e))?;
+            }
+        }
+        tx.commit().await.map_err(|e| s(&e))
     }
 
     /// What `view` carries now: its lineage, its assignment rows and its
@@ -1328,6 +1511,9 @@ impl ViewHold {
     async fn forget_dropped(&self, warehouse_id: Uuid, view: &ViewRef) {
         let result = async {
             let mut tx = self.db.pool.begin().await.map_err(|e| e.to_string())?;
+            egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut tx)
+                .await
+                .map_err(|e| e.to_string())?;
             let bound = egret_catalog_registry::services_bound_to_warehouse(&mut *tx, warehouse_id)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -1455,7 +1641,7 @@ impl ViewHold {
             .write(
                 warehouse_id,
                 dst,
-                &rows,
+                Rows::Fixed(&rows),
                 &src_lineage,
                 src_columns.as_deref(),
             )
@@ -1478,6 +1664,9 @@ impl ViewHold {
         // The source no longer exists: drop what it held.
         let result = async {
             let mut tx = self.db.pool.begin().await.map_err(|e| e.to_string())?;
+            egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut tx)
+                .await
+                .map_err(|e| e.to_string())?;
             let bound = egret_catalog_registry::services_bound_to_warehouse(&mut *tx, warehouse_id)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -1502,6 +1691,32 @@ impl ViewHold {
     }
 }
 
+/// Delete those of `rows` in `warehouse_id` that are still lineage-derived;
+/// how many went. A row an admin assigned by hand meanwhile stays (I1(a)).
+async fn delete_derived_rows(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    warehouse_id: Uuid,
+    rows: &[Assignment],
+) -> Result<u64, sqlx::Error> {
+    let mut removed = 0;
+    for (tag, schema, table, column, _) in rows {
+        removed += sqlx::query(
+            "DELETE FROM catalog_tag_assignments \
+              WHERE tag_id = $1 AND warehouse_id = $2 AND schema_name = $3 \
+                AND table_name = $4 AND column_name = $5 AND from_lineage",
+        )
+        .bind(tag)
+        .bind(warehouse_id)
+        .bind(schema)
+        .bind(table)
+        .bind(column)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+    }
+    Ok(removed)
+}
+
 /// Delete exactly `rows` from `warehouse_id`.
 async fn delete_rows(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -1523,6 +1738,16 @@ async fn delete_rows(
         .await?;
     }
     Ok(())
+}
+
+/// The commit's request metadata (the guard put it there), or an internal one.
+fn request_metadata(req: &Request) -> lakekeeper::api::RequestMetadata {
+    req.extensions()
+        .get::<lakekeeper::api::RequestMetadata>()
+        .cloned()
+        .unwrap_or_else(
+            || lakekeeper::api::RequestMetadata::new_lakekeeper_internal(Uuid::now_v7()),
+        )
 }
 
 fn view_ref(catalog: &str, schema: &str, name: &str) -> ViewRef {

@@ -3125,6 +3125,11 @@ export type controlPlaneCatalogUndropTabularResponse404 = {
   status: 404
 }
 
+export type controlPlaneCatalogUndropTabularResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneCatalogUndropTabularResponse500 = {
   data: ErrorBody
   status: 500
@@ -3138,7 +3143,7 @@ export type controlPlaneCatalogUndropTabularResponse502 = {
 export type controlPlaneCatalogUndropTabularResponseSuccess = (controlPlaneCatalogUndropTabularResponse204) & {
   headers: Headers;
 };
-export type controlPlaneCatalogUndropTabularResponseError = (controlPlaneCatalogUndropTabularResponse401 | controlPlaneCatalogUndropTabularResponse403 | controlPlaneCatalogUndropTabularResponse404 | controlPlaneCatalogUndropTabularResponse500 | controlPlaneCatalogUndropTabularResponse502) & {
+export type controlPlaneCatalogUndropTabularResponseError = (controlPlaneCatalogUndropTabularResponse401 | controlPlaneCatalogUndropTabularResponse403 | controlPlaneCatalogUndropTabularResponse404 | controlPlaneCatalogUndropTabularResponse409 | controlPlaneCatalogUndropTabularResponse500 | controlPlaneCatalogUndropTabularResponse502) & {
   headers: Headers;
 };
 

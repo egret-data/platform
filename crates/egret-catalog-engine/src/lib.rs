@@ -58,8 +58,8 @@ pub use lakekeeper::api::ApiContext;
 pub use lakekeeper::service::authz::AllowAllAuthorizer;
 pub use lakekeeper::CancellationToken;
 pub use lineage_sweep::{
-    LineageSweep, LineageSweeper, NoCatalogSweeper, SweepError, SweepFailure, SweepReport,
-    LINEAGE_SWEEP_INTERVAL,
+    spawn_classification_sweeps, LineageSweep, LineageSweeper, NoCatalogSweeper, SweepError,
+    SweepFailure, SweepReport, LINEAGE_SWEEP_INTERVAL,
 };
 /// Test-only [`build_state`] variant that takes the task-queue poll interval, so
 /// integration tests can register the built-in GC queues with a short cadence.
