@@ -250,6 +250,9 @@ const MARKERS = [
   ["src/components/workflows/triggers/FlowTriggersTab.tsx", "This flow has no triggers", "editor"],
   ["src/components/workflows/triggers/TriggerDetailsDrawer.tsx", "The key is hidden; Reveal under Webhook shows it.", "editor"],
   ["src/components/workflows/triggers/EnableTriggerDialog.tsx", "Skip missed runs; start at the next tick", "editor"],
+  // The trigger's YAML (fix round 2): `triggerBlock` and the webhook key's mask parse YAML, so the
+  // module stays with the flow pages, never in the model the list shares. `HIDDEN_BLOCK`.
+  ["src/components/workflows/triggers/triggerYaml.ts", "This trigger's YAML is hidden until Reveal: it holds the webhook's key.", "editor"],
   ["src/components/workflows/triggers/TriggersTable.tsx", "The schedule tick the scheduler last processed, not the wall-clock time it fired."],
   ["src/components/workflows/triggers/triggersModel.ts", "On, but the flow is disabled, so it does not fire"],
   ["src/components/workflows/triggers/TriggerBanners.tsx", "trigger-banners"],

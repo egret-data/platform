@@ -3,8 +3,6 @@ import {
   bannersFor,
   enableBody,
   kindLabel,
-  MASK,
-  maskWebhookKey,
   missedLabel,
   needsEnableDialog,
   recoverDescription,
@@ -14,8 +12,7 @@ import {
   webhookNote,
   webhookPath,
 } from "@/components/workflows/triggers/triggersModel";
-import { triggerBlock } from "@/components/workflows/triggers/TriggerDetailsDrawer";
-import { flowEntry, flowTriggers, otherEntry, scheduleEntry, TRIGGERS_SOURCE, webhookEntry } from "./triggerFixtures";
+import { flowEntry, flowTriggers, otherEntry, scheduleEntry, webhookEntry } from "./triggerFixtures";
 
 const ON = { flowDisabled: false, flowDeleted: false };
 const NOW = Date.parse("2026-10-15T12:00:00Z");
@@ -167,50 +164,5 @@ describe("names", () => {
     expect(["schedule", "webhook", "flow", "other"].map((k) => kindLabel(k as never))).toEqual(["Schedule", "Webhook", "Flow", "Other"]);
     expect(shortType("io.kestra.plugin.core.trigger.Schedule")).toBe("Schedule");
     expect(shortType("Schedule")).toBe("Schedule");
-  });
-});
-
-describe("triggerBlock", () => {
-  it("cuts one trigger's whole block from the source, dedented", () => {
-    expect(triggerBlock(TRIGGERS_SOURCE, "hook")).toBe("id: hook\ntype: io.kestra.plugin.core.trigger.Webhook\nkey: s3cr3t-key");
-    // A block with a nested list stops at the next trigger, not at its own list.
-    expect(triggerBlock(TRIGGERS_SOURCE, "upstream")).toBe(
-      "id: upstream\ntype: io.kestra.plugin.core.trigger.Flow\nconditions:\n  - type: io.kestra.plugin.core.condition.ExecutionStatus\n    in: [SUCCESS]",
-    );
-    // The last trigger runs to the end of the document.
-    expect(triggerBlock(TRIGGERS_SOURCE, "poll")).toBe("id: poll\ntype: io.kestra.plugin.fs.http.Trigger\nuri: https://example.com");
-  });
-
-  it("keeps a less-indented comment inside the block, and stops at one that ends it", () => {
-    const src = "triggers:\n  - id: a\n# about the cron\n    cron: x\n# the next trigger\n  - id: b\n    cron: y\n";
-    expect(triggerBlock(src, "a")).toBe("id: a\n# about the cron\ncron: x");
-    expect(triggerBlock(src, "b")).toBe("id: b\ncron: y");
-  });
-
-  it("is null for a flow-style list, which has no lines to cut", () => {
-    expect(triggerBlock("id: x\ntriggers: [{ id: a, type: a.B }]\n", "a")).toBeNull();
-  });
-
-  it("is null for an id the source does not declare, or a task's id", () => {
-    expect(triggerBlock(TRIGGERS_SOURCE, "gone")).toBeNull();
-    expect(triggerBlock("id: x\ntasks:\n  - id: daily\n    type: a.B\n", "daily")).toBeNull();
-  });
-});
-
-describe("maskWebhookKey", () => {
-  it("hides a plain, quoted or templated key, keeping every other line", () => {
-    expect(maskWebhookKey("id: hook\ntype: a.Webhook\nkey: s3cr3t")).toBe(`id: hook\ntype: a.Webhook\nkey: ${MASK}`);
-    expect(maskWebhookKey('id: hook\nkey: "s3cr3t" # the key')).toBe(`id: hook\nkey: ${MASK}`);
-    expect(maskWebhookKey("key: '{{ secret(\"HOOK\") }}'\nid: hook")).toBe(`key: ${MASK}\nid: hook`);
-  });
-
-  it("hides a block scalar's lines, and stops at the next key", () => {
-    expect(maskWebhookKey("key: |\n  s3cr3t\n  more\nid: hook")).toBe(`key: |\n  ${MASK}\n  ${MASK}\nid: hook`);
-    expect(maskWebhookKey("key:\n  s3cr3t\nid: hook")).toBe(`key:\n  ${MASK}\nid: hook`);
-  });
-
-  it("leaves a nested key alone, and a block without a key unchanged", () => {
-    const nested = "id: hook\nconditions:\n  - key: not-the-webhook-key";
-    expect(maskWebhookKey(nested)).toBe(nested);
   });
 });

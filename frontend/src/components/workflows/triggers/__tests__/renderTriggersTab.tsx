@@ -19,7 +19,7 @@ function Where() {
  * mutator and `apiFetch` over the stubbed `fetch`), with the URL shown in
  * `where`.
  */
-export function renderTriggersTab(server: FakeWorkflowServer, { manage = true, at = TAB_PATH } = {}) {
+export function renderTriggersTab(server: FakeWorkflowServer, { manage = true, at = TAB_PATH, source = TRIGGERS_SOURCE } = {}) {
   server.install();
   const onEdit = vi.fn();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -30,7 +30,7 @@ export function renderTriggersTab(server: FakeWorkflowServer, { manage = true, a
           <Routes>
             <Route
               path="/explore/:workspace/workflows/flows/:id/:tab"
-              element={<FlowTriggersTab ws={WS} flowId={FLOW_ID} source={TRIGGERS_SOURCE} manage={manage} onEditTrigger={onEdit} />}
+              element={<FlowTriggersTab ws={WS} flowId={FLOW_ID} source={source} manage={manage} onEditTrigger={onEdit} />}
             />
           </Routes>
           <Where />

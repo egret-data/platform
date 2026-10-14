@@ -8,6 +8,7 @@ vi.mock("sonner", () => ({ toast }));
 import { FakeWorkflowServer } from "@/routes/workflows/__tests__/fakeWorkflowServer";
 import { flowEntry, flowTriggers, otherEntry, scheduleEntry, webhookEntry } from "./triggerFixtures";
 import { renderTriggersTab, TAB_PATH } from "./renderTriggersTab";
+import { triggerBlock } from "@/components/workflows/triggers/triggerYaml";
 
 const SECRET_PATH = "/workflows/v1/eng/executions/webhook/company.team/hello/s3cr3t-key";
 const LATER = new Date(Date.now() + 25 * 60_000).toISOString();
@@ -183,5 +184,55 @@ describe("TriggerDetailsDrawer: another trigger starts hidden", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     await userEvent.click(screen.getByRole("link", { name: "Details of hook" }));
     expect((await drawer("hook")).textContent).not.toContain("s3cr3t-key");
+  });
+});
+
+describe("TriggerDetailsDrawer: the key is hidden in every shape of YAML", () => {
+  const W = "io.kestra.plugin.core.trigger.Webhook";
+  it.each([
+    ["(a) a flow mapping", `triggers:\n  - { id: hook, type: ${W}, key: s3cr3t }\n`],
+    ["(b) a quoted key name", `triggers:\n  - id: hook\n    type: ${W}\n    "key": s3cr3t\n`],
+    ["(b) a single-quoted key name", `triggers:\n  - id: hook\n    type: ${W}\n    'key': s3cr3t\n`],
+    ["(c) a quoted value over lines", `triggers:\n  - id: hook\n    type: ${W}\n    key: "abc\n      s3cr3t"\n`],
+    ["(c) a plain value over lines", `triggers:\n  - id: hook\n    type: ${W}\n    key: abc\n      s3cr3t\n`],
+    ["(d) a sequence at the key's indent", `triggers:\n  - id: hook\n    type: ${W}\n    key:\n    - s3cr3t\n`],
+    ["a block that does not parse (all hidden)", `triggers:\n  - id: hook\n    type: ${W}\n    key: s3cr3t\n    bad: : :\n`],
+  ])("%s", async (_shape, source) => {
+    server.triggers = { ...server.triggers, triggers: [webhookEntry({ webhook: { url_path: null, key_error: "the key does not render", unsupported: null } })] };
+    const block = triggerBlock(source, "hook");
+    expect(block).toContain("s3cr3t");
+    renderTriggersTab(server, { at: `${TAB_PATH}?trigger=hook`, source });
+    const d = await drawer("hook");
+    expect(d.textContent).not.toContain("s3cr3t");
+    await userEvent.click(within(d).getByRole("button", { name: "Reveal" }));
+    expect(within(d).getByRole("figure", { name: "YAML of hook" }).querySelector("pre")!.textContent).toBe(block);
+  });
+
+  it("says when the whole block is hidden", async () => {
+    const source = `triggers:\n  - id: hook\n    type: ${W}\n    key: s3cr3t\n    bad: : :\n`;
+    renderTriggersTab(server, { at: `${TAB_PATH}?trigger=hook`, source });
+    const d = await drawer("hook");
+    expect(within(d).getByText(/^The whole block is hidden/)).toBeInTheDocument();
+  });
+});
+
+describe("TriggerDetailsDrawer: the path's key", () => {
+  it("masks a key holding a slash, which the server sends as %2F in the last segment", async () => {
+    server.triggers = {
+      ...server.triggers,
+      triggers: [webhookEntry({ webhook: { url_path: "/workflows/v1/eng/executions/webhook/company.team/hello/team%2Fs3cr3t", key_error: null, unsupported: null } })],
+    };
+    renderTriggersTab(server, { at: `${TAB_PATH}?trigger=hook` });
+    const d = await drawer("hook");
+    expect(within(d).getByTestId("webhook-path").textContent).toBe("/workflows/v1/eng/executions/webhook/company.team/hello/••••••••");
+    expect(d.textContent).not.toContain("s3cr3t");
+  });
+
+  it("offers no Reveal when there is neither a path nor a block to reveal", async () => {
+    server.triggers = { ...server.triggers, triggers: [webhookEntry({ webhook: { url_path: null, key_error: "no key is declared", unsupported: null } })] };
+    renderTriggersTab(server, { at: `${TAB_PATH}?trigger=hook`, source: "id: hello\nnamespace: company.team\n" });
+    const d = await drawer("hook");
+    expect(within(d).getByText("no key is declared")).toBeInTheDocument();
+    expect(within(d).queryByRole("button", { name: "Reveal" })).not.toBeInTheDocument();
   });
 });

@@ -8,7 +8,6 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { StateChip } from "@/components/workflows/StateChip";
 import {
   kindLabel,
-  maskWebhookKey,
   missedLabel,
   statusText,
   webhookNote,
@@ -18,53 +17,11 @@ import {
 import dayjs from "dayjs";
 import timezone from "dayjs/plugin/timezone";
 import utc from "dayjs/plugin/utc";
-import { rangeOfPath } from "@/components/workflows/editor/yamlPath";
 import { fullTimestamp, timeAgo } from "@/lib/relativeTime";
+import { MASK, maskWebhookKey } from "@/components/workflows/triggers/triggerYaml";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
-
-/**
- * The YAML block of one trigger, cut from `source` and dedented, or null when
- * `source` declares no trigger with that id or the block cannot be cut.
- * `rangeOfPath` finds where the trigger's mapping starts; the block runs until
- * the first non-blank line indented less than that mapping (the next trigger's
- * `- ` or the next top-level key).
- *
- * Limits, by design: a comment line indented less than the mapping belongs to
- * the block only when the block's own lines continue after it; a flow-style
- * list (`triggers: [{ id: a, … }]`) has no lines of its own to cut, so it is
- * null and the drawer points to the editor.
- *
- * Here rather than in `triggersModel.ts`: it brings the `yaml` library, which the
- * model's other users (the global Triggers page, in the flow list's chunk) must not.
- */
-export function triggerBlock(source: string, triggerId: string): string | null {
-  const range = rangeOfPath(source, `triggers.${triggerId}`);
-  if (!range) return null;
-  const lines = source.split("\n");
-  const indent = range.startCol - 1;
-  const first = lines[range.startLine - 1];
-  // Block style: only spaces and list dashes before the mapping.
-  if (!/^[\s-]*$/.test(first.slice(0, indent))) return null;
-  const indentOf = (line: string) => line.length - line.trimStart().length;
-  const isComment = (line: string) => line.trimStart().startsWith("#");
-  const block = [first.slice(indent)];
-  for (let i = range.startLine; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.trim() !== "" && indentOf(line) < indent) {
-      if (!isComment(line)) break;
-      // A less-indented comment: kept only if the block goes on after it.
-      const next = lines.slice(i + 1).find((l) => l.trim() !== "" && !isComment(l));
-      if (next === undefined || indentOf(next) < indent) break;
-      block.push(line.trimStart());
-      continue;
-    }
-    block.push(line.slice(indent));
-  }
-  while (block.length > 1 && block[block.length - 1].trim() === "") block.pop();
-  return block.join("\n");
-}
 
 /** What the drawer says when `?trigger=` names an id the flow no longer declares (spec §5). */
 export const TRIGGER_GONE = "This trigger no longer exists in the flow; reload.";
@@ -175,19 +132,24 @@ function DependsOn({ dependsOn }: { dependsOn: DependsOnDto }) {
 }
 
 /** The path with its last segment, the key, hidden: the key is what lets anyone start the flow. */
-const masked = (path: string) => path.replace(/[^/]+$/, "••••••••");
+// The server percent-encodes each segment (`entry.rs`, `encode_segment`): a `/` inside the key is
+// `%2F`, so the last segment is the whole key.
+const masked = (path: string) => path.replace(/[^/]+$/, MASK);
 
 function WebhookFacts({
   webhook,
   webhooksEnabled,
   revealed,
   onRevealedChange,
+  hasSecret,
 }: {
   webhook: WebhookInfoDto;
   webhooksEnabled: boolean;
   /** One switch for the path here and the `key:` in the Definition block. */
   revealed: boolean;
   onRevealedChange: (revealed: boolean) => void;
+  /** The Definition block holds the key: Reveal shows it there, even with no path. */
+  hasSecret: boolean;
 }) {
   const [copied, setCopied] = useState(false);
   useEffect(() => {
@@ -217,6 +179,7 @@ function WebhookFacts({
           {revealed ? path : masked(path)}
         </code>
       ) : null}
+      {hasSecret || path ? (
       <div className="flex items-center gap-2">
         {/* One signal for the state: the pressed state, under a label that does not change. */}
         <Button type="button" size="sm" variant="outline" aria-pressed={revealed} onClick={() => onRevealedChange(!revealed)}>
@@ -235,6 +198,7 @@ function WebhookFacts({
           </>
         ) : null}
       </div>
+      ) : null}
       <p className="text-muted-foreground">{webhookNote(webhooksEnabled)}</p>
       {webhook.unsupported ? <p>egret refuses requests to this webhook: {webhook.unsupported}</p> : null}
     </div>
@@ -275,7 +239,8 @@ export function TriggerDetailsDrawer({
   const [revealed, setRevealed] = useState(false);
   const captionId = useId();
   const isWebhook = entry?.kind === "webhook";
-  const shownBlock = block !== null && isWebhook && !revealed ? maskWebhookKey(block) : block;
+  const hiding = block !== null && isWebhook && !revealed ? maskWebhookKey(block) : null;
+  const shownBlock = hiding ? hiding.text : block;
   return (
     <Sheet open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
       <SheetContent>
@@ -307,8 +272,12 @@ export function TriggerDetailsDrawer({
                       YAML of {triggerId}
                     </figcaption>
                     <pre className="overflow-auto rounded bg-muted p-3 font-mono text-xs">{shownBlock}</pre>
-                    {isWebhook && !revealed ? (
-                      <p className="text-xs text-muted-foreground">The key is hidden; Reveal under Webhook shows it.</p>
+                    {hiding ? (
+                      <p className="text-xs text-muted-foreground">
+                        {hiding.whole
+                          ? "The whole block is hidden: its key could not be told apart from the rest. Reveal under Webhook shows it."
+                          : "The key is hidden; Reveal under Webhook shows it."}
+                      </p>
                     ) : null}
                   </figure>
                 ) : (
@@ -349,6 +318,7 @@ export function TriggerDetailsDrawer({
                     webhooksEnabled={webhooksEnabled}
                     revealed={revealed}
                     onRevealedChange={setRevealed}
+                    hasSecret={block !== null}
                   />
                 </Section>
               ) : null}
