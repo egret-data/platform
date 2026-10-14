@@ -34,6 +34,13 @@ export interface KvWorld {
   listReply?: KvReply | null;
   /** Answers every PUT with this instead of 200. */
   putReply?: KvReply | Error | null;
+  /**
+   * Keys created by someone else after the list was read: a PUT of one of
+   * them that carries `If-None-Match: *` is answered as W9c's route answers a
+   * create-only write over a live key (409 `kv_exists`); without the header it
+   * overwrites (200).
+   */
+  createdMeanwhile?: string[];
   /** Answers every DELETE with this instead. */
   deleteReply?: KvReply | null;
   /** While set, every `GET …/kv/{key}` waits for it (a slow read, so its fetching state paints). */
@@ -99,6 +106,10 @@ export function serveKv(world: KvWorld): KvRequest[] {
         }
         if (method === "PUT") {
           if (world.putReply instanceof Error) throw world.putReply;
+          if (world.createdMeanwhile?.includes(key) && new Headers(init.headers).get("if-none-match") === "*") {
+            const error = `conflict: key '${key}' already exists in namespace '${world.namespace}' (revision 1); nothing was written`;
+            return json({ status: 409, body: { error, code: "kv_exists" } });
+          }
           return json(world.putReply ?? { status: 200 });
         }
         if (method === "DELETE") {

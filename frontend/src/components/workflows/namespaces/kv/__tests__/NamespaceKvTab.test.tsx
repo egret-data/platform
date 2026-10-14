@@ -234,7 +234,8 @@ describe("row actions", () => {
     expect(ttl).not.toBeNull();
     expect(Number(ttl![1])).toBeGreaterThan(3_500);
     expect(Number(ttl![1])).toBeLessThanOrEqual(3_600);
-    // No overwrite question: this is the key being edited.
+    // No overwrite question: this is the key being edited, and an edit overwrites.
+    expect(put.headers.get("if-none-match")).toBeNull();
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
@@ -508,6 +509,8 @@ describe("the create drawer, for each type", () => {
     expect(put.headers.get("content-type")).toBe("text/plain");
     expect(put.headers.get("ttl")).toBeNull();
     expect(put.headers.get("description")).toBeNull();
+    // A create: the server refuses it rather than overwrite a key created meanwhile.
+    expect(put.headers.get("if-none-match")).toBe("*");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add a key" })).not.toBeInTheDocument());
     expect(toast.success).toHaveBeenCalledWith("Saved the key “fresh”.");
   });
@@ -598,6 +601,38 @@ describe("TTL and overwriting", () => {
     await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Overwrite" }));
     await waitFor(() => expect(puts()).toHaveLength(1));
     expect(puts()[0].body).toBe('"new"');
+    // Overwriting was confirmed: the write is not create-only.
+    expect(puts()[0].headers.get("if-none-match")).toBeNull();
+  });
+
+  it("asks before overwriting a key created after the list was read; Overwrite resends without If-None-Match", async () => {
+    renderTab({ world: { createdMeanwhile: ["fresh"] } });
+    const { user, sheet } = await addKey("fresh", "STRING", typeValue("mine"));
+    await user.click(within(sheet).getByRole("button", { name: "Save" }));
+    const ask = await screen.findByRole("alertdialog", { name: "A key named “fresh” was created meanwhile — overwrite?" });
+    expect(puts()).toHaveLength(1);
+    expect(puts()[0].headers.get("if-none-match")).toBe("*");
+    // Not an error: the key is not saved yet, and the question says why.
+    expect(within(sheet).queryByRole("alert")).not.toBeInTheDocument();
+    expect(toast.success).not.toHaveBeenCalled();
+
+    await user.click(within(ask).getByRole("button", { name: "Overwrite" }));
+    await waitFor(() => expect(puts()).toHaveLength(2));
+    expect(puts()[1].body).toBe('"mine"');
+    expect(puts()[1].headers.get("if-none-match")).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add a key" })).not.toBeInTheDocument());
+    expect(toast.success).toHaveBeenCalledWith("Saved the key “fresh”.");
+  });
+
+  it("keeps the form and sends nothing more when the created-meanwhile question is cancelled", async () => {
+    renderTab({ world: { createdMeanwhile: ["fresh"] } });
+    const { user, sheet } = await addKey("fresh", "STRING", typeValue("mine"));
+    await user.click(within(sheet).getByRole("button", { name: "Save" }));
+    const ask = await screen.findByRole("alertdialog", { name: /was created meanwhile/ });
+    await user.click(within(ask).getByRole("button", { name: "Cancel" }));
+    expect(puts()).toHaveLength(1);
+    expect(screen.getByRole("dialog", { name: "Add a key" })).toBeInTheDocument();
+    expect(within(sheet).getByLabelText("Value")).toHaveValue("mine");
   });
 });
 

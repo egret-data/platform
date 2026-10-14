@@ -21,7 +21,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Skeleton } from "@/components/ui/skeleton";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
-import { kvErrorMessage, putKvValue, readKvValue, type KvValueDetail } from "./kvApi";
+import { isKvExists, kvErrorMessage, putKvValue, readKvValue, type KvValueDetail } from "./kvApi";
 import { formatInstant } from "./KvTable";
 import { KvValueControl } from "./KvValueControl";
 import {
@@ -217,6 +217,8 @@ function KvForm({
   const [saving, setSaving] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
   const [askOverwrite, setAskOverwrite] = useState(false);
+  // Set when a create found the key created meanwhile (409 `kv_exists`).
+  const [askCreatedMeanwhile, setAskCreatedMeanwhile] = useState(false);
   // Set when a save found the kept expiration already passed (see `put`).
   const [keepExpired, setKeepExpired] = useState(false);
 
@@ -254,7 +256,13 @@ function KvForm({
     }
   };
 
-  const put = async () => {
+  /**
+   * `onlyIfAbsent`: a create of a key the list did not show is sent with
+   * `If-None-Match: *`, so a key someone created after the list was read is
+   * not silently replaced; the server's 409 `kv_exists` asks instead. An edit,
+   * or a create the user already agreed to overwrite, overwrites.
+   */
+  const put = async ({ onlyIfAbsent }: { onlyIfAbsent: boolean }) => {
     if (!encoded.ok) return;
     // The remaining time is read now, not when the form was filled. A key
     // that expired meanwhile has none, and a PUT without `ttl` would make it
@@ -267,14 +275,15 @@ function KvForm({
     setSaving(true);
     setServerError(null);
     try {
-      await putKvValue(ws, namespace, form.key, encoded.body, { description: form.description.trim(), ttl });
+      await putKvValue(ws, namespace, form.key, encoded.body, { description: form.description.trim(), ttl, onlyIfAbsent });
       toast.success(`Saved the key “${form.key}”.`);
       onDirty(false);
       await onSaved();
       onClose();
     } catch (e) {
       // Nothing the user entered is cleared (FE-ACTION-3).
-      setServerError(kvErrorMessage(e, "The key was not saved"));
+      if (onlyIfAbsent && isKvExists(e)) setAskCreatedMeanwhile(true);
+      else setServerError(kvErrorMessage(e, "The key was not saved"));
     } finally {
       setSaving(false);
     }
@@ -287,7 +296,7 @@ function KvForm({
       setAskOverwrite(true);
       return;
     }
-    void put();
+    void put({ onlyIfAbsent: !editing });
   };
 
   const describe = (help: string, error: string | null) => (error ? `${help} ${error}` : help);
@@ -460,7 +469,30 @@ function KvForm({
               variant="destructive"
               onClick={() => {
                 setAskOverwrite(false);
-                void put();
+                void put({ onlyIfAbsent: false });
+              }}
+            >
+              Overwrite
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog open={askCreatedMeanwhile} onOpenChange={setAskCreatedMeanwhile}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>A key named “{form.key}” was created meanwhile — overwrite?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Someone created {form.key} in {namespace} after this list was loaded, so nothing was saved. Overwriting
+              replaces its value, type, description and expiration; its earlier revisions are kept.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                setAskCreatedMeanwhile(false);
+                void put({ onlyIfAbsent: false });
               }}
             >
               Overwrite
