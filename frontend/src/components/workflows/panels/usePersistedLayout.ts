@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { normalise, parseLayout, type Layout } from "@/components/workflows/panels/layout";
-import { getTabs, useTabsVersion } from "@/components/workflows/panels/registry";
+import { getTabs, isKnownTab, useTabsVersion } from "@/components/workflows/panels/registry";
 
 /** `egret.wf.layout.<flow uuid>` (spec §5.1). */
 export const LAYOUT_KEY_PREFIX = "egret.wf.layout.";
@@ -15,7 +15,9 @@ const WRITE_DEBOUNCE_MS = 300;
  */
 function read(key: string | null, defaults: Layout): Layout {
   const known = getTabs().map((t) => t.id);
-  const fallback = normalise(defaults, known);
+  // A family's tabs (a `file:<path>`, W7d) are known by their prefix; those the layout names are added.
+  const withFamilies = (l: Layout) => [...known, ...l.panels.flatMap((p) => p.tabs).filter((t) => !known.includes(t) && isKnownTab(t))];
+  const fallback = normalise(defaults, withFamilies(defaults));
   if (key === null) return fallback;
   let raw: string | null;
   try {
@@ -31,7 +33,7 @@ function read(key: string | null, defaults: Layout): Layout {
     return fallback;
   }
   const layout = parseLayout(parsed);
-  return layout ? normalise(layout, known) : fallback;
+  return layout ? normalise(layout, withFamilies(layout)) : fallback;
 }
 
 function write(key: string, layout: Layout): void {

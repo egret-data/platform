@@ -144,7 +144,9 @@ export class FakeWorkflowServer {
       if (req.if_updated_at != null && req.if_updated_at !== this.flow.updated_at) {
         return { status: 409, body: { error: "conflict: the draft was changed since you opened it", code: "draft_changed" } };
       }
-      this.flow = { ...this.flow, source: req.source, updated_at: stamp() };
+      // As the server does, the saved draft's namespace is the YAML's.
+      const namespace = /^namespace:\s*(\S+)\s*$/m.exec(req.source)?.[1] ?? this.flow.namespace;
+      this.flow = { ...this.flow, source: req.source, namespace, updated_at: stamp() };
       return { status: 200, body: this.flow };
     }
     if (method === "POST" && path === `${flowPath}/publish`) {

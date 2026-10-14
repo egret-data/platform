@@ -11,4 +11,13 @@ export type WorkflowUploadNamespaceFileParams = {
  * The path in the namespace (a leading `/` is added when missing).
  */
 path: string;
+/**
+ * Write only if the path's current revision is this one, else 409 with
+ * `code: "file_changed"` and nothing written. The current revision is
+ * the latest LIVE one: `0` means "the path must not exist" (a path that
+ * never existed, or one soft-deleted, is at `0`). Absent: no check, the
+ * next revision is written whatever it is.
+ * @minimum 0
+ */
+if_revision?: number;
 };

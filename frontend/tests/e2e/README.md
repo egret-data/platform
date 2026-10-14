@@ -362,3 +362,38 @@ cd frontend && EGRET_E2E_VITE_PORT=5217 EGRET_E2E_API=http://localhost:8207 \
 cd frontend && EGRET_E2E_WORKFLOWS=1 EGRET_E2E_BASE_URL=http://localhost:5217 \
   npx playwright test workflows-topology
 ```
+
+## Workflow namespaces (`workflows-namespaces.spec.ts`)
+
+Opt-in (`EGRET_E2E_WORKFLOWS=1`). W7d's money path in the browser. The spec creates, through the API, a flow in
+`company.team`, a flow in `company.other` that calls it through a `Subflow`, a third flow in `company.team` and a KV key
+in `company`. It then asserts:
+
+- the namespace list shows `company` and its children, and the detail has the tabs Overview, Flows, Executions,
+  Dependencies, Files, KV;
+- on the namespace's Files tab: a new file is written with `if_revision=0`, Ctrl+S sends one POST with the revision it
+  read, a rename, a real pointer drag and drop into a folder, a folder imported through the `webkitdirectory` picker
+  (`setInputFiles` with a directory), and the zip export;
+- the tree and the editor fill the tab, in light and dark mode, and an editor hidden behind another tab lays itself
+  out when it is shown again;
+- KV: a JSON key and a DATE key created in the drawer, a NUMBER with an exponent read back with every digit, and the
+  key inherited from `company`;
+- the flow editor with Code and two file tabs side by side: Ctrl+S in each file editor sends only that file's POST
+  (with `if_revision`), and in Code only the flow's PUT; measured at the default width and in dark mode;
+- a save from a second session makes this one answer 409 `file_changed`: the stale dialog, and Overwrite resends
+  without `if_revision`;
+- a flow saved into another namespace while a file has unsaved edits asks first, and "Save files first" writes the
+  file into the old namespace before the flow moves;
+- Dependencies draws the `subflow` edge from `company.other` to `company.team`, on the canvas and in the list view.
+
+The stack is private, as for the other workflow specs: a database of its own on the branch's Postgres, a private
+RustFS (namespace files are stored there), `serve` on :8217 and Vite on :5227 through `tests/e2e/vite.e2e.config.mts`.
+Every command, setup and teardown, is in the spec file's header. Each run uses its own flow ids, folder and keys, so it
+can be repeated on the same database. It signs in twice (the second session), within the limit of 5 per 5 minutes.
+
+```bash
+cd frontend && EGRET_E2E_VITE_PORT=5227 EGRET_E2E_API=http://localhost:8217 \
+  npx vite --config tests/e2e/vite.e2e.config.mts                       # in one shell
+cd frontend && EGRET_E2E_WORKFLOWS=1 EGRET_E2E_BASE_URL=http://localhost:5227 \
+  npx playwright test workflows-namespaces
+```

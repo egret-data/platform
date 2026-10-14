@@ -1,5 +1,6 @@
 import React, { Suspense, lazy } from "react";
 import type { DiffEditorProps, EditorProps } from "@monaco-editor/react";
+import { useIsDark } from "@/hooks/useIsDark";
 
 /**
  * The single lazy boundary for Monaco, and the only module allowed to reach
@@ -70,13 +71,29 @@ class MonacoErrorBoundary extends React.Component<
   }
 }
 
+/**
+ * The theme an editor gets when its caller names none: the app's mode.
+ *
+ * `@monaco-editor/react` defaults `theme` to "light", and Monaco's
+ * `setTheme` is GLOBAL — every editor on the page takes the theme of the
+ * last one that mounted or changed it. So one editor that names no theme
+ * turns every other editor light in dark mode (measured in W7d: a namespace
+ * file tab flipped the flow's Code tab beside it). Defaulting here, at the
+ * one boundary every editor goes through, means no caller can forget. A
+ * caller's own `theme` (SQL Lab's custom themes) still wins.
+ */
+function useAppTheme(): string {
+  return useIsDark() ? "vs-dark" : "vs";
+}
+
 export default function MonacoEditor(props: EditorProps) {
+  const theme = useAppTheme();
   // The fallback fills the slot the editor is about to occupy, so the
   // surrounding layout does not jump when the chunk lands.
   return (
     <MonacoErrorBoundary>
       <Suspense fallback={<div className="h-full w-full" aria-hidden="true" />}>
-        <Editor {...props} />
+        <Editor {...props} theme={props.theme ?? theme} />
       </Suspense>
     </MonacoErrorBoundary>
   );
@@ -88,10 +105,11 @@ export default function MonacoEditor(props: EditorProps) {
  * `@monaco-editor/react`, for the same reasons.
  */
 export function MonacoDiffEditor(props: DiffEditorProps) {
+  const theme = useAppTheme();
   return (
     <MonacoErrorBoundary>
       <Suspense fallback={<div className="h-full w-full" aria-hidden="true" />}>
-        <DiffEditor {...props} />
+        <DiffEditor {...props} theme={props.theme ?? theme} />
       </Suspense>
     </MonacoErrorBoundary>
   );

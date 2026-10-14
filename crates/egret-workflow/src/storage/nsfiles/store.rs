@@ -540,6 +540,14 @@ pub enum Conflict {
     Error,
     /// Nothing is written; [`Written::Skipped`].
     Skip,
+    /// The next revision, only if the path's current revision is this one
+    /// (W7d §3.2, the API's `if_revision`); otherwise nothing is written and
+    /// the answer is [`Written::Changed`]. A path's current revision is its
+    /// latest LIVE revision: `0` when it never existed or is soft-deleted, so
+    /// `IfRevision(0)` means "the path must not exist" and a path deleted
+    /// since it was read is changed. Judged under the path's lock, in the
+    /// transaction that inserts the revision.
+    IfRevision(u32),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -551,6 +559,13 @@ pub enum Written {
     /// infrastructure failure): nothing is written (Task 6 fix round 1, I1,
     /// judged under the path's lock since Task 8 fix round 1).
     Already(NsEntry),
+    /// [`Conflict::IfRevision`] named another revision than the path's
+    /// current one: nothing is written. `current` is the path's latest row,
+    /// live or soft-deleted (`None`: the path never existed).
+    Changed {
+        expected: u32,
+        current: Option<NsEntry>,
+    },
 }
 
 /// The lock key's text of one `lock_path`, bound as a value.
@@ -1171,9 +1186,21 @@ async fn commit_staged(
     }
     check_kinds(&mut tx, grant, path, &subject).await?;
     let current = latest_now.map(|(e, _)| e);
+    // W7d §3.2: compare-and-write. Read under the path's lock, in the
+    // transaction that inserts the revision, so no other writer of the path
+    // commits between this check and that insert.
+    if let Conflict::IfRevision(expected) = conflict {
+        let live = current
+            .as_ref()
+            .filter(|l| !l.deleted)
+            .map_or(0, |l| l.revision);
+        if live != expected {
+            return Ok(Written::Changed { expected, current });
+        }
+    }
     if current.as_ref().is_some_and(|l| !l.deleted) {
         match conflict {
-            Conflict::Overwrite => {}
+            Conflict::Overwrite | Conflict::IfRevision(_) => {}
             Conflict::Error => {
                 return Err(NsError::Conflict(format!(
                     "namespace file '{path}' already exists in namespace '{ns}' and \

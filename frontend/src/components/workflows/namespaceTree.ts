@@ -1,4 +1,4 @@
-import type { FlowListItemDto } from "@/api/generated/model";
+import type { FlowListItemDto, WorkflowNamespaceDto } from "@/api/generated/model";
 
 /**
  * One namespace in the flow list's tree (spec §4).
@@ -85,3 +85,78 @@ export function knownNamespaces(flows: FlowListItemDto[]): string[] {
  * string literal in this module that survives minification.
  */
 export const EMPTY_SEGMENT_LABEL = "(empty segment)";
+
+/**
+ * One namespace in the namespaces list's tree (W7d spec §4.1), built from
+ * `GET …/namespaces` rows rather than from flows: a namespace can hold only
+ * files or KV keys.
+ *
+ * `label` is the path below the parent node: the last segment, or the full
+ * namespace for a root whose parent is not listed (a prefix filter answers
+ * `company.team` and below, without `company`). It is `""` for an empty
+ * segment (`a.` under `a`); show `EMPTY_SEGMENT_LABEL` then.
+ */
+export interface NamespaceRowNode {
+  label: string;
+  path: string;
+  row: WorkflowNamespaceDto;
+  children: NamespaceRowNode[];
+}
+
+/**
+ * Builds the namespaces list's tree from the server's flat rows.
+ *
+ * - A node's parent is its nearest listed ancestor by dots. The server lists
+ *   every parent (`own: false`), so that is the direct parent, except at the
+ *   top of a filtered list.
+ * - Siblings sort by label; the input order is never relied on.
+ */
+export function buildNamespaceRowTree(rows: WorkflowNamespaceDto[]): NamespaceRowNode[] {
+  const byPath = new Map<string, NamespaceRowNode>();
+  for (const row of rows) byPath.set(row.namespace, { label: row.namespace, path: row.namespace, row, children: [] });
+  const roots: NamespaceRowNode[] = [];
+  for (const node of byPath.values()) {
+    let parent: NamespaceRowNode | undefined;
+    for (let cut = node.path.lastIndexOf("."); cut >= 0 && !parent; cut = node.path.lastIndexOf(".", cut - 1)) {
+      parent = byPath.get(node.path.slice(0, cut));
+      if (cut === 0) break;
+    }
+    if (parent) {
+      node.label = node.path.slice(parent.path.length + 1);
+      parent.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+  const sort = (nodes: NamespaceRowNode[]) => {
+    nodes.sort((a, b) => a.label.localeCompare(b.label));
+    for (const n of nodes) sort(n.children);
+  };
+  sort(roots);
+  return roots;
+}
+
+/**
+ * Each segment of `namespace` with the namespace it ends, for the detail's
+ * breadcrumb: `company.team` → `company`, `company.team`. An empty segment is
+ * kept (`a..b` → `a`, `a.`, `a..b`), with label `""`.
+ */
+export function namespaceSegments(namespace: string): { label: string; path: string }[] {
+  const parts = namespace.split(".");
+  return parts.map((label, i) => ({ label, path: parts.slice(0, i + 1).join(".") }));
+}
+
+/**
+ * The rows exactly one dot below `namespace`, sorted: the detail's child
+ * namespaces. `a.` is a child of `a` (an empty segment), `a.b.c` is not.
+ */
+export function directChildNamespaces(rows: WorkflowNamespaceDto[], namespace: string): WorkflowNamespaceDto[] {
+  return rows
+    .filter(
+      (r) =>
+        r.namespace !== namespace &&
+        namespaceContains(namespace, r.namespace) &&
+        !r.namespace.slice(namespace.length + 1).includes("."),
+    )
+    .sort((a, b) => a.namespace.localeCompare(b.namespace));
+}

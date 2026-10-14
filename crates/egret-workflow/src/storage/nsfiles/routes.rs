@@ -8,7 +8,7 @@
 //! GET    /api/ws/{workspace}/workflows/namespaces/{namespace}/files/search?q        workflow:read
 //! GET    /api/ws/{workspace}/workflows/namespaces/{namespace}/files/directory?path  workflow:read
 //! GET    /api/ws/{workspace}/workflows/namespaces/{namespace}/files/export          workflow:read (a streamed zip)
-//! POST   /api/ws/{workspace}/workflows/namespaces/{namespace}/files?path            workflow:manage (multipart)
+//! POST   /api/ws/{workspace}/workflows/namespaces/{namespace}/files?path&if_revision workflow:manage (multipart)
 //! POST   /api/ws/{workspace}/workflows/namespaces/{namespace}/files/directory?path  workflow:manage
 //! PUT    /api/ws/{workspace}/workflows/namespaces/{namespace}/files?from&to         workflow:manage
 //! DELETE /api/ws/{workspace}/workflows/namespaces/{namespace}/files?path            workflow:manage
@@ -116,6 +116,64 @@ pub struct NsPathQuery {
 pub struct NsTargetQuery {
     /// The path in the namespace (a leading `/` is added when missing).
     pub path: String,
+}
+
+/// `POST …/files`'s query (W7d §3.2 adds `if_revision`).
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct NsUploadQuery {
+    /// The path in the namespace (a leading `/` is added when missing).
+    pub path: String,
+    /// Write only if the path's current revision is this one, else 409 with
+    /// `code: "file_changed"` and nothing written. The current revision is
+    /// the latest LIVE one: `0` means "the path must not exist" (a path that
+    /// never existed, or one soft-deleted, is at `0`). Absent: no check, the
+    /// next revision is written whatever it is.
+    pub if_revision: Option<u32>,
+}
+
+/// `ErrorBody.code` of the 409 an `if_revision` mismatch answers (W7d §3.2),
+/// as W7a's `draft_changed` ([`crate::routes::DRAFT_CHANGED_CODE`]): a client
+/// tells it from the other 409s (a directory there, a busy path) by code.
+pub const FILE_CHANGED_CODE: &str = "file_changed";
+
+/// The 409 `file_changed` of an upload refused by `if_revision`.
+fn file_changed(
+    grant: &Grant,
+    path: &NsPath,
+    expected: u32,
+    current: Option<&NsEntry>,
+) -> Response {
+    let ns = grant.namespace();
+    let message = match current {
+        Some(c) if !c.deleted && expected == 0 => format!(
+            "namespace file '{path}' already exists in namespace '{ns}' (revision {}); \
+             nothing was written",
+            c.revision
+        ),
+        Some(c) if !c.deleted => format!(
+            "namespace file '{path}' in namespace '{ns}' was changed: it is at revision {}, \
+             not {expected}; nothing was written",
+            c.revision
+        ),
+        Some(c) => format!(
+            "namespace file '{path}' in namespace '{ns}' was deleted (at revision {}); \
+             nothing was written",
+            c.revision
+        ),
+        None => format!(
+            "namespace file '{path}' does not exist in namespace '{ns}', so it is not at \
+             revision {expected}; nothing was written"
+        ),
+    };
+    (
+        StatusCode::CONFLICT,
+        axum::Json(egret_core::http::ErrorBody {
+            error: Error::Conflict(message).to_string(),
+            code: Some(FILE_CHANGED_CODE.to_string()),
+        }),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -956,7 +1014,7 @@ fn body_refusal(
     params(
         WorkspacePath,
         ("namespace" = String, Path, description = "The namespace; it needs no flow"),
-        NsTargetQuery,
+        NsUploadQuery,
     ),
     request_body(
         description = "`multipart/form-data` with one part, `fileContent` (at most `workflow.storage.max_file_bytes`; the body at most that + 1 MiB, each part's headers at most 64 KiB). The bytes become the next revision of `path` (a new path's revision 1; a soft-deleted path's next revision, live again). A `.zip` is stored as one file, never expanded; `/_flows` is refused (flows are published through the flow API). A body that stops arriving for 30 seconds, or takes longer than 12 hours in all, ends the upload (408). **Build the body as a `FormData`** and let the browser set `multipart/form-data; boundary=…`.",
@@ -964,11 +1022,11 @@ fn body_refusal(
     ),
     responses(
         (status = 200, description = "Stored, as the path's next revision. No content and no content type (Kestra's answer)."),
-        (status = 400, description = "A path rule (named), a refused namespace, `/_flows`, no `fileContent` part or another part before it (named), a malformed multipart body, or headers over the budget", body = egret_core::http::ErrorBody),
+        (status = 400, description = "A path rule (named), a refused namespace, `/_flows`, no `fileContent` part or another part before it (named), a malformed multipart body, headers over the budget, or an `if_revision` that is not a whole number from 0", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 408, description = "No byte of the body arrived for 30 seconds, or the body took longer than 12 hours in all; nothing was stored.", body = egret_core::http::ErrorBody),
-        (status = 409, description = "A directory is at `path`, a file is where one of its parent directories goes, or a soft-deleted entry of the other kind still holds history there (named; only a flow's `PurgeFiles` task removes history -- the API has no purge route). Also 409 when the path is busy: a move or another write holds its lock for longer than the API waits (5 s); nothing was written, try again.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "A directory is at `path`, a file is where one of its parent directories goes, or a soft-deleted entry of the other kind still holds history there (named; only a flow's `PurgeFiles` task removes history -- the API has no purge route). Also 409 when the path is busy: a move or another write holds its lock for longer than the API waits (5 s); nothing was written, try again. With `if_revision`: when the path's current revision (its latest live one; `0` when it never existed or is soft-deleted) is not `if_revision`, 409 with `code: \"file_changed\"` and nothing written -- the check and the write are one step under the path's lock, so of two writes carrying the same revision exactly one commits; the other 409s carry no code.", body = egret_core::http::ErrorBody),
         (status = 413, description = "The file is over `workflow.storage.max_file_bytes`, or the body over its limit (named)", body = egret_core::http::ErrorBody),
         (status = 415, description = "Not `multipart/form-data`", body = egret_core::http::ErrorBody),
         (status = 503, description = "Internal storage or the database is unavailable or not configured; nothing was stored and the request can be retried.", body = egret_core::http::ErrorBody),
@@ -978,7 +1036,7 @@ pub(crate) async fn upload_namespace_file(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, namespace)): Path<(String, String)>,
-    NsQuery(q): NsQuery<NsTargetQuery>,
+    NsQuery(q): NsQuery<NsUploadQuery>,
     req: axum::extract::Request,
 ) -> Result<StatusCode, Response> {
     use axum::extract::FromRequest as _;
@@ -1067,12 +1125,16 @@ pub(crate) async fn upload_namespace_file(
         &grant,
         &path,
         &mut body,
-        Conflict::Overwrite,
+        q.if_revision
+            .map_or(Conflict::Overwrite, Conflict::IfRevision),
         by,
     )
     .await;
     let entry = match written {
         Ok(Written::Written(e)) => e,
+        Ok(Written::Changed { expected, current }) => {
+            return Err(file_changed(&grant, &path, expected, current.as_ref()))
+        }
         Ok(Written::Skipped(_) | Written::Already(_)) => {
             return Err(core_refusal(Error::Internal(anyhow::anyhow!(
                 "an OVERWRITE upload of '{path}' by a user was skipped"

@@ -94,8 +94,15 @@ const isTime = (v: string): v is ExecutionFilters["time"] => v === "custom" || T
  * page, say) is read as absent: it neither narrows the request nor counts as
  * a filter the page would have to offer to clear.
  */
-export function readFilters(params: URLSearchParams, opts: { pinned?: boolean } = {}): ExecutionFilters {
+export function readFilters(
+  params: URLSearchParams,
+  opts: { pinned?: boolean; pinnedNamespace?: boolean } = {},
+): ExecutionFilters {
   if (opts.pinned) return { ...readFilters(params), namespace: "", subNamespaces: false, flow: "" };
+  // A namespace's own Executions tab (W7d): the namespace is fixed and its
+  // picker hidden, so a `namespace` or `subns` in the URL is read as absent.
+  // The flow picker stays, offering the namespace's flows.
+  if (opts.pinnedNamespace) return { ...readFilters(params), namespace: "", subNamespaces: false };
   const states = [...new Set((params.get("state") ?? "").split(",").filter(Boolean))];
   const namespace = params.get("namespace") ?? "";
   const time = params.get("time") ?? "";
@@ -165,15 +172,20 @@ export function clearedFilters(f: ExecutionFilters): Partial<ExecutionFilters> {
  *   2026-10-11).
  * - `pinnedFlowId` is the flow's own Executions tab: it replaces the flow
  *   filter, and no namespace is sent.
+ * - `pinnedNamespace` is a namespace's own Executions tab (W7d spec §4.2): it
+ *   is sent as `namespace_prefix`, so the namespace and its children, and
+ *   replaces the namespace filter.
  */
 export function toQueryParams(
   f: ExecutionFilters,
   now: number,
-  opts: { pinnedFlowId?: string } = {},
+  opts: { pinnedFlowId?: string; pinnedNamespace?: string } = {},
 ): WorkflowListExecutionsParams {
   const q: WorkflowListExecutionsParams = {};
   if (f.states.length) q.state = f.states.join(",");
-  if (!opts.pinnedFlowId && f.namespace) {
+  if (opts.pinnedNamespace !== undefined) {
+    q.namespace_prefix = opts.pinnedNamespace;
+  } else if (!opts.pinnedFlowId && f.namespace) {
     if (f.subNamespaces) q.namespace_prefix = f.namespace;
     else q.namespace = f.namespace;
   }

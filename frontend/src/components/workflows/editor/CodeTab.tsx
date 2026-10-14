@@ -34,6 +34,17 @@ const toMonaco = (r: YamlRange): MonacoNS.IRange => ({
  * (`saveViewState`). The page disposes the model when it leaves the flow
  * (`disposeFlowModel`).
  */
+/**
+ * The id of Code's save action (Ctrl/Cmd+S). An editor ACTION, not `addCommand`: standalone
+ * Monaco keeps every editor's keybindings in one shared service, and an `addCommand` answers in
+ * whichever editor has focus (monaco-editor #2947), is matched newest-first, and is never
+ * removed, so a namespace file's editor beside Code would save the flow and swallow the key.
+ * `addAction` scopes its keybinding to this editor (`editorId == getId()`, monaco-editor 0.56
+ * `standaloneCodeEditor.js`) and returns a disposable, disposed when the tab unmounts, because
+ * disposing the editor does not remove it (W7d Task 7, fix round 2).
+ */
+export const FLOW_SAVE_ACTION = "egret.flow.save";
+
 export function CodeTab({ ctx }: { ctx: EditorContext }) {
   const [mounted, setMounted] = useState<Mounted | null>(null);
   const [yamlFailed, setYamlFailed] = useState(false);
@@ -41,12 +52,20 @@ export function CodeTab({ ctx }: { ctx: EditorContext }) {
   // Monaco's callbacks are bound once, at mount; they read the latest context through this.
   const latest = useRef(ctx);
   useEffect(() => { latest.current = ctx; });
+  const saveAction = useRef<MonacoNS.IDisposable | null>(null);
+  useEffect(() => () => saveAction.current?.dispose(), []);
 
   const handleMount: OnMount = (editor, monaco) => {
     rememberMonaco(monaco);
     // Registered while read-only too, and inert there: read-only can arrive after mount.
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      if (!latest.current.readOnly) latest.current.save?.();
+    saveAction.current?.dispose();
+    saveAction.current = editor.addAction({
+      id: FLOW_SAVE_ACTION,
+      label: "Save the flow",
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+      run: () => {
+        if (!latest.current.readOnly) latest.current.save?.();
+      },
     });
     editor.onDidChangeCursorPosition(() => {
       const position = editor.getPosition();

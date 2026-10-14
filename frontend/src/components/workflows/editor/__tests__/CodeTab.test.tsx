@@ -35,6 +35,12 @@ const fake = vi.hoisted(() => {
     markers: new Map<string, unknown[]>(),
     markerListeners: [] as Array<() => void>,
     commands: {} as Record<number, () => void>,
+    /** Each command's `when` context key, by keybinding (W7d Task 7, fix round 1). */
+    commandContexts: {} as Record<number, string | undefined>,
+    /** The editor context keys created. */
+    contextKeys: [] as string[],
+    /** Every `addAction`: its id, keybindings, and whether it was disposed (W7d Task 7, fix round 2). */
+    actions: [] as { id: string; keybindings: number[]; disposed: boolean }[],
     selection: null as unknown,
     revealed: null as unknown,
     focused: 0,
@@ -86,7 +92,7 @@ const fake = vi.hoisted(() => {
     monaco,
     reset() {
       Object.assign(state, {
-        mounts: 0, props: null, models: new Map(), markers: new Map(), markerListeners: [], commands: {},
+        mounts: 0, props: null, models: new Map(), markers: new Map(), markerListeners: [], commands: {}, commandContexts: {}, contextKeys: [], actions: [],
         selection: null, revealed: null, focused: 0, yamlMarkers: [],
       });
     },
@@ -109,7 +115,21 @@ vi.mock("@/components/monaco/MonacoEditor", () => ({
       model.listeners.add(changed);
       const editor = {
         getModel: () => model,
-        addCommand: (k: number, cb: () => void) => { fake.state.commands[k] = cb; },
+        addCommand: (k: number, cb: () => void, context?: string) => {
+          fake.state.commands[k] = cb;
+          fake.state.commandContexts[k] = context;
+        },
+        addAction: (desc: { id: string; keybindings?: number[]; run: () => unknown }) => {
+          const entry = { id: desc.id, keybindings: desc.keybindings ?? [], disposed: false };
+          fake.state.actions.push(entry);
+          // Monaco runs the action on its keybinding: tests press it through `commands`, as before.
+          for (const k of entry.keybindings) fake.state.commands[k] = () => void desc.run();
+          return { dispose: () => { entry.disposed = true; } };
+        },
+        createContextKey: (key: string, value: unknown) => {
+          fake.state.contextKeys.push(key);
+          return { set: () => {}, get: () => value, reset: () => {} };
+        },
         onDidChangeCursorPosition: () => ({ dispose: () => {} }),
         getPosition: () => null,
         setSelection: (r: unknown) => { fake.state.selection = r; },
@@ -139,7 +159,7 @@ vi.mock("@/components/workflows/editor/monacoYaml", () => ({
   configureFlowYaml: (...a: unknown[]) => configureFlowYaml(...a),
 }));
 
-import { CodeTab } from "@/components/workflows/editor/CodeTab";
+import { CodeTab, FLOW_SAVE_ACTION } from "@/components/workflows/editor/CodeTab";
 import { registerEditorTabs } from "@/components/workflows/editor/registerEditorTabs";
 import { createEditorBridge, type EditorContext } from "@/components/workflows/editor/EditorContext";
 import { MultiPanel } from "@/components/workflows/panels/MultiPanel";
@@ -286,6 +306,18 @@ describe("CodeTab", () => {
     render(<CodeTab ctx={makeEditorContext({ modelKey: "f-1", save })} />);
     fake.state.commands[fake.monaco.KeyMod.CtrlCmd | fake.monaco.KeyCode.KeyS]();
     expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  it("binds Ctrl/Cmd+S as an action of its own editor, not a shared command, and disposes it on unmount", () => {
+    // An `addCommand` keybinding answers in every editor and is never removed; an action's is
+    // scoped to the editor that added it (W7d Task 7, fix round 2).
+    const save = vi.fn();
+    const { unmount } = render(<CodeTab ctx={makeEditorContext({ modelKey: "f-1", save })} />);
+    const saveKey = fake.monaco.KeyMod.CtrlCmd | fake.monaco.KeyCode.KeyS;
+    expect(fake.state.actions).toEqual([{ id: FLOW_SAVE_ACTION, keybindings: [saveKey], disposed: false }]);
+    expect(saveKey in fake.state.commandContexts).toBe(false);
+    unmount();
+    expect(fake.state.actions[0].disposed).toBe(true);
   });
 
   it("is read-only with a banner that says why for a viewer without workflow:manage", () => {

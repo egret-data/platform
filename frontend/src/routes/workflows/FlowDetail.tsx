@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { lazy, useCallback, useEffect, useId, useRef, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Milestone, Play, RotateCw, Save, Trash2 } from "lucide-react";
+import { Milestone, Play, RotateCw, Save, SaveAll, Trash2 } from "lucide-react";
 import { ApiError } from "@/api/client";
 import {
   useWorkflowDeleteFlow,
@@ -33,6 +33,9 @@ import {
   versionSourceOf,
 } from "@/components/workflows/draftState";
 import { useFlowEditor } from "@/components/workflows/editor/EditorContext";
+import { DiscardFileDialog, NamespaceChangeDialog, useFilesHost } from "@/components/workflows/editor/fileTabs";
+import { parseYaml, topLevelScalar } from "@/components/workflows/editor/yamlPath";
+import { LazyRouteArea } from "@/components/layout/LazyRouteArea";
 import { disposeFlowModel } from "@/components/workflows/editor/flowModel";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { Forbidden } from "@/routes/Forbidden";
@@ -64,6 +67,13 @@ export const DRAFT_CHANGED_CODE = "draft_changed";
  * (`FlowNew.tsx`): the flow's editor opens on it, unsaved.
  */
 export type CarriedDraft = { unsavedSource: string };
+
+/**
+ * The open namespace files' state (W7d spec §4.3), mounted while a file tab is
+ * open. Through `lazy()` only: it brings `useNamespaceFile` and the file API,
+ * which stay out of this chunk (`scripts/assert-workflows-lazy.mjs`).
+ */
+const FileSessions = lazy(() => import("@/components/workflows/editor/files/FileSessions"));
 
 const errorMessage = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
 
@@ -145,6 +155,11 @@ type SaveRequest = {
   successToast?: string;
   /** What this save writes, as the stale-save dialog names it ("v1's text"); the editor's text when absent. */
   label?: string;
+  /**
+   * The open files' unsaved edits have been dealt with (saved or discarded), so a save that
+   * moves the flow to another namespace goes ahead without asking (W7d Task 7, fix round 1).
+   */
+  filesSettled?: boolean;
 };
 
 const SAVED_TOAST = "Saved. New runs use this version of the flow.";
@@ -200,13 +215,18 @@ function FlowWorkspace({
   // through a ref that every render points at that render's `saveFlow`.
   const saveRef = useRef<(request?: SaveRequest, overwrite?: boolean) => Promise<boolean>>(async () => false);
   const save = useCallback(() => void saveRef.current(), []);
-  const flowLayout = useFlowLayout(id);
+  const pageLayout = useFlowLayout(id);
+  // The flow's namespace files as editor tabs (W7d spec §4.3). Their saves are their own: the
+  // flow's Save below never saves a file, and a file's save never saves the flow.
+  const files = useFilesHost({ ws, flowKey: id, namespace: flow.namespace, readOnly: !manage, flowLayout: pageLayout });
+  const flowLayout = files.flowLayout;
   const editor = useFlowEditor({
     workspace: ws,
     flowId: id,
     initialSource: carried ?? flow.source,
     readOnly: !manage,
     save: manage ? save : undefined,
+    files: files.host,
     onRevealCode: flowLayout.revealCode,
   });
 
@@ -214,8 +234,16 @@ function FlowWorkspace({
   useEffect(() => () => disposeFlowModel(id), [id]);
 
   const dirty = editor.source !== baseline.source;
-  useUnsavedChangesWarning(dirty);
+  const unsavedFiles = files.host.dirtyPaths.length;
+  // One warning for the page: the flow's draft or any open file with unsaved edits.
+  useUnsavedChangesWarning(dirty || unsavedFiles > 0);
 
+  /**
+   * A save that would move the flow to another namespace while open files have unsaved edits,
+   * held for the question: save the files into the old namespace first, discard them, or cancel.
+   */
+  const [namespaceAsk, setNamespaceAsk] = useState<{ request: SaveRequest; overwrite: boolean; to: string; files: string[] } | null>(null);
+  const [namespaceBusy, setNamespaceBusy] = useState(false);
   /** The save the server refused with `draft_changed`, which the stale dialog may overwrite; open while set. */
   const [staleSave, setStaleSave] = useState<SaveRequest | null>(null);
   const [publishOpen, setPublishOpen] = useState(false);
@@ -250,6 +278,16 @@ function FlowWorkspace({
     if (!manage || inFlight.current) return false;
     const source = request.source ?? editor.source;
     if (!overwrite && source === baseline.source) return false;
+    // The open files belong to the flow's namespace: moving the flow orphans their tabs (they
+    // close), so their unsaved edits are dealt with first.
+    if (!request.filesSettled && files.host.dirtyPaths.length > 0) {
+      const to = topLevelScalar(parseYaml(source), "namespace");
+      if (to !== null && to !== flow.namespace) {
+        if (overwrite) setStaleSave(null);
+        setNamespaceAsk({ request, overwrite, to, files: [...files.host.dirtyPaths] });
+        return false;
+      }
+    }
     inFlight.current = true;
     setSaving(true);
     let precondition = baseline.updatedAt;
@@ -410,6 +448,11 @@ function FlowWorkspace({
             </span>
             {changesPill && <Badge variant="outline">{changesPill}</Badge>}
             {dirty && <Badge variant="secondary">Unsaved changes</Badge>}
+            {unsavedFiles > 0 && (
+              <Badge variant="secondary" className="tabular-nums">
+                {unsavedFiles === 1 ? "1 unsaved file" : `${unsavedFiles} unsaved files`}
+              </Badge>
+            )}
           </div>
           <p className="text-sm text-muted-foreground">{flow.namespace}</p>
         </div>
@@ -420,6 +463,12 @@ function FlowWorkspace({
                 <Save aria-hidden />
                 Save
               </ReasonButton>
+              {files.openPaths.length > 0 && (
+                <ReasonButton enablement={files.saveAllState} reasonId={`${reasonsId}-files`} variant="outline" onClick={() => void files.saveAll()}>
+                  <SaveAll aria-hidden />
+                  Save all files
+                </ReasonButton>
+              )}
               <ReasonButton enablement={versionState} reasonId={`${reasonsId}-version`} onClick={() => setPublishOpen(true)}>
                 <Milestone aria-hidden />
                 Create version
@@ -436,6 +485,7 @@ function FlowWorkspace({
             <DisabledReasons
               actions={[
                 { id: `${reasonsId}-save`, label: "Save", enablement: saveState },
+                ...(files.openPaths.length > 0 ? [{ id: `${reasonsId}-files`, label: "Save all files", enablement: files.saveAllState }] : []),
                 { id: `${reasonsId}-version`, label: "Create version", enablement: versionState },
                 { id: `${reasonsId}-run`, label: "Run", enablement: runState },
               ]}
@@ -476,6 +526,36 @@ function FlowWorkspace({
         </TabsContent>
       </Tabs>
 
+      {files.openPaths.length > 0 && (
+        <LazyRouteArea area="Files" fallback={null}>
+          <FileSessions key={`${id}:${flow.namespace}`} ws={ws} namespace={flow.namespace} paths={files.openPaths} store={files.host.store} />
+        </LazyRouteArea>
+      )}
+      <DiscardFileDialog paths={files.closing} onConfirm={files.confirmClose} onCancel={files.cancelClose} />
+      <NamespaceChangeDialog
+        ask={namespaceAsk && { from: flow.namespace, to: namespaceAsk.to, files: namespaceAsk.files }}
+        busy={namespaceBusy}
+        onCancel={() => setNamespaceAsk(null)}
+        onDiscard={() => {
+          const ask = namespaceAsk;
+          setNamespaceAsk(null);
+          if (ask) void saveFlow({ ...ask.request, filesSettled: true }, ask.overwrite).catch(() => {});
+        }}
+        onSaveFiles={async () => {
+          const ask = namespaceAsk;
+          if (!ask) return;
+          setNamespaceBusy(true);
+          try {
+            // Into the namespace they were read from, before the flow leaves it. A file that is not
+            // saved (its tab or its stale dialog says why) keeps the flow where it is.
+            const saved = await files.saveAll();
+            setNamespaceAsk(null);
+            if (saved) await saveFlow({ ...ask.request, filesSettled: true }, ask.overwrite).catch(() => {});
+          } finally {
+            setNamespaceBusy(false);
+          }
+        }}
+      />
       <StaleSaveDialog
         open={staleSave !== null}
         onOpenChange={(o) => { if (!o) setStaleSave(null); }}

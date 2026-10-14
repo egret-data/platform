@@ -147,6 +147,37 @@ export function reopenTab(l: Layout, tab: TabId, panel: string): Layout {
   };
 }
 
+/**
+ * Show `tab`: selected where it is when open, else opened at the end of the
+ * panel holding Code (the first panel if none does) and selected. A namespace
+ * file opened from the Files tab lands next to Code (W7d spec §4.3).
+ */
+export function openTab(l: Layout, tab: TabId): Layout {
+  if (panelOf(l, tab)) return activateTab(l, tab);
+  const home = panelOf(l, CODE_TAB) ?? l.panels[0];
+  return home ? reopenTab(l, tab, home.id) : l;
+}
+
+/**
+ * Rename tabs where they stand (a moved namespace file, W7d), the selection
+ * with them. A tab renamed onto one already open keeps the first place only,
+ * and a panel left empty goes. The same layout comes back when no id changes.
+ */
+export function renameTabs(l: Layout, rename: (tab: TabId) => TabId): Layout {
+  if (!l.panels.some((p) => p.tabs.some((t) => rename(t) !== t))) return l;
+  const seen = new Set<TabId>();
+  const panels = l.panels.map((p) => {
+    const tabs = p.tabs.map(rename).filter((t) => {
+      if (seen.has(t)) return false;
+      seen.add(t);
+      return true;
+    });
+    const active = rename(p.active);
+    return { ...p, tabs, active: tabs.includes(active) ? active : (tabs[0] ?? active) };
+  });
+  return settle(panels);
+}
+
 /** Apply sizes given in panel order, scaled to 100. A list that does not fit is ignored. */
 export function resize(l: Layout, sizes: number[]): Layout {
   if (sizes.length !== l.panels.length || !sizes.every(usableSize)) return l;

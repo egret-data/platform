@@ -30374,6 +30374,275 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/namespaces": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "list_namespaces",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prefix",
+            "in": "query",
+            "description": "Only this namespace and the ones beneath it, dot-anchored: `company` matches `company` and `company.team`, never `companyx`. Empty means no filter.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The workspace's namespaces, from flows that are not deleted, live namespace files and live KV keys, plus every parent by dots (`own: false`); a namespace holding only a live directory is listed (`own: true`, `files: 0`); sorted by namespace (byte order). Counts are each namespace's own, never its children's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WorkflowNamespaceDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/namespaces/{namespace}": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "get_namespace",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The namespace's own counts; `own: false` when it is only a parent by dots of another; `can_manage` whether the caller holds workflow:manage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowNamespaceDetailDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a valid namespace name (`^[a-z0-9][a-z0-9._-]*`, 1-150 characters)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Nothing lives in this namespace or beneath it in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/namespaces/{namespace}/dependencies": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "namespace_dependencies",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The namespace; its children (dot-anchored) are inside it",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The flow-to-flow graph of the namespace, built from every flow's saved draft: `subflow` edges from `Subflow` tasks with a literal target, `flow_trigger` edges from `Flow` triggers' `dependsOn` entries naming a flow. A namespace with no flows answers an empty graph.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NamespaceDependenciesDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a valid namespace name (`^[a-z0-9][a-z0-9._-]*`, 1-150 characters)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The workspace has more than 2000 flows (not deleted), every one of which would be read (`code: dependencies_too_large`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/namespaces/{namespace}/files": {
       "get": {
         "tags": [
@@ -30657,6 +30926,17 @@
             }
           },
           {
+            "name": "if_revision",
+            "in": "query",
+            "description": "Write only if the path's current revision is this one, else 409 with\n`code: \"file_changed\"` and nothing written. The current revision is\nthe latest LIVE one: `0` means \"the path must not exist\" (a path that\nnever existed, or one soft-deleted, is at `0`). Absent: no check, the\nnext revision is written whatever it is.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
             "name": "workspace",
             "in": "path",
             "required": true,
@@ -30681,7 +30961,7 @@
             "description": "Stored, as the path's next revision. No content and no content type (Kestra's answer)."
           },
           "400": {
-            "description": "A path rule (named), a refused namespace, `/_flows`, no `fileContent` part or another part before it (named), a malformed multipart body, or headers over the budget",
+            "description": "A path rule (named), a refused namespace, `/_flows`, no `fileContent` part or another part before it (named), a malformed multipart body, headers over the budget, or an `if_revision` that is not a whole number from 0",
             "content": {
               "application/json": {
                 "schema": {
@@ -30721,7 +31001,7 @@
             }
           },
           "409": {
-            "description": "A directory is at `path`, a file is where one of its parent directories goes, or a soft-deleted entry of the other kind still holds history there (named; only a flow's `PurgeFiles` task removes history -- the API has no purge route). Also 409 when the path is busy: a move or another write holds its lock for longer than the API waits (5 s); nothing was written, try again.",
+            "description": "A directory is at `path`, a file is where one of its parent directories goes, or a soft-deleted entry of the other kind still holds history there (named; only a flow's `PurgeFiles` task removes history -- the API has no purge route). Also 409 when the path is busy: a move or another write holds its lock for longer than the API waits (5 s); nothing was written, try again. With `if_revision`: when the path's current revision (its latest live one; `0` when it never existed or is soft-deleted) is not `if_revision`, 409 with `code: \"file_changed\"` and nothing written -- the check and the write are one step under the path's lock, so of two writes carrying the same revision exactly one commits; the other 409s carry no code.",
             "content": {
               "application/json": {
                 "schema": {
@@ -40419,6 +40699,108 @@
           }
         }
       },
+      "NamespaceDependenciesDto": {
+        "type": "object",
+        "description": "A namespace's flow-to-flow graph, built from the flows' saved drafts.",
+        "required": [
+          "nodes",
+          "edges",
+          "unparsable"
+        ],
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamespaceDependencyNodeDto"
+            },
+            "description": "The namespace's flows and its children's, then every flow elsewhere\nwith a direct edge to or from one of them; by namespace, then flow id."
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamespaceDependencyEdgeDto"
+            },
+            "description": "Edges with at least one end in the namespace; one per (source,\ntarget, kind)."
+          },
+          "unparsable": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Drafts in the WORKSPACE (not only this namespace) whose YAML does not\nparse. Each is still a node (`unparsable: true`) when it is in the\nnamespace or an edge reaches it, but its own edges are unknown."
+          }
+        }
+      },
+      "NamespaceDependencyEdgeDto": {
+        "type": "object",
+        "required": [
+          "source",
+          "target",
+          "kind"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "target": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/NamespaceDependencyKind"
+          }
+        }
+      },
+      "NamespaceDependencyKind": {
+        "type": "string",
+        "description": "What an edge of the dependencies graph means.",
+        "enum": [
+          "subflow",
+          "flow_trigger"
+        ]
+      },
+      "NamespaceDependencyNodeDto": {
+        "type": "object",
+        "description": "One flow of a namespace's dependencies graph (W7d spec §3.4).",
+        "required": [
+          "id",
+          "namespace",
+          "flow_id",
+          "disabled",
+          "in_namespace",
+          "dynamic_subflows",
+          "unparsable"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The flow's id (the uuid every flow route takes); edges name it."
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "flow_id": {
+            "type": "string"
+          },
+          "disabled": {
+            "type": "boolean",
+            "description": "The flow is switched off: its state is `disabled` or its YAML says\n`disabled: true`."
+          },
+          "in_namespace": {
+            "type": "boolean",
+            "description": "The flow is in the namespace or beneath it (dot-anchored); false for a\nflow elsewhere present only for an edge to or from one that is."
+          },
+          "dynamic_subflows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`Subflow` tasks whose `namespace` or `flowId` is an expression\n(`{{ }}`/`{% %}`): only an execution knows their target, so they draw\nno edge."
+          },
+          "unparsable": {
+            "type": "boolean",
+            "description": "The flow's saved draft does not parse: it is drawn so edges into it\nshow, but its own edges are unknown."
+          }
+        }
+      },
       "NamespaceDto": {
         "type": "object",
         "required": [
@@ -47949,6 +48331,81 @@
           }
         ],
         "description": "Wire mirror of [`Unmodelled`] — the construct a policy or envelope body\ncarries that this reader detected but does not model. See the module\ndoc for why this is mirrored exhaustively rather than rendered as a\n`Debug` string."
+      },
+      "WorkflowNamespaceDetailDto": {
+        "type": "object",
+        "description": "One namespace as its detail route answers it (W7d spec §4.5): the\nlisting's row ([`WorkflowNamespaceDto`]) and whether the caller may\nmanage it. The listing carries no `can_manage`; this is a type of its own\nso that the client's type of each answer is exact.",
+        "required": [
+          "namespace",
+          "flows",
+          "files",
+          "kv_keys",
+          "own",
+          "can_manage"
+        ],
+        "properties": {
+          "namespace": {
+            "type": "string"
+          },
+          "flows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Flows in exactly this namespace that are not deleted."
+          },
+          "files": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Live namespace files (directories are not counted)."
+          },
+          "kv_keys": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Live KV keys (the latest revision neither deleted nor expired)."
+          },
+          "own": {
+            "type": "boolean",
+            "description": "False when the namespace is present only as a parent by dots of\nanother."
+          },
+          "can_manage": {
+            "type": "boolean",
+            "description": "The caller holds `workflow:manage` in this workspace: the same PDP\ndecision as the namespace file and KV write routes, which still check\nfor themselves. The UI disables its writes when this is false."
+          }
+        }
+      },
+      "WorkflowNamespaceDto": {
+        "type": "object",
+        "description": "One namespace of the workspace (W7d spec §3.1). egret has no namespace\ntable: a namespace exists while a flow that is not deleted, a live\nnamespace file or directory (even an empty one) or a live KV key is in\nit, or while it is a parent by dots of one that is.\n\n**The counts are this namespace's OWN**, never rolled up from its\nchildren: `company` with one flow in `company.team` answers `flows: 0`.\n\nNamed `Workflow…` because the aggregated OpenAPI document already has a\n`NamespaceDto` (the catalog's), and a second one of that name is dropped.",
+        "required": [
+          "namespace",
+          "flows",
+          "files",
+          "kv_keys",
+          "own"
+        ],
+        "properties": {
+          "namespace": {
+            "type": "string"
+          },
+          "flows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Flows in exactly this namespace that are not deleted."
+          },
+          "files": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Live namespace files (a path whose latest revision is not deleted;\nseveral revisions of one path are one file; directories are not counted)."
+          },
+          "kv_keys": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Live KV keys (the latest revision neither deleted nor expired)."
+          },
+          "own": {
+            "type": "boolean",
+            "description": "False when the namespace is present only as a parent by dots of\nanother (its counts are then all zero). True for a source, whose\ncounts can all be zero when it holds only a live empty directory."
+          }
+        }
       },
       "WorkspaceDto": {
         "type": "object",

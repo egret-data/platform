@@ -781,6 +781,7 @@ pub(crate) mod testing {
             Written::Written(e) => e.revision,
             Written::Skipped(p) => panic!("{p} skipped"),
             Written::Already(e) => panic!("{} already written", e.path),
+            Written::Changed { .. } => panic!("an OVERWRITE write was refused as changed"),
         }
     }
 

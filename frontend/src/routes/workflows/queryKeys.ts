@@ -52,6 +52,59 @@ export const workflowsKeys = {
    * the request: a time preset is turned into `since` at fetch time, so the key
    * stays the same between polls. Without `params` it reaches every page.
    */
+  /**
+   * The namespaces list (`GET …/namespaces`, W7d spec §3.1), and with
+   * `prefix` one subtree of it (the Overview's child namespaces). Without
+   * `prefix` the key is a prefix of every subtree's, so invalidating it
+   * reaches them all.
+   */
+  namespaces: (ws: string, prefix?: string) =>
+    prefix === undefined
+      ? (["workflows", "ws", ws, "namespaces"] as const)
+      : (["workflows", "ws", ws, "namespaces", { prefix }] as const),
+  /**
+   * One namespace (`GET …/namespaces/{ns}`). Under `ws`: a namespace is a name,
+   * not a UUID, and repeats across workspaces. Placed beside the list rather
+   * than under it, so a subtree's key never collides with a namespace called
+   * like a filter.
+   */
+  namespace: (ws: string, namespace: string) => ["workflows", "ws", ws, "namespace", namespace] as const,
+  /**
+   * A namespace's live KV keys (`GET …/namespaces/{ns}/kv`), under
+   * `namespace(ws, ns)`: invalidating the namespace (its counts) refreshes
+   * them, and invalidating this reaches every value and the inherited list
+   * below it.
+   */
+  kv: (ws: string, namespace: string) => ["workflows", "ws", ws, "namespace", namespace, "kv"] as const,
+  /** One key's latest value (`GET …/kv/{key}`). */
+  kvValue: (ws: string, namespace: string, key: string) =>
+    ["workflows", "ws", ws, "namespace", namespace, "kv", "value", key] as const,
+  /** The keys inherited from the namespace's parents (`GET …/kv/inheritance`). */
+  kvInherited: (ws: string, namespace: string) => ["workflows", "ws", ws, "namespace", namespace, "kv", "inherited"] as const,
+  /**
+   * A namespace's files (W9b's routes), under `namespace(ws, ns)`. Every
+   * listing below is reached by invalidating this one after a write. An open
+   * file's content is NOT a query (`useNamespaceFile` holds it as the
+   * editor's base), so no invalidation replaces text being edited.
+   */
+  nsFiles: (ws: string, namespace: string) => ["workflows", "ws", ws, "namespace", namespace, "files"] as const,
+  /** The live children of one directory (`GET …/files/directory?path`), `/` for the root. */
+  nsDirectory: (ws: string, namespace: string, dir: string) =>
+    ["workflows", "ws", ws, "namespace", namespace, "files", "directory", dir] as const,
+  /** The live files whose path contains `q` (`GET …/files/search`). */
+  nsFileSearch: (ws: string, namespace: string, q: string) =>
+    ["workflows", "ws", ws, "namespace", namespace, "files", "search", q] as const,
+  /** One file's revisions (`GET …/files/revisions?path`). */
+  nsFileRevisions: (ws: string, namespace: string, path: string) =>
+    ["workflows", "ws", ws, "namespace", namespace, "files", "revisions", path] as const,
+  /** One revision's bytes (`GET …/files?path&revision`): immutable, so cached as is. */
+  nsFileRevision: (ws: string, namespace: string, path: string, revision: number) =>
+    ["workflows", "ws", ws, "namespace", namespace, "files", "revisions", path, revision] as const,
+  /**
+   * A namespace's dependencies graph (`GET …/namespaces/{ns}/dependencies`, W7d spec §3.4), under
+   * `namespace(ws, ns)`: built from every flow's saved draft on each request, nothing stored.
+   */
+  nsDependencies: (ws: string, namespace: string) => ["workflows", "ws", ws, "namespace", namespace, "dependencies"] as const,
   executions: (ws: string, params?: object) =>
     params
       ? (["workflows", "ws", ws, "executions", params] as const)

@@ -3,6 +3,7 @@ import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import FlowsList from "@/routes/workflows/FlowsList";
 import ExecutionsList from "@/routes/workflows/ExecutionsList";
+import NamespacesList from "@/routes/workflows/NamespacesList";
 
 /**
  * The flow pages, a lazy chunk of their own inside this one: they bring the
@@ -17,6 +18,12 @@ const FlowNew = lazy(() => import("@/routes/workflows/FlowNew"));
  * logs and outputs off it, none of which the lists need.
  */
 const ExecutionDetail = lazy(() => import("@/routes/workflows/ExecutionDetail"));
+/**
+ * The namespace detail (W7d spec §4.2), split the same way: its frame and
+ * Overview, and through it the lazy Dependencies, Files and KV tabs, none of
+ * which the lists need.
+ */
+const NamespaceDetail = lazy(() => import("@/routes/workflows/NamespaceDetail"));
 
 /**
  * The loading state of the flow and execution pages (FE-STATE-2). A failed
@@ -66,6 +73,12 @@ export default function WorkflowsRoutes() {
           `overview`; its tabs are `overview`, `gantt`, `logs` and `outputs`. */}
       <Route path="executions/:id" element={<ExecutionIndexRedirect base={base} />} />
       <Route path="executions/:id/:tab" element={<FlowPage><ExecutionDetail /></FlowPage>} />
+      {/* The namespaces (W7d spec §4). `NamespaceDetail` sends an unknown tab to
+          `overview`; its tabs are `overview`, `flows`, `executions`,
+          `dependencies`, `files` and `kv`. */}
+      <Route path="namespaces" element={<NamespacesList />} />
+      <Route path="namespaces/:namespace" element={<NamespaceIndexRedirect base={base} />} />
+      <Route path="namespaces/:namespace/:tab" element={<FlowPage><NamespaceDetail /></FlowPage>} />
       <Route path="*" element={<Navigate to={`${base}/flows`} replace />} />
     </Routes>
   );
@@ -79,4 +92,9 @@ function FlowIndexRedirect({ base }: { base: string }) {
 function ExecutionIndexRedirect({ base }: { base: string }) {
   const { id } = useParams();
   return <Navigate to={`${base}/executions/${encodeURIComponent(id ?? "")}/overview`} replace />;
+}
+
+function NamespaceIndexRedirect({ base }: { base: string }) {
+  const { namespace } = useParams();
+  return <Navigate to={`${base}/namespaces/${encodeURIComponent(namespace ?? "")}/overview`} replace />;
 }

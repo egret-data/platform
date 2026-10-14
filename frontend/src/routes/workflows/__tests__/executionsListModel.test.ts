@@ -184,3 +184,22 @@ describe("pageCount", () => {
     expect(pageCount(3000)).toBe(60);
   });
 });
+
+describe("the namespace's own Executions tab (W7d)", () => {
+  it("reads a namespace or child-namespace switch left in the URL as absent, and keeps the flow", () => {
+    const params = new URLSearchParams("flow=f-1&namespace=x&subns=1&state=FAILED");
+    expect(readFilters(params, { pinnedNamespace: true })).toEqual({
+      ...DEFAULT_FILTERS,
+      states: ["FAILED"],
+      flow: "f-1",
+    });
+    expect(isFiltering(readFilters(new URLSearchParams("namespace=x&subns=1"), { pinnedNamespace: true }))).toBe(false);
+  });
+
+  it("sends the pinned namespace as namespace_prefix, whatever the filters say, with the flow filter", () => {
+    const req = toQueryParams({ ...DEFAULT_FILTERS, namespace: "x", flow: "f-1" }, NOW, { pinnedNamespace: "company" });
+    expect(req.namespace_prefix).toBe("company");
+    expect(req).not.toHaveProperty("namespace");
+    expect(req.flow_id).toBe("f-1");
+  });
+});

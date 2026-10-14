@@ -36,7 +36,7 @@ import {
 } from "@/components/workflows/executions/timing";
 import { useNow } from "@/components/workflows/executions/polling";
 import { TriggerLabel } from "@/components/workflows/executions/trigger";
-import { knownNamespaces } from "@/components/workflows/namespaceTree";
+import { knownNamespaces, namespaceContains } from "@/components/workflows/namespaceTree";
 import { timeAgo } from "@/lib/relativeTime";
 import {
   clearedFilters,
@@ -69,12 +69,12 @@ interface ListPage {
 async function fetchPage(
   ws: string,
   filters: ExecutionFilters,
-  pinnedFlowId: string | undefined,
+  pins: { pinnedFlowId?: string; pinnedNamespace?: string },
   signal: AbortSignal,
 ): Promise<ListPage> {
   // `customInstance` throws `ApiError` on a non-2xx answer; the check narrows the union.
   // FE-DATA-2 exception: a generated fetcher called directly, for parameters computed at fetch time (`since` from the time preset).
-  const res = await workflowListExecutions(ws, toQueryParams(filters, Date.now(), { pinnedFlowId }), { signal });
+  const res = await workflowListExecutions(ws, toQueryParams(filters, Date.now(), pins), { signal });
   if (res.status !== 200) throw new Error("The executions could not be loaded.");
   return { rows: res.data.rows, total: res.data.total };
 }
@@ -98,27 +98,51 @@ const stateWord = (s: string) => s.charAt(0).toUpperCase() + s.slice(1).toLowerC
  *   document is hidden (`refetchIntervalInBackground: false`).
  * - On the flow's tab it has no page frame (the flow page owns the `h1`), no
  *   flow column, and no flow or namespace filter.
+ * - With `pinnedNamespace`, as a namespace's Executions tab (W7d spec §4.2),
+ *   it has no page frame either. It asks for the namespace and its children
+ *   (`namespace_prefix`), shows no namespace filter, and keeps the flow
+ *   column and a flow filter offering the namespace's flows.
  */
-export default function ExecutionsList({ pinnedFlowId }: { pinnedFlowId?: string }) {
+export default function ExecutionsList({
+  pinnedFlowId,
+  pinnedNamespace,
+}: {
+  pinnedFlowId?: string;
+  pinnedNamespace?: string;
+}) {
   const ws = useParams().workspace!;
   const base = `/explore/${ws}/workflows`;
-  const embedded = pinnedFlowId !== undefined;
+  const flowPinned = pinnedFlowId !== undefined;
+  const namespacePinned = pinnedNamespace !== undefined;
+  const embedded = flowPinned || namespacePinned;
 
   const [params, setParams] = useSearchParams();
-  const filters = useMemo(() => readFilters(params, { pinned: embedded }), [params, embedded]);
+  const filters = useMemo(
+    () => readFilters(params, { pinned: flowPinned, pinnedNamespace: namespacePinned }),
+    [params, flowPinned, namespacePinned],
+  );
   // A picker pushes an entry, so Back undoes it; the time inputs replace theirs.
   const setFilters = (patch: Partial<ExecutionFilters>, replace = false) =>
     setParams((p) => withFilters(p, patch), { replace });
 
-  // The flow list feeds the namespace and flow pickers; the flow's tab shows neither.
+  // The flow list feeds the namespace and flow pickers; the flow's tab shows
+  // neither, and a namespace's tab only the flow picker, over its own flows.
   const flowsQuery = useWorkflowListFlows(ws, undefined, {
-    query: { queryKey: workflowsKeys.flows(ws), enabled: !embedded },
+    query: { queryKey: workflowsKeys.flows(ws), enabled: !flowPinned },
   });
-  const flows = useMemo(() => (flowsQuery.data?.status === 200 ? flowsQuery.data.data : []), [flowsQuery.data]);
+  const flows = useMemo(() => {
+    const all = flowsQuery.data?.status === 200 ? flowsQuery.data.data : [];
+    return pinnedNamespace === undefined ? all : all.filter((f) => namespaceContains(pinnedNamespace, f.namespace));
+  }, [flowsQuery.data, pinnedNamespace]);
 
   const query = useQuery({
-    queryKey: workflowsKeys.executions(ws, { ...filters, pinnedFlowId: pinnedFlowId ?? null }),
-    queryFn: ({ signal }) => fetchPage(ws, filters, pinnedFlowId, signal),
+    queryKey: workflowsKeys.executions(ws, {
+      ...filters,
+      pinnedFlowId: pinnedFlowId ?? null,
+      // Only when pinned, so the other lists' keys are as they were.
+      ...(namespacePinned ? { pinnedNamespace } : {}),
+    }),
+    queryFn: ({ signal }) => fetchPage(ws, filters, { pinnedFlowId, pinnedNamespace }, signal),
     // A new page or filter keeps the old rows on screen until the answer lands.
     placeholderData: keepPreviousData,
     refetchInterval: (q) => (q.state.data?.rows.some((r) => !isTerminalState(r.state)) ? LIST_POLL_MS : false),
@@ -141,7 +165,8 @@ export default function ExecutionsList({ pinnedFlowId }: { pinnedFlowId?: string
   const body = (
     <>
       <FilterBar
-        embedded={embedded}
+        showNamespace={!embedded}
+        showFlow={!flowPinned}
         filters={filters}
         setFilters={setFilters}
         flows={flows}
@@ -167,7 +192,7 @@ export default function ExecutionsList({ pinnedFlowId }: { pinnedFlowId?: string
         </Alert>
       );
     }
-    if (!page) return <ListSkeleton cols={embedded ? 6 : 7} />;
+    if (!page) return <ListSkeleton cols={flowPinned ? 6 : 7} />;
 
     const refreshError = query.isError ? (
       <Alert variant="destructive" className="mb-3">
@@ -204,6 +229,15 @@ export default function ExecutionsList({ pinnedFlowId }: { pinnedFlowId?: string
               Clear filters
             </Button>
           </div>
+        );
+      } else if (namespacePinned) {
+        empty = (
+          <EmptyState
+            variant="dashed"
+            icon={History}
+            title="No executions in this namespace yet"
+            description="Each run of a flow in this namespace, or in a namespace below it, appears here."
+          />
         );
       } else if (embedded) {
         empty = (
@@ -248,7 +282,7 @@ export default function ExecutionsList({ pinnedFlowId }: { pinnedFlowId?: string
             <TableHeader>
               <TableRow>
                 <TableHead>ID</TableHead>
-                {embedded ? null : <TableHead>Flow</TableHead>}
+                {flowPinned ? null : <TableHead>Flow</TableHead>}
                 <TableHead>Namespace</TableHead>
                 <TableHead>State</TableHead>
                 <TableHead>Start</TableHead>
@@ -258,7 +292,7 @@ export default function ExecutionsList({ pinnedFlowId }: { pinnedFlowId?: string
             </TableHeader>
             <TableBody>
               {page.rows.map((row) => (
-                <ExecutionRow key={row.id} row={row} base={base} showFlow={!embedded} now={now} />
+                <ExecutionRow key={row.id} row={row} base={base} showFlow={!flowPinned} now={now} />
               ))}
             </TableBody>
           </Table>
@@ -306,7 +340,11 @@ function summaryItems(
   return items;
 }
 
-function ExecutionRow({ row, base, showFlow, now }: { row: ExecutionListItemDto; base: string; showFlow: boolean; now: number }) {
+/**
+ * One row of the list. Exported for the namespace Overview's recent executions
+ * (W7d), which show the same columns.
+ */
+export function ExecutionRow({ row, base, showFlow, now }: { row: ExecutionListItemDto; base: string; showFlow: boolean; now: number }) {
   const start = executionStart(row);
   const duration = executionDuration(row, now);
   return (
@@ -415,13 +453,17 @@ const fromLocalInput = (v: string) => {
  * child switch.
  */
 function FilterBar({
-  embedded,
+  showNamespace,
+  showFlow,
   filters,
   setFilters,
   flows,
   trailing,
 }: {
-  embedded: boolean;
+  /** False on a flow's or a namespace's own tab. */
+  showNamespace: boolean;
+  /** False on a flow's own tab. */
+  showFlow: boolean;
   filters: ExecutionFilters;
   setFilters: (patch: Partial<ExecutionFilters>, replace?: boolean) => void;
   flows: FlowListItemDto[];
@@ -445,7 +487,7 @@ function FilterBar({
   return (
     <div className="mb-3 flex flex-wrap items-center gap-2">
       <StatePicker states={filters.states} onChange={(states) => setFilters({ states })} />
-      {embedded ? null : (
+      {showNamespace ? (
         <>
           <FacetSelect
             label="Namespace"
@@ -465,14 +507,16 @@ function FilterBar({
               </Label>
             </div>
           ) : null}
-          <FacetSelect
-            label="Flow"
-            value={filters.flow || FACET_ALL}
-            onChange={(v) => setFilters({ flow: v === FACET_ALL ? "" : v })}
-            options={flowOptions}
-          />
         </>
-      )}
+      ) : null}
+      {showFlow ? (
+        <FacetSelect
+          label="Flow"
+          value={filters.flow || FACET_ALL}
+          onChange={(v) => setFilters({ flow: v === FACET_ALL ? "" : v })}
+          options={flowOptions}
+        />
+      ) : null}
       <FacetSelect
         label="Time"
         value={filters.time || FACET_ALL}

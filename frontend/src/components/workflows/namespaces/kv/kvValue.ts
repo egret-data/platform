@@ -1,0 +1,368 @@
+import { JsonNumber, parseLossless, stringifyLossless, type LosslessJson } from "./losslessJson";
+
+/**
+ * THE KV FORM'S RULES (W7d spec §4.4), the server's own (W9c).
+ *
+ * `PUT …/kv/{key}` takes no type. Its `text/plain` body is read as ONE Ion
+ * value and typed by what it is (`storage::kv::value::parse_api_body`); any
+ * other body is stored whole as a STRING. So each type is sent as text the
+ * server reads back as that type, and the form refuses, before sending, a
+ * value that would be stored as another type or refused:
+ *
+ * | type     | body                         | refused here                                   |
+ * |----------|------------------------------|------------------------------------------------|
+ * | STRING   | `"…"` (a quoted string)      | text shaped like a duration (stored DURATION)  |
+ * | NUMBER   | an Ion int or decimal (`d`)  | not a JSON number; over 1,000 plain digits     |
+ * | BOOLEAN  | `true` / `false`             | anything else                                  |
+ * | DATETIME | `2026-10-14T02:30:00.000Z`   | no value; a year outside 1-9999 in UTC         |
+ * | DATE     | `2026-10-14`                 | not a real day of years 1-9999                 |
+ * | DURATION | `"PT1H30M"` (quoted)         | outside Kestra's pattern (stored STRING)       |
+ * | JSON     | the JSON, numbers as NUMBER  | malformed; a scalar; a number too long         |
+ *
+ * Numbers never pass through a JS number (`JSON.parse` rounds past 2^53), and
+ * an exponent is sent as an Ion decimal (`6.02d23`), never a float, so the
+ * server keeps every digit (`ionNumber`).
+ */
+export const KV_TYPES = ["STRING", "NUMBER", "BOOLEAN", "DATETIME", "DATE", "DURATION", "JSON"] as const;
+export type KvType = (typeof KV_TYPES)[number];
+
+export const isKvType = (t: string): t is KvType => (KV_TYPES as readonly string[]).includes(t);
+
+/** What each type holds, shown under the type picker (FE-FORM-3). */
+export const KV_TYPE_HELP: Record<KvType, string> = {
+  STRING: "Any text.",
+  NUMBER: "An integer or a decimal, kept exactly, never rounded: 42, -1.5, 6.02e23 (stored written out in full).",
+  BOOLEAN: "true or false.",
+  DATETIME: "A date and a time, entered in your time zone and stored in UTC.",
+  DATE: "A calendar day.",
+  DURATION: "An ISO-8601 duration of days, hours, minutes and seconds: PT1H30M, P1D.",
+  JSON: "A JSON object or array.",
+};
+
+export type Encoded = { ok: true; body: string } | { ok: false; error: string };
+
+const MAX_DIGITS = 1000;
+
+/**
+ * Kestra's DURATION_PATTERN as W9c reads it (`kestra_duration`): `P`, then
+ * whole days, then `T` and at least one of whole hours, minutes and seconds,
+ * with at least one part, and a total that fits a Java `long` of seconds.
+ * A text it matches is stored as a DURATION, whatever the form called it.
+ */
+export function isKestraDuration(text: string): boolean {
+  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(text);
+  if (!m || text === "P" || text.endsWith("T")) return false;
+  const [, d, h, min, s] = m;
+  let total = 0n;
+  for (const [digits, per] of [[d, 86400n], [h, 3600n], [min, 60n], [s, 1n]] as const) {
+    if (digits !== undefined) total += BigInt(digits) * per;
+  }
+  return total <= 9223372036854775807n;
+}
+
+/**
+ * A JSON number as the Ion number that keeps every digit, and how many digits
+ * the server counts in it (`KvNumber`, `within_digit_limit`): null when the
+ * text is not a JSON number.
+ *
+ * - No point, no exponent: an Ion int, as written.
+ * - Otherwise an Ion DECIMAL. A point alone already is one (`1.50`); an
+ *   exponent is written `d`, not `e` (`6.02e23` -> `6.02d23`), since Ion reads
+ *   `e` as a float, a double that drops digits (`KvNumber::Float`) and turns
+ *   `1e400` into an infinity. The server keeps a decimal in plain notation
+ *   (`6.02d23` is `602000000000000000000000`), and counts its digits there.
+ */
+export function ionNumber(text: string): { ion: string; digits: number } | null {
+  const m = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(text);
+  if (!m || /^-?0\d/.test(text)) return null;
+  const [, , int, frac, exp] = m;
+  if (frac === undefined && exp === undefined) return { ion: text, digits: int.length };
+  const fraction = frac ?? "";
+  // The decimal's coefficient and exponent, as Ion holds them.
+  const coefficient = (int + fraction).replace(/^0+/, "") || "0";
+  const exponent = Number(exp ?? "0") - fraction.length;
+  const len = coefficient.length;
+  const shift = Math.abs(exponent);
+  // The plain notation's digits (`of_ion_decimal`'s length without sign and point).
+  const digits =
+    coefficient === "0" && exponent >= 0 ? 1 : exponent >= 0 ? len + shift : len > shift ? len : shift + 1;
+  return { ion: text.replace(/[eE]/, "d"), digits };
+}
+
+const TOO_MANY_DIGITS = "A number has at most 1,000 digits written out in full. Shorten it, or store it as a STRING.";
+
+function encodeNumber(raw: string): Encoded {
+  const text = raw.trim();
+  const n = ionNumber(text);
+  if (!n) {
+    return { ok: false, error: "Enter a number, such as 42, -1.5 or 6.02e23 (digits, an optional point and exponent; no spaces or separators)." };
+  }
+  if (!(n.digits <= MAX_DIGITS)) return { ok: false, error: TOO_MANY_DIGITS };
+  return { ok: true, body: n.ion };
+}
+
+/** Years 1-9999, as the server's DATETIME and DATE hold them. */
+const inYearRange = (iso: string) => /^\d{4}-/.test(iso) && !iso.startsWith("0000-");
+
+function encodeDatetime(local: string): Encoded {
+  const at = local ? new Date(local) : null;
+  if (!at || Number.isNaN(at.getTime()) || !/^\d{4,}-\d{2}-\d{2}T\d{2}:\d{2}/.test(local.replace(/^\+/, ""))) {
+    return { ok: false, error: "Enter a date and a time." };
+  }
+  const iso = at.toISOString();
+  if (!inYearRange(iso)) {
+    return { ok: false, error: `This is ${iso} in UTC: a DATETIME holds the years 1 to 9999 in UTC. Choose another date.` };
+  }
+  return { ok: true, body: iso };
+}
+
+function encodeDate(text: string): Encoded {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  const refused = { ok: false as const, error: "Enter a date of the years 1 to 9999, such as 2026-10-14." };
+  if (!m) return refused;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const day = new Date(0);
+  day.setUTCFullYear(y, mo - 1, d);
+  if (y < 1 || day.getUTCFullYear() !== y || day.getUTCMonth() !== mo - 1 || day.getUTCDate() !== d) return refused;
+  return { ok: true, body: text };
+}
+
+/**
+ * A JSON object or array, sent as Ion text: the same JSON with each number
+ * written as {@link ionNumber} writes it, so a number inside keeps every digit
+ * as a NUMBER does (the server reads the body as Ion, `parse_api_body`, and a
+ * number with `e` would be a float there).
+ */
+function encodeJson(raw: string): Encoded {
+  const text = raw.trim();
+  let parsed: LosslessJson;
+  try {
+    parsed = parseLossless(text);
+  } catch (e) {
+    return { ok: false, error: `This is not valid JSON (${e instanceof Error ? e.message : "it could not be read"}). Fix it and save again.` };
+  }
+  if (parsed === null || typeof parsed !== "object" || parsed instanceof JsonNumber) {
+    return {
+      ok: false,
+      error: "A JSON value here is an object ({…}) or an array ([…]). For a single number, text, true or false, choose that type.",
+    };
+  }
+  let tooLong = false;
+  const body = stringifyLossless(parsed, 0, (n) => {
+    const ion = ionNumber(n.text);
+    if (!ion || !(ion.digits <= MAX_DIGITS)) tooLong = true;
+    return ion?.ion ?? n.text;
+  });
+  if (tooLong) return { ok: false, error: `A number in this JSON is too long. ${TOO_MANY_DIGITS}` };
+  return { ok: true, body };
+}
+
+/** The `PUT` body for `text` entered as `type`, or why the form refuses it. */
+export function encodeValue(type: KvType, text: string): Encoded {
+  switch (type) {
+    case "STRING":
+      if (isKestraDuration(text)) {
+        return {
+          ok: false,
+          error: `"${text}" reads as a duration, so egret would store it as a DURATION, not a STRING. Choose the DURATION type, or change the text.`,
+        };
+      }
+      return { ok: true, body: JSON.stringify(text) };
+    case "NUMBER":
+      return encodeNumber(text);
+    case "BOOLEAN":
+      return text === "true" || text === "false" ? { ok: true, body: text } : { ok: false, error: "Choose true or false." };
+    case "DATETIME":
+      return encodeDatetime(text);
+    case "DATE":
+      return encodeDate(text);
+    case "DURATION":
+      return isKestraDuration(text)
+        ? { ok: true, body: JSON.stringify(text) }
+        : {
+            ok: false,
+            error: "Enter a duration such as PT1H30M or P1D: P, whole days, then T and whole hours, minutes or seconds.",
+          };
+    case "JSON":
+      return encodeJson(text);
+  }
+}
+
+/**
+ * The `PUT` body for an edit. A DATETIME whose text is still the text the
+ * form was filled with is sent as the server sent it: the form's
+ * `datetime-local` text holds milliseconds at most, so re-encoding it would
+ * drop a stored value's micro- or nanoseconds on any edit, even one that
+ * changed only the description. The stored string is an RFC 3339 instant in
+ * UTC (`java_instant`), which the server reads back as an Ion timestamp.
+ */
+export function encodeEdit(
+  type: KvType,
+  text: string,
+  stored: { type: KvType; value: LosslessJson; text: string } | undefined,
+): Encoded {
+  if (stored && type === "DATETIME" && stored.type === "DATETIME" && typeof stored.value === "string" && text === stored.text) {
+    return { ok: true, body: stored.value };
+  }
+  return encodeValue(type, text);
+}
+
+const two = (n: number) => String(n).padStart(2, "0");
+
+/** A stored DATETIME (UTC) as `datetime-local` text in the viewer's zone, milliseconds when it has any. */
+function localDatetime(utc: string): string {
+  const at = new Date(utc);
+  if (Number.isNaN(at.getTime())) return "";
+  const base = `${String(at.getFullYear()).padStart(4, "0")}-${two(at.getMonth() + 1)}-${two(at.getDate())}T${two(at.getHours())}:${two(at.getMinutes())}`;
+  const s = at.getSeconds();
+  const ms = at.getMilliseconds();
+  if (ms) return `${base}:${two(s)}.${String(ms).padStart(3, "0")}`;
+  return s ? `${base}:${two(s)}` : base;
+}
+
+/** A value as `GET …/kv/{key}` sent it (read by `parseLossless`), as the form's text for `type`. */
+export function valueToText(type: KvType, value: LosslessJson): string {
+  if (value === null) return "";
+  if (type === "JSON") return stringifyLossless(value, 2);
+  if (type === "DATETIME" && typeof value === "string") return localDatetime(value);
+  if (value instanceof JsonNumber) return value.text;
+  if (typeof value === "object") return stringifyLossless(value);
+  return String(value);
+}
+
+/** A value for reading (the view drawer): JSON indented, a number with its digits. */
+export function valueForDisplay(type: KvType, value: LosslessJson): string {
+  if (value === null) return "null";
+  if (type === "JSON" || typeof value === "object") return stringifyLossless(value, 2);
+  return String(value);
+}
+
+/** The key rule (W9c `KvKey::parse`): `[a-zA-Z0-9][a-zA-Z0-9._-]*`, at most 350 bytes. */
+export function checkKey(key: string): string | null {
+  if (!key) return "Enter a key.";
+  if (!/^[a-zA-Z0-9]/.test(key)) return "A key starts with a letter or a digit (A-Z, a-z, 0-9).";
+  if (!/^[a-zA-Z0-9._-]*$/.test(key)) return "A key holds only letters, digits, dots, dashes and underscores.";
+  if (key.length > 350) return `A key is at most 350 characters; this one has ${key.length}.`;
+  return null;
+}
+
+/** The longest TTL the server takes: 365,250 days (W9c `MAX_TTL_DAYS`). */
+const MAX_TTL_SECONDS = 365_250 * 86_400;
+
+/** Rust's `f64::from_str`: a decimal with an optional exponent, or `inf`/`infinity`/`nan`, signed. */
+function rustF64(text: string): number | null {
+  if (!/^[+-]?(?:inf|infinity|nan|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)$/i.test(text)) return null;
+  const unsigned = text.replace(/^[+-]/, "").toLowerCase();
+  const sign = text.startsWith("-") ? -1 : 1;
+  if (unsigned === "nan") return Number.NaN;
+  if (unsigned === "inf" || unsigned === "infinity") return sign * Number.POSITIVE_INFINITY;
+  return Number(text);
+}
+
+/**
+ * egret's TTL grammar, `executor::parse_duration`
+ * (`crates/egret-workflow/src/executor/retry.rs:518`), which `parse_ttl`
+ * (`storage/kv/value.rs:1490`) applies to the `ttl` header: the seconds it
+ * reads, or null where it answers `None`.
+ *
+ * Its rules, as written there: the text is trimmed; a leading `-` is refused
+ * and a `+` dropped; then `P`/`p`; the part before the first `T`/`t` holds
+ * days only (`<n>D`); after it, hours, minutes and seconds in that order,
+ * each found at the first occurrence of its letter (either case). Each number
+ * is an `f64` as Rust reads one, so EVERY unit takes a fraction or an
+ * exponent (`P1.5D`, `PT1e3S`; Java's `Duration.parse` takes a fraction on
+ * seconds only). At least one unit; nothing left over; and a total that
+ * `Duration::try_from_secs_f64` and `TimeDelta::from_std` hold.
+ */
+export function egretTtlSeconds(source: string): number | null {
+  let s = source.trim();
+  if (s.startsWith("-")) return null;
+  if (s.startsWith("+")) s = s.slice(1);
+  if (!/^[Pp]/.test(s)) return null;
+  s = s.slice(1);
+  const at = s.search(/[Tt]/);
+  const days = at >= 0 ? s.slice(0, at) : s;
+  let rest = at >= 0 ? s.slice(at + 1) : "";
+  let total = 0;
+  let fields = 0;
+  // `take_unit`: `<number><unit>` up to the unit's first occurrence, when it occurs.
+  const take = (text: string, unit: RegExp): { value: number; left: string } | null => {
+    const i = text.search(unit);
+    if (i < 0) return { value: 0, left: text };
+    const value = rustF64(text.slice(0, i));
+    if (value === null || !(value >= 0)) return null;
+    fields += 1;
+    return { value, left: text.slice(i + 1) };
+  };
+  if (days) {
+    const d = take(days, /[Dd]/);
+    if (!d || d.left) return null;
+    total += d.value * 86_400;
+  }
+  for (const [unit, per] of [[/[Hh]/, 3_600], [/[Mm]/, 60], [/[Ss]/, 1]] as const) {
+    const u = take(rest, unit);
+    if (!u) return null;
+    total += u.value * per;
+    rest = u.left;
+  }
+  if (rest || fields === 0) return null;
+  // `try_from_secs_f64` (finite, within u64 seconds), then `TimeDelta::from_std` (i64 milliseconds).
+  if (!Number.isFinite(total) || total >= 2 ** 64 || total * 1000 > 2 ** 63) return null;
+  return total;
+}
+
+/**
+ * A custom TTL, judged as the `ttl` header is (`parse_ttl` with
+ * `Ttl::Header`, `storage/kv/value.rs:1490`): a leading `-` makes it
+ * negative, which is refused; the rest is {@link egretTtlSeconds}; at most
+ * 365,250 days (`MAX_TTL_DAYS`). Zero is refused here although the server
+ * takes it: the key would expire as it is written.
+ */
+export function checkTtl(text: string): string | null {
+  // `fetch` trims a header value, so the server reads it trimmed.
+  const raw = text.trim();
+  const negative = raw.startsWith("-") && !/^-[-+]/.test(raw);
+  const seconds = egretTtlSeconds(negative ? raw.slice(1) : raw);
+  if (seconds === null) {
+    return "Enter a duration such as PT30M, PT12H, P7D or P1.5D: P, then days, then T and hours, minutes or seconds.";
+  }
+  if (!negative && seconds > MAX_TTL_SECONDS) {
+    return "A TTL is at most 365,250 days (1,000 years). Choose a shorter one, or Never.";
+  }
+  if (negative && seconds > 0) return "A TTL cannot be negative. Enter how long the key lives, such as PT1H.";
+  if (seconds === 0) return "A TTL of zero expires the key at once. Choose Never, or a longer TTL.";
+  return null;
+}
+
+/** The time left until `expiresAt`, as a TTL in whole seconds (rounded up); null once it has passed. */
+export function remainingTtl(expiresAt: string, now: number = Date.now()): string | null {
+  const ms = Date.parse(expiresAt) - now;
+  if (!(ms > 0)) return null;
+  return `PT${Math.ceil(ms / 1000)}S`;
+}
+
+/**
+ * A description is sent in a header, which holds one line: no line break and
+ * no control character (`fetch` refuses them, and strips the ends).
+ */
+export function checkDescription(text: string): string | null {
+  // A tab is allowed; every other C0 control character and DEL is not.
+  const control = [...text].some((c) => {
+    const code = c.charCodeAt(0);
+    return (code < 0x20 && c !== "\t") || code === 0x7f;
+  });
+  return control ? "A description is one line of text, without line breaks or control characters." : null;
+}
+
+/**
+ * Header text as its UTF-8 bytes, one character per byte. A header carries
+ * bytes (`fetch` refuses a character past U+00FF), and the server reads the
+ * `description` header's bytes as UTF-8 (`header_text`), so a description in
+ * any language reaches it intact.
+ */
+export function headerText(text: string): string {
+  return Array.from(new TextEncoder().encode(text), (b) => String.fromCharCode(b)).join("");
+}
+
+/** The expression a flow reads the key with. */
+export const kvExpression = (key: string) => `{{ kv('${key}') }}`;

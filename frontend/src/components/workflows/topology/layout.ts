@@ -123,8 +123,8 @@ const LABEL_HEIGHT = 20;
  * even a halved stack.
  */
 export const DAGRE_LIMIT = 300;
-const NODESEP = 28;
-const RANKSEP = 44;
+export const NODESEP = 28;
+export const RANKSEP = 44;
 /** `layered` reserves no box for an edge label, so its ranks sit far enough apart for one. */
 const LAYERED_RANKSEP = 88;
 
@@ -197,6 +197,24 @@ function layered(g: graphlib.Graph, orientation: Orientation): void {
     const from = lr ? { x: a.x + (forward * a.width) / 2, y: a.y } : { x: a.x, y: a.y + (forward * a.height) / 2 };
     const to = lr ? { x: b.x - (forward * b.width) / 2, y: b.y } : { x: b.x, y: b.y - (forward * b.height) / 2 };
     Object.assign(g.edge(e), { points: [from, to], x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 });
+  }
+}
+
+/**
+ * LAYS OUT ONE GRAPHLIB GRAPH IN PLACE: dagre, unless the graph has more than `dagreLimit` nodes
+ * (`DAGRE_LIMIT` by default) or dagre throws on it, and then `layered`. Either way it writes `x`,
+ * `y` on every node and `points`, `x`, `y` on every edge. `layout()` calls it once per container;
+ * W7d's namespace dependencies graph calls it once per connected group of flows.
+ */
+export function arrange(g: graphlib.Graph, orientation: Orientation, dagreLimit: number = DAGRE_LIMIT): void {
+  if (g.nodeCount() > dagreLimit) layered(g, orientation);
+  else {
+    try {
+      dagreLayout(g);
+    } catch {
+      // dagre lays out a copy and writes back only at the end, so `g` is untouched here.
+      layered(g, orientation);
+    }
   }
 }
 
@@ -333,15 +351,7 @@ export function layout(graph: FlowGraph, opts: LayoutOptions): { nodes: Position
       const shown = e.relation === "choice" && e.label !== null;
       g.setEdge(memberOf(e.source, container), memberOf(e.target, container), shown ? { width: LABEL_WIDTH, height: LABEL_HEIGHT, labelpos: "c" } : {}, e.id);
     }
-    if (g.nodeCount() > (opts.dagreLimit ?? DAGRE_LIMIT)) layered(g, opts.orientation);
-    else {
-      try {
-        dagreLayout(g);
-      } catch {
-        // dagre lays out a copy and writes back only at the end, so `g` is untouched here.
-        layered(g, opts.orientation);
-      }
-    }
+    arrange(g, opts.orientation, opts.dagreLimit);
     // Shift so the content starts at 0,0: nodes, routes and labels together.
     let minX = Infinity;
     let minY = Infinity;
