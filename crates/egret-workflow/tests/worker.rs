@@ -9476,8 +9476,27 @@ async fn a_run_whose_worker_stopped_renewing_is_reaped(pool: sqlx::PgPool) {
     worker.abort();
     assert!(worker.await.unwrap_err().is_cancelled());
     // A renewal in flight when the tick was aborted can still commit on the
-    // server (`under_lease`'s doc): one renewal period lets it land.
-    tokio::time::sleep(timing.renew_every()).await;
+    // server (`under_lease`'s doc): wait until no other backend of this
+    // test's database is running a statement, so it has landed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let active: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+              WHERE datname = current_database() AND pid <> pg_backend_pid() \
+                AND state = 'active'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read pg_stat_activity");
+        if active == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the aborted worker's last statement finished ({active} still active)"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     let last = lease_of(&pool, ex, "a").await.expect("still leased");
 
     until_db_clock_passes(&pool, last, timeout).await;

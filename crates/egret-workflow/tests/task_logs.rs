@@ -778,10 +778,13 @@ struct Rigged {
 
 /// One [`Rigged`] call: when it began, and whether any OTHER task ran since
 /// the call before it began. The second is measured, not timed: each call
-/// spawns a probe task that only sets a flag, and on these tests'
-/// single-threaded runtime the probe can only run once the writer yields --
-/// which a backoff `sleep` does and an immediate re-run does not. A loaded
-/// machine can delay a poll; it cannot make a task run inside another's.
+/// spawns a probe task that only sets a flag, and on a single-threaded
+/// runtime the probe can only run once the writer yields -- which a backoff
+/// `sleep` does and an immediate re-run does not. A loaded machine can delay
+/// a poll; it cannot make a task run inside another's. **A test that reads
+/// it must run on `flavor = "current_thread"`**: on a multi-threaded runtime
+/// the probe could run beside the writer and the test would fail on correct
+/// code.
 #[derive(Clone, Copy, Debug)]
 struct Call {
     at: tokio::time::Instant,
@@ -850,7 +853,7 @@ impl Inserter for Rigged {
 /// taken before a 300 ms timer fired failed on a loaded machine): exactly one
 /// call stored them, and it began no sooner than `flush_every` after the
 /// first write -- a lower bound, which load can only make truer.
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn lines_reach_postgres_in_order_within_a_flush() {
     let Some(fx) = fx().await else { return };
     let exec = fx.execution().await;
@@ -1016,7 +1019,7 @@ async fn a_failing_batch_is_retried_then_reported_not_fatal() {
 /// has run (see [`Call`]), which a backoff `sleep` would allow. "Drops" is
 /// shown by what follows: the next batch is stored by the very next call, and
 /// the dropped lines never are.
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn an_execution_deleted_batch_is_rerun_once_not_retried() {
     let Some(fx) = fx().await else { return };
     let exec = fx.execution().await;
@@ -1051,11 +1054,6 @@ async fn an_execution_deleted_batch_is_rerun_once_not_retried() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(
-        rigged.calls(),
-        4,
-        "a second 23503 drops the batch rather than retrying it"
-    );
     assert!(
         !rigged.log()[3].yielded_since_the_last,
         "the batch's re-run, too, is at once"

@@ -37,7 +37,7 @@ Mã, đã kiểm:
 | Test | Ngưỡng hiện nay | Hồi quy nó canh | Cách đo mới |
 |---|---|---|---|
 | `a_dotted_key_deeper_than_max_depth_is_refused_at_once` (`merge.rs:847`) | `< 250 ms` | việc từ chối xảy ra sau khi đã dựng một thứ gì đó | (a) công việc: một bộ đếm bước đường đi chỉ có khi test, riêng từng thread (mỗi lần tra `child` trong trie một bước, mỗi bước arena một bước), phải bằng **0** sau một lần merge bị từ chối |
-| `many_keys_near_the_depth_limit_merge_fast` (`merge.rs:892`) | `< 2 s` | merge bậc hai theo độ sâu của đường đi (C1: băm mọi tiền tố thành một vector) | (a) tối đa 2 bước mỗi segment, **và** (c) hai patch sâu tốn tối đa 1,5 lần một mốc: cùng số segment nhưng dưới dạng key một segment, đo ngay bên cạnh |
+| `many_keys_near_the_depth_limit_merge_fast` (`merge.rs:892`) | `< 2 s` | merge bậc hai theo độ sâu của đường đi (C1: băm mọi tiền tố thành một vector) | (a) đúng 2 bước mỗi segment (ngưỡng: gấp 3 lần số ấy), chống một lượt đi thừa, **và** (c), chống bước đắt hơn của C1, hai patch sâu tốn tối đa 1,5 lần một mốc: cùng số segment nhưng dưới dạng key một segment, đo ngay bên cạnh |
 | `a_large_merge_is_linear` (`merge.rs:943`) | `< 5 s` | merge bậc hai theo bề rộng map hay độ dài list | (c) ba lần merge ở cỡ `n` tốn tối đa 30 lần chính ba lần merge ấy ở cỡ `n / 10`. Tuyến tính thì tỉ số khoảng 10; bậc hai thì khoảng 100 |
 
 Bộ đếm có `#[cfg(test)]`. Ở các bản build khác, nó là một hàm inline rỗng.
@@ -48,9 +48,9 @@ Ngưỡng tương đối được đo bằng helper `least_times`:
 - Nó chạy tối đa 5 vòng và dừng ở vòng đầu tiên lọt ngưỡng. Nó cũng dừng sớm khi ca lớn vượt một tỉ số bỏ cuộc (60 với `a_large_merge_is_linear`), nên một bản merge hồi quy đỏ sau một vòng chậm, không phải năm vòng.
 - Tải làm giãn cả hai số đo thì triệt tiêu nhau. Một đợt tải dồn trong một vòng thì vòng sau sống qua được. Chỉ một chi phí tăng nhanh hơn mốc mới đỏ ở mọi vòng.
 
-Số đo ngày 2026-10-14: các patch sâu tốn 0,5–0,7 lần mốc, dù máy tải hay không. Khi đặt lại lỗi C1 (băm mọi tiền tố thành một vector, ở cả bước kiểm lẫn bước lồng), chúng tốn 2,1–2,3 lần; đặt lại một nửa lỗi thì 1,6–1,8 lần. Vì độ sâu bị chặn ở `MAX_DEPTH`, bậc hai theo độ sâu chỉ tốn một hệ số có giới hạn, nên khoảng phân biệt này hẹp. Ngưỡng tuyệt đối 2 s có khoảng còn hẹp hơn: 1,1 s khi chạy riêng và 2,8 s khi máy tải. Số bước là dụng cụ đo sắc hơn. `a_large_merge_is_linear` đo được 10–15 lần khi tuyến tính, và 108 lần khi `deep_merge` dò tuần tự.
+Số đo ngày 2026-10-14: các patch sâu tốn 0,5–0,7 lần mốc, dù máy tải hay không. Khi đặt lại lỗi C1 (băm mọi tiền tố thành một vector, ở cả bước kiểm lẫn bước lồng), chúng tốn 2,1–2,3 lần; đặt lại một nửa lỗi thì 1,6–1,8 lần. Vì độ sâu bị chặn ở `MAX_DEPTH`, bậc hai theo độ sâu chỉ tốn một hệ số có giới hạn, nên khoảng phân biệt này hẹp. Ngưỡng tuyệt đối 2 s có khoảng còn hẹp hơn: 1,1 s khi chạy riêng và 2,8 s khi máy tải. `a_large_merge_is_linear` đo được 10–15 lần khi tuyến tính, và 108 lần khi `deep_merge` dò tuần tự.
 
-Với các test độ phức tạp, chỉ có bộ đếm thì không đủ. Bộ đếm chỉ thấy những vòng lặp có đặt nó, và một lần viết lại (lỗi C1 chính là một lần viết lại) có thể đi vòng qua nó. Thời gian tương đối thì thấy mọi đoạn mã.
+Hai cách đo canh hai kiểu hồi quy khác nhau. Số bước bắt được một **lượt đi thừa**: mutation `trie-rewalk` tốn 16,5 triệu bước so với ngưỡng khoảng 1 triệu. Nó **không thấy được C1**, vì C1 giữ nguyên số bước và làm mỗi bước đắt hơn: các mutation `c1` và `prefix-vectors` tốn đúng 655 200 bước như bản merge tuyến tính. Thời gian tương đối là cái canh **duy nhất** chống C1. Khoảng dư của nó so với một nửa lỗi C1 chỉ khoảng 1,1 lần, nên nửa lỗi ấy thỉnh thoảng có thể lọt: một hồi quy bị bỏ sót, không bao giờ là một lần đỏ trên mã đúng.
 
 ### 3.2 `a_run_whose_worker_stopped_renewing_is_reaped`
 
@@ -69,7 +69,7 @@ Test hiện nay dùng lease 900 ms và các lần sleep cố định:
 Đồng hồ ảo (b) không dùng được ở đây, vì lease và reaper đều đọc `now()` của Postgres. Test mới chờ theo điều kiện:
 
 - **Lượt còn sống.** Cứ 50 ms đọc lease một lần, cho đến khi có một lần gia hạn đáp xuống sau thời điểm claim hơn `working_timeout`, rồi reap ngay: không thu hồi run nào. Hạn chờ là 60 s, nên một worker không bao giờ gia hạn sẽ đỏ kèm thông báo. `working_timeout` thành 2 s, nên cứ 667 ms gia hạn một lần và khoảng dư là 1,33 s. Phần phụ thuộc thời gian còn lại ấy không bỏ được: một worker còn sống mà không gia hạn được trong `working_timeout` thì bị thu hồi là đúng.
-- **Lượt đã chết.** Abort worker, rồi chờ một chu kỳ gia hạn để lần gia hạn còn đang bay đáp xuống. Đọc lease, rồi chờ đến khi **đồng hồ database** vượt nó một `working_timeout` (`until_db_clock_passes`). Lease phải không đổi, và reap thu hồi một run.
+- **Lượt đã chết.** Abort worker, rồi poll `pg_stat_activity` cho đến khi không backend nào khác của database của test còn `active` (hạn báo lỗi 60 s), để lần gia hạn còn đang bay đã đáp xuống. Đọc lease, rồi chờ đến khi **đồng hồ database** vượt nó một `working_timeout` (`until_db_clock_passes`). Lease phải không đổi, và reap thu hồi một run.
 
 Test vẫn bắt được:
 
@@ -86,7 +86,9 @@ Test vẫn bắt được:
 | `tests/task_logs.rs:821` `lines_reach_postgres_in_order_within_a_flush` | `count == 0` phải được đọc trước khi timer flush 300 ms nổ. | (a) Writer chạy trên inserter `Rigged` có đếm: đúng **một** lần gọi lưu ba dòng. Thêm một cận **dưới**, mà tải chỉ làm nó đúng hơn: lần gọi ấy bắt đầu sau lần ghi đầu tiên ít nhất `flush_every`. | Flush mỗi dòng (3 lần gọi); flush không chờ timer (nó bắt đầu khoảng 2 ms sau lần ghi). |
 | `tests/task_logs.rs:973` `an_execution_deleted_batch_is_rerun_once_not_retried` | `< 400 ms` qua các lượt đi về Postgres, rồi `sleep(500)` trước khi kiểm `calls == 4`. | (a) "Ngay lập tức" được đo thành "không task nào khác chạy giữa lỗi 23503 và lần chạy lại". Mỗi lần gọi `Rigged` spawn một task dò, task này bật một cờ. Trên runtime một luồng của test, task dò chỉ chạy được khi writer nhường, và một lần `sleep` backoff thì có nhường. Lần gọi thứ 4 được chờ như một điều kiện. "Bị bỏ" được cho thấy bằng việc batch kế tiếp được lưu bởi lần gọi thứ 5, và các dòng bị bỏ không bao giờ được lưu. | Một lần backoff trước khi chạy lại; lỗi 23503 thứ hai bị thử lại như một lỗi thường. |
 
-Task dò trong test thứ ba dựa vào runtime một luồng mặc định của `#[tokio::test]`. Trên runtime nhiều luồng, task dò có thể chạy song song với writer.
+Task dò trong test thứ ba cần runtime một luồng, nên cả hai test `task_logs` đặt rõ `#[tokio::test(flavor = "current_thread")]`. Trên runtime nhiều luồng, task dò có thể chạy song song với writer và test sẽ đỏ trên mã đúng (đỏ giả); nó sẽ không lặng lẽ yếu đi.
+
+Ba test này được xếp HIGH theo phân tích. Bản trên `main` qua 5/5 lần dưới cùng mức tải, nên chưa tái hiện được lần đỏ nào.
 
 ## 4. Không sửa trong gói này
 
@@ -99,7 +101,19 @@ Các test nhạy thời gian sau được đánh giá MEDIUM-HIGH. Chúng đư�
 - `src/storage/nsfiles/stage.rs:1148` `matching_runs_off_the_async_runtime_and_a_ticker_keeps_ticking`: cùng mức sàn ticker ấy, thêm một phép kiểm trên pool 1 connection.
 - `tests/container_docker_live.rs` 795, 986 và 1853 (test live, phải bật mới chạy): mỗi test drop `run()` sau 1,5–2,5 s rồi khẳng định container đang chạy, nên một lần `docker run` chậm thì chưa kịp khởi động nó.
 
-**Về phép kiểm tương đối ở §3.1.** Trong `many_keys_near_the_depth_limit_merge_fast`, khoảng phân biệt của nó hẹp: ngưỡng 1,5, tuyến tính 0,53–0,69, một nửa lỗi C1 là 1,64. Bộ đếm bước là cái canh chính, còn thời gian tương đối là chốt chặn sau cho một lần viết lại đi vòng qua bộ đếm.
+Được đánh giá MEDIUM, cũng để lại như việc tiếp theo:
+
+- `tests/flow_trigger_fire.rs:1476` `a_pass_stops_at_its_time_cap_and_the_next_pass_goes_on`: trần 1 s của một lượt pass so với `pg_sleep(0.6)` mỗi lần fire.
+- `tests/runtime.rs:567` `the_worker_ticks_on_a_fixed_interval_rather_than_draining_to_zero`: `sleep(600)`, rồi `ran == 1`.
+- `tests/worker.rs:7000` `a_max_duration_chain_stops_when_the_original_clock_runs_out`: lần thử đầu tiên phải xong trong 1 s của ngân sách PT2S.
+- `tests/worker.rs:211` `two_concurrent_claims_partition_the_runnable_set`: `timeout(500ms, claim)`.
+- `tests/kv_sweep.rs:379` `the_spawned_sweeper_sweeps_after_its_interval_and_stops_on_cancel`: "chưa quét" ở 500 ms so với chu kỳ 1 s.
+- `tests/nsfiles_api.rs:1894` `an_export_whose_client_goes_away_stops_opening_files`: ảnh chụp lan truyền abort sau 300 ms.
+- `src/worker/commands.rs:4387` `a_dropped_run_future_leaves_no_staging_directory_behind`: hai lần spawn tiến trình trong 1,5 s.
+- `src/worker/k8s/runner.rs:2416` `a_slow_but_progressing_upload_is_not_timed_out_and_a_stalled_one_is`: một `select!` không thiên vị với khoảng dư 200 ms.
+- `tests/task_logs.rs:1853` `a_refused_line_costs_only_itself_not_its_batch`: barrier `< 2 s` qua các lượt đi về Postgres.
+
+**Về phép kiểm tương đối ở §3.1.** Trong `many_keys_near_the_depth_limit_merge_fast`, khoảng phân biệt của nó hẹp: ngưỡng 1,5, tuyến tính 0,53–0,69, một nửa lỗi C1 là 1,64. Dù vậy nó là cái canh duy nhất chống bước đắt hơn của C1; bộ đếm bước chỉ canh một lượt đi thừa. Khoảng dư hẹp có thể dẫn tới bỏ sót một hồi quy, không bao giờ là một lần đỏ trên mã đúng.
 
 ## 5. Bằng chứng cần có
 

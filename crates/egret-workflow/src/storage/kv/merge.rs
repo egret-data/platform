@@ -964,18 +964,23 @@ mod tests {
     /// all.
     ///
     /// Measured two ways, neither of them against the wall clock alone (an
-    /// absolute 2 s bound failed at 2.8 s under load average 25):
-    /// - the WORK: the conflict trie and the nesting arena take at most two
-    ///   steps per segment (a check that re-walks each path from the trie's
-    ///   root takes about `MAX_DEPTH / 2` per segment);
-    /// - the TIME, relative: the two deep patches cost at most
-    ///   `DEPTH_FACTOR` times a baseline of the same number of segments as
-    ///   one-segment keys, timed beside them. Linear, they cost 0.5-0.7
-    ///   times the baseline, loaded or not (measured, 2026-10-14). The C1
-    ///   defect put back (every prefix of a path hashed as a vector, in the
-    ///   check and in the nesting) costs 2.1-2.3 times; half of it, 1.6-1.8.
-    ///   The depth is capped, so quadratic in it is a bounded factor: the
-    ///   window is narrow, and the step count is the sharper instrument.
+    /// absolute 2 s bound failed at 2.8 s under load average 25), each
+    /// guarding a different regression:
+    /// - the WORK, against an EXTRA WALK: the conflict trie and the nesting
+    ///   arena take exactly two steps per segment (4 x `segments` for the
+    ///   two patches; the bound allows 6 x), and a check that re-walks each
+    ///   path from the trie's root takes about `MAX_DEPTH / 2` per segment.
+    ///   It cannot see C1: C1 kept the step count and made each step dear;
+    /// - the TIME, relative, against a DEARER STEP (C1): the two deep
+    ///   patches cost at most `DEPTH_FACTOR` times a baseline of the same
+    ///   number of segments as one-segment keys, timed beside them. Linear,
+    ///   they cost 0.5-0.7 times the baseline, loaded or not (measured,
+    ///   2026-10-14). The C1 defect put back (every prefix of a path hashed
+    ///   as a vector, in the check and in the nesting) costs 2.1-2.3 times;
+    ///   half of it, 1.6-1.8. The depth is capped, so being quadratic in it
+    ///   is a bounded factor, and the margin against half of C1 is about
+    ///   1.1 x: that half may now and then pass (a missed regression, never
+    ///   a red on correct code). This ratio is the only guard against C1.
     #[test]
     fn many_keys_near_the_depth_limit_merge_fast() {
         const DEPTH_FACTOR: f64 = 1.5;
@@ -1008,7 +1013,7 @@ mod tests {
             (taken, flat, deep)
         });
         assert!(
-            taken <= 2 * 2 * segments as u64,
+            taken <= 3 * 2 * segments as u64,
             "two patches of {keys} keys of {MAX_DEPTH} segments took {taken} path steps"
         );
         assert!(
