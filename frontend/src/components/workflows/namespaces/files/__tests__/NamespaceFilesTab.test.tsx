@@ -305,7 +305,8 @@ describe("creating and importing", () => {
     await user.upload(screen.getByLabelText("Choose files to import"), many.slice(0, 100).map((f) => new File(["x"], `again-${f.name}`)));
     await waitFor(() => expect(sent("POST")).toHaveLength(201), { timeout: 10_000 });
     expect(screen.queryByRole("alertdialog", { name: /^Import/ })).not.toBeInTheDocument();
-  });
+    // 302 uploads through the fake server: past the 5 s default on a loaded machine (measured 5.2 s).
+  }, 30_000);
 
   it("shows the server's 413 for a file over the cap, and imports the rest", async () => {
     const user = userEvent.setup();
