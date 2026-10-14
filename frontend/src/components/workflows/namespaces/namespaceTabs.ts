@@ -1,4 +1,4 @@
-import type { WorkflowNamespaceDto } from "@/api/generated/model";
+import type { WorkflowNamespaceDetailDto } from "@/api/generated/model";
 
 /**
  * The namespace detail's tabs, in Kestra OSS's order (W7d spec §4.2, the
@@ -32,8 +32,14 @@ export const isNamespaceTab = (t: string | undefined): t is NamespaceTab =>
 export interface NamespaceTabProps {
   ws: string;
   namespace: string;
-  /** `GET …/namespaces/{ns}`'s row: the namespace's own counts. */
-  detail: WorkflowNamespaceDto;
+  /** `GET …/namespaces/{ns}`'s answer: the namespace's own counts. */
+  detail: WorkflowNamespaceDetailDto;
+  /**
+   * The viewer holds `workflow:manage` (`detail.can_manage`, the PDP decision
+   * the write routes make). Without it a tab shows everything and disables
+   * each write with its reason (W7d spec §4.5); the routes still check.
+   */
+  canManage: boolean;
 }
 
 /**

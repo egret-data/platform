@@ -60,6 +60,8 @@ export interface NamespaceWorld {
   detailReply?: Reply | null;
   /** While set, `GET …/namespaces` waits for it. */
   listGate?: Promise<void> | null;
+  /** The detail's `can_manage` (true when unset). */
+  canManage?: boolean;
 }
 
 export function serveNamespaces(world: NamespaceWorld): Request[] {
@@ -80,12 +82,17 @@ export function serveNamespaces(world: NamespaceWorld): Request[] {
           status: 200,
           body: world.namespaces.filter((r) => !prefix || namespaceContains(prefix, r.namespace)),
         };
+      } else if (/^\/api\/ws\/[^/]+\/workflows\/namespaces\/[^/]+\/kv$/.test(rawPath)) {
+        // The KV tab's list (W9c): an empty namespace.
+        reply = { status: 200, body: [] };
       } else if (rawPath.startsWith(`${base}/namespaces/`)) {
         const ns = decodeURIComponent(rawPath.slice(`${base}/namespaces/`.length));
         const found = world.namespaces.find((r) => r.namespace === ns);
         reply =
           world.detailReply ??
-          (found ? { status: 200, body: found } : { status: 404, body: { error: `not found: namespace ${ns}` } });
+          (found
+            ? { status: 200, body: { ...found, can_manage: world.canManage ?? true } }
+            : { status: 404, body: { error: `not found: namespace ${ns}` } });
       } else if (rawPath === `${base}/flows`) {
         reply = { status: 200, body: world.flows ?? [] };
       } else if (rawPath === `${base}/executions`) {

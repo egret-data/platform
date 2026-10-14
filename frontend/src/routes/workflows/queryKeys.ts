@@ -69,6 +69,18 @@ export const workflowsKeys = {
    * like a filter.
    */
   namespace: (ws: string, namespace: string) => ["workflows", "ws", ws, "namespace", namespace] as const,
+  /**
+   * A namespace's live KV keys (`GET …/namespaces/{ns}/kv`), under
+   * `namespace(ws, ns)`: invalidating the namespace (its counts) refreshes
+   * them, and invalidating this reaches every value and the inherited list
+   * below it.
+   */
+  kv: (ws: string, namespace: string) => ["workflows", "ws", ws, "namespace", namespace, "kv"] as const,
+  /** One key's latest value (`GET …/kv/{key}`). */
+  kvValue: (ws: string, namespace: string, key: string) =>
+    ["workflows", "ws", ws, "namespace", namespace, "kv", "value", key] as const,
+  /** The keys inherited from the namespace's parents (`GET …/kv/inheritance`). */
+  kvInherited: (ws: string, namespace: string) => ["workflows", "ws", ws, "namespace", namespace, "kv", "inherited"] as const,
   executions: (ws: string, params?: object) =>
     params
       ? (["workflows", "ws", ws, "executions", params] as const)

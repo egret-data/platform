@@ -181,7 +181,7 @@ function NamespaceFrame({ ws, namespace, tab }: { ws: string; namespace: string;
             return (
               <TabsContent key={t} value={t} className="mt-0 min-h-0 min-w-0 flex-1 overflow-auto">
                 <Suspense fallback={<ListSkeleton cols={3} />}>
-                  <Body ws={ws} namespace={namespace} detail={detail} />
+                  <Body ws={ws} namespace={namespace} detail={detail} canManage={detail.can_manage} />
                 </Suspense>
               </TabsContent>
             );

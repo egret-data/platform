@@ -173,11 +173,26 @@ const MARKERS = [
   // the counts' note.
   ["src/routes/workflows/NamespaceDetail.tsx", NAMESPACE_HOST, "namespace"],
   ["src/components/workflows/namespaces/NamespaceOverview.tsx", "Counted in this namespace only; each child namespace counts its own.", "namespace"],
-  // The three tab slots, each its own lazy chunk. Placeholders until Tasks 5–8: a task that
-  // replaces a slot's body replaces its marker here too (a stale marker fails below).
+  // The three tab slots, each its own lazy chunk. Dependencies and Files are placeholders until
+  // Tasks 6–8: a task that replaces a slot's body replaces its marker here too (a stale marker
+  // fails below).
   ["src/components/workflows/namespaces/NamespaceDependenciesTab.tsx", "the flows they call is not available yet.", "namespace-tab"],
   ["src/components/workflows/namespaces/NamespaceFilesTab.tsx", "files cannot be browsed here yet.", "namespace-tab"],
-  ["src/components/workflows/namespaces/NamespaceKvTab.tsx", "KV keys cannot be managed here yet.", "namespace-tab"],
+  // The KV tab (W7d Task 5) and its `kv/` modules, in the tab's lazy chunk: the bulk-delete
+  // button's reason; the STRING refusal; the read's malformed-answer refusal; the lossless JSON
+  // reader's trailing-text refusal; the edit drawer's locked-key help; the JSON value's Monaco
+  // model path; the view drawer's expression label; the inherited drawer's override note.
+  // `KvTable.tsx` (its strings are column names and "Actions for", which other pages spell too)
+  // and `kvCopy.ts` (its one sentence is also `kvApi.ts`'s) are reached only through these and
+  // are NOT guarded here. Each marker was proven by a scratch static import (W7d task-5-report.md).
+  ["src/components/workflows/namespaces/NamespaceKvTab.tsx", "Select the keys to delete first", "namespace-tab"],
+  ["src/components/workflows/namespaces/kv/kvValue.ts", "reads as a duration, so egret would store it as a DURATION", "namespace-tab"],
+  ["src/components/workflows/namespaces/kv/kvApi.ts", "the server's answer was not a KV value", "namespace-tab"],
+  ["src/components/workflows/namespaces/kv/losslessJson.ts", "unexpected text after the value", "namespace-tab"],
+  ["src/components/workflows/namespaces/kv/KvEditDrawer.tsx", "A key cannot be renamed: add a new key and delete this one instead.", "namespace-tab"],
+  ["src/components/workflows/namespaces/kv/KvValueControl.tsx", "egret-kv-value-", "namespace-tab"],
+  ["src/components/workflows/namespaces/kv/KvValueDrawer.tsx", "Read in a flow with", "namespace-tab"],
+  ["src/components/workflows/namespaces/kv/InheritedKvDrawer.tsx", "Overridden by this namespace", "namespace-tab"],
 ];
 
 const entry = entryChunkName(DIST);

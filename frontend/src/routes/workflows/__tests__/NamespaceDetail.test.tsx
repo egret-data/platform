@@ -240,11 +240,27 @@ describe("NamespaceDetail: the slots later tasks fill", () => {
   it.each([
     ["dependencies", "Dependencies"],
     ["files", "Files"],
-    ["kv", "KV"],
   ])("renders the %s tab's slot", async (tab, label) => {
     renderAt(at("company.team", tab));
     const list = await screen.findByRole("tablist", {}, LAZY);
     expect(within(list).getByRole("tab", { name: label })).toHaveAttribute("aria-selected", "true");
     expect(await screen.findByTestId(`namespace-tab-${tab}`, {}, LAZY)).toBeInTheDocument();
+  });
+});
+
+describe("NamespaceDetail: the KV tab", () => {
+  it("gets the viewer's workflow:manage from the namespace detail: writes on", async () => {
+    renderAt(at("company.team", "kv"), { canManage: true });
+    expect(await screen.findByText("No KV keys yet", {}, LAZY)).toBeInTheDocument();
+    for (const add of screen.getAllByRole("button", { name: "Add a key" })) expect(add).toBeEnabled();
+  });
+
+  it("gets the viewer's workflow:manage from the namespace detail: writes off, with the reason", async () => {
+    renderAt(at("company.team", "kv"), { canManage: false });
+    expect(await screen.findByText("No KV keys yet", {}, LAZY)).toBeInTheDocument();
+    for (const add of screen.getAllByRole("button", { name: "Add a key" })) {
+      expect(add).toBeDisabled();
+      expect(add).toHaveAccessibleDescription("Changing KV keys needs the workflow:manage permission");
+    }
   });
 });
