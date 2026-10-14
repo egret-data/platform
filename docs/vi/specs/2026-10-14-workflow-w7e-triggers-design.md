@@ -48,7 +48,7 @@ Mọi trigger một flow khai báo hiện chỉ nhìn thấy được dưới d�
 
 | Kestra | egret | Vì sao |
 |---|---|---|
-| **Quan sát.** Chỉ các trigger do scheduler chạy mới có trigger state, và `disabled` ở runtime nằm ở đó. `PUT /api/v1/main/triggers/set-disabled` trên `Webhook` hoặc trigger `Flow` trả 404 "Trigger disappeared after set-disabled" (scheduler ghi log "Trigger state not found"): không cái nào tắt được ở runtime. Sau đó POST tới webhook vẫn trả 200 và khởi động một execution, và chạy cả hai upstream vẫn khởi động downstream. (Trong mã nguồn: đường webhook chỉ kiểm tra `disabled` của flow, `webserver/.../ExecutionController.java:844-858`, và trigger Flow chỉ kiểm tra YAML, `executor/.../FlowTriggerService.java:50, 61`.) | Công tắc dừng cả ba loại: việc claim schedule, việc chọn listener Flow-trigger cùng insert outbox, và route webhook. **Quan sát:** một webhook đã tắt trả 409 "Cannot execute webhook: the trigger 'hook' is disabled." và không khởi động gì; bật lại, 200 và một execution | Một công tắc để webhook vẫn bắn là một điều khiển giả |
+| **Quan sát.** Chỉ các trigger do scheduler chạy mới có trigger state, và `disabled` ở runtime nằm ở đó. `PUT /api/v1/main/triggers/set-disabled` trên `Webhook` hoặc trigger `Flow` trả 404 "Trigger disappeared after set-disabled" (scheduler ghi log "Trigger state not found"): không cái nào tắt được ở runtime. Sau đó POST tới webhook vẫn trả 200 và khởi động một execution, và chạy cả hai upstream vẫn khởi động downstream. (Trong mã nguồn: đường webhook chỉ kiểm tra `disabled` của flow, `webserver/.../ExecutionController.java:844-858`, và trigger Flow chỉ kiểm tra YAML, `executor/.../FlowTriggerService.java:50, 61`.) | Công tắc dừng cả ba loại: việc claim schedule, việc chọn listener Flow-trigger cùng insert outbox, và route webhook. **Quan sát:** một webhook đã tắt trả 409 với body `{"error": "conflict: Cannot execute webhook: the trigger 'hook' is disabled."}` và không khởi động gì; bật lại, 200 và một execution | Một công tắc để webhook vẫn bắn là một điều khiển giả |
 | **Quan sát.** Công tắc ở tab flow vắng mặt khi trigger không có dòng state: các dòng `Webhook` và `Flow` không có (dòng webhook có "Send test event") | Mọi trigger `Schedule`, `Webhook` và `Flow` đều có công tắc; một `Leaf` hiện "Not run by egret" và không có công tắc | egret không có dòng state cho webhook, mà công tắc phủ chúng (D3) |
 | **Quan sát.** Bật qua API một trigger có YAML ghi `disabled: true` trả 200 và đặt `disabled` của state thành false; công tắc của UI vẫn tắt và bị vô hiệu hoá (nó hiện `!(disabled \|\| sourceDisabled)`). Trong mã nguồn, trigger vẫn không bao giờ bắn: fetcher bỏ qua trigger bị tắt trong YAML (`DefaultSchedulableTriggerFetcher.java:104`) | 409 `trigger_disabled_in_source`, "This trigger is disabled in the flow's YAML; remove `disabled: true` there" (cũng quan sát trên egret); công tắc bị vô hiệu hoá kèm "Disabled in the flow's YAML" | Người gọi API không nên nhận 200 cho một thay đổi không có tác dụng |
 | **Quan sát** cho skip và `ALL`. Tắt qua hai tick: không gì chạy. Bật với lựa chọn mặc định (body không mang `recoverMissedSchedules`): không lần chạy lỡ nào, lần chạy kế là tick sau đó, và `evaluatedAt` thành thời điểm bật. Bật với "Follow…" khi thuộc tính vắng (`ALL`): cả hai tick lỡ đều chạy, mỗi lượt scheduler một tick, cách nhau khoảng 1,6 s. **Đọc trong mã nguồn** cho `LAST` và `NONE` (`core/.../Schedulable.java:47-51`, `TriggerEventHandler.java:259-306`) | Các kết quả giống vậy (§3.3), end to end quan sát cho skip và `ALL` (`LAST` và `NONE` do test Rust). `evaluated_at` được để nguyên | egret không có phục hồi khi khởi động đọc `evaluated_at`; nó vẫn là "tick cuối cùng đã xử lý" |
@@ -105,7 +105,7 @@ COMMENT ON COLUMN workflow.flow_listeners.disabled IS
   - việc chọn listener Flow-trigger, `AND NOT l.disabled` (`flow_trigger/process.rs:572-589`);
   - insert outbox, chỉ ghi một event nếu có listener với `NOT l.disabled` nghe nó (`worker/claim.rs:2477-2491`).
 - **Vì sao là bản sao chứ không phải join:** ba câu lệnh nóng giữ nguyên hình dạng, các partial index `workflow_triggers_due` và `workflow_flow_listeners_ws` (`0157:35`) vẫn đúng, và chỉ có một hàm tính giá trị.
-- **Route webhook** không có dòng nào để đọc. Sau khi key khớp và sau khi kiểm tra trigger YAML (`webhook_routes.rs:559-566`), nó đọc `disabled_triggers` cho `(flow, trigger.id)` và trả cùng 409 như một trigger bị tắt trong YAML: "Cannot execute webhook: the trigger 'x' is disabled." Việc tra cứu chỉ chạy sau khi key đã khớp, nên bốn trường hợp vắng mặt vẫn là một 404 không phân biệt được (`webhook_routes.rs:107-125`).
+- **Route webhook** không có dòng nào để đọc. Sau khi key khớp và sau khi kiểm tra trigger YAML (`webhook_routes.rs:559-566`), nó đọc `disabled_triggers` cho `(flow, trigger.id)` và trả cùng 409 như một trigger bị tắt trong YAML, `Error::Conflict` với câu của Kestra: body là `{"error": "conflict: Cannot execute webhook: the trigger 'x' is disabled."}`, tiền tố `conflict: ` đến từ `#[error("conflict: {0}")]` của `egret_core::Error`, và không có `code` (sửa 2026-10-15: 409 của trigger tắt bằng công tắc và của trigger tắt trong YAML đều mang tiền tố này). Việc tra cứu chỉ chạy sau khi key đã khớp, nên bốn trường hợp vắng mặt vẫn là một 404 không phân biệt được (`webhook_routes.rs:107-125`).
 - **`fire_one`** vẫn so source với dòng đã claim (`fire.rs:204-213`); một dòng tắt không được claim. `resync` của nó (nhánh Frozen, gọi `sync`) giờ đọc flow `FOR SHARE SKIP LOCKED` (xem **Đồng thời** bên dưới).
 - **Window (D7).** Window đang mở trong `flow_trigger_windows` của một listener `dependsOn` bị tắt được để yên. Nó không được nạp khi đang tắt, hết hạn ở `window_end` và `sweep_expired_windows` xoá nó (`process.rs:280-292`), đúng như window của một listener bị tắt trong YAML hiện nay (dòng listener vẫn còn, `sync.rs:184`, nên cascade từ `0158` không chạy). Bật lại trong window thì giữ các điều kiện đã thoả trước khi tắt.
 
@@ -158,6 +158,8 @@ Cả hai route yêu cầu `workflow:read` (`routes.rs:105`).
 
 **`GET /api/ws/{workspace}/workflows/flows/{id}/triggers`**: một mục cho mỗi trigger đã khai báo, theo thứ tự khai báo.
 
+- **Một snapshot.** Bản nháp của flow được đọc bên trong transaction REPEATABLE READ, chỉ đọc, của route, cùng các bảng state, `now()` và các execution gần nhất, nên một lần lưu xen giữa các lần đọc không thể ghép source mới với các dòng trigger cũ trong một lần poll (sửa sau review toàn nhánh, 2026-10-15; trước đó bản nháp được đọc trước, bên ngoài transaction). Bản nháp duy nhất vẫn được parse trên worker của request, bên trong transaction đó, như trước.
+
 | Trường | Nguồn |
 |---|---|
 | `trigger_id`, `type`, `kind` (`schedule` / `webhook` / `flow` / `other`) | YAML |
@@ -172,7 +174,7 @@ Cả hai route yêu cầu `workflow:read` (`routes.rs:105`).
 Và ở trên cùng: `flow_disabled` (YAML hoặc `state = 'disabled'`), `flow_deleted`, `scheduler_enabled`, `worker_enabled`, `webhooks_enabled`.
 
 - **Các điều kiện** được gán nhãn bằng cách tính lại `condition_key` (`trigger/depends_on.rs:92`) cho từng mục `dependsOn`; `met` là `results[key] == true`. Một window có `window_end <= now()` được báo là không có (sweep hoặc event kế tiếp sẽ xoá nó).
-- **Key webhook.** Nó render dựa trên id và namespace của flow, `variables` của flow, và chỉ id cùng kiểu của trigger (`KeyContext::render_context_for`, `trigger/webhook.rs:436-452`), tất cả đọc từ source mà `GET /flows/{id}` đã trả cho `workflow:read` (`FlowDto.source`, `routes.rs:314-321`). Vì vậy việc trả URL đã render **không mở rộng** ai có thể biết key. UI hiện nó dạng che cho tới khi được bấm xem.
+- **Key webhook.** Nó render dựa trên id và namespace của flow, `variables` của flow, và chỉ id cùng kiểu của trigger (`KeyContext::render_context_for`, `trigger/webhook.rs:436-452`), tất cả đọc từ source mà `GET /flows/{id}` đã trả cho `workflow:read` (`FlowDto.source`, `routes.rs:314-321`). Vì vậy việc trả URL đã render **không mở rộng** ai có thể biết key. UI hiện nó dạng che cho tới khi được bấm xem. **Việc che chỉ chống nhìn trộm qua vai và chia sẻ màn hình, không phải kiểm soát truy cập.** Bất kỳ ai có `workflow:read` đều đọc được key trong source của flow (`GET /flows/{id}`), trong tab Edit, và trong `url_path` của route này.
 - **Cờ server.** `WorkflowState` (`routes.rs:200-251`) có thêm `trigger_flags { scheduler_enabled, worker_enabled, webhooks_enabled }`, đặt từ `config.workflow` (`egret-config/src/lib.rs:596, 619, 689`) ở nơi state được dựng (`egret-bin/src/main.rs:2302`). Deployment đặt chúng một lần cho mọi replica (`deploy/helm/egret/values.yaml:86-98`).
 - **Một flow có `state` là `disabled`** (D18) trả mọi trigger với `effective_disabled: true`, và `state=disabled` của danh sách gồm chúng; `yaml_disabled`, `runtime_disabled` và `can_toggle` không bị ảnh hưởng.
 - **Một flow trong thùng rác** trả trigger của nó với `flow_deleted: true`, mọi trigger đều effective-disabled và `can_toggle: false` (`get_flow` phục vụ draft trong thùng rác, `routes.rs:695-700`).
@@ -211,7 +213,7 @@ SELECT k.flow_id, k.trigger_id, e.id, e.state, e.created_at
 { "triggers": [{ "flow_id": "…uuid…", "trigger_id": "daily" }], "disabled": true, "recover_missed": false }
 ```
 
-- Tối đa 100 mục (400 nếu vượt); giới hạn body 64 KiB.
+- Tối đa 100 mục: vượt thì 400 `too_many_triggers` ("{n} triggers: a bulk switch takes at most 100; nothing was switched") và không gì bị bật/tắt; giới hạn body 64 KiB (413 `body_too_large`; body không đúng dạng request, 400 `invalid_body`).
 - Mỗi mục chạy §3.3 trong transaction riêng, theo thứ tự đã cho. Các mục độc lập: một lần từ chối được ghi lại và mục kế tiếp vẫn chạy.
 - 200 với `{results: [{flow_id, trigger_id, ok, code?, message?, trigger?}]}`. Một flow ngoài workspace là `not_found`, không bao giờ là 403.
 - Một audit event cho mỗi trigger được bật/tắt.
@@ -275,8 +277,9 @@ Cho một trigger hoặc cho các `Schedule` trong phần chọn hàng loạt.
 - **Tiêu đề:** "Enable trigger" / "Enable {n} triggers".
 - **Lựa chọn** (radio group, FE-FORM-2):
   - "Skip missed runs; start at the next tick" (mặc định, `SKIP` của Kestra). Nó không nêu thời điểm: trình duyệt không có thư viện cron và §8 không cho thêm dependency mới, nên tick kế tiếp là của server, hiện trong tab khi công tắc trả lời (sửa 2026-10-15).
-  - "Recover missed runs ({n} missed)". Mô tả của nó theo `recoverMissedSchedules` của trigger: "runs every missed tick, one per scheduler pass" (`ALL`), "runs only the latest missed tick" (`LAST`), "skips them: this trigger's `recoverMissedSchedules` is NONE" (`NONE`).
+  - "Recover missed runs ({n} missed)". Nhãn là một đoạn chữ liền (con số nằm trong đó), nên accessible name đúng là "Recover missed runs (2 missed)" và khoảng `gap` flex của `ui/label` dùng chung không chia cắt nó (sửa 2026-10-15; end to end đo khoảng hở). Mô tả của nó theo `recoverMissedSchedules` của trigger: "runs every missed tick, one per scheduler pass" (`ALL`), "runs only the latest missed tick" (`LAST`), "skips them: this trigger's `recoverMissedSchedules` is NONE" (`NONE`).
 - **Nút:** Cancel, Enable.
+- **Khi nào hỏi** (sửa sau review toàn nhánh, 2026-10-15): một `Schedule` đã tắt, còn trong hàng đợi, là quá hạn khi server nói vậy: `missed_ticks` được đặt khi server thấy `next_evaluation_date <= now()` theo đồng hồ của database (và schedule resolve được); đồng hồ trình duyệt chỉ bổ sung trường hợp response được đọc trước khi tick tới hạn. Trước đó chỉ đồng hồ trình duyệt quyết định, nên trình duyệt chạy chậm hơn server bỏ qua câu hỏi, lệnh bật mang `recover_missed: false`, và server lặng lẽ bỏ cả backlog `ALL`. Còn một khe hở: response đọc trước khi tick tới hạn, trên một trình duyệt mà đồng hồ cũng chậm, vẫn bỏ qua câu hỏi cho tới khi lần poll sau làm mới dòng.
 
 ### 4.4 Trang Triggers toàn cục
 
@@ -302,7 +305,7 @@ Các module mới chỉ tải bên trong chunk Workflows; `test:bundle:workflows
 
 - 404: một flow hoặc trigger id không biết ("This trigger no longer exists in the flow; reload").
 - 409 `trigger_disabled_in_source`, `trigger_not_supported`, `recover_missed_unknown`: câu của server.
-- 400: một source không parse được, một danh sách hàng loạt quá 100.
+- 400: một source không parse được; một danh sách hàng loạt quá 100 (`too_many_triggers`).
 - 422 `triggers_too_large`: §4.4.
 - Lỗi mạng nói điều đã xảy ra và phải làm gì (FE-COPY-2).
 

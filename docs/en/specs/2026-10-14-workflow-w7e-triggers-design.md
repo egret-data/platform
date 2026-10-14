@@ -46,7 +46,7 @@ Every trigger a flow declares is visible only as YAML today. No route lists trig
 
 | Kestra | egret | Why |
 |---|---|---|
-| **Observed.** Only scheduler-driven triggers have a trigger state, and the runtime `disabled` lives there. `PUT /api/v1/main/triggers/set-disabled` on the `Webhook` or the `Flow` trigger answers 404 "Trigger disappeared after set-disabled" (the scheduler logs "Trigger state not found"): neither can be switched off at runtime at all. The webhook's POST then still answers 200 and starts an execution, and running both upstreams still starts the downstream. (In source: the webhook path checks only the flow's `disabled`, `webserver/.../ExecutionController.java:844-858`, and Flow triggers only the YAML, `executor/.../FlowTriggerService.java:50, 61`.) | The switch stops all three kinds: the schedule claim, the Flow-trigger listener select and outbox insert, and the webhook route. **Observed:** a switched-off webhook answers 409 "Cannot execute webhook: the trigger 'hook' is disabled." and starts nothing; on again, 200 and an execution | A switch that leaves a webhook firing is a false control |
+| **Observed.** Only scheduler-driven triggers have a trigger state, and the runtime `disabled` lives there. `PUT /api/v1/main/triggers/set-disabled` on the `Webhook` or the `Flow` trigger answers 404 "Trigger disappeared after set-disabled" (the scheduler logs "Trigger state not found"): neither can be switched off at runtime at all. The webhook's POST then still answers 200 and starts an execution, and running both upstreams still starts the downstream. (In source: the webhook path checks only the flow's `disabled`, `webserver/.../ExecutionController.java:844-858`, and Flow triggers only the YAML, `executor/.../FlowTriggerService.java:50, 61`.) | The switch stops all three kinds: the schedule claim, the Flow-trigger listener select and outbox insert, and the webhook route. **Observed:** a switched-off webhook answers 409 with the body `{"error": "conflict: Cannot execute webhook: the trigger 'hook' is disabled."}` and starts nothing; on again, 200 and an execution | A switch that leaves a webhook firing is a false control |
 | **Observed.** The flow tab's switch is absent when the trigger has no state row: the `Webhook` and `Flow` rows have none (the webhook row offers "Send test event") | Every `Schedule`, `Webhook` and `Flow` trigger has the switch; a `Leaf` shows "Not run by egret" and no switch | egret has no state row for webhooks, and the switch covers them (D3) |
 | **Observed.** Enabling a trigger whose YAML says `disabled: true` through the API answers 200 and sets the state's `disabled` to false; the UI's switch stays off and disabled (it shows `!(disabled \|\| sourceDisabled)`). In source, the trigger still never fires: the fetcher skips a YAML-disabled trigger (`DefaultSchedulableTriggerFetcher.java:104`) | 409 `trigger_disabled_in_source`, "This trigger is disabled in the flow's YAML; remove `disabled: true` there" (observed on egret too); the switch is disabled with "Disabled in the flow's YAML" | An API caller should not get a 200 for a change that has no effect |
 | **Observed** for skip and `ALL`. Off for two ticks: nothing ran. Enable with the default choice (the body carries no `recoverMissedSchedules`): no missed run, the next run is the following tick, and `evaluatedAt` becomes the enable time. Enable with "Follow…" and the property absent (`ALL`): both missed ticks ran, one per scheduler pass, about 1.6 s apart. **Read in source** for `LAST` and `NONE` (`core/.../Schedulable.java:47-51`, `TriggerEventHandler.java:259-306`) | The same outcomes (§3.3), observed for skip and `ALL` by the end to end (`LAST` and `NONE` by the Rust tests). `evaluated_at` is left alone | egret has no startup recovery that reads `evaluated_at`; it stays "the last tick processed" |
@@ -103,7 +103,7 @@ COMMENT ON COLUMN workflow.flow_listeners.disabled IS
   - the Flow-trigger listener select, `AND NOT l.disabled` (`flow_trigger/process.rs:572-589`);
   - the outbox insert, which writes an event only if some listener with `NOT l.disabled` hears it (`worker/claim.rs:2477-2491`).
 - **Why a copy and not a join:** three hot statements keep their shape, the partial indexes `workflow_triggers_due` and `workflow_flow_listeners_ws` (`0157:35`) stay right, and there is one function that computes the value.
-- **The webhook route** has no row to read. After the key matches and after the YAML trigger check (`webhook_routes.rs:559-566`), it reads `disabled_triggers` for `(flow, trigger.id)` and answers the same 409 as a YAML-disabled trigger: "Cannot execute webhook: the trigger 'x' is disabled." The lookup runs only after the key matched, so the four absences stay one indistinguishable 404 (`webhook_routes.rs:107-125`).
+- **The webhook route** has no row to read. After the key matches and after the YAML trigger check (`webhook_routes.rs:559-566`), it reads `disabled_triggers` for `(flow, trigger.id)` and answers the same 409 as a YAML-disabled trigger, `Error::Conflict` with Kestra's sentence: the body is `{"error": "conflict: Cannot execute webhook: the trigger 'x' is disabled."}`, the `conflict: ` prefix coming from `egret_core::Error`'s `#[error("conflict: {0}")]`, and no `code` (corrected 2026-10-15: the switched-off and the YAML-disabled 409 carry the prefix alike). The lookup runs only after the key matched, so the four absences stay one indistinguishable 404 (`webhook_routes.rs:107-125`).
 - **`fire_one`** still compares the source with the claimed row (`fire.rs:204-213`); an off row is not claimed. Its `resync` (the Frozen path, which calls `sync`) now reads the flow `FOR SHARE SKIP LOCKED` (see **Concurrency** below).
 - **Windows (D7).** A switched-off `dependsOn` listener's open window in `flow_trigger_windows` is left alone. It is not fed while off, it expires at `window_end` and `sweep_expired_windows` removes it (`process.rs:280-292`), which is what a YAML-disabled listener's window does today (the listener row stays, `sync.rs:184`, so the cascade from `0158` does not fire). A re-enable inside the window keeps the conditions met before the switch.
 
@@ -156,6 +156,8 @@ Both routes require `workflow:read` (`routes.rs:105`).
 
 **`GET /api/ws/{workspace}/workflows/flows/{id}/triggers`**: one entry per declared trigger, in declaration order.
 
+- **One snapshot.** The flow's draft is read inside the route's REPEATABLE READ, read-only transaction, with the state tables, `now()` and the last executions, so a save between the reads cannot pair a new source with old trigger rows for a poll (fixed after the whole-branch review, 2026-10-15; before, the draft was read first, outside it). The one draft is parsed on the request's worker inside that transaction, as before.
+
 | Field | Source |
 |---|---|
 | `trigger_id`, `type`, `kind` (`schedule` / `webhook` / `flow` / `other`) | the YAML |
@@ -170,7 +172,7 @@ Both routes require `workflow:read` (`routes.rs:105`).
 And at the top: `flow_disabled` (YAML or `state = 'disabled'`), `flow_deleted`, `scheduler_enabled`, `worker_enabled`, `webhooks_enabled`.
 
 - **Conditions** are labelled by recomputing `condition_key` (`trigger/depends_on.rs:92`) for each `dependsOn` entry; `met` is `results[key] == true`. A window whose `window_end <= now()` is reported as none (the sweep or the next event removes it).
-- **The webhook key.** It renders against the flow's id and namespace, its `variables` and the trigger's id and type only (`KeyContext::render_context_for`, `trigger/webhook.rs:436-452`), all read from the source that `GET /flows/{id}` already returns to `workflow:read` (`FlowDto.source`, `routes.rs:314-321`). Returning the rendered URL therefore **does not widen** who can learn the key. The UI shows it masked until revealed.
+- **The webhook key.** It renders against the flow's id and namespace, its `variables` and the trigger's id and type only (`KeyContext::render_context_for`, `trigger/webhook.rs:436-452`), all read from the source that `GET /flows/{id}` already returns to `workflow:read` (`FlowDto.source`, `routes.rs:314-321`). Returning the rendered URL therefore **does not widen** who can learn the key. The UI shows it masked until revealed. **The mask guards against shoulder-surfing and screen sharing, not access: it is not access control.** Any viewer with `workflow:read` can read the key in the flow's source (`GET /flows/{id}`), in the Edit tab, and in this route's `url_path`.
 - **Server flags.** `WorkflowState` (`routes.rs:200-251`) gains `trigger_flags { scheduler_enabled, worker_enabled, webhooks_enabled }`, set from `config.workflow` (`egret-config/src/lib.rs:596, 619, 689`) where the state is built (`egret-bin/src/main.rs:2302`). The deployment sets them once for every replica (`deploy/helm/egret/values.yaml:86-98`).
 - **A flow whose `state` is `disabled`** (D18) answers every trigger `effective_disabled: true`, and the list's `state=disabled` includes them; `yaml_disabled`, `runtime_disabled` and `can_toggle` are unaffected.
 - **A trashed flow** answers its triggers with `flow_deleted: true`, every one effective-disabled and `can_toggle: false` (`get_flow` serves trashed drafts, `routes.rs:695-700`).
@@ -209,7 +211,7 @@ SELECT k.flow_id, k.trigger_id, e.id, e.state, e.created_at
 { "triggers": [{ "flow_id": "…uuid…", "trigger_id": "daily" }], "disabled": true, "recover_missed": false }
 ```
 
-- At most 100 entries (400 beyond); a body cap of 64 KiB.
+- At most 100 entries: beyond, 400 `too_many_triggers` ("{n} triggers: a bulk switch takes at most 100; nothing was switched") and nothing is switched; a body cap of 64 KiB (413 `body_too_large`; a body that is not the request, 400 `invalid_body`).
 - Each entry runs §3.3 in its own transaction, in the order given. Entries are independent: a refusal is recorded and the next entry runs.
 - 200 with `{results: [{flow_id, trigger_id, ok, code?, message?, trigger?}]}`. A flow outside the workspace is `not_found`, never a 403.
 - One audit event per switched trigger.
@@ -273,8 +275,9 @@ For one trigger or for the `Schedule`s of a bulk selection.
 - **Title:** "Enable trigger" / "Enable {n} triggers".
 - **Choices** (radio group, FE-FORM-2):
   - "Skip missed runs; start at the next tick" (default, Kestra's `SKIP`). It names no time: the browser has no cron library and §8 allows no new dependency, so the next tick is the server's, shown in the tab once the switch answers (corrected 2026-10-15).
-  - "Recover missed runs ({n} missed)". Its description follows the trigger's `recoverMissedSchedules`: "runs every missed tick, one per scheduler pass" (`ALL`), "runs only the latest missed tick" (`LAST`), "skips them: this trigger's `recoverMissedSchedules` is NONE" (`NONE`).
+  - "Recover missed runs ({n} missed)". The label is one run of text (the count inside it), so its accessible name is exactly "Recover missed runs (2 missed)" and the shared `ui/label`'s flex gap does not split it (fixed 2026-10-15; the end to end measures the gap). Its description follows the trigger's `recoverMissedSchedules`: "runs every missed tick, one per scheduler pass" (`ALL`), "runs only the latest missed tick" (`LAST`), "skips them: this trigger's `recoverMissedSchedules` is NONE" (`NONE`).
 - **Buttons:** Cancel, Enable.
+- **When it asks** (fixed after the whole-branch review, 2026-10-15): a switched-off `Schedule` on the queue is overdue when the server says so, `missed_ticks` being set when the server found `next_evaluation_date <= now()` at the database's clock (and the schedule resolves); the browser's clock only adds a response read before the tick came due. One gap is left: a response read before the tick came due, in a browser whose clock is also behind, still skips the question until the next poll refreshes the row. Before, the browser's clock alone decided, so a browser clock behind the server's skipped the question, the enable carried `recover_missed: false`, and the server skipped an `ALL` backlog without a word.
 
 ### 4.4 The global Triggers page
 
@@ -300,7 +303,7 @@ The new modules load only inside the Workflows chunk; `test:bundle:workflows` (`
 
 - 404: an unknown flow or trigger id ("This trigger no longer exists in the flow; reload").
 - 409 `trigger_disabled_in_source`, `trigger_not_supported`, `recover_missed_unknown`: the server's sentence.
-- 400: an unparseable source, a bulk list over 100.
+- 400: an unparseable source; a bulk list over 100 (`too_many_triggers`).
 - 422 `triggers_too_large`: §4.4.
 - Network failures say what happened and what to do (FE-COPY-2).
 

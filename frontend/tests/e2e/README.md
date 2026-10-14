@@ -397,3 +397,53 @@ cd frontend && EGRET_E2E_VITE_PORT=5227 EGRET_E2E_API=http://localhost:8217 \
 cd frontend && EGRET_E2E_WORKFLOWS=1 EGRET_E2E_BASE_URL=http://localhost:5227 \
   npx playwright test workflows-namespaces
 ```
+
+## Workflow triggers (`workflows-triggers.spec.ts`)
+
+Opt-in (`EGRET_E2E_WORKFLOWS=1`). W7e's §6 scenarios 1-7 in the browser
+(`docs/en/specs/2026-10-14-workflow-w7e-triggers-design.md`). The spec creates, through the API, a flow with a
+`* * * * *` schedule, a webhook, a `dependsOn` Flow trigger on two upstream flows and a schedule `disabled: true` in
+its YAML, plus a second flow for the global page. It then asserts:
+
+- the Triggers tab shows each trigger with its next run, and the drawer the webhook's path, masked, then revealed;
+- the schedule switched off creates no execution past two ticks (read in the database); on with "Skip", no missed
+  execution appears; off again and on with "Recover", one execution per missed tick;
+- the webhook switched off answers 409 on the backend's own port, and on again 200 and an execution;
+- one upstream run shows the window and one condition met in the drawer; the other runs the downstream flow;
+- the global page, filtered by namespace and kind in the URL, disables two triggers of another flow in bulk, and both
+  stay off after a reload (DOM and database);
+- a viewer with `workflow:read` and not `workflow:manage` sees every switch and bulk button disabled with "You need
+  workflow:manage"; the YAML-disabled trigger's switch says "Disabled in the flow's YAML";
+- the tab, the drawer per kind, the enable dialog and the global page measured in light and dark mode at 1280 and
+  390 px (`measure [...]` lines: page overflow, clipped text, horizontal scrollers, contrast).
+
+Every wait on the scheduler is bounded by the schedule (the spec reads `next_evaluation_date` and the database's
+`now()`), never a fixed sleep; a run takes four to six minutes, most of it the minute ticks. It signs in twice (the
+admin, then the viewer), within the limit of 5 per 5 minutes.
+
+The stack is private, never the shared dev stack: a database of its own on the branch's Postgres (:5448), a private
+RustFS with one bucket, `serve` on :8237 with the scheduler, the worker and webhooks on, and Vite on :5237 through
+`tests/e2e/vite.e2e.config.mts`. The spec reads the database through `docker exec <container> psql`. The spec file's
+header holds every command; in short:
+
+```bash
+# setup (from the egret repo root)
+docker exec egret-w7e-postgres psql -U egret -d postgres -c "CREATE DATABASE egret_w7e_e2e"
+docker run -d --name w7e-rustfs -p 9488:9000 \
+  -e RUSTFS_ACCESS_KEY=egret -e RUSTFS_SECRET_KEY=egretsecret rustfs/rustfs:1.0.1
+curl --aws-sigv4 "aws:amz:us-east-1:s3" --user egret:egretsecret -X PUT http://localhost:9488/warehouse
+# export the EGRET_* variables listed in the spec header, then:
+./target/debug/egret migrate && ./target/debug/egret init && ./target/debug/egret serve   # in one shell
+cd frontend && EGRET_E2E_VITE_PORT=5237 EGRET_E2E_API=http://localhost:8237 \
+  npx vite --config tests/e2e/vite.e2e.config.mts                                         # in another
+
+# the spec
+cd frontend && EGRET_E2E_WORKFLOWS=1 EGRET_E2E_BASE_URL=http://localhost:5237 \
+  EGRET_E2E_API=http://localhost:8237 \
+  EGRET_E2E_PG_CONTAINER=egret-w7e-postgres EGRET_E2E_PG_DB=egret_w7e_e2e \
+  npx playwright test workflows-triggers
+
+# teardown: stop both servers, then
+docker rm -f -v w7e-rustfs
+docker exec egret-w7e-postgres psql -U egret -d postgres -c "DROP DATABASE egret_w7e_e2e"
+```
