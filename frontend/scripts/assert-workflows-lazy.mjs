@@ -182,9 +182,10 @@ const MARKERS = [
   // The namespaces list (W7d Task 4), in the area's chunk: `PARENT_ONLY_TITLE`.
   ["src/routes/workflows/NamespacesList.tsx", "it is listed because a namespace below it holds flows, files or keys."],
   // The namespace detail and its Overview, a lazy chunk of their own: the not-found sentence and
-  // the counts' note.
+  // the child namespaces' empty sentence. (Not the counts' note: the namespace list says it too,
+  // from `namespaceTabs.ts`, since the final review.)
   ["src/routes/workflows/NamespaceDetail.tsx", NAMESPACE_HOST, "namespace"],
-  ["src/components/workflows/namespaces/NamespaceOverview.tsx", "Counted in this namespace only; each child namespace counts its own.", "namespace"],
+  ["src/components/workflows/namespaces/NamespaceOverview.tsx", "This namespace has no child namespaces.", "namespace"],
   // The three tab slots, each its own lazy chunk. A task that replaces a slot's body replaces its
   // marker here too (a stale marker fails below).
   // The Dependencies tab (W7d Task 8) and its `dependencies/` modules, in the tab's lazy chunk: the
