@@ -238,6 +238,60 @@ describe("row actions", () => {
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
+  it("refuses to keep an expiration that passed while the drawer was open, instead of making the key permanent", async () => {
+    const inAnHour = new Date(Date.now() + 3_600_000).toISOString();
+    renderTab({
+      world: {
+        keys: KEYS.map((k) => (k.key === "alpha" ? { ...k, expiresAt: inAnHour } : { ...k })),
+        values: { ...VALUES, alpha: kvDetail("NUMBER", "1", { description: "Big number", expiresAt: inAnHour }) },
+      },
+    });
+    const user = await openRowMenu("alpha");
+    await user.click(screen.getByRole("menuitem", { name: "Edit" }));
+    const sheet = await screen.findByRole("dialog", { name: "Edit alpha" });
+    expect(await within(sheet).findByLabelText("Value")).toHaveValue("1");
+    expect(within(sheet).getByRole("combobox", { name: "Expiration" })).toHaveTextContent("Keep the current expiration");
+
+    // The clock passes the key's expiry while the drawer is open.
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse(inAnHour) + 1_000);
+    try {
+      await user.click(within(sheet).getByRole("button", { name: "Save" }));
+      const error = await within(sheet).findByText("This key expired while you were editing; choose an expiration.");
+      expect(error).toHaveAttribute("id", "kv-ttl-keep-error");
+      expect(within(sheet).getByRole("combobox", { name: "Expiration" })).toHaveAccessibleDescription(/expired while you were editing/);
+      expect(puts()).toHaveLength(0);
+
+      // Choosing an expiration clears the refusal and saves with it.
+      await user.click(within(sheet).getByRole("combobox", { name: "Expiration" }));
+      await user.click(await screen.findByRole("option", { name: "1 hour" }));
+      expect(within(sheet).queryByText(/expired while you were editing/)).not.toBeInTheDocument();
+      await user.click(within(sheet).getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(puts()).toHaveLength(1));
+      expect(puts()[0].headers.get("ttl")).toBe("PT1H");
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("sends a stored DATETIME's sub-millisecond digits back verbatim when only the description changed", async () => {
+    renderTab({
+      world: {
+        keys: [...KEYS.map((k) => ({ ...k })), kvEntry("when", { type: "DATETIME", description: "a moment", updated: "2026-10-04T00:00:00Z" })],
+        values: { ...VALUES, when: kvDetail("DATETIME", '"2026-10-14T02:30:00.123456Z"', { description: "a moment" }) },
+      },
+    });
+    const user = await openRowMenu("when");
+    await user.click(screen.getByRole("menuitem", { name: "Edit" }));
+    const sheet = await screen.findByRole("dialog", { name: "Edit when" });
+    // The form shows milliseconds at most (datetime-local), in the viewer's zone.
+    expect(await within(sheet).findByLabelText("Value")).toHaveValue("2026-10-14T09:30:00.123");
+    await user.type(within(sheet).getByLabelText("Description"), " later");
+    await user.click(within(sheet).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(puts()).toHaveLength(1));
+    expect(puts()[0].body).toBe("2026-10-14T02:30:00.123456Z");
+    expect(headerUtf8(puts()[0].headers.get("description"))).toBe("a moment later");
+  });
+
   it("fills the edit form from a read made when it opens, not from the view's cached one", async () => {
     const values = { ...VALUES };
     renderTab({ world: { values } });

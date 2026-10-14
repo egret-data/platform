@@ -188,6 +188,25 @@ export function encodeValue(type: KvType, text: string): Encoded {
   }
 }
 
+/**
+ * The `PUT` body for an edit. A DATETIME whose text is still the text the
+ * form was filled with is sent as the server sent it: the form's
+ * `datetime-local` text holds milliseconds at most, so re-encoding it would
+ * drop a stored value's micro- or nanoseconds on any edit, even one that
+ * changed only the description. The stored string is an RFC 3339 instant in
+ * UTC (`java_instant`), which the server reads back as an Ion timestamp.
+ */
+export function encodeEdit(
+  type: KvType,
+  text: string,
+  stored: { type: KvType; value: LosslessJson; text: string } | undefined,
+): Encoded {
+  if (stored && type === "DATETIME" && stored.type === "DATETIME" && typeof stored.value === "string" && text === stored.text) {
+    return { ok: true, body: stored.value };
+  }
+  return encodeValue(type, text);
+}
+
 const two = (n: number) => String(n).padStart(2, "0");
 
 /** A stored DATETIME (UTC) as `datetime-local` text in the viewer's zone, milliseconds when it has any. */

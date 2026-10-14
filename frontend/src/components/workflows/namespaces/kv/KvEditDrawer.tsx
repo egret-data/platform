@@ -28,7 +28,7 @@ import {
   checkDescription,
   checkKey,
   checkTtl,
-  encodeValue,
+  encodeEdit,
   KV_TYPES,
   kvExpression,
   remainingTtl,
@@ -56,6 +56,9 @@ interface FormState {
   ttl: TtlChoice;
   ttlCustom: string;
 }
+
+/** "Keep the current expiration" chosen, and the key expired while the drawer was open. */
+const KEEP_EXPIRED = "This key expired while you were editing; choose an expiration.";
 
 const emptyValues = (): Record<KvType, string> =>
   Object.fromEntries(KV_TYPES.map((t) => [t, ""])) as Record<KvType, string>;
@@ -214,20 +217,27 @@ function KvForm({
   const [saving, setSaving] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
   const [askOverwrite, setAskOverwrite] = useState(false);
+  // Set when a save found the kept expiration already passed (see `put`).
+  const [keepExpired, setKeepExpired] = useState(false);
 
   const dirty = JSON.stringify(form) !== JSON.stringify(initial);
   useUnsavedChangesWarning(dirty && !saving);
   const update = (patch: Partial<FormState>) => {
     const next = { ...form, ...patch };
     setForm(next);
+    if (patch.ttl !== undefined) setKeepExpired(false);
     onDirty(JSON.stringify(next) !== JSON.stringify(initial));
   };
 
   const editing = !!entry;
   const keyError = editing ? null : checkKey(form.key);
-  const encoded = encodeValue(form.type, form.values[form.type]);
+  const encoded = encodeEdit(
+    form.type,
+    form.values[form.type],
+    stored ? { type: stored.type, value: stored.value, text: initial.values[stored.type] } : undefined,
+  );
   const descriptionError = checkDescription(form.description);
-  const ttlError = form.ttl === "custom" ? checkTtl(form.ttlCustom) : null;
+  const ttlError = form.ttl === "custom" ? checkTtl(form.ttlCustom) : form.ttl === "keep" && keepExpired ? KEEP_EXPIRED : null;
   const valid = !keyError && encoded.ok && !descriptionError && !ttlError;
   const show = (e: string | null) => (submitted ? e : null);
 
@@ -246,10 +256,18 @@ function KvForm({
 
   const put = async () => {
     if (!encoded.ok) return;
+    // The remaining time is read now, not when the form was filled. A key
+    // that expired meanwhile has none, and a PUT without `ttl` would make it
+    // permanent: refuse and ask for an expiration instead.
+    const ttl = ttlHeader();
+    if (form.ttl === "keep" && ttl === null) {
+      setKeepExpired(true);
+      return;
+    }
     setSaving(true);
     setServerError(null);
     try {
-      await putKvValue(ws, namespace, form.key, encoded.body, { description: form.description.trim(), ttl: ttlHeader() });
+      await putKvValue(ws, namespace, form.key, encoded.body, { description: form.description.trim(), ttl });
       toast.success(`Saved the key “${form.key}”.`);
       onDirty(false);
       await onSaved();
@@ -355,7 +373,12 @@ function KvForm({
         <div className="grid gap-1.5">
           <Label htmlFor="kv-ttl">Expiration</Label>
           <Select value={form.ttl} onValueChange={(v) => update({ ttl: v as TtlChoice })}>
-            <SelectTrigger id="kv-ttl" className="w-72" aria-describedby="kv-ttl-help">
+            <SelectTrigger
+              id="kv-ttl"
+              className="w-72"
+              aria-invalid={form.ttl === "keep" && show(ttlError) ? true : undefined}
+              aria-describedby={describe("kv-ttl-help", form.ttl === "keep" && show(ttlError) ? "kv-ttl-keep-error" : null)}
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -374,6 +397,11 @@ function KvForm({
           <p id="kv-ttl-help" className="text-xs text-muted-foreground">
             The key expires this long after it is saved.
           </p>
+          {form.ttl === "keep" && show(ttlError) ? (
+            <p id="kv-ttl-keep-error" role="alert" className="text-sm text-destructive">
+              {ttlError}
+            </p>
+          ) : null}
           {form.ttl === "custom" ? (
             <div className="grid gap-1.5">
               <Label htmlFor="kv-ttl-custom">TTL</Label>
