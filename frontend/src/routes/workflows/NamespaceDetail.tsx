@@ -1,4 +1,4 @@
-import { Fragment, lazy, Suspense, type ComponentType } from "react";
+import { Fragment, lazy, Suspense, useState, type ComponentType } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { RotateCw } from "lucide-react";
 import { ApiError } from "@/api/client";
@@ -32,7 +32,8 @@ import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
 /**
  * THE TAB SLOTS. One body per tab, rendered with `NamespaceTabProps` once the
- * namespace has been read; only the selected tab's body is mounted.
+ * namespace has been read; only the selected tab's body is mounted, except
+ * Files (see `KEEP_MOUNTED`).
  *
  * Dependencies, Files and KV are lazy: each brings what no other tab needs
  * (xyflow and dagre; Monaco and the file tree; the KV forms). Tasks 5–8
@@ -48,6 +49,13 @@ const TAB_BODIES: Record<NamespaceTab, ComponentType<NamespaceTabProps>> = {
   files: lazy(() => import("@/components/workflows/namespaces/NamespaceFilesTab")),
   kv: lazy(() => import("@/components/workflows/namespaces/NamespaceKvTab")),
 };
+
+/**
+ * Tabs whose body stays mounted, hidden, once it has been shown. Files holds
+ * unsaved edits in its open editors; Radix unmounts an inactive tab's content,
+ * so without this a visit to KV and back dropped every unsaved edit silently.
+ */
+const KEEP_MOUNTED: ReadonlySet<NamespaceTab> = new Set(["files"]);
 
 /** W7a's flow list, fixed to the namespace and its children. */
 function NamespaceFlowsTab({ namespace }: NamespaceTabProps) {
@@ -77,6 +85,10 @@ function NamespaceFrame({ ws, namespace, tab }: { ws: string; namespace: string;
   const listHref = `/explore/${ws}/workflows/namespaces`;
   const query = useWorkflowGetNamespace(ws, namespace, { query: { queryKey: workflowsKeys.namespace(ws, namespace) } });
   const detail = query.data?.status === 200 ? query.data.data : undefined;
+  // The kept tabs shown so far (adjusted during render, React's documented
+  // pattern for state derived from a prop).
+  const [visited, setVisited] = useState<ReadonlySet<NamespaceTab>>(() => new Set([tab]));
+  if (!visited.has(tab)) setVisited(new Set([...visited, tab]));
 
   const crumbs = (
     <Breadcrumb>
@@ -166,6 +178,9 @@ function NamespaceFrame({ ws, namespace, tab }: { ws: string; namespace: string;
         <Tabs
           value={tab}
           orientation="vertical"
+          // Manual: arrows move focus, Enter or Space selects. Automatic
+          // activation navigated (one history entry) per arrow press.
+          activationMode="manual"
           onValueChange={(t) => navigate(namespaceHref(ws, namespace, t as NamespaceTab))}
           className="mt-3 flex min-h-0 flex-1 flex-col gap-4 px-4 pb-4 md:flex-row"
         >
@@ -178,8 +193,17 @@ function NamespaceFrame({ ws, namespace, tab }: { ws: string; namespace: string;
           </TabsList>
           {NAMESPACE_TABS.map((t) => {
             const Body = TAB_BODIES[t];
+            const keep = KEEP_MOUNTED.has(t) && visited.has(t);
             return (
-              <TabsContent key={t} value={t} className="mt-0 min-h-0 min-w-0 flex-1 overflow-auto">
+              <TabsContent
+                key={t}
+                value={t}
+                forceMount={keep ? true : undefined}
+                // Radix spreads this after its own `hidden`, which is false
+                // for a force-mounted panel: a kept panel hides itself.
+                hidden={t !== tab}
+                className="mt-0 min-h-0 min-w-0 flex-1 overflow-auto"
+              >
                 <Suspense fallback={<ListSkeleton cols={3} />}>
                   <Body ws={ws} namespace={namespace} detail={detail} canManage={detail.can_manage} />
                 </Suspense>
