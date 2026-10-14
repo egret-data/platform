@@ -4,7 +4,7 @@ import {
   Activity, ChevronDown, ChevronRight, Compass, EyeOff,
   FolderKanban, FolderTree, Gauge, HardDrive, History, KeyRound, Library, ListChecks, type LucideIcon,
   PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Search, Server, Settings, Share2, ShieldCheck,
-  Tags, UserCheck, UserCog, Users, UsersRound, Workflow,
+  Tags, UserCheck, UserCog, Users, UsersRound, Workflow, Zap,
 } from "lucide-react";
 import {
   Tooltip,
@@ -56,6 +56,7 @@ const EXPLORE_GROUPS: NavGroup[] = [
       { label: "Flows", icon: Workflow, to: "workflows/flows", feature: "workflows" },
       { label: "Executions", icon: History, to: "workflows/executions", feature: "workflows" },
       { label: "Namespaces", icon: FolderTree, to: "workflows/namespaces", feature: "workflows" },
+      { label: "Triggers", icon: Zap, to: "workflows/triggers", feature: "workflows" },
     ],
   },
   {

@@ -30,6 +30,16 @@ const KIND_ICONS: Record<TriggerKindDto, ComponentType<{ className?: string; "ar
 /** A row as the global page has it: the flow's namespace and YAML id beside the entry. */
 export type TableRowData = TriggerRow & { namespace?: string; flow_id?: string };
 
+/**
+ * How a row's controls name it: the trigger id on the flow's tab; on the global
+ * page, where two flows can declare the same id, the id and its flow
+ * (`daily of company.team.hello`).
+ */
+export const rowName = (row: TableRowData, variant: "flow" | "global") =>
+  variant === "global" && row.namespace !== undefined && row.flow_id !== undefined
+    ? `${row.trigger_id} of ${row.namespace}.${row.flow_id}`
+    : row.trigger_id;
+
 /** The key a row is selected by: a trigger id is unique within its flow only. */
 export const selectionKey = (r: Pick<TriggerRow, "flow_uuid" | "trigger_id">) => `${r.flow_uuid}/${r.trigger_id}`;
 
@@ -54,7 +64,7 @@ export function TriggersTable({
   detailsHref,
 }: {
   rows: TableRowData[];
-  /** `global` adds the Namespace and Flow columns. */
+  /** `global` adds the Namespace and Flow columns (links), and names each row by its flow too. */
   variant: "flow" | "global";
   /** `/explore/{ws}/workflows`: execution and flow links start here. */
   base: string;
@@ -141,11 +151,12 @@ export function TriggersTable({
           const on = !row.runtime_disabled && !row.yaml_disabled;
           const KindIcon = KIND_ICONS[row.kind] ?? Puzzle;
           const status = statusText(row, ctx);
+          const name = rowName(row, variant);
           return (
             <TableRow key={`${key}#${i}`} data-trigger={row.trigger_id}>
               <TableCell>
                 <Checkbox
-                  aria-label={`Select ${row.trigger_id}`}
+                  aria-label={`Select ${name}`}
                   aria-describedby={selectDescribedBy}
                   disabled={!manage}
                   checked={selection.has(key)}
@@ -169,7 +180,14 @@ export function TriggersTable({
               </TableCell>
               {variant === "global" ? (
                 <>
-                  <TableCell className="text-muted-foreground">{row.namespace}</TableCell>
+                  <TableCell>
+                    <Link
+                      className="text-muted-foreground hover:underline"
+                      to={`${base}/namespaces/${encodeURIComponent(row.namespace ?? "")}/overview`}
+                    >
+                      {row.namespace}
+                    </Link>
+                  </TableCell>
                   <TableCell>
                     <Link className="hover:underline" to={`${base}/flows/${encodeURIComponent(row.flow_uuid)}/triggers`}>
                       {row.flow_id}
@@ -216,7 +234,7 @@ export function TriggersTable({
                     // In flight: still focusable, so the keyboard focus stays on it (a `disabled`
                     // button drops focus to the page); the click is ignored until the answer.
                     aria-disabled={enablement.ok && busy ? true : undefined}
-                    aria-label={`Trigger ${row.trigger_id} enabled`}
+                    aria-label={`Trigger ${name} enabled`}
                     aria-describedby={!enablement.ok ? reasonId : busy ? busyId : undefined}
                     title={enablement.ok ? (on && ctx.flowDisabled ? FLOW_DISABLED_STATUS : undefined) : enablement.reason}
                     onCheckedChange={(c) => {
@@ -242,7 +260,7 @@ export function TriggersTable({
                 <Link
                   className="text-sm text-muted-foreground hover:underline"
                   to={detailsHref(row)}
-                  aria-label={`Details of ${row.trigger_id}`}
+                  aria-label={`Details of ${name}`}
                 >
                   Details
                 </Link>

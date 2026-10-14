@@ -257,6 +257,14 @@ const MARKERS = [
   ["src/components/workflows/triggers/triggersModel.ts", "On, but the flow is disabled, so it does not fire"],
   ["src/components/workflows/triggers/TriggerBanners.tsx", "trigger-banners"],
   ["src/components/workflows/triggers/useTriggerSwitch.ts", "The triggers were not switched "],
+  // The workspace's Triggers page (W7e Task 7), in the area's chunk like the namespaces list
+  // (`WorkflowsRoutes.tsx` imports it): `UNPARSABLE_ONE`. Its drawer, which reads the flow and
+  // cuts the trigger's YAML (`triggerYaml.ts`), is reached through `lazy()` only and flagged
+  // `editor`, so it and the YAML stay out of the list's chunk: `DETAILS_UNREADABLE`. The page
+  // reaches `EnableTriggerDialog.tsx` through `lazy()` too (its marker above). Each was proven by
+  // a scratch static import (W7e task-7-report.md, "Bundle proof").
+  ["src/routes/workflows/TriggersList.tsx", "1 flow could not be read; its triggers are not listed"],
+  ["src/components/workflows/triggers/GlobalTriggerDrawer.tsx", "The trigger's details could not be loaded: ", "editor"],
 ];
 
 const entry = entryChunkName(DIST);

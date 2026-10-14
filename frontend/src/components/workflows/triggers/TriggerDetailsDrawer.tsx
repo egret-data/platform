@@ -3,8 +3,10 @@ import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { Copy, Eye, EyeOff, SquarePen } from "lucide-react";
 import type { DependsOnDto, ScheduleInfoDto, TriggerEntryDto, WebhookInfoDto } from "@/api/generated/model";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Skeleton } from "@/components/ui/skeleton";
 import { StateChip } from "@/components/workflows/StateChip";
 import {
   kindLabel,
@@ -220,6 +222,8 @@ export function TriggerDetailsDrawer({
   block,
   base,
   onEditInEditor,
+  pending = false,
+  failure = null,
 }: {
   open: boolean;
   onClose: () => void;
@@ -233,6 +237,13 @@ export function TriggerDetailsDrawer({
   base: string;
   /** Open the flow's Code at this trigger; absent where the editor is not on the page. */
   onEditInEditor?: () => void;
+  /**
+   * The caller is still reading the trigger (the global page, W7e Task 7): a skeleton, not
+   * "no longer exists". The same drawer stays mounted when the answer lands, so it opens once.
+   */
+  pending?: boolean;
+  /** The caller's read failed: this sentence instead of the details. */
+  failure?: string | null;
 }) {
   // The webhook's key stays hidden, in its path and in the YAML, until Reveal. The tab keys the
   // drawer by trigger id, so another trigger starts hidden again.
@@ -249,7 +260,11 @@ export function TriggerDetailsDrawer({
             Trigger <span className="font-mono">{triggerId}</span>
           </SheetTitle>
           <SheetDescription>
-            {entry ? (
+            {failure ? (
+              "Not loaded"
+            ) : pending ? (
+              "Reading this trigger's details."
+            ) : entry ? (
               <>
                 {kindLabel(entry.kind)} · <span className="font-mono">{entry.type}</span>
               </>
@@ -259,7 +274,17 @@ export function TriggerDetailsDrawer({
           </SheetDescription>
         </SheetHeader>
         <div className="grid min-h-0 flex-1 content-start gap-5 overflow-auto">
-          {entry ? (
+          {failure ? (
+            <Alert variant="destructive">
+              <AlertDescription>{failure}</AlertDescription>
+            </Alert>
+          ) : pending ? (
+            <div className="grid gap-2" data-testid="trigger-drawer-loading">
+              <Skeleton className="h-5 w-2/3" />
+              <Skeleton className="h-24 w-full" />
+              <Skeleton className="h-5 w-1/2" />
+            </div>
+          ) : entry ? (
             <>
               <p className="text-sm">
                 <span className="text-muted-foreground">Status: </span>
