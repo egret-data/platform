@@ -15,4 +15,5 @@ export type MatchedBy = typeof MatchedBy[keyof typeof MatchedBy];
 export const MatchedBy = {
   baseTable: 'baseTable',
   text: 'text',
+  lineage: 'lineage',
 } as const;

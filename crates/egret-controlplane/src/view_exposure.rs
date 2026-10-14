@@ -90,6 +90,9 @@ pub enum MatchedBy {
     /// The view has no base-table map, and its definition names the classified
     /// catalog and database.
     Text,
+    /// A Trino view: its recorded lineage (spec B1) reaches the table, or
+    /// could not be computed (`lineageState`).
+    Lineage,
 }
 
 /// One view that reads a classified table. Shared by the StarRocks list and the
@@ -126,8 +129,76 @@ pub struct ViewExposureDto {
     /// Engines that reach the classification but were not asked (external, or
     /// not running). Their views are unknown, not absent.
     pub engines_not_checked: Vec<EngineNotChecked>,
-    /// Always empty until Trino views are reported.
-    pub trino_views: Vec<ViewExposureItem>,
+    /// The views in egret's catalogs that the DEFINER audit lists (spec B5):
+    /// their lineage reaches a table of this classification, or a table a mask
+    /// or row-filter rule selects, or is unknown. `null` when egret's catalogs
+    /// could not all be listed; see `trino_list_error`.
+    pub trino_views: Option<Vec<TrinoViewItem>>,
+    /// Set exactly when `trino_views` is `null`; names what could not be
+    /// listed.
+    pub trino_list_error: Option<String>,
+}
+
+/// A Trino view's security mode, read from its stored `trino.run-as-owner`
+/// property and never from the statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityMode {
+    /// The property is present; the view runs as its owner.
+    Definer,
+    /// The view's metadata was read and carries no such property.
+    Invoker,
+    /// The metadata could not be read. Never inferred as `definer`.
+    Unknown,
+}
+
+/// Why a Trino view is listed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TrinoViewReason {
+    /// The lineage reaches a table of this classification. Also given, fail
+    /// closed, to a view whose lineage is `missing` or `failed`: it may.
+    Classified,
+    /// The lineage reaches a table a mask or row-filter rule selects. Base
+    /// masks and row filters apply as a DEFINER view's owner, not its reader.
+    MaskOrRowFilter,
+}
+
+/// What egret has recorded of a Trino view's lineage (spec B1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageState {
+    Computed,
+    /// Never computed: the view predates the hold, or was committed while
+    /// its profile had no classified column and its EXPLAIN did not run.
+    Missing,
+    /// The last computation failed; `lineage_detail` says why.
+    Failed,
+}
+
+/// One Trino view in the DEFINER audit (spec B5).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TrinoViewItem {
+    /// The registry catalog name.
+    pub catalog: String,
+    pub schema: String,
+    pub name: String,
+    pub security_mode: SecurityMode,
+    /// Why the mode is `unknown`; `null` otherwise.
+    pub security_mode_error: Option<String>,
+    /// The DEFINER's `trino.run-as-owner`; `null` for any other mode.
+    pub owner: Option<String>,
+    /// Whether the owner is cleared for every classification the lineage
+    /// reaches. `null` when it cannot be said: not DEFINER, lineage not
+    /// computed, or a reached clearance names only groups.
+    pub owner_cleared: Option<bool>,
+    pub reason: TrinoViewReason,
+    pub lineage_state: LineageState,
+    /// Why the lineage failed; `null` otherwise.
+    pub lineage_detail: Option<String>,
+    /// Always `lineage`.
+    pub matched_by: MatchedBy,
 }
 
 #[utoipa::path(
@@ -176,11 +247,13 @@ async fn get_view_exposure(
     }
 
     let (views, failures) = list_all(&*st.mv_lister, &dialled, st.mv_list_timeout).await;
+    let (trino_views, trino_list_error) = trino_views(&st, id).await?;
     Ok(Json(ViewExposureDto {
         starrocks_materialized_views: failures.is_empty().then_some(views),
         starrocks_list_error: (!failures.is_empty()).then(|| failures.join("; ")),
         engines_not_checked: not_checked,
-        trino_views: Vec::new(),
+        trino_views,
+        trino_list_error,
     }))
 }
 
@@ -275,10 +348,130 @@ async fn list_all(
     (views, failures)
 }
 
+/// The Trino half of the report (spec B5): every view in egret's catalogs
+/// whose recorded lineage reaches a table of the classification `tag_id` or a
+/// table with a mask or row-filter rule, with its security mode, owner and
+/// whether the owner is cleared.
+///
+/// **A view whose lineage is missing or failed is listed, fail closed**, with
+/// `reason: classified` and its `lineage_state`: egret cannot say it reads
+/// nothing classified. **A listing that fails withholds the whole list**
+/// (`None` and the error), as the StarRocks half does.
+async fn trino_views(
+    st: &CpState,
+    tag_id: Uuid,
+) -> Result<(Option<Vec<TrinoViewItem>>, Option<String>), CpError> {
+    use egret_perm_compile::lineage::{self, RecordedLineage, ViewRef};
+    use egret_perm_compile::view_audit;
+
+    let listing = match st.view_catalog.list_views().await {
+        Ok(l) => l,
+        Err(e) => return Ok((None, Some(format!("could not list egret's views: {e}")))),
+    };
+    if !listing.failures.is_empty() {
+        return Ok((None, Some(listing.failures.join("; "))));
+    }
+    let internal = |what: &'static str| {
+        move |e: &dyn std::fmt::Display| {
+            tracing::error!(error = %e, "view-exposure: {what}");
+            CpError::Internal
+        }
+    };
+    let mut conn = st
+        .db
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| internal("acquire connection")(&e))?;
+
+    let mut out = Vec::new();
+    for view in listing.views {
+        let at = ViewRef {
+            catalog: view.catalog.clone(),
+            schema: view.schema.clone(),
+            name: view.name.clone(),
+        };
+        let recorded = lineage::recorded_lineage(&mut conn, &at)
+            .await
+            .map_err(|e| internal("recorded lineage")(&e))?;
+        let (reason, lineage_state, lineage_detail, tables) = match recorded {
+            RecordedLineage::Computed(tables) => {
+                let reason = if view_audit::tables_carry_tag(&mut conn, &tables, tag_id)
+                    .await
+                    .map_err(|e| internal("classified tables")(&e))?
+                {
+                    TrinoViewReason::Classified
+                } else if view_audit::tables_have_rule(&mut conn, &tables)
+                    .await
+                    .map_err(|e| internal("mask and row-filter rules")(&e))?
+                {
+                    TrinoViewReason::MaskOrRowFilter
+                } else {
+                    continue;
+                };
+                (reason, LineageState::Computed, None, Some(tables))
+            }
+            RecordedLineage::Missing => (
+                TrinoViewReason::Classified,
+                LineageState::Missing,
+                None,
+                None,
+            ),
+            RecordedLineage::Failed { detail } => (
+                TrinoViewReason::Classified,
+                LineageState::Failed,
+                Some(detail),
+                None,
+            ),
+        };
+        let (security_mode, owner, security_mode_error) =
+            match st.view_catalog.run_as_owner(&view).await {
+                Ok(Some(owner)) => (SecurityMode::Definer, Some(owner), None),
+                Ok(None) => (SecurityMode::Invoker, None, None),
+                Err(e) => (SecurityMode::Unknown, None, Some(e)),
+            };
+        let owner_cleared = match (&owner, &tables) {
+            (Some(owner), Some(tables)) => {
+                let reached = lineage::view_tag_set(&mut conn, tables)
+                    .await
+                    .map_err(|e| internal("view tag set")(&e))?;
+                view_audit::owner_cleared(&mut conn, owner, &reached)
+                    .await
+                    .map_err(|e| internal("owner clearance")(&e))?
+            }
+            _ => None,
+        };
+        out.push(TrinoViewItem {
+            catalog: view.catalog,
+            schema: view.schema,
+            name: view.name,
+            security_mode,
+            security_mode_error,
+            owner,
+            owner_cleared,
+            reason,
+            lineage_state,
+            lineage_detail,
+            matched_by: MatchedBy::Lineage,
+        });
+    }
+    Ok((Some(out), None))
+}
+
 #[derive(utoipa::OpenApi)]
 #[openapi(
     paths(get_view_exposure),
-    components(schemas(ViewExposureDto, ViewExposureItem, MatchedBy, EngineNotChecked, ErrorBody)),
+    components(schemas(
+        ViewExposureDto,
+        ViewExposureItem,
+        MatchedBy,
+        EngineNotChecked,
+        TrinoViewItem,
+        SecurityMode,
+        TrinoViewReason,
+        LineageState,
+        ErrorBody
+    )),
     tags((name = "control-plane-tags", description = "Platform classification-tag catalog (Access P3.1) + access policies (P3.3)")),
 )]
 pub struct ControlPlaneViewExposureApi;

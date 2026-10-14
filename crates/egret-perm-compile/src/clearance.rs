@@ -413,10 +413,14 @@ pub(crate) async fn compile_clearance(
 /// The access type that lets a user store a query result as a materialized
 /// view. Spelled as in `service-defs/starrocks.json`, where it is an access type
 /// of the `database` resource.
-const CREATE_MV_ACCESS: &str = "create materialized view";
+pub(crate) const CREATE_MV_ACCESS: &str = "create materialized view";
 
 /// The only catalog StarRocks creates a materialized view in.
 pub const MV_CATALOG: &str = "default_catalog";
+
+/// What follows [`COMPILER_CLEARANCE_PREFIX`] in the name of the A3 deny
+/// (`perm-clearance-mv`). `crate::attribute_policy_name` reads it back.
+pub(crate) const MV_DENY_SUFFIX: &str = "mv";
 
 /// A3 (revised 2026-10-14): at most ONE deny per StarRocks profile. Denying
 /// `create materialized view` to `{public}` keeps an uncleared user from
@@ -457,7 +461,7 @@ pub(crate) fn mv_deny_inputs(
     let Some(cleared) = cleared else {
         return Vec::new();
     };
-    let name = format!("{COMPILER_CLEARANCE_PREFIX}mv");
+    let name = format!("{COMPILER_CLEARANCE_PREFIX}{MV_DENY_SUFFIX}");
     let mut resources = BTreeMap::new();
     resources.insert("catalog".to_string(), level(MV_CATALOG.to_string()));
     resources.insert("database".to_string(), level("*".to_string()));

@@ -145,11 +145,43 @@ pub struct LineageSweep {
     running: tokio::sync::Mutex<()>,
 }
 
-/// One egret warehouse the sweep walks.
-struct Swept {
-    warehouse_id: Uuid,
-    prefix: String,
-    catalog: String,
+/// One egret warehouse the sweep walks (and the DEFINER audit lists,
+/// `crate::view_audit`).
+pub(crate) struct Swept {
+    pub(crate) warehouse_id: Uuid,
+    pub(crate) prefix: String,
+    pub(crate) catalog: String,
+}
+
+/// Every egret warehouse with a lakekeeper warehouse and a registry catalog
+/// (the name the engines and the lineage use, as the hold resolves it),
+/// optionally only `only`.
+pub(crate) async fn governed_warehouses(
+    pool: &sqlx::PgPool,
+    only: Option<&[Uuid]>,
+) -> Result<Vec<Swept>, sqlx::Error> {
+    let rows: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
+        "SELECT w.id, w.lakekeeper_warehouse_id, \
+                (SELECT c.name FROM registry.catalogs c WHERE c.warehouse_id = w.id \
+                  ORDER BY c.name LIMIT 1) \
+           FROM catalog.warehouses w \
+          WHERE w.lakekeeper_warehouse_id IS NOT NULL \
+            AND ($1::uuid[] IS NULL OR w.id = ANY($1)) \
+          ORDER BY w.id",
+    )
+    .bind(only)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(warehouse_id, prefix, catalog)| {
+            Some(Swept {
+                warehouse_id,
+                prefix,
+                catalog: catalog?,
+            })
+        })
+        .collect())
 }
 
 impl LineageSweep {
@@ -229,32 +261,8 @@ impl LineageSweep {
         Ok(report)
     }
 
-    /// Every egret warehouse with a lakekeeper warehouse and a registry
-    /// catalog (the name the engines and the lineage use, as the hold
-    /// resolves it).
     async fn warehouses(&self, only: Option<&[Uuid]>) -> Result<Vec<Swept>, sqlx::Error> {
-        let rows: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
-            "SELECT w.id, w.lakekeeper_warehouse_id, \
-                    (SELECT c.name FROM registry.catalogs c WHERE c.warehouse_id = w.id \
-                      ORDER BY c.name LIMIT 1) \
-               FROM catalog.warehouses w \
-              WHERE w.lakekeeper_warehouse_id IS NOT NULL \
-                AND ($1::uuid[] IS NULL OR w.id = ANY($1)) \
-              ORDER BY w.id",
-        )
-        .bind(only)
-        .fetch_all(&self.db.pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|(warehouse_id, prefix, catalog)| {
-                Some(Swept {
-                    warehouse_id,
-                    prefix,
-                    catalog: catalog?,
-                })
-            })
-            .collect())
+        governed_warehouses(&self.db.pool, only).await
     }
 
     async fn sweep_warehouse(

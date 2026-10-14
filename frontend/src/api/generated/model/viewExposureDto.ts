@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { EngineNotChecked } from './engineNotChecked';
+import type { TrinoViewItem } from './trinoViewItem';
 import type { ViewExposureItem } from './viewExposureItem';
 
 export interface ViewExposureDto {
@@ -25,6 +26,18 @@ export interface ViewExposureDto {
      * not running). Their views are unknown, not absent.
      */
   enginesNotChecked: EngineNotChecked[];
-  /** Always empty until Trino views are reported. */
-  trinoViews: ViewExposureItem[];
+  /**
+     * The views in egret's catalogs that the DEFINER audit lists (spec B5):
+     * their lineage reaches a table of this classification, or a table a mask
+     * or row-filter rule selects, or is unknown. `null` when egret's catalogs
+     * could not all be listed; see `trino_list_error`.
+     * @nullable
+     */
+  trinoViews?: TrinoViewItem[] | null;
+  /**
+     * Set exactly when `trino_views` is `null`; names what could not be
+     * listed.
+     * @nullable
+     */
+  trinoListError?: string | null;
 }

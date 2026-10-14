@@ -91,6 +91,7 @@ pub mod role_membership;
 pub mod routes;
 pub mod rules;
 pub mod trigger;
+pub mod view_audit;
 pub mod view_exposure;
 // View governance B3 (Task 9): a view's lineage-derived column tags follow
 // its base tables' classifications.

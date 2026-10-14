@@ -1,6 +1,8 @@
 import { AlertTriangle } from "lucide-react";
 
 import { useControlPlaneTagsGetViewExposure } from "@/api/generated/control-plane-tags/control-plane-tags";
+import type { TrinoViewItem } from "@/api/generated/model/trinoViewItem";
+import type { ViewExposureDto } from "@/api/generated/model/viewExposureDto";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -138,8 +140,97 @@ export default function ViewExposureSection({
           </TableBody>
         </Table>
       )}
+
+      {exposure && <TrinoViews exposure={exposure} />}
     </section>
   );
+}
+
+/**
+ * The Trino half (view governance B5): the views in egret's catalogs whose
+ * lineage reads this classification or a masked or row-filtered table, with
+ * each view's security mode as stored (`trino.run-as-owner`), its owner and
+ * whether the owner is cleared. Minimal by the user's ruling (2026-10-14): the
+ * DG frontend is redesigned later as its own spec.
+ *
+ * `trinoViews` is `null` exactly when egret's catalogs could not all be
+ * listed; that is an error, never "none" (FE-STATE-1).
+ */
+function TrinoViews({ exposure }: { exposure: ViewExposureDto }) {
+  const views = exposure.trinoViews;
+  return (
+    <section className="space-y-2" aria-labelledby="trino-views-heading">
+      <h3 id="trino-views-heading" className="text-sm font-semibold">
+        Trino views
+      </h3>
+      <p className="text-sm text-muted-foreground">
+        DEFINER views run as their owner: base masks and row filters apply as the owner, and an
+        uncleared owner blocks every reader. INVOKER views run as the reader, so prefer SECURITY
+        INVOKER.
+      </p>
+      {!Array.isArray(views) ? (
+        <Alert variant="destructive">
+          <AlertDescription>
+            {exposure.trinoListError ?? "Could not list egret's views."} Reload the page to try
+            again.
+          </AlertDescription>
+        </Alert>
+      ) : views.length === 0 ? (
+        <EmptyState title="No Trino views read this classification or a masked table." />
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>View</TableHead>
+              <TableHead>Mode</TableHead>
+              <TableHead>Owner</TableHead>
+              <TableHead>Owner clearance</TableHead>
+              <TableHead>Why listed</TableHead>
+              <TableHead>Lineage</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {views.map((v) => (
+              <TableRow key={`${v.catalog}/${v.schema}/${v.name}`}>
+                <TableCell className="font-mono text-xs">{`${v.catalog}.${v.schema}.${v.name}`}</TableCell>
+                <TableCell>{modeText(v)}</TableCell>
+                <TableCell>{v.owner ?? "—"}</TableCell>
+                <TableCell>{clearanceText(v)}</TableCell>
+                <TableCell>{reasonText(v)}</TableCell>
+                <TableCell>{lineageText(v)}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+    </section>
+  );
+}
+
+function modeText(v: TrinoViewItem): string {
+  if (v.securityMode === "definer") return "DEFINER";
+  if (v.securityMode === "invoker") return "INVOKER";
+  return `unknown: the view's metadata could not be read (${v.securityModeError ?? "no reason given"})`;
+}
+
+function clearanceText(v: TrinoViewItem): string {
+  if (v.securityMode !== "definer") return "—";
+  if (v.ownerCleared === true) return "cleared";
+  if (v.ownerCleared === false) return "not cleared";
+  return "clearance unknown";
+}
+
+function reasonText(v: TrinoViewItem): string {
+  if (v.reason === "mask_or_row_filter") return "reads a table with a mask or row filter";
+  return v.lineageState === "computed" ? "reads classified data" : "may read classified data";
+}
+
+function lineageText(v: TrinoViewItem): string {
+  if (v.lineageState === "computed") return "computed";
+  if (v.lineageState === "missing") {
+    return "lineage not computed; egret has not judged this view. Run the lineage sweep.";
+  }
+  return `lineage failed: ${v.lineageDetail ?? "no reason given"}. Run the lineage sweep.`;
 }
 
 /** What a not-checked reason means, and what the reader can do about it. */

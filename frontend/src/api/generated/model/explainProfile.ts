@@ -92,4 +92,5 @@ export interface ExplainProfile {
      */
   tag_policies_in_download: number;
   mask?: null | ExplainMask;
+  materialized_view?: null | ExplainAccess;
 }

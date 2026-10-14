@@ -674,6 +674,20 @@ function DecidedBy({
     );
   }
 
+  // The engine-wide `create materialized view` deny (view governance A3). It
+  // belongs to no single tag, so there is no tag or role to name.
+  if (attribution.kind === "materialized_view_deny") {
+    return (
+      <div className="space-y-1 text-xs">
+        <p className="text-muted-foreground">
+          The engine-wide materialized-view deny: only users cleared for every classification
+          with a column on this engine may create a materialized view on it.
+        </p>
+        {ranger}
+      </div>
+    );
+  }
+
   // A classification gate. D10's pre-existing defect was here: `clearance` had
   // no entry in the reason map at all, so it rendered the raw wire string with
   // "Unrecognized reason class." and dropped the gating tag and the clearing
@@ -871,9 +885,36 @@ function ProfileBlock({
         {profile.accesses.length === 0 && (
           <li className="text-sm text-muted-foreground">No access type was evaluated.</li>
         )}
+        {profile.materialized_view && (
+          <AccessRow verdict={profile.materialized_view} declined={declined} />
+        )}
       </ul>
+      {profile.mask && <MaskLine mask={profile.mask} />}
       <ProfileTags profile={profile} declined={declined} />
     </section>
+  );
+}
+
+/**
+ * The masked-read verdict for the target column (StarRocks, view governance
+ * A2). Plain on purpose: the DG frontend is redesigned later as its own spec.
+ */
+function MaskLine({ mask }: { mask: NonNullable<ExplainProfile["mask"]> }) {
+  const d = mask.decision;
+  return (
+    <p data-testid="explain-mask" className="text-xs text-muted-foreground">
+      Mask on {mask.access_type}:{" "}
+      {d.kind === "masked" ? (
+        <>
+          masked to <span className="font-mono">{d.result.mask_type}</span> by Ranger policy{" "}
+          <span className="font-mono">{d.result.policy_name}</span>
+        </>
+      ) : d.kind === "no_mask" ? (
+        "no mask applies"
+      ) : (
+        `undecidable (${d.why.map((c) => c.kind).join(", ")})`
+      )}
+    </p>
   );
 }
 

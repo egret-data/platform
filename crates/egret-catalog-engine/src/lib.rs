@@ -26,6 +26,9 @@ pub mod recovery;
 /// merged in from the former `egret-catalog` crate (E3d-1). Runs on the
 /// egret-side pool, which is now the same sqlx major lakekeeper uses.
 pub mod store;
+/// The view-governance DEFINER audit's reader (spec B5): every view in
+/// egret's catalogs and its stored `trino.run-as-owner`.
+pub mod view_audit;
 /// The view-governance hold (spec B2): a classified view's commit waits until
 /// every Ranger plugin holds its classification tags.
 pub mod view_hold;
@@ -74,6 +77,10 @@ pub use pool::{build_isolated_pool, LAKEKEEPER_SCHEMA};
 pub use recovery::{
     list_deleted_tabulars, set_protection, undrop_tabular, DeletedTabular, ProtectTarget,
     TabularKindName,
+};
+pub use view_audit::{
+    load_view_run_as_owner, CatalogView, CatalogViews, EmbeddedViewCatalog, NoViewCatalog,
+    ViewCatalog, RUN_AS_OWNER_PROPERTY,
 };
 pub use view_hold::{
     default_hold_limit, view_lock_key, ViewHold, DEFAULT_MAX_HOLDS, EXPLAIN_BUDGET,

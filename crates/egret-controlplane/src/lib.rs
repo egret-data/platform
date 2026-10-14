@@ -22,8 +22,8 @@ mod view_exposure;
 
 pub use error::CpError;
 pub use view_exposure::{
-    EngineNotChecked, ExposureEngine, MatchedBy, MaterializedViewLister, MvRow, ViewExposureDto,
-    ViewExposureItem,
+    EngineNotChecked, ExposureEngine, LineageState, MatchedBy, MaterializedViewLister, MvRow,
+    SecurityMode, TrinoViewItem, TrinoViewReason, ViewExposureDto, ViewExposureItem,
 };
 
 use axum::extract::FromRef;
@@ -91,6 +91,11 @@ pub struct CpState {
     /// `egret_catalog_engine::LineageSweep`, wired in `egret-bin`; tests pass a
     /// fake.
     pub lineage_sweeper: Arc<dyn egret_catalog_engine::LineageSweeper>,
+    /// The views of egret's catalogs and their stored security mode, for the
+    /// DEFINER audit (view governance B5). The real one is
+    /// `egret_catalog_engine::EmbeddedViewCatalog`, wired in `egret-bin`;
+    /// tests pass a fake.
+    pub view_catalog: Arc<dyn egret_catalog_engine::ViewCatalog>,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.

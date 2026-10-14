@@ -156,6 +156,24 @@ fn app_full(
     mv_list_timeout: std::time::Duration,
     lineage_sweeper: Arc<dyn egret_catalog_engine::LineageSweeper>,
 ) -> axum::Router {
+    app_views(
+        f,
+        pdp,
+        lister,
+        mv_list_timeout,
+        lineage_sweeper,
+        Arc::new(egret_catalog_engine::NoViewCatalog),
+    )
+}
+
+fn app_views(
+    f: &Fixture,
+    pdp: Arc<dyn egret_core::authz::Pdp>,
+    lister: Arc<dyn MaterializedViewLister>,
+    mv_list_timeout: std::time::Duration,
+    lineage_sweeper: Arc<dyn egret_catalog_engine::LineageSweeper>,
+    view_catalog: Arc<dyn egret_catalog_engine::ViewCatalog>,
+) -> axum::Router {
     let crypto = egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").unwrap();
     let secrets = egret_secrets::WorkspaceSecretStore::new(
         f.db.clone(),
@@ -183,6 +201,7 @@ fn app_full(
         mv_lister: lister,
         mv_list_timeout,
         lineage_sweeper,
+        view_catalog,
     })
 }
 
@@ -445,6 +464,7 @@ async fn a_view_whose_base_tables_name_a_classified_table_matches_by_base_table(
 
     assert_eq!(j["starrocksListError"], serde_json::Value::Null, "body={j}");
     assert_eq!(j["trinoViews"], serde_json::json!([]), "body={j}");
+    assert_eq!(j["trinoListError"], serde_json::Value::Null, "body={j}");
     assert_eq!(j["enginesNotChecked"], serde_json::json!([]), "body={j}");
     assert_eq!(
         listed(&j),
@@ -944,4 +964,388 @@ async fn the_lineage_sweep_says_when_it_cannot_run() {
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert!(body.to_string().contains(says), "{body}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// View governance B5 (Task 10): the Trino half, the DEFINER audit.
+// ---------------------------------------------------------------------------
+
+/// The views of egret's catalogs, and each one's stored `trino.run-as-owner`.
+#[derive(Default)]
+struct FakeViews {
+    views: Vec<egret_catalog_engine::CatalogView>,
+    failures: Vec<String>,
+    unlistable: Option<String>,
+    /// View name -> its stored owner (`None` = INVOKER), or a read error.
+    owners: BTreeMap<String, Result<Option<String>, String>>,
+}
+
+impl FakeViews {
+    fn view(mut self, catalog: &str, name: &str, owner: Result<Option<&str>, &str>) -> Self {
+        self.views.push(egret_catalog_engine::CatalogView {
+            catalog: catalog.into(),
+            schema: "sales".into(),
+            name: name.into(),
+            prefix: "lk-prefix".into(),
+        });
+        self.owners.insert(
+            name.into(),
+            owner.map(|o| o.map(String::from)).map_err(String::from),
+        );
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl egret_catalog_engine::ViewCatalog for FakeViews {
+    async fn list_views(&self) -> Result<egret_catalog_engine::CatalogViews, String> {
+        if let Some(e) = &self.unlistable {
+            return Err(e.clone());
+        }
+        Ok(egret_catalog_engine::CatalogViews {
+            views: self.views.clone(),
+            failures: self.failures.clone(),
+        })
+    }
+
+    async fn run_as_owner(
+        &self,
+        view: &egret_catalog_engine::CatalogView,
+    ) -> Result<Option<String>, String> {
+        self.owners
+            .get(&view.name)
+            .cloned()
+            .unwrap_or_else(|| Err("no such view".into()))
+    }
+}
+
+/// Record `tables` (`catalog.schema.table`) as `view`'s computed lineage.
+async fn lineage(f: &Fixture, catalog: &str, view: &str, tables: &[(&str, &str, &str)]) {
+    let mut conn = f.db.pool.acquire().await.unwrap();
+    let set = tables
+        .iter()
+        .map(|(c, s, t)| (c.to_string(), s.to_string(), t.to_string()))
+        .collect();
+    egret_perm_compile::lineage::write_lineage(&mut conn, &view_ref(catalog, view), &set)
+        .await
+        .unwrap();
+}
+
+fn view_ref(catalog: &str, view: &str) -> egret_perm_compile::lineage::ViewRef {
+    egret_perm_compile::lineage::ViewRef {
+        catalog: catalog.into(),
+        schema: "sales".into(),
+        name: view.into(),
+    }
+}
+
+async fn trino_exposure(f: &Fixture, views: FakeViews, tag_id: Uuid) -> serde_json::Value {
+    let token = session(f).await;
+    let router = app_views(
+        f,
+        Arc::new(AllowOnly(&["tag:read"])),
+        Arc::new(FakeLister::default()),
+        std::time::Duration::from_secs(15),
+        Arc::new(egret_catalog_engine::NoCatalogSweeper),
+        Arc::new(views),
+    );
+    let (status, j) = get(
+        router,
+        &format!("/classifications/{tag_id}/view-exposure"),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    j
+}
+
+/// The listed Trino view named `name`, or a panic naming the body.
+fn trino_view<'a>(j: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    j["trinoViews"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a list: {j}"))
+        .iter()
+        .find(|v| v["name"] == name)
+        .unwrap_or_else(|| panic!("{name} is listed: {j}"))
+}
+
+fn trino_names(j: &serde_json::Value) -> Vec<String> {
+    let mut n: Vec<String> = j["trinoViews"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a list: {j}"))
+        .iter()
+        .map(|v| v["name"].as_str().unwrap().to_string())
+        .collect();
+    n.sort();
+    n
+}
+
+#[tokio::test]
+async fn a_view_whose_lineage_reads_a_classified_table_is_listed_as_classified() {
+    let Some(f) = setup().await else {
+        panic!("no test database");
+    };
+    let s = seed(&f).await;
+    lineage(&f, &s.catalog, "v_cls", &[(&s.catalog, "sales", "orders")]).await;
+    // Same catalog, an unclassified table with no rule: not listed.
+    lineage(
+        &f,
+        &s.catalog,
+        "v_plain",
+        &[(&s.catalog, "sales", "customers")],
+    )
+    .await;
+    let views = FakeViews::default()
+        .view(&s.catalog, "v_cls", Ok(Some("alice")))
+        .view(&s.catalog, "v_plain", Ok(Some("alice")));
+
+    let j = trino_exposure(&f, views, s.tag_id).await;
+
+    assert_eq!(j["trinoListError"], serde_json::Value::Null, "body={j}");
+    assert_eq!(trino_names(&j), ["v_cls"], "body={j}");
+    let v = trino_view(&j, "v_cls");
+    assert_eq!(v["catalog"], s.catalog.as_str());
+    assert_eq!(v["schema"], "sales");
+    assert_eq!(v["reason"], "classified");
+    assert_eq!(v["matchedBy"], "lineage");
+    assert_eq!(v["lineageState"], "computed");
+    assert_eq!(v["lineageDetail"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn a_view_over_a_table_with_a_mask_rule_is_listed_as_mask_or_row_filter() {
+    let Some(f) = setup().await else {
+        panic!("no test database");
+    };
+    let s = seed(&f).await;
+    let catalog_id: Uuid = sqlx::query_scalar("SELECT id FROM registry.catalogs WHERE name = $1")
+        .bind(&s.catalog)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, \
+         schema_name, table_name, column_name) \
+         VALUES ($1, 'mask', 'MASK_NULL', 'path', $2, 'sales', 'customers', 'email')",
+    )
+    .bind(format!("ve-rule-{}", suffix()))
+    .bind(catalog_id)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    lineage(
+        &f,
+        &s.catalog,
+        "v_masked",
+        &[(&s.catalog, "sales", "customers")],
+    )
+    .await;
+    lineage(
+        &f,
+        &s.catalog,
+        "v_other",
+        &[(&s.catalog, "sales", "products")],
+    )
+    .await;
+    let views = FakeViews::default()
+        .view(&s.catalog, "v_masked", Ok(None))
+        .view(&s.catalog, "v_other", Ok(None));
+
+    let j = trino_exposure(&f, views, s.tag_id).await;
+
+    assert_eq!(trino_names(&j), ["v_masked"], "body={j}");
+    assert_eq!(trino_view(&j, "v_masked")["reason"], "mask_or_row_filter");
+}
+
+#[tokio::test]
+async fn the_mode_is_definer_with_the_owner_invoker_without_and_unknown_when_unreadable() {
+    let Some(f) = setup().await else {
+        panic!("no test database");
+    };
+    let s = seed(&f).await;
+    for v in ["v_def", "v_inv", "v_unk"] {
+        lineage(&f, &s.catalog, v, &[(&s.catalog, "sales", "orders")]).await;
+    }
+    let views = FakeViews::default()
+        .view(&s.catalog, "v_def", Ok(Some("alice")))
+        .view(&s.catalog, "v_inv", Ok(None))
+        .view(&s.catalog, "v_unk", Err("load_view: connection reset"));
+
+    let j = trino_exposure(&f, views, s.tag_id).await;
+
+    let def = trino_view(&j, "v_def");
+    assert_eq!(def["securityMode"], "definer", "body={j}");
+    assert_eq!(def["owner"], "alice");
+    assert_eq!(def["securityModeError"], serde_json::Value::Null);
+    let inv = trino_view(&j, "v_inv");
+    assert_eq!(inv["securityMode"], "invoker", "body={j}");
+    assert_eq!(inv["owner"], serde_json::Value::Null);
+    assert_eq!(inv["ownerCleared"], serde_json::Value::Null);
+    let unk = trino_view(&j, "v_unk");
+    assert_eq!(unk["securityMode"], "unknown", "never definer; body={j}");
+    assert_eq!(unk["owner"], serde_json::Value::Null);
+    assert_eq!(unk["ownerCleared"], serde_json::Value::Null);
+    assert!(
+        unk["securityModeError"]
+            .as_str()
+            .is_some_and(|e| e.contains("connection reset")),
+        "body={j}"
+    );
+}
+
+/// A user with a username, holding `role` (created if needed) when given.
+async fn user_holding(f: &Fixture, username: &str, role: Option<&str>) {
+    let uid = f
+        .users
+        .insert_local(&format!("{username}@egret.local"), "T", "x")
+        .await
+        .unwrap()
+        .0;
+    sqlx::query("UPDATE users SET username = $1 WHERE id = $2")
+        .bind(username)
+        .bind(uid)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    if let Some(role) = role {
+        let role_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO roles (scope, name) VALUES ('platform', $1) \
+             ON CONFLICT (scope, name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+        )
+        .bind(role)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, \
+             scope_id) VALUES ('user', $1, $2, 'platform', NULL)",
+        )
+        .bind(uid)
+        .bind(role_id)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    }
+}
+
+/// `ownerCleared` reads the clearance membership the compiler uses: the owner
+/// holds a required role of every gated classification the lineage reaches.
+#[tokio::test]
+async fn owner_cleared_says_whether_the_definer_holds_the_clearing_role() {
+    let Some(f) = setup().await else {
+        panic!("no test database");
+    };
+    let s = seed(&f).await;
+    let role = format!("ve-role-{}", suffix());
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, '{}')",
+    )
+    .bind(s.tag_id)
+    .bind(vec![role.clone()])
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    let cleared = format!("ve_cleared_{}", suffix());
+    let uncleared = format!("ve_uncleared_{}", suffix());
+    user_holding(&f, &cleared, Some(&role)).await;
+    user_holding(&f, &uncleared, None).await;
+    for v in ["v_by_cleared", "v_by_uncleared"] {
+        lineage(&f, &s.catalog, v, &[(&s.catalog, "sales", "orders")]).await;
+    }
+    let views = FakeViews::default()
+        .view(&s.catalog, "v_by_cleared", Ok(Some(&cleared)))
+        .view(&s.catalog, "v_by_uncleared", Ok(Some(&uncleared)));
+
+    let j = trino_exposure(&f, views, s.tag_id).await;
+
+    assert_eq!(
+        trino_view(&j, "v_by_cleared")["ownerCleared"],
+        true,
+        "body={j}"
+    );
+    assert_eq!(
+        trino_view(&j, "v_by_uncleared")["ownerCleared"],
+        false,
+        "body={j}"
+    );
+    sqlx::query("DELETE FROM classification_policies WHERE tag_id = $1")
+        .bind(s.tag_id)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+}
+
+/// Fail closed: a view whose lineage is missing or failed is listed, with its
+/// lineage state, and never dropped as "reads nothing classified".
+#[tokio::test]
+async fn a_view_with_missing_or_failed_lineage_is_listed_with_its_lineage_state() {
+    let Some(f) = setup().await else {
+        panic!("no test database");
+    };
+    let s = seed(&f).await;
+    {
+        let mut conn = f.db.pool.acquire().await.unwrap();
+        egret_perm_compile::lineage::record_lineage_failure(
+            &mut conn,
+            &view_ref(&s.catalog, "v_failed"),
+            "engine trino-1: Access Denied",
+        )
+        .await
+        .unwrap();
+    }
+    let views = FakeViews::default()
+        .view(&s.catalog, "v_missing", Ok(Some("alice")))
+        .view(&s.catalog, "v_failed", Ok(None));
+
+    let j = trino_exposure(&f, views, s.tag_id).await;
+
+    assert_eq!(trino_names(&j), ["v_failed", "v_missing"], "body={j}");
+    let missing = trino_view(&j, "v_missing");
+    assert_eq!(missing["lineageState"], "missing");
+    assert_eq!(missing["reason"], "classified");
+    assert_eq!(missing["securityMode"], "definer");
+    assert_eq!(
+        missing["ownerCleared"],
+        serde_json::Value::Null,
+        "unknown lineage, unknown clearance; body={j}"
+    );
+    let failed = trino_view(&j, "v_failed");
+    assert_eq!(failed["lineageState"], "failed");
+    assert_eq!(failed["lineageDetail"], "engine trino-1: Access Denied");
+}
+
+/// A listing that fails withholds the whole Trino list, as the StarRocks half
+/// does: a partial list is never shown as complete.
+#[tokio::test]
+async fn a_view_listing_that_fails_is_null_with_the_error_never_a_partial_list() {
+    let Some(f) = setup().await else {
+        panic!("no test database");
+    };
+    let s = seed(&f).await;
+    lineage(&f, &s.catalog, "v_cls", &[(&s.catalog, "sales", "orders")]).await;
+    let mut partial = FakeViews::default().view(&s.catalog, "v_cls", Ok(None));
+    partial.failures = vec!["the views of c.s could not be listed: boom".into()];
+
+    let j = trino_exposure(&f, partial, s.tag_id).await;
+    assert_eq!(j["trinoViews"], serde_json::Value::Null, "body={j}");
+    assert!(
+        j["trinoListError"]
+            .as_str()
+            .is_some_and(|e| e.contains("boom")),
+        "body={j}"
+    );
+
+    let none = FakeViews {
+        unlistable: Some("the warehouses could not be listed: db down".into()),
+        ..FakeViews::default()
+    };
+    let j = trino_exposure(&f, none, s.tag_id).await;
+    assert_eq!(j["trinoViews"], serde_json::Value::Null, "body={j}");
+    assert!(
+        j["trinoListError"]
+            .as_str()
+            .is_some_and(|e| e.contains("db down")),
+        "body={j}"
+    );
 }

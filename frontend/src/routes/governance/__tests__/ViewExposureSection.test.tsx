@@ -23,6 +23,7 @@ const EMPTY: ViewExposureDto = {
   starrocksListError: null,
   enginesNotChecked: [],
   trinoViews: [],
+  trinoListError: null,
 };
 
 const WARNING = /may hold real classified values/i;
@@ -164,5 +165,116 @@ describe("ViewExposureSection", () => {
       "t-42",
       expect.anything(),
     );
+  });
+
+  test("lists the Trino views with mode, owner, clearance and reason", () => {
+    respond({
+      ...EMPTY,
+      trinoViews: [
+        {
+          catalog: "ice",
+          schema: "sales",
+          name: "v_definer",
+          securityMode: "definer",
+          owner: "alice",
+          ownerCleared: false,
+          reason: "classified",
+          lineageState: "computed",
+          matchedBy: "lineage",
+        },
+        {
+          catalog: "ice",
+          schema: "sales",
+          name: "v_masked",
+          securityMode: "invoker",
+          owner: null,
+          ownerCleared: null,
+          reason: "mask_or_row_filter",
+          lineageState: "computed",
+          matchedBy: "lineage",
+        },
+        {
+          catalog: "ice",
+          schema: "sales",
+          name: "v_unknown",
+          securityMode: "unknown",
+          securityModeError: "load_view: connection reset",
+          owner: null,
+          ownerCleared: null,
+          reason: "classified",
+          lineageState: "failed",
+          lineageDetail: "engine trino-1: Access Denied",
+          matchedBy: "lineage",
+        },
+      ],
+    });
+    render(<ViewExposureSection tagId="t1" engineGated />);
+
+    const section = screen.getByRole("region", { name: /trino views/i });
+    expect(within(section).getByText(/definer views run as their owner/i)).toBeInTheDocument();
+    expect(within(section).getByText(/invoker views run as the reader/i)).toBeInTheDocument();
+    const table = within(section).getByRole("table");
+
+    const definer = within(table).getByText("ice.sales.v_definer").closest("tr") as HTMLElement;
+    expect(definer).toHaveTextContent(/definer/i);
+    expect(definer).toHaveTextContent("alice");
+    expect(definer).toHaveTextContent(/not cleared/i);
+    expect(definer).toHaveTextContent(/reads classified data/i);
+
+    const masked = within(table).getByText("ice.sales.v_masked").closest("tr") as HTMLElement;
+    expect(masked).toHaveTextContent(/invoker/i);
+    expect(masked).toHaveTextContent(/mask or row filter/i);
+
+    const unknown = within(table).getByText("ice.sales.v_unknown").closest("tr") as HTMLElement;
+    expect(unknown).toHaveTextContent(/unknown/i);
+    expect(unknown).toHaveTextContent("connection reset");
+    expect(unknown).toHaveTextContent(/lineage failed/i);
+    expect(unknown).toHaveTextContent("engine trino-1: Access Denied");
+  });
+
+  test("a view with missing lineage says egret has not judged it", () => {
+    respond({
+      ...EMPTY,
+      trinoViews: [
+        {
+          catalog: "ice",
+          schema: "sales",
+          name: "v_old",
+          securityMode: "definer",
+          owner: "bob",
+          ownerCleared: null,
+          reason: "classified",
+          lineageState: "missing",
+          matchedBy: "lineage",
+        },
+      ],
+    });
+    render(<ViewExposureSection tagId="t1" engineGated />);
+
+    const row = screen.getByText("ice.sales.v_old").closest("tr") as HTMLElement;
+    expect(row).toHaveTextContent(/lineage not computed/i);
+    expect(row).toHaveTextContent(/clearance unknown/i);
+  });
+
+  test("an empty Trino list says none were found", () => {
+    respond(EMPTY);
+    render(<ViewExposureSection tagId="t1" engineGated />);
+
+    const section = screen.getByRole("region", { name: /trino views/i });
+    expect(within(section).getByText(/no trino views/i)).toBeInTheDocument();
+    expect(within(section).queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  test("a failed Trino listing shows the error and never says there are none", () => {
+    respond({
+      ...EMPTY,
+      trinoViews: null,
+      trinoListError: "the views of ice.sales could not be listed: boom",
+    });
+    render(<ViewExposureSection tagId="t1" engineGated />);
+
+    const section = screen.getByRole("region", { name: /trino views/i });
+    expect(within(section).getByRole("alert")).toHaveTextContent(/boom/);
+    expect(within(section).queryByText(/no trino views/i)).not.toBeInTheDocument();
   });
 });

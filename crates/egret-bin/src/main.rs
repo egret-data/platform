@@ -1970,6 +1970,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // nothing to sweep, and the route says so.
     let mut lineage_sweeper: std::sync::Arc<dyn egret_catalog_engine::LineageSweeper> =
         std::sync::Arc::new(egret_catalog_engine::NoCatalogSweeper);
+    // View governance B5: the DEFINER audit reads the views of egret's
+    // catalogs. With no embedded catalog there are none.
+    let mut view_catalog: std::sync::Arc<dyn egret_catalog_engine::ViewCatalog> =
+        std::sync::Arc::new(egret_catalog_engine::NoViewCatalog);
     let catalog_engine: Option<axum::Router> = if config.catalog.enabled {
         let dsn = config.database.url.as_str();
         egret_catalog_engine::run_lakekeeper_migrations(dsn)
@@ -2031,6 +2035,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             lineage_runner,
         ));
         lineage_sweeper = sweep.clone();
+        view_catalog = std::sync::Arc::new(egret_catalog_engine::EmbeddedViewCatalog::new(
+            db.clone(),
+            engine_state.clone(),
+            config.catalog.system_user.clone(),
+        ));
         // Task 9 fix round 1: after each classification write commits, sweep
         // the views with no computed lineage that its profiles reach.
         egret_catalog_engine::spawn_classification_sweeps(sweep.clone(), db.clone());
@@ -2265,6 +2274,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 .expect("engine-mgmt state is built just above"),
         }),
         lineage_sweeper: lineage_sweeper.clone(),
+        view_catalog: view_catalog.clone(),
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).

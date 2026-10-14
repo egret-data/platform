@@ -3791,6 +3791,36 @@ async fn explain_names_the_clearance_as_deny_and_as_mask_for_an_uncleared_reader
     lift_gate(&f, tag_id).await;
 }
 
+/// View governance Task 10 (Task 3 review M-4): explain surfaces the A3
+/// engine-wide materialized-view deny. On a StarRocks profile a read explain
+/// also answers `create materialized view` on `default_catalog.<the target's
+/// database>`, and for an uncleared reader the deny decides it, attributed to
+/// the materialized-view deny rather than to nothing.
+#[tokio::test]
+async fn explain_names_the_materialized_view_deny_for_an_uncleared_reader() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, _cleared, uncleared) = clearance_readers(&f, &token).await;
+
+    let body = explain_column(&f, &token, &uncleared).await;
+    let mv = &profile_for(&body, "starrocks")["materialized_view"];
+    assert_eq!(
+        mv["access_type"], "create materialized view",
+        "body: {body}"
+    );
+    assert_eq!(mv["decision"]["kind"], "denied", "body: {body}");
+    assert_eq!(
+        mv["decision"]["policy_name"], "perm-clearance-mv",
+        "body: {body}"
+    );
+    assert_eq!(
+        mv["attribution"]["kind"], "materialized_view_deny",
+        "body: {body}"
+    );
+    lift_gate(&f, tag_id).await;
+}
+
 /// The other reader kind: a CLEARED reader is allowed by their grant, and the
 /// mask the clearance folded for them transforms nothing (`MASK_NONE`) — the
 /// page must not tell them their column is nulled.

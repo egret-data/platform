@@ -1933,3 +1933,95 @@ describe("ExplainAccess — the subject's ref is the allocated username (fact 5/
     expect(screen.queryByRole("button", { name: /Bob Roe/ })).not.toBeInTheDocument();
   });
 });
+
+/**
+ * View governance Task 10 (Task 3 review M-6, M-4). A StarRocks read explain of
+ * a column also carries the masked-read verdict (`mask`) and the
+ * `create materialized view` verdict (`materialized_view`). Both are shown, in a
+ * plain form.
+ */
+describe("ExplainAccess — the StarRocks mask and materialized-view verdicts", () => {
+  const WITH_MASK_AND_MV: ExplainResponse = {
+    outcome: "per_profile",
+    profiles: [
+      {
+        service_id: 12,
+        service_name: "egret-starrocks-prod",
+        engine: "starrocks",
+        tags: [],
+        tag_policies_in_download: 0,
+        accesses: [
+          {
+            access_type: "select",
+            decision: {
+              kind: "denied",
+              policy_id: 2,
+              policy_name: "perm-clearance-t1-sales.public.orders.ssn",
+              reason: "deny_policy_item",
+            },
+            attribution: {
+              kind: "clearance",
+              tag_id: "t1",
+              tag: "pii",
+              required_roles: ["cleared"],
+              locator: "sales.public.orders.ssn",
+            },
+          },
+        ],
+        mask: {
+          access_type: "select",
+          decision: {
+            kind: "masked",
+            result: {
+              policy_id: 1,
+              policy_name: "perm-clearance-t1-mask-sales.public.orders.ssn",
+              mask_type: "MASK_NULL",
+              masked_value: null,
+              mask_condition: null,
+            },
+          },
+          attribution: null,
+        },
+        materialized_view: {
+          access_type: "create materialized view",
+          decision: {
+            kind: "denied",
+            policy_id: 3,
+            policy_name: "perm-clearance-mv",
+            reason: "deny_policy_item",
+          },
+          attribution: { kind: "materialized_view_deny" },
+        },
+      },
+    ],
+  };
+
+  test("renders the mask type and the materialized-view deny", async () => {
+    mutateAsync.mockResolvedValue({ status: 200, data: WITH_MASK_AND_MV });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const profile = await screen.findByTestId("explain-profile");
+    const mask = within(profile).getByTestId("explain-mask");
+    expect(mask).toHaveTextContent(/masked/i);
+    expect(mask).toHaveTextContent("MASK_NULL");
+    expect(mask).toHaveTextContent("perm-clearance-t1-mask-sales.public.orders.ssn");
+
+    const rows = within(profile).getAllByTestId("explain-access");
+    const mv = rows.find((r) => r.textContent?.includes("create materialized view"));
+    expect(mv).toBeDefined();
+    expect(within(mv as HTMLElement).getByTestId("decision-badge")).toHaveTextContent(/refused by a deny item/i);
+    expect(mv).toHaveTextContent(/materialized-view deny/i);
+    expect(mv).toHaveTextContent(/cleared for every classification/i);
+  });
+
+  test("a profile with no mask verdict shows no mask line", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    await screen.findByTestId("explain-result");
+    expect(screen.queryByTestId("explain-mask")).not.toBeInTheDocument();
+  });
+});

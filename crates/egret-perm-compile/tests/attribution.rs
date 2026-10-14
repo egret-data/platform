@@ -123,6 +123,21 @@ fn clearance_per_column_locator() {
     );
 }
 
+#[test]
+fn the_engine_wide_materialized_view_deny_is_attributed() {
+    // clearance.rs `mv_deny_inputs` (view governance A3, Task 3 review M-4):
+    // one `perm-clearance-mv` per StarRocks profile, which carries no tag id.
+    assert_eq!(
+        attribute_policy_name(&format!("{COMPILER_CLEARANCE_PREFIX}mv")),
+        Some(PolicyAttribution::MaterializedViewDeny)
+    );
+    // Only that exact name: a first-draft `…mv-{catalog}.{database}` is not it.
+    assert_eq!(
+        attribute_policy_name(&format!("{COMPILER_CLEARANCE_PREFIX}mv-ice.db1")),
+        None
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Negative: live, no-model-object shapes that must return `None` cleanly.
 // ---------------------------------------------------------------------------

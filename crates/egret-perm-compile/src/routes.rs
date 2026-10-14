@@ -495,6 +495,11 @@ pub enum ExplainAttribution {
         required_roles: Option<Vec<String>>,
         locator: Option<String>,
     },
+    /// `perm-clearance-mv`: a StarRocks profile's engine-wide `create
+    /// materialized view` deny (view governance A3). Its exceptions are the
+    /// users cleared for EVERY classification with a column on the profile,
+    /// so it names no single tag.
+    MaterializedViewDeny,
 }
 
 /// One Ranger ACCESS TYPE's verdict inside one profile.
@@ -605,6 +610,18 @@ pub struct ExplainProfile {
     /// (tier c), so none is asked there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mask: Option<ExplainMask>,
+    /// Whether the subject may `create materialized view` on this StarRocks
+    /// engine (view governance A3; Task 3 review M-4). StarRocks creates a
+    /// materialized view only in `default_catalog`, and checks the privilege
+    /// on the TARGET database, so this asks for `default_catalog.<the
+    /// target's database>`; the A3 deny covers every database alike. For an
+    /// uncleared user the deny decides it, attributed
+    /// `materialized_view_deny`.
+    ///
+    /// Present only for a `read` explain on a StarRocks profile whose target
+    /// names a database.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub materialized_view: Option<ExplainAccess>,
 }
 
 /// The data-mask verdict for the target column: Ranger's `select` request
@@ -1990,6 +2007,35 @@ async fn explain(
         } else {
             None
         };
+        // The A3 question: may this subject store a query result as a
+        // materialized view on this engine? See `ExplainProfile::materialized_view`.
+        let materialized_view = match (engine, body.action, body.target.schema.as_deref()) {
+            (EngineType::StarRocks, Action::Read, Some(database)) => {
+                let names = resource_level_names(engine);
+                let mut mv_resource = RequestResource::new();
+                mv_resource.insert(names[0], crate::clearance::MV_CATALOG);
+                mv_resource.insert(names[1], database);
+                let request = AccessRequest {
+                    user: body.subject.user.clone(),
+                    groups: BTreeSet::new(),
+                    roles: BTreeSet::new(),
+                    access_type: crate::clearance::CREATE_MV_ACCESS.to_string(),
+                    resource: mv_resource,
+                    owner: None,
+                    // StarRocks has no tag service.
+                    resolved_tags: None,
+                };
+                let decision =
+                    egret_ranger_eval::eval::evaluate(&artifact, &request, &service_def, &config);
+                let attribution = attribution_for(&mut *conn, &decision).await?;
+                Some(ExplainAccess {
+                    access_type: crate::clearance::CREATE_MV_ACCESS.to_string(),
+                    decision: WireDecision::from(&decision),
+                    attribution,
+                })
+            }
+            _ => None,
+        };
         profiles.push(ExplainProfile {
             service_id,
             service_name: svc.name,
@@ -1998,6 +2044,7 @@ async fn explain(
             tags: tags_for_profile(&resolved_for_display, tag_policies_in_download),
             tag_policies_in_download,
             mask,
+            materialized_view,
         });
     }
 
@@ -2706,6 +2753,9 @@ async fn attribution_for_name<L: ClearanceLookups + Send>(
         // `required_roles` are the two facts a steward needs and neither is on
         // the wire the engine sees, so both are reconstructed here — `tags.key`
         // (not `tags.name`), and the gate's roles keyed by that same key.
+        Some(PolicyAttribution::MaterializedViewDeny) => {
+            Some(ExplainAttribution::MaterializedViewDeny)
+        }
         Some(PolicyAttribution::Clearance { tag_id, locator }) => {
             let tag = conn.tag_key(tag_id).await?;
             // The gate is keyed by `tags.key`, so with no key there is no
