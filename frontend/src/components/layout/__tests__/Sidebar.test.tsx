@@ -508,6 +508,23 @@ describe("Sidebar – Workflows group", () => {
     expect(executions.compareDocumentPosition(namespaces) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  test("lists Triggers after Namespaces in the Workflows group (W7e)", async () => {
+    renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () => wsResponse(["sql_lab", "workflows"]));
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Datasets" })).not.toBeInTheDocument());
+    const group = screen.getByRole("button", { name: /^Workflows$/i }).parentElement as HTMLElement;
+    const triggers = within(group).getByRole("link", { name: "Triggers" });
+    expect(triggers).toHaveAttribute("href", "/explore/eng/workflows/triggers");
+    const links = within(group).getAllByRole("link").map((l) => l.textContent);
+    expect(links).toEqual(["Flows", "Executions", "Namespaces", "Triggers"]);
+  });
+
+  test("hides Triggers with the rest of the group when the workspace lacks workflows (W7e)", async () => {
+    renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () => wsResponse(["sql_lab", "data_api"]));
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Flows" })).not.toBeInTheDocument());
+    expect(screen.queryByRole("link", { name: "Triggers" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Endpoints" })).toBeInTheDocument();
+  });
+
   test("hides the whole Workflows group when the workspace lacks workflows", async () => {
     renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () => wsResponse(["sql_lab", "data_api"]));
     await waitFor(() => expect(screen.queryByRole("link", { name: "Flows" })).not.toBeInTheDocument());

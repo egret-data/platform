@@ -45,6 +45,8 @@ export const stub = {
   actions: [] as { editorId: string; path: string; id: string; keybindings: number[]; run: () => void; disposed: boolean }[],
   /** The editors mounted now, each showing one model (`monaco.editor.getEditors()`). */
   editors: new Set<{ getModel: () => Model }>(),
+  /** Every `setSelection`, in order: where a tab asked the editor to put the cursor. */
+  selections: [] as { startLineNumber: number; startColumn: number }[],
 };
 
 export function resetMonacoStub(): void {
@@ -56,6 +58,7 @@ export function resetMonacoStub(): void {
   stub.bindings = [];
   stub.contextKeys = [];
   stub.actions = [];
+  stub.selections = [];
 }
 
 /** Run the editor's own `Ctrl/Cmd+S` binding, as Monaco would on that key. */
@@ -157,7 +160,7 @@ export default function MonacoStub(props: EditorProps) {
       },
       onDidChangeCursorPosition: () => ({ dispose: () => {} }),
       getPosition: () => null,
-      setSelection: () => {},
+      setSelection: (r: { startLineNumber: number; startColumn: number }) => { stub.selections.push(r); },
       revealRangeInCenter: () => {},
       focus: () => {},
     };

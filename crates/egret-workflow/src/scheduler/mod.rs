@@ -128,7 +128,25 @@
 //! is the `SKIP LOCKED` property statement 1 records as unobserved, and no
 //! test holds a save open while a pass runs. The pass's own call, `resync` (a
 //! source that disagrees with the row), runs inside the claim's transaction
-//! and already holds the lock.
+//! and already holds the claimed trigger's lock. `sync` also reads
+//! `workflow.disabled_triggers` (the runtime switch, W7e) and deletes its
+//! undeclared rows, in the same transaction.
+//!
+//! **`resync` is serialised on the flow row, without waiting.** Every other
+//! caller holds the flow row while `sync` runs (a save `FOR NO KEY UPDATE` or
+//! `FOR UPDATE`, `reconcile` `FOR SHARE`), and so does the W7e switch route
+//! while it writes a switch row and a trigger's copy. `resync` reads the flow
+//! `FOR SHARE SKIP LOCKED`: when a writer holds it, `resync` does nothing --
+//! the claimed trigger stays frozen, the writer's own write puts the copy
+//! right, and a later pass resyncs a row that still disagrees. Without the
+//! lock, `sync` read the switch rows before the route committed, waited on the
+//! trigger row the route held, and then wrote the stale `disabled` over it (a
+//! lost update; W7e review I1). A waiting `FOR SHARE` deadlocks when the route
+//! switches the claimed trigger itself (route holds the flow, wants the
+//! trigger; the pass holds the trigger, wants the flow), and `NOWAIT` would
+//! abort the pass's transaction. Proved by `tests/disabled_triggers.rs`'s
+//! `a_resync_does_not_undo_a_concurrent_switch_on_another_trigger` and
+//! `a_resync_of_the_trigger_being_switched_does_not_deadlock`.
 //!
 //! Proved by `tests/runtime.rs`'s
 //! `a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance`, which
@@ -155,4 +173,7 @@ pub(crate) mod start;
 mod sync;
 
 pub use fire::{fire_due, PassReport};
+// The switch route (`triggers::switch`) writes the same effective value `sync`
+// does; the read routes report it.
+pub(crate) use sync::{effective_disabled, never_fires};
 pub use sync::{reconcile, sync, Reconciled};

@@ -1258,6 +1258,30 @@ impl fmt::Display for ScheduleError {
 
 impl std::error::Error for ScheduleError {}
 
+/// `Schedulable.recoverMissedSchedules` (`Schedulable.java:47-51`): which of
+/// the ticks missed while a trigger was off a re-enable replays. Read only by
+/// the trigger switch route (W7e spec §3.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoverMissed {
+    All,
+    None,
+    Last,
+}
+
+impl RecoverMissed {
+    /// Absent = `All`. Anything but the strings "ALL", "NONE", "LAST" is
+    /// `Err(raw value rendered as JSON)`.
+    pub fn from_model(v: Option<&serde_json::Value>) -> Result<Self, String> {
+        match v {
+            None => Ok(Self::All),
+            Some(serde_json::Value::String(s)) if s == "ALL" => Ok(Self::All),
+            Some(serde_json::Value::String(s)) if s == "NONE" => Ok(Self::None),
+            Some(serde_json::Value::String(s)) if s == "LAST" => Ok(Self::Last),
+            Some(other) => Err(other.to_string()),
+        }
+    }
+}
+
 /// A `Schedule` resolved far enough to be driven by a clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduleTrigger {
@@ -1390,6 +1414,35 @@ impl ScheduleTrigger {
             next: self.cron.next_after(next).map(|d| d.with_timezone(&Utc)),
             previous: self.cron.last_before(local).map(|d| d.with_timezone(&Utc)),
         })
+    }
+
+    /// The latest tick `t <= at` in this trigger's zone. `Cron::last_before`
+    /// is STRICTLY before, so it is asked about `at + 1ns`.
+    pub fn last_tick_at_or_before(&self, at: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.cron
+            .last_before(self.in_zone(at) + Duration::nanoseconds(1))
+            .map(|d| d.with_timezone(&Utc))
+    }
+
+    /// The ticks `t` with `from <= t <= at`, counted up to `cap`:
+    /// `(count, more)` where `more` means "there are more than `cap`".
+    pub fn ticks_through(&self, from: DateTime<Utc>, at: DateTime<Utc>, cap: u32) -> (u32, bool) {
+        let end = self.in_zone(at);
+        let mut n = 0u32;
+        let mut cur = self
+            .cron
+            .next_after(self.in_zone(from) - Duration::nanoseconds(1));
+        while let Some(t) = cur {
+            if t > end {
+                break;
+            }
+            if n == cap {
+                return (n, true);
+            }
+            n += 1;
+            cur = self.cron.next_after(t);
+        }
+        (n, false)
     }
 
     /// `Schedule.handleMaxDelay`.
@@ -1601,7 +1654,9 @@ impl Backfill {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cron, CronError, Field, ScheduleError, ScheduleTrigger, SkipReason};
+    use super::{
+        Cron, CronError, Field, RecoverMissed, ScheduleError, ScheduleTrigger, SkipReason,
+    };
     use crate::models::Trigger;
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use chrono_tz::Tz;
@@ -1642,6 +1697,70 @@ mod tests {
             .unwrap_or_else(|e| panic!("fixture yaml did not parse: {e}\n{yaml}"));
         ScheduleTrigger::resolve(&trigger)
             .unwrap_or_else(|e| panic!("fixture did not resolve: {e}\n{yaml}"))
+    }
+
+    // ---------------------------------------------------------------------
+    // W7e: recoverMissedSchedules + tick helpers
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn recover_missed_from_model() {
+        use serde_json::json;
+        assert_eq!(RecoverMissed::from_model(None), Ok(RecoverMissed::All));
+        for (s, want) in [
+            ("ALL", RecoverMissed::All),
+            ("NONE", RecoverMissed::None),
+            ("LAST", RecoverMissed::Last),
+        ] {
+            assert_eq!(RecoverMissed::from_model(Some(&json!(s))), Ok(want));
+        }
+        for bad in [json!("all"), json!(true), json!(1), json!("SOME")] {
+            assert_eq!(
+                RecoverMissed::from_model(Some(&bad)),
+                Err(bad.to_string()),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn last_tick_at_or_before_includes_the_instant() {
+        let s = sched("*/15 * * * *", false, None);
+        assert_eq!(
+            s.last_tick_at_or_before(at("2026-06-15T10:07:00Z")),
+            Some(at("2026-06-15T10:00:00Z"))
+        );
+        assert_eq!(
+            s.last_tick_at_or_before(at("2026-06-15T10:15:00Z")),
+            Some(at("2026-06-15T10:15:00Z"))
+        );
+        let z = sched("0 2 * * *", false, Some("Asia/Ho_Chi_Minh"));
+        assert_eq!(
+            z.last_tick_at_or_before(at("2026-06-15T20:00:00Z")),
+            Some(at("2026-06-15T19:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn ticks_through_counts_inclusive_with_cap() {
+        let s = sched("*/1 * * * *", false, None);
+        let t = |x: &str| at(x);
+        assert_eq!(
+            s.ticks_through(t("2026-06-15T10:00:00Z"), t("2026-06-15T10:04:30Z"), 100),
+            (5, false)
+        );
+        assert_eq!(
+            s.ticks_through(t("2026-06-15T10:05:00Z"), t("2026-06-15T10:00:00Z"), 100),
+            (0, false)
+        );
+        assert_eq!(
+            s.ticks_through(t("2026-06-15T10:00:00Z"), t("2026-06-15T10:00:00Z"), 100),
+            (1, false)
+        );
+        assert_eq!(
+            s.ticks_through(t("2026-06-15T10:00:00Z"), t("2026-06-15T10:04:30Z"), 3),
+            (3, true)
+        );
     }
 
     // ---------------------------------------------------------------------

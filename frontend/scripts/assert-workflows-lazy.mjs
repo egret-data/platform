@@ -240,6 +240,31 @@ const MARKERS = [
   ["src/components/workflows/namespaces/kv/KvValueControl.tsx", "egret-kv-value-", "namespace-tab"],
   ["src/components/workflows/namespaces/kv/KvValueDrawer.tsx", "Read in a flow with", "namespace-tab"],
   ["src/components/workflows/namespaces/kv/InheritedKvDrawer.tsx", "Overridden by this namespace", "namespace-tab"],
+  // The flow's Triggers tab (W7e Task 6), in the flow pages' chunk (`FlowDetail.tsx` imports it):
+  // the tab's empty title; the drawer's hidden-key note; the dialog's Skip choice. Flagged
+  // `editor`, so they stay out of the flow list's chunk. The table, the model, the banners and the
+  // switch hook are shared with the global Triggers page (Task 7), so they are guarded against the
+  // entry only: the Last evaluated tooltip; `FLOW_DISABLED_STATUS`; the banners' test id; the
+  // bulk switch's failure sentence. Each was proven by a scratch static import from `App.tsx`
+  // (W7e task-6-report.md, "Bundle proof").
+  ["src/components/workflows/triggers/FlowTriggersTab.tsx", "This flow has no triggers", "editor"],
+  ["src/components/workflows/triggers/TriggerDetailsDrawer.tsx", "The key is hidden; Reveal under Webhook shows it.", "editor"],
+  ["src/components/workflows/triggers/EnableTriggerDialog.tsx", "Skip missed runs; start at the next tick", "editor"],
+  // The trigger's YAML (fix round 2): `triggerBlock` and the webhook key's mask parse YAML, so the
+  // module stays with the flow pages, never in the model the list shares. `HIDDEN_BLOCK`.
+  ["src/components/workflows/triggers/triggerYaml.ts", "This trigger's YAML is hidden until Reveal: it holds the webhook's key.", "editor"],
+  ["src/components/workflows/triggers/TriggersTable.tsx", "The schedule tick the scheduler last processed, not the wall-clock time it fired."],
+  ["src/components/workflows/triggers/triggersModel.ts", "On, but the flow is disabled, so it does not fire"],
+  ["src/components/workflows/triggers/TriggerBanners.tsx", "trigger-banners"],
+  ["src/components/workflows/triggers/useTriggerSwitch.ts", "The triggers were not switched "],
+  // The workspace's Triggers page (W7e Task 7), in the area's chunk like the namespaces list
+  // (`WorkflowsRoutes.tsx` imports it): `UNPARSABLE_ONE`. Its drawer, which reads the flow and
+  // cuts the trigger's YAML (`triggerYaml.ts`), is reached through `lazy()` only and flagged
+  // `editor`, so it and the YAML stay out of the list's chunk: `DETAILS_UNREADABLE`. The page
+  // reaches `EnableTriggerDialog.tsx` through `lazy()` too (its marker above). Each was proven by
+  // a scratch static import (W7e task-7-report.md, "Bundle proof").
+  ["src/routes/workflows/TriggersList.tsx", "1 flow could not be read; its triggers are not listed"],
+  ["src/components/workflows/triggers/GlobalTriggerDrawer.tsx", "The trigger's details could not be loaded: ", "editor"],
 ];
 
 const entry = entryChunkName(DIST);

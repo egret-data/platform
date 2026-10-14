@@ -55,6 +55,13 @@ pub mod models;
 /// W7d: what the namespace pages read beyond the repository -- the
 /// dependencies graph built from flow drafts.
 pub(crate) mod namespaces;
+/// W7e: reading triggers -- a flow's and the workspace's, with their state
+/// (spec §3.5, §3.6).
+pub(crate) mod triggers;
+/// §3.6's last-execution statement, `pub` so `tests/disabled_triggers.rs`
+/// `EXPLAIN`s the text the routes run.
+#[doc(hidden)]
+pub use triggers::state::LAST_EXECUTION_SQL;
 /// W5b: real Kestra plugins run by the plugin host (`plugin-host/`). Task 2
 /// holds only the embedded catalog and its lockfile check.
 pub mod plugins;
@@ -90,10 +97,10 @@ pub mod spec;
 /// `tests/storage_index.rs` drives the index.
 pub mod storage;
 // W6 Tasks 5 and 6: the schedule trigger, its backfill, and the flow
-// trigger's window-free arm. `pub` because the routes
-// that create a backfill and the loop that drives the clock both live outside
-// this module -- and because NOTHING in `oracle-exec/` can reach it, so its own
-// tests are the whole instrument (see the module doc).
+// trigger's window-free arm. `pub` because the loop that drives the clock
+// lives in `scheduler`, not here, and backfill has no route yet (W7f) -- and
+// because NOTHING in `oracle-exec/` can reach it, so its own tests are the
+// whole instrument (see the module doc).
 pub mod trigger;
 
 /// The anonymous webhook surface (W6 Task 7). Mounted OUTSIDE `/api` and

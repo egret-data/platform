@@ -29,6 +29,8 @@ function renderAt(path: string) {
   vi.mocked(api.workflowValidateUnsavedFlow).mockReturnValue(new Promise(() => {}));
   vi.mocked(api.workflowListExecutions).mockReturnValue(new Promise(() => {}));
   vi.mocked(api.useWorkflowGetExecution).mockReturnValue(loading as unknown as ReturnType<typeof api.useWorkflowGetExecution>);
+  vi.mocked(api.useWorkflowListTriggers).mockReturnValue(loading as unknown as ReturnType<typeof api.useWorkflowListTriggers>);
+  vi.mocked(api.useWorkflowListNamespaces).mockReturnValue(loading as unknown as ReturnType<typeof api.useWorkflowListNamespaces>);
   render(
     <QueryClientProvider client={new QueryClient()}>
       <TooltipProvider>
@@ -117,5 +119,14 @@ describe("WorkflowsRoutes", () => {
     renderAt("/explore/eng/workflows/flows/f-1/executions");
     await waitFor(() => expect(api.useWorkflowGetFlow).toHaveBeenCalledWith("eng", "f-1", expect.anything()), { timeout: 4000 });
     expect(screen.getByTestId("path")).toHaveTextContent("/explore/eng/workflows/flows/f-1/executions");
+  });
+
+  it("opens the workspace's Triggers page at triggers (W7e)", async () => {
+    renderAt("/explore/eng/workflows/triggers");
+    expect(screen.getByRole("heading", { level: 1, name: "Triggers" })).toBeInTheDocument();
+    expect(screen.getByTestId("path")).toHaveTextContent("/explore/eng/workflows/triggers");
+    await waitFor(() =>
+      expect(api.useWorkflowListTriggers).toHaveBeenCalledWith("eng", expect.objectContaining({ limit: 50, offset: 0 }), expect.anything()),
+    );
   });
 });

@@ -355,7 +355,25 @@ fn save_only_findings(flow: &Flow, report: &mut ValidationReport) {
             path: "pluginDefaults".to_string(),
         });
     }
+    duplicate_trigger_ids(flow, report);
     secret_findings(flow, report);
+}
+
+/// W7e spec §3.8: a trigger id declared twice makes the switch ambiguous.
+/// Save-only on purpose -- raised from `validate_for_run` it would stop every
+/// run of a stored flow that already declares one.
+fn duplicate_trigger_ids(flow: &Flow, report: &mut ValidationReport) {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut reported: HashSet<&str> = HashSet::new();
+    for t in &flow.triggers {
+        if !seen.insert(t.id.as_str()) && reported.insert(t.id.as_str()) {
+            report.errors.push(Finding {
+                code: "duplicate_trigger_id",
+                message: format!("trigger id '{}' is declared more than once", t.id),
+                path: format!("triggers.{}", t.id),
+            });
+        }
+    }
 }
 
 /// W5b fix round 1 (I2), spec §6: `secret()` resolves only in a `kestra.*`
@@ -2462,6 +2480,40 @@ mod tests {
         assert!(
             err.line.is_some(),
             "a syntax error must locate itself: {err:?}"
+        );
+    }
+
+    /// W7e: a trigger id declared twice is a SAVE-only finding. It must not
+    /// appear in `validate_for_run`, or a stored flow that declares one would
+    /// stop running.
+    #[test]
+    fn duplicate_trigger_id_is_save_only() {
+        let dup = "id: f\nnamespace: a.b\ntasks:\n  - id: x\n    type: core.log\ntriggers:\n  \
+                   - id: t\n    type: core.schedule\n    cron: \"* * * * *\"\n  - id: t\n    \
+                   type: core.webhook\n    key: k\n";
+        let f = parse(dup).unwrap();
+        let r = validate(&f);
+        let hits: Vec<_> = r
+            .errors
+            .iter()
+            .filter(|e| e.code == "duplicate_trigger_id")
+            .collect();
+        assert_eq!(hits.len(), 1, "{r:?}");
+        assert_eq!(hits[0].path, "triggers.t");
+        let run = validate_for_run(&f);
+        assert!(
+            !run.errors.iter().any(|e| e.code == "duplicate_trigger_id"),
+            "{run:?}"
+        );
+        let distinct = dup.replacen(
+            "id: t\n    type: core.webhook",
+            "id: u\n    type: core.webhook",
+            1,
+        );
+        let r = validate(&parse(&distinct).unwrap());
+        assert!(
+            !r.errors.iter().any(|e| e.code == "duplicate_trigger_id"),
+            "{r:?}"
         );
     }
 

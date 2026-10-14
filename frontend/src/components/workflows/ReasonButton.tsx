@@ -19,12 +19,19 @@ export function ReasonButton({
   onClick,
   children,
   variant,
+  busy = false,
 }: {
   enablement: Enablement;
   reasonId: string;
   onClick: () => void;
   children: ReactNode;
   variant?: ComponentProps<typeof Button>["variant"];
+  /**
+   * An action of this button is in flight: the click is ignored, but the button stays
+   * focusable (`aria-disabled`, not `disabled`), so the keyboard focus is not dropped to the
+   * page while it runs.
+   */
+  busy?: boolean;
 }) {
   return (
     <Button
@@ -32,9 +39,13 @@ export function ReasonButton({
       size="sm"
       variant={variant}
       disabled={!enablement.ok}
+      aria-disabled={enablement.ok && busy ? true : undefined}
+      aria-busy={enablement.ok && busy ? true : undefined}
       title={enablement.ok ? undefined : enablement.reason}
       aria-describedby={enablement.ok ? undefined : reasonId}
-      onClick={onClick}
+      onClick={() => {
+        if (!busy) onClick();
+      }}
     >
       {children}
     </Button>

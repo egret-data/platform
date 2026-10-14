@@ -4,6 +4,7 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import FlowsList from "@/routes/workflows/FlowsList";
 import ExecutionsList from "@/routes/workflows/ExecutionsList";
 import NamespacesList from "@/routes/workflows/NamespacesList";
+import TriggersList from "@/routes/workflows/TriggersList";
 
 /**
  * The flow pages, a lazy chunk of their own inside this one: they bring the
@@ -66,7 +67,8 @@ export default function WorkflowsRoutes() {
       <Route path="flows/new" element={<FlowPage><FlowNew /></FlowPage>} />
       <Route path="flows/:id" element={<FlowIndexRedirect base={base} />} />
       {/* `FlowDetail` sends an unknown tab to `edit`. Its tabs are `edit`,
-          `revisions` and `executions` (W7b: the flow's executions list). */}
+          `revisions`, `executions` (W7b: the flow's executions list) and
+          `triggers` (W7e: the flow's triggers and their runtime switches). */}
       <Route path="flows/:id/:tab" element={<FlowPage><FlowDetail /></FlowPage>} />
       <Route path="executions" element={<ExecutionsList />} />
       {/* The execution detail (W7b spec §4). `ExecutionDetail` sends an unknown tab to
@@ -79,6 +81,8 @@ export default function WorkflowsRoutes() {
       <Route path="namespaces" element={<NamespacesList />} />
       <Route path="namespaces/:namespace" element={<NamespaceIndexRedirect base={base} />} />
       <Route path="namespaces/:namespace/:tab" element={<FlowPage><NamespaceDetail /></FlowPage>} />
+      {/* The workspace's triggers (W7e spec §4.4); its drawer is `?trigger=<flow uuid>/<trigger id>`. */}
+      <Route path="triggers" element={<TriggersList />} />
       <Route path="*" element={<Navigate to={`${base}/flows`} replace />} />
     </Routes>
   );

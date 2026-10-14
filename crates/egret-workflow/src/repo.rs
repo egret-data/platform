@@ -395,6 +395,36 @@ impl FlowRepo {
         .await
         .map_err(db_err)
     }
+
+    /// The flows of `workspace` not deleted whose triggers the workspace
+    /// trigger list reads (W7e spec §3.5, D9): the namespace filter
+    /// dot-anchored (`a.b` is `a.b` and `a.b.c`, never `a.bc`; `starts_with`,
+    /// not `LIKE`, as W7b's `namespace_prefix`) and the flow filter in SQL, by
+    /// namespace then flow id (byte order), at most `limit` rows. The caller
+    /// passes its bound plus one, so the bound applies AFTER the filters.
+    pub async fn trigger_drafts(
+        &self,
+        workspace: Uuid,
+        namespace_prefix: Option<&str>,
+        flow: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<crate::namespaces::dependencies::DraftRow>> {
+        sqlx::query_as(
+            "SELECT id, namespace, flow_id, source, state FROM workflow.flows \
+              WHERE workspace_id = $1 AND deleted_at IS NULL \
+                AND ($2::text IS NULL OR namespace = $2 OR starts_with(namespace, $2 || '.')) \
+                AND ($3::uuid IS NULL OR id = $3) \
+              ORDER BY namespace COLLATE \"C\", flow_id COLLATE \"C\" \
+              LIMIT $4",
+        )
+        .bind(workspace)
+        .bind(namespace_prefix)
+        .bind(flow)
+        .bind(limit)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
 }
 
 /// Persistence for flow drafts and their published versions.
@@ -488,6 +518,16 @@ impl FlowRepo {
     /// One draft, if it belongs to `workspace`. `NotFound` otherwise -- see
     /// the module comment on why the predicate is here and not in the caller.
     pub async fn get(&self, ws: Uuid, id: Uuid) -> Result<FlowRow> {
+        Self::get_on(&self.db.pool, ws, id).await
+    }
+
+    /// [`Self::get`] on a given executor: a transaction reads the draft in
+    /// its own snapshot, with the state it reads next.
+    pub async fn get_on<'e, E: sqlx::PgExecutor<'e>>(
+        executor: E,
+        ws: Uuid,
+        id: Uuid,
+    ) -> Result<FlowRow> {
         let row: Option<FlowRow> = sqlx::query_as(with_flow_names!(
             concat!(
                 "SELECT ",
@@ -498,7 +538,7 @@ impl FlowRepo {
         ))
         .bind(id)
         .bind(ws)
-        .fetch_optional(&self.db.pool)
+        .fetch_optional(executor)
         .await
         .map_err(db_err)?;
         row.ok_or_else(|| Error::NotFound("flow".into()))

@@ -209,14 +209,14 @@ pub async fn build_blocking(ns: String, drafts: Vec<DraftRow>) -> egret_core::Re
     off_runtime(move || build(&ns, &drafts)).await
 }
 
-/// Runs `f` on tokio's blocking pool, never on the calling worker.
-async fn off_runtime<T: Send + 'static>(
+/// Runs `f` on tokio's blocking pool, never on the calling worker. Shared
+/// with the trigger listing (W7e spec §3.5, D15), which parses up to the same
+/// number of drafts; a join failure (a panic in `f`) is a 500.
+pub(crate) async fn off_runtime<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
 ) -> egret_core::Result<T> {
     tokio::task::spawn_blocking(f).await.map_err(|join| {
-        egret_core::Error::Internal(anyhow::anyhow!(
-            "building namespace dependencies stopped: {join}"
-        ))
+        egret_core::Error::Internal(anyhow::anyhow!("a blocking parse stopped: {join}"))
     })
 }
 

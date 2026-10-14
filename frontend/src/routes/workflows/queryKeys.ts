@@ -1,4 +1,4 @@
-import type { WorkflowListFlowsParams } from "@/api/generated/model";
+import type { WorkflowListFlowsParams, WorkflowListTriggersParams } from "@/api/generated/model";
 
 /**
  * Every workflow query key, prefixed `["workflows", …]` (FE-DATA-2, spec §8).
@@ -24,6 +24,17 @@ export const workflowsKeys = {
     params ? (["workflows", "ws", ws, "flows", params] as const) : (["workflows", "ws", ws, "flows"] as const),
   flow: (id: string) => ["workflows", "flow", id] as const,
   versions: (id: string) => ["workflows", "flow", id, "versions"] as const,
+  /**
+   * A flow's triggers and their state (`GET …/flows/{id}/triggers`, W7e spec §3.5), under
+   * `flow(id)`: a save of the flow, which may add or drop triggers, refreshes them.
+   */
+  flowTriggers: (id: string) => ["workflows", "flow", id, "triggers"] as const,
+  /**
+   * The workspace's triggers (`GET …/workflows/triggers`, W7e spec §3.5); without `params` it
+   * reaches every page and filter, which a switch invalidates.
+   */
+  triggers: (ws: string, params?: WorkflowListTriggersParams) =>
+    params ? (["workflows", "ws", ws, "triggers", params] as const) : (["workflows", "ws", ws, "triggers"] as const),
   version: (id: string, v: number) => ["workflows", "flow", id, "versions", v] as const,
   schema: (ws: string) => ["workflows", "ws", ws, "schema"] as const,
   execution: (id: string) => ["workflows", "execution", id] as const,

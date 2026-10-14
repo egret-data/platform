@@ -18,19 +18,41 @@ fn db_err(e: sqlx::Error) -> Error {
     Error::Internal(anyhow::anyhow!("{e}"))
 }
 
-/// Bring `workflow.triggers` and `workflow.flow_listeners` in line with
-/// `flow.source`. Called inside the transaction that wrote `flow`; `gone =
-/// true` for a delete.
+/// The ONE place the effective `disabled` of a trigger is computed (W7e spec
+/// §3.2): the flow's YAML `disabled:`, the trigger's own, or a row in
+/// `workflow.disabled_triggers` (the runtime switch). `sync` writes it onto
+/// `workflow.triggers` and `workflow.flow_listeners`, whose `NOT disabled`
+/// the schedule claim, the listener select and the outbox insert already read.
+pub(crate) fn effective_disabled(flow_yaml: bool, trigger_yaml: bool, runtime: bool) -> bool {
+    flow_yaml || trigger_yaml || runtime
+}
+
+/// The `last_error` of a schedule that resolves but has no tick after `now`
+/// (`0 0 30 2 *`): written by `sync` and by the switch route's skip, which
+/// take the row off the queue for it.
+pub(crate) fn never_fires(cron: Option<&str>, now: DateTime<Utc>) -> String {
+    format!(
+        "the schedule never fires: `{}` has no tick after {now}",
+        cron.unwrap_or("")
+    )
+}
+
+/// Bring `workflow.triggers`, `workflow.flow_listeners` and
+/// `workflow.disabled_triggers` in line with `flow.source`. Called inside the
+/// transaction that wrote `flow`; `gone = true` for a delete.
 ///
 /// 1. The flow's `Schedule` and `Flow` triggers are collected in one pass --
 ///    none if `gone` or if the source does not parse. A `Webhook` trigger
-///    never gets a row.
+///    never gets a row. The flow's switched-off trigger ids
+///    (`workflow.disabled_triggers`) are read once, in the same transaction.
 /// 2. Rows whose `trigger_id` is no longer declared are deleted.
 /// 3. Each declared schedule is upserted. A new row, or one whose `spec_key`
 ///    changed, is initialised to the **next** cron tick after the
 ///    transaction's `now()`; an unchanged `spec_key` keeps its dates, so
-///    editing a task never resets a schedule. `disabled` is written every time
-///    and never touches the dates, so re-enabling recovers what was missed.
+///    editing a task never resets a schedule. `disabled` is the effective
+///    value ([`effective_disabled`]: flow YAML, trigger YAML or the runtime
+///    switch); it is written every time and never touches the dates, so
+///    re-enabling recovers what was missed.
 /// 4. When a row IS (re-)initialised and there is no first date -- `resolve`
 ///    refused the schedule, or it resolved but has no future tick (`0 0 30 2
 ///    *`) -- it is stored with `next_evaluation_date = NULL` and the reason in
@@ -38,7 +60,15 @@ fn db_err(e: sqlx::Error) -> Error {
 ///
 /// 5. The `Flow` triggers go to [`sync_flow_listeners`], in the same
 ///    transaction: one `workflow.flow_listeners` row per declaration, stale
-///    rows deleted, `states`/`depends_on`/`disabled` rewritten every time.
+///    rows deleted, `states`/`depends_on`/`disabled` rewritten every time,
+///    `disabled` being the same effective value.
+///
+/// 6. The switch rows (W7e spec §3.4), after the trigger rows: a soft delete
+///    (`gone`) deletes them all, since the FK cascade does not fire on one; a
+///    source that parses deletes those whose `trigger_id` it no longer
+///    declares, under any kind (a renamed id is a new trigger and starts on;
+///    a kind change under the same id keeps its row); a source that does not
+///    parse keeps every one, so no switch is lost to a broken source.
 ///
 /// Points 2-4 are about `workflow.triggers`. Point 4 does not reach a row that keeps its dates. A refusal whose cause is
 /// not in `spec_key` (`lateMaximumDelay`, `when`), written onto a row that is
@@ -72,6 +102,13 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
         .filter(|t| matches!(t.kind, TriggerKind::Flow(_)))
         .collect();
     let flow_disabled = parsed.as_ref().is_some_and(|f| f.disabled);
+    let switched_off: Vec<String> =
+        sqlx::query_scalar("SELECT trigger_id FROM workflow.disabled_triggers WHERE flow_id = $1")
+            .bind(flow.id)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    let runtime_off = |id: &str| switched_off.iter().any(|s| s == id);
 
     let keep: Vec<String> = schedules.iter().map(|t| t.id.clone()).collect();
     sqlx::query("DELETE FROM workflow.triggers WHERE flow_id = $1 AND NOT (trigger_id = ANY($2))")
@@ -86,7 +123,7 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
             unreachable!("filtered to schedules above")
         };
         let key = spec_key(s);
-        let disabled = flow_disabled || t.disabled;
+        let disabled = effective_disabled(flow_disabled, t.disabled, runtime_off(&t.id));
         // `initialise` reads only the trigger and the clock for the date; the
         // namespace/flow_id strings it copies are read from the flow at fire
         // time instead, so a rename cannot leave them stale.
@@ -97,13 +134,7 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
                     // Off the queue like a refusal, and for the same reason it
                     // must say so: otherwise the author sees a schedule that
                     // is simply never due (final review I4).
-                    None => (
-                        None,
-                        Some(format!(
-                            "the schedule never fires: `{}` has no tick after {now}",
-                            s.cron.as_deref().unwrap_or("")
-                        )),
-                    ),
+                    None => (None, Some(never_fires(s.cron.as_deref(), now))),
                 }
             }
             Err(e) => (None, Some(e.to_string())),
@@ -145,7 +176,28 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
         .map_err(db_err)?;
     }
 
-    sync_flow_listeners(conn, flow, &flow_triggers, flow_disabled).await?;
+    sync_flow_listeners(conn, flow, &flow_triggers, flow_disabled, &switched_off).await?;
+
+    // The switch rows (point 6). `parsed` is `None` both for `gone` and for a
+    // source that does not parse, so `gone` is tested first.
+    if gone {
+        sqlx::query("DELETE FROM workflow.disabled_triggers WHERE flow_id = $1")
+            .bind(flow.id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    } else if let Some(f) = &parsed {
+        let declared: Vec<String> = f.triggers.iter().map(|t| t.id.clone()).collect();
+        sqlx::query(
+            "DELETE FROM workflow.disabled_triggers WHERE flow_id = $1 AND NOT (trigger_id = ANY($2))",
+        )
+        .bind(flow.id)
+        .bind(&declared)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    }
+    // `parsed == None && !gone`: the source does not parse; every row is kept.
 
     Ok(())
 }
@@ -167,6 +219,7 @@ async fn sync_flow_listeners(
     flow: &FlowRow,
     flow_triggers: &[&Trigger],
     flow_disabled: bool,
+    switched_off: &[String],
 ) -> Result<()> {
     struct ListenerRow<'a> {
         trigger_id: &'a str,
@@ -181,7 +234,8 @@ async fn sync_flow_listeners(
             unreachable!("filtered to TriggerKind::Flow above")
         };
         let depends_on = !spec.depends_on.is_empty();
-        let disabled = flow_disabled || t.disabled;
+        let runtime_off = switched_off.contains(&t.id);
+        let disabled = effective_disabled(flow_disabled, t.disabled, runtime_off);
         if depends_on {
             rows.push(ListenerRow {
                 trigger_id: &t.id,

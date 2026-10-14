@@ -13,6 +13,10 @@
 //! POST   /api/ws/{workspace}/workflows/flows/{id}/publish
 //! GET    /api/ws/{workspace}/workflows/flows/{id}/versions
 //! GET    /api/ws/{workspace}/workflows/flows/{id}/versions/{version}
+//! GET    /api/ws/{workspace}/workflows/flows/{id}/triggers              (triggers::routes)
+//! GET    /api/ws/{workspace}/workflows/triggers
+//! PUT    /api/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/disabled
+//! PUT    /api/ws/{workspace}/workflows/triggers/disabled
 //! POST   /api/ws/{workspace}/workflows/flows/graph
 //! GET    /api/ws/{workspace}/workflows/flows/{id}/graph
 //! POST   /api/ws/{workspace}/workflows/flows/{id}/executions
@@ -70,7 +74,7 @@ use std::sync::Arc;
 
 use axum::extract::{FromRef, Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use egret_auth::session::SessionService;
@@ -195,6 +199,17 @@ async fn require_secret_use(
 /// makes, for the same reason.
 pub type WorkflowError = Error;
 
+/// Which of the workflow loops this deployment runs, from `config.workflow`
+/// (`scheduler_enabled`, `worker_enabled`, `webhooks_enabled`). The trigger
+/// routes echo them so the UI can say a trigger cannot fire here (W7e spec
+/// §3.5). The deployment sets them once for every replica.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TriggerFlags {
+    pub scheduler_enabled: bool,
+    pub worker_enabled: bool,
+    pub webhooks_enabled: bool,
+}
+
 /// State for [`management_router`].
 #[derive(Clone)]
 pub struct WorkflowState {
@@ -248,6 +263,8 @@ pub struct WorkflowState {
     /// (12 hours) in production; a field so a test can drive it in
     /// milliseconds.
     pub export_total_timeout: std::time::Duration,
+    /// W7e: the loops this deployment runs, echoed by the trigger routes.
+    pub trigger_flags: TriggerFlags,
 }
 
 impl FromRef<WorkflowState> for SessionService {
@@ -1648,7 +1665,7 @@ impl ExecutionDto {
 
 /// The PDP's answer to the check every mutating workflow route makes. A PDP
 /// that failed is an error, not a "no": only a refusal reads as false.
-async fn caller_may_manage(
+pub(crate) async fn caller_may_manage(
     st: &WorkflowState,
     ctx: &egret_core::WorkspaceContext,
 ) -> EgretResult<bool> {
@@ -2268,10 +2285,10 @@ async fn startable_flow(
     if flow.deleted_at.is_some() {
         return Err(Error::NotFound("flow".into()));
     }
-    // **Both doors a flow can be switched off by.** The `state` column is the
-    // one the management UI writes and `disabled: true` is the one the YAML
-    // does; reading only the column let a disabled flow fire through the
-    // webhook, which was that route's fix round 1 Critical 1.
+    // **Both doors a flow can be switched off by.** The `state` column is
+    // honoured here, though nothing writes it yet; `disabled: true` is the
+    // YAML's. The runtime switch is per trigger, not per flow
+    // (`workflow.disabled_triggers`).
     let parsed = parse(&flow.source)
         .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
     if parsed.disabled || flow.state == "disabled" {
@@ -3311,6 +3328,28 @@ pub fn management_router() -> Router<WorkflowState> {
             get(list_flow_versions),
         )
         .route(
+            "/ws/{workspace}/workflows/flows/{id}/triggers",
+            get(crate::triggers::routes::list_flow_triggers),
+        )
+        .route(
+            "/ws/{workspace}/workflows/triggers",
+            get(crate::triggers::routes::list_triggers),
+        )
+        .route(
+            "/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/disabled",
+            put(crate::triggers::routes::set_trigger_disabled),
+        )
+        .route(
+            "/ws/{workspace}/workflows/triggers/disabled",
+            // The bulk body's own cap, as the KV bulk delete's.
+            put(axum::handler::Handler::layer(
+                crate::triggers::routes::set_triggers_disabled,
+                axum::extract::DefaultBodyLimit::max(
+                    crate::triggers::routes::MAX_BULK_TRIGGERS_BODY_BYTES,
+                ),
+            )),
+        )
+        .route(
             "/ws/{workspace}/workflows/flows/{id}/versions/{version}",
             get(get_flow_version),
         )
@@ -3454,6 +3493,10 @@ pub fn management_router() -> Router<WorkflowState> {
         list_namespaces,
         get_namespace,
         namespace_dependencies,
+        crate::triggers::routes::list_flow_triggers,
+        crate::triggers::routes::list_triggers,
+        crate::triggers::routes::set_trigger_disabled,
+        crate::triggers::routes::set_triggers_disabled,
         crate::storage::nsfiles::routes::download_namespace_file,
         crate::storage::nsfiles::routes::namespace_file_stats,
         crate::storage::nsfiles::routes::namespace_file_revisions,
@@ -3500,6 +3543,25 @@ pub fn management_router() -> Router<WorkflowState> {
         NamespaceDependencyNodeDto,
         NamespaceDependencyEdgeDto,
         NamespaceDependencyKind,
+        crate::triggers::routes::TriggerKindDto,
+        crate::triggers::routes::ToggleRefusal,
+        crate::triggers::routes::MissedTicksDto,
+        crate::triggers::routes::ScheduleInfoDto,
+        crate::triggers::routes::ConditionDto,
+        crate::triggers::routes::WindowDto,
+        crate::triggers::routes::DependsOnDto,
+        crate::triggers::routes::FlowTriggerInfoDto,
+        crate::triggers::routes::WebhookInfoDto,
+        crate::triggers::routes::LastExecutionDto,
+        crate::triggers::routes::TriggerEntryDto,
+        crate::triggers::routes::FlowTriggersDto,
+        crate::triggers::routes::TriggerRowDto,
+        crate::triggers::routes::TriggerPageDto,
+        crate::triggers::routes::SetTriggerDisabledRequest,
+        crate::triggers::routes::BulkTriggerRef,
+        crate::triggers::routes::SetTriggersDisabledRequest,
+        crate::triggers::routes::BulkResultDto,
+        crate::triggers::routes::BulkResultsDto,
         crate::storage::routes::FileMetasDto,
         crate::storage::routes::FilePreviewDto,
         crate::storage::nsfiles::routes::NsFileStatsDto,

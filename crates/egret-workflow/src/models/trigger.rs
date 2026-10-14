@@ -90,10 +90,10 @@ pub enum TriggerKind {
 /// same call Kestra's own `Schedule::convertDateTime` makes when
 /// `this.timezone == null`.
 ///
-/// Dropped: `lateMaximumDelay` (a `Duration`, no parser for that type yet --
-/// same reasoning as `Sla::MaxDuration.duration`), `recoverMissedSchedules`,
-/// and the `executionTime`/`cachedCron` runtime caches (transient in Java,
-/// not wire fields at all).
+/// Dropped: the `executionTime`/`cachedCron` runtime caches (transient in
+/// Java, not wire fields at all). `lateMaximumDelay` is captured verbatim (see
+/// the field). `recoverMissedSchedules` is captured verbatim too; only the
+/// trigger switch route reads it (W7e spec §3.3) -- no scheduler path does.
 ///
 /// **`inputs` was dropped too, and the reason written down for it was wrong.**
 /// W1 recorded it as "the deprecated `inputs` map"; measured at the pinned
@@ -148,6 +148,10 @@ pub struct Schedule {
     // already refuses a `when` it cannot render.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub late_maximum_delay: Option<serde_json::Value>,
+    // `Schedule.java`: `recoverMissedSchedules` (`ALL` | `NONE` | `LAST`).
+    // Captured verbatim; interpreted by `trigger::RecoverMissed::from_model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recover_missed_schedules: Option<serde_json::Value>,
 }
 
 /// `io.kestra.plugin.core.trigger.Webhook` + its
@@ -501,6 +505,22 @@ fn kind_for(r#type: &str, rest: serde_json::Value) -> Result<TriggerKind, serde_
 mod tests {
     use super::{FetchType, Trigger, TriggerKind};
     use crate::models::State;
+
+    #[test]
+    fn recover_missed_schedules_round_trips() {
+        let base = "id: n\ntype: core.schedule\ncron: \"0 2 * * *\"\n";
+        let t: Trigger =
+            serde_norway::from_str(&format!("{base}recoverMissedSchedules: LAST\n")).unwrap();
+        let TriggerKind::Schedule(s) = &t.kind else {
+            panic!("{t:?}")
+        };
+        assert_eq!(s.recover_missed_schedules, Some(serde_json::json!("LAST")));
+        let out = serde_json::to_value(&t).unwrap();
+        assert_eq!(out["recoverMissedSchedules"], "LAST");
+        let t: Trigger = serde_norway::from_str(base).unwrap();
+        let out = serde_json::to_value(&t).unwrap();
+        assert!(out.get("recoverMissedSchedules").is_none(), "{out}");
+    }
 
     /// The reference flow's own trigger, exercised directly rather than only
     /// through `Flow`.

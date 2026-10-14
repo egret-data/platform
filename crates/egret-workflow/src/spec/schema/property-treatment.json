@@ -1157,7 +1157,7 @@
       "logLevel": "ignored",
       "logToFile": "ignored",
       "policyRefs": "ignored",
-      "recoverMissedSchedules": "ignored",
+      "recoverMissedSchedules": "honoured",
       "stopAfter": "ignored",
       "timezone": "honoured",
       "type": "honoured",
