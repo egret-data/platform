@@ -170,6 +170,9 @@ function nextStatementName(existing: string[]): string {
   }
 }
 
+/** The id of the script editor's ⌘↵ action (run the preview). */
+const PREVIEW_RUN_ACTION = "egret.dataapi.preview";
+
 export default function Query() {
   const { ws, form, setForm, trashed } = useEndpointDetail();
   const { data: databases } = useDatabases(ws);
@@ -395,6 +398,17 @@ export default function Query() {
   useEffect(() => {
     trashedRef.current = trashed;
   }, [trashed]);
+  // The script editor's ⌘↵ action, disposed when the script editor leaves the
+  // page (the statement switched to SQL, or this section unmounted): disposing
+  // a Monaco editor does not remove an action's keybinding.
+  const scriptRunAction = useRef<MonacoNS.IDisposable | null>(null);
+  useEffect(() => {
+    if (!scripted) return;
+    return () => {
+      scriptRunAction.current?.dispose();
+      scriptRunAction.current = null;
+    };
+  }, [scripted]);
   const isDark = useIsDark();
 
   return (
@@ -755,11 +769,23 @@ export default function Query() {
                       // The same ⌘↵ the SQL editor registers, so the promise
                       // the preview panel prints ("⌘↵ in the editor") is true
                       // in both modes. Guarded through a ref rather than by
-                      // not registering: the command is registered once at
+                      // not registering: the action is registered once at
                       // mount and an endpoint can be trashed after that.
-                      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
-                        if (trashedRef.current) return;
-                        preview.current?.run();
+                      //
+                      // An editor ACTION, not `addCommand`, for `SqlEditor`'s
+                      // reason: an `addCommand` shortcut answers in whichever
+                      // editor has focus and is never removed, so it would
+                      // outlive this editor and fire from the SQL one that
+                      // replaces it. Disposed when this editor goes (below).
+                      scriptRunAction.current?.dispose();
+                      scriptRunAction.current = editor.addAction({
+                        id: PREVIEW_RUN_ACTION,
+                        label: "Run the preview",
+                        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
+                        run: () => {
+                          if (trashedRef.current) return;
+                          preview.current?.run();
+                        },
                       });
                     }}
                     options={{
