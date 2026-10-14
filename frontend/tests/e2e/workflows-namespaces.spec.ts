@@ -9,15 +9,17 @@ import { csrf, firstWorkspace, loginLocalAdmin, postJson } from "./helpers";
  * `docs/en/specs/2026-10-14-workflow-w7d-namespaces-design.md` §6:
  *
  * - a flow in `company.team` and a flow in `company.other` that calls it through a `Subflow`;
- * - on the namespace page: a file created, edited and saved with Ctrl+S (its POST carries
- *   `if_revision`), renamed, moved by a real drag and drop, a folder imported through the
+ * - on the namespace page: a file created, edited, kept with its unsaved dot across a visit to
+ *   the KV tab, and saved with Ctrl+S (its POST carries `if_revision`), renamed, moved by a real drag and drop, a folder imported through the
  *   `webkitdirectory` picker, the namespace exported as a zip; the tree and the editor measured, in
- *   light and dark mode, and an editor that was hidden lays itself out when shown again;
+ *   light and dark mode (the editor's background asserted dark in dark mode), and an editor that
+ *   was hidden lays itself out when shown again;
  * - KV: a JSON key and a DATE key created, a NUMBER with an exponent read back with every digit,
  *   and the keys inherited from `company`;
  * - the flow editor: Code beside TWO file tabs, side by side; Ctrl+S in each file saves only that
  *   file (one POST with `if_revision`, no flow PUT), and in Code only the flow; measured at the
- *   default width;
+ *   default width; in dark mode the file editors and Code are dark, and stay dark while and after a
+ *   revision opens in the Revisions drawer (Monaco's theme is global);
  * - a save from a second session makes the next one answer 409 `file_changed`: the stale dialog,
  *   and Overwrite resends without `if_revision`;
  * - a flow saved into another namespace while a file has unsaved edits asks first, and "Save files
@@ -125,6 +127,9 @@ async function paste(page: Page, text: string): Promise<void> {
 const monaco = (page: Page, label: string): Locator => page.locator(".monaco-editor").filter({ has: page.getByRole("textbox", { name: label, exact: true }) });
 const fileEditor = (page: Page, name: string): Locator => monaco(page, `Contents of ${name}`);
 const codeEditor = (page: Page): Locator => monaco(page, "Flow source");
+/** The same, found also while a modal drawer hides the page from the accessibility tree (`aria-hidden`). */
+const monacoBehindModal = (page: Page, label: string): Locator =>
+  page.locator(".monaco-editor").filter({ has: page.getByRole("textbox", { name: label, exact: true, includeHidden: true }) });
 
 /**
  * Focus a Monaco editor through its input. A click on its lines can land on a neighbour's
@@ -225,6 +230,23 @@ function expectFills(m: { editor: Box; container: Box; lineWidth: number }, what
   expect(Math.abs(m.editor.height - m.container.height), `${what}: editor height vs its box`).toBeLessThanOrEqual(2);
   expect(m.editor.height, `${what}: editor height`).toBeGreaterThanOrEqual(minHeight);
   expect(m.lineWidth, `${what}: first line drawn`).toBeGreaterThan(0);
+}
+
+/** A CSS `rgb()`/`rgba()` colour's relative brightness, 0 (black) to 1 (white). */
+function brightness(css: string): number {
+  const [r, g, b] = (css.match(/\d+(?:\.\d+)?/g) ?? []).map(Number);
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+}
+
+/**
+ * An editor's background follows the app's mode. Monaco's theme is global, so one editor that
+ * names no theme turns every editor light in dark mode (W7d's final review): measured, not assumed.
+ */
+function expectTheme(m: { background: string }, theme: "light" | "dark", what: string): void {
+  report(`${what} background`, m.background);
+  const b = brightness(m.background);
+  if (theme === "dark") expect(b, `${what}: a dark background, not ${m.background}`).toBeLessThan(0.3);
+  else expect(b, `${what}: a light background, not ${m.background}`).toBeGreaterThan(0.7);
 }
 
 /** Expand every folder above `file` in a file tree (rows carry their stored path as `title`), then open it. */
@@ -363,6 +385,19 @@ test.describe("W7d namespaces: list, files, KV, file tabs, 409, namespace change
       await page.getByRole("tab", { name: "a.py" }).click();
       await appendTo(page, fileEditor(page, "a.py"), "print('saved on the page')\n");
       await expect(page.getByRole("tablist", { name: "Open files" }).getByTestId("unsaved-dot")).toHaveCount(1);
+
+      // Another tab of the namespace and back: the unsaved text and its dot are still there.
+      await page.getByRole("tab", { name: "KV", exact: true }).click();
+      await expect(page).toHaveURL(/\/kv$/);
+      await expect(fileEditor(page, "a.py")).toBeHidden();
+      await page.getByRole("tab", { name: "Files", exact: true }).click();
+      await expect(page).toHaveURL(/\/files$/);
+      await expect(fileEditor(page, "a.py")).toBeVisible();
+      await expect(fileEditor(page, "a.py").locator(".view-lines")).toContainText("print('saved on the page')");
+      await expect(page.getByRole("tablist", { name: "Open files" }).getByTestId("unsaved-dot")).toHaveCount(1);
+      // Ctrl+S belongs to the editor with focus.
+      await focusEditor(fileEditor(page, "a.py"));
+
       const beforeSave = writes.length;
       const saved = page.waitForResponse((r) => r.request().method() === "POST" && r.url().includes("/files?") && r.url().includes("a.py"));
       await page.keyboard.press(`${MOD}+s`);
@@ -389,6 +424,7 @@ test.describe("W7d namespaces: list, files, KV, file tabs, 409, namespace change
         report(`namespace files tab ${theme}`, m);
         expect(m.tree.height, `${theme}: tree height`).toBeGreaterThanOrEqual(300);
         expectFills(m.editor, `namespace files editor ${theme}`, 300);
+        expectTheme(m.editor, theme, `namespace files editor ${theme}`);
         await shot(page, `namespace-files-${theme}`);
       }
       await setTheme(page, "light");
@@ -594,8 +630,33 @@ test.describe("W7d namespaces: list, files, KV, file tabs, 409, namespace change
       // Dark mode: the file tab still fills its panel.
       await setTheme(page, "dark");
       await expect(fileEditor(page, "a.py")).toBeVisible({ timeout: 30_000 });
-      for (const name of ["a.py", "c.py"]) expectFills(await measureMonaco(fileEditor(page, name)), `editor ${name} side by side dark`, 300);
+      await expect(codeEditor(page)).toBeVisible({ timeout: 30_000 });
+      for (const name of ["a.py", "c.py"]) {
+        const m = await measureMonaco(fileEditor(page, name));
+        expectFills(m, `editor ${name} side by side dark`, 300);
+        expectTheme(m, "dark", `editor ${name} side by side dark`);
+      }
+      expectTheme(await measureMonaco(codeEditor(page)), "dark", "Code beside the file tabs, dark");
       await shot(page, "editor-side-by-side-dark");
+
+      // A revision opened in the drawer is dark too, and leaves every other editor dark.
+      // The innermost tab panel holding a.py's editor (the panels nest; document order puts it last).
+      await page.locator('[role="tabpanel"]').filter({ has: fileEditor(page, "a.py") }).last().getByRole("button", { name: "Revisions" }).click();
+      const drawer = page.getByRole("dialog", { name: "Revisions of a.py" });
+      await drawer.getByRole("button", { name: "View revision 1" }).click();
+      const revisionEditor = monaco(page, "Revision 1 of a.py");
+      await expect(revisionEditor).toBeVisible({ timeout: 30_000 });
+      expectTheme(await measureMonaco(revisionEditor), "dark", "revision 1 in the drawer, dark");
+      // The drawer is modal: the editors behind it are hidden from the accessibility tree, not the screen.
+      for (const name of ["a.py", "c.py"]) {
+        expectTheme(await measureMonaco(monacoBehindModal(page, `Contents of ${name}`)), "dark", `editor ${name} beside the open Revisions, dark`);
+      }
+      expectTheme(await measureMonaco(monacoBehindModal(page, "Flow source")), "dark", "Code beside the open Revisions, dark");
+      await shot(page, "editor-revisions-dark");
+      await page.keyboard.press("Escape");
+      await expect(drawer).toBeHidden();
+      for (const name of ["a.py", "c.py"]) expectTheme(await measureMonaco(fileEditor(page, name)), "dark", `editor ${name} after Revisions, dark`);
+      expectTheme(await measureMonaco(codeEditor(page)), "dark", "Code after Revisions, dark");
       await setTheme(page, "light");
       await expect(fileEditor(page, "a.py")).toBeVisible({ timeout: 30_000 });
     });
