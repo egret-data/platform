@@ -3082,6 +3082,9 @@ pub struct NamespaceDependencyNodeDto {
     /// (`{{ }}`/`{% %}`): only an execution knows their target, so they draw
     /// no edge.
     pub dynamic_subflows: i64,
+    /// The flow's saved draft does not parse: it is drawn so edges into it
+    /// show, but its own edges are unknown.
+    pub unparsable: bool,
 }
 
 /// What an edge of the dependencies graph means.
@@ -3113,7 +3116,8 @@ pub struct NamespaceDependenciesDto {
     /// target, kind).
     pub edges: Vec<NamespaceDependencyEdgeDto>,
     /// Drafts in the WORKSPACE (not only this namespace) whose YAML does not
-    /// parse: skipped, so their nodes and edges are missing from the graph.
+    /// parse. Each is still a node (`unparsable: true`) when it is in the
+    /// namespace or an edge reaches it, but its own edges are unknown.
     pub unparsable: i64,
 }
 
@@ -3131,6 +3135,7 @@ impl From<crate::namespaces::dependencies::Dependencies> for NamespaceDependenci
                     disabled: n.disabled,
                     in_namespace: n.in_namespace,
                     dynamic_subflows: n.dynamic_subflows,
+                    unparsable: n.unparsable,
                 })
                 .collect(),
             edges: d
@@ -3176,7 +3181,7 @@ async fn namespace_dependencies(
     WsContext(ctx): WsContext,
     Path((_ws, namespace)): Path<(String, String)>,
 ) -> std::result::Result<Json<NamespaceDependenciesDto>, DependenciesRouteError> {
-    use crate::namespaces::dependencies::{build, MAX_FLOWS};
+    use crate::namespaces::dependencies::{build_blocking, MAX_FLOWS};
     egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
     if !crate::spec::validate::is_valid_namespace(&namespace) {
         return Err(Error::InvalidInput(format!(
@@ -3191,7 +3196,8 @@ async fn namespace_dependencies(
     if drafts.len() > MAX_FLOWS {
         return Err(DependenciesRouteError::TooManyFlows);
     }
-    Ok(Json(build(&namespace, &drafts).into()))
+    // Parsing up to MAX_FLOWS drafts is seconds of CPU: never on this worker.
+    Ok(Json(build_blocking(namespace, drafts).await?.into()))
 }
 
 /// The error of the dependencies route: every [`egret_core::Error`], plus

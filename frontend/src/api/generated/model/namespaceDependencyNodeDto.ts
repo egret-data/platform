@@ -30,4 +30,9 @@ export interface NamespaceDependencyNodeDto {
      * no edge.
      */
   dynamic_subflows: number;
+  /**
+     * The flow's saved draft does not parse: it is drawn so edges into it
+     * show, but its own edges are unknown.
+     */
+  unparsable: boolean;
 }

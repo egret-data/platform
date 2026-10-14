@@ -585,6 +585,7 @@ async fn literal_subflows_draw_edges_including_under_errors() {
         json!({
             "id": caller, "namespace": "dep", "flow_id": "caller",
             "disabled": false, "in_namespace": true, "dynamic_subflows": 0,
+            "unparsable": false,
         })
     );
     assert_eq!(nodes["dep/callee"]["disabled"], json!(true), "state column");
@@ -871,16 +872,31 @@ async fn more_than_two_thousand_flows_answer_422() {
     }
 }
 
-/// A draft whose YAML does not parse is skipped -- no node, no edges -- and
-/// counted in the top-level `unparsable` (every draft read, i.e. the
-/// workspace's, because one outside the namespace can hide an edge into it);
-/// the rest of the graph still answers 200.
+/// A draft whose YAML does not parse stays a node, flagged `unparsable`,
+/// with no edges of its own -- but a literal `Subflow` INTO it from a
+/// parsable flow still draws. It is counted in the top-level `unparsable`
+/// over every draft read (the workspace's, because one outside the namespace
+/// can hide an edge into it); a broken draft outside with no edge to the
+/// namespace is counted but is no node. The graph still answers 200.
 #[tokio::test]
-async fn an_unparsable_draft_is_skipped_and_counted() {
+async fn an_unparsable_draft_stays_a_flagged_node_and_is_counted() {
     let Some(db) = common::db().await else { return };
     let (ws, user) = reader(&db).await;
-    seed_flow(&db, ws, user, "bad", "ok").await;
-    let broken_in = seed_flow(&db, ws, user, "bad", "broken").await;
+    seed_src(
+        &db,
+        ws,
+        user,
+        &flow_with("bad", "ok", &subflow_task("s", "bad", "broken"), ""),
+    )
+    .await;
+    // Before it broke, `broken` called `bad/ok`: that edge is now unknown.
+    let broken_in = seed_src(
+        &db,
+        ws,
+        user,
+        &flow_with("bad", "broken", &subflow_task("s", "bad", "ok"), ""),
+    )
+    .await;
     let broken_out = seed_flow(&db, ws, user, "elsewhere", "broken").await;
     for id in [broken_in, broken_out] {
         sqlx::query("UPDATE workflow.flows SET source = 'tasks: [unclosed' WHERE id = $1")
@@ -892,9 +908,17 @@ async fn an_unparsable_draft_is_skipped_and_counted() {
     let app = common::app(&db).await;
 
     let body = deps(&app, ws, user, "bad").await;
+    let nodes = nodes_by_name(&body);
     assert_eq!(
-        nodes_by_name(&body).keys().cloned().collect::<Vec<_>>(),
-        vec!["bad/ok"]
+        nodes.keys().cloned().collect::<Vec<_>>(),
+        vec!["bad/broken", "bad/ok"]
+    );
+    assert_eq!(nodes["bad/broken"]["unparsable"], json!(true));
+    assert_eq!(nodes["bad/broken"]["in_namespace"], json!(true));
+    assert_eq!(nodes["bad/ok"]["unparsable"], json!(false));
+    assert_eq!(
+        edge_names(&body),
+        vec![edge("bad/ok", "bad/broken", "subflow")]
     );
     assert_eq!(body["unparsable"], json!(2));
 }

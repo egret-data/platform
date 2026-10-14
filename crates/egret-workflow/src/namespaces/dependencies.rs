@@ -15,7 +15,7 @@
 //!   ([`crate::spec::path::every_task`]: the four root lists, `children()`
 //!   and `error_children()`), whose `namespace` and `flowId` are both
 //!   present, neither an expression ([`crate::graph::target_is_dynamic`],
-//!   W7c's `dynamic` reason), and name a flow that was read and parsed.
+//!   W7c's `dynamic` reason), and name a flow that was read (parsed or not).
 //! - **`flow_trigger`**: a `Flow` trigger's `dependsOn` entry naming BOTH
 //!   `namespace` and `flowId` of such a flow draws `upstream -> listener`.
 //!   An entry missing either draws nothing: `trigger::depends_on::
@@ -36,9 +36,14 @@
 //!   are one edge.
 //! - **`disabled`**: either door that stops a flow -- the `state` column
 //!   (`disabled`) or the YAML's `disabled: true`.
-//! - **A draft that does not parse** is skipped -- no node, no edge either
-//!   way -- and counted in `unparsable`, over every draft read (the
+//! - **A draft that does not parse** stays a node (`unparsable: true`, its
+//!   `disabled` from the state column alone) and an edge target, but draws
+//!   no edge of its own, since its tasks and triggers cannot be read. It is
+//!   counted in the top-level `unparsable`, over every draft read (the
 //!   workspace's): one outside the namespace can hide an edge into it.
+//!   (Fix round 1, controller ruling; it was dropped entirely before.)
+//! - **Off the async workers**: the handler calls [`build_blocking`], which
+//!   runs [`build`] on tokio's blocking pool.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -74,6 +79,9 @@ pub struct Node {
     pub disabled: bool,
     pub in_namespace: bool,
     pub dynamic_subflows: i64,
+    /// The draft does not parse: the node stands, edges INTO it still draw,
+    /// but it has none of its own (its tasks and triggers cannot be read).
+    pub unparsable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,23 +112,21 @@ fn within(namespace: &str, ns: &str) -> bool {
 /// The graph of `ns` over `drafts` (every flow of the workspace that is not
 /// deleted). Pure: see the module doc for the rules.
 pub fn build(ns: &str, drafts: &[DraftRow]) -> Dependencies {
-    let mut unparsable = 0;
     // (index into `drafts`, parsed flow), parsed ones only.
     let mut parsed = Vec::with_capacity(drafts.len());
+    let mut broken = vec![false; drafts.len()];
     for (i, d) in drafts.iter().enumerate() {
         match crate::spec::parse(&d.source) {
             Ok(flow) => parsed.push((i, flow)),
-            Err(_) => unparsable += 1,
+            Err(_) => broken[i] = true,
         }
     }
-    let index: HashMap<(&str, &str), usize> = parsed
+    // Every flow read is a target, parsed or not: a broken draft is still a
+    // flow that exists, so an edge into it draws.
+    let index: HashMap<(&str, &str), usize> = drafts
         .iter()
-        .map(|(i, _)| {
-            (
-                (drafts[*i].namespace.as_str(), drafts[*i].flow_id.as_str()),
-                *i,
-            )
-        })
+        .enumerate()
+        .map(|(i, d)| ((d.namespace.as_str(), d.flow_id.as_str()), i))
         .collect();
     let lookup = |namespace: &Option<String>, flow_id: &Option<String>| match (namespace, flow_id) {
         (Some(n), Some(f)) => index.get(&(n.as_str(), f.as_str())).copied(),
@@ -128,11 +134,13 @@ pub fn build(ns: &str, drafts: &[DraftRow]) -> Dependencies {
     };
 
     let mut dynamic = vec![0i64; drafts.len()];
-    let mut disabled = vec![false; drafts.len()];
+    // The state column is one door for every flow; the YAML's `disabled:`
+    // is the other, readable only on a parsed draft.
+    let mut disabled: Vec<bool> = drafts.iter().map(|d| d.state == "disabled").collect();
     let mut edges: BTreeSet<(usize, usize, EdgeKind)> = BTreeSet::new();
     for (i, flow) in &parsed {
         let i = *i;
-        disabled[i] = drafts[i].state == "disabled" || flow.disabled;
+        disabled[i] |= flow.disabled;
         for (_, task) in crate::spec::path::every_task(flow) {
             let TaskKind::Subflow(sub) = &task.kind else {
                 continue;
@@ -160,12 +168,7 @@ pub fn build(ns: &str, drafts: &[DraftRow]) -> Dependencies {
         .into_iter()
         .filter(|(s, t, _)| inside[*s] || inside[*t])
         .collect();
-    let mut keep: Vec<bool> = parsed
-        .iter()
-        .fold(vec![false; drafts.len()], |mut k, (i, _)| {
-            k[*i] = inside[*i];
-            k
-        });
+    let mut keep = inside.clone();
     for (s, t, _) in &edges {
         keep[*s] = true;
         keep[*t] = true;
@@ -183,6 +186,7 @@ pub fn build(ns: &str, drafts: &[DraftRow]) -> Dependencies {
                 disabled: disabled[i],
                 in_namespace: inside[i],
                 dynamic_subflows: dynamic[i],
+                unparsable: broken[i],
             })
             .collect(),
         edges: edges
@@ -193,8 +197,27 @@ pub fn build(ns: &str, drafts: &[DraftRow]) -> Dependencies {
                 kind,
             })
             .collect(),
-        unparsable,
+        unparsable: broken.iter().filter(|b| **b).count() as i64,
     }
+}
+
+/// [`build`] off the async workers: it parses up to [`MAX_FLOWS`] drafts
+/// (YAML, twice each), seconds of CPU at the limit, which must not pin a
+/// runtime worker that also runs the scheduler, the reaper and lease
+/// renewal. A join failure is a 500.
+pub async fn build_blocking(ns: String, drafts: Vec<DraftRow>) -> egret_core::Result<Dependencies> {
+    off_runtime(move || build(&ns, &drafts)).await
+}
+
+/// Runs `f` on tokio's blocking pool, never on the calling worker.
+async fn off_runtime<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> egret_core::Result<T> {
+    tokio::task::spawn_blocking(f).await.map_err(|join| {
+        egret_core::Error::Internal(anyhow::anyhow!(
+            "building namespace dependencies stopped: {join}"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -207,5 +230,47 @@ mod tests {
         assert!(within("a.b.c", "a.b"));
         assert!(!within("a.bc", "a.b"));
         assert!(!within("a", "a.b"));
+    }
+
+    /// The closure `build_blocking` hands over runs on another thread than
+    /// the (single-threaded) runtime awaiting it: inline execution would
+    /// report the same thread.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_build_runs_off_the_awaiting_worker() {
+        let here = std::thread::current().id();
+        let there = off_runtime(|| std::thread::current().id()).await.unwrap();
+        assert_ne!(here, there);
+    }
+
+    /// A broken draft stays a node, flagged, with the edge into it.
+    #[test]
+    fn a_broken_draft_is_a_flagged_target() {
+        let row = |ns: &str, id: &str, source: &str| DraftRow {
+            id: Uuid::new_v4(),
+            namespace: ns.into(),
+            flow_id: id.into(),
+            source: source.into(),
+            state: "draft".into(),
+        };
+        let drafts = vec![
+            row("n", "broken", "tasks: [unclosed"),
+            row(
+                "n",
+                "caller",
+                "id: caller\nnamespace: n\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Subflow\n    namespace: n\n    flowId: broken\n",
+            ),
+        ];
+        let d = build("n", &drafts);
+        assert_eq!(d.unparsable, 1);
+        assert_eq!(d.nodes.len(), 2);
+        assert!(d.nodes[0].unparsable && !d.nodes[1].unparsable);
+        assert_eq!(
+            d.edges,
+            vec![Edge {
+                source: drafts[1].id,
+                target: drafts[0].id,
+                kind: EdgeKind::Subflow
+            }]
+        );
     }
 }

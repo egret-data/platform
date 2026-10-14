@@ -24,7 +24,8 @@ export interface NamespaceDependenciesDto {
   edges: NamespaceDependencyEdgeDto[];
   /**
      * Drafts in the WORKSPACE (not only this namespace) whose YAML does not
-     * parse: skipped, so their nodes and edges are missing from the graph.
+     * parse. Each is still a node (`unparsable: true`) when it is in the
+     * namespace or an edge reaches it, but its own edges are unknown.
      */
   unparsable: number;
 }
