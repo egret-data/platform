@@ -460,9 +460,12 @@ async fn the_four_absences_are_indistinguishable() {
     let Some(db) = common::db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let ns = fresh_namespace();
-    let flow = common::seed_flow(&db, ws, user, &hook_flow(&ns), "draft").await;
-    // Switched off at runtime: a caller without the key must still see the 404.
-    switch_off(&db, ws, flow, "fx-trigger").await;
+    common::seed_flow(&db, ws, user, &hook_flow(&ns), "draft").await;
+    // A second flow beside it, switched off at runtime: a caller without its
+    // key must still see the same 404.
+    let ns_off = fresh_namespace();
+    let off = common::seed_flow(&db, ws, user, &hook_flow(&ns_off), "draft").await;
+    switch_off(&db, ws, off, "fx-trigger").await;
     let app = common::webhook_app(&db).await;
 
     let mut seen = Vec::new();
@@ -479,7 +482,7 @@ async fn the_four_absences_are_indistinguishable() {
         ("no such key", hook_url(ws, &ns, "fx-other-key")),
         (
             "wrong key on a switched-off trigger",
-            hook_url(ws, &ns, "fx-other-key"),
+            hook_url(ws, &ns_off, "fx-other-key"),
         ),
     ] {
         let res = common::anon(&app, "POST", &path, Some("application/json"), b"{}").await;
@@ -499,8 +502,17 @@ async fn the_four_absences_are_indistinguishable() {
     }
     assert_eq!(common::execution_count(&db, ws).await, 0);
 
-    // The control: the response they must all differ from. The right key on
-    // the switched-off trigger explains itself with a 409.
+    // The controls: the responses they must all differ from. The right key on
+    // the enabled flow fires; on the switched-off one it explains itself.
+    let res = common::anon(
+        &app,
+        "POST",
+        &hook_url(ws, &ns_off, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
     let res = common::anon(
         &app,
         "POST",
@@ -509,7 +521,7 @@ async fn the_four_absences_are_indistinguishable() {
         b"{}",
     )
     .await;
-    assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert_eq!(res.status(), StatusCode::OK);
 }
 
 /// **The operand test.** The four path segments carry four different facts, and

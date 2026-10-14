@@ -587,9 +587,10 @@ async fn handle(
     }
     // **Both ways a flow can be switched off, and the YAML one was missing.**
     //
+    // (The runtime switch is per trigger and was checked above.)
+    //
     // Fix round 1, Critical 1. egret has two: the `state` column, which is
-    // honoured here though nothing writes it yet (the runtime switch is per
-    // trigger, `workflow.disabled_triggers`, checked above), and the YAML's own
+    // honoured here though nothing writes it yet, and the YAML's own
     // `disabled: true`, which is
     // Kestra's `Flow.isDisabled()` and therefore the one the artifact answers
     // 409 for. The first version of this handler read only the column, so a
