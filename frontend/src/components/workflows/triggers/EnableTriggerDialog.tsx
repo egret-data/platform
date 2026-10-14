@@ -93,7 +93,10 @@ export function EnableTriggerDialog({
             <RadioGroupItem id={`${id}-recover`} value="recover" className="mt-0.5" aria-describedby={`${id}-recover-desc`} />
             <div className="grid gap-1">
               <Label htmlFor={`${id}-recover`} className="font-normal">
-                Recover missed runs (<span className="tabular-nums">{missedOf(schedules)}</span> missed)
+                {/* One inline run: ui/label is `flex gap-2`, so loose text and a count span would each get a gap. */}
+                <span>
+                  Recover missed runs (<span className="tabular-nums">{missedOf(schedules)}</span> missed)
+                </span>
               </Label>
               <div id={`${id}-recover-desc`} className="text-sm text-muted-foreground">
                 {lines.length === 1 ? (

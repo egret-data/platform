@@ -185,6 +185,20 @@ describe("FlowTriggersTab: the switch", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  // A browser clock behind the server's: the next tick reads as ahead here, but
+  // the server, at its own now(), counted missed ticks. Without the question the
+  // enable would carry recover_missed:false and drop the backlog.
+  it("asks when the server counts missed ticks though the browser's clock reads the tick as ahead", async () => {
+    server.triggers = flowTriggers({
+      triggers: [scheduleEntry({ runtime_disabled: true, effective_disabled: true }, { next_evaluation_date: FUTURE, missed_ticks: { count: 2, more: false } })],
+    });
+    renderTriggersTab(server);
+    await userEvent.click(await theSwitch("daily"));
+    const dialog = await screen.findByRole("dialog", { name: "Enable trigger" });
+    expect(within(dialog).getByRole("radio", { name: "Recover missed runs (2 missed)" })).toBeInTheDocument();
+    expect(server.callsTo("PUT", switchPath("daily"))).toHaveLength(0);
+  });
+
   it("says, on a switch that is on, that a disabled flow fires nothing (D18)", async () => {
     server.triggers = flowTriggers({ flow_disabled: true, triggers: [webhookEntry({ effective_disabled: true })] });
     renderTriggersTab(server);
@@ -249,6 +263,21 @@ describe("FlowTriggersTab: bulk", () => {
       disabled: false,
       recover_missed: true,
     });
+  });
+  it("asks in its bulk form when only the server's clock says a schedule is overdue", async () => {
+    server.triggers = flowTriggers({
+      triggers: [
+        scheduleEntry({ runtime_disabled: true, effective_disabled: true }, { next_evaluation_date: FUTURE, missed_ticks: { count: 2, more: false } }),
+        webhookEntry({ runtime_disabled: true, effective_disabled: true }),
+      ],
+    });
+    renderTriggersTab(server);
+    await theSwitch("daily");
+    await userEvent.click(screen.getByRole("checkbox", { name: "Select all triggers" }));
+    await userEvent.click(screen.getByRole("button", { name: "Enable" }));
+    const dialog = await screen.findByRole("dialog", { name: "Enable 2 triggers" });
+    expect(within(dialog).getByRole("radio", { name: "Recover missed runs (2 missed)" })).toBeInTheDocument();
+    expect(server.callsTo("PUT", BULK)).toHaveLength(0);
   });
 });
 

@@ -90,6 +90,12 @@ describe("needsEnableDialog", () => {
     // A tick exactly now has passed too: the scheduler's claim is `<= now()`.
     expect(needsEnableDialog(scheduleEntry(off, { next_evaluation_date: "2026-10-15T12:00:00Z" }), NOW)).toBe(true);
   });
+  it("asks when the server counted missed ticks, though the browser's clock reads the tick as ahead", () => {
+    // The server computes missed_ticks against the database's now(); a client
+    // clock behind it must not hide the backlog.
+    const skewed = scheduleEntry(off, { next_evaluation_date: "2026-10-15T12:05:00Z", missed_ticks: { count: 2, more: false } });
+    expect(needsEnableDialog(skewed, NOW)).toBe(true);
+  });
   it("does not ask for a future tick, an off-queue row, an already-on schedule or another kind", () => {
     expect(needsEnableDialog(scheduleEntry(off, { next_evaluation_date: "2026-10-15T12:05:00Z" }), NOW)).toBe(false);
     expect(needsEnableDialog(scheduleEntry(off, { off_queue: true, next_evaluation_date: "2026-10-15T11:55:00Z" }), NOW)).toBe(false);

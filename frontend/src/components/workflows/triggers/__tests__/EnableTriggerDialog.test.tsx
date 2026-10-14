@@ -46,6 +46,22 @@ describe("EnableTriggerDialog", () => {
     expect(within(dialog).getByRole("radio", { name: "Recover missed runs (1000+ missed)" })).toBeInTheDocument();
   });
 
+  // ui/label is `flex gap-2`: every child node of the label is its own flex
+  // item and gets a gap, so "(", the count and "missed)" must be one run of
+  // text inside one inline element. jsdom does no layout, so the gap itself
+  // cannot be measured here; the test pins the structure that causes it
+  // (the e2e measures the gap in a browser).
+  it("labels Recover with a single text run, so the flex gap cannot split the count", () => {
+    const { dialog } = renderDialog({ schedules: [overdue("daily", null, { count: 2, more: false })] });
+    const recover = within(dialog).getByRole("radio", { name: "Recover missed runs (2 missed)" });
+    const label = dialog.querySelector(`label[for="${recover.id}"]`);
+    expect(label).not.toBeNull();
+    const textBearing = Array.from(label!.childNodes).filter((n) => (n.textContent ?? "").trim() !== "");
+    expect(textBearing).toHaveLength(1);
+    expect(textBearing[0].nodeType).toBe(Node.ELEMENT_NODE);
+    expect(textBearing[0].textContent).toBe("Recover missed runs (2 missed)");
+  });
+
   it("sends each choice", async () => {
     const { dialog, onEnable } = renderDialog();
     await userEvent.click(within(dialog).getByRole("button", { name: "Enable" }));

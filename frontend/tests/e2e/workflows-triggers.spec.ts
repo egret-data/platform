@@ -212,8 +212,8 @@ type Measure = {
   scopeRight: number;
   /** Text cut by an `overflow` other than visible, or pushed past the viewport outside any scroller. */
   clipped: string[];
-  /** Horizontal scrollers inside the scope: their own width and content width. */
-  scrollers: { width: number; scrollWidth: number }[];
+  /** Horizontal scrollers inside the scope: which element, its own width and content width. */
+  scrollers: { element: string; width: number; scrollWidth: number }[];
   samples: TextSample[];
   tokens: Record<string, string>;
 };
@@ -291,7 +291,11 @@ async function measure(scope: Locator): Promise<Measure> {
         const ox = getComputedStyle(e).overflowX;
         return (ox === "auto" || ox === "scroll") && e.scrollWidth > e.clientWidth;
       })
-      .map((e) => ({ width: e.clientWidth, scrollWidth: e.scrollWidth }));
+      .map((e) => ({
+        element: [e.tagName.toLowerCase(), ...Array.from(e.classList).slice(0, 4)].join("."),
+        width: e.clientWidth,
+        scrollWidth: e.scrollWidth,
+      }));
     const rootStyle = getComputedStyle(document.documentElement);
     const tokens = Object.fromEntries(
       ["--background", "--foreground", "--muted-foreground", "--card", "--popover", "--border", "--destructive"].map((t) => [t, rootStyle.getPropertyValue(t).trim()]),
@@ -596,7 +600,9 @@ test.describe("W7e triggers: tab, switch, enable dialog, webhook, dependsOn, glo
     // between "(" and the number, nor after it, and the radio's name reads as the text does.
     const gaps = await dialog.locator("label:has(.tabular-nums)").evaluate((label) => {
       const count = label.querySelector(".tabular-nums")!;
-      const before = Array.from(label.childNodes).find((n) => n.nodeType === Node.TEXT_NODE && n.textContent!.includes("("))!;
+      // The text run that holds the count: one inline element inside the flex label.
+      const run = count.parentNode!;
+      const before = Array.from(run.childNodes).find((n) => n.nodeType === Node.TEXT_NODE && n.textContent!.includes("("))!;
       const after = count.nextSibling!;
       const box = (n: Node) => {
         const r = document.createRange();
@@ -605,6 +611,7 @@ test.describe("W7e triggers: tab, switch, enable dialog, webhook, dependsOn, glo
       };
       return {
         display: getComputedStyle(label).display,
+        labelChildren: label.childNodes.length,
         beforeCount: Math.round(box(count).left - box(before).right),
         afterCount: Math.round(box(after).left - box(count).right),
       };

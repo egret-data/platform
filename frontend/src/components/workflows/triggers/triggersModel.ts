@@ -90,10 +90,17 @@ export function switchEnablement(entry: TriggerEntryDto, ctx: { manage: boolean 
  * switched-off `Schedule` on the queue whose next tick has passed. Only a
  * switched-off trigger: enabling one already on changes nothing on the server
  * (§3.3), so there is nothing to ask.
+ *
+ * "Passed" is the server's word first: `missed_ticks` is set exactly when the
+ * server, at the database's `now()`, found the tick due, so a browser clock
+ * behind the server's cannot hide a backlog (the enable would then carry
+ * `recover_missed: false` and the server would skip it). `now`, the
+ * browser's clock, only adds: a response read before the tick came due.
  */
 export function needsEnableDialog(entry: TriggerEntryDto, now: number): boolean {
   const s = entry.schedule;
   if (entry.kind !== "schedule" || !s || !entry.runtime_disabled || s.off_queue || !s.next_evaluation_date) return false;
+  if (s.missed_ticks) return true;
   return Date.parse(s.next_evaluation_date) <= now;
 }
 
