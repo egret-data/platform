@@ -637,6 +637,12 @@ impl PolicyStore {
         Self { db }
     }
 
+    /// The pool, for sibling modules that own their own tables
+    /// (`plugin_downloads`).
+    pub(crate) fn pool(&self) -> &sqlx::PgPool {
+        &self.db.pool
+    }
+
     /// Pool-based [`refuse_if_generated`], for a write path that has no
     /// transaction open yet at the point the check belongs
     /// (`default_policies::seed_default_trino_policies`, which must refuse

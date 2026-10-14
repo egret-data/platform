@@ -6,6 +6,7 @@ pub mod admin;
 pub mod ambiguous_arbitration;
 pub mod default_policies;
 pub mod error;
+mod plugin_downloads;
 mod port_impl;
 pub mod ranger;
 pub mod service_def;
@@ -24,6 +25,10 @@ pub use ambiguous_arbitration::{
 // production; re-exported so the canonical path stays `egret_policy::infra_names`.
 pub use egret_policy_api::infra_names;
 pub use error::PolicyStoreError;
+pub use plugin_downloads::{
+    plugins_hold_tag_version, wait_for_tag_version, DownloadKind, HoldState, WaitError,
+    NO_PLUGIN_POLLED,
+};
 pub use ranger::{ranger_router, RangerState};
 pub use service_def::{
     seed_starrocks, seed_tag, seed_trino, starrocks_service_def, tag_service_def,
