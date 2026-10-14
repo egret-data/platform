@@ -1,5 +1,15 @@
 import { vi } from "vitest";
-import type { ExecutionListItemDto, FlowDto, FlowVersionDto, ValidationReportDto } from "@/api/generated/model";
+import type {
+  BulkResultDto,
+  ExecutionListItemDto,
+  FlowDto,
+  FlowTriggersDto,
+  FlowVersionDto,
+  SetTriggerDisabledRequest,
+  SetTriggersDisabledRequest,
+  TriggerEntryDto,
+  ValidationReportDto,
+} from "@/api/generated/model";
 
 /**
  * The workflow routes the flow pages call, served from memory through a
@@ -49,6 +59,25 @@ export class FakeWorkflowServer {
   putGate: Promise<void> | null = null;
   /** While set, `POST …/flows` waits for it before answering. */
   createGate: Promise<void> | null = null;
+  /**
+   * What `GET …/flows/{id}/triggers` answers (W7e), and what the switch routes change: a
+   * `PUT …/triggers/{trigger_id}/disabled` or `PUT …/workflows/triggers/disabled` flips the
+   * entry's `runtime_disabled` as the server does. Each request's body is in `calls`.
+   */
+  triggers: FlowTriggersDto = {
+    flow_disabled: false,
+    flow_deleted: false,
+    scheduler_enabled: true,
+    worker_enabled: true,
+    webhooks_enabled: true,
+    triggers: [],
+  };
+  /** Answers `GET …/flows/{id}/triggers` with this instead of `triggers`. */
+  triggersReply: Reply | null = null;
+  /** Answers the next `PUT …/triggers/{trigger_id}/disabled` with this instead of switching. */
+  triggerPutReply: Reply | null = null;
+  /** Bulk entries refused by trigger id, with the server's code and sentence. */
+  bulkRefusals: Record<string, { code: string; message: string }> = {};
 
   constructor(flow: Partial<FlowDto> | null = {}) {
     this.flow = flow === null ? null : {
@@ -97,6 +126,34 @@ export class FakeWorkflowServer {
     return this.calls.filter((c) => c.method === method && c.path === path);
   }
 
+  /** Switch one trigger as `set_trigger_disabled` does; undefined when the flow declares no such id. */
+  private switchOne(triggerId: string, req: SetTriggerDisabledRequest): TriggerEntryDto | undefined {
+    const at = this.triggers.triggers.findIndex((t) => t.trigger_id === triggerId);
+    if (at < 0) return undefined;
+    const old = this.triggers.triggers[at];
+    const next: TriggerEntryDto = {
+      ...old,
+      runtime_disabled: req.disabled,
+      disabled_by_name: req.disabled ? "Ana Lima" : null,
+      disabled_at: req.disabled ? new Date().toISOString() : null,
+      effective_disabled: req.disabled || old.yaml_disabled || this.triggers.flow_disabled || this.triggers.flow_deleted,
+    };
+    this.triggers = { ...this.triggers, triggers: this.triggers.triggers.map((t, i) => (i === at ? next : t)) };
+    return next;
+  }
+
+  private switchBulk(req: SetTriggersDisabledRequest): Reply {
+    const results: BulkResultDto[] = req.triggers.map(({ flow_id, trigger_id }) => {
+      const refusal = this.bulkRefusals[trigger_id];
+      if (refusal) return { flow_id, trigger_id, ok: false, code: refusal.code, message: refusal.message, trigger: null };
+      const trigger = flow_id === FLOW_ID ? this.switchOne(trigger_id, req) : undefined;
+      return trigger
+        ? { flow_id, trigger_id, ok: true, code: null, message: null, trigger }
+        : { flow_id, trigger_id, ok: false, code: "not_found", message: "not found: trigger", trigger: null };
+    });
+    return { status: 200, body: { results } };
+  }
+
   install(): void {
     vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
       const method = (init?.method ?? "GET").toUpperCase();
@@ -129,7 +186,34 @@ export class FakeWorkflowServer {
       this.flow = new FakeWorkflowServer({ source, updated_at: stamp() }).flow;
       return { status: 201, body: this.flow };
     }
+    if (method === "GET" && path === `${base}/triggers`) {
+      // The workspace's list (Task 7's page): the one flow's triggers as rows, unfiltered.
+      const flow = this.flow;
+      const rows = flow
+        ? this.triggers.triggers.map((t) => ({
+            ...t,
+            flow_uuid: flow.id,
+            namespace: flow.namespace,
+            flow_id: flow.flow_id,
+            flow_disabled: this.triggers.flow_disabled,
+          }))
+        : [];
+      const { scheduler_enabled, worker_enabled, webhooks_enabled } = this.triggers;
+      return { status: 200, body: { rows, total: rows.length, limit: 50, offset: 0, unparsable: 0, scheduler_enabled, worker_enabled, webhooks_enabled } };
+    }
+    if (method === "PUT" && path === `${base}/triggers/disabled`) return this.switchBulk(body as SetTriggersDisabledRequest);
     if (!this.flow || !path.startsWith(flowPath)) return { status: 404, body: { error: "not found: flow" } };
+    if (method === "GET" && path === `${flowPath}/triggers`) return this.triggersReply ?? { status: 200, body: this.triggers };
+    const switchPath = new RegExp(`^${flowPath}/triggers/([^/]+)/disabled$`).exec(path);
+    if (method === "PUT" && switchPath) {
+      if (this.triggerPutReply) {
+        const reply = this.triggerPutReply;
+        this.triggerPutReply = null;
+        return reply;
+      }
+      const switched = this.switchOne(decodeURIComponent(switchPath[1]), body as SetTriggerDisabledRequest);
+      return switched ? { status: 200, body: switched } : { status: 404, body: { error: "not found: trigger" } };
+    }
     if (method === "GET" && path === flowPath) {
       if (this.getFlowFailures > 0) {
         this.getFlowFailures--;

@@ -12,7 +12,8 @@ vi.mock("sonner", () => ({ toast }));
 
 import FlowDetail from "@/routes/workflows/FlowDetail";
 import { FakeWorkflowServer, FLOW_ID, flowSource, WS } from "./fakeWorkflowServer";
-import { pressSaveInEditor, resetMonacoStub } from "./monacoStub";
+import { pressSaveInEditor, resetMonacoStub, stub } from "./monacoStub";
+import { TRIGGERS_SOURCE, webhookEntry } from "@/components/workflows/triggers/__tests__/triggerFixtures";
 
 const FLOW_PATH = `/api/ws/${WS}/workflows/flows/${FLOW_ID}`;
 const LONG = { timeout: 3000 };
@@ -97,6 +98,34 @@ describe("FlowDetail: the Executions tab", () => {
     expect(lists.at(-1)!.query!.get("root_only")).toBe("true");
     // The flow's own heading is the page's only h1.
     expect(screen.getAllByRole("heading", { level: 1 }).map((h) => h.textContent)).toEqual(["hello"]);
+  });
+});
+
+describe("FlowDetail: the Triggers tab", () => {
+  it("renders at flows/:id/triggers, and is reached from the tab list", async () => {
+    server = new FakeWorkflowServer({ source: TRIGGERS_SOURCE });
+    server.triggers = { ...server.triggers, triggers: [webhookEntry()] };
+    renderAt("triggers");
+    expect(await screen.findByRole("switch", { name: "Trigger hook enabled" })).toBeChecked();
+    expect(screen.getByRole("tab", { name: "Triggers" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("path")).toHaveTextContent(`/flows/${FLOW_ID}/triggers`);
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Edit" }), { button: 0 });
+    await editorBox();
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Triggers" }), { button: 0 });
+    expect(screen.getByTestId("path")).toHaveTextContent(`/flows/${FLOW_ID}/triggers`);
+    expect(await screen.findByRole("switch", { name: "Trigger hook enabled" })).toBeInTheDocument();
+  });
+
+  it("opens the editor at the trigger from the drawer's Edit in the editor", async () => {
+    server = new FakeWorkflowServer({ source: TRIGGERS_SOURCE });
+    server.triggers = { ...server.triggers, triggers: [webhookEntry()] };
+    renderAt("triggers?trigger=hook");
+    const drawer = await screen.findByRole("dialog", { name: "Trigger hook" });
+    await userEvent.click(within(drawer).getByRole("button", { name: "Edit in the editor" }));
+    await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent(`/flows/${FLOW_ID}/edit`));
+    await editorBox();
+    // `- id: hook` is line 11 of the source; the range starts at the mapping, after `- `.
+    await waitFor(() => expect(stub.selections.at(-1)).toMatchObject({ startLineNumber: 11, startColumn: 5 }));
   });
 });
 

@@ -69,6 +69,15 @@ describe("workflowsKeys", () => {
     expect(reaches(workflowsKeys.flows("eng"), workflowsKeys.flows("eng", { namespace: "x" }))).toBe(true);
   });
 
+  it("refreshes a flow's triggers with the flow, and every page of a workspace's triggers from its unfiltered key", () => {
+    expect(reaches(workflowsKeys.flow("f"), workflowsKeys.flowTriggers("f"))).toBe(true);
+    expect(reaches(workflowsKeys.flow("g"), workflowsKeys.flowTriggers("f"))).toBe(false);
+    expect(reaches(workflowsKeys.triggers("eng"), workflowsKeys.triggers("eng", { kind: "schedule", offset: 50 }))).toBe(true);
+    expect(reaches(workflowsKeys.triggers("eng"), workflowsKeys.triggers("ops"))).toBe(false);
+    expect(reaches(workflowsKeys.triggers("eng"), workflowsKeys.flowTriggers("f"))).toBe(false);
+    expect(workflowsKeys.triggers("eng")[0]).toBe("workflows");
+  });
+
   it("reaches a flow's versions from the flow, and one version from the list", () => {
     expect(reaches(workflowsKeys.flow("f"), workflowsKeys.versions("f"))).toBe(true);
     expect(reaches(workflowsKeys.versions("f"), workflowsKeys.version("f", 3))).toBe(true);

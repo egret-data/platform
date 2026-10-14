@@ -34,7 +34,7 @@ import {
 } from "@/components/workflows/draftState";
 import { useFlowEditor } from "@/components/workflows/editor/EditorContext";
 import { DiscardFileDialog, NamespaceChangeDialog, useFilesHost } from "@/components/workflows/editor/fileTabs";
-import { parseYaml, topLevelScalar } from "@/components/workflows/editor/yamlPath";
+import { parseYaml, rangeOfPath, topLevelScalar } from "@/components/workflows/editor/yamlPath";
 import { LazyRouteArea } from "@/components/layout/LazyRouteArea";
 import { disposeFlowModel } from "@/components/workflows/editor/flowModel";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
@@ -47,10 +47,11 @@ import {
 import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
 import { FlowRevisions } from "@/routes/workflows/FlowRevisions";
 import ExecutionsList from "@/routes/workflows/ExecutionsList";
+import FlowTriggersTab from "@/components/workflows/triggers/FlowTriggersTab";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
-/** The flow detail's tabs (W7a spec §3; W7b adds Executions); W7e adds its own here. */
-export const FLOW_TABS = ["edit", "revisions", "executions"] as const;
+/** The flow detail's tabs (W7a spec §3; W7b adds Executions; W7e adds Triggers). */
+export const FLOW_TABS = ["edit", "revisions", "executions", "triggers"] as const;
 type FlowTab = (typeof FLOW_TABS)[number];
 const isFlowTab = (t: string | undefined): t is FlowTab => (FLOW_TABS as readonly string[]).includes(t ?? "");
 
@@ -400,6 +401,17 @@ function FlowWorkspace({
     }
   };
 
+  /**
+   * "Edit in the editor" from a trigger's drawer: the Edit tab, with the cursor on the trigger in
+   * the editor's text (which may hold unsaved edits, so it is looked up there, not in the saved
+   * draft). The range waits for the Code tab to attach (`EditorBridge`).
+   */
+  const editTrigger = (triggerId: string) => {
+    navigate(`${base}/flows/${encodeURIComponent(id)}/edit`);
+    const range = rangeOfPath(editor.source, `triggers.${triggerId}`);
+    if (range) editor.focusRange(range);
+  };
+
   // Someone else's save, read back (after Create version, for one): the server would run text
   // this editor neither shows nor validated.
   const stale = !dirty && flow.source !== baseline.source;
@@ -503,6 +515,7 @@ function FlowWorkspace({
           <TabsTrigger value="edit">Edit</TabsTrigger>
           <TabsTrigger value="revisions">Revisions</TabsTrigger>
           <TabsTrigger value="executions">Executions</TabsTrigger>
+          <TabsTrigger value="triggers">Triggers</TabsTrigger>
         </TabsList>
         <TabsContent value="edit" className="min-h-0 flex-1">
           <FlowEditPage ctx={editor} flowLayout={flowLayout} />
@@ -523,6 +536,11 @@ function FlowWorkspace({
           {/* The executions list pinned to this flow (W7b spec §4); its filters
               live in this tab's URL. */}
           <ExecutionsList pinnedFlowId={id} />
+        </TabsContent>
+        <TabsContent value="triggers" className="min-h-0 flex-1 overflow-auto p-4">
+          {/* The flow's triggers and their runtime switches (W7e spec §4.1). The drawer's YAML is
+              cut from the saved draft, which the server read the triggers from. */}
+          <FlowTriggersTab ws={ws} flowId={id} source={flow.source} manage={manage} onEditTrigger={editTrigger} />
         </TabsContent>
       </Tabs>
 

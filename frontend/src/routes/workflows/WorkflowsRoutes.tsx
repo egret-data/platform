@@ -66,7 +66,8 @@ export default function WorkflowsRoutes() {
       <Route path="flows/new" element={<FlowPage><FlowNew /></FlowPage>} />
       <Route path="flows/:id" element={<FlowIndexRedirect base={base} />} />
       {/* `FlowDetail` sends an unknown tab to `edit`. Its tabs are `edit`,
-          `revisions` and `executions` (W7b: the flow's executions list). */}
+          `revisions`, `executions` (W7b: the flow's executions list) and
+          `triggers` (W7e: the flow's triggers and their runtime switches). */}
       <Route path="flows/:id/:tab" element={<FlowPage><FlowDetail /></FlowPage>} />
       <Route path="executions" element={<ExecutionsList />} />
       {/* The execution detail (W7b spec §4). `ExecutionDetail` sends an unknown tab to
