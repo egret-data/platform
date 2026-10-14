@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
 import { useEffect, useRef } from "react";
 
 /**
@@ -25,6 +25,8 @@ const monacoStub = vi.hoisted(() => {
      */
     actions: [] as { editorId: string; id: string; keybindings: number[]; run: () => void; disposed: boolean }[],
     editorSeq: 0,
+    /** Calls the mounted component's `onMount` again, as `@monaco-editor/react` can. */
+    remount: undefined as (() => void) | undefined,
     reset() {
       this.commands = {};
       this.actions = [];
@@ -81,6 +83,7 @@ vi.mock("@/components/monaco/MonacoEditor", () => ({
         onDidChangeCursorSelection: () => ({ dispose: () => {} }),
       };
       onMount?.(editor, monaco);
+      monacoStub.remount = () => onMount?.(editor, monaco);
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
     return <textarea aria-label={options?.ariaLabel} readOnly={!!options?.readOnly} value={value} />;
@@ -174,5 +177,16 @@ describe("SqlEditor — ⌘↵ is scoped to its editor", () => {
 
     unmount();
     expect(monacoStub.actions[0].disposed).toBe(true);
+  });
+
+  it("disposes the first mount's action when onMount runs a second time", () => {
+    render(<SqlEditor value="SELECT 1" onChange={() => {}} schemaWords={[]} onRun={() => {}} />);
+    expect(monacoStub.actions).toHaveLength(1);
+
+    act(() => monacoStub.remount!());
+
+    expect(monacoStub.actions).toHaveLength(2);
+    expect(monacoStub.actions[0].disposed).toBe(true);
+    expect(monacoStub.actions[1].disposed).toBe(false);
   });
 });
