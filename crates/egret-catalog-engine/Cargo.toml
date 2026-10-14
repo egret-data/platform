@@ -123,6 +123,9 @@ sqlx = { workspace = true }
 egret-perm-compile = { workspace = true }
 egret-policy = { workspace = true }
 egret-engine-mgmt-api = { workspace = true }
+# `ServiceExt::oneshot`: the view hold loads a stored view through
+# lakekeeper's own router (N3).
+tower = { workspace = true }
 
 [dev-dependencies]
 # One private, already-migrated database per test process, cloned from a

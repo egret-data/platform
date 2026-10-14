@@ -281,10 +281,15 @@ pub fn front_catalog_router(
     hold: Option<std::sync::Arc<crate::view_hold::ViewHold>>,
 ) -> axum::Router {
     let inner = match hold {
-        Some(hold) => inner.layer(axum::middleware::from_fn_with_state(
-            hold,
-            crate::view_hold::hold_view_commits,
-        )),
+        // The hold reads a stored view through lakekeeper's own router, with
+        // no hold in front of it.
+        Some(hold) => {
+            let loader = inner.clone();
+            inner.layer(axum::middleware::from_fn_with_state(
+                (hold, loader),
+                crate::view_hold::hold_view_commits,
+            ))
+        }
         None => inner,
     };
     inner.layer(axum::middleware::from_fn_with_state(

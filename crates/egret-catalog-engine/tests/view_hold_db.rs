@@ -884,63 +884,78 @@ async fn a_profile_with_no_classified_column_commits_without_explain() {
 
 // ── fix round 1 ─────────────────────────────────────────────────────────────
 
-/// A view `name` in `s` over `orders` with two stored versions (1 and 2),
-/// both unclassified, so neither was held.
-async fn view_with_two_versions(env: &Env, name: &str) {
-    let (status, body) = env.create(name, "SELECT id, name FROM orders").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let view = env.view(name).await.unwrap();
-    let (status, body) = env
-        .call(
-            "POST",
-            &format!("namespaces/s/views/{name}"),
-            Some(replace_body(
-                &view,
-                "SELECT id, name FROM orders WHERE id > 0",
-            )),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-}
-
-/// I1: a commit that makes a version current that it does not add (an older
-/// stored one, by id or by `-1` with nothing added) is refused on a
-/// classified profile, and the current version does not move.
+/// I1 / N3: a commit that makes a STORED version current is judged on that
+/// stored version (loaded from the view's metadata) and held like any other.
+/// `-1` with no version added before it cannot be resolved and is refused.
 #[tokio::test]
-async fn a_commit_switching_to_an_older_version_is_refused() {
+async fn a_commit_switching_to_a_stored_version_is_held_on_that_version() {
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
-    view_with_two_versions(&env, "v1").await;
-    let before = current_sql(&env.view("v1").await.unwrap());
+    let plugin = env.start_plugin();
+    plugin.polled().await;
+    // Version 1 reads the classified table, version 2 does not.
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let view = env.view("v1").await.unwrap();
+    let (status, body) = env
+        .call(
+            "POST",
+            "namespaces/s/views/v1",
+            Some(replace_body(&view, "SELECT id, name FROM orders")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(env.lineage("v1").await, computed(&["orders"], &env.catalog));
+    let calls = env.runner.calls.load(Ordering::SeqCst);
 
-    for id in [1, -1] {
-        let (status, body) = env
-            .call(
-                "POST",
-                "namespaces/s/views/v1",
-                Some(json!({"updates": [
-                    {"action": "set-current-view-version", "view-version-id": id}
-                ]})),
-            )
-            .await;
-        assert_eq!(status, StatusCode::CONFLICT, "id {id}: {body}");
-        let msg = message(&body);
-        assert!(msg.contains("older"), "{msg}");
-        assert!(msg.contains("CREATE OR REPLACE VIEW"), "{msg}");
-    }
-    assert_eq!(current_sql(&env.view("v1").await.unwrap()), before);
+    let (status, body) = env
+        .call(
+            "POST",
+            "namespaces/s/views/v1",
+            Some(json!({"updates": [
+                {"action": "set-current-view-version", "view-version-id": 1}
+            ]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        env.reached("POST /namespaces/s/views/v1").len(),
-        1,
-        "only the setup replace"
+        env.runner.calls.load(Ordering::SeqCst),
+        calls + 1,
+        "the stored version was EXPLAINed"
     );
+    assert_eq!(
+        current_sql(&env.view("v1").await.unwrap()),
+        "SELECT id, ssn FROM pii"
+    );
+    assert_eq!(env.lineage("v1").await, computed(&["pii"], &env.catalog));
+    let version = env.tag_version().await;
+    let reached = env.reached("POST /namespaces/s/views/v1");
+    let confirmed = plugin.report_of(version).await;
+    assert!(
+        confirmed <= *reached.last().unwrap(),
+        "the switch did not wait"
+    );
+
+    // `-1` with nothing added before it.
+    let (status, body) = env
+        .call(
+            "POST",
+            "namespaces/s/views/v1",
+            Some(json!({"updates": [
+                {"action": "set-current-view-version", "view-version-id": -1}
+            ]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(message(&body).contains("DROP and CREATE"), "{body}");
 }
 
-/// I1: with two `add-view-version` updates and an explicit current naming
-/// the first, the hold may not judge the second.
+/// I1 / N3: an explicit current id that no STORED version has (here the id
+/// lakekeeper would give a version this request adds) cannot be loaded, and
+/// is refused; the hold never judges the wrong added version.
 #[tokio::test]
-async fn a_commit_whose_current_is_not_the_last_added_version_is_refused() {
+async fn a_commit_whose_current_cannot_be_loaded_is_refused() {
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -959,12 +974,77 @@ async fn a_commit_whose_current_is_not_the_last_added_version_is_refused() {
     });
     let (status, resp) = env.call("POST", "namespaces/s/views/v1", Some(body)).await;
     assert_eq!(status, StatusCode::CONFLICT, "{resp}");
-    assert!(message(&resp).contains("older"), "{resp}");
+    assert!(message(&resp).contains("cannot be loaded"), "{resp}");
     assert_eq!(
         current_sql(&env.view("v1").await.unwrap()),
         "SELECT id, name FROM orders"
     );
     assert!(env.assignments("v1").await.is_empty());
+}
+
+/// N1: `set-current-view-version -1` binds to the version added just before
+/// it. In `[add A, set -1, add B]` A is current, so A is what is judged.
+#[tokio::test]
+async fn set_current_minus_one_binds_to_the_version_added_before_it() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let plugin = env.start_plugin();
+    plugin.polled().await;
+    let (status, body) = env.create("v1", "SELECT id, name FROM orders").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let view = env.view("v1").await.unwrap();
+    let uuid = view["metadata"]["view-uuid"].as_str().unwrap();
+    let body = json!({
+        "requirements": [{"type": "assert-view-uuid", "uuid": uuid}],
+        "updates": [
+            {"action": "add-schema", "schema": schema(1, &["id", "ssn"])},
+            {"action": "add-view-version", "view-version": version(2, -1, "SELECT id, ssn FROM pii")},
+            {"action": "set-current-view-version", "view-version-id": -1},
+            {"action": "add-view-version", "view-version": version(3, -1, "SELECT id, name FROM orders WHERE id > 1")}
+        ]
+    });
+    let (status, resp) = env.call("POST", "namespaces/s/views/v1", Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        current_sql(&env.view("v1").await.unwrap()),
+        "SELECT id, ssn FROM pii"
+    );
+    assert_eq!(
+        env.assignments("v1").await,
+        env.expected_pii_tags(&["id", "ssn"])
+    );
+    assert_eq!(env.lineage("v1").await, computed(&["pii"], &env.catalog));
+}
+
+/// N2: `schema-id: -1` is the schema added just before the version, not the
+/// last one in the request: the tags go on the columns the view really has.
+#[tokio::test]
+async fn schema_minus_one_is_the_schema_added_before_the_version() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let plugin = env.start_plugin();
+    plugin.polled().await;
+    let (status, body) = env.create("v1", "SELECT id, name FROM orders").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let view = env.view("v1").await.unwrap();
+    let uuid = view["metadata"]["view-uuid"].as_str().unwrap();
+    let body = json!({
+        "requirements": [{"type": "assert-view-uuid", "uuid": uuid}],
+        "updates": [
+            {"action": "add-schema", "schema": schema(1, &["id", "ssn"])},
+            {"action": "add-view-version", "view-version": version(2, -1, "SELECT id, ssn FROM pii")},
+            {"action": "add-schema", "schema": schema(2, &["x", "y"])},
+            {"action": "set-current-view-version", "view-version-id": -1}
+        ]
+    });
+    let (status, resp) = env.call("POST", "namespaces/s/views/v1", Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(
+        env.assignments("v1").await,
+        env.expected_pii_tags(&["id", "ssn"])
+    );
 }
 
 /// Create the namespace `a`, then `a.b` (lakekeeper's `\u{1f}`).
@@ -1179,9 +1259,15 @@ async fn no_bound_trino_engine_refuses_at_once() {
     else {
         return;
     };
+    let before = env.tag_version().await;
     let start = Instant::now();
     let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        env.tag_version().await,
+        before,
+        "refused before step 3: no write, no bump, no compensation"
+    );
     let msg = message(&body);
     assert!(msg.contains("no Trino engine"), "{msg}");
     assert!(msg.contains("attach a Trino engine"), "{msg}");

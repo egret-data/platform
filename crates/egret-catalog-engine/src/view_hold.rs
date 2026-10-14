@@ -12,11 +12,11 @@
 //! - commit, `POST /{prefix}/namespaces/{ns}/views/{view}`. A commit that
 //!   neither adds a view version nor sets the current one (`COMMENT ON VIEW`,
 //!   a replace whose updates are empty) passes through untouched. Otherwise
-//!   the hold judges the version that is current after ALL the updates: the
-//!   last added one when `set-current-view-version` is `-1`. A commit that
-//!   makes current a version it does not add (an older stored one, or one
-//!   named by id) is refused on a classified profile, because egret has not
-//!   judged it;
+//!   the hold replays the updates in order, as the view builder applies them
+//!   ([`commit_change`]), and judges the version that is current at the end.
+//!   A stored version made current by id is read from the view's metadata
+//!   through lakekeeper's own router and judged like a new one; a version
+//!   that cannot be resolved or loaded is refused on a classified profile;
 //! - rename, `POST /{prefix}/views/rename`, which moves the view's lineage and
 //!   tag assignments to the new name under the same hold.
 //!
@@ -193,10 +193,10 @@ impl Refusal {
                 .into(),
         )
     }
-    fn older_version(why: &str) -> Self {
+    fn unjudgeable(why: impl std::fmt::Display) -> Self {
         Self(format!(
-            "{why}: egret cannot judge an older view version on a catalog with classified \
-             columns; replace the view with CREATE OR REPLACE VIEW instead"
+            "{why}: egret cannot judge this view version on a catalog with classified columns; \
+             change the view's definition, or DROP and CREATE it"
         ))
     }
     fn locked(limit: Duration) -> Self {
@@ -370,83 +370,199 @@ fn definition(version: &Value, schema: Option<&Value>) -> Result<Definition, Str
     })
 }
 
-/// A create's view name and definition. The name is read first: without it
+/// A create's view name and its version. The name is read first: without it
 /// nothing can be held or recorded.
-fn create_definition(body: &Value) -> Result<(String, Result<Definition, String>), String> {
+fn create_definition(body: &Value) -> Result<(String, Result<Pending, String>), String> {
     let name = body
         .get("name")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .ok_or("the create request names no view")?
         .to_string();
-    let def = match body.get("view-version") {
-        Some(v) => definition(v, body.get("schema")),
-        None => Err("the create request carries no view version".to_string()),
+    let pending = match (body.get("view-version"), body.get("schema")) {
+        (Some(version), Some(schema)) => Ok(Pending::Request {
+            version: version.clone(),
+            schema: Ok(SchemaSource::Request(schema.clone())),
+        }),
+        (None, _) => Err("the create request carries no view version".to_string()),
+        (_, None) => Err("the create request carries no schema".to_string()),
     };
-    Ok((name, def))
+    Ok((name, pending))
+}
+
+/// Where the schema of an added version comes from.
+#[derive(Debug, Clone, PartialEq)]
+enum SchemaSource {
+    /// An `add-schema` of this request, resolved positionally.
+    Request(Value),
+    /// A schema the view already stores, by id.
+    Stored(i64),
+}
+
+/// The version a commit leaves current, before any stored metadata is read.
+#[derive(Debug, Clone, PartialEq)]
+enum Pending {
+    /// A version this request adds, with its schema.
+    Request {
+        version: Value,
+        schema: Result<SchemaSource, String>,
+    },
+    /// A version the view already stores, by id.
+    Stored(i64),
+}
+
+impl Pending {
+    fn needs_stored_metadata(&self) -> bool {
+        matches!(
+            self,
+            Pending::Stored(_)
+                | Pending::Request {
+                    schema: Ok(SchemaSource::Stored(_)),
+                    ..
+                }
+        )
+    }
 }
 
 /// What a commit does to the view's current version.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Change {
     /// Neither adds a version nor sets the current one: passes untouched.
     Untouched,
-    /// The version to judge.
-    Judge(Result<Definition, String>),
-    /// The current version after the commit is not one it adds.
-    NotAdded(&'static str),
+    /// The version to judge, or why the updates cannot be resolved to one.
+    Judge(Result<Pending, String>),
 }
 
-/// Resolve every update in order: the version that is current afterwards.
+/// What a `set-current-view-version` points at, at its position.
+enum Current {
+    /// The version added at this index of the request.
+    Added(usize),
+    /// A stored version, by id.
+    Stored(i64),
+    Invalid(&'static str),
+}
+
+/// The version that is current after the commit (N1, N2), by replaying the
+/// updates IN ORDER with the view builder's "last added" bookkeeping
+/// (iceberg-rust `ViewMetadataBuilder`, which lakekeeper applies):
+///
+/// - `add-schema` makes that schema the last added one;
+/// - `add-view-version` with `schema-id: -1` uses the schema last added
+///   BEFORE it, and becomes the last added version. A positive schema id
+///   names a stored schema; alongside an `add-schema` it is refused, because
+///   the builder may renumber the added schema;
+/// - `set-current-view-version -1` binds to the version last added BEFORE
+///   it; an explicit id names a stored version. The last one wins.
+///
+/// A commit with adds but no `set-current-view-version` leaves the current
+/// version where it was; its last added version is judged anyway, which
+/// over-judges, safely.
 fn commit_change(body: &Value) -> Change {
     let Some(updates) = body.get("updates").and_then(Value::as_array) else {
         // Not a commit body; lakekeeper refuses it.
         return Change::Untouched;
     };
     let action = |u: &Value, a: &str| u.get("action").and_then(Value::as_str) == Some(a);
-    let mut schemas: Vec<&Value> = Vec::new();
-    let mut added: Vec<Option<&Value>> = Vec::new();
-    // `Some(None)`: a set-current whose id is not an integer.
-    let mut current: Option<Option<i64>> = None;
+    let mut schemas_added = false;
+    let mut last_schema: Option<Value> = None;
+    let mut added: Vec<Result<Pending, String>> = Vec::new();
+    let mut last_added: Option<usize> = None;
+    let mut current: Option<Current> = None;
     for u in updates {
         if action(u, "add-schema") {
-            if let Some(s) = u.get("schema") {
-                schemas.push(s);
+            if let Some(schema) = u.get("schema") {
+                schemas_added = true;
+                last_schema = Some(schema.clone());
             }
         } else if action(u, "add-view-version") {
-            added.push(u.get("view-version"));
+            let entry = match u.get("view-version") {
+                None => Err("an add-view-version update carries no view version".to_string()),
+                Some(version) => {
+                    let schema = match version.get("schema-id").and_then(Value::as_i64) {
+                        Some(-1) => last_schema.clone().map(SchemaSource::Request).ok_or_else(|| {
+                            "an added view version uses schema -1, but no schema is added before it"
+                                .to_string()
+                        }),
+                        Some(id) if !schemas_added => Ok(SchemaSource::Stored(id)),
+                        Some(_) => Err(
+                            "an added view version names its schema by id beside an add-schema,                              which the catalog may renumber"
+                                .to_string(),
+                        ),
+                        None => Err("an added view version names no schema".to_string()),
+                    };
+                    Ok(Pending::Request {
+                        version: version.clone(),
+                        schema,
+                    })
+                }
+            };
+            added.push(entry);
+            last_added = Some(added.len() - 1);
         } else if action(u, "set-current-view-version") {
-            current = Some(u.get("view-version-id").and_then(Value::as_i64));
+            current = Some(match u.get("view-version-id").and_then(Value::as_i64) {
+                Some(-1) => match last_added {
+                    Some(i) => Current::Added(i),
+                    None => Current::Invalid(
+                        "the commit sets the current version to -1 before adding any version",
+                    ),
+                },
+                Some(id) => Current::Stored(id),
+                None => Current::Invalid("the commit sets the current version to a non-integer id"),
+            });
         }
     }
-    let last =
-        match (added.last(), current) {
-            (None, None) => return Change::Untouched,
-            (Some(v), None | Some(Some(-1))) => *v,
-            (None, Some(_)) => {
-                return Change::NotAdded("the commit makes a stored view version current")
-            }
-            (Some(_), Some(_)) => return Change::NotAdded(
-                "the commit makes a view version current by id rather than the one it adds last",
-            ),
-        };
-    let Some(version) = last else {
-        return Change::Judge(Err(
-            "an add-view-version update carries no view version".into()
-        ));
+    let index = match current {
+        None => match last_added {
+            None => return Change::Untouched,
+            Some(i) => i,
+        },
+        Some(Current::Added(i)) => i,
+        Some(Current::Stored(id)) => return Change::Judge(Ok(Pending::Stored(id))),
+        Some(Current::Invalid(why)) => return Change::Judge(Err(why.to_string())),
     };
-    // `-1` is "the schema this commit last added"; any other id must be added
-    // by this commit too, or the columns are not in the request.
-    let schema = match version.get("schema-id").and_then(Value::as_i64) {
-        Some(-1) => schemas.last().copied(),
-        Some(id) => schemas
-            .iter()
-            .rev()
-            .find(|s| s.get("schema-id").and_then(Value::as_i64) == Some(id))
-            .copied(),
-        None => None,
+    Change::Judge(added.swap_remove(index))
+}
+
+/// The definition `pending` names. `stored` is the view's current metadata
+/// (`ViewMetadata` JSON), required when a part of it is stored; `None` makes
+/// such a part fail.
+fn resolve_pending(pending: Pending, stored: Option<&Value>) -> Result<Definition, String> {
+    let stored_schema = |id: i64| -> Result<Value, String> {
+        stored
+            .and_then(|m| m.get("schemas"))
+            .and_then(Value::as_array)
+            .and_then(|a| {
+                a.iter()
+                    .find(|s| s.get("schema-id").and_then(Value::as_i64) == Some(id))
+            })
+            .cloned()
+            .ok_or_else(|| format!("the view's stored schema {id} cannot be loaded"))
     };
-    Change::Judge(definition(version, schema))
+    match pending {
+        Pending::Request { version, schema } => {
+            let schema = match schema? {
+                SchemaSource::Request(s) => s,
+                SchemaSource::Stored(id) => stored_schema(id)?,
+            };
+            definition(&version, Some(&schema))
+        }
+        Pending::Stored(id) => {
+            let version = stored
+                .and_then(|m| m.get("versions"))
+                .and_then(Value::as_array)
+                .and_then(|a| {
+                    a.iter()
+                        .find(|v| v.get("version-id").and_then(Value::as_i64) == Some(id))
+                })
+                .cloned()
+                .ok_or_else(|| format!("the view's stored version {id} cannot be loaded"))?;
+            let schema_id = version
+                .get("schema-id")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| format!("the view's stored version {id} names no schema"))?;
+            definition(&version, Some(&stored_schema(schema_id)?))
+        }
+    }
 }
 
 /// `{source, destination}` of a rename, each `(namespace, name)`, the
@@ -798,10 +914,49 @@ impl ViewHold {
         response
     }
 
+    /// The view's stored metadata (`ViewMetadata` JSON), by a `GET` of the
+    /// commit's own path on lakekeeper's router, with the commit's request
+    /// metadata, bounded by the deadline.
+    async fn load_stored(
+        &self,
+        loader: &axum::Router,
+        path: String,
+        metadata: lakekeeper::api::RequestMetadata,
+        deadline: Instant,
+    ) -> Result<Value, String> {
+        use tower::ServiceExt as _;
+        let mut get = Request::builder()
+            .method(Method::GET)
+            .uri(path)
+            .body(Body::empty())
+            .map_err(|e| format!("the stored view cannot be loaded: {e}"))?;
+        get.extensions_mut().insert(metadata);
+        let left = deadline.saturating_duration_since(Instant::now());
+        let response = tokio::time::timeout(left, loader.clone().oneshot(get))
+            .await
+            .map_err(|_| "the stored view cannot be loaded before the deadline".to_string())?
+            .map_err(|e| format!("the stored view cannot be loaded: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "the stored view cannot be loaded: the catalog answered {}",
+                response.status()
+            ));
+        }
+        let bytes = axum::body::to_bytes(response.into_body(), MAX_BODY)
+            .await
+            .map_err(|e| format!("the stored view cannot be loaded: {e}"))?;
+        let mut body: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("the stored view cannot be loaded: {e}"))?;
+        body.get_mut("metadata")
+            .map(Value::take)
+            .ok_or_else(|| "the stored view cannot be loaded: no metadata".to_string())
+    }
+
     /// Create, replace, or a commit that sets the current version.
     #[allow(clippy::too_many_arguments)]
     async fn hold_definition(
         &self,
+        loader: &axum::Router,
         deadline: Instant,
         prefix: &str,
         ns: &str,
@@ -837,11 +992,34 @@ impl ViewHold {
         if is_multi_level(ns) {
             return Refusal::multi_level().into_response();
         }
-        let def = match change {
+        let pending = match change {
             Change::Untouched => return next.run(req).await,
-            Change::NotAdded(why) => return Refusal::older_version(why).into_response(),
-            Change::Judge(Err(e)) => return Refusal::lineage(e).into_response(),
-            Change::Judge(Ok(d)) => d,
+            Change::Judge(Err(e)) => return Refusal::unjudgeable(e).into_response(),
+            Change::Judge(Ok(p)) => p,
+        };
+        // N3: a stored version (or schema) is read from the view's metadata,
+        // through lakekeeper's own load, within the deadline.
+        let stored = if pending.needs_stored_metadata() {
+            // The commit's own path, and its request metadata (the guard
+            // put it there); taken out first, since a `Body` is not `Sync`.
+            let path = req.uri().path().to_string();
+            let metadata = req
+                .extensions()
+                .get::<lakekeeper::api::RequestMetadata>()
+                .cloned()
+                .unwrap_or_else(|| {
+                    lakekeeper::api::RequestMetadata::new_lakekeeper_internal(Uuid::now_v7())
+                });
+            match self.load_stored(loader, path, metadata, deadline).await {
+                Ok(m) => Some(m),
+                Err(e) => return Refusal::unjudgeable(e).into_response(),
+            }
+        } else {
+            None
+        };
+        let def = match resolve_pending(pending, stored.as_ref()) {
+            Ok(d) => d,
+            Err(e) => return Refusal::unjudgeable(e).into_response(),
         };
         let Some(catalog) = r.catalog else {
             return Refusal::lineage("the view's warehouse has no catalog in egret's registry")
@@ -917,6 +1095,17 @@ impl ViewHold {
                     .await;
             }
             return response;
+        }
+
+        // M1: with no Trino engine bound, no plugin could confirm; refuse
+        // before writing anything. (`wait` checks again, after the write.)
+        match self.db.pool.acquire().await {
+            Ok(mut conn) => match trino_tag_versions(&mut conn, warehouse_id).await {
+                Ok(pairs) if pairs.is_empty() => return Refusal::no_trino().into_response(),
+                Ok(_) => {}
+                Err(e) => return Refusal::internal("database", e).into_response(),
+            },
+            Err(e) => return Refusal::internal("database", e).into_response(),
         }
 
         // Step 3.
@@ -1140,8 +1329,11 @@ fn seconds(d: Duration) -> String {
 
 /// The axum middleware (module doc). Every request it does not hold passes
 /// through unchanged.
+///
+/// The state's router is lakekeeper's own, with no hold in front: the hold
+/// reads a stored view through it (N3).
 pub async fn hold_view_commits(
-    State(hold): State<Arc<ViewHold>>,
+    State((hold, loader)): State<(Arc<ViewHold>, axum::Router)>,
     req: Request,
     next: Next,
 ) -> Response {
@@ -1165,14 +1357,23 @@ pub async fn hold_view_commits(
         Target::Commit { ns, view } => match commit_change(&json) {
             Change::Untouched => next.run(req).await,
             change => {
-                hold.hold_definition(deadline, &prefix, &ns, &view, change, req, next)
+                hold.hold_definition(&loader, deadline, &prefix, &ns, &view, change, req, next)
                     .await
             }
         },
         Target::Create { ns } => match create_definition(&json) {
             Ok((name, def)) => {
-                hold.hold_definition(deadline, &prefix, &ns, &name, Change::Judge(def), req, next)
-                    .await
+                hold.hold_definition(
+                    &loader,
+                    deadline,
+                    &prefix,
+                    &ns,
+                    &name,
+                    Change::Judge(def),
+                    req,
+                    next,
+                )
+                .await
             }
             // No name: lakekeeper refuses it, and nothing can be recorded.
             Err(_) => next.run(req).await,
@@ -1258,7 +1459,7 @@ mod tests {
                 {"action": "set-current-view-version", "view-version-id": -1}
             ]
         });
-        let Change::Judge(Ok(def)) = commit_change(&body) else {
+        let Some(Ok(def)) = judged(&body) else {
             panic!("not judged");
         };
         assert_eq!(def.sql, "SELECT id, ssn FROM ice.s.pii");
@@ -1287,7 +1488,7 @@ mod tests {
             |id: i64| json!({"action": "set-current-view-version", "view-version-id": id});
         // Two versions, `-1`: the last added is judged.
         let body = json!({"updates": [schema, v("first"), v("second"), current(-1)]});
-        let Change::Judge(Ok(def)) = commit_change(&body) else {
+        let Some(Ok(def)) = judged(&body) else {
             panic!("not judged");
         };
         assert_eq!(def.sql, "second");
@@ -1298,11 +1499,84 @@ mod tests {
             json!({"updates": [current(-1)]}),
             json!({"updates": [{"action": "set-current-view-version", "view-version-id": "x"}]}),
         ] {
-            assert!(
-                matches!(commit_change(&body), Change::NotAdded(_)),
-                "{body}"
-            );
+            assert!(judged(&body).is_some_and(|d| d.is_err()), "{body}");
         }
+    }
+
+    /// The definition a commit body resolves to with no stored metadata, or
+    /// `Err` when it cannot; `None` when it is not judged at all.
+    fn judged(body: &Value) -> Option<Result<Definition, String>> {
+        match commit_change(body) {
+            Change::Untouched => None,
+            Change::Judge(p) => Some(p.and_then(|p| resolve_pending(p, None))),
+        }
+    }
+
+    fn add(sql: &str, schema_id: i64) -> Value {
+        json!({"action": "add-view-version", "view-version": {"schema-id": schema_id,
+            "representations": [{"type": "sql", "sql": sql, "dialect": "trino"}]}})
+    }
+
+    fn add_schema(id: i64, cols: &[&str]) -> Value {
+        let fields: Vec<Value> = cols.iter().map(|c| json!({"name": c})).collect();
+        json!({"action": "add-schema", "schema": {"schema-id": id, "fields": fields}})
+    }
+
+    fn set(id: i64) -> Value {
+        json!({"action": "set-current-view-version", "view-version-id": id})
+    }
+
+    /// N1 and N2: the updates replay in order, with the builder's "last
+    /// added" bookkeeping for both `-1`s.
+    #[test]
+    fn the_updates_replay_in_order_like_the_view_builder() {
+        let s1 = add_schema(1, &["id", "ssn"]);
+        let s2 = add_schema(2, &["x", "y"]);
+        let sql = |body: Value| judged(&body).unwrap().unwrap().sql;
+        let cols = |body: Value| judged(&body).unwrap().unwrap().columns;
+
+        // [add A, set -1, add B]: A is current.
+        assert_eq!(
+            sql(json!({"updates": [s1, add("A", -1), set(-1), add("B", -1)]})),
+            "A"
+        );
+        // [add A, add B, set -1]: B is current.
+        assert_eq!(
+            sql(json!({"updates": [s1, add("A", -1), add("B", -1), set(-1)]})),
+            "B"
+        );
+        // [add-schema S1, add A(-1), add-schema S2, set -1]: A with S1.
+        assert_eq!(
+            cols(json!({"updates": [s1, add("A", -1), s2, set(-1)]})),
+            vec!["id", "ssn"]
+        );
+        // [S1, add A, set -1, S2, add B(-1)]: A, with S1, stays current.
+        let body = json!({"updates": [s1, add("A", -1), set(-1), s2, add("B", -1)]});
+        assert_eq!(sql(body.clone()), "A");
+        assert_eq!(cols(body), vec!["id", "ssn"]);
+        // [S1, add A, S2, add B(-1), set -1]: B, with S2.
+        let body = json!({"updates": [s1, add("A", -1), s2, add("B", -1), set(-1)]});
+        assert_eq!(sql(body.clone()), "B");
+        assert_eq!(cols(body), vec!["x", "y"]);
+        // The last set-current wins: [add A, set -1, add B, set -1] is B.
+        assert_eq!(
+            sql(json!({"updates": [s1, add("A", -1), set(-1), add("B", -1), set(-1)]})),
+            "B"
+        );
+        // An add with no set-current is still judged (over-judges, safely).
+        assert_eq!(sql(json!({"updates": [s1, add("A", -1)]})), "A");
+        // `-1` before any version, and a `-1` schema before any schema, fail.
+        assert!(judged(&json!({"updates": [set(-1), s1, add("A", -1)]}))
+            .unwrap()
+            .is_err());
+        assert!(judged(&json!({"updates": [add("A", -1), s1, set(-1)]}))
+            .unwrap()
+            .is_err());
+        // An explicit schema id alongside an add-schema is ambiguous (the
+        // builder may renumber the added schema).
+        assert!(judged(&json!({"updates": [s1, add("A", 1), set(-1)]}))
+            .unwrap()
+            .is_err());
     }
 
     #[test]
@@ -1317,7 +1591,7 @@ mod tests {
         // An add-view-version naming a schema the commit did not add.
         let body = json!({"updates": [{"action": "add-view-version", "view-version": {
             "schema-id": 4, "representations": [{"type": "sql", "sql": "x", "dialect": "trino"}]}}]});
-        assert!(matches!(commit_change(&body), Change::Judge(Err(_))));
+        assert!(judged(&body).is_some_and(|d| d.is_err()));
     }
 
     #[test]
@@ -1340,7 +1614,7 @@ mod tests {
             Refusal::lineage("x"),
             Refusal::internal("db", "x"),
             Refusal::multi_level(),
-            Refusal::older_version("x"),
+            Refusal::unjudgeable("x"),
             Refusal::locked(default_hold_limit()),
             Refusal::full(8),
             Refusal::no_trino(),
@@ -1351,7 +1625,7 @@ mod tests {
                 [
                     "retry",
                     "use a single-level",
-                    "CREATE OR REPLACE",
+                    "DROP and CREATE",
                     "attach a Trino"
                 ]
                 .iter()
