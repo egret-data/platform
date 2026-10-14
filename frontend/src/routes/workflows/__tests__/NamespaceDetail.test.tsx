@@ -237,14 +237,28 @@ describe("NamespaceDetail: Flows and Executions, pinned to the namespace", () =>
 });
 
 describe("NamespaceDetail: the slots later tasks fill", () => {
-  it.each([
-    ["dependencies", "Dependencies"],
-    ["files", "Files"],
-  ])("renders the %s tab's slot", async (tab, label) => {
+  it.each([["dependencies", "Dependencies"]])("renders the %s tab's slot", async (tab, label) => {
     renderAt(at("company.team", tab));
     const list = await screen.findByRole("tablist", {}, LAZY);
     expect(within(list).getByRole("tab", { name: label })).toHaveAttribute("aria-selected", "true");
     expect(await screen.findByTestId(`namespace-tab-${tab}`, {}, LAZY)).toBeInTheDocument();
+  });
+});
+
+describe("NamespaceDetail: the Files tab", () => {
+  it("gets the viewer's workflow:manage from the namespace detail: writes on", async () => {
+    renderAt(at("company.team", "files"), { canManage: true });
+    expect(await screen.findByText("No files yet", {}, LAZY)).toBeInTheDocument();
+    for (const b of screen.getAllByRole("button", { name: "New file" })) expect(b).toBeEnabled();
+  });
+
+  it("gets the viewer's workflow:manage from the namespace detail: writes off, with the reason", async () => {
+    renderAt(at("company.team", "files"), { canManage: false });
+    expect(await screen.findByText("No files yet", {}, LAZY)).toBeInTheDocument();
+    for (const b of screen.getAllByRole("button", { name: "New file" })) {
+      expect(b).toBeDisabled();
+      expect(b).toHaveAccessibleDescription("Changing namespace files needs the workflow:manage permission");
+    }
   });
 });
 

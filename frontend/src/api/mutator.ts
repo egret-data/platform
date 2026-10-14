@@ -50,6 +50,15 @@ export interface CustomRequestOptions extends RequestInit {
    * body; read `data` through `rawText()`. Errors are thrown as always.
    */
   rawText?: boolean;
+  /**
+   * Answer the success body as a `Blob` in `data`, every byte as sent, never
+   * decoded. For a caller that reads bytes the text decoding would change: a
+   * namespace file may be an image or any other binary, and the editor must
+   * write back exactly the bytes it read
+   * (`components/workflows/namespaces/files/nsFilesApi.ts`). Read `data`
+   * through `rawBlob()`. Errors are thrown as always.
+   */
+  rawBlob?: boolean;
 }
 
 /**
@@ -61,11 +70,24 @@ export function rawText(response: { data: unknown }): string {
   return response.data;
 }
 
+/**
+ * The body of a response requested with `rawBlob: true`. Checked by shape,
+ * not `instanceof`: in tests the `Blob` comes from another realm (Node's
+ * `fetch` under jsdom).
+ */
+export function rawBlob(response: { data: unknown }): Blob {
+  const data = response.data as Blob | undefined;
+  if (!data || typeof data !== "object" || typeof data.arrayBuffer !== "function") {
+    throw new Error("the response was not read as bytes (pass rawBlob: true)");
+  }
+  return data;
+}
+
 export const customInstance = async <T>(
   url: string,
   requestOptions?: CustomRequestOptions,
 ): Promise<T> => {
-  const { rawText: asText = false, ...options } = requestOptions ?? {};
+  const { rawText: asText = false, rawBlob: asBlob = false, ...options } = requestOptions ?? {};
   const method = (options.method ?? "GET").toUpperCase();
   // Reconcile the spec's `/api`-prefixed paths with apiFetch's own `/api` prefix.
   // Segment-anchored so a hypothetical `/apiXxx` path is never mangled.
@@ -86,6 +108,8 @@ export const customInstance = async <T>(
   let data: unknown = undefined;
   if (asText) {
     data = await res.text();
+  } else if (asBlob) {
+    data = await res.blob();
   } else if (res.status !== 204 && res.headers.get("content-length") !== "0") {
     const contentType = res.headers.get("content-type") ?? "";
     data = contentType.includes("application/json")

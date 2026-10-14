@@ -173,11 +173,25 @@ const MARKERS = [
   // the counts' note.
   ["src/routes/workflows/NamespaceDetail.tsx", NAMESPACE_HOST, "namespace"],
   ["src/components/workflows/namespaces/NamespaceOverview.tsx", "Counted in this namespace only; each child namespace counts its own.", "namespace"],
-  // The three tab slots, each its own lazy chunk. Dependencies and Files are placeholders until
-  // Tasks 6–8: a task that replaces a slot's body replaces its marker here too (a stale marker
-  // fails below).
+  // The three tab slots, each its own lazy chunk. Dependencies is a placeholder until Task 8: a
+  // task that replaces a slot's body replaces its marker here too (a stale marker fails below).
   ["src/components/workflows/namespaces/NamespaceDependenciesTab.tsx", "the flows they call is not available yet.", "namespace-tab"],
-  ["src/components/workflows/namespaces/NamespaceFilesTab.tsx", "files cannot be browsed here yet.", "namespace-tab"],
+  // The Files tab (W7d Task 6) and its `files/` modules, in the tab's lazy chunk: the tab's
+  // heading id; the explorer's import note; the tree's keyboard help; Save's non-text reason; the
+  // restore conflict's title; the overwrite question's Keep button; `FILES_MANAGE_REASON`; the
+  // name check's empty-segment sentence; the hook's overwrite failure; `OPEN_TABS_KEY_PREFIX`.
+  // Monaco itself stays behind `MonacoEditor`'s own `lazy()` (`assert-monaco-lazy.mjs`). Each
+  // marker was proven by a scratch static import (W7d task-6-report.md).
+  ["src/components/workflows/namespaces/NamespaceFilesTab.tsx", "files-heading", "namespace-tab"],
+  ["src/components/workflows/namespaces/files/NamespaceFiles.tsx", "New files and imports go into", "namespace-tab"],
+  ["src/components/workflows/namespaces/files/FileTree.tsx", "F2 renames, Delete deletes", "namespace-tab"],
+  ["src/components/workflows/namespaces/files/NamespaceFileEditor.tsx", "Only a text file is edited here", "namespace-tab"],
+  ["src/components/workflows/namespaces/files/RevisionsDrawer.tsx", "changed since its revisions were listed", "namespace-tab"],
+  ["src/components/workflows/namespaces/files/FileDialogs.tsx", "Keep the existing files", "namespace-tab"],
+  ["src/components/workflows/namespaces/files/nsFilesApi.ts", "Changing namespace files needs the workflow:manage permission", "namespace-tab"],
+  ["src/components/workflows/namespaces/files/nsFilePaths.ts", "The name has an empty folder name between two slashes", "namespace-tab"],
+  ["src/components/workflows/namespaces/files/useNamespaceFile.ts", "The file was not overwritten", "namespace-tab"],
+  ["src/components/workflows/namespaces/files/openTabs.ts", "egret.wf.ns-files.tabs.", "namespace-tab"],
   // The KV tab (W7d Task 5) and its `kv/` modules, in the tab's lazy chunk: the bulk-delete
   // button's reason; the STRING refusal; the read's malformed-answer refusal; the lossless JSON
   // reader's trailing-text refusal; the edit drawer's locked-key help; the JSON value's Monaco

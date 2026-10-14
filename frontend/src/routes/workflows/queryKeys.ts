@@ -81,6 +81,25 @@ export const workflowsKeys = {
     ["workflows", "ws", ws, "namespace", namespace, "kv", "value", key] as const,
   /** The keys inherited from the namespace's parents (`GET …/kv/inheritance`). */
   kvInherited: (ws: string, namespace: string) => ["workflows", "ws", ws, "namespace", namespace, "kv", "inherited"] as const,
+  /**
+   * A namespace's files (W9b's routes), under `namespace(ws, ns)`. Every
+   * listing below is reached by invalidating this one after a write. An open
+   * file's content is NOT a query (`useNamespaceFile` holds it as the
+   * editor's base), so no invalidation replaces text being edited.
+   */
+  nsFiles: (ws: string, namespace: string) => ["workflows", "ws", ws, "namespace", namespace, "files"] as const,
+  /** The live children of one directory (`GET …/files/directory?path`), `/` for the root. */
+  nsDirectory: (ws: string, namespace: string, dir: string) =>
+    ["workflows", "ws", ws, "namespace", namespace, "files", "directory", dir] as const,
+  /** The live files whose path contains `q` (`GET …/files/search`). */
+  nsFileSearch: (ws: string, namespace: string, q: string) =>
+    ["workflows", "ws", ws, "namespace", namespace, "files", "search", q] as const,
+  /** One file's revisions (`GET …/files/revisions?path`). */
+  nsFileRevisions: (ws: string, namespace: string, path: string) =>
+    ["workflows", "ws", ws, "namespace", namespace, "files", "revisions", path] as const,
+  /** One revision's bytes (`GET …/files?path&revision`): immutable, so cached as is. */
+  nsFileRevision: (ws: string, namespace: string, path: string, revision: number) =>
+    ["workflows", "ws", ws, "namespace", namespace, "files", "revisions", path, revision] as const,
   executions: (ws: string, params?: object) =>
     params
       ? (["workflows", "ws", ws, "executions", params] as const)

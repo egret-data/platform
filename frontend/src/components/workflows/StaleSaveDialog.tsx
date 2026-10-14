@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +20,10 @@ import {
  * - **Overwrite** saves the local text anyway, without the precondition.
  *
  * Cancel keeps the edits in the editor and saves nothing.
+ *
+ * The copy names a flow's draft unless `title`, `description` and
+ * `reloadDescription` say otherwise: a namespace file's save (W7d spec §4.3,
+ * the 409 `file_changed`) names the file and shows the server's reason.
  */
 export function StaleSaveDialog({
   open,
@@ -27,7 +31,16 @@ export function StaleSaveDialog({
   onReload,
   onOverwrite,
   overwriteWith = "your text",
+  title = "The draft changed since you opened it",
+  description,
+  reloadDescription = "Reloading replaces the text in the editor with the saved draft. Your unsaved edits are lost.",
 }: {
+  /** The question's title. */
+  title?: string;
+  /** The question's text; by default, a flow draft's. */
+  description?: ReactNode;
+  /** What "Discard and reload" will do, asked before it runs. */
+  reloadDescription?: string;
   /** What Overwrite saves, as the description names it: "your text", or "v1's text" for a restore. */
   overwriteWith?: string;
   open: boolean;
@@ -67,9 +80,7 @@ export function StaleSaveDialog({
           <>
             <AlertDialogHeader>
               <AlertDialogTitle>Discard your edits?</AlertDialogTitle>
-              <AlertDialogDescription>
-                Reloading replaces the text in the editor with the saved draft. Your unsaved edits are lost.
-              </AlertDialogDescription>
+              <AlertDialogDescription>{reloadDescription}</AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <Button variant="outline" disabled={pending !== null} onClick={() => setConfirmingReload(false)}>
@@ -84,10 +95,14 @@ export function StaleSaveDialog({
         ) : (
           <>
             <AlertDialogHeader>
-              <AlertDialogTitle>The draft changed since you opened it</AlertDialogTitle>
+              <AlertDialogTitle>{title}</AlertDialogTitle>
               <AlertDialogDescription>
-                Someone saved this flow or created a version of it after you opened it, so your save was refused and nothing was
-                written. Reload the saved draft, or overwrite it with {overwriteWith}.
+                {description ?? (
+                  <>
+                    Someone saved this flow or created a version of it after you opened it, so your save was refused and nothing was
+                    written. Reload the saved draft, or overwrite it with {overwriteWith}.
+                  </>
+                )}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
