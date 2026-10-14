@@ -2587,11 +2587,25 @@ pub(crate) async fn served_artifact_via(
     conn: &mut sqlx::PgConnection,
     svc: &ServiceRow,
 ) -> Result<ServicePolicySet, PermHttpError> {
+    use egret_policy::lineage_transform as lt;
     let mut envelope = envelope_via(conn, svc).await?;
-    if let Some(catalogs) =
-        egret_policy::lineage_transform::lineage_catalogs_for_service_via(conn, svc.id).await?
-    {
-        egret_policy::lineage_transform::apply_lineage_transform(&mut envelope, &catalogs);
+    // Fix round 2, N4: the download's own per-poller decision, asked for a
+    // representative coordinator pod of the first engine bound to the profile,
+    // so explain and the download cannot diverge.
+    let engines: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM engine_mgmt.engines WHERE authz_service_id = $1 ORDER BY name",
+    )
+    .bind(svc.id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(PermHttpError::db)?;
+    if let Some(engine) = engines.first() {
+        let plugin_id = lt::representative_plugin_id(engine, &svc.name);
+        if let Some(catalogs) =
+            lt::lineage_catalogs_for_poll_via(conn, svc.id, &svc.name, Some(&plugin_id)).await?
+        {
+            lt::apply_lineage_transform(&mut envelope, &catalogs);
+        }
     }
     to_policy_set(&envelope)
 }

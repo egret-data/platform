@@ -51,3 +51,37 @@ CREATE TABLE view_lineage_state (
 UPDATE users SET username = NULL WHERE username = 'egret-lineage';
 ALTER TABLE users ADD CONSTRAINT users_username_not_reserved
     CHECK (username IS NULL OR username <> 'egret-lineage');
+
+-- Task 7 fix round 2 (N1): what egret serves `egret-lineage` depends on which
+-- engines are bound to a profile and on their delegation mode
+-- (`egret_policy::lineage_transform`), but a plugin re-downloads only when the
+-- profile's `policy_version` moves. So every bind, unbind and delegation-mode
+-- or origin change of a bound engine bumps the profile(s) it affects, and no
+-- plugin cache or 304 can carry a transform across a change of eligibility.
+-- A trigger rather than a call at each writer, for the reason 0182 gives: the
+-- writers are in several crates, and a rule that has to be remembered at each
+-- is forgotten at one. A bumped `trino` profile is never a `tag` service, so
+-- 0182's cascade does not fire from here.
+CREATE FUNCTION engine_mgmt.bump_profiles_on_engine_binding() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now()
+         WHERE id = NEW.authz_service_id;
+    ELSIF TG_OP = 'DELETE' THEN
+        UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now()
+         WHERE id = OLD.authz_service_id;
+    ELSIF NEW.authz_service_id IS DISTINCT FROM OLD.authz_service_id
+       OR NEW.origin IS DISTINCT FROM OLD.origin
+       OR NEW.type IS DISTINCT FROM OLD.type
+       OR (NEW.spec->'trinoConfig'->>'delegationMode')
+          IS DISTINCT FROM (OLD.spec->'trinoConfig'->>'delegationMode') THEN
+        UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now()
+         WHERE id IN (OLD.authz_service_id, NEW.authz_service_id);
+    END IF;
+    RETURN NULL;
+END $$;
+
+CREATE TRIGGER engines_binding_bumps_profiles
+    AFTER INSERT OR UPDATE OR DELETE ON engine_mgmt.engines
+    FOR EACH ROW EXECUTE FUNCTION engine_mgmt.bump_profiles_on_engine_binding();

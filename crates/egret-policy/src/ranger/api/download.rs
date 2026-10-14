@@ -200,24 +200,25 @@ pub async fn download_policies(
             Err(e) => return Err(e.into()),
         }
     }
-    // View governance R5: a plugin of a Trino engine egret provisions in JWT
-    // mode is served the `egret-lineage` transform; every other plugin gets
-    // the stored policies (`crate::lineage_transform`). The pluginId must name
-    // this service. A forged id gains nothing a poll does not already give: the
-    // download is readable by anyone who can reach it (spec B4).
-    if crate::lineage_transform::plugin_id_names_service(p.plugin_id.as_deref(), &service_name) {
-        let mut conn = s
-            .store
-            .pool()
-            .acquire()
-            .await
-            .map_err(crate::PolicyStoreError::from)?;
-        if let Some(catalogs) =
-            crate::lineage_transform::lineage_catalogs_for_service_via(&mut conn, sp.service_id)
-                .await?
-        {
-            crate::lineage_transform::apply_lineage_transform(&mut sp, &catalogs);
-        }
+    // View governance R5: decided per POLLER (fix round 2, N1). Only a pod of
+    // a Trino engine egret provisions in JWT mode, bound to this profile, is
+    // served the `egret-lineage` transform; every other poller gets the stored
+    // policies (`crate::lineage_transform::lineage_catalogs_for_poll_via`).
+    let mut conn = s
+        .store
+        .pool()
+        .acquire()
+        .await
+        .map_err(crate::PolicyStoreError::from)?;
+    if let Some(catalogs) = crate::lineage_transform::lineage_catalogs_for_poll_via(
+        &mut conn,
+        sp.service_id,
+        &service_name,
+        p.plugin_id.as_deref(),
+    )
+    .await?
+    {
+        crate::lineage_transform::apply_lineage_transform(&mut sp, &catalogs);
     }
     Ok(Json(sp).into_response())
 }

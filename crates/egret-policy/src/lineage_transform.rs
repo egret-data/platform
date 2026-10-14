@@ -38,7 +38,14 @@
 //! 4. **Its own two policy kinds, appended.** `use`+`select` on every catalog
 //!    the profile's engines attach (`catalog/*/*/*`), and, per resource
 //!    hierarchy of the service-def, an override-priority DENY of every access
-//!    type except what EXPLAIN needs ([`kept_accesses`]).
+//!    type except what EXPLAIN needs ([`kept_accesses`]), narrowed further on
+//!    `trinouser` (itself only) and `systemproperty` (`query_max_run_time`).
+//!
+//! **Who is served it is decided per POLLER** (fix round 2, N1): the
+//! `pluginId`'s hostname must be a coordinator or worker pod of an eligible
+//! engine bound to the polled profile ([`lineage_catalogs_for_poll_via`]). A
+//! bind, unbind or delegation-mode change bumps the profile's version
+//! (migration 0187), so no cached transform outlives a change of eligibility.
 //!
 //! The transform is a pure function of the served envelope and the catalog
 //! list, so one policy version gives the same bytes to every eligible plugin.
@@ -48,7 +55,7 @@
 //! **One function, two callers.** `download_policies` and `explain`
 //! (`egret_perm_compile::routes`, "evaluate what the engine actually
 //! downloads") both call [`apply_lineage_transform`] after
-//! [`lineage_catalogs_for_service_via`] says the profile's engines are eligible.
+//! [`lineage_catalogs_for_poll_via`] says the poller is eligible.
 
 use std::collections::BTreeSet;
 
@@ -90,6 +97,27 @@ pub fn kept_accesses(leaf: &str) -> &'static [&'static str] {
         "queryid" => &["execute"],
         "systemproperty" => &["alter"],
         _ => &[],
+    }
+}
+
+/// A kept access that is kept only on some VALUES of its resource (fix round
+/// 2, N2), as `(access, the values it stays allowed on)`. A second
+/// override-priority deny withholds `access` on every other value, through
+/// `isExcludes: true`.
+///
+/// - `trinouser`: `impersonate` of itself only. With an egret JWT the session
+///   user is the principal, so EXPLAIN never needs another user; a `{public}`
+///   impersonate allow must not let the credential act as anyone else.
+/// - `systemproperty`: `alter` of `query_max_run_time` only, the one system
+///   session property egret's client sends.
+///
+/// `queryid` keeps `execute` on every value: its value is the id of the query
+/// being run, which egret cannot know before the engine assigns it.
+fn narrowed(leaf: &str) -> Option<(&'static str, &'static [&'static str])> {
+    match leaf {
+        "trinouser" => Some(("impersonate", &[LINEAGE_PRINCIPAL])),
+        "systemproperty" => Some(("alter", &["query_max_run_time"])),
+        _ => None,
     }
 }
 
@@ -319,14 +347,30 @@ fn appended_policies(service: &str, service_def: &Value, catalogs: &[String]) ->
             .filter(|a| !keep.contains(&a.as_str()))
             .cloned()
             .collect();
-        if denied.is_empty() {
-            continue;
-        }
         let mut res = serde_json::Map::new();
         for r in &chain {
             res.insert(r.name.clone(), level("*"));
         }
         let names: Vec<&str> = chain.iter().map(|r| r.name.as_str()).collect();
+        if let Some((access, only)) = narrowed(&leaf.name) {
+            let mut narrow = res.clone();
+            narrow.insert(
+                leaf.name.clone(),
+                json!({"values": only, "isExcludes": true, "isRecursive": false}),
+            );
+            out.push(appended_policy(
+                id,
+                format!("{LINEAGE_POLICY_PREFIX}deny-other-{}", names.join("-")),
+                service,
+                narrow,
+                None,
+                Some(vec![access.to_string()]),
+            ));
+            id += 1;
+        }
+        if denied.is_empty() {
+            continue;
+        }
         out.push(appended_policy(
             id,
             format!("{LINEAGE_POLICY_PREFIX}deny-{}", names.join("-")),
@@ -360,39 +404,96 @@ pub fn apply_lineage_transform(sp: &mut ServicePolicies, catalogs: &[String]) {
     sp.policies.extend(appended);
 }
 
-/// Whether a poll's `pluginId` names the service it polls:
-/// `<appId>@<host>-<service>` (live result §1 Q4). A poll without one, or one
-/// naming another service, is not served the transform.
-pub fn plugin_id_names_service(plugin_id: Option<&str>, service: &str) -> bool {
-    let Some(id) = plugin_id else { return false };
-    let Some((app, rest)) = id.split_once('@') else {
-        return false;
-    };
-    !app.is_empty()
-        && rest
-            .strip_suffix(service)
-            .and_then(|host| host.strip_suffix('-'))
-            .is_some_and(|host| !host.is_empty())
+/// The `<hostname>` of a poll's `pluginId` (`<appId>@<hostname>-<service>`,
+/// live result §1 Q4) when the id names `service`, the service it polls.
+pub fn plugin_host<'a>(plugin_id: Option<&'a str>, service: &str) -> Option<&'a str> {
+    let (app, rest) = plugin_id?.split_once('@')?;
+    if app.is_empty() {
+        return None;
+    }
+    let host = rest.strip_suffix(service)?.strip_suffix('-')?;
+    (!host.is_empty()).then_some(host)
 }
 
-/// `Some(catalogs)` when `service_id`'s profile is one whose plugins are served
-/// the transform: at least one engine is bound to it, and EVERY bound engine is
-/// a Trino engine egret provisioned, in JWT delegation mode (review I4).
-/// `catalogs` are the names of every catalog those engines attach.
-pub async fn lineage_catalogs_for_service_via(
+/// Whether `host` is the hostname of a pod egret's provisioner runs for the
+/// Trino engine `engine`. The provisioner renders two Deployments,
+/// `{engine}-coordinator` and `{engine}-worker`
+/// (`egret_provisioner::trino`), and a Deployment's pod is named
+/// `<deployment>-<pod-template-hash>-<suffix>`, which Kubernetes uses as the
+/// pod's hostname. So the host must be exactly that: the prefix and then two
+/// lowercase alphanumeric segments, nothing more. An engine whose name happens
+/// to extend another's cannot match it, because the remainder would have more
+/// than two segments.
+pub fn host_is_engine_pod(host: &str, engine: &str) -> bool {
+    let segment = |s: &str| {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    };
+    ["coordinator", "worker"].iter().any(|role| {
+        host.strip_prefix(engine)
+            .and_then(|r| r.strip_prefix('-'))
+            .and_then(|r| r.strip_prefix(role))
+            .and_then(|r| r.strip_prefix('-'))
+            .and_then(|r| r.split_once('-'))
+            .is_some_and(|(hash, suffix)| segment(hash) && segment(suffix))
+    })
+}
+
+/// The `pluginId` a coordinator pod of `engine` sends when polling `service`,
+/// with a placeholder pod suffix. `explain` decides eligibility through it, so
+/// explain and the download cannot disagree (fix round 2, N4).
+pub fn representative_plugin_id(engine: &str, service: &str) -> String {
+    format!("trino@{engine}-coordinator-explain-0-{service}")
+}
+
+/// The engines bound to `service_id` when the profile as a whole may be served
+/// the transform: at least one is bound, and EVERY bound engine is a Trino
+/// engine egret provisioned, in JWT delegation mode (review I4). Sorted by
+/// name. `None` otherwise.
+pub async fn eligible_bound_engines_via(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
 ) -> Result<Option<Vec<String>>, PolicyStoreError> {
-    let (bound, eligible): (i64, i64) = sqlx::query_as(
-        "SELECT count(*), count(*) FILTER ( \
-                WHERE type = 'trino' AND origin = 'provisioned' \
-                  AND spec->'trinoConfig'->>'delegationMode' = 'jwt') \
-           FROM engine_mgmt.engines WHERE authz_service_id = $1",
+    let rows: Vec<(String, bool)> = sqlx::query_as(
+        // `coalesce`: a spec with no `delegationMode` makes the comparison
+        // NULL, which is "not eligible", not a decode error.
+        "SELECT name, coalesce(type = 'trino' AND origin = 'provisioned' \
+                       AND spec->'trinoConfig'->>'delegationMode' = 'jwt', false) \
+           FROM engine_mgmt.engines WHERE authz_service_id = $1 ORDER BY name",
     )
     .bind(service_id)
-    .fetch_one(&mut *conn)
+    .fetch_all(&mut *conn)
     .await?;
-    if bound == 0 || bound != eligible {
+    if rows.is_empty() || rows.iter().any(|(_, ok)| !ok) {
+        return Ok(None);
+    }
+    Ok(Some(rows.into_iter().map(|(n, _)| n).collect()))
+}
+
+/// `Some(catalogs)` when the POLLER is served the transform (fix round 2, N1):
+///
+/// 1. its `pluginId` names `service_name`, the polled service;
+/// 2. the profile is eligible as a whole ([`eligible_bound_engines_via`]);
+/// 3. its hostname is a pod of one of those bound engines
+///    ([`host_is_engine_pod`]).
+///
+/// Anything else, an unknown host, an unbound or ineligible engine's host, a
+/// missing or malformed id, is `None`: the stored policies, untransformed.
+/// `catalogs` are every catalog the profile's engines attach.
+pub async fn lineage_catalogs_for_poll_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    service_name: &str,
+    plugin_id: Option<&str>,
+) -> Result<Option<Vec<String>>, PolicyStoreError> {
+    let Some(host) = plugin_host(plugin_id, service_name) else {
+        return Ok(None);
+    };
+    let Some(engines) = eligible_bound_engines_via(conn, service_id).await? else {
+        return Ok(None);
+    };
+    if !engines.iter().any(|e| host_is_engine_pod(host, e)) {
         return Ok(None);
     }
     let mut names: Vec<String> = crate::catalogs_for_service_via(conn, service_id)
@@ -410,11 +511,11 @@ mod tests {
 
     #[test]
     fn a_plugin_id_names_its_service_only_in_the_measured_shape() {
-        assert!(plugin_id_names_service(
-            Some("trino@e00d4f5be6a4-vg-trino"),
-            "vg-trino"
-        ));
-        assert!(plugin_id_names_service(Some("trino@pod-1-a-b"), "a-b"));
+        assert_eq!(
+            plugin_host(Some("trino@e00d4f5be6a4-vg-trino"), "vg-trino"),
+            Some("e00d4f5be6a4")
+        );
+        assert_eq!(plugin_host(Some("trino@pod-1-a-b"), "a-b"), Some("pod-1"));
         for bad in [
             None,
             Some(""),
@@ -423,8 +524,44 @@ mod tests {
             Some("trino@-svc"),
             Some("trino-host-svc"),
         ] {
-            assert!(!plugin_id_names_service(bad, "svc"), "{bad:?}");
+            assert_eq!(plugin_host(bad, "svc"), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn only_the_provisioners_pod_names_are_an_engines_hosts() {
+        for ok in [
+            "lake-coordinator-7d9f8c6b5-x2k4p",
+            "lake-worker-5c4b8d9f7-ab12c",
+        ] {
+            assert!(host_is_engine_pod(ok, "lake"), "{ok}");
+        }
+        for bad in [
+            "lake",
+            "lake-coordinator",
+            "lake-coordinator-7d9f8c6b5",
+            "lake-coordinator-7d9f8c6b5-x2k4p-extra",
+            "lake-gateway-7d9f8c6b5-x2k4p",
+            "lake2-coordinator-7d9f8c6b5-x2k4p",
+            "lake-coordinator-7D9F-x2k4p",
+            "e00d4f5be6a4",
+        ] {
+            assert!(!host_is_engine_pod(bad, "lake"), "{bad}");
+        }
+        // An engine whose name extends another's is not the other's pod.
+        assert!(!host_is_engine_pod(
+            "lake-coordinator-abc-coordinator-h-s",
+            "lake"
+        ));
+        assert!(host_is_engine_pod(
+            "lake-coordinator-abc-coordinator-h-s",
+            "lake-coordinator-abc"
+        ));
+        let rep = representative_plugin_id("lake", "svc-1");
+        assert!(host_is_engine_pod(
+            plugin_host(Some(&rep), "svc-1").unwrap(),
+            "lake"
+        ));
     }
 
     fn envelope(policies: Vec<Value>) -> ServicePolicies {

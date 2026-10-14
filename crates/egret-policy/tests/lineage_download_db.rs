@@ -50,6 +50,13 @@ struct Fx {
     name: String,
     id: i64,
     catalog: String,
+    /// The bound engine's name; its coordinator pod polls as
+    /// `trino@{engine}-coordinator-<hash>-<suffix>-{service}`.
+    engine: String,
+}
+
+fn pod_plugin(engine: &str, service: &str) -> String {
+    format!("trino@{engine}-coordinator-7d9f8c6b5-x2k4p-{service}")
 }
 
 /// A trino profile bound to one engine of `origin`/`mode`, with one attached
@@ -64,6 +71,7 @@ async fn setup(db: Db, origin: &str, mode: &str) -> Fx {
         .create_service(&name, "trino", &json!({}))
         .await
         .unwrap();
+    let engine_name = format!("e-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let engine: Uuid = if origin == "external" {
         sqlx::query_scalar(
             "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, status, origin, \
@@ -71,7 +79,7 @@ async fn setup(db: Db, origin: &str, mode: &str) -> Fx {
              VALUES ($1,'trino','','{}'::jsonb,'running','external','h',8443,'2.5.0',$2) \
              RETURNING id",
         )
-        .bind(format!("e-{}", Uuid::new_v4().simple()))
+        .bind(&engine_name)
         .bind(row.id)
         .fetch_one(&pool)
         .await
@@ -82,7 +90,7 @@ async fn setup(db: Db, origin: &str, mode: &str) -> Fx {
              VALUES ($1,'trino','egret',jsonb_build_object('trinoConfig', \
                      jsonb_build_object('delegationMode', $2::text)),'running',$3) RETURNING id",
         )
-        .bind(format!("e-{}", Uuid::new_v4().simple()))
+        .bind(&engine_name)
         .bind(mode)
         .bind(row.id)
         .fetch_one(&pool)
@@ -129,6 +137,7 @@ async fn setup(db: Db, origin: &str, mode: &str) -> Fx {
         name,
         id: row.id,
         catalog,
+        engine: engine_name,
     }
 }
 
@@ -147,7 +156,7 @@ fn uri(svc: &str, plugin: Option<&str>) -> String {
 async fn a_provisioned_jwt_trino_plugin_is_served_the_transform_and_nothing_is_stored() {
     let Some(db) = db().await else { return };
     let f = setup(db, "provisioned", "jwt").await;
-    let plugin = format!("trino@pod-0-{}", f.name);
+    let plugin = pod_plugin(&f.engine, &f.name);
 
     let (status, body) = download(&f.store, &uri(&f.name, Some(&plugin))).await;
     assert_eq!(status, StatusCode::OK);
@@ -172,7 +181,7 @@ async fn a_provisioned_jwt_trino_plugin_is_served_the_transform_and_nothing_is_s
         .any(|p| p["name"] == "egret-lineage-deny-catalog-schema-table-column"));
     assert_eq!(
         body["policyVersion"],
-        json!(1),
+        json!(version(&f.pool, f.id).await),
         "the served version is the stored one"
     );
 
@@ -191,20 +200,120 @@ async fn a_provisioned_jwt_trino_plugin_is_served_the_transform_and_nothing_is_s
 }
 
 #[tokio::test]
-async fn every_other_plugin_gets_the_stored_policies() {
+async fn every_other_poller_gets_the_stored_policies() {
     let Some(db) = db().await else { return };
-    // An external engine, an impersonate-mode engine, and on the eligible
-    // engine a poll with no pluginId or one naming another service.
+    // A pod of an external engine and of an impersonate-mode engine, each bound.
     for (origin, mode) in [("external", ""), ("provisioned", "impersonate")] {
         let f = setup(db.clone(), origin, mode).await;
-        let plugin = format!("trino@pod-0-{}", f.name);
-        let (status, body) = download(&f.store, &uri(&f.name, Some(&plugin))).await;
+        let (status, body) = download(
+            &f.store,
+            &uri(&f.name, Some(&pod_plugin(&f.engine, &f.name))),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert!(!names_lineage(&body), "{origin}/{mode}: {body}");
+        // A provisioned engine whose spec names no delegation mode at all is
+        // ineligible too, not an error.
+        if origin == "provisioned" {
+            sqlx::query("UPDATE engine_mgmt.engines SET spec = '{}'::jsonb WHERE name = $1")
+                .bind(&f.engine)
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let (status, body) = download(
+                &f.store,
+                &uri(&f.name, Some(&pod_plugin(&f.engine, &f.name))),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(!names_lineage(&body), "no mode: {body}");
+        }
     }
-    let f = setup(db, "provisioned", "jwt").await;
-    for plugin in [None, Some("trino@pod-0-another-service".to_string())] {
+    // On an eligible profile (fix round 2, N1): no pluginId, one naming another
+    // service, a well-formed id with an unknown host (the shape Task 5 measured
+    // from a container), and a pod of a provisioned JWT engine NOT bound here.
+    let f = setup(db.clone(), "provisioned", "jwt").await;
+    let other = setup(db, "provisioned", "jwt").await;
+    for plugin in [
+        None,
+        Some(pod_plugin(&f.engine, "another-service")),
+        Some(format!("trino@e00d4f5be6a4-{}", f.name)),
+        Some(pod_plugin(&other.engine, &f.name)),
+    ] {
         let (_, body) = download(&f.store, &uri(&f.name, plugin.as_deref())).await;
         assert!(!names_lineage(&body), "{plugin:?}: {body}");
     }
+    // The control: the bound engine's own worker pod is served the transform.
+    let worker = format!("trino@{}-worker-5c4b8d9f7-ab12c-{}", f.engine, f.name);
+    let (_, body) = download(&f.store, &uri(&f.name, Some(&worker))).await;
+    assert!(names_lineage(&body));
+}
+
+async fn version(pool: &sqlx::PgPool, id: i64) -> i64 {
+    sqlx::query_scalar("SELECT policy_version FROM policy.authz_services WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Fix round 2, N1(ii): a bind, an unbind and a delegation-mode change of a
+/// bound engine each bump the profile, so no cached transform outlives a
+/// change of eligibility. An unrelated engine edit bumps nothing.
+#[tokio::test]
+async fn binding_changes_bump_the_profiles_version() {
+    let Some(db) = db().await else { return };
+    let f = setup(db.clone(), "provisioned", "jwt").await;
+    let other = setup(db, "provisioned", "jwt").await;
+    let id = |name: &str| {
+        let pool = f.pool.clone();
+        let name = name.to_string();
+        async move {
+            sqlx::query_scalar::<_, Uuid>("SELECT id FROM engine_mgmt.engines WHERE name = $1")
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let e = id(&f.engine).await;
+
+    let v0 = version(&f.pool, f.id).await;
+    let w0 = version(&f.pool, other.id).await;
+    // Unbind.
+    sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = NULL WHERE id = $1")
+        .bind(e)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let v1 = version(&f.pool, f.id).await;
+    assert!(v1 > v0, "unbind: {v0} -> {v1}");
+    // Bind to another profile: that profile moves, this one does not.
+    sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = $2 WHERE id = $1")
+        .bind(e)
+        .bind(other.id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert!(version(&f.pool, other.id).await > w0, "bind");
+    assert_eq!(version(&f.pool, f.id).await, v1);
+    // Delegation mode of a bound engine.
+    let w1 = version(&f.pool, other.id).await;
+    sqlx::query(
+        "UPDATE engine_mgmt.engines SET spec = jsonb_set(spec, '{trinoConfig,delegationMode}', '\"impersonate\"') \
+          WHERE id = $1",
+    )
+    .bind(e)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let w2 = version(&f.pool, other.id).await;
+    assert!(w2 > w1, "mode change: {w1} -> {w2}");
+    // An unrelated edit (status) bumps nothing.
+    sqlx::query("UPDATE engine_mgmt.engines SET status = 'failed' WHERE id = $1")
+        .bind(e)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(version(&f.pool, other.id).await, w2);
 }

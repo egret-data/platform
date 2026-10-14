@@ -354,6 +354,56 @@ async fn govern(db: &Db, f: &Fixture) {
         }),
     )
     .await;
+    // Fix round 2 (N2, N3): hand-written `{public}` allows at the catalog and
+    // schema levels (DDL), and on the two special resources the principal
+    // keeps a narrow part of.
+    let allow = |name: &str, resources: serde_json::Value, accesses: &[&str]| {
+        serde_json::json!({
+            "name": name, "policyType": 0, "isEnabled": true, "resources": resources,
+            "policyItems": [{"users": [], "groups": ["public"], "roles": [],
+                "accesses": accesses.iter()
+                    .map(|a| serde_json::json!({"type": a, "isAllowed": true}))
+                    .collect::<Vec<_>>()}],
+            "denyPolicyItems": [], "allowExceptions": [], "denyExceptions": []
+        })
+    };
+    let ddl = ["create", "drop", "alter", "show", "grant", "revoke"];
+    for (name, body) in [
+        (
+            "hand public catalog ddl",
+            allow(
+                "hand public catalog ddl",
+                serde_json::json!({"catalog": lvl(&f.catalog_name)}),
+                &ddl,
+            ),
+        ),
+        (
+            "hand public schema ddl",
+            allow(
+                "hand public schema ddl",
+                serde_json::json!({"catalog": lvl(&f.catalog_name), "schema": lvl("*")}),
+                &ddl,
+            ),
+        ),
+        (
+            "hand public impersonate",
+            allow(
+                "hand public impersonate",
+                serde_json::json!({"trinouser": lvl("*")}),
+                &["impersonate"],
+            ),
+        ),
+        (
+            "hand public system properties",
+            allow(
+                "hand public system properties",
+                serde_json::json!({"systemproperty": lvl("*")}),
+                &["alter"],
+            ),
+        ),
+    ] {
+        hand_written(db, f, name, body).await;
+    }
 }
 
 struct Asker {
@@ -445,6 +495,28 @@ impl Asker {
         evaluate(
             &self.artifact,
             &self.request(who, access, table, column),
+            &self.def,
+            &self.config,
+        )
+    }
+
+    /// An access request on an arbitrary resource, with no tags.
+    fn ask(&self, who: &str, access: &str, levels: &[(&str, &str)]) -> Decision {
+        let mut resource = RequestResource::new();
+        for (k, v) in levels {
+            resource = resource.with(*k, *v);
+        }
+        evaluate(
+            &self.artifact,
+            &AccessRequest {
+                user: who.to_string(),
+                groups: BTreeSet::new(),
+                roles: BTreeSet::new(),
+                access_type: access.to_string(),
+                resource,
+                owner: None,
+                resolved_tags: Some(egret_ranger_eval::eval::UnenrichedTags::new(Vec::new())),
+            },
             &self.def,
             &self.config,
         )
@@ -577,6 +649,63 @@ async fn the_lineage_principal_never_writes_even_where_public_may() {
                     "{plugin:?}: egret-lineage must never be allowed `{w}` on {table:?}.{column:?}: {d:?}"
                 );
             }
+        }
+        // N3: catalog- and schema-level DDL, where `{public}` IS allowed it.
+        let cat = a.catalog.clone();
+        for levels in [
+            vec![("catalog", cat.as_str())],
+            vec![("catalog", cat.as_str()), ("schema", "sales")],
+        ] {
+            let d = a.ask("alice", "create", &levels);
+            assert!(
+                matches!(d, Decision::Allowed { .. }),
+                "{plugin:?} control {levels:?}: {d:?}"
+            );
+            for w in ["create", "drop", "alter", "show", "grant", "revoke"] {
+                let d = a.ask(LINEAGE_PRINCIPAL, w, &levels);
+                assert!(
+                    !matches!(d, Decision::Allowed { .. }),
+                    "{plugin:?}: egret-lineage must never be allowed `{w}` on {levels:?}: {d:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Fix round 2, N2: `{public}` may impersonate anyone and set any system
+/// session property. `egret-lineage` may impersonate only itself and set only
+/// `query_max_run_time`.
+#[tokio::test]
+async fn the_lineage_principal_keeps_only_the_narrow_specials() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+    govern(&db, &f).await;
+    for plugin in PLUGINS {
+        let a = Asker::new(&db, &f, plugin).await;
+        for (access, resource, value) in [
+            ("impersonate", "trinouser", "bob"),
+            ("alter", "systemproperty", "join_distribution_type"),
+        ] {
+            let d = a.ask("alice", access, &[(resource, value)]);
+            assert!(
+                matches!(d, Decision::Allowed { .. }),
+                "{plugin:?} control {resource}: {d:?}"
+            );
+            let d = a.ask(LINEAGE_PRINCIPAL, access, &[(resource, value)]);
+            assert!(
+                !matches!(d, Decision::Allowed { .. }),
+                "{plugin:?}: egret-lineage must not `{access}` {resource}={value}: {d:?}"
+            );
+        }
+        for (access, resource, value) in [
+            ("impersonate", "trinouser", LINEAGE_PRINCIPAL),
+            ("alter", "systemproperty", "query_max_run_time"),
+        ] {
+            let d = a.ask(LINEAGE_PRINCIPAL, access, &[(resource, value)]);
+            assert!(
+                matches!(d, Decision::Allowed { .. }),
+                "{plugin:?}: egret-lineage keeps `{access}` {resource}={value}: {d:?}"
+            );
         }
     }
 }
