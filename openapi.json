@@ -33136,7 +33136,7 @@
             }
           },
           "400": {
-            "description": "More than 100 entries (nothing is switched), or the body is not a bulk switch request: bad JSON, a missing or mistyped field, or no JSON content type (`code: invalid_body`)",
+            "description": "More than 100 entries (`code: too_many_triggers`; nothing is switched), or the body is not a bulk switch request: bad JSON, a missing or mistyped field, or no JSON content type (`code: invalid_body`)",
             "content": {
               "application/json": {
                 "schema": {

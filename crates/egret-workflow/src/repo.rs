@@ -518,6 +518,16 @@ impl FlowRepo {
     /// One draft, if it belongs to `workspace`. `NotFound` otherwise -- see
     /// the module comment on why the predicate is here and not in the caller.
     pub async fn get(&self, ws: Uuid, id: Uuid) -> Result<FlowRow> {
+        Self::get_on(&self.db.pool, ws, id).await
+    }
+
+    /// [`Self::get`] on a given executor: a transaction reads the draft in
+    /// its own snapshot, with the state it reads next.
+    pub async fn get_on<'e, E: sqlx::PgExecutor<'e>>(
+        executor: E,
+        ws: Uuid,
+        id: Uuid,
+    ) -> Result<FlowRow> {
         let row: Option<FlowRow> = sqlx::query_as(with_flow_names!(
             concat!(
                 "SELECT ",
@@ -528,7 +538,7 @@ impl FlowRepo {
         ))
         .bind(id)
         .bind(ws)
-        .fetch_optional(&self.db.pool)
+        .fetch_optional(executor)
         .await
         .map_err(db_err)?;
         row.ok_or_else(|| Error::NotFound("flow".into()))

@@ -23,7 +23,7 @@ use super::entry::{self, Detail, FlowCtx};
 use super::state::{db_err, last_executions, read_state, Key};
 use super::switch::{self, SwitchRefusal};
 use crate::namespaces::dependencies::{off_runtime, DraftRow, MAX_FLOWS};
-use crate::repo::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
+use crate::repo::{FlowRepo, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
 use crate::routes::{caller_may_manage, WorkflowState, WF_MANAGE, WF_READ};
 
 /// What a trigger is, as egret runs it: one of the three kinds it fires, or
@@ -326,16 +326,18 @@ pub(crate) async fn list_flow_triggers(
     Path((ws_slug, id)): Path<(String, Uuid)>,
 ) -> Result<Json<FlowTriggersDto>, TriggerRouteError> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
-    let row = st.repo.get(ctx.workspace_id.0, id).await?;
+    let may_manage = caller_may_manage(&st, &ctx).await?;
+
+    // The draft is read inside the snapshot, with the state: a save between
+    // two separate reads would pair the new source with the old rows.
+    let mut tx = snapshot(&st).await?;
+    let row = FlowRepo::get_on(&mut *tx, ctx.workspace_id.0, id).await?;
     let parsed = crate::spec::parse(&row.source).map_err(|e| {
         Error::InvalidInput(format!(
             "the flow's saved source does not parse, so its triggers are unknown: {}",
             e.message
         ))
     })?;
-    let may_manage = caller_may_manage(&st, &ctx).await?;
-
-    let mut tx = snapshot(&st).await?;
     let state = read_state(&mut tx, &[row.id]).await?;
     let flow = FlowCtx {
         id: row.id,
@@ -702,6 +704,8 @@ pub struct BulkResultsDto {
 pub const TRIGGER_BODY_INVALID: &str = "invalid_body";
 /// 413: the body is over the route's cap.
 pub const TRIGGER_BODY_TOO_LARGE: &str = "body_too_large";
+/// 400: the bulk body names more than [`MAX_BULK_TRIGGERS`] entries.
+pub const TOO_MANY_TRIGGERS: &str = "too_many_triggers";
 
 /// A body the extractor refused, after the permission check (as the KV bulk
 /// delete does): over the cap is a 413, anything else a 400, each with its
@@ -898,7 +902,7 @@ pub(crate) async fn set_trigger_disabled(
     request_body = SetTriggersDisabledRequest,
     responses(
         (status = 200, description = "A result per entry, in the order given. Each entry is switched in its own transaction, as the per-trigger route does, and a refusal (`ok: false` with its `code`: a flow outside this workspace is `not_found`, never a 403) does not stop the next. A Flow-trigger pass or a webhook request that read a switch before it changed may still fire once more after the answer.", body = BulkResultsDto),
-        (status = 400, description = "More than 100 entries (nothing is switched), or the body is not a bulk switch request: bad JSON, a missing or mistyped field, or no JSON content type (`code: invalid_body`)", body = egret_core::http::ErrorBody),
+        (status = 400, description = "More than 100 entries (`code: too_many_triggers`; nothing is switched), or the body is not a bulk switch request: bad JSON, a missing or mistyped field, or no JSON content type (`code: invalid_body`)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
         (status = 413, description = "The body is over 64 KiB (`code: body_too_large`); nothing is switched", body = egret_core::http::ErrorBody),
@@ -919,11 +923,14 @@ pub(crate) async fn set_triggers_disabled(
         )
     })?;
     if body.triggers.len() > MAX_BULK_TRIGGERS {
-        return Err(Error::InvalidInput(format!(
-            "{} triggers: a bulk switch takes at most {MAX_BULK_TRIGGERS}; nothing was switched",
-            body.triggers.len()
-        ))
-        .into());
+        return Err(TriggerRouteError::Coded {
+            status: StatusCode::BAD_REQUEST,
+            code: TOO_MANY_TRIGGERS,
+            message: format!(
+                "{} triggers: a bulk switch takes at most {MAX_BULK_TRIGGERS}; nothing was switched",
+                body.triggers.len()
+            ),
+        });
     }
     let mut results = Vec::with_capacity(body.triggers.len());
     for r in body.triggers {

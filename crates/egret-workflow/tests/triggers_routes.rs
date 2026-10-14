@@ -1763,6 +1763,11 @@ async fn bulk_switching_is_per_entry_and_bounded() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "too_many_triggers", "{body}");
+    assert_eq!(
+        body["error"],
+        "101 triggers: a bulk switch takes at most 100; nothing was switched"
+    );
     assert!(common::switched_off(&db, flow).await.is_empty());
     assert!(common::audit_mutations(&app).is_empty());
 
