@@ -48,6 +48,8 @@ export interface FilesWorld {
   uploadReplies?: Record<string, FilesReply>;
   /** While set, every download waits for it. */
   downloadGate?: Promise<void> | null;
+  /** While set, every upload (`POST …/files`) waits for it. */
+  uploadGate?: Promise<void> | null;
 }
 
 const enc = new TextEncoder();
@@ -181,6 +183,7 @@ export function serveFiles(world: FilesWorld): { requests: FilesRequest[]; store
         return new Response(rev.bytes.slice().buffer, { status: 200, headers: { "content-type": "application/octet-stream" } });
       }
       if (method === "POST" && route === "") {
+        if (world.uploadGate) await world.uploadGate;
         const reply = world.uploadReplies?.[p];
         if (reply) return json(reply);
         if (store.dirs.has(`${p}/`)) {

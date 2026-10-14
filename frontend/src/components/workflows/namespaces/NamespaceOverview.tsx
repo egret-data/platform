@@ -12,7 +12,7 @@ import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { isTerminalState } from "@/components/workflows/executionState";
 import { useNow } from "@/components/workflows/executions/polling";
 import { directChildNamespaces, EMPTY_SEGMENT_LABEL } from "@/components/workflows/namespaceTree";
-import { namespaceHref, type NamespaceTabProps } from "@/components/workflows/namespaces/namespaceTabs";
+import { namespaceHref, OWN_COUNTS_NOTE, type NamespaceTabProps } from "@/components/workflows/namespaces/namespaceTabs";
 import { ExecutionRow } from "@/routes/workflows/ExecutionsList";
 import { LIST_POLL_MS } from "@/routes/workflows/executionsListModel";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
@@ -44,7 +44,7 @@ export function NamespaceOverview({ ws, namespace, detail }: NamespaceTabProps) 
           />
         </div>
         <p className="mt-1 text-sm text-muted-foreground">
-          Counted in this namespace only; each child namespace counts its own.
+          {OWN_COUNTS_NOTE}
         </p>
       </section>
       <RecentExecutions ws={ws} namespace={namespace} />

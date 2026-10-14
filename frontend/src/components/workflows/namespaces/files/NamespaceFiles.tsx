@@ -60,6 +60,12 @@ export interface NamespaceFilesProps {
   /** A delete removed `path` (a file, or a folder and all it holds). */
   onPathDeleted?: (path: string) => void;
   /**
+   * A restore from the tree's Revisions wrote a new revision of `path`. The
+   * host's open copy reads it when it has no unsaved edits (the namespace
+   * page does this for its own tabs).
+   */
+  onPathRestored?: (path: string) => void;
+  /**
    * With `onOpenFile`: the host's open files with unsaved edits. Moving or
    * renaming them is refused until they are saved or closed; a delete says
    * their edits are lost. The namespace page tracks its own.
@@ -88,6 +94,12 @@ interface Picked {
   rel: string;
 }
 
+/** An import of more files than this asks first: each file is its own upload. */
+export const IMPORT_CONFIRM_ABOVE = 100;
+
+/** Why the writes are off while an import runs. */
+const IMPORT_RUNNING = "Wait for the import to finish.";
+
 const filesCount = (n: number) => (n === 1 ? "1 file" : `${n} files`);
 
 function useDebounced<T>(value: T, ms: number): T {
@@ -107,6 +119,7 @@ function FilesExplorer({
   onOpenFile,
   onPathMoved,
   onPathDeleted,
+  onPathRestored,
   dirtyPaths: hostDirty,
 }: NamespaceFilesProps) {
   const queryClient = useQueryClient();
@@ -139,6 +152,7 @@ function FilesExplorer({
   const [dialog, setDialog] = useState<Dialog>(null);
   const [importing, setImporting] = useState<{ done: number; total: number } | null>(null);
   const [importErrors, setImportErrors] = useState<string[]>([]);
+  const [confirmImport, setConfirmImport] = useState<Picked[] | null>(null);
   const [overwrite, setOverwrite] = useState<{ items: { path: string; file: File }[]; busy: boolean } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
@@ -149,8 +163,10 @@ function FilesExplorer({
   }, []);
   const noteId = useId();
 
-  const write: Enablement = readOnly ? { ok: false, reason: readOnlyReason } : { ok: true };
-  const writeReason = readOnly ? readOnlyReason : null;
+  // While an import runs every write waits for it: a second import, a new
+  // file or a move would race the uploads into the same folders.
+  const writeReason = readOnly ? readOnlyReason : importing ? IMPORT_RUNNING : null;
+  const write: Enablement = writeReason ? { ok: false, reason: writeReason } : { ok: true };
   /** Where New file, New folder and the imports put things: the selected folder, or the selected file's. */
   const targetDir = selected ? (isDirPath(selected) ? selected : parentDir(selected)) : "/";
 
@@ -265,13 +281,13 @@ function FilesExplorer({
     setSelected(entry.path);
     if (action === "revisions") setRevisionsFor(entry.path);
     else if (action === "copy-path") void copyPath(entry.path);
-    else if (readOnly) return;
+    else if (writeReason) return;
     else if (action === "delete") startDelete(entry);
     else setDialog({ kind: action, entry });
   };
 
   const importFiles = async (picked: Picked[]) => {
-    if (picked.length === 0) return;
+    if (picked.length === 0 || importing) return;
     const dir = targetDir;
     setImportErrors([]);
     setImporting({ done: 0, total: picked.length });
@@ -321,7 +337,9 @@ function FilesExplorer({
   const pick = (input: HTMLInputElement, relative: boolean) => {
     const files = [...(input.files ?? [])];
     input.value = "";
-    void importFiles(files.map((file) => ({ file, rel: (relative && file.webkitRelativePath) || file.name })));
+    const picked = files.map((file) => ({ file, rel: (relative && file.webkitRelativePath) || file.name }));
+    if (picked.length > IMPORT_CONFIRM_ABOVE) setConfirmImport(picked);
+    else void importFiles(picked);
   };
 
   const searchBody = () => {
@@ -421,7 +439,7 @@ function FilesExplorer({
         onToggle={toggle}
         onOpen={openFile}
         onAction={onAction}
-        onDrop={readOnly ? undefined : (from, dir) => void onDrop(from, dir)}
+        onDrop={writeReason ? undefined : (from, dir) => void onDrop(from, dir)}
         writeReason={writeReason}
       />
     );
@@ -456,9 +474,9 @@ function FilesExplorer({
             </a>
           </Button>
         </div>
-        {readOnly ? (
+        {writeReason ? (
           <p id={noteId} className="text-xs text-muted-foreground">
-            {readOnlyReason}
+            {writeReason}
           </p>
         ) : (
           <p className="text-xs text-muted-foreground">
@@ -602,6 +620,30 @@ function FilesExplorer({
           onClose={() => setDialog(null)}
         />
       ) : null}
+      <AlertDialog open={confirmImport !== null} onOpenChange={(o) => (o ? undefined : setConfirmImport(null))}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Import {filesCount(confirmImport?.length ?? 0)}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              They go into <span className="font-mono">{targetDir}</span>, each uploaded on its own, so this takes a while. Files that exist
+              already are not replaced without asking.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button
+              type="button"
+              onClick={() => {
+                const picked = confirmImport ?? [];
+                setConfirmImport(null);
+                void importFiles(picked);
+              }}
+            >
+              Import {filesCount(confirmImport?.length ?? 0)}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       {overwrite ? (
         <OverwriteDialog paths={overwrite.items.map((i) => i.path)} busy={overwrite.busy} onConfirm={() => void confirmOverwrite()} onClose={() => setOverwrite(null)} />
       ) : null}
@@ -612,7 +654,10 @@ function FilesExplorer({
           path={revisionsFor}
           readOnly={readOnly}
           readOnlyReason={readOnlyReason}
-          onRestored={(p) => setReloads((r) => ({ ...r, [p]: (r[p] ?? 0) + 1 }))}
+          onRestored={(p) => {
+            setReloads((r) => ({ ...r, [p]: (r[p] ?? 0) + 1 }));
+            onPathRestored?.(p);
+          }}
           onClose={() => setRevisionsFor(null)}
         />
       ) : null}

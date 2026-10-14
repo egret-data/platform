@@ -370,6 +370,42 @@ describe("the tree and the open tabs", () => {
     expect(requests.filter((r) => r.method === "PUT")).toHaveLength(0);
   });
 
+  it("a restore from the tree's Revisions reloads an open, unedited file tab; an edited one keeps its edits", async () => {
+    const user = userEvent.setup();
+    // The file tab beside Code, the tree in the other panel: both shown at once.
+    storeLayout({
+      panels: [
+        { id: "p1", size: 60, tabs: ["code", "file:a.py", "file:scripts/b.py"], active: "file:a.py" },
+        { id: "p2", size: 40, tabs: ["files"], active: "files" },
+      ],
+    });
+    renderFlow({ world: { files: { ...FILES, "/a.py": ["a = 0\n", "a = 1\n"], "/scripts/b.py": ["b = 0\n", "b = 2\n"] } } });
+    expect(await fileBox("a.py")).toHaveValue("a = 1\n");
+
+    const restoreFromTree = async (name: string) => {
+      const file = await row(name);
+      await openMenu(user, within(file).getByRole("button", { name: `Actions for ${name}` }));
+      await user.click(await screen.findByRole("menuitem", { name: "Revisions" }));
+      const drawer = await screen.findByRole("dialog", { name: `Revisions of ${name}` });
+      await user.click(await within(drawer).findByRole("button", { name: "Restore revision 1" }));
+      await waitFor(() => expect(toast.success).toHaveBeenCalledWith(`Restored revision 1 of ${name} as a new revision.`));
+      await user.keyboard("{Escape}");
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: `Revisions of ${name}` })).not.toBeInTheDocument());
+    };
+
+    await restoreFromTree("a.py");
+    await waitFor(async () => expect(await fileBox("a.py")).toHaveValue("a = 0\n"));
+    expect(within(strip(1)).getByRole("tab", { name: "a.py (/a.py)" })).toBeInTheDocument();
+
+    // An edited tab keeps what was typed.
+    await user.click(within(strip(1)).getByRole("tab", { name: "b.py (/scripts/b.py)" }));
+    type(await fileBox("b.py"), "b = 42\n");
+    await user.click(await row("scripts"));
+    await restoreFromTree("b.py");
+    expect(await fileBox("b.py")).toHaveValue("b = 42\n");
+    expect(within(strip(1)).getByRole("tab", { name: "b.py (/scripts/b.py), unsaved" })).toBeInTheDocument();
+  });
+
   it("deleting an open file from the tree closes its tab", async () => {
     const user = userEvent.setup();
     storeLayout(layoutWith("file:a.py", "files"));

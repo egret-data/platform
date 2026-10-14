@@ -116,7 +116,8 @@ export async function countFilesUnder(ws: string, namespace: string, path: strin
  * names the attempt: "The file was not saved".
  */
 export function fileErrorMessage(e: unknown, what: string): string {
-  const server = e instanceof Error && e.message ? e.message.replace(/\.$/, "") : "";
+  // Without `Error::Conflict`'s `conflict: ` prefix, as `serverSentence` reads it.
+  const server = e instanceof Error && e.message ? e.message.replace(/^conflict:\s*/i, "").replace(/\.$/, "") : "";
   if (e instanceof ApiError) {
     switch (e.status) {
       case 403:

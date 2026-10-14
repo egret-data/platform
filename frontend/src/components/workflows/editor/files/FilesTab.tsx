@@ -37,6 +37,13 @@ export function FilesTab({ ctx }: { ctx: EditorContext }) {
         dirtyPaths={host.dirtyPaths}
         onPathMoved={host.moved}
         onPathDeleted={host.deleted}
+        // A restore from the tree: an open, unedited file tab reads the new
+        // revision (as a restore from the tab's own Revisions does); unsaved
+        // edits are kept, and their save meets the stale-save question.
+        onPathRestored={(p) => {
+          const file = host.store.get(p);
+          if (file && !file.dirty) void file.reload();
+        }}
       />
     </div>
   );

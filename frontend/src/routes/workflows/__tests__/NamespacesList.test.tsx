@@ -73,6 +73,13 @@ describe("NamespacesList: the tree", () => {
     expect(rowText(bodyRows()[1]).slice(1)).toEqual(["0", "0", "7"]);
   });
 
+  it("says the counts are each namespace's own, as the table's caption", async () => {
+    serveNamespaces({ namespaces: ROWS });
+    renderList();
+    await screen.findByTestId("namespaces-table");
+    expect(screen.getByRole("table", { name: "Counted in this namespace only; each child namespace counts its own." })).toBe(table());
+  });
+
   it("indents a child deeper than its parent", async () => {
     serveNamespaces({ namespaces: ROWS });
     renderList();

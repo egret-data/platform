@@ -4,6 +4,12 @@ import type { WorkflowNamespaceDetailDto } from "@/api/generated/model";
  * The namespace detail's tabs, in Kestra OSS's order (W7d spec §4.2, the
  * user's ruling of 2026-10-14). The id is the URL's `:tab`.
  */
+/**
+ * How a namespace's counts are counted, said wherever they are shown (the
+ * Overview, the list): a parent's row is not its subtree's total.
+ */
+export const OWN_COUNTS_NOTE = "Counted in this namespace only; each child namespace counts its own.";
+
 export const NAMESPACE_TABS = ["overview", "flows", "executions", "dependencies", "files", "kv"] as const;
 export type NamespaceTab = (typeof NAMESPACE_TABS)[number];
 

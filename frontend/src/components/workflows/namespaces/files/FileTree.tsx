@@ -230,8 +230,10 @@ export function FileTree({ ws, namespace, rows, expanded, selected, onSelect, on
       {...dragProps(null)}
     >
       <p id={helpId} className="sr-only">
-        Arrow keys move through the files. Enter opens a file. F2 renames, Delete deletes, and Shift+F10 opens a file&apos;s actions, among
-        them Move to….
+        {/* F2 and Delete do nothing while writes are off, so they are not offered then. */}
+        {writeReason
+          ? "Arrow keys move through the files. Enter opens a file, and Shift+F10 opens a file's actions."
+          : "Arrow keys move through the files. Enter opens a file. F2 renames, Delete deletes, and Shift+F10 opens a file's actions, among them Move to…."}
       </p>
       {rows.map((row) => {
         if (row.kind === "loading") {

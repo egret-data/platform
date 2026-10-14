@@ -134,18 +134,23 @@ export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: strin
   // filters clear. The toggles still work on the results, but what they fold
   // is kept in memory for THIS filter only (`filterSig`): a new search starts
   // fully open again, and nothing about a transient search is persisted.
-  const filterSig = filtering ? JSON.stringify([q, nsFilter, stateFilter]) : "";
+  //
+  // A namespace's Flows tab (pinned) folds in memory too, starting open: the
+  // stored state belongs to the workspace tree, where a collapsed ancestor
+  // (`company` above `company.team`) would hide the whole tab.
+  const transient = filtering || pinned;
+  const filterSig = transient ? JSON.stringify([pinnedNamespace ?? null, q, nsFilter, stateFilter]) : "";
   const [filterFolds, setFilterFolds] = useState<{ sig: string; closed: Set<string> }>(() => ({
     sig: "",
     closed: new Set(),
   }));
   const closedNow = filterFolds.sig === filterSig ? filterFolds.closed : null;
   const isCollapsed = useCallback(
-    (path: string) => (filtering ? (closedNow?.has(path) ?? false) : isStoredCollapsed(path)),
-    [filtering, closedNow, isStoredCollapsed],
+    (path: string) => (transient ? (closedNow?.has(path) ?? false) : isStoredCollapsed(path)),
+    [transient, closedNow, isStoredCollapsed],
   );
   const onToggle = (path: string) => {
-    if (!filtering) return toggle(path);
+    if (!transient) return toggle(path);
     const next = new Set(closedNow ?? []);
     if (next.has(path)) next.delete(path);
     else next.add(path);

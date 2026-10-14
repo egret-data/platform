@@ -25,6 +25,7 @@ import {
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 import { baseName, classifyBytes, fileKindFor, imageMime, languageFor } from "./nsFilePaths";
 import { FILES_MANAGE_REASON, fileErrorMessage, isFileChanged, readRevision, serverSentence, writeFile } from "./nsFilesApi";
+import { MAX_OPEN_BYTES } from "./useNamespaceFile";
 
 /**
  * The revision a restore must find: the latest one when it is live, 0 when
@@ -180,7 +181,17 @@ export function RevisionsDrawer({
           </Alert>
         ) : null}
         {body}
-        {viewing !== null ? <RevisionContent ws={ws} namespace={namespace} path={path} revision={viewing} /> : null}
+        {viewing !== null ? (
+          <RevisionContent
+            // Its own state per revision: what one revision showed is never shown for another.
+            key={viewing}
+            ws={ws}
+            namespace={namespace}
+            path={path}
+            revision={viewing}
+            size={revisions?.find((r) => r.revision === viewing)?.size ?? 0}
+          />
+        ) : null}
         <AlertDialog open={conflict !== null} onOpenChange={(o) => (o || restoring !== null ? undefined : setConflict(null))}>
           <AlertDialogContent>
             <AlertDialogHeader>
@@ -215,10 +226,15 @@ export function RevisionsDrawer({
   );
 }
 
-/** One revision's content: read-only text, an image, or a download. */
-function RevisionContent({ ws, namespace, path, revision }: { ws: string; namespace: string; path: string; revision: number }) {
+/**
+ * One revision's content: read-only text, an image, or a download. Over
+ * {@link MAX_OPEN_BYTES} it is a download only, as an open file is: it is
+ * not read into the page at all.
+ */
+function RevisionContent({ ws, namespace, path, revision, size }: { ws: string; namespace: string; path: string; revision: number; size: number }) {
   const name = baseName(path);
-  const kind = fileKindFor(path);
+  const tooLarge = size > MAX_OPEN_BYTES;
+  const kind = tooLarge ? "binary" : fileKindFor(path);
   // Monaco's theme is global: name it so this view cannot turn other editors light.
   const isDark = useIsDark();
   // The generated hook, asked for the bytes (`rawBlob`): a revision never changes, so it is cached as is.
@@ -269,7 +285,7 @@ function RevisionContent({ ws, namespace, path, revision }: { ws: string; namesp
     if (shown?.kind === "image" && shown.url) return <img src={shown.url} alt={`Revision ${revision} of ${name}`} className="max-h-64 max-w-full object-contain" />;
     return (
       <p className="text-sm text-muted-foreground">
-        Revision {revision} is not shown here.{" "}
+        {tooLarge ? `Revision ${revision} is larger than ${MAX_OPEN_BYTES / 1024 / 1024} MB, so it is not shown here.` : `Revision ${revision} is not shown here.`}{" "}
         <a className="underline underline-offset-2 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none" href={download} download={name}>
           Download revision {revision}
         </a>{" "}

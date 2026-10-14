@@ -4,7 +4,7 @@ import { FolderTree } from "lucide-react";
 import { useWorkflowListNamespaces } from "@/api/generated/workflow/workflow";
 import type { WorkflowNamespaceDto } from "@/api/generated/model";
 import { Button } from "@/components/ui/button";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { ListPageShell } from "@/components/explore/ListPageShell";
@@ -16,7 +16,7 @@ import {
   namespaceContains,
   type NamespaceRowNode,
 } from "@/components/workflows/namespaceTree";
-import { namespaceHref } from "@/components/workflows/namespaces/namespaceTabs";
+import { namespaceHref, OWN_COUNTS_NOTE } from "@/components/workflows/namespaces/namespaceTabs";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
 /** The table's column count, for the skeleton. */
@@ -126,6 +126,8 @@ export default function NamespacesList() {
           </div>
         ) : (
           <Table data-testid="namespaces-table">
+            {/* A parent's row is not its subtree's total, as the Overview says too. */}
+            <TableCaption className="mt-0 mb-2 caption-top text-left">{OWN_COUNTS_NOTE}</TableCaption>
             <TableHeader>
               <TableRow>
                 <TableHead>Namespace</TableHead>

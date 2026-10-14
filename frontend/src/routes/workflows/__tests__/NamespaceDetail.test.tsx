@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import WorkflowsRoutes from "@/routes/workflows/WorkflowsRoutes";
+import { nsCollapseKey } from "@/routes/workflows/FlowsList";
 import { NS_WS, nsExecution, nsFlow, nsRow, serveNamespaces, type NamespaceWorld } from "./fakeNamespaceServer";
 
 /**
@@ -198,6 +199,23 @@ describe("NamespaceDetail: Flows and Executions, pinned to the namespace", () =>
     expect(screen.getByLabelText("State")).toBeInTheDocument();
     // The namespace page owns the one h1.
     expect(screen.getAllByRole("heading", { level: 1 }).map((h) => h.textContent)).toEqual(["company.team"]);
+  });
+
+  it("Flows ignores the workspace tree's stored collapse: a collapsed ancestor does not hide the tab", async () => {
+    // The workspace list left `company` and `company.team` collapsed.
+    localStorage.setItem(nsCollapseKey(NS_WS), JSON.stringify(["company", "company.team"]));
+    try {
+      const user = userEvent.setup();
+      renderAt(at("company.team", "flows"));
+      expect(await screen.findByRole("link", { name: "sync" }, LAZY)).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "load" })).toBeInTheDocument();
+      // Folding here stays here: the workspace tree's stored state is untouched.
+      await user.click(screen.getByRole("button", { name: /company\.team\.etl|etl/ }));
+      expect(screen.queryByRole("link", { name: "load" })).toBeNull();
+      expect(JSON.parse(localStorage.getItem(nsCollapseKey(NS_WS)) ?? "[]")).toEqual(["company", "company.team"]);
+    } finally {
+      localStorage.removeItem(nsCollapseKey(NS_WS));
+    }
   });
 
   it("Flows says when the namespace has no flow of its own or below", async () => {

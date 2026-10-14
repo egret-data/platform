@@ -261,6 +261,52 @@ describe("creating and importing", () => {
     expect(toast.success).toHaveBeenCalledWith("Imported 2 files into /scripts/.");
   });
 
+  it("keeps every write off while an import runs, saying why", async () => {
+    const user = userEvent.setup();
+    let open!: () => void;
+    renderTab({ world: { uploadGate: new Promise<void>((r) => (open = r)) } });
+    await findItem("a.py");
+    await user.upload(screen.getByLabelText("Choose files to import"), [new File(["1"], "one.txt"), new File(["2"], "two.txt")]);
+    expect(await screen.findByRole("status")).toHaveTextContent("Importing 0 of 2 files");
+    for (const name of ["New file", "New folder", "Import files", "Import a folder"]) {
+      const b = screen.getByRole("button", { name });
+      expect(b).toBeDisabled();
+      expect(b).toHaveAccessibleDescription("Wait for the import to finish.");
+    }
+    // No drag and drop, and no F2 rename, while it runs.
+    expect(item("a.py")).toHaveAttribute("draggable", "false");
+    await user.click(item("a.py"));
+    await user.keyboard("{F2}");
+    expect(screen.queryByRole("dialog", { name: "Rename a.py" })).not.toBeInTheDocument();
+
+    open();
+    await waitFor(() => expect(sent("POST")).toHaveLength(2));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Import files" })).toBeEnabled());
+    expect(item("a.py")).toHaveAttribute("draggable", "true");
+  });
+
+  it("asks before importing more than 100 files: Cancel sends nothing, Import sends them all", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await findItem("a.py");
+    const many = Array.from({ length: 101 }, (_, i) => new File([String(i)], `f${String(i).padStart(3, "0")}.txt`));
+    await user.upload(screen.getByLabelText("Choose files to import"), many);
+    let ask = await screen.findByRole("alertdialog", { name: "Import 101 files?" });
+    await user.click(within(ask).getByRole("button", { name: "Cancel" }));
+    expect(sent("POST")).toHaveLength(0);
+
+    await user.upload(screen.getByLabelText("Choose files to import"), many);
+    ask = await screen.findByRole("alertdialog", { name: "Import 101 files?" });
+    await user.click(within(ask).getByRole("button", { name: "Import 101 files" }));
+    await waitFor(() => expect(sent("POST")).toHaveLength(101), { timeout: 10_000 });
+
+    // A hundred is not asked about.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Import files" })).toBeEnabled());
+    await user.upload(screen.getByLabelText("Choose files to import"), many.slice(0, 100).map((f) => new File(["x"], `again-${f.name}`)));
+    await waitFor(() => expect(sent("POST")).toHaveLength(201), { timeout: 10_000 });
+    expect(screen.queryByRole("alertdialog", { name: /^Import/ })).not.toBeInTheDocument();
+  });
+
   it("shows the server's 413 for a file over the cap, and imports the rest", async () => {
     const user = userEvent.setup();
     renderTab({
@@ -473,6 +519,30 @@ describe("revisions", () => {
   });
 });
 
+describe("revisions over 5 MB", () => {
+  it("offers a revision over 5 MB for download only, without reading it; a small one is still shown", async () => {
+    const user = userEvent.setup();
+    const big = new Uint8Array(5 * 1024 * 1024 + 1).fill(0x61);
+    renderTab({ world: { files: { ...FILES, "/big.txt": ["small\n", big] } } });
+    await user.click(await findItem("big.txt"));
+    await user.click(within(item("big.txt")).getByRole("button", { name: "Actions for big.txt" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Revisions" }));
+    const drawer = await screen.findByRole("dialog", { name: "Revisions of big.txt" });
+    await within(drawer).findByRole("list", { name: "Revisions of big.txt" });
+
+    await user.click(within(drawer).getByRole("button", { name: "View revision 2" }));
+    expect(await within(drawer).findByText(/Revision 2 is larger than 5 MB, so it is not shown here/)).toBeInTheDocument();
+    expect(within(drawer).getByRole("link", { name: "Download revision 2" }).getAttribute("href")).toBe(
+      `/api/ws/${FILES_WS}/workflows/namespaces/${NS}/files?path=%2Fbig.txt&revision=2`,
+    );
+    expect(within(drawer).queryByRole("textbox", { name: "Revision 2 of big.txt" })).toBeNull();
+    expect(sent("GET").filter((r) => r.query.get("path") === "/big.txt" && r.query.get("revision") === "2")).toHaveLength(0);
+
+    await user.click(within(drawer).getByRole("button", { name: "View revision 1" }));
+    expect(await within(drawer).findByRole("textbox", { name: "Revision 1 of big.txt" })).toHaveValue("small\n");
+  });
+});
+
 describe("opening a file", () => {
   it("reads the revision from stats, then the bytes AT that revision, into Monaco with the extension's language", async () => {
     const user = userEvent.setup();
@@ -602,7 +672,7 @@ describe("saving", () => {
     const box = await editor("a.py");
     await user.type(box, "!");
     await user.click(screen.getByRole("button", { name: "Save" }));
-    expect(await screen.findByText("The file was not saved: conflict: the path is busy (a move or another write holds it); try again.")).toBeInTheDocument();
+    expect(await screen.findByText("The file was not saved: the path is busy (a move or another write holds it); try again.")).toBeInTheDocument();
     expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(box).toHaveValue("x = 1\n!");
   });
@@ -749,6 +819,12 @@ describe("a read-only viewer (no workflow:manage)", () => {
     const save = screen.getByRole("button", { name: "Save" });
     expect(save).toBeDisabled();
     expect(save).toHaveAccessibleDescription(REASON);
+  });
+
+  it("is not told about F2 and Delete, which do nothing for it", async () => {
+    renderTab({ canManage: false });
+    await findItem("a.py");
+    expect(tree()).toHaveAccessibleDescription("Arrow keys move through the files. Enter opens a file, and Shift+F10 opens a file's actions.");
   });
 
   it("cannot restore a revision, and is told why", async () => {
