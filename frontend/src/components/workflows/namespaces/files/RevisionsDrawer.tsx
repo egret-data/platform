@@ -10,6 +10,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useIsDark } from "@/hooks/useIsDark";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { EmptyState } from "@/components/explore/EmptyState";
 import {
@@ -218,6 +219,8 @@ export function RevisionsDrawer({
 function RevisionContent({ ws, namespace, path, revision }: { ws: string; namespace: string; path: string; revision: number }) {
   const name = baseName(path);
   const kind = fileKindFor(path);
+  // Monaco's theme is global: name it so this view cannot turn other editors light.
+  const isDark = useIsDark();
   // The generated hook, asked for the bytes (`rawBlob`): a revision never changes, so it is cached as is.
   const query = useWorkflowDownloadNamespaceFile(
     ws,
@@ -256,6 +259,7 @@ function RevisionContent({ ws, namespace, path, revision }: { ws: string; namesp
             height="100%"
             path={`egret-nsfile-revision-${revision}/${name}`}
             language={languageFor(path)}
+            theme={isDark ? "vs-dark" : "vs"}
             defaultValue={shown.text}
             options={{ ariaLabel: `Revision ${revision} of ${name}`, readOnly: true, minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: 13 }}
           />

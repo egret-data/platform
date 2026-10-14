@@ -6,6 +6,7 @@ import MonacoEditor from "@/components/monaco/MonacoEditor";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useIsDark } from "@/hooks/useIsDark";
 import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
 import { StaleSaveDialog } from "@/components/workflows/StaleSaveDialog";
 import type { Enablement } from "@/components/workflows/draftState";
@@ -267,6 +268,10 @@ function FileBody({
   readOnly: boolean;
   onMount: OnMount;
 }) {
+  // Named here as well as defaulted by `MonacoEditor`: Monaco's theme is
+  // global, so an editor that names none would turn the flow's Code tab
+  // beside it light in dark mode.
+  const isDark = useIsDark();
   // Error first (FE-STATE-1).
   if (file.status === "error") {
     return (
@@ -299,6 +304,7 @@ function FileBody({
         height="100%"
         path={modelPath}
         language={loaded.language}
+        theme={isDark ? "vs-dark" : "vs"}
         defaultValue={file.text}
         onChange={(v) => file.setText(v ?? "")}
         onMount={onMount}
