@@ -12,6 +12,7 @@ import { StateChip } from "@/components/workflows/StateChip";
 import {
   FLOW_DISABLED_STATUS,
   kindLabel,
+  MANAGE_REASON,
   shortType,
   statusText,
   switchEnablement,
@@ -71,16 +72,25 @@ export function TriggersTable({
   const keys = rows.map(selectionKey);
   const selectedCount = keys.filter((k) => selection.has(k)).length;
   const all = rows.length > 0 && selectedCount === rows.length;
-  const selectReason = manage ? undefined : "You need workflow:manage";
+  const selectNoteId = `${idBase}-select-note`;
+  const selectDescribedBy = manage ? undefined : selectNoteId;
 
   return (
+    <div className="grid gap-1">
+    {manage ? null : (
+      // Why the selection boxes are disabled, as text the boxes name in `aria-describedby` (FE-ACTION-4).
+      <p id={selectNoteId} className="text-xs text-muted-foreground">
+        <span aria-hidden>Selecting triggers: </span>
+        {MANAGE_REASON}
+      </p>
+    )}
     <Table data-testid="triggers-table">
       <TableHeader>
         <TableRow>
           <TableHead className="w-8">
             <Checkbox
               aria-label="Select all triggers"
-              title={selectReason}
+              aria-describedby={selectDescribedBy}
               disabled={!manage || rows.length === 0}
               checked={all ? true : selectedCount > 0 ? "indeterminate" : false}
               onCheckedChange={(c) => onSelectionChange(c === true ? new Set(keys) : new Set())}
@@ -125,8 +135,9 @@ export function TriggersTable({
           const key = keys[i];
           const ctx = contextOf(row);
           const busy = isBusy(row);
-          const enablement = switchEnablement(row, { manage, busy });
+          const enablement = switchEnablement(row, { manage });
           const reasonId = `${idBase}-reason-${i}`;
+          const busyId = `${idBase}-busy-${i}`;
           const on = !row.runtime_disabled && !row.yaml_disabled;
           const KindIcon = KIND_ICONS[row.kind] ?? Puzzle;
           const status = statusText(row, ctx);
@@ -135,7 +146,7 @@ export function TriggersTable({
               <TableCell>
                 <Checkbox
                   aria-label={`Select ${row.trigger_id}`}
-                  title={selectReason}
+                  aria-describedby={selectDescribedBy}
                   disabled={!manage}
                   checked={selection.has(key)}
                   onCheckedChange={(c) => {
@@ -202,12 +213,24 @@ export function TriggersTable({
                   <Switch
                     checked={on}
                     disabled={!enablement.ok}
+                    // In flight: still focusable, so the keyboard focus stays on it (a `disabled`
+                    // button drops focus to the page); the click is ignored until the answer.
+                    aria-disabled={enablement.ok && busy ? true : undefined}
                     aria-label={`Trigger ${row.trigger_id} enabled`}
-                    aria-describedby={enablement.ok ? undefined : reasonId}
+                    aria-describedby={!enablement.ok ? reasonId : busy ? busyId : undefined}
                     title={enablement.ok ? (on && ctx.flowDisabled ? FLOW_DISABLED_STATUS : undefined) : enablement.reason}
-                    onCheckedChange={(c) => onToggle(row, c)}
+                    onCheckedChange={(c) => {
+                      if (!busy) onToggle(row, c);
+                    }}
                   />
-                  {busy ? <Loader2 aria-hidden className="h-4 w-4 animate-spin text-muted-foreground" /> : null}
+                  {busy ? (
+                    <>
+                      <Loader2 aria-hidden className="h-4 w-4 animate-spin text-muted-foreground" />
+                      <span id={busyId} className="sr-only">
+                        Switching…
+                      </span>
+                    </>
+                  ) : null}
                   {enablement.ok ? null : (
                     <span id={reasonId} className="text-xs text-muted-foreground">
                       {enablement.reason}
@@ -229,5 +252,6 @@ export function TriggersTable({
         })}
       </TableBody>
     </Table>
+    </div>
   );
 }

@@ -9,6 +9,7 @@ import { FakeWorkflowServer, FLOW_ID, WS } from "@/routes/workflows/__tests__/fa
 import { flowEntry, flowTriggers, otherEntry, scheduleEntry, webhookEntry } from "./triggerFixtures";
 import { renderTriggersTab } from "./renderTriggersTab";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
+import { TRIGGERS_POLL_MS } from "@/components/workflows/triggers/FlowTriggersTab";
 
 const FLOW_TRIGGERS = `/api/ws/${WS}/workflows/flows/${FLOW_ID}/triggers`;
 const BULK = `/api/ws/${WS}/workflows/triggers/disabled`;
@@ -104,10 +105,20 @@ describe("FlowTriggersTab: the switch", () => {
     await userEvent.click(hook);
     await waitFor(() => expect(server.callsTo("PUT", switchPath("hook"))).toHaveLength(1));
     expect(server.callsTo("PUT", switchPath("hook"))[0].body).toEqual({ disabled: true, recover_missed: false });
-    // Asked, not answered: the switch still shows the server's state.
+    // Asked, not answered: the switch still shows the server's state, and keeps the focus,
+    // ignoring a second click.
     expect(await theSwitch("hook")).toBeChecked();
+    expect(hook).toHaveAttribute("aria-disabled", "true");
+    // Not `disabled`: a browser blurs a focused button that becomes disabled (jsdom does not,
+    // so `toHaveFocus` alone cannot tell).
+    expect(hook).toBeEnabled();
+    expect(hook).toHaveFocus();
+    await userEvent.click(hook);
     release();
     await waitFor(async () => expect(await theSwitch("hook")).not.toBeChecked());
+    expect(server.callsTo("PUT", switchPath("hook"))).toHaveLength(1);
+    expect(hook).toHaveFocus();
+    expect(hook).not.toHaveAttribute("aria-disabled");
     expect(statusOf("hook")).toMatch(/^Switched off by Ana Lima /);
     expect(toast.success).toHaveBeenCalledWith("Switched hook off.");
     // FE-ACTION-2: the flow's triggers are read again, and the workspace's list is stale.
@@ -210,6 +221,9 @@ describe("FlowTriggersTab: bulk", () => {
     await waitFor(async () => expect(await theSwitch("daily")).not.toBeChecked());
     expect(await theSwitch("hook")).toBeChecked();
     expect(toast.success).toHaveBeenCalledWith("Switched 1 trigger off.");
+    // Answered: the selection is cleared; the refused row is named above.
+    expect(screen.getByRole("checkbox", { name: "Select daily" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Select hook" })).not.toBeChecked();
   });
 
   it("asks once, in its bulk form, when the selection holds an overdue schedule", async () => {
@@ -285,7 +299,12 @@ describe("FlowTriggersTab: banners, empty, read-only", () => {
       const s = await theSwitch(id);
       expect(s).toBeDisabled();
       expect(s).toHaveAccessibleDescription("You need workflow:manage");
-      expect(screen.getByRole("checkbox", { name: `Select ${id}` })).toBeDisabled();
+      const box = screen.getByRole("checkbox", { name: `Select ${id}` });
+      expect(box).toBeDisabled();
+      expect(box).toHaveAccessibleDescription("You need workflow:manage");
+      // From visible text the box names, not a hover-only `title`.
+      expect(box).not.toHaveAttribute("title");
+      expect(document.getElementById(box.getAttribute("aria-describedby")!)).toHaveTextContent("You need workflow:manage");
     }
     expect(screen.getByRole("checkbox", { name: "Select all triggers" })).toBeDisabled();
     for (const name of ["Enable", "Disable"]) {
@@ -295,5 +314,86 @@ describe("FlowTriggersTab: banners, empty, read-only", () => {
     }
     // No fieldset or other ancestor disables them for the harness: each control is disabled itself.
     expect(document.querySelector("fieldset")).toBeNull();
+  });
+});
+
+describe("FlowTriggersTab: refresh and failures", () => {
+  it("reads the triggers again every 30 seconds, only while the browser tab is visible", async () => {
+    eachKind();
+    const { client } = renderTriggersTab(server);
+    await theSwitch("daily");
+    const query = client.getQueryCache().find({ queryKey: workflowsKeys.flowTriggers(FLOW_ID) })!;
+    expect(TRIGGERS_POLL_MS).toBe(30_000);
+    expect(query.options).toMatchObject({ refetchInterval: 30_000, refetchIntervalInBackground: false });
+  });
+
+  it("keeps the dialog open with the choice on a coded refusal (recover_missed_unknown)", async () => {
+    server.triggers = flowTriggers({
+      triggers: [
+        scheduleEntry(
+          { runtime_disabled: true, effective_disabled: true },
+          { next_evaluation_date: OVERDUE, missed_ticks: { count: 3, more: false }, recover_missed_schedules: "SOMETIMES" },
+        ),
+      ],
+    });
+    server.triggerPutReply = {
+      status: 409,
+      body: { error: "conflict: recoverMissedSchedules SOMETIMES is not ALL, NONE or LAST", code: "recover_missed_unknown" },
+    };
+    renderTriggersTab(server);
+    await userEvent.click(await theSwitch("daily"));
+    const dialog = await screen.findByRole("dialog", { name: "Enable trigger" });
+    await userEvent.click(within(dialog).getByRole("radio", { name: /^Recover missed runs/ }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Enable" }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(toast.error.mock.calls[0][0]).toContain("recoverMissedSchedules SOMETIMES is not ALL, NONE or LAST");
+    expect(screen.getByRole("dialog", { name: "Enable trigger" })).toBeInTheDocument();
+    expect(within(screen.getByRole("dialog")).getByRole("radio", { name: /^Recover missed runs/ })).toBeChecked();
+    // Behind the open (modal) dialog, the switch has not moved.
+    expect(screen.getByRole("switch", { name: "Trigger daily enabled", hidden: true })).not.toBeChecked();
+  });
+
+  it("says a trigger the flow no longer declares is gone, on a 404", async () => {
+    eachKind();
+    server.triggerPutReply = { status: 404, body: { error: "not found: trigger" } };
+    renderTriggersTab(server);
+    await userEvent.click(await theSwitch("hook"));
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(toast.error).toHaveBeenCalledWith("hook was not switched off: This trigger no longer exists in the flow; reload.");
+    expect(await theSwitch("hook")).toBeChecked();
+  });
+
+  it("shows a refused bulk request's sentence and keeps the selection", async () => {
+    eachKind();
+    server.bulkReply = { status: 400, body: { error: "bad request: at most 100 triggers per request" } };
+    renderTriggersTab(server);
+    await theSwitch("daily");
+    await userEvent.click(screen.getByRole("checkbox", { name: "Select daily" }));
+    await userEvent.click(screen.getByRole("button", { name: "Disable" }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(toast.error).toHaveBeenCalledWith("The triggers were not switched off: bad request: at most 100 triggers per request");
+    expect(screen.getByRole("checkbox", { name: "Select daily" })).toBeChecked();
+    expect(await theSwitch("daily")).toBeChecked();
+    expect(screen.queryByTestId("bulk-refusals")).not.toBeInTheDocument();
+  });
+
+  it("keeps the focus on a bulk button while its request runs", async () => {
+    eachKind();
+    let release!: () => void;
+    server.putGate = new Promise((r) => (release = r));
+    renderTriggersTab(server);
+    await theSwitch("daily");
+    await userEvent.click(screen.getByRole("checkbox", { name: "Select daily" }));
+    const disable = screen.getByRole("button", { name: "Disable" });
+    await userEvent.click(disable);
+    await waitFor(() => expect(disable).toHaveAttribute("aria-disabled", "true"));
+    // Not `disabled`, which a browser would blur (jsdom keeps the focus either way).
+    expect(disable).toBeEnabled();
+    expect(disable).toHaveFocus();
+    await userEvent.click(disable);
+    release();
+    await waitFor(async () => expect(await theSwitch("daily")).not.toBeChecked());
+    expect(server.callsTo("PUT", BULK)).toHaveLength(1);
+    expect(disable).toHaveFocus();
   });
 });

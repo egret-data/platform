@@ -16,10 +16,11 @@ import { selectionKey, TriggersTable } from "@/components/workflows/triggers/Tri
 import { bannersFor, MANAGE_REASON, type TriggerRow } from "@/components/workflows/triggers/triggersModel";
 import { useTriggerSwitch } from "@/components/workflows/triggers/useTriggerSwitch";
 
-/** A failed read, in words (FE-COPY-2): the server's sentence, or what to do. */
-const readError = (e: unknown) =>
-  e instanceof ApiError && e.message ? `${e.message}.` : "the request failed. Check your connection and try again.";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
+
+/** A failed read, in words (FE-COPY-2): the server's sentence, ending once, or what to do. */
+const readError = (e: unknown) =>
+  e instanceof ApiError && e.message ? `${e.message.replace(/\.+$/, "")}.` : "the request failed. Check your connection and try again.";
 
 /** How often the tab reads the triggers again while it is shown (spec §4.1). */
 export const TRIGGERS_POLL_MS = 30_000;
@@ -59,8 +60,9 @@ export default function FlowTriggersTab({
     },
   });
   const page = query.data?.status === 200 ? query.data.data : undefined;
-  const sw = useTriggerSwitch(ws);
   const [selection, setSelection] = useState<Set<string>>(() => new Set());
+  // A bulk action that the server answered clears the selection; its refusals are listed by name.
+  const sw = useTriggerSwitch(ws, { onBulkAnswered: () => setSelection(new Set()) });
   const [params, setParams] = useSearchParams();
   const reasonsId = useId();
   const openId = params.get("trigger");
@@ -79,7 +81,7 @@ export default function FlowTriggersTab({
       </Alert>
     );
   }
-  if (!page) return <ListSkeleton cols={8} />;
+  if (!page) return <ListSkeleton cols={9} />;
 
   if (page.triggers.length === 0) {
     return (
@@ -104,9 +106,7 @@ export default function FlowTriggersTab({
     ? { ok: false, reason: MANAGE_REASON }
     : selected.length === 0
       ? { ok: false, reason: "Select triggers first" }
-      : sw.anyBusy
-        ? { ok: false, reason: "Switching…" }
-        : { ok: true };
+      : { ok: true };
 
   const detailsHref = (row: TriggerRow) => {
     const next = new URLSearchParams(params);
@@ -131,11 +131,11 @@ export default function FlowTriggersTab({
       ) : null}
       <div className="flex flex-col items-start gap-1">
         <div className="flex flex-wrap items-center gap-2">
-          <ReasonButton enablement={bulk} reasonId={`${reasonsId}-enable`} variant="outline" onClick={() => sw.switchMany(selected, true)}>
+          <ReasonButton enablement={bulk} reasonId={`${reasonsId}-enable`} variant="outline" busy={sw.anyBusy} onClick={() => sw.switchMany(selected, true)}>
             <Power aria-hidden />
             Enable
           </ReasonButton>
-          <ReasonButton enablement={bulk} reasonId={`${reasonsId}-disable`} variant="outline" onClick={() => sw.switchMany(selected, false)}>
+          <ReasonButton enablement={bulk} reasonId={`${reasonsId}-disable`} variant="outline" busy={sw.anyBusy} onClick={() => sw.switchMany(selected, false)}>
             <PowerOff aria-hidden />
             Disable
           </ReasonButton>
@@ -186,6 +186,7 @@ export default function FlowTriggersTab({
         detailsHref={detailsHref}
       />
       <TriggerDetailsDrawer
+        key={openId ?? ""}
         open={openId !== null}
         onClose={closeDrawer}
         triggerId={openId ?? ""}

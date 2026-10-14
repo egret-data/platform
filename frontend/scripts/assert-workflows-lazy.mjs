@@ -241,14 +241,14 @@ const MARKERS = [
   ["src/components/workflows/namespaces/kv/KvValueDrawer.tsx", "Read in a flow with", "namespace-tab"],
   ["src/components/workflows/namespaces/kv/InheritedKvDrawer.tsx", "Overridden by this namespace", "namespace-tab"],
   // The flow's Triggers tab (W7e Task 6), in the flow pages' chunk (`FlowDetail.tsx` imports it):
-  // the tab's empty title; the drawer's not-declared note; the dialog's Skip choice. Flagged
+  // the tab's empty title; the drawer's hidden-key note; the dialog's Skip choice. Flagged
   // `editor`, so they stay out of the flow list's chunk. The table, the model, the banners and the
   // switch hook are shared with the global Triggers page (Task 7), so they are guarded against the
   // entry only: the Last evaluated tooltip; `FLOW_DISABLED_STATUS`; the banners' test id; the
   // bulk switch's failure sentence. Each was proven by a scratch static import from `App.tsx`
   // (W7e task-6-report.md, "Bundle proof").
   ["src/components/workflows/triggers/FlowTriggersTab.tsx", "This flow has no triggers", "editor"],
-  ["src/components/workflows/triggers/TriggerDetailsDrawer.tsx", "The saved draft no longer declares this trigger; reload.", "editor"],
+  ["src/components/workflows/triggers/TriggerDetailsDrawer.tsx", "The key is hidden; Reveal under Webhook shows it.", "editor"],
   ["src/components/workflows/triggers/EnableTriggerDialog.tsx", "Skip missed runs; start at the next tick", "editor"],
   ["src/components/workflows/triggers/TriggersTable.tsx", "The schedule tick the scheduler last processed, not the wall-clock time it fired."],
   ["src/components/workflows/triggers/triggersModel.ts", "On, but the flow is disabled, so it does not fire"],

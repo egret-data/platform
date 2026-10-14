@@ -10,7 +10,7 @@ import type { Banner } from "@/components/workflows/triggers/triggersModel";
 export function TriggerBanners({ banners }: { banners: Banner[] }) {
   if (banners.length === 0) return null;
   return (
-    <div className="mb-3 grid gap-2" data-testid="trigger-banners">
+    <div className="grid gap-2" data-testid="trigger-banners">
       {banners.map((b) => (
         <Alert key={b.id} role="status" data-banner={b.id}>
           <TriangleAlert aria-hidden className="h-4 w-4" />

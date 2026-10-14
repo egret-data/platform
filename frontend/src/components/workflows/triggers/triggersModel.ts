@@ -57,6 +57,7 @@ export function statusText(entry: TriggerEntryDto, ctx: FlowContext): string {
   }
   if (entry.kind === "other") return "Not run by egret";
   if (entry.webhook?.key_error) return "Key does not render";
+  if (entry.webhook?.unsupported) return `Not served by egret: ${entry.webhook.unsupported}`;
   return "Active";
 }
 
@@ -72,14 +73,15 @@ const REFUSALS: Record<string, string> = {
 /**
  * Whether a trigger's switch can be used, and why not (FE-ACTION-4). The
  * server's `toggle_refusal` is the authority; a viewer without
- * `workflow:manage` is refused here too, whatever the entry says.
+ * `workflow:manage` is refused here too, whatever the entry says. A switch in
+ * flight is not "disabled" here: the table keeps it focusable and marks it
+ * `aria-disabled` instead, so the keyboard focus is not dropped.
  */
-export function switchEnablement(entry: TriggerEntryDto, ctx: { manage: boolean; busy?: boolean }): Enablement {
+export function switchEnablement(entry: TriggerEntryDto, ctx: { manage: boolean }): Enablement {
   if (!entry.can_toggle) {
     return { ok: false, reason: (entry.toggle_refusal && REFUSALS[entry.toggle_refusal]) || "This trigger cannot be switched" };
   }
   if (!ctx.manage) return { ok: false, reason: MANAGE_REASON };
-  if (ctx.busy) return { ok: false, reason: "Switching…" };
   return { ok: true };
 }
 
@@ -158,4 +160,47 @@ export function webhookPath(urlPath: string | null | undefined): string | null {
 export function webhookNote(webhooksEnabled: boolean): string {
   const note = "This path is served by the egret backend, at whatever host your operator exposes for webhooks.";
   return webhooksEnabled ? note : `${note} Webhooks are off on this server.`;
+}
+
+/** What a hidden webhook key reads as. */
+export const MASK = "••••••••";
+
+/**
+ * A webhook trigger's YAML block with its top-level `key:` value hidden: the
+ * key is what lets anyone start the flow, and the drawer shows it only after
+ * Reveal. A plain or quoted value (a templated `"{{ … }}"` one too) is replaced
+ * on its line; a block scalar (`key: |`, `key: >-`) hides every line under it.
+ * `block` is dedented (`triggerBlock`), so the trigger's own keys start at
+ * column 0 and a nested `key:` (a condition's) is left alone.
+ */
+export function maskWebhookKey(block: string): string {
+  const lines = block.split("\n");
+  const out: string[] = [];
+  let inScalar = false;
+  for (const line of lines) {
+    if (inScalar) {
+      if (line.trim() === "" || /^\s/.test(line)) {
+        out.push(line.trim() === "" ? line : `${line.match(/^\s*/)![0]}${MASK}`);
+        continue;
+      }
+      inScalar = false;
+    }
+    const m = /^(key\s*:)(\s*)(.*)$/.exec(line);
+    if (!m) {
+      out.push(line);
+      continue;
+    }
+    const value = m[3].replace(/\s+#.*$/, "").trim();
+    if (/^[|>]/.test(value)) {
+      out.push(line);
+      inScalar = true;
+    } else if (value === "") {
+      // `key:` with its value on the following, indented lines.
+      out.push(line);
+      inScalar = true;
+    } else {
+      out.push(`${m[1]} ${MASK}`);
+    }
+  }
+  return out.join("\n");
 }

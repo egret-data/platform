@@ -90,8 +90,10 @@ describe("TriggerDetailsDrawer: per kind", () => {
     expect(within(d).getByText("0 9 * * *")).toBeInTheDocument();
     expect(within(d).getByText("Asia/Ho_Chi_Minh")).toBeInTheDocument();
     // 02:00 UTC is 09:00 in Ho Chi Minh City (UTC+7, no DST).
-    expect(within(d).getByText(/16 Oct 2026, 09:00:00/)).toBeInTheDocument();
-    expect(within(d).getByText("(the trigger's timezone)")).toBeInTheDocument();
+    // In `fullTimestamp`'s format, whatever the test machine's own zone.
+    expect(within(d).getByText("(the trigger's timezone)").parentElement).toHaveTextContent(
+      /^2026-10-16 09:00:00 \(the trigger's timezone\)$/,
+    );
     expect(within(d).getByText(/\(your time, /)).toBeInTheDocument();
     expect(within(d).getByText("the scheduler could not claim the row")).toBeInTheDocument();
     expect(within(d).getByText("Missed ticks").nextElementSibling).toHaveTextContent("4");
@@ -117,13 +119,13 @@ describe("TriggerDetailsDrawer: per kind", () => {
   });
 
   it("shows the trigger's YAML block, and opens the editor at it", async () => {
-    const { onEdit } = renderTriggersTab(server, { at: `${TAB_PATH}?trigger=hook` });
-    const d = await drawer("hook");
-    expect(within(d).getByLabelText("YAML of hook").textContent).toBe(
-      "id: hook\ntype: io.kestra.plugin.core.trigger.Webhook\nkey: s3cr3t-key",
+    const { onEdit } = renderTriggersTab(server, { at: `${TAB_PATH}?trigger=daily` });
+    const d = await drawer("daily");
+    expect(within(d).getByRole("figure", { name: "YAML of daily" }).querySelector("pre")!.textContent).toBe(
+      'id: daily\ntype: io.kestra.plugin.core.trigger.Schedule\ncron: "*/5 * * * *"',
     );
     await userEvent.click(within(d).getByRole("button", { name: "Edit in the editor" }));
-    expect(onEdit).toHaveBeenCalledWith("hook");
+    expect(onEdit).toHaveBeenCalledWith("daily");
   });
 });
 
@@ -136,8 +138,17 @@ describe("TriggerDetailsDrawer: the webhook path (D17)", () => {
     const shown = within(d).getByTestId("webhook-path");
     expect(shown.textContent).not.toContain("s3cr3t-key");
     expect(shown.textContent).toBe("/workflows/v1/eng/executions/webhook/company.team/hello/••••••••");
-    await userEvent.click(within(d).getByRole("button", { name: "Reveal" }));
+    // The YAML block hides the same key: nowhere in the drawer before Reveal.
+    const yaml = () => within(d).getByRole("figure", { name: "YAML of hook" }).querySelector("pre")!.textContent;
+    expect(yaml()).toBe("id: hook\ntype: io.kestra.plugin.core.trigger.Webhook\nkey: ••••••••");
+    expect(d.textContent).not.toContain("s3cr3t-key");
+    const reveal = within(d).getByRole("button", { name: "Reveal" });
+    expect(reveal).toHaveAttribute("aria-pressed", "false");
+    await userEvent.click(reveal);
+    // One signal: pressed, under the same label.
+    expect(within(d).getByRole("button", { name: "Reveal" })).toHaveAttribute("aria-pressed", "true");
     expect(within(d).getByTestId("webhook-path").textContent).toBe(SECRET_PATH);
+    expect(yaml()).toBe("id: hook\ntype: io.kestra.plugin.core.trigger.Webhook\nkey: s3cr3t-key");
     await userEvent.click(within(d).getByRole("button", { name: "Copy" }));
     expect(writeText).toHaveBeenCalledWith(SECRET_PATH);
     const live = within(d).getByText("Copied");
@@ -159,5 +170,18 @@ describe("TriggerDetailsDrawer: the webhook path (D17)", () => {
     expect(within(d).queryByTestId("webhook-path")).not.toBeInTheDocument();
     expect(within(d).queryByRole("button", { name: "Copy" })).not.toBeInTheDocument();
     expect(within(d).getByText(/Webhooks are off on this server\.$/)).toBeInTheDocument();
+  });
+});
+
+describe("TriggerDetailsDrawer: another trigger starts hidden", () => {
+  it("hides the key again when the drawer moves to another webhook", async () => {
+    renderTriggersTab(server, { at: `${TAB_PATH}?trigger=hook` });
+    const d = await drawer("hook");
+    await userEvent.click(within(d).getByRole("button", { name: "Reveal" }));
+    expect(d.textContent).toContain("s3cr3t-key");
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await userEvent.click(screen.getByRole("link", { name: "Details of hook" }));
+    expect((await drawer("hook")).textContent).not.toContain("s3cr3t-key");
   });
 });

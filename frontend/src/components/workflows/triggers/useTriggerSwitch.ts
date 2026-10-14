@@ -37,10 +37,13 @@ const triggerCount = (n: number) => (n === 1 ? "1 trigger" : `${n} triggers`);
  * both trigger queries are invalidated (FE-ACTION-2). A refusal is the
  * server's sentence in a toast, and the switch stays where it was.
  *
+ * `onBulkAnswered` runs once the bulk route has answered (whatever it refused):
+ * the caller clears its selection.
+ *
  * Switching on a schedule that `needsEnableDialog` opens the question first;
  * `answer` sends the choice, `dismiss` sends nothing.
  */
-export function useTriggerSwitch(ws: string) {
+export function useTriggerSwitch(ws: string, { onBulkAnswered }: { onBulkAnswered?: () => void } = {}) {
   const queryClient = useQueryClient();
   const one = useWorkflowSetTriggerDisabled();
   const many = useWorkflowSetTriggersDisabled();
@@ -111,6 +114,7 @@ export function useTriggerSwitch(ws: string) {
           .map((r) => ({ flow_uuid: r.flow_id, trigger_id: r.trigger_id, message: r.message ?? r.code ?? "refused" })),
       );
       if (switched > 0) toast.success(`Switched ${triggerCount(switched)} ${body.disabled ? "off" : "on"}.`);
+      onBulkAnswered?.();
       return true;
     } catch (e) {
       toast.error(`The triggers were not switched ${body.disabled ? "off" : "on"}: ${switchError(e)}`);

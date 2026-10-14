@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { Copy, Eye, EyeOff, SquarePen } from "lucide-react";
@@ -8,21 +8,33 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { StateChip } from "@/components/workflows/StateChip";
 import {
   kindLabel,
+  maskWebhookKey,
   missedLabel,
   statusText,
   webhookNote,
   webhookPath,
   type FlowContext,
 } from "@/components/workflows/triggers/triggersModel";
+import dayjs from "dayjs";
+import timezone from "dayjs/plugin/timezone";
+import utc from "dayjs/plugin/utc";
 import { rangeOfPath } from "@/components/workflows/editor/yamlPath";
 import { fullTimestamp, timeAgo } from "@/lib/relativeTime";
 
+dayjs.extend(utc);
+dayjs.extend(timezone);
+
 /**
  * The YAML block of one trigger, cut from `source` and dedented, or null when
- * `source` declares no trigger with that id. `rangeOfPath` finds where the
- * trigger's mapping starts; the block runs until the first non-blank line
- * indented less than that mapping (the next trigger's `- ` or the next
- * top-level key).
+ * `source` declares no trigger with that id or the block cannot be cut.
+ * `rangeOfPath` finds where the trigger's mapping starts; the block runs until
+ * the first non-blank line indented less than that mapping (the next trigger's
+ * `- ` or the next top-level key).
+ *
+ * Limits, by design: a comment line indented less than the mapping belongs to
+ * the block only when the block's own lines continue after it; a flow-style
+ * list (`triggers: [{ id: a, … }]`) has no lines of its own to cut, so it is
+ * null and the drawer points to the editor.
  *
  * Here rather than in `triggersModel.ts`: it brings the `yaml` library, which the
  * model's other users (the global Triggers page, in the flow list's chunk) must not.
@@ -32,10 +44,22 @@ export function triggerBlock(source: string, triggerId: string): string | null {
   if (!range) return null;
   const lines = source.split("\n");
   const indent = range.startCol - 1;
-  const block = [lines[range.startLine - 1].slice(indent)];
+  const first = lines[range.startLine - 1];
+  // Block style: only spaces and list dashes before the mapping.
+  if (!/^[\s-]*$/.test(first.slice(0, indent))) return null;
+  const indentOf = (line: string) => line.length - line.trimStart().length;
+  const isComment = (line: string) => line.trimStart().startsWith("#");
+  const block = [first.slice(indent)];
   for (let i = range.startLine; i < lines.length; i++) {
     const line = lines[i];
-    if (line.trim() !== "" && line.length - line.trimStart().length < indent) break;
+    if (line.trim() !== "" && indentOf(line) < indent) {
+      if (!isComment(line)) break;
+      // A less-indented comment: kept only if the block goes on after it.
+      const next = lines.slice(i + 1).find((l) => l.trim() !== "" && !isComment(l));
+      if (next === undefined || indentOf(next) < indent) break;
+      block.push(line.trimStart());
+      continue;
+    }
     block.push(line.slice(indent));
   }
   while (block.length > 1 && block[block.length - 1].trim() === "") block.pop();
@@ -45,10 +69,13 @@ export function triggerBlock(source: string, triggerId: string): string | null {
 /** What the drawer says when `?trigger=` names an id the flow no longer declares (spec §5). */
 export const TRIGGER_GONE = "This trigger no longer exists in the flow; reload.";
 
-/** `iso` in `timeZone`, or null when the browser does not know that zone. */
+/**
+ * `iso` in `timeZone`, in `fullTimestamp`'s format (dayjs, `YYYY-MM-DD HH:mm:ss`), or null
+ * when the browser does not know that zone.
+ */
 function inZone(iso: string, timeZone: string): string | null {
   try {
-    return new Intl.DateTimeFormat("en-GB", { timeZone, dateStyle: "medium", timeStyle: "long" }).format(new Date(iso));
+    return dayjs(iso).tz(timeZone).format("YYYY-MM-DD HH:mm:ss");
   } catch {
     return null;
   }
@@ -150,8 +177,18 @@ function DependsOn({ dependsOn }: { dependsOn: DependsOnDto }) {
 /** The path with its last segment, the key, hidden: the key is what lets anyone start the flow. */
 const masked = (path: string) => path.replace(/[^/]+$/, "••••••••");
 
-function WebhookFacts({ webhook, webhooksEnabled }: { webhook: WebhookInfoDto; webhooksEnabled: boolean }) {
-  const [revealed, setRevealed] = useState(false);
+function WebhookFacts({
+  webhook,
+  webhooksEnabled,
+  revealed,
+  onRevealedChange,
+}: {
+  webhook: WebhookInfoDto;
+  webhooksEnabled: boolean;
+  /** One switch for the path here and the `key:` in the Definition block. */
+  revealed: boolean;
+  onRevealedChange: (revealed: boolean) => void;
+}) {
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return;
@@ -176,15 +213,18 @@ function WebhookFacts({ webhook, webhooksEnabled }: { webhook: WebhookInfoDto; w
       {webhook.key_error ? (
         <p>{webhook.key_error}</p>
       ) : path ? (
-        <>
-          <code className="break-all rounded bg-muted px-2 py-1 font-mono text-xs" data-testid="webhook-path">
-            {revealed ? path : masked(path)}
-          </code>
-          <div className="flex items-center gap-2">
-            <Button type="button" size="sm" variant="outline" aria-pressed={revealed} onClick={() => setRevealed((r) => !r)}>
-              {revealed ? <EyeOff aria-hidden /> : <Eye aria-hidden />}
-              {revealed ? "Hide" : "Reveal"}
-            </Button>
+        <code className="break-all rounded bg-muted px-2 py-1 font-mono text-xs" data-testid="webhook-path">
+          {revealed ? path : masked(path)}
+        </code>
+      ) : null}
+      <div className="flex items-center gap-2">
+        {/* One signal for the state: the pressed state, under a label that does not change. */}
+        <Button type="button" size="sm" variant="outline" aria-pressed={revealed} onClick={() => onRevealedChange(!revealed)}>
+          {revealed ? <EyeOff aria-hidden /> : <Eye aria-hidden />}
+          Reveal
+        </Button>
+        {!webhook.key_error && path ? (
+          <>
             <Button type="button" size="sm" variant="outline" onClick={() => void copy()}>
               <Copy aria-hidden />
               Copy
@@ -192,9 +232,9 @@ function WebhookFacts({ webhook, webhooksEnabled }: { webhook: WebhookInfoDto; w
             <span aria-live="polite" className="text-xs text-muted-foreground">
               {copied ? "Copied" : ""}
             </span>
-          </div>
-        </>
-      ) : null}
+          </>
+        ) : null}
+      </div>
       <p className="text-muted-foreground">{webhookNote(webhooksEnabled)}</p>
       {webhook.unsupported ? <p>egret refuses requests to this webhook: {webhook.unsupported}</p> : null}
     </div>
@@ -230,6 +270,12 @@ export function TriggerDetailsDrawer({
   /** Open the flow's Code at this trigger; absent where the editor is not on the page. */
   onEditInEditor?: () => void;
 }) {
+  // The webhook's key stays hidden, in its path and in the YAML, until Reveal. The tab keys the
+  // drawer by trigger id, so another trigger starts hidden again.
+  const [revealed, setRevealed] = useState(false);
+  const captionId = useId();
+  const isWebhook = entry?.kind === "webhook";
+  const shownBlock = block !== null && isWebhook && !revealed ? maskWebhookKey(block) : block;
   return (
     <Sheet open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
       <SheetContent>
@@ -255,12 +301,18 @@ export function TriggerDetailsDrawer({
                 {statusText(entry, ctx)}
               </p>
               <Section title="Definition">
-                {block !== null ? (
-                  <pre className="overflow-auto rounded bg-muted p-3 font-mono text-xs" aria-label={`YAML of ${triggerId}`}>
-                    {block}
-                  </pre>
+                {shownBlock !== null ? (
+                  <figure className="grid gap-1" aria-labelledby={captionId}>
+                    <figcaption id={captionId} className="sr-only">
+                      YAML of {triggerId}
+                    </figcaption>
+                    <pre className="overflow-auto rounded bg-muted p-3 font-mono text-xs">{shownBlock}</pre>
+                    {isWebhook && !revealed ? (
+                      <p className="text-xs text-muted-foreground">The key is hidden; Reveal under Webhook shows it.</p>
+                    ) : null}
+                  </figure>
                 ) : (
-                  <p className="text-sm text-muted-foreground">The saved draft no longer declares this trigger; reload.</p>
+                  <p className="text-sm text-muted-foreground">This trigger&apos;s YAML cannot be shown here; open it in the editor.</p>
                 )}
                 {onEditInEditor ? (
                   <div>
@@ -292,7 +344,12 @@ export function TriggerDetailsDrawer({
               ) : null}
               {entry.webhook ? (
                 <Section title="Webhook">
-                  <WebhookFacts webhook={entry.webhook} webhooksEnabled={webhooksEnabled} />
+                  <WebhookFacts
+                    webhook={entry.webhook}
+                    webhooksEnabled={webhooksEnabled}
+                    revealed={revealed}
+                    onRevealedChange={setRevealed}
+                  />
                 </Section>
               ) : null}
               <Section title="Last execution">

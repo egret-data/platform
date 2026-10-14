@@ -76,6 +76,8 @@ export class FakeWorkflowServer {
   triggersReply: Reply | null = null;
   /** Answers the next `PUT …/triggers/{trigger_id}/disabled` with this instead of switching. */
   triggerPutReply: Reply | null = null;
+  /** Answers the next `PUT …/workflows/triggers/disabled` with this instead of switching. */
+  bulkReply: Reply | null = null;
   /** Bulk entries refused by trigger id, with the server's code and sentence. */
   bulkRefusals: Record<string, { code: string; message: string }> = {};
 
@@ -143,6 +145,11 @@ export class FakeWorkflowServer {
   }
 
   private switchBulk(req: SetTriggersDisabledRequest): Reply {
+    if (this.bulkReply) {
+      const reply = this.bulkReply;
+      this.bulkReply = null;
+      return reply;
+    }
     const results: BulkResultDto[] = req.triggers.map(({ flow_id, trigger_id }) => {
       const refusal = this.bulkRefusals[trigger_id];
       if (refusal) return { flow_id, trigger_id, ok: false, code: refusal.code, message: refusal.message, trigger: null };

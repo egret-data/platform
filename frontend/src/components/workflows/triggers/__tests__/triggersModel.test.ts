@@ -3,6 +3,8 @@ import {
   bannersFor,
   enableBody,
   kindLabel,
+  MASK,
+  maskWebhookKey,
   missedLabel,
   needsEnableDialog,
   recoverDescription,
@@ -53,6 +55,8 @@ describe("statusText", () => {
     expect(statusText(otherEntry(), ON)).toBe("Not run by egret");
     expect(statusText(webhookEntry({ webhook: { url_path: null, key_error: "the key renders to nothing", unsupported: null } }), ON))
       .toBe("Key does not render");
+    expect(statusText(webhookEntry({ webhook: { url_path: "/w/k", key_error: null, unsupported: "responseContentType" } }), ON))
+      .toBe("Not served by egret: responseContentType");
     expect(statusText(webhookEntry(), ON)).toBe("Active");
     expect(statusText(scheduleEntry(), ON)).toBe("Active");
     expect(statusText(flowEntry(), ON)).toBe("Active");
@@ -80,9 +84,6 @@ describe("switchEnablement", () => {
     expect(switchEnablement(scheduleEntry(), { manage: false })).toEqual({ ok: false, reason: "You need workflow:manage" });
   });
 
-  it("is off while its own switch is in flight", () => {
-    expect(switchEnablement(scheduleEntry(), { manage: true, busy: true })).toEqual({ ok: false, reason: "Switching…" });
-  });
 });
 
 describe("needsEnableDialog", () => {
@@ -180,8 +181,36 @@ describe("triggerBlock", () => {
     expect(triggerBlock(TRIGGERS_SOURCE, "poll")).toBe("id: poll\ntype: io.kestra.plugin.fs.http.Trigger\nuri: https://example.com");
   });
 
+  it("keeps a less-indented comment inside the block, and stops at one that ends it", () => {
+    const src = "triggers:\n  - id: a\n# about the cron\n    cron: x\n# the next trigger\n  - id: b\n    cron: y\n";
+    expect(triggerBlock(src, "a")).toBe("id: a\n# about the cron\ncron: x");
+    expect(triggerBlock(src, "b")).toBe("id: b\ncron: y");
+  });
+
+  it("is null for a flow-style list, which has no lines to cut", () => {
+    expect(triggerBlock("id: x\ntriggers: [{ id: a, type: a.B }]\n", "a")).toBeNull();
+  });
+
   it("is null for an id the source does not declare, or a task's id", () => {
     expect(triggerBlock(TRIGGERS_SOURCE, "gone")).toBeNull();
     expect(triggerBlock("id: x\ntasks:\n  - id: daily\n    type: a.B\n", "daily")).toBeNull();
+  });
+});
+
+describe("maskWebhookKey", () => {
+  it("hides a plain, quoted or templated key, keeping every other line", () => {
+    expect(maskWebhookKey("id: hook\ntype: a.Webhook\nkey: s3cr3t")).toBe(`id: hook\ntype: a.Webhook\nkey: ${MASK}`);
+    expect(maskWebhookKey('id: hook\nkey: "s3cr3t" # the key')).toBe(`id: hook\nkey: ${MASK}`);
+    expect(maskWebhookKey("key: '{{ secret(\"HOOK\") }}'\nid: hook")).toBe(`key: ${MASK}\nid: hook`);
+  });
+
+  it("hides a block scalar's lines, and stops at the next key", () => {
+    expect(maskWebhookKey("key: |\n  s3cr3t\n  more\nid: hook")).toBe(`key: |\n  ${MASK}\n  ${MASK}\nid: hook`);
+    expect(maskWebhookKey("key:\n  s3cr3t\nid: hook")).toBe(`key:\n  ${MASK}\nid: hook`);
+  });
+
+  it("leaves a nested key alone, and a block without a key unchanged", () => {
+    const nested = "id: hook\nconditions:\n  - key: not-the-webhook-key";
+    expect(maskWebhookKey(nested)).toBe(nested);
   });
 });
