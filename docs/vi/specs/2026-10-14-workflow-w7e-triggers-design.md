@@ -2,7 +2,7 @@
 
 > Bản tham khảo tiếng Việt. Bản chính là `docs/en/specs/2026-10-14-workflow-w7e-triggers-design.md`; khi hai bản khác nhau, bản tiếng Anh thắng.
 
-**Trạng thái:** thiết kế, 2026-10-14. Chưa hiện thực.
+**Trạng thái:** đã hiện thực trên `feat/workflow-w7e-triggers`, 2026-10-15. Các kịch bản Playwright 1-7 của §6 đã chạy trên một stack riêng (`frontend/tests/e2e/workflows-triggers.spec.ts`), và phép so sánh của §7 đã chạy với image Kestra cục bộ; §2 nói dòng nào được quan sát. Chỗ nào văn bản này và code khác nhau thì code đã được đo và văn bản được sửa (2026-10-15).
 
 **Phụ thuộc:**
 - W7a (#659): khu vực Workflows, trang chi tiết flow và danh sách tab của nó (`FLOW_TABS`, `frontend/src/routes/workflows/FlowDetail.tsx:52-53`, có comment đã dành sẵn một chỗ cho W7e).
@@ -27,7 +27,7 @@ Bộ rule frontend `docs/en/frontend-rules.md` ràng buộc mọi dòng code fro
 - D6. Một lần lưu hợp lệ không còn khai báo một trigger id thì xoá dòng công tắc của nó; một source không parse được thì không bao giờ xoá dòng nào; xoá mềm xoá hết (§3.4).
 - D7. Window đang mở của một listener `dependsOn` bị tắt được để tự hết hạn, như với listener bị tắt trong YAML hiện nay (§3.2).
 - D8. Một index mới phục vụ "execution gần nhất theo từng trigger" (§3.6), chỉ giữ nếu `EXPLAIN` cho thấy truy vấn dùng nó (rule của 0183).
-- D9. Danh sách toàn cục parse draft ngoài các worker async với giới hạn 2.000 flow **sau** khi lọc namespace và flow, 422 `triggers_too_large` nếu vượt (§3.5).
+- D9. Danh sách toàn cục parse draft ngoài các worker async với giới hạn 2.000 flow **sau** khi lọc namespace và flow, 422 `triggers_too_large` nếu vượt (§3.5). Trang chỉ chuyển focus vào bộ lọc namespace khi gặp 422 đó sau một thay đổi do người dùng làm bằng một picker, bộ phân trang hoặc Clear filters: không bao giờ ở lần tải đầu của trang, và không bao giờ khi đang gõ trong ô tìm kiếm (quyết định mặc định, 2026-10-15; FE-A11Y-6; §4.4).
 - D10. Bật/tắt hàng loạt chỉ theo lựa chọn, tối đa 100 trigger, một transaction cho mỗi trigger, đồng bộ, có kết quả cho từng trigger. Không có "chọn tất cả kết quả khớp" (§3.7).
 - D11. Trùng trigger id trở thành lỗi validation, `duplicate_trigger_id`, như Kestra, nhưng là finding **chỉ-khi-lưu**: nó hiện trên draft và chặn publish, và không nằm trong `validate_for_run`, nên các flow đã lưu mà đang khai báo trùng vẫn tiếp tục chạy (§3.8).
 - D12. Không có hành động unlock, restart hay delete-state (egret không có lock được lưu bền; §3.9). Không cảnh báo rằng một draft không bắn: draft có bắn (§4.4).
@@ -44,25 +44,27 @@ Mọi trigger một flow khai báo hiện chỉ nhìn thấy được dưới d�
 
 ## 2. Khác biệt so với Kestra
 
-Mọi dòng dưới đây đều **được đọc trong mã nguồn** (checkout Kestra ở `data-portal/kestra`; path tính từ đó). Chưa dòng nào được quan sát: task cuối của kế hoạch hiện thực chạy kịch bản của §7 trên image Kestra cục bộ, như Task 9 của W7d, và gán lại nhãn cho từng dòng nó đo được.
+**Đo trên một Kestra đang chạy, 2026-10-14/15 (Task 8, §7).** Image cục bộ `kestra/kestra` `28f59bf175e1` (Kestra 2.0 nightly, `server local`, trong một container dùng một lần) chạy các kịch bản 1-3 và 5 của §6 với các flow của end to end: `kcmp.team.up1`, `kcmp.team.up2`, và `kcmp.team.main` với một `Schedule` `* * * * *`, một `Webhook`, một trigger `Flow` có `dependsOn` trên cả hai upstream (nightly này chấp nhận `dependsOn`) và một `Schedule` có `disabled: true`. Cùng các kịch bản đó chạy trên egret (`frontend/tests/e2e/workflows-triggers.spec.ts`). Mỗi ô Kestra nói nó được **quan sát** trên image đang chạy (API của nó ở `/api/v1/main/...` hoặc UI của nó, đọc trong DOM) hay **đọc trong mã nguồn** (checkout ở `data-portal/kestra`, `96893b589`; path tính từ đó).
 
 | Kestra | egret | Vì sao |
 |---|---|---|
-| `disabled` ở runtime nằm trong trạng thái trigger và chỉ scheduler đọc (`scheduler/.../TriggerEventHandler.java:228-250`). Đường webhook chỉ kiểm tra `disabled` của flow (`webserver/.../ExecutionController.java:844-858`) và khớp webhook không có bộ lọc disabled (`:879-899`); trigger Flow chỉ kiểm tra YAML (`executor/.../FlowTriggerService.java:50, 61`) | Công tắc dừng cả ba loại: việc claim schedule, việc chọn listener Flow-trigger cùng insert outbox, và route webhook (409) | Một công tắc để webhook vẫn bắn là một điều khiển giả |
-| Công tắc ở tab flow bị ẩn khi trigger không có dòng state (`ui/src/components/flows/FlowTriggers.vue:146-163`) | Mọi trigger `Schedule`, `Webhook` và `Flow` đều có công tắc; một `Leaf` hiện "Not run by egret" và không có công tắc | egret không có dòng state cho webhook, mà công tắc phủ chúng (D3) |
-| Bật một trigger có YAML ghi `disabled: true`: server chấp nhận (`TriggerStateService.validateToggleable` chỉ kiểm tra flow và trigger tồn tại, `webserver/.../TriggerStateService.java:385-393`); UI vô hiệu hoá công tắc (`FlowTriggers.vue:155-161`) | 409 `trigger_disabled_in_source`, "This trigger is disabled in the flow's YAML; remove `disabled: true` there" | Người gọi API không nên nhận 200 cho một thay đổi không có tác dụng |
-| Bật lại với `recoverMissedSchedules=true` theo `recoverMissedSchedules` của trigger (mặc định `ALL`, `core/.../Schedulable.java:47-51`); vắng hoặc false là `NONE` (`TriggerEventHandler.java:259-283`). `NONE` còn đặt `evaluatedAt` thành now | Ba kết quả giống hệt (§3.3). `evaluated_at` được để nguyên | egret không có phục hồi khi khởi động đọc `evaluated_at`; nó vẫn là "tick cuối cùng đã xử lý" |
-| Dialog bật đưa ra "Do not recover missed schedules" (mặc định) và "Follow `recoverMissedSchedules`" (`ui/src/components/triggers/TriggerEnableDialog.vue`) | Hai lựa chọn giống vậy, thêm số tick đã lỡ và việc `recoverMissedSchedules` của trigger sẽ làm gì với chúng | Người dùng quyết định khi đã thấy cái giá trước mặt |
-| Các hành động unlock, restart và delete-state (`TriggerController.java:161-217, 339`) | Không có | egret không giữ lock được lưu bền (§3.9) |
-| Hành động hàng loạt là bất đồng bộ, "theo trigger" hoặc "theo query" (`TriggersManage.vue:790-880`) | Đồng bộ, theo lựa chọn, tối đa 100, có kết quả cho từng trigger | Một transaction cho mỗi trigger đủ nhanh; kết quả theo từng dòng nói rõ điều đã xảy ra |
-| Trang toàn cục ở `admin/triggers` với tab catalog "add" và xuất CSV (`ui/src/routes/routes.ts:100`, `Triggers.vue`) | "Triggers" trong nav Workflows; không catalog, không CSV | Không có gì để cài; xuất file là việc theo sau |
-| Bộ lọc: namespace, flow, khoảng ngày, scope, trigger id, worker, enabled/disabled; không có bộ lọc theo kiểu (`ui/src/components/filter/configurations/triggerFilter.ts`) | Namespace (prefix), flow, kind, enabled/disabled, một ô tìm văn bản | egret không có worker id; kind là thứ người dùng quét tìm |
-| Các cột `lastTriggeredDate`, `executionId`, `workerId` | "Last execution" (id, state và thời gian của nó); không có worker | egret không lưu ngày bắn gần nhất; execution chính là bản ghi |
-| Dòng mở rộng nhúng log của trigger | Không có log trigger | egret không ghi: lỗi schedule là `last_error`, lỗi Flow-trigger nằm trong log server (§10) |
-| Tab flow không có nút copy URL webhook (`FlowTriggers.vue:346-359` chỉ có dialog test-event) | Drawer chi tiết hiện URL với nút copy | URL là lý do người dùng mở chi tiết của một webhook |
-| Tiến độ window `dependsOn` không được hiện | Drawer hiện window đang mở và các điều kiện đã thoả | egret có dữ liệu (`flow_trigger_windows.results`) |
-| Trùng trigger id là lỗi validation (`core/.../FlowValidator.java:65-68`) | Giống vậy, từ W7e (D11) | Mọi route ở đây đều khoá theo trigger id |
-| Cột, form và banner backfill | W7f | Quyết định của người dùng |
+| **Quan sát.** Chỉ các trigger do scheduler chạy mới có trigger state, và `disabled` ở runtime nằm ở đó. `PUT /api/v1/main/triggers/set-disabled` trên `Webhook` hoặc trigger `Flow` trả 404 "Trigger disappeared after set-disabled" (scheduler ghi log "Trigger state not found"): không cái nào tắt được ở runtime. Sau đó POST tới webhook vẫn trả 200 và khởi động một execution, và chạy cả hai upstream vẫn khởi động downstream. (Trong mã nguồn: đường webhook chỉ kiểm tra `disabled` của flow, `webserver/.../ExecutionController.java:844-858`, và trigger Flow chỉ kiểm tra YAML, `executor/.../FlowTriggerService.java:50, 61`.) | Công tắc dừng cả ba loại: việc claim schedule, việc chọn listener Flow-trigger cùng insert outbox, và route webhook. **Quan sát:** một webhook đã tắt trả 409 "Cannot execute webhook: the trigger 'hook' is disabled." và không khởi động gì; bật lại, 200 và một execution | Một công tắc để webhook vẫn bắn là một điều khiển giả |
+| **Quan sát.** Công tắc ở tab flow vắng mặt khi trigger không có dòng state: các dòng `Webhook` và `Flow` không có (dòng webhook có "Send test event") | Mọi trigger `Schedule`, `Webhook` và `Flow` đều có công tắc; một `Leaf` hiện "Not run by egret" và không có công tắc | egret không có dòng state cho webhook, mà công tắc phủ chúng (D3) |
+| **Quan sát.** Bật qua API một trigger có YAML ghi `disabled: true` trả 200 và đặt `disabled` của state thành false; công tắc của UI vẫn tắt và bị vô hiệu hoá (nó hiện `!(disabled \|\| sourceDisabled)`). Trong mã nguồn, trigger vẫn không bao giờ bắn: fetcher bỏ qua trigger bị tắt trong YAML (`DefaultSchedulableTriggerFetcher.java:104`) | 409 `trigger_disabled_in_source`, "This trigger is disabled in the flow's YAML; remove `disabled: true` there" (cũng quan sát trên egret); công tắc bị vô hiệu hoá kèm "Disabled in the flow's YAML" | Người gọi API không nên nhận 200 cho một thay đổi không có tác dụng |
+| **Quan sát** cho skip và `ALL`. Tắt qua hai tick: không gì chạy. Bật với lựa chọn mặc định (body không mang `recoverMissedSchedules`): không lần chạy lỡ nào, lần chạy kế là tick sau đó, và `evaluatedAt` thành thời điểm bật. Bật với "Follow…" khi thuộc tính vắng (`ALL`): cả hai tick lỡ đều chạy, mỗi lượt scheduler một tick, cách nhau khoảng 1,6 s. **Đọc trong mã nguồn** cho `LAST` và `NONE` (`core/.../Schedulable.java:47-51`, `TriggerEventHandler.java:259-306`) | Các kết quả giống vậy (§3.3), end to end quan sát cho skip và `ALL` (`LAST` và `NONE` do test Rust). `evaluated_at` được để nguyên | egret không có phục hồi khi khởi động đọc `evaluated_at`; nó vẫn là "tick cuối cùng đã xử lý" |
+| **Quan sát.** Dialog, tiêu đề "Enable trigger", đưa ra "Do not recover missed schedules" (được chọn) và "Follow the trigger's recoverMissedSchedules configuration", với Cancel và Enable. Nó không hiện số tick lỡ và không hiện thời điểm kế, và nó mở ở **mọi** lần bật một `Schedule`, có tick lỡ hay không (`FlowTriggers.vue:612-617`) | Hai lựa chọn giống vậy, thêm số tick đã lỡ và việc `recoverMissedSchedules` của trigger sẽ làm gì với chúng. Nó chỉ mở cho một `Schedule` đã tắt có tick kế đã qua; mọi lần bật khác gửi ngay | Người dùng quyết định khi đã thấy cái giá trước mặt, và không bị hỏi khi chẳng có gì để quyết |
+| **Đọc trong mã nguồn.** Các hành động unlock, restart và delete-state (`TriggerController.java:161-217, 339`) | Không có | egret không giữ lock được lưu bền (§3.9) |
+| **Quan sát.** Hàng loạt theo trigger (`POST /triggers/set-disabled/by-triggers`) trả 202 `{operationId, totalItems}` và chạy bất đồng bộ, không có kết quả cho từng trigger: trigger của một flow không tồn tại bị bỏ không một lời, và một webhook được tính là chấp nhận rồi bị scheduler bỏ. "Theo query" đọc trong mã nguồn (`TriggersManage.vue:790-880`) | Đồng bộ, theo lựa chọn, tối đa 100, có kết quả cho từng trigger (quan sát: `{results: [{…, ok}]}`) | Một transaction cho mỗi trigger đủ nhanh; kết quả theo từng dòng nói rõ điều đã xảy ra |
+| **Quan sát.** Trang toàn cục ở `admin/triggers` chuyển hướng tới tab "Add" (catalog) bên cạnh "Manage", nơi có "Export as CSV" | "Triggers" trong nav Workflows; không catalog, không CSV | Không có gì để cài; xuất file là việc theo sau |
+| **Quan sát.** Trang toàn cục của Kestra liệt kê các trigger **state**, nên một `Webhook` hay một trigger `Flow` không bao giờ hiện trên đó | Mọi trigger đã khai báo, của mọi kind, parse từ source của các flow (§3.5) | Trang này là nơi người dùng tìm "cái gì có thể khởi động flow của tôi" |
+| **Đọc trong mã nguồn.** Bộ lọc: namespace, flow, khoảng ngày, scope, trigger id, worker, enabled/disabled; không có bộ lọc theo kiểu (`ui/src/components/filter/configurations/triggerFilter.ts`). Trang đang chạy hiện "Add filters" | Namespace (prefix), flow, kind, enabled/disabled, một ô tìm văn bản, tất cả trên URL | egret không có worker id; kind là thứ người dùng quét tìm |
+| **Quan sát.** Các cột ở tab flow: Id, Type, Execution Id, Last triggered date, Next evaluation date, Last evaluation date, Backfill, Enabled; ở trang toàn cục: Id, Flow, Namespace, Execution Id, Last triggered date, Backfill, Enabled. Mặc định không có cột worker (`workerId` của API là đọc trong mã nguồn) | "Last execution" (id, state và thời gian của nó); không có worker | egret không lưu ngày bắn gần nhất; execution chính là bản ghi |
+| **Đọc trong mã nguồn.** Dòng mở rộng nhúng log của trigger | Không có log trigger | egret không ghi: lỗi schedule là `last_error`, lỗi Flow-trigger nằm trong log server (§10) |
+| **Quan sát.** Tab flow không có URL webhook; dòng có nút "Send test event". Kestra phục vụ webhook trên chính origin API của nó (`/api/v1/main/executions/webhook/{namespace}/{flow}/{key}`, 200 trên cổng phục vụ UI) | Drawer chi tiết hiện **đường dẫn** của webhook (`/workflows/v1/{ws}/executions/webhook/…`), che cho tới khi Reveal, có Copy và một ghi chú. Chỉ backend phục vụ nó: end to end POST tới cổng riêng của backend; cùng đường dẫn ở origin của UI không được route (quan sát: dev server trả 404) | D17: không routing và không origin; mở webhook ra ngoài là việc theo sau với review bảo mật riêng |
+| **Quan sát** ở dòng (không hiện tiến độ); dòng mở rộng chưa được mở | Drawer hiện window đang mở và các điều kiện đã thoả (quan sát: chạy một upstream, window "duration", điều kiện đầu "Met", điều kiện thứ hai "Not met") | egret có dữ liệu (`flow_trigger_windows.results`) |
+| **Quan sát.** Trùng trigger id từ chối việc lưu: `POST /flows` trả 422 "Invalid Flow: Duplicate trigger id with name [t]", và flow không được lưu (`core/.../FlowValidator.java:65-68`) | `duplicate_trigger_id` là finding chỉ-khi-lưu: draft vẫn lưu, chỗ trùng được đánh dấu và chặn publish, và các flow đã lưu vẫn chạy (D11) | Ở egret draft lưu được dù có lỗi validation; một lỗi lúc chạy sẽ dừng các flow đã lưu |
+| **Quan sát.** Một dòng state mới chép `disabled` của YAML vào `disabled` runtime; từ đó hai giá trị là hai trường riêng (`sourceDisabled`, `disabled`) | Công tắc runtime chỉ nằm trong `workflow.disabled_triggers`; YAML được đọc từ source; các dòng trigger giữ bản sao hiệu lực (D2) | Một lần sửa YAML không nên bị che bởi một giá trị runtime mà nó từng gieo |
+| **Quan sát.** Một cột Backfill và các nút | W7f | Quyết định của người dùng |
 
 ## 3. Backend
 
@@ -178,8 +180,8 @@ Và ở trên cùng: `flow_disabled` (YAML hoặc `state = 'disabled'`), `flow_d
 **`GET /api/ws/{workspace}/workflows/triggers`**: mọi trigger của các flow trong workspace không nằm trong thùng rác.
 
 - **Query:** `namespace_prefix` (neo theo dấu chấm, như của W7b), `flow_id` (uuid), `kind` (phân tách bằng dấu phẩy), `state` (`enabled` / `disabled`, trên `effective_disabled`), `q` (chuỗi con không phân biệt hoa thường của trigger id, flow id hoặc namespace), `limit` (mặc định 50, tối đa 200, bị kẹp), `offset`.
-- **Dòng:** uuid, namespace và flow id của flow, cộng mục theo từng flow không có `depends_on.conditions` và không có `webhook` (drawer lấy route theo từng flow).
-- **Trang:** `{rows, total, limit, offset, unparsable, scheduler_enabled, worker_enabled, webhooks_enabled}`; `unparsable` đếm các flow trong phạm vi có source không parse được (trigger của chúng không biết). Thứ tự: namespace, flow id, thứ tự khai báo.
+- **Dòng:** mục theo từng flow được làm phẳng, cộng `flow_uuid` (uuid của flow; đặt tên như vậy vì `flow` của chính mục là thông tin của một trigger `Flow`, và một object không mang được hai khoá cùng tên), `namespace`, `flow_id` (id trong YAML) và `flow_disabled` (cờ cấp trên của route theo từng flow, theo từng dòng: YAML của flow hoặc `state = 'disabled'`). Một dòng không mang đường dẫn webhook (`webhook` là null) và không mang điều kiện (`depends_on.conditions` là null): drawer đọc route theo từng flow.
+- **Trang:** `{rows, total, limit, offset, unparsable, scheduler_enabled, worker_enabled, webhooks_enabled, can_manage}`; `unparsable` đếm các flow trong phạm vi có source không parse được (trigger của chúng không biết); `can_manage` là quyền `workflow:manage` của người gọi trong workspace, theo người gọi chứ không theo dòng, nên một trang mà mọi dòng đều bị từ chối vì lý do khác vẫn cho biết công tắc và route hàng loạt có thuộc về người gọi hay không. Thứ tự: namespace, flow id, thứ tự khai báo.
 - **Cách làm (D9):** các flow trong phạm vi được đọc với bộ lọc namespace và flow trong SQL, tối đa 2.001 (hình dạng của `dependency_drafts`, `repo.rs:381-397`). Hơn 2.000 trả 422 `triggers_too_large`, "more than 2000 flows match; narrow by namespace". Các source được parse trên blocking pool (`off_runtime` của W7d, `dependencies.rs:213`, nâng lên `pub(crate)` với thông báo lỗi trung tính, vì hiện nó private và thông báo của nó nêu tên đồ thị phụ thuộc). Các bảng state được đọc, mỗi bảng một câu lệnh, cho các flow id trong phạm vi. Bộ lọc kind, state và tìm kiếm lọc trong bộ nhớ, rồi trang được cắt, rồi `last_execution` chỉ được đọc cho trang đó.
 - **Vì sao phải parse:** webhook và trigger `Leaf` không có dòng ở đâu cả, và chỉ source biết chúng.
 
@@ -240,7 +242,7 @@ Mọi thứ nằm trong khu vực Workflows tải lười của W7a (FE-ROUTE-2)
 `FLOW_TABS` trở thành `["edit", "revisions", "executions", "triggers"]` (`FlowDetail.tsx:52-53`); URL là `flows/:id/triggers` (FE-PAGE-2).
 
 - **Cột** (`ui/table`, FE-PAGE-4): chọn, ID, Type (icon kind và tên kiểu ngắn), Next run, Last tick (`evaluated_at`, nhãn "Last evaluated" với tooltip nói đó là tick đã xử lý, không phải lần bắn theo đồng hồ), Last execution (chip state, thời gian tương đối, liên kết), Status, Enabled (công tắc), Details.
-- **Status** nói bằng lời vì sao một trigger không bắn: "Disabled in YAML", "Switched off by {disabled_by_name} {time}", "Off the queue: {last_error}", "Not listening: {reason}", "Not run by egret" (Leaf), "Key does not render". Không bao giờ chỉ bằng màu (FE-A11Y).
+- **Status** nói bằng lời vì sao một trigger không bắn: "Disabled in YAML", "Switched off by {disabled_by_name} {time}", "Off the queue: {last_error}", "Not listening: {reason}", "Not run by egret" (Leaf), "Key does not render", và cả "The flow is in the trash", "On, but the flow is disabled, so it does not fire" (D18), "Not served by egret: {reason}" (một tuỳ chọn webhook đã khai báo mà egret từ chối), và "Active" khi không có gì chặn. Nguyên nhân đầu tiên thắng, theo thứ tự: YAML, công tắc runtime, flow, rồi trạng thái riêng của kind. Không bao giờ chỉ bằng màu (FE-A11Y).
 - **Công tắc.**
   - Bị vô hiệu hoá kèm lý do (FE-ACTION-4): "Disabled in the flow's YAML", "Not run by egret", "You need workflow:manage", "The flow is in the trash".
   - Tắt thì gửi PUT ngay.
@@ -258,9 +260,9 @@ Mọi thứ nằm trong khu vực Workflows tải lười của W7a (FE-ROUTE-2)
 
 ### 4.2 Drawer chi tiết
 
-Mở từ Details hoặc ID của một dòng; `?trigger=<id>` trên URL để chia sẻ được (FE-PAGE-2).
+Mở từ Details hoặc ID của một dòng; `?trigger=<id>` trên URL để chia sẻ được (FE-PAGE-2) (trên trang toàn cục là `?trigger=<flow uuid>/<trigger id>`, §4.4).
 
-- **Định nghĩa:** khối YAML của trigger, chỉ đọc, kèm liên kết "Edit in the editor" mở Code tại khối đó.
+- **Định nghĩa:** khối YAML của trigger, chỉ đọc, kèm liên kết "Edit in the editor" mở Code tại khối đó. `key:` của một webhook cũng bị ẩn trong khối này cho tới khi Reveal, và cả khối bị ẩn khi không tách được key khỏi phần còn lại (thất bại theo hướng đóng).
 - **Schedule:** cron, timezone, lần chạy tới theo timezone của trigger và của người xem, tick cuối, lỗi cuối, số tick đã lỡ khi bị tắt.
 - **Flow trigger:** các state được nghe; với `dependsOn`, mode, window (kind, bắt đầu và kết thúc, thời gian còn lại), và từng điều kiện với đã thoả hoặc chưa thoả. "No window is open" khi không có.
 - **Webhook** (quyết định mặc định, 2026-10-14): **đường dẫn** `url_path` (`/workflows/v1/{ws}/executions/webhook/{namespace}/{flow}/{key}`), được che với Reveal và Copy (nút copy báo "Copied" trong một vùng `aria-live`), và một ghi chú rằng nó do backend egret phục vụ tại host nào operator mở cho webhook. Nếu `webhooks_enabled` là false, vẫn hiện cảnh báo "Webhooks are off on this server". W7e **không** dựng URL từ `window.location.origin` và **không** thêm routing: không có gì ở origin của trình duyệt chuyển `/workflows/` tới backend (Helm ingress, `nginx-prod.conf`, Vite proxy), nên URL như vậy sẽ nhận `index.html` của SPA với 200 và không bao giờ bắn, và thêm routing sẽ mở ra một bề mặt ẩn danh mà review của nó ghi "not approved for exposure" (`webhook_routes.rs:60-64`). Mở webhook qua ingress là việc tiếp theo, cần review bảo mật riêng.
@@ -272,7 +274,7 @@ Cho một trigger hoặc cho các `Schedule` trong phần chọn hàng loạt.
 
 - **Tiêu đề:** "Enable trigger" / "Enable {n} triggers".
 - **Lựa chọn** (radio group, FE-FORM-2):
-  - "Skip missed runs; start at the next tick ({time})" (mặc định, `SKIP` của Kestra).
+  - "Skip missed runs; start at the next tick" (mặc định, `SKIP` của Kestra). Nó không nêu thời điểm: trình duyệt không có thư viện cron và §8 không cho thêm dependency mới, nên tick kế tiếp là của server, hiện trong tab khi công tắc trả lời (sửa 2026-10-15).
   - "Recover missed runs ({n} missed)". Mô tả của nó theo `recoverMissedSchedules` của trigger: "runs every missed tick, one per scheduler pass" (`ALL`), "runs only the latest missed tick" (`LAST`), "skips them: this trigger's `recoverMissedSchedules` is NONE" (`NONE`).
 - **Nút:** Cancel, Enable.
 
@@ -283,12 +285,14 @@ Cho một trigger hoặc cho các `Schedule` trong phần chọn hàng loạt.
 - **Bộ lọc trên URL** (FE-PAGE-2): namespace prefix (một picker trên danh sách namespace của W7d, FE-FORM-3), flow, kind, Enabled / Disabled, tìm kiếm, trang.
 - **Cột:** của tab flow, thêm Namespace và Flow (liên kết), bớt tên dài của Type.
 - **Hàng loạt** enable và disable như ở tab flow.
-- **Trạng thái** (FE-STATE-1/2/3): skeleton, lỗi trước, "No triggers match these filters" kèm Clear filters. Một 422 `triggers_too_large` hiện thông điệp của nó và đưa focus vào bộ lọc namespace. `unparsable > 0` hiện "{n} flows could not be read; their triggers are not listed".
+- **Trạng thái** (FE-STATE-1/2/3): skeleton, lỗi trước, "No triggers match these filters" kèm Clear filters. Một 422 `triggers_too_large` hiện thông điệp của nó; nó chỉ chuyển focus vào bộ lọc namespace sau một thay đổi do người dùng làm bằng một picker, bộ phân trang hoặc Clear filters, không ở lần tải đầu của trang và không khi người dùng đang gõ trong ô tìm kiếm (D9, FE-A11Y-6). `unparsable > 0` hiện "{n} flows could not be read; their triggers are not listed".
+- **Drawer** ở đây là `?trigger=<flow uuid>/<trigger id>`, vì hai flow có thể khai báo cùng một trigger id; nó đọc route theo từng flow của flow đó và chính flow cho phần Định nghĩa, và nêu tên flow trong tiêu đề.
+- **Quyền** lấy từ `can_manage` của trang (§3.5), không từ các dòng.
 - **Cùng các banner** cho các cờ server.
 
 ### 4.5 Quyền
 
-Người xem có `workflow:read` mà không có `workflow:manage` thấy mọi thứ; các công tắc, ô chọn và nút hàng loạt bị vô hiệu hoá kèm "You need workflow:manage" (FE-ACTION-4).
+Người xem có `workflow:read` mà không có `workflow:manage` thấy mọi thứ; các công tắc, ô chọn và nút hàng loạt bị vô hiệu hoá kèm "You need workflow:manage" (FE-ACTION-4). `toggle_refusal` của server nêu lý do đầu tiên áp dụng, theo thứ tự thùng rác, `Leaf`, quyền của người gọi, YAML, nên người xem như vậy cũng đọc "You need workflow:manage" trên một trigger bị tắt trong YAML (quan sát 2026-10-15).
 
 ### 4.6 Chunk
 
@@ -325,7 +329,7 @@ Các module mới chỉ tải bên trong chunk Workflows; `test:bundle:workflows
 **Playwright** (`frontend/tests/e2e/workflows-triggers.spec.ts`), trên một stack riêng với scheduler, worker và webhook bật, không bao giờ trên stack dev dùng chung:
 1. Một flow có schedule `* * * * *`, một webhook và một trigger Flow `dependsOn` trên hai flow upstream. Tab Triggers hiện từng cái với lần chạy tới và URL webhook; chế độ sáng và tối.
 2. Tắt schedule; chờ qua hai tick; không execution nào được tạo. Bật với "Skip": lần chạy tới ở tương lai và không execution lỡ nào xuất hiện. Lặp lại với "Recover": các tick đã lỡ chạy.
-3. Tắt webhook: một `curl` tới URL của nó trả 409; bật lại: 200.
+3. Tắt webhook: một `curl` tới URL của nó trả 409; bật lại: 200. Request đi tới cổng riêng của backend với `url_path`, vì W7e không thêm routing nào cho webhook (D17).
 4. Chạy một flow upstream: drawer hiện window và một điều kiện đã thoả; chạy flow còn lại: flow downstream chạy.
 5. Trang toàn cục: lọc theo namespace và kind trên URL, tắt hàng loạt hai trigger, tải lại, thấy chúng tắt.
 6. Một người xem không có `workflow:manage` thấy các công tắc bị vô hiệu hoá kèm lý do.

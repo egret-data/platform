@@ -1,6 +1,6 @@
 # W7e — Workflows UI, part 5: triggers (flow Triggers tab, global Triggers page, runtime switch)
 
-**Status:** design, 2026-10-14. Not implemented.
+**Status:** implemented on `feat/workflow-w7e-triggers`, 2026-10-15. §6's Playwright scenarios 1-7 ran on a private stack (`frontend/tests/e2e/workflows-triggers.spec.ts`), and §7's comparison ran against the local Kestra image; §2 says which rows were observed. Where this text and the code differ, the code was measured and this text corrected (2026-10-15).
 
 **Depends on:**
 - W7a (#659): the Workflows area, the flow detail and its tab list (`FLOW_TABS`, `frontend/src/routes/workflows/FlowDetail.tsx:52-53`, whose comment already reserves a slot for W7e).
@@ -25,7 +25,7 @@ The frontend rulebook `docs/en/frontend-rules.md` binds every frontend line.
 - D6. A valid save that no longer declares a trigger id drops its switch row; a source that does not parse never drops one; a soft delete drops them all (§3.4).
 - D7. A switched-off `dependsOn` listener's open window is left to expire, as for a YAML-disabled one today (§3.2).
 - D8. A new index serves "last execution per trigger" (§3.6), kept only if `EXPLAIN` shows the query uses it (0183's rule).
-- D9. The global list parses drafts off the async workers with a bound of 2,000 flows **after** the namespace and flow filters, 422 `triggers_too_large` beyond (§3.5).
+- D9. The global list parses drafts off the async workers with a bound of 2,000 flows **after** the namespace and flow filters, 422 `triggers_too_large` beyond (§3.5). The page moves the focus to the namespace filter on that 422 only after a change the user made with a picker, the pager or Clear filters: never on the page's first load, and never while typing in the search box (default decision, 2026-10-15; FE-A11Y-6; §4.4).
 - D10. Bulk switching is by selection only, at most 100 triggers, one transaction per trigger, synchronous, with a result per trigger. No "select all matching" (§3.7).
 - D11. A duplicate trigger id becomes a validation error, `duplicate_trigger_id`, as in Kestra, but a **save-only** finding: it is shown on the draft and blocks publish, and it is not in `validate_for_run`, so stored flows that already declare a duplicate keep running (§3.8).
 - D12. No unlock, restart or delete-state action (egret has no persisted lock; §3.9). No warning that a draft does not fire: a draft fires (§4.4).
@@ -42,25 +42,27 @@ Every trigger a flow declares is visible only as YAML today. No route lists trig
 
 ## 2. Divergences from Kestra
 
-Every row below is **read in source** (the Kestra checkout at `data-portal/kestra`; paths relative to it). None is observed yet: the implementation plan's last task runs §7's scenario against the local Kestra image, as W7d's Task 9 did, and relabels each row it measures.
+**Measured against a running Kestra, 2026-10-14/15 (Task 8, §7).** The local image `kestra/kestra` `28f59bf175e1` (Kestra 2.0 nightly, `server local`, in a throwaway container) ran §6's scenarios 1-3 and 5 with the end to end's flows: `kcmp.team.up1`, `kcmp.team.up2`, and `kcmp.team.main` with a `* * * * *` `Schedule`, a `Webhook`, a `Flow` trigger with `dependsOn` on both upstreams (this nightly accepts `dependsOn`) and a `Schedule` with `disabled: true`. The same scenarios ran on egret (`frontend/tests/e2e/workflows-triggers.spec.ts`). Each Kestra cell says whether it was **observed** on the running image (its API at `/api/v1/main/...` or its UI, read in the DOM) or **read in source** (the checkout at `data-portal/kestra`, `96893b589`; paths relative to it).
 
 | Kestra | egret | Why |
 |---|---|---|
-| The runtime `disabled` lives in the trigger state and is read by the scheduler only (`scheduler/.../TriggerEventHandler.java:228-250`). The webhook path checks only the flow's `disabled` (`webserver/.../ExecutionController.java:844-858`) and matches webhooks without a disabled filter (`:879-899`); Flow triggers check only the YAML (`executor/.../FlowTriggerService.java:50, 61`) | The switch stops all three kinds: the schedule claim, the Flow-trigger listener select and outbox insert, and the webhook route (409) | A switch that leaves a webhook firing is a false control |
-| The flow tab's switch is hidden when the trigger has no state row (`ui/src/components/flows/FlowTriggers.vue:146-163`) | Every `Schedule`, `Webhook` and `Flow` trigger has the switch; a `Leaf` shows "Not run by egret" and no switch | egret has no state row for webhooks, and the switch covers them (D3) |
-| Enabling a trigger whose YAML says `disabled: true`: the server accepts it (`TriggerStateService.validateToggleable` checks only that flow and trigger exist, `webserver/.../TriggerStateService.java:385-393`); the UI disables the switch (`FlowTriggers.vue:155-161`) | 409 `trigger_disabled_in_source`, "This trigger is disabled in the flow's YAML; remove `disabled: true` there" | An API caller should not get a 200 for a change that has no effect |
-| Re-enable with `recoverMissedSchedules=true` follows the trigger's `recoverMissedSchedules` (default `ALL`, `core/.../Schedulable.java:47-51`); absent or false is `NONE` (`TriggerEventHandler.java:259-283`). `NONE` also sets `evaluatedAt` to now | The same three outcomes (§3.3). `evaluated_at` is left alone | egret has no startup recovery that reads `evaluated_at`; it stays "the last tick processed" |
-| The enable dialog offers "Do not recover missed schedules" (default) and "Follow `recoverMissedSchedules`" (`ui/src/components/triggers/TriggerEnableDialog.vue`) | The same two choices, plus the number of missed ticks and what the trigger's `recoverMissedSchedules` will do with them | The user decides with the cost in front of them |
-| Unlock, restart and delete-state actions (`TriggerController.java:161-217, 339`) | None | egret holds no persisted lock (§3.9) |
-| Bulk actions are asynchronous, "by triggers" or "by query" (`TriggersManage.vue:790-880`) | Synchronous, by selection, at most 100, a result per trigger | One transaction per trigger is fast enough; a result per row says what happened |
-| Global page at `admin/triggers` with an "add" catalog tab and CSV export (`ui/src/routes/routes.ts:100`, `Triggers.vue`) | "Triggers" in the Workflows nav; no catalog, no CSV | Nothing to install; export is a follow-up |
-| Filters: namespace, flow, date range, scope, trigger id, worker, enabled/disabled; no type filter (`ui/src/components/filter/configurations/triggerFilter.ts`) | Namespace (prefix), flow, kind, enabled/disabled, a text search | egret has no worker id; kind is what a user scans for |
-| Columns `lastTriggeredDate`, `executionId`, `workerId` | "Last execution" (its id, state and time); no worker | egret stores no last-triggered date; the execution is the record |
-| The expanded row embeds the trigger's logs | No trigger logs | egret writes none: schedule errors are `last_error`, Flow-trigger failures are server logs (§10) |
-| No webhook URL copy on the flow tab (`FlowTriggers.vue:346-359` offers a test-event dialog) | The details drawer shows the URL with a copy button | The URL is the reason a user opens a webhook's details |
-| `dependsOn` window progress is not shown | The drawer shows the open window and which conditions are met | egret has the data (`flow_trigger_windows.results`) |
-| Duplicate trigger ids are a validation error (`core/.../FlowValidator.java:65-68`) | The same, from W7e (D11) | Every route here is keyed by trigger id |
-| Backfill column, form and banner | W7f | User decision |
+| **Observed.** Only scheduler-driven triggers have a trigger state, and the runtime `disabled` lives there. `PUT /api/v1/main/triggers/set-disabled` on the `Webhook` or the `Flow` trigger answers 404 "Trigger disappeared after set-disabled" (the scheduler logs "Trigger state not found"): neither can be switched off at runtime at all. The webhook's POST then still answers 200 and starts an execution, and running both upstreams still starts the downstream. (In source: the webhook path checks only the flow's `disabled`, `webserver/.../ExecutionController.java:844-858`, and Flow triggers only the YAML, `executor/.../FlowTriggerService.java:50, 61`.) | The switch stops all three kinds: the schedule claim, the Flow-trigger listener select and outbox insert, and the webhook route. **Observed:** a switched-off webhook answers 409 "Cannot execute webhook: the trigger 'hook' is disabled." and starts nothing; on again, 200 and an execution | A switch that leaves a webhook firing is a false control |
+| **Observed.** The flow tab's switch is absent when the trigger has no state row: the `Webhook` and `Flow` rows have none (the webhook row offers "Send test event") | Every `Schedule`, `Webhook` and `Flow` trigger has the switch; a `Leaf` shows "Not run by egret" and no switch | egret has no state row for webhooks, and the switch covers them (D3) |
+| **Observed.** Enabling a trigger whose YAML says `disabled: true` through the API answers 200 and sets the state's `disabled` to false; the UI's switch stays off and disabled (it shows `!(disabled \|\| sourceDisabled)`). In source, the trigger still never fires: the fetcher skips a YAML-disabled trigger (`DefaultSchedulableTriggerFetcher.java:104`) | 409 `trigger_disabled_in_source`, "This trigger is disabled in the flow's YAML; remove `disabled: true` there" (observed on egret too); the switch is disabled with "Disabled in the flow's YAML" | An API caller should not get a 200 for a change that has no effect |
+| **Observed** for skip and `ALL`. Off for two ticks: nothing ran. Enable with the default choice (the body carries no `recoverMissedSchedules`): no missed run, the next run is the following tick, and `evaluatedAt` becomes the enable time. Enable with "Follow…" and the property absent (`ALL`): both missed ticks ran, one per scheduler pass, about 1.6 s apart. **Read in source** for `LAST` and `NONE` (`core/.../Schedulable.java:47-51`, `TriggerEventHandler.java:259-306`) | The same outcomes (§3.3), observed for skip and `ALL` by the end to end (`LAST` and `NONE` by the Rust tests). `evaluated_at` is left alone | egret has no startup recovery that reads `evaluated_at`; it stays "the last tick processed" |
+| **Observed.** The dialog, titled "Enable trigger", offers "Do not recover missed schedules" (selected) and "Follow the trigger's recoverMissedSchedules configuration", with Cancel and Enable. It shows no missed count and no next time, and it opens on **every** enable of a `Schedule`, missed ticks or not (`FlowTriggers.vue:612-617`) | The same two choices, plus the number of missed ticks and what the trigger's `recoverMissedSchedules` will do with them. It opens only for a switched-off `Schedule` whose next tick has passed; any other enable sends at once | The user decides with the cost in front of them, and is not asked when there is nothing to decide |
+| **Read in source.** Unlock, restart and delete-state actions (`TriggerController.java:161-217, 339`) | None | egret holds no persisted lock (§3.9) |
+| **Observed.** Bulk by triggers (`POST /triggers/set-disabled/by-triggers`) answers 202 `{operationId, totalItems}` and runs asynchronously with no result per trigger: a trigger of a flow that does not exist is dropped without a word, and a webhook is counted as accepted and then dropped by the scheduler. "By query" is read in source (`TriggersManage.vue:790-880`) | Synchronous, by selection, at most 100, a result per trigger (observed: `{results: [{…, ok}]}`) | One transaction per trigger is fast enough; a result per row says what happened |
+| **Observed.** The global page at `admin/triggers` redirects to its "Add" (catalog) tab beside "Manage", which has "Export as CSV" | "Triggers" in the Workflows nav; no catalog, no CSV | Nothing to install; export is a follow-up |
+| **Observed.** Kestra's global page lists trigger **states**, so a `Webhook` or a `Flow` trigger never appears on it | Every declared trigger of every kind, parsed from the flows' sources (§3.5) | The page is where a user looks for "what can start my flows" |
+| **Read in source.** Filters: namespace, flow, date range, scope, trigger id, worker, enabled/disabled; no type filter (`ui/src/components/filter/configurations/triggerFilter.ts`). The running page shows "Add filters" | Namespace (prefix), flow, kind, enabled/disabled, a text search, all in the URL | egret has no worker id; kind is what a user scans for |
+| **Observed.** Columns on the flow tab: Id, Type, Execution Id, Last triggered date, Next evaluation date, Last evaluation date, Backfill, Enabled; on the global page: Id, Flow, Namespace, Execution Id, Last triggered date, Backfill, Enabled. No worker column by default (the API's `workerId` is read in source) | "Last execution" (its id, state and time); no worker | egret stores no last-triggered date; the execution is the record |
+| **Read in source.** The expanded row embeds the trigger's logs | No trigger logs | egret writes none: schedule errors are `last_error`, Flow-trigger failures are server logs (§10) |
+| **Observed.** No webhook URL on the flow tab; the row has a "Send test event" button. Kestra serves the webhook on its own API origin (`/api/v1/main/executions/webhook/{namespace}/{flow}/{key}`, 200 on the port the UI is served from) | The details drawer shows the webhook's **path** (`/workflows/v1/{ws}/executions/webhook/…`), masked until Reveal, with Copy and a note. It is served by the backend only: the end to end posts to the backend's own port; the same path at the UI's origin is not routed (observed: 404 from the dev server) | D17: no routing and no origin; exposing webhooks is a follow-up with its own security review |
+| **Observed** in the row (no progress shown); the expanded row was not opened | The drawer shows the open window and which conditions are met (observed: one upstream run, "duration" window, the first condition "Met", the second "Not met") | egret has the data (`flow_trigger_windows.results`) |
+| **Observed.** A duplicate trigger id refuses the save: `POST /flows` answers 422 "Invalid Flow: Duplicate trigger id with name [t]", and the flow is not stored (`core/.../FlowValidator.java:65-68`) | `duplicate_trigger_id` is a save-only finding: the draft saves, the duplicate is marked and blocks publish, and stored flows keep running (D11) | Drafts save with validation errors in egret; a run-time error would stop flows already stored |
+| **Observed.** A new state row copies the YAML's `disabled` into the runtime `disabled`; from then on the two are separate fields (`sourceDisabled`, `disabled`) | The runtime switch lives only in `workflow.disabled_triggers`; the YAML is read from the source; the trigger rows hold the effective copy (D2) | A YAML edit should not be shadowed by a runtime value it once seeded |
+| **Observed.** A Backfill column and buttons | W7f | User decision |
 
 ## 3. Backend
 
@@ -176,8 +178,8 @@ And at the top: `flow_disabled` (YAML or `state = 'disabled'`), `flow_deleted`, 
 **`GET /api/ws/{workspace}/workflows/triggers`**: every trigger of the workspace's flows not in the trash.
 
 - **Query:** `namespace_prefix` (dot-anchored, as W7b's), `flow_id` (uuid), `kind` (comma-separated), `state` (`enabled` / `disabled`, on `effective_disabled`), `q` (case-insensitive substring of trigger id, flow id or namespace), `limit` (default 50, max 200, clamped), `offset`.
-- **Row:** the flow's uuid, namespace and flow id, plus the per-flow entry without `depends_on.conditions` and without `webhook` (the drawer fetches the per-flow route).
-- **Page:** `{rows, total, limit, offset, unparsable, scheduler_enabled, worker_enabled, webhooks_enabled}`; `unparsable` counts flows in scope whose source did not parse (their triggers are unknown). Order: namespace, flow id, declaration order.
+- **Row:** the per-flow entry flattened, plus `flow_uuid` (the flow's uuid; named so because the entry's own `flow` is a `Flow` trigger's info and one object cannot carry two keys of one name), `namespace`, `flow_id` (the YAML id) and `flow_disabled` (the per-flow route's top-level flag, per row: the flow's YAML or `state = 'disabled'`). A row carries no webhook path (`webhook` is null) and no conditions (`depends_on.conditions` is null): the drawer reads the per-flow route.
+- **Page:** `{rows, total, limit, offset, unparsable, scheduler_enabled, worker_enabled, webhooks_enabled, can_manage}`; `unparsable` counts flows in scope whose source did not parse (their triggers are unknown); `can_manage` is the caller's `workflow:manage` in the workspace, per caller and not per row, so a page whose rows are all refused for another reason still says whether the switches and the bulk route are the caller's to use. Order: namespace, flow id, declaration order.
 - **How (D9):** the flows in scope are read with the namespace and flow filters in SQL, at most 2,001 (`dependency_drafts`'s shape, `repo.rs:381-397`). More than 2,000 answers 422 `triggers_too_large`, "more than 2000 flows match; narrow by namespace". The sources are parsed on the blocking pool (W7d's `off_runtime`, `dependencies.rs:213`, lifted to `pub(crate)` with a neutral error message, since today it is private and its message names the dependencies graph). The state tables are read in one statement each for the flow ids in scope. Kind, state and search filter in memory, then the page is cut, then `last_execution` is read for that page only.
 - **Why parse:** webhooks and `Leaf` triggers have no row anywhere, and only the source knows them.
 
@@ -238,7 +240,7 @@ Everything lives inside W7a's lazy Workflows area (FE-ROUTE-2). New modules: `co
 `FLOW_TABS` becomes `["edit", "revisions", "executions", "triggers"]` (`FlowDetail.tsx:52-53`); the URL is `flows/:id/triggers` (FE-PAGE-2).
 
 - **Columns** (`ui/table`, FE-PAGE-4): selection, ID, Type (kind icon and the short type name), Next run, Last tick (`evaluated_at`, labelled "Last evaluated" with a tooltip that it is the tick processed, not the wall-clock fire), Last execution (state chip, relative time, link), Status, Enabled (switch), Details.
-- **Status** says why a trigger does not fire, in words: "Disabled in YAML", "Switched off by {disabled_by_name} {time}", "Off the queue: {last_error}", "Not listening: {reason}", "Not run by egret" (Leaf), "Key does not render". Never by colour alone (FE-A11Y).
+- **Status** says why a trigger does not fire, in words: "Disabled in YAML", "Switched off by {disabled_by_name} {time}", "Off the queue: {last_error}", "Not listening: {reason}", "Not run by egret" (Leaf), "Key does not render", and also "The flow is in the trash", "On, but the flow is disabled, so it does not fire" (D18), "Not served by egret: {reason}" (a declared webhook option egret refuses), and "Active" when nothing stops it. The first cause wins, in that order: the YAML, the runtime switch, the flow, then the kind's own state. Never by colour alone (FE-A11Y).
 - **The switch.**
   - Disabled with its reason (FE-ACTION-4): "Disabled in the flow's YAML", "Not run by egret", "You need workflow:manage", "The flow is in the trash".
   - Switching off sends the PUT at once.
@@ -256,9 +258,9 @@ Everything lives inside W7a's lazy Workflows area (FE-ROUTE-2). New modules: `co
 
 ### 4.2 The details drawer
 
-Opened from Details or a row's ID; `?trigger=<id>` in the URL so it can be shared (FE-PAGE-2).
+Opened from Details or a row's ID; `?trigger=<id>` in the URL so it can be shared (FE-PAGE-2) (on the global page `?trigger=<flow uuid>/<trigger id>`, §4.4).
 
-- **Definition:** the trigger's YAML block, read-only, with a link "Edit in the editor" that opens Code at that block.
+- **Definition:** the trigger's YAML block, read-only, with a link "Edit in the editor" that opens Code at that block. A webhook's `key:` is hidden in this block too until Reveal, and the whole block is hidden when the key cannot be told apart from the rest (failing closed).
 - **Schedule:** cron, timezone, next run in the trigger's timezone and the viewer's, last tick, last error, missed ticks when switched off.
 - **Flow trigger:** the states heard; for `dependsOn`, the mode, the window (kind, start and end, time left), and each condition with met or not met. "No window is open" when there is none.
 - **Webhook** (default decision, 2026-10-14): the **path** `url_path` (`/workflows/v1/{ws}/executions/webhook/{namespace}/{flow}/{key}`), masked with Reveal and Copy (the copy button says "Copied" in an `aria-live` region), and a note that it is served by the egret backend at whatever host the operator exposes for webhooks. If `webhooks_enabled` is false, the same "Webhooks are off on this server" warning shows. W7e does **not** build the URL from `window.location.origin` and adds **no** routing: nothing at the browser's origin sends `/workflows/` to the backend (Helm ingress, `nginx-prod.conf`, Vite proxy), so such a URL would answer the SPA's `index.html` with 200 and never fire, and adding the routing would expose an anonymous surface whose review says "not approved for exposure" (`webhook_routes.rs:60-64`). Exposing webhooks through ingress is a follow-up that needs its own security review.
@@ -270,7 +272,7 @@ For one trigger or for the `Schedule`s of a bulk selection.
 
 - **Title:** "Enable trigger" / "Enable {n} triggers".
 - **Choices** (radio group, FE-FORM-2):
-  - "Skip missed runs; start at the next tick ({time})" (default, Kestra's `SKIP`).
+  - "Skip missed runs; start at the next tick" (default, Kestra's `SKIP`). It names no time: the browser has no cron library and §8 allows no new dependency, so the next tick is the server's, shown in the tab once the switch answers (corrected 2026-10-15).
   - "Recover missed runs ({n} missed)". Its description follows the trigger's `recoverMissedSchedules`: "runs every missed tick, one per scheduler pass" (`ALL`), "runs only the latest missed tick" (`LAST`), "skips them: this trigger's `recoverMissedSchedules` is NONE" (`NONE`).
 - **Buttons:** Cancel, Enable.
 
@@ -281,12 +283,14 @@ For one trigger or for the `Schedule`s of a bulk selection.
 - **Filters in the URL** (FE-PAGE-2): namespace prefix (a picker over W7d's namespace list, FE-FORM-3), flow, kind, Enabled / Disabled, search, page.
 - **Columns:** the flow tab's, plus Namespace and Flow (links), minus Type's long name.
 - **Bulk** enable and disable as on the flow tab.
-- **States** (FE-STATE-1/2/3): skeleton, error first, "No triggers match these filters" with Clear filters. A 422 `triggers_too_large` shows its message and focuses the namespace filter. `unparsable > 0` shows "{n} flows could not be read; their triggers are not listed".
+- **States** (FE-STATE-1/2/3): skeleton, error first, "No triggers match these filters" with Clear filters. A 422 `triggers_too_large` shows its message; it moves the focus to the namespace filter only after a change the user made with a picker, the pager or Clear filters, not on the page's first load and not while the user types in the search box (D9, FE-A11Y-6). `unparsable > 0` shows "{n} flows could not be read; their triggers are not listed".
+- **The drawer** is `?trigger=<flow uuid>/<trigger id>` here, since two flows can declare one trigger id; it reads the flow's per-flow route and the flow for the Definition, and names the flow in its title.
+- **Permissions** come from the page's `can_manage` (§3.5), not from the rows.
 - **The same banners** for the server flags.
 
 ### 4.5 Permissions
 
-A viewer with `workflow:read` and not `workflow:manage` sees everything; the switches, selection and bulk buttons are disabled with "You need workflow:manage" (FE-ACTION-4).
+A viewer with `workflow:read` and not `workflow:manage` sees everything; the switches, selection and bulk buttons are disabled with "You need workflow:manage" (FE-ACTION-4). The server's `toggle_refusal` names the first reason that applies, in the order trash, `Leaf`, the caller's right, the YAML, so such a viewer reads "You need workflow:manage" on a YAML-disabled trigger too (observed 2026-10-15).
 
 ### 4.6 Chunks
 
@@ -323,7 +327,7 @@ The new modules load only inside the Workflows chunk; `test:bundle:workflows` (`
 **Playwright** (`frontend/tests/e2e/workflows-triggers.spec.ts`), on a private stack with the scheduler, worker and webhooks on, never the shared dev stack:
 1. A flow with a `* * * * *` schedule, a webhook and a `dependsOn` Flow trigger on two upstream flows. The Triggers tab shows each with its next run and the webhook URL; light and dark mode.
 2. Switch the schedule off; wait past two ticks; no execution is created. Switch it on with "Skip": the next run is in the future and no missed execution appears. Repeat with "Recover": the missed ticks run.
-3. Switch the webhook off: a `curl` of its URL answers 409; on again: 200.
+3. Switch the webhook off: a `curl` of its URL answers 409; on again: 200. The request goes to the backend's own port with `url_path`, since W7e adds no routing for webhooks (D17).
 4. Run one upstream flow: the drawer shows the window and one condition met; run the other: the downstream flow runs.
 5. The global page: filter by namespace and kind in the URL, bulk-disable two triggers, reload, see them off.
 6. A viewer without `workflow:manage` sees disabled switches with the reason.
