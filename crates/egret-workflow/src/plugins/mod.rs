@@ -456,26 +456,18 @@ fn type_refusal(type_id: &str) -> PluginRefusal {
 }
 
 /// Every leaf task in `flow`, with its validation path, in all four root
-/// lists and at every depth -- through [`Task::children`] **and**
-/// [`Task::error_children`], as `scripts::script_tasks` walks (and
-/// `spec::validate`'s own walk, since no-silent-stall Task 1).
+/// lists and at every depth -- `spec::path::every_task`'s walk, through
+/// [`Task::children`] **and** [`Task::error_children`] (as `spec::validate`'s
+/// own walk does, since no-silent-stall Task 1).
 /// `spec::unrunnable` walks this too, so its paths are these.
 pub(crate) fn leaves(flow: &Flow) -> Vec<(String, &Task, &Value)> {
-    fn walk<'a>(task: &'a Task, path: String, out: &mut Vec<(String, &'a Task, &'a Value)>) {
-        if let TaskKind::Leaf { spec } = &task.kind {
-            out.push((path.clone(), task, spec));
-        }
-        for child in task.children().into_iter().chain(task.error_children()) {
-            walk(child, crate::spec::path::task_path(&path, &child.id), out);
-        }
-    }
-    let mut out = Vec::new();
-    for (name, list) in crate::spec::path::root_lists(flow) {
-        for task in list {
-            walk(task, crate::spec::path::task_path(name, &task.id), &mut out);
-        }
-    }
-    out
+    crate::spec::path::every_task(flow)
+        .into_iter()
+        .filter_map(|(path, task)| match &task.kind {
+            TaskKind::Leaf { spec } => Some((path, task, spec)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Every plugin task (`type:` starting with [`PREFIX`], in the catalog or

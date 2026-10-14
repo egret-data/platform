@@ -373,6 +373,28 @@ impl FlowRepo {
             .await
             .map_err(db_err)
     }
+
+    /// Every flow of `workspace` that is not deleted, by namespace then flow
+    /// id (byte order), at most `limit` rows -- what the namespace
+    /// dependencies graph reads (W7d spec §3.4). The caller passes its
+    /// limit plus one to tell "exactly the limit" from "over it".
+    pub async fn dependency_drafts(
+        &self,
+        workspace: Uuid,
+        limit: i64,
+    ) -> Result<Vec<crate::namespaces::dependencies::DraftRow>> {
+        sqlx::query_as(
+            "SELECT id, namespace, flow_id, source, state FROM workflow.flows \
+              WHERE workspace_id = $1 AND deleted_at IS NULL \
+              ORDER BY namespace COLLATE \"C\", flow_id COLLATE \"C\" \
+              LIMIT $2",
+        )
+        .bind(workspace)
+        .bind(limit)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
 }
 
 /// Persistence for flow drafts and their published versions.

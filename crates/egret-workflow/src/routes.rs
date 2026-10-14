@@ -3065,6 +3065,169 @@ async fn get_namespace(
         .ok_or_else(|| Error::NotFound(format!("namespace '{namespace}'")))
 }
 
+/// One flow of a namespace's dependencies graph (W7d spec §3.4).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct NamespaceDependencyNodeDto {
+    /// The flow's id (the uuid every flow route takes); edges name it.
+    pub id: Uuid,
+    pub namespace: String,
+    pub flow_id: String,
+    /// The flow is switched off: its state is `disabled` or its YAML says
+    /// `disabled: true`.
+    pub disabled: bool,
+    /// The flow is in the namespace or beneath it (dot-anchored); false for a
+    /// flow elsewhere present only for an edge to or from one that is.
+    pub in_namespace: bool,
+    /// `Subflow` tasks whose `namespace` or `flowId` is an expression
+    /// (`{{ }}`/`{% %}`): only an execution knows their target, so they draw
+    /// no edge.
+    pub dynamic_subflows: i64,
+}
+
+/// What an edge of the dependencies graph means.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NamespaceDependencyKind {
+    /// `source` calls `target` through a `Subflow` task with a literal
+    /// target, anywhere in its task tree (`errors:` included).
+    Subflow,
+    /// `target` has a `Flow` trigger whose `dependsOn` names `source` (both
+    /// `namespace` and `flowId`).
+    FlowTrigger,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct NamespaceDependencyEdgeDto {
+    pub source: Uuid,
+    pub target: Uuid,
+    pub kind: NamespaceDependencyKind,
+}
+
+/// A namespace's flow-to-flow graph, built from the flows' saved drafts.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct NamespaceDependenciesDto {
+    /// The namespace's flows and its children's, then every flow elsewhere
+    /// with a direct edge to or from one of them; by namespace, then flow id.
+    pub nodes: Vec<NamespaceDependencyNodeDto>,
+    /// Edges with at least one end in the namespace; one per (source,
+    /// target, kind).
+    pub edges: Vec<NamespaceDependencyEdgeDto>,
+    /// Drafts in the WORKSPACE (not only this namespace) whose YAML does not
+    /// parse: skipped, so their nodes and edges are missing from the graph.
+    pub unparsable: i64,
+}
+
+impl From<crate::namespaces::dependencies::Dependencies> for NamespaceDependenciesDto {
+    fn from(d: crate::namespaces::dependencies::Dependencies) -> Self {
+        use crate::namespaces::dependencies::EdgeKind;
+        Self {
+            nodes: d
+                .nodes
+                .into_iter()
+                .map(|n| NamespaceDependencyNodeDto {
+                    id: n.id,
+                    namespace: n.namespace,
+                    flow_id: n.flow_id,
+                    disabled: n.disabled,
+                    in_namespace: n.in_namespace,
+                    dynamic_subflows: n.dynamic_subflows,
+                })
+                .collect(),
+            edges: d
+                .edges
+                .into_iter()
+                .map(|e| NamespaceDependencyEdgeDto {
+                    source: e.source,
+                    target: e.target,
+                    kind: match e.kind {
+                        EdgeKind::Subflow => NamespaceDependencyKind::Subflow,
+                        EdgeKind::FlowTrigger => NamespaceDependencyKind::FlowTrigger,
+                    },
+                })
+                .collect(),
+            unparsable: d.unparsable,
+        }
+    }
+}
+
+/// The `code` of the 422 a workspace over
+/// [`crate::namespaces::dependencies::MAX_FLOWS`] flows answers.
+pub const DEPENDENCIES_TOO_LARGE_CODE: &str = "dependencies_too_large";
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/namespaces/{namespace}/dependencies",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("namespace" = String, Path, description = "The namespace; its children (dot-anchored) are inside it"),
+    ),
+    responses(
+        (status = 200, description = "The flow-to-flow graph of the namespace, built from every flow's saved draft: `subflow` edges from `Subflow` tasks with a literal target, `flow_trigger` edges from `Flow` triggers' `dependsOn` entries naming a flow. A namespace with no flows answers an empty graph.", body = NamespaceDependenciesDto),
+        (status = 400, description = "Not a valid namespace name (`^[a-z0-9][a-z0-9._-]*`, 1-150 characters)", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 422, description = "The workspace has more than 2000 flows (not deleted), every one of which would be read (`code: dependencies_too_large`)", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn namespace_dependencies(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, namespace)): Path<(String, String)>,
+) -> std::result::Result<Json<NamespaceDependenciesDto>, DependenciesRouteError> {
+    use crate::namespaces::dependencies::{build, MAX_FLOWS};
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    if !crate::spec::validate::is_valid_namespace(&namespace) {
+        return Err(Error::InvalidInput(format!(
+            "namespace '{namespace}' must match ^[a-z0-9][a-z0-9._-]* and be 1-150 characters long"
+        ))
+        .into());
+    }
+    let drafts = st
+        .repo
+        .dependency_drafts(ctx.workspace_id.0, MAX_FLOWS as i64 + 1)
+        .await?;
+    if drafts.len() > MAX_FLOWS {
+        return Err(DependenciesRouteError::TooManyFlows);
+    }
+    Ok(Json(build(&namespace, &drafts).into()))
+}
+
+/// The error of the dependencies route: every [`egret_core::Error`], plus
+/// the 422 `egret_core::Error` has no variant for.
+#[derive(Debug)]
+pub enum DependenciesRouteError {
+    Core(Error),
+    TooManyFlows,
+}
+
+impl From<Error> for DependenciesRouteError {
+    fn from(e: Error) -> Self {
+        DependenciesRouteError::Core(e)
+    }
+}
+
+impl axum::response::IntoResponse for DependenciesRouteError {
+    fn into_response(self) -> axum::response::Response {
+        use crate::namespaces::dependencies::MAX_FLOWS;
+        match self {
+            DependenciesRouteError::Core(e) => e.into_response(),
+            DependenciesRouteError::TooManyFlows => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(egret_core::http::ErrorBody {
+                    error: format!(
+                        "this workspace has more than {MAX_FLOWS} flows; the dependencies graph \
+                         reads every flow's draft and is limited to {MAX_FLOWS}"
+                    ),
+                    code: Some(DEPENDENCIES_TOO_LARGE_CODE.to_string()),
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
 /// The Workflow management router. Mount under `/api` so the live paths are
 /// `/api/ws/{workspace}/workflows/...` — see this module's doc comment for
 /// the feature-gate convention that depends on it.
@@ -3143,6 +3306,10 @@ pub fn management_router() -> Router<WorkflowState> {
         .route(
             "/ws/{workspace}/workflows/namespaces/{namespace}",
             get(get_namespace),
+        )
+        .route(
+            "/ws/{workspace}/workflows/namespaces/{namespace}/dependencies",
+            get(namespace_dependencies),
         )
         .route(
             "/ws/{workspace}/workflows/namespaces/{namespace}/files",
@@ -3249,6 +3416,7 @@ pub fn management_router() -> Router<WorkflowState> {
         replay_execution,
         list_namespaces,
         get_namespace,
+        namespace_dependencies,
         crate::storage::nsfiles::routes::download_namespace_file,
         crate::storage::nsfiles::routes::namespace_file_stats,
         crate::storage::nsfiles::routes::namespace_file_revisions,
@@ -3290,6 +3458,10 @@ pub fn management_router() -> Router<WorkflowState> {
         LogLineDto,
         LogPageDto,
         WorkflowNamespaceDto,
+        NamespaceDependenciesDto,
+        NamespaceDependencyNodeDto,
+        NamespaceDependencyEdgeDto,
+        NamespaceDependencyKind,
         crate::storage::routes::FileMetasDto,
         crate::storage::routes::FilePreviewDto,
         crate::storage::nsfiles::routes::NsFileStatsDto,

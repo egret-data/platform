@@ -362,14 +362,22 @@ fn graph_of<'a>(
     })
 }
 
-/// The `(namespace, flowId)` to load, or why there is none to load. The
-/// order is the module doc's ("Reasons").
-fn target(sub: &SubflowRef, depth: u8) -> Result<(&str, &str), ExpansionReason> {
+/// True when a `Subflow`'s `namespace` or `flowId` is an expression
+/// (`{{ }}`/`{% %}`, Kestra's `containsOpeningBlockDelimiter`), so only an
+/// execution knows the target -- the `dynamic` reason here, and the
+/// `dynamic_subflows` count of the namespace dependencies (W7d spec §3.4).
+pub(crate) fn target_is_dynamic(namespace: &Option<String>, flow_id: &Option<String>) -> bool {
     let dynamic = |v: &Option<String>| {
         v.as_deref()
             .is_some_and(crate::scripts::gate::is_unrendered)
     };
-    if dynamic(&sub.namespace) || dynamic(&sub.flow_id) {
+    dynamic(namespace) || dynamic(flow_id)
+}
+
+/// The `(namespace, flowId)` to load, or why there is none to load. The
+/// order is the module doc's ("Reasons").
+fn target(sub: &SubflowRef, depth: u8) -> Result<(&str, &str), ExpansionReason> {
+    if target_is_dynamic(&sub.namespace, &sub.flow_id) {
         return Err(ExpansionReason::Dynamic);
     }
     if depth >= MAX_EXPANSION_DEPTH {

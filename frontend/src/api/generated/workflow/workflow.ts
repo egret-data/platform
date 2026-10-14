@@ -44,6 +44,7 @@ import type {
   KvKeysBody,
   KvRevisionDto,
   LogPageDto,
+  NamespaceDependenciesDto,
   NsFileRevisionDto,
   NsFileStatsDto,
   NsFileUploadForm,
@@ -3359,6 +3360,147 @@ export function useWorkflowGetNamespace<TData = Awaited<ReturnType<typeof workfl
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getWorkflowGetNamespaceQueryOptions(workspace,namespace,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowNamespaceDependenciesResponse200 = {
+  data: NamespaceDependenciesDto
+  status: 200
+}
+
+export type workflowNamespaceDependenciesResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowNamespaceDependenciesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowNamespaceDependenciesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowNamespaceDependenciesResponse422 = {
+  data: ErrorBody
+  status: 422
+}
+
+export type workflowNamespaceDependenciesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowNamespaceDependenciesResponseSuccess = (workflowNamespaceDependenciesResponse200) & {
+  headers: Headers;
+};
+export type workflowNamespaceDependenciesResponseError = (workflowNamespaceDependenciesResponse400 | workflowNamespaceDependenciesResponse401 | workflowNamespaceDependenciesResponse403 | workflowNamespaceDependenciesResponse422 | workflowNamespaceDependenciesResponse500) & {
+  headers: Headers;
+};
+
+export type workflowNamespaceDependenciesResponse = (workflowNamespaceDependenciesResponseSuccess | workflowNamespaceDependenciesResponseError)
+
+export const getWorkflowNamespaceDependenciesUrl = (workspace: string,
+    namespace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/dependencies`
+}
+
+export const workflowNamespaceDependencies = async (workspace: string,
+    namespace: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowNamespaceDependenciesResponse> => {
+
+  return customInstance<workflowNamespaceDependenciesResponse>(getWorkflowNamespaceDependenciesUrl(workspace,namespace),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowNamespaceDependenciesQueryKey = (workspace: string,
+    namespace: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/namespaces/${encodeURIComponent(namespace)}/dependencies`
+    ] as const;
+    }
+
+
+export const getWorkflowNamespaceDependenciesQueryOptions = <TData = Awaited<ReturnType<typeof workflowNamespaceDependencies>>, TError = ErrorBody>(workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceDependencies>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowNamespaceDependenciesQueryKey(workspace,namespace);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowNamespaceDependencies>>> = ({ signal }) => workflowNamespaceDependencies(workspace,namespace, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && namespace !== null && namespace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceDependencies>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowNamespaceDependenciesQueryResult = NonNullable<Awaited<ReturnType<typeof workflowNamespaceDependencies>>>
+export type WorkflowNamespaceDependenciesQueryError = ErrorBody
+
+
+export function useWorkflowNamespaceDependencies<TData = Awaited<ReturnType<typeof workflowNamespaceDependencies>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceDependencies>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowNamespaceDependencies>>,
+          TError,
+          Awaited<ReturnType<typeof workflowNamespaceDependencies>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowNamespaceDependencies<TData = Awaited<ReturnType<typeof workflowNamespaceDependencies>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceDependencies>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowNamespaceDependencies>>,
+          TError,
+          Awaited<ReturnType<typeof workflowNamespaceDependencies>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowNamespaceDependencies<TData = Awaited<ReturnType<typeof workflowNamespaceDependencies>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceDependencies>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowNamespaceDependencies<TData = Awaited<ReturnType<typeof workflowNamespaceDependencies>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowNamespaceDependencies>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowNamespaceDependenciesQueryOptions(workspace,namespace,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

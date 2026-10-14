@@ -52,6 +52,9 @@ pub mod graph;
 /// because `tests/task_logs.rs` drives the repository directly.
 pub mod logs;
 pub mod models;
+/// W7d: what the namespace pages read beyond the repository -- the
+/// dependencies graph built from flow drafts.
+pub(crate) mod namespaces;
 /// W5b: real Kestra plugins run by the plugin host (`plugin-host/`). Task 2
 /// holds only the embedded catalog and its lockfile check.
 pub mod plugins;

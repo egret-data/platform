@@ -957,31 +957,19 @@ fn string_map(
 }
 
 /// Every script task in `flow`, with its validation path, in all four root
-/// lists and at every depth — through [`Task::children`] **and**
+/// lists and at every depth (`spec::path::every_task`) — through [`Task::children`] **and**
 /// [`Task::error_children`]. `spec::validate`'s own walk visits
 /// `children()` only, so a script task inside a flowable's `errors:` would
 /// escape a refusal that relied on it; this walk is what `validate` and
 /// `publish` both use for script tasks.
 pub(crate) fn script_tasks(flow: &Flow) -> Vec<(String, &Task, ScriptKind, &Value)> {
-    fn walk<'a>(
-        task: &'a Task,
-        path: String,
-        out: &mut Vec<(String, &'a Task, ScriptKind, &'a Value)>,
-    ) {
-        if let (TaskKind::Leaf { spec }, Some(kind)) = (&task.kind, kind_of(&task.r#type)) {
-            out.push((path.clone(), task, kind, spec));
-        }
-        for child in task.children().into_iter().chain(task.error_children()) {
-            walk(child, crate::spec::path::task_path(&path, &child.id), out);
-        }
-    }
-    let mut out = Vec::new();
-    for (name, list) in crate::spec::path::root_lists(flow) {
-        for task in list {
-            walk(task, crate::spec::path::task_path(name, &task.id), &mut out);
-        }
-    }
-    out
+    crate::spec::path::every_task(flow)
+        .into_iter()
+        .filter_map(|(path, task)| match (&task.kind, kind_of(&task.r#type)) {
+            (TaskKind::Leaf { spec }, Some(kind)) => Some((path, task, kind, spec)),
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]

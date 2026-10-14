@@ -901,6 +901,7 @@ fn canonical_type(task: &Task) -> String {
 
 mod expand;
 mod states;
+pub(crate) use expand::target_is_dynamic;
 pub use expand::{
     execution_graph, expanded_flow_graph, ExecutionSource, FrozenExecution, SubflowSource,
     MAX_EXPANSION_DEPTH, SUBFLOW_SEPARATOR,

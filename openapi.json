@@ -30545,6 +30545,104 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/namespaces/{namespace}/dependencies": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "namespace_dependencies",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The namespace; its children (dot-anchored) are inside it",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The flow-to-flow graph of the namespace, built from every flow's saved draft: `subflow` edges from `Subflow` tasks with a literal target, `flow_trigger` edges from `Flow` triggers' `dependsOn` entries naming a flow. A namespace with no flows answers an empty graph.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NamespaceDependenciesDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a valid namespace name (`^[a-z0-9][a-z0-9._-]*`, 1-150 characters)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The workspace has more than 2000 flows (not deleted), every one of which would be read (`code: dependencies_too_large`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/namespaces/{namespace}/files": {
       "get": {
         "tags": [
@@ -40598,6 +40696,103 @@
           },
           "version": {
             "type": "string"
+          }
+        }
+      },
+      "NamespaceDependenciesDto": {
+        "type": "object",
+        "description": "A namespace's flow-to-flow graph, built from the flows' saved drafts.",
+        "required": [
+          "nodes",
+          "edges",
+          "unparsable"
+        ],
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamespaceDependencyNodeDto"
+            },
+            "description": "The namespace's flows and its children's, then every flow elsewhere\nwith a direct edge to or from one of them; by namespace, then flow id."
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamespaceDependencyEdgeDto"
+            },
+            "description": "Edges with at least one end in the namespace; one per (source,\ntarget, kind)."
+          },
+          "unparsable": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Drafts in the WORKSPACE (not only this namespace) whose YAML does not\nparse: skipped, so their nodes and edges are missing from the graph."
+          }
+        }
+      },
+      "NamespaceDependencyEdgeDto": {
+        "type": "object",
+        "required": [
+          "source",
+          "target",
+          "kind"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "target": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/NamespaceDependencyKind"
+          }
+        }
+      },
+      "NamespaceDependencyKind": {
+        "type": "string",
+        "description": "What an edge of the dependencies graph means.",
+        "enum": [
+          "subflow",
+          "flow_trigger"
+        ]
+      },
+      "NamespaceDependencyNodeDto": {
+        "type": "object",
+        "description": "One flow of a namespace's dependencies graph (W7d spec §3.4).",
+        "required": [
+          "id",
+          "namespace",
+          "flow_id",
+          "disabled",
+          "in_namespace",
+          "dynamic_subflows"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The flow's id (the uuid every flow route takes); edges name it."
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "flow_id": {
+            "type": "string"
+          },
+          "disabled": {
+            "type": "boolean",
+            "description": "The flow is switched off: its state is `disabled` or its YAML says\n`disabled: true`."
+          },
+          "in_namespace": {
+            "type": "boolean",
+            "description": "The flow is in the namespace or beneath it (dot-anchored); false for a\nflow elsewhere present only for an edge to or from one that is."
+          },
+          "dynamic_subflows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`Subflow` tasks whose `namespace` or `flowId` is an expression\n(`{{ }}`/`{% %}`): only an execution knows their target, so they draw\nno edge."
           }
         }
       },

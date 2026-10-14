@@ -1,4 +1,4 @@
-//! W7d Task 1: the namespace listing (spec §3.1) --
+//! W7d Tasks 1 and 3: the namespace listing (spec §3.1) and dependencies (§3.4) --
 //! `GET /api/ws/{workspace}/workflows/namespaces?prefix=` and
 //! `GET /api/ws/{workspace}/workflows/namespaces/{namespace}`.
 //!
@@ -427,4 +427,506 @@ async fn a_live_folder_alone_makes_a_namespace() {
     )
     .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// W7d Task 3: `GET namespaces/{namespace}/dependencies` (spec §3.4)
+// ---------------------------------------------------------------------------
+
+/// A flow `ns/id` whose `tasks:` are `body` (already indented by two) and
+/// whose top level ends with `extra` (e.g. a `triggers:` block).
+fn flow_with(ns: &str, id: &str, body: &str, extra: &str) -> String {
+    format!("id: {id}\nnamespace: {ns}\ntasks:\n{body}{extra}")
+}
+
+/// A root `Subflow` task calling `ns/id` (both written verbatim).
+fn subflow_task(task: &str, ns: &str, id: &str) -> String {
+    format!(
+        "  - id: {task}\n    type: io.kestra.plugin.core.flow.Subflow\n    namespace: \"{ns}\"\n    flowId: \"{id}\"\n"
+    )
+}
+
+const LOG: &str = "  - id: t\n    type: core.log\n";
+
+/// A `Flow` trigger whose `dependsOn` lists `deps` (`(namespace, flowId)`,
+/// either omitted when `None`).
+fn flow_trigger(deps: &[(Option<&str>, Option<&str>)]) -> String {
+    let mut s = String::from(
+        "triggers:\n  - id: on_upstream\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n",
+    );
+    for (ns, id) in deps {
+        let mut first = true;
+        for (key, v) in [("namespace", ns), ("flowId", id)] {
+            if let Some(v) = v {
+                s.push_str(if first { "      - " } else { "        " });
+                s.push_str(&format!("{key}: {v}\n"));
+                first = false;
+            }
+        }
+    }
+    s
+}
+
+async fn seed_src(db: &Db, ws: Uuid, user: UserId, source: &str) -> Uuid {
+    common::seed_flow(db, ws, user, source, "draft").await
+}
+
+async fn deps_res(app: &common::App, ws: Uuid, user: UserId, ns: &str) -> axum::response::Response {
+    common::get(
+        app,
+        &format!("/api/ws/{ws}/workflows/namespaces/{ns}/dependencies"),
+        user,
+    )
+    .await
+}
+
+async fn deps(app: &common::App, ws: Uuid, user: UserId, ns: &str) -> Value {
+    let res = deps_res(app, ws, user, ns).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    common::json(res).await
+}
+
+/// `{ "ns/id": node }`, keyed by the flow's name rather than its uuid.
+fn nodes_by_name(body: &Value) -> std::collections::BTreeMap<String, Value> {
+    body["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .map(|n| {
+            (
+                format!(
+                    "{}/{}",
+                    n["namespace"].as_str().unwrap(),
+                    n["flow_id"].as_str().unwrap()
+                ),
+                n.clone(),
+            )
+        })
+        .collect()
+}
+
+/// The edges as `(source name, target name, kind)`, sorted.
+fn edge_names(body: &Value) -> Vec<(String, String, String)> {
+    let by_id: std::collections::HashMap<String, String> = nodes_by_name(body)
+        .into_iter()
+        .map(|(name, n)| (n["id"].as_str().unwrap().to_string(), name))
+        .collect();
+    let mut out: Vec<_> = body["edges"]
+        .as_array()
+        .expect("edges")
+        .iter()
+        .map(|e| {
+            let name = |k: &str| {
+                by_id
+                    .get(e[k].as_str().unwrap())
+                    .unwrap_or_else(|| panic!("edge {k} names no node: {e}"))
+                    .clone()
+            };
+            (
+                name("source"),
+                name("target"),
+                e["kind"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn edge(s: &str, t: &str, kind: &str) -> (String, String, String) {
+    (s.to_string(), t.to_string(), kind.to_string())
+}
+
+/// A literal `Subflow` draws an edge, at the root and under a flowable's
+/// `errors:` (and `afterExecution:`); every node carries the spec's six
+/// fields, `disabled` from either door (the state column, the YAML key).
+#[tokio::test]
+async fn literal_subflows_draw_edges_including_under_errors() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = reader(&db).await;
+    let caller = seed_src(
+        &db,
+        ws,
+        user,
+        &flow_with(
+            "dep",
+            "caller",
+            &format!(
+                "{}  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: inner\n        type: core.log\n    errors:\n      - id: on_err\n        type: io.kestra.plugin.core.flow.Subflow\n        namespace: dep\n        flowId: handler\n",
+                subflow_task("call", "dep", "callee")
+            ),
+            &format!("afterExecution:\n{}", subflow_task("after", "dep", "after")),
+        ),
+    )
+    .await;
+    common::seed_flow(&db, ws, user, &flow("dep", "callee"), "disabled").await;
+    seed_src(
+        &db,
+        ws,
+        user,
+        &format!("{}disabled: true\n", flow("dep", "handler")),
+    )
+    .await;
+    seed_flow(&db, ws, user, "dep", "after").await;
+    let app = common::app(&db).await;
+
+    let body = deps(&app, ws, user, "dep").await;
+    assert_eq!(
+        edge_names(&body),
+        vec![
+            edge("dep/caller", "dep/after", "subflow"),
+            edge("dep/caller", "dep/callee", "subflow"),
+            edge("dep/caller", "dep/handler", "subflow"),
+        ]
+    );
+    let nodes = nodes_by_name(&body);
+    assert_eq!(
+        nodes["dep/caller"],
+        json!({
+            "id": caller, "namespace": "dep", "flow_id": "caller",
+            "disabled": false, "in_namespace": true, "dynamic_subflows": 0,
+        })
+    );
+    assert_eq!(nodes["dep/callee"]["disabled"], json!(true), "state column");
+    assert_eq!(nodes["dep/handler"]["disabled"], json!(true), "YAML key");
+    assert_eq!(nodes["dep/after"]["disabled"], json!(false));
+    assert_eq!(body["unparsable"], json!(0));
+}
+
+/// A `Subflow` whose `namespace` or `flowId` is an expression (`{{ }}` or
+/// `{% %}`) draws no edge and is counted on its flow's node; a literal one
+/// naming no flow draws nothing and is not counted.
+#[tokio::test]
+async fn a_dynamic_subflow_draws_no_edge_and_is_counted() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = reader(&db).await;
+    seed_src(
+        &db,
+        ws,
+        user,
+        &flow_with(
+            "dyn",
+            "caller",
+            &format!(
+                "{}{}{}",
+                subflow_task("a", "{{ inputs.ns }}", "target"),
+                subflow_task("b", "dyn", "{% if true %}target{% endif %}"),
+                subflow_task("c", "dyn", "missing"),
+            ),
+            "",
+        ),
+    )
+    .await;
+    seed_flow(&db, ws, user, "dyn", "target").await;
+    let app = common::app(&db).await;
+
+    let body = deps(&app, ws, user, "dyn").await;
+    assert_eq!(edge_names(&body), vec![]);
+    let nodes = nodes_by_name(&body);
+    assert_eq!(nodes["dyn/caller"]["dynamic_subflows"], json!(2));
+    assert_eq!(nodes["dyn/target"]["dynamic_subflows"], json!(0));
+}
+
+/// A `Flow` trigger's `dependsOn` entry naming `namespace` AND `flowId` of
+/// an existing flow draws `upstream -> listener`. An entry with only a
+/// namespace draws nothing: egret's `dependency_matches` fails closed on a
+/// missing field, so such a listener is never fired by any flow.
+#[tokio::test]
+async fn a_flow_trigger_draws_an_edge_from_the_flow_it_names() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = reader(&db).await;
+    seed_flow(&db, ws, user, "ft", "up").await;
+    seed_flow(&db, ws, user, "ft", "other").await;
+    seed_src(
+        &db,
+        ws,
+        user,
+        &flow_with(
+            "ft",
+            "listener",
+            LOG,
+            &flow_trigger(&[(Some("ft"), Some("up")), (Some("ft"), None)]),
+        ),
+    )
+    .await;
+    let app = common::app(&db).await;
+
+    let body = deps(&app, ws, user, "ft").await;
+    assert_eq!(
+        edge_names(&body),
+        vec![edge("ft/up", "ft/listener", "flow_trigger")]
+    );
+    assert_eq!(
+        nodes_by_name(&body).len(),
+        3,
+        "ft/other is a node, edge-less"
+    );
+}
+
+/// Edges into the namespace and out of it bring their outside end along with
+/// `in_namespace: false`; an outside flow with no edge to the namespace, and
+/// an edge between two outside flows, are absent.
+#[tokio::test]
+async fn edges_across_the_namespace_boundary_bring_the_outside_flow() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = reader(&db).await;
+    seed_src(
+        &db,
+        ws,
+        user,
+        &flow_with("in", "mid", &subflow_task("out", "outer", "callee"), ""),
+    )
+    .await;
+    seed_src(
+        &db,
+        ws,
+        user,
+        &flow_with("outer", "caller", &subflow_task("in", "in", "mid"), ""),
+    )
+    .await;
+    seed_flow(&db, ws, user, "outer", "callee").await;
+    seed_src(
+        &db,
+        ws,
+        user,
+        &flow_with("outer", "lonely", &subflow_task("x", "outer", "callee"), ""),
+    )
+    .await;
+    seed_src(
+        &db,
+        ws,
+        user,
+        &flow_with(
+            "outer",
+            "watcher",
+            LOG,
+            &flow_trigger(&[(Some("in"), Some("mid"))]),
+        ),
+    )
+    .await;
+    let app = common::app(&db).await;
+
+    let body = deps(&app, ws, user, "in").await;
+    assert_eq!(
+        edge_names(&body),
+        vec![
+            edge("in/mid", "outer/callee", "subflow"),
+            edge("in/mid", "outer/watcher", "flow_trigger"),
+            edge("outer/caller", "in/mid", "subflow"),
+        ]
+    );
+    let nodes = nodes_by_name(&body);
+    assert_eq!(
+        nodes.keys().cloned().collect::<Vec<_>>(),
+        vec!["in/mid", "outer/callee", "outer/caller", "outer/watcher"]
+    );
+    assert_eq!(nodes["in/mid"]["in_namespace"], json!(true));
+    for n in ["outer/callee", "outer/caller", "outer/watcher"] {
+        assert_eq!(nodes[n]["in_namespace"], json!(false), "{n}");
+    }
+}
+
+/// The namespace's children (dot-anchored) are inside it; a sibling sharing
+/// its prefix (`kidsx`) and its parent are not.
+#[tokio::test]
+async fn child_namespaces_are_inside() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = reader(&db).await;
+    seed_flow(&db, ws, user, "kids", "top").await;
+    seed_src(
+        &db,
+        ws,
+        user,
+        &flow_with("kids.a.b", "deep", &subflow_task("s", "kids", "top"), ""),
+    )
+    .await;
+    seed_flow(&db, ws, user, "kidsx", "sibling").await;
+    seed_flow(&db, ws, user, "parent", "p").await;
+    let app = common::app(&db).await;
+
+    let body = deps(&app, ws, user, "kids").await;
+    let nodes = nodes_by_name(&body);
+    assert_eq!(
+        nodes.keys().cloned().collect::<Vec<_>>(),
+        vec!["kids.a.b/deep", "kids/top"]
+    );
+    assert!(nodes.values().all(|n| n["in_namespace"] == json!(true)));
+    assert_eq!(
+        edge_names(&body),
+        vec![edge("kids.a.b/deep", "kids/top", "subflow")]
+    );
+}
+
+/// A deleted flow is no node, and neither its edges nor edges naming it are
+/// drawn.
+#[tokio::test]
+async fn a_deleted_flow_is_absent() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = reader(&db).await;
+    seed_src(
+        &db,
+        ws,
+        user,
+        &flow_with("del", "caller", &subflow_task("s", "del", "gone"), ""),
+    )
+    .await;
+    let gone = seed_flow(&db, ws, user, "del", "gone").await;
+    let gone_caller = seed_src(
+        &db,
+        ws,
+        user,
+        &flow_with(
+            "del",
+            "gone_caller",
+            &subflow_task("s", "del", "caller"),
+            "",
+        ),
+    )
+    .await;
+    soft_delete_flow(&db, gone).await;
+    soft_delete_flow(&db, gone_caller).await;
+    let app = common::app(&db).await;
+
+    let body = deps(&app, ws, user, "del").await;
+    assert_eq!(
+        nodes_by_name(&body).keys().cloned().collect::<Vec<_>>(),
+        vec!["del/caller"]
+    );
+    assert_eq!(edge_names(&body), vec![]);
+}
+
+/// Another workspace's flows are neither nodes nor edge ends, even under the
+/// same names.
+#[tokio::test]
+async fn another_workspace_is_invisible_to_dependencies() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = reader(&db).await;
+    let (other, other_user) = common::seed_workspace(&db).await;
+    seed_src(
+        &db,
+        ws,
+        user,
+        &flow_with("mine", "caller", &subflow_task("s", "theirs", "t"), ""),
+    )
+    .await;
+    seed_flow(&db, other, other_user, "theirs", "t").await;
+    seed_flow(&db, other, other_user, "mine", "intruder").await;
+    seed_src(
+        &db,
+        other,
+        other_user,
+        &flow_with("theirs", "c", &subflow_task("s", "mine", "caller"), ""),
+    )
+    .await;
+    let app = common::app(&db).await;
+
+    let body = deps(&app, ws, user, "mine").await;
+    assert_eq!(
+        nodes_by_name(&body).keys().cloned().collect::<Vec<_>>(),
+        vec!["mine/caller"]
+    );
+    assert_eq!(edge_names(&body), vec![]);
+}
+
+/// Inserts `n` minimal drafts `bulk/f{i}` straight into the table (the
+/// repository's create would take minutes at this count).
+async fn bulk_flows(db: &Db, ws: Uuid, ns: &str, n: i32) {
+    sqlx::query(
+        "INSERT INTO workflow.flows (workspace_id, namespace, flow_id, source, plan) \
+         SELECT $1, $2, 'f' || i, \
+                'id: f' || i || E'\\nnamespace: ' || $2 || E'\\ntasks:\\n  - id: t\\n    type: core.log\\n', \
+                '{}'::jsonb \
+           FROM generate_series(1, $3) AS i",
+    )
+    .bind(ws)
+    .bind(ns)
+    .bind(n)
+    .execute(&db.pool)
+    .await
+    .expect("bulk flows");
+}
+
+/// The limit is the WORKSPACE's flow count (not deleted), since every draft
+/// is read: 2,000 answer, 2,001 is a 422 with a message -- even for a
+/// namespace holding none of them -- and a deleted 2,001st does not count.
+#[tokio::test]
+async fn more_than_two_thousand_flows_answer_422() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = reader(&db).await;
+    bulk_flows(&db, ws, "bulk", 2_000).await;
+    let extra = seed_flow(&db, ws, user, "elsewhere", "f").await;
+    soft_delete_flow(&db, extra).await;
+    let app = common::app(&db).await;
+
+    let body = deps(&app, ws, user, "bulk").await;
+    assert_eq!(body["nodes"].as_array().unwrap().len(), 2_000);
+
+    seed_flow(&db, ws, user, "elsewhere", "g").await;
+    for ns in ["bulk", "elsewhere", "empty"] {
+        let res = deps_res(&app, ws, user, ns).await;
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{ns}");
+        let body = common::json(res).await;
+        assert_eq!(body["code"], json!("dependencies_too_large"));
+        assert!(body["error"].as_str().unwrap().contains("2000"), "{body}");
+    }
+}
+
+/// A draft whose YAML does not parse is skipped -- no node, no edges -- and
+/// counted in the top-level `unparsable` (every draft read, i.e. the
+/// workspace's, because one outside the namespace can hide an edge into it);
+/// the rest of the graph still answers 200.
+#[tokio::test]
+async fn an_unparsable_draft_is_skipped_and_counted() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = reader(&db).await;
+    seed_flow(&db, ws, user, "bad", "ok").await;
+    let broken_in = seed_flow(&db, ws, user, "bad", "broken").await;
+    let broken_out = seed_flow(&db, ws, user, "elsewhere", "broken").await;
+    for id in [broken_in, broken_out] {
+        sqlx::query("UPDATE workflow.flows SET source = 'tasks: [unclosed' WHERE id = $1")
+            .bind(id)
+            .execute(&db.pool)
+            .await
+            .expect("break the draft");
+    }
+    let app = common::app(&db).await;
+
+    let body = deps(&app, ws, user, "bad").await;
+    assert_eq!(
+        nodes_by_name(&body).keys().cloned().collect::<Vec<_>>(),
+        vec!["bad/ok"]
+    );
+    assert_eq!(body["unparsable"], json!(2));
+}
+
+/// An empty namespace answers an empty graph (not 404); a name outside the
+/// flow grammar is 400; the route needs `workflow:read`.
+#[tokio::test]
+async fn dependencies_validation_and_permission() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let app = common::app(&db).await;
+    assert_eq!(
+        deps_res(&app, ws, user, "a").await.status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        common::anon_get(
+            &app,
+            &format!("/api/ws/{ws}/workflows/namespaces/a/dependencies")
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let app = common::app(&db).await;
+    assert_eq!(
+        deps(&app, ws, user, "nothing.here").await,
+        json!({ "nodes": [], "edges": [], "unparsable": 0 })
+    );
+    assert_eq!(
+        deps_res(&app, ws, user, "Bad_NS").await.status(),
+        StatusCode::BAD_REQUEST
+    );
 }
