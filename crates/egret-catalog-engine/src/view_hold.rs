@@ -9,43 +9,64 @@
 //! open Postgres write transaction. The layer sees three requests:
 //!
 //! - create, `POST /{prefix}/namespaces/{ns}/views`;
-//! - commit, `POST /{prefix}/namespaces/{ns}/views/{view}`. Only a commit that
-//!   carries an `add-view-version` is held. `COMMENT ON VIEW` and a replace
-//!   whose updates are empty pass through untouched;
+//! - commit, `POST /{prefix}/namespaces/{ns}/views/{view}`. A commit that
+//!   neither adds a view version nor sets the current one (`COMMENT ON VIEW`,
+//!   a replace whose updates are empty) passes through untouched. Otherwise
+//!   the hold judges the version that is current after ALL the updates: the
+//!   last added one when `set-current-view-version` is `-1`. A commit that
+//!   makes current a version it does not add (an older stored one, or one
+//!   named by id) is refused on a classified profile, because egret has not
+//!   judged it;
 //! - rename, `POST /{prefix}/views/rename`, which moves the view's lineage and
 //!   tag assignments to the new name under the same hold.
+//!
+//! A multi-level namespace on any of these is refused on a classified profile
+//! (the Ranger resource has one schema level), and passes otherwise.
 //!
 //! # Order of operations (spec B2)
 //!
 //! No DB transaction stays open across the EXPLAIN or the wait.
 //!
 //! 0. If the profile that governs the view's catalog has no classified column
-//!    at all, the commit passes through with no EXPLAIN. The lineage is left
-//!    missing, and the B3 sweep computes it later.
-//! 1. Compute the lineage ([`lineage::compute_lineage`]). On failure, refuse.
+//!    at all, the commit passes through with no EXPLAIN and no lock. The
+//!    lineage is left missing, and the B3 sweep computes it later.
+//! 1. Compute the lineage ([`lineage::compute_lineage`]), bounded by
+//!    [`EXPLAIN_BUDGET`]. On failure, refuse.
 //! 2. If no lineage table is classified, let the commit proceed, and record the
 //!    lineage (`computed`) once lakekeeper has answered 2xx.
 //! 3. Otherwise, in one transaction: write one tag assignment per view column
 //!    and tag, record the lineage, bump the tag version (and recompile the
 //!    bound profiles, as every catalog-tag write does). Commit.
 //! 4. Wait ([`wait_for_tag_version`]) for every Trino profile bound to the
-//!    view's catalog to report the new tag version.
+//!    view's catalog to report the new tag version. With none bound, refuse at
+//!    once: no plugin could ever confirm.
 //! 5. Let the commit proceed. On timeout, or when lakekeeper answers non-2xx,
 //!    compensate in one transaction: delete exactly the assignment rows step 3
 //!    inserted, restore the lineage recorded before step 3, and bump again.
 //!
+//! # One deadline
+//!
+//! Every held request has ONE deadline, [`ViewHold::limit`] (2 × the poll
+//! interval, 60 s) from its arrival, covering the lock, the EXPLAIN and the
+//! wait together. Trino was measured to tolerate a 65 s hold (live result §1
+//! Q1), so a refusal arrives as a refusal rather than as a client timeout.
+//!
 //! # Refusal
 //!
 //! A `409` Iceberg REST error, which Trino prints verbatim. Its message names
-//! the reason: [`LINEAGE_REFUSAL`] or [`UNCONFIRMED_REFUSAL`].
+//! the reason ([`LINEAGE_REFUSAL`], [`UNCONFIRMED_REFUSAL`], …) and what to
+//! do about it.
 //!
 //! # Concurrency
 //!
-//! Every hold takes a session-level advisory lock per view name it touches, on
-//! a connection of its own that holds no transaction. Without it, a create
-//! that lakekeeper refuses because a concurrent create of the same name won
-//! would compensate, deleting assignment rows the winner relied on. The rows
-//! were inserted by the loser, so the winner's insert was a no-op.
+//! A hold that writes takes a session-level advisory lock per view name it
+//! touches, with `pg_try_advisory_lock` on a connection of its own that holds
+//! no transaction. A busy lock refuses at once: the other hold may run for the
+//! whole deadline. Without the lock, a create that lakekeeper refuses because
+//! a concurrent create of the same name won would compensate, deleting rows
+//! the winner relied on. Holds are capped ([`DEFAULT_MAX_HOLDS`]); past the
+//! cap a request is refused at once, so a burst cannot grow Postgres
+//! connections without bound.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,12 +81,23 @@ use egret_perm_compile::lineage::{self, ExplainRunner, LineageError, RecordedLin
 use egret_policy::{wait_for_tag_version, PolicyStore, WaitError};
 use serde_json::Value;
 use sqlx::Connection as _;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::time::Instant;
 use uuid::Uuid;
 
 /// The reason a view is refused when egret cannot judge what it reads.
 pub const LINEAGE_REFUSAL: &str = "lineage could not be computed";
 /// The reason a view is refused when a plugin did not confirm the tags.
 pub const UNCONFIRMED_REFUSAL: &str = "engines did not confirm the classification tags within";
+
+/// The longest the lineage EXPLAIN may take. `EXPLAIN (TYPE IO)` plans and
+/// reads no data; planning a view loads its tables' metadata from egret's own
+/// catalog. 5 s is far above that, and leaves 55 s of the 60 s deadline for
+/// the plugins to confirm. The production runner gets the same timeout.
+pub const EXPLAIN_BUDGET: Duration = Duration::from_secs(5);
+
+/// How many holds may be in flight at once.
+pub const DEFAULT_MAX_HOLDS: usize = 8;
 
 /// Largest view request body the hold reads.
 const MAX_BODY: usize = 16 << 20;
@@ -84,26 +116,40 @@ pub struct ViewHold {
     policy: PolicyStore,
     runner: Arc<dyn ExplainRunner>,
     limit: Duration,
+    holds: Arc<Semaphore>,
+    max_holds: usize,
 }
 
 impl ViewHold {
-    /// A hold that waits up to [`default_hold_limit`].
+    /// A hold with a deadline of [`default_hold_limit`] and at most
+    /// [`DEFAULT_MAX_HOLDS`] in flight.
     pub fn new(db: Db, runner: Arc<dyn ExplainRunner>) -> Self {
         Self {
             policy: PolicyStore::new(db.clone()),
             db,
             runner,
             limit: default_hold_limit(),
+            holds: Arc::new(Semaphore::new(DEFAULT_MAX_HOLDS)),
+            max_holds: DEFAULT_MAX_HOLDS,
         }
     }
 
-    /// The same hold with another limit (tests).
+    /// The same hold with another deadline (tests).
     #[must_use]
     pub fn with_limit(mut self, limit: Duration) -> Self {
         self.limit = limit;
         self
     }
 
+    /// The same hold with another cap on holds in flight.
+    #[must_use]
+    pub fn with_max_holds(mut self, n: usize) -> Self {
+        self.holds = Arc::new(Semaphore::new(n));
+        self.max_holds = n;
+        self
+    }
+
+    /// The deadline of one held request, from its arrival.
     pub fn limit(&self) -> Duration {
         self.limit
     }
@@ -124,15 +170,66 @@ struct Written {
     required: Vec<(i64, i64)>,
 }
 
-/// Why a request is refused. Every refusal is the Iceberg `409`.
+/// Why a request is refused. Every refusal is the Iceberg `409`, and every
+/// message says what to do.
 struct Refusal(String);
 
 impl Refusal {
     fn lineage(detail: impl std::fmt::Display) -> Self {
-        Self(format!("{LINEAGE_REFUSAL}: {detail}"))
+        Self(format!(
+            "{LINEAGE_REFUSAL}: {detail}; check that a running Trino engine egret provisions \
+             in JWT mode has the catalog attached and can plan this SQL, then retry"
+        ))
     }
     fn internal(what: &str, e: impl std::fmt::Display) -> Self {
-        Self(format!("egret could not hold the view ({what}): {e}"))
+        Self(format!(
+            "egret could not hold the view ({what}): {e}; retry"
+        ))
+    }
+    fn multi_level() -> Self {
+        Self(
+            "the view's namespace has more than one level, which egret cannot govern on a \
+             catalog with classified columns; use a single-level schema"
+                .into(),
+        )
+    }
+    fn older_version(why: &str) -> Self {
+        Self(format!(
+            "{why}: egret cannot judge an older view version on a catalog with classified \
+             columns; replace the view with CREATE OR REPLACE VIEW instead"
+        ))
+    }
+    fn locked(limit: Duration) -> Self {
+        Self(format!(
+            "another change to this view is being held; retry when it has finished (at most {} s)",
+            seconds(limit)
+        ))
+    }
+    fn full(max: usize) -> Self {
+        Self(format!(
+            "egret is holding {max} classified view changes already, its maximum; retry in a minute"
+        ))
+    }
+    fn no_trino() -> Self {
+        Self(
+            "no Trino engine is bound to the view's catalog, so no plugin can confirm its \
+             classification tags; attach a Trino engine to the catalog, then retry"
+                .into(),
+        )
+    }
+    fn overlap(e: impl std::fmt::Display) -> Self {
+        Self(format!(
+            "the classification tags cannot be assigned: {e}; resolve the overlapping mask or \
+             row-filter policies, then retry"
+        ))
+    }
+    fn unconfirmed(limit: Duration, waiting_on: &[String]) -> Self {
+        Self(format!(
+            "{UNCONFIRMED_REFUSAL} {} s: {}; check that the engines are running and polling \
+             egret's Ranger endpoint, then retry",
+            seconds(limit),
+            waiting_on.join(", ")
+        ))
     }
 }
 
@@ -150,7 +247,8 @@ impl IntoResponse for Refusal {
     }
 }
 
-/// The view request a path names.
+/// The view request a path names. A namespace is decoded with lakekeeper's
+/// `\u{1f}` level separator kept ([`is_multi_level`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Target {
     Create { ns: String },
@@ -158,9 +256,7 @@ enum Target {
     Rename,
 }
 
-/// `(prefix, target)` for a `POST` the hold handles, else `None`. A
-/// multi-level namespace is `None`: nothing is recorded under one (see
-/// [`decode_segment`]).
+/// `(prefix, target)` for a `POST` the hold handles, else `None`.
 fn classify(method: &Method, path: &str) -> Option<(String, Target)> {
     if method != Method::POST {
         return None;
@@ -189,10 +285,8 @@ fn classify(method: &Method, path: &str) -> Option<(String, Target)> {
     }
 }
 
-/// Percent-decode one path segment. `None` for a malformed escape, invalid
-/// UTF-8, or a lakekeeper multi-level namespace (`\u{1f}`-separated): Trino
-/// sends single-level namespaces, and the Ranger resource has one schema
-/// level, so the hold neither records nor guesses one.
+/// Percent-decode one path segment. `None` for a malformed escape or invalid
+/// UTF-8, which lakekeeper refuses too.
 fn decode_segment(seg: &str) -> Option<String> {
     let bytes = seg.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -207,8 +301,13 @@ fn decode_segment(seg: &str) -> Option<String> {
             i += 1;
         }
     }
-    let s = String::from_utf8(out).ok()?;
-    (!s.contains('\u{1f}')).then_some(s)
+    String::from_utf8(out).ok()
+}
+
+/// A lakekeeper multi-level namespace (`\u{1f}`-separated). Trino sends
+/// single-level namespaces, and the Ranger resource has one schema level.
+fn is_multi_level(ns: &str) -> bool {
+    ns.contains('\u{1f}')
 }
 
 /// What the hold needs from a new view version.
@@ -287,28 +386,57 @@ fn create_definition(body: &Value) -> Result<(String, Result<Definition, String>
     Ok((name, def))
 }
 
-/// A commit's new view version, or `None` when it carries none
-/// (`COMMENT ON VIEW`, an empty replace): such a commit passes untouched.
-fn commit_definition(body: &Value) -> Option<Result<Definition, String>> {
-    let updates = body.get("updates").and_then(Value::as_array)?;
+/// What a commit does to the view's current version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Change {
+    /// Neither adds a version nor sets the current one: passes untouched.
+    Untouched,
+    /// The version to judge.
+    Judge(Result<Definition, String>),
+    /// The current version after the commit is not one it adds.
+    NotAdded(&'static str),
+}
+
+/// Resolve every update in order: the version that is current afterwards.
+fn commit_change(body: &Value) -> Change {
+    let Some(updates) = body.get("updates").and_then(Value::as_array) else {
+        // Not a commit body; lakekeeper refuses it.
+        return Change::Untouched;
+    };
     let action = |u: &Value, a: &str| u.get("action").and_then(Value::as_str) == Some(a);
-    let version = updates
-        .iter()
-        .rev()
-        .find(|u| action(u, "add-view-version"))?
-        .get("view-version");
-    let Some(version) = version else {
-        return Some(Err(
+    let mut schemas: Vec<&Value> = Vec::new();
+    let mut added: Vec<Option<&Value>> = Vec::new();
+    // `Some(None)`: a set-current whose id is not an integer.
+    let mut current: Option<Option<i64>> = None;
+    for u in updates {
+        if action(u, "add-schema") {
+            if let Some(s) = u.get("schema") {
+                schemas.push(s);
+            }
+        } else if action(u, "add-view-version") {
+            added.push(u.get("view-version"));
+        } else if action(u, "set-current-view-version") {
+            current = Some(u.get("view-version-id").and_then(Value::as_i64));
+        }
+    }
+    let last =
+        match (added.last(), current) {
+            (None, None) => return Change::Untouched,
+            (Some(v), None | Some(Some(-1))) => *v,
+            (None, Some(_)) => {
+                return Change::NotAdded("the commit makes a stored view version current")
+            }
+            (Some(_), Some(_)) => return Change::NotAdded(
+                "the commit makes a view version current by id rather than the one it adds last",
+            ),
+        };
+    let Some(version) = last else {
+        return Change::Judge(Err(
             "an add-view-version update carries no view version".into()
         ));
     };
     // `-1` is "the schema this commit last added"; any other id must be added
     // by this commit too, or the columns are not in the request.
-    let schemas: Vec<&Value> = updates
-        .iter()
-        .filter(|u| action(u, "add-schema"))
-        .filter_map(|u| u.get("schema"))
-        .collect();
     let schema = match version.get("schema-id").and_then(Value::as_i64) {
         Some(-1) => schemas.last().copied(),
         Some(id) => schemas
@@ -318,19 +446,25 @@ fn commit_definition(body: &Value) -> Option<Result<Definition, String>> {
             .copied(),
         None => None,
     };
-    Some(definition(version, schema))
+    Change::Judge(definition(version, schema))
 }
 
-/// `{source, destination}` of a rename, each `(namespace, name)`; `None` for
-/// a multi-level namespace or a body of another shape.
+/// `{source, destination}` of a rename, each `(namespace, name)`, the
+/// namespace's levels joined with `\u{1f}`. `None` for a body of another
+/// shape, which lakekeeper refuses.
 fn rename_of(body: &Value) -> Option<((String, String), (String, String))> {
     let side = |k: &str| -> Option<(String, String)> {
         let v = body.get(k)?;
-        let ns = match v.get("namespace")?.as_array()?.as_slice() {
-            [Value::String(s)] => s.clone(),
-            _ => return None,
-        };
-        Some((ns, v.get("name")?.as_str()?.to_string()))
+        let parts: Vec<&str> = v
+            .get("namespace")?
+            .as_array()?
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<_>>()?;
+        if parts.is_empty() {
+            return None;
+        }
+        Some((parts.join("\u{1f}"), v.get("name")?.as_str()?.to_string()))
     };
     Some((side("source")?, side("destination")?))
 }
@@ -341,7 +475,7 @@ async fn resolve(
     conn: &mut sqlx::PgConnection,
     prefix: &str,
 ) -> Result<Option<(Uuid, Option<String>)>, sqlx::Error> {
-    let row: Option<(Uuid, Option<String>)> = sqlx::query_as(
+    sqlx::query_as(
         "SELECT w.id, \
                 (SELECT c.name FROM registry.catalogs c WHERE c.warehouse_id = w.id \
                   ORDER BY c.name LIMIT 1) \
@@ -349,8 +483,7 @@ async fn resolve(
     )
     .bind(prefix)
     .fetch_optional(&mut *conn)
-    .await?;
-    Ok(row)
+    .await
 }
 
 /// Does any warehouse reachable from `warehouse_id`'s profile hold a
@@ -455,11 +588,86 @@ async fn bump_and_recompile(
         .map_err(|e| Refusal::internal("tag version", e))?;
     egret_perm_compile::recompile_services_in_tx(tx, bound)
         .await
-        .map_err(|e| Refusal(format!("the classification tags cannot be assigned: {e}")))?;
+        .map_err(Refusal::overlap)?;
     Ok(())
 }
 
+/// The view request's state before any hold work: which egret warehouse and
+/// catalog, and whether its profile is classified.
+struct Resolved {
+    warehouse_id: Uuid,
+    catalog: Option<String>,
+    classified: bool,
+}
+
+/// The lock connection and the semaphore permit of one hold; [`Self::release`]
+/// frees both.
+struct Held {
+    conn: sqlx::PgConnection,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Held {
+    /// Close the lock connection, which releases its advisory locks.
+    async fn release(self) {
+        if let Err(e) = self.conn.close().await {
+            tracing::warn!(error = %e, "view hold: closing the lock connection failed");
+        }
+    }
+}
+
 impl ViewHold {
+    async fn resolve(&self, prefix: &str) -> Result<Option<Resolved>, Refusal> {
+        let db = |e: sqlx::Error| Refusal::internal("database", e);
+        let mut conn = self.db.pool.acquire().await.map_err(db)?;
+        let Some((warehouse_id, catalog)) = resolve(&mut conn, prefix).await.map_err(db)? else {
+            return Ok(None);
+        };
+        let classified = profile_has_classified_column(&mut conn, warehouse_id)
+            .await
+            .map_err(db)?;
+        Ok(Some(Resolved {
+            warehouse_id,
+            catalog,
+            classified,
+        }))
+    }
+
+    /// A permit, then a session-level `pg_try_advisory_lock` per key on a
+    /// connection detached from the pool. Full or busy refuses at once.
+    async fn hold(&self, prefix: &str, views: &[(&str, &str)]) -> Result<Held, Refusal> {
+        let permit = self
+            .holds
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Refusal::full(self.max_holds))?;
+        let mut keys: Vec<String> = views
+            .iter()
+            .map(|(ns, name)| lock_key(prefix, ns, name))
+            .collect();
+        keys.sort();
+        keys.dedup();
+        let db = |e: sqlx::Error| Refusal::internal("view lock", e);
+        let mut conn = self.db.pool.acquire().await.map_err(db)?.detach();
+        for key in &keys {
+            let got: bool =
+                sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
+                    .bind(key)
+                    .fetch_one(&mut conn)
+                    .await
+                    .map_err(db)?;
+            if !got {
+                // Closing releases any key this loop already took.
+                let _ = conn.close().await;
+                return Err(Refusal::locked(self.limit));
+            }
+        }
+        Ok(Held {
+            conn,
+            _permit: permit,
+        })
+    }
+
     /// Step 3: one transaction that writes `rows`, records `lineage` for
     /// `view`, and bumps the tag version when a row is new.
     async fn write(
@@ -507,7 +715,7 @@ impl ViewHold {
             bump_and_recompile(&mut tx, warehouse_id, &bound).await?;
             egret_perm_compile::overlap::refuse_created_overlaps_via(&mut tx, &overlaps_before)
                 .await
-                .map_err(|e| Refusal(format!("the classification tags cannot be assigned: {e}")))?;
+                .map_err(Refusal::overlap)?;
         }
         // Read after the bump, in the same transaction: the version the
         // plugins must report is the one these rows are served under.
@@ -543,21 +751,9 @@ impl ViewHold {
         let bound = egret_catalog_registry::services_bound_to_warehouse(&mut *tx, w.warehouse_id)
             .await
             .map_err(db)?;
-        for (tag, schema, table, column) in &w.inserted {
-            sqlx::query(
-                "DELETE FROM catalog_tag_assignments \
-                  WHERE tag_id = $1 AND warehouse_id = $2 AND schema_name = $3 \
-                    AND table_name = $4 AND column_name = $5",
-            )
-            .bind(tag)
-            .bind(w.warehouse_id)
-            .bind(schema)
-            .bind(table)
-            .bind(column)
-            .execute(&mut *tx)
+        delete_rows(&mut tx, w.warehouse_id, &w.inserted)
             .await
             .map_err(db)?;
-        }
         record(&mut tx, &w.view, &w.previous)
             .await
             .map_err(|e| Refusal::internal("lineage", e))?;
@@ -568,22 +764,30 @@ impl ViewHold {
         Ok(())
     }
 
-    /// Step 4.
-    async fn wait(&self, w: &Written) -> Result<(), Refusal> {
-        match wait_for_tag_version(&self.policy, &w.required, self.limit).await {
+    /// Step 4, until `deadline`. No Trino engine bound refuses at once.
+    async fn wait(&self, w: &Written, deadline: Instant) -> Result<(), Refusal> {
+        if w.required.is_empty() {
+            return Err(Refusal::no_trino());
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        match wait_for_tag_version(&self.policy, &w.required, left).await {
             Ok(()) => Ok(()),
-            Err(WaitError::Timeout { waiting_on }) => Err(Refusal(format!(
-                "{UNCONFIRMED_REFUSAL} {} s: {}",
-                seconds(self.limit),
-                waiting_on.join(", ")
-            ))),
+            Err(WaitError::Timeout { waiting_on }) => {
+                Err(Refusal::unconfirmed(self.limit, &waiting_on))
+            }
             Err(WaitError::Store(e)) => Err(Refusal::internal("plugin download ledger", e)),
         }
     }
 
     /// Steps 4 and 5 after a successful step 3.
-    async fn wait_then_commit(&self, w: Written, req: Request, next: Next) -> Response {
-        if let Err(refusal) = self.wait(&w).await {
+    async fn wait_then_commit(
+        &self,
+        w: Written,
+        deadline: Instant,
+        req: Request,
+        next: Next,
+    ) -> Response {
+        if let Err(refusal) = self.wait(&w, deadline).await {
             self.compensate(&w).await;
             return refusal.into_response();
         }
@@ -594,100 +798,110 @@ impl ViewHold {
         response
     }
 
-    /// A session-level advisory lock per key, on a connection detached from
-    /// the pool and holding no transaction. Dropping or closing the
-    /// connection releases them.
-    async fn lock(&self, keys: &mut [String]) -> Result<sqlx::PgConnection, sqlx::Error> {
-        keys.sort();
-        let mut conn = self.db.pool.acquire().await?.detach();
-        let mut last: Option<&String> = None;
-        for key in keys.iter() {
-            if last == Some(key) {
-                continue;
-            }
-            sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
-                .bind(key)
-                .execute(&mut conn)
-                .await?;
-            last = Some(key);
-        }
-        Ok(conn)
-    }
-
-    /// Create or replace (steps 0 to 5).
+    /// Create, replace, or a commit that sets the current version.
+    #[allow(clippy::too_many_arguments)]
     async fn hold_definition(
         &self,
+        deadline: Instant,
         prefix: &str,
         ns: &str,
         name: &str,
-        def: Result<Definition, String>,
+        change: Change,
         req: Request,
         next: Next,
     ) -> Response {
-        let db = |e: sqlx::Error| Refusal::internal("database", e).into_response();
-        let (warehouse_id, catalog, classified) = {
-            let mut conn = match self.db.pool.acquire().await {
-                Ok(c) => c,
-                Err(e) => return db(e),
-            };
-            let Some((warehouse_id, catalog)) = (match resolve(&mut conn, prefix).await {
-                Ok(r) => r,
-                Err(e) => return db(e),
-            }) else {
+        let r = match self.resolve(prefix).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
                 tracing::warn!(
                     prefix,
                     "view hold: no egret warehouse has this lakekeeper id; not held"
                 );
                 return next.run(req).await;
-            };
-            let classified = match profile_has_classified_column(&mut conn, warehouse_id).await {
-                Ok(c) => c,
-                Err(e) => return db(e),
-            };
-            (warehouse_id, catalog, classified)
+            }
+            Err(refusal) => return refusal.into_response(),
         };
 
-        // Step 0: nothing classified anywhere this view could read.
-        if !classified {
+        // Step 0: nothing classified anywhere this view could read. No lock.
+        if !r.classified {
             let response = next.run(req).await;
-            if response.status().is_success() {
-                if let Some(catalog) = catalog {
-                    let view = view_ref(&catalog, ns, name);
+            if response.status().is_success() && !is_multi_level(ns) {
+                if let Some(catalog) = &r.catalog {
+                    let view = view_ref(catalog, ns, name);
                     self.record_after_commit(&view, &RecordedLineage::Missing)
                         .await;
                 }
             }
             return response;
         }
-
-        let Some(catalog) = catalog else {
+        if is_multi_level(ns) {
+            return Refusal::multi_level().into_response();
+        }
+        let def = match change {
+            Change::Untouched => return next.run(req).await,
+            Change::NotAdded(why) => return Refusal::older_version(why).into_response(),
+            Change::Judge(Err(e)) => return Refusal::lineage(e).into_response(),
+            Change::Judge(Ok(d)) => d,
+        };
+        let Some(catalog) = r.catalog else {
             return Refusal::lineage("the view's warehouse has no catalog in egret's registry")
                 .into_response();
         };
-        let def = match def {
-            Ok(d) => d,
-            Err(e) => return Refusal::lineage(e).into_response(),
+        let held = match self.hold(prefix, &[(ns, name)]).await {
+            Ok(h) => h,
+            Err(refusal) => return refusal.into_response(),
         };
-        let view = view_ref(&catalog, ns, name);
+        let response = self
+            .judge(deadline, r.warehouse_id, &catalog, ns, name, def, req, next)
+            .await;
+        held.release().await;
+        response
+    }
 
-        // Step 1, with no connection held across the EXPLAIN.
-        let default_catalog = def.default_catalog.as_deref().unwrap_or(&catalog);
+    /// Steps 1 to 5 for one definition, under the hold's lock.
+    #[allow(clippy::too_many_arguments)]
+    async fn judge(
+        &self,
+        deadline: Instant,
+        warehouse_id: Uuid,
+        catalog: &str,
+        ns: &str,
+        name: &str,
+        def: Definition,
+        req: Request,
+        next: Next,
+    ) -> Response {
+        let view = view_ref(catalog, ns, name);
+
+        // Step 1, bounded, with no connection held across the EXPLAIN.
+        let budget = EXPLAIN_BUDGET.min(deadline.saturating_duration_since(Instant::now()));
+        let default_catalog = def.default_catalog.as_deref().unwrap_or(catalog);
         let default_schema = def.default_schema.as_deref().unwrap_or(ns);
-        let tables = match lineage::compute_lineage(
-            self.runner.as_ref(),
-            default_catalog,
-            default_schema,
-            &def.sql,
+        let explained = tokio::time::timeout(
+            budget,
+            lineage::compute_lineage(
+                self.runner.as_ref(),
+                default_catalog,
+                default_schema,
+                &def.sql,
+            ),
         )
-        .await
-        {
-            Ok(t) => t,
-            Err(e) => return Refusal::lineage(e).into_response(),
+        .await;
+        let tables = match explained {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => return Refusal::lineage(e).into_response(),
+            Err(_) => {
+                return Refusal::lineage(format!(
+                    "the EXPLAIN did not answer within {} s",
+                    seconds(budget)
+                ))
+                .into_response()
+            }
         };
         let tags = {
             let mut conn = match self.db.pool.acquire().await {
                 Ok(c) => c,
-                Err(e) => return db(e),
+                Err(e) => return Refusal::internal("database", e).into_response(),
             };
             match lineage::view_tag_set(&mut conn, &tables).await {
                 Ok(t) => t,
@@ -726,7 +940,7 @@ impl ViewHold {
             Ok(w) => w,
             Err(r) => return r.into_response(),
         };
-        self.wait_then_commit(written, req, next).await
+        self.wait_then_commit(written, deadline, req, next).await
     }
 
     /// Record a lineage for a view lakekeeper has committed. A failure leaves
@@ -745,54 +959,109 @@ impl ViewHold {
         }
     }
 
+    /// What `view` carries now: its lineage and its assignment rows.
+    async fn state_of(
+        &self,
+        warehouse_id: Uuid,
+        view: &ViewRef,
+    ) -> Result<(RecordedLineage, Vec<Assignment>), Refusal> {
+        let db = |e: sqlx::Error| Refusal::internal("database", e);
+        let mut conn = self.db.pool.acquire().await.map_err(db)?;
+        let lineage = lineage::recorded_lineage(&mut conn, view)
+            .await
+            .map_err(db)?;
+        let rows = assignments_of(&mut conn, warehouse_id, view)
+            .await
+            .map_err(db)?;
+        Ok((lineage, rows))
+    }
+
     /// Rename: copy the source's lineage and tag assignments to the
     /// destination, hold until the plugins report the version, let lakekeeper
     /// rename, then delete the source's.
     async fn hold_rename(
         &self,
+        deadline: Instant,
         prefix: &str,
         source: (String, String),
         destination: (String, String),
         req: Request,
         next: Next,
     ) -> Response {
-        let db = |e: sqlx::Error| Refusal::internal("database", e).into_response();
-        let (warehouse_id, src, dst, src_lineage, src_rows) = {
-            let mut conn = match self.db.pool.acquire().await {
-                Ok(c) => c,
-                Err(e) => return db(e),
-            };
-            let Some((warehouse_id, Some(catalog))) = (match resolve(&mut conn, prefix).await {
-                Ok(r) => r,
-                Err(e) => return db(e),
-            }) else {
-                return next.run(req).await;
-            };
-            let src = view_ref(&catalog, &source.0, &source.1);
-            let dst = view_ref(&catalog, &destination.0, &destination.1);
-            let src_lineage = match lineage::recorded_lineage(&mut conn, &src).await {
-                Ok(l) => l,
-                Err(e) => return db(e),
-            };
-            let src_rows = match assignments_of(&mut conn, warehouse_id, &src).await {
-                Ok(r) => r,
-                Err(e) => return db(e),
-            };
-            (warehouse_id, src, dst, src_lineage, src_rows)
+        let r = match self.resolve(prefix).await {
+            Ok(Some(r)) => r,
+            Ok(None) => return next.run(req).await,
+            Err(refusal) => return refusal.into_response(),
         };
-        if src_rows.is_empty() && src_lineage == RecordedLineage::Missing {
+        let Some(catalog) = r.catalog.as_deref() else {
+            return next.run(req).await;
+        };
+        let warehouse_id = r.warehouse_id;
+        let src = view_ref(catalog, &source.0, &source.1);
+        let dst = view_ref(catalog, &destination.0, &destination.1);
+        let multi = is_multi_level(&src.schema) || is_multi_level(&dst.schema);
+        if multi && r.classified {
+            return Refusal::multi_level().into_response();
+        }
+        // Nothing can be recorded under a multi-level name, so a multi-level
+        // source carries nothing. A single-level source that does carry
+        // something may not move where it cannot follow.
+        if is_multi_level(&src.schema) {
             return next.run(req).await;
         }
+        let carries = match self.state_of(warehouse_id, &src).await {
+            Ok((l, rows)) => l != RecordedLineage::Missing || !rows.is_empty(),
+            Err(refusal) => return refusal.into_response(),
+        };
+        if !carries {
+            return next.run(req).await;
+        }
+        if multi {
+            return Refusal::multi_level().into_response();
+        }
+
+        let held = match self
+            .hold(
+                prefix,
+                &[(&src.schema, &src.name), (&dst.schema, &dst.name)],
+            )
+            .await
+        {
+            Ok(h) => h,
+            Err(refusal) => return refusal.into_response(),
+        };
+        let response = self
+            .move_view(deadline, warehouse_id, &src, &dst, req, next)
+            .await;
+        held.release().await;
+        response
+    }
+
+    /// The rename's hold, under its lock.
+    async fn move_view(
+        &self,
+        deadline: Instant,
+        warehouse_id: Uuid,
+        src: &ViewRef,
+        dst: &ViewRef,
+        req: Request,
+        next: Next,
+    ) -> Response {
+        // Re-read under the lock.
+        let (src_lineage, src_rows) = match self.state_of(warehouse_id, src).await {
+            Ok(s) => s,
+            Err(refusal) => return refusal.into_response(),
+        };
         let rows: Vec<Assignment> = src_rows
             .iter()
             .map(|(tag, _, _, column)| (*tag, dst.schema.clone(), dst.name.clone(), column.clone()))
             .collect();
-        let written = match self.write(warehouse_id, &dst, &rows, &src_lineage).await {
+        let written = match self.write(warehouse_id, dst, &rows, &src_lineage).await {
             Ok(w) => w,
             Err(r) => return r.into_response(),
         };
         if !rows.is_empty() {
-            if let Err(refusal) = self.wait(&written).await {
+            if let Err(refusal) = self.wait(&written, deadline).await {
                 self.compensate(&written).await;
                 return refusal.into_response();
             }
@@ -808,22 +1077,10 @@ impl ViewHold {
             let bound = egret_catalog_registry::services_bound_to_warehouse(&mut *tx, warehouse_id)
                 .await
                 .map_err(|e| e.to_string())?;
-            for (tag, schema, table, column) in &src_rows {
-                sqlx::query(
-                    "DELETE FROM catalog_tag_assignments \
-                      WHERE tag_id = $1 AND warehouse_id = $2 AND schema_name = $3 \
-                        AND table_name = $4 AND column_name = $5",
-                )
-                .bind(tag)
-                .bind(warehouse_id)
-                .bind(schema)
-                .bind(table)
-                .bind(column)
-                .execute(&mut *tx)
+            delete_rows(&mut tx, warehouse_id, &src_rows)
                 .await
                 .map_err(|e| e.to_string())?;
-            }
-            lineage::delete_lineage(&mut tx, &src)
+            lineage::delete_lineage(&mut tx, src)
                 .await
                 .map_err(|e| e.to_string())?;
             if !src_rows.is_empty() {
@@ -839,6 +1096,29 @@ impl ViewHold {
         }
         response
     }
+}
+
+/// Delete exactly `rows` from `warehouse_id`.
+async fn delete_rows(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    warehouse_id: Uuid,
+    rows: &[Assignment],
+) -> Result<(), sqlx::Error> {
+    for (tag, schema, table, column) in rows {
+        sqlx::query(
+            "DELETE FROM catalog_tag_assignments \
+              WHERE tag_id = $1 AND warehouse_id = $2 AND schema_name = $3 \
+                AND table_name = $4 AND column_name = $5",
+        )
+        .bind(tag)
+        .bind(warehouse_id)
+        .bind(schema)
+        .bind(table)
+        .bind(column)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
 }
 
 fn view_ref(catalog: &str, schema: &str, name: &str) -> ViewRef {
@@ -868,6 +1148,8 @@ pub async fn hold_view_commits(
     let Some((prefix, target)) = classify(req.method(), req.uri().path()) else {
         return next.run(req).await;
     };
+    // The one deadline of this request (module doc), from its arrival.
+    let deadline = Instant::now() + hold.limit;
     let (parts, body) = req.into_parts();
     let bytes = match axum::body::to_bytes(body, MAX_BODY).await {
         Ok(b) => b,
@@ -880,70 +1162,40 @@ pub async fn hold_view_commits(
     let req = Request::from_parts(parts, Body::from(bytes));
 
     match target {
-        Target::Commit { ns, view } => {
-            let Some(def) = commit_definition(&json) else {
-                return next.run(req).await;
-            };
-            let mut keys = vec![lock_key(&prefix, &ns, &view)];
-            let lock = match hold.lock(&mut keys).await {
-                Ok(c) => c,
-                Err(e) => return Refusal::internal("view lock", e).into_response(),
-            };
-            let response = hold
-                .hold_definition(&prefix, &ns, &view, def, req, next)
-                .await;
-            release(lock).await;
-            response
-        }
-        Target::Create { ns } => {
-            let (name, def) = match create_definition(&json) {
-                Ok(x) => x,
-                // No name: lakekeeper refuses it, and nothing can be recorded.
-                Err(_) => return next.run(req).await,
-            };
-            let mut keys = vec![lock_key(&prefix, &ns, &name)];
-            let lock = match hold.lock(&mut keys).await {
-                Ok(c) => c,
-                Err(e) => return Refusal::internal("view lock", e).into_response(),
-            };
-            let response = hold
-                .hold_definition(&prefix, &ns, &name, def, req, next)
-                .await;
-            release(lock).await;
-            response
-        }
-        Target::Rename => {
-            let Some((source, destination)) = rename_of(&json) else {
-                return next.run(req).await;
-            };
-            let mut keys = vec![
-                lock_key(&prefix, &source.0, &source.1),
-                lock_key(&prefix, &destination.0, &destination.1),
-            ];
-            let lock = match hold.lock(&mut keys).await {
-                Ok(c) => c,
-                Err(e) => return Refusal::internal("view lock", e).into_response(),
-            };
-            let response = hold
-                .hold_rename(&prefix, source, destination, req, next)
-                .await;
-            release(lock).await;
-            response
-        }
+        Target::Commit { ns, view } => match commit_change(&json) {
+            Change::Untouched => next.run(req).await,
+            change => {
+                hold.hold_definition(deadline, &prefix, &ns, &view, change, req, next)
+                    .await
+            }
+        },
+        Target::Create { ns } => match create_definition(&json) {
+            Ok((name, def)) => {
+                hold.hold_definition(deadline, &prefix, &ns, &name, Change::Judge(def), req, next)
+                    .await
+            }
+            // No name: lakekeeper refuses it, and nothing can be recorded.
+            Err(_) => next.run(req).await,
+        },
+        Target::Rename => match rename_of(&json) {
+            Some((source, destination)) => {
+                hold.hold_rename(deadline, &prefix, source, destination, req, next)
+                    .await
+            }
+            None => next.run(req).await,
+        },
     }
+}
+
+/// The advisory-lock key of one view (exposed for tests).
+pub fn view_lock_key(prefix: &str, ns: &str, name: &str) -> String {
+    lock_key(prefix, ns, name)
 }
 
 fn lock_key(prefix: &str, ns: &str, name: &str) -> String {
-    // `\u{1f}` cannot occur in a decoded single-level name (`decode_segment`);
-    // a NUL cannot be sent as Postgres text.
-    format!("egret-view-hold\u{1f}{prefix}\u{1f}{ns}\u{1f}{name}")
-}
-
-/// Close the lock connection, which releases its advisory locks.
-async fn release(conn: sqlx::PgConnection) {
-    if let Err(e) = conn.close().await {
-        tracing::warn!(error = %e, "view hold: closing the lock connection failed");
-    }
+    // A NUL cannot be sent as Postgres text; `\u{1e}` occurs in no name Trino
+    // sends.
+    format!("egret-view-hold\u{1e}{prefix}\u{1e}{ns}\u{1e}{name}")
 }
 
 #[cfg(test)]
@@ -978,7 +1230,12 @@ mod tests {
             None
         );
         assert_eq!(classify(&post, "/wh1/namespaces/s/tables"), None);
-        assert_eq!(classify(&post, "/wh1/namespaces/a%1Fb/views"), None);
+        // A multi-level namespace is classified, and recognised as one.
+        let Some((_, Target::Create { ns })) = classify(&post, "/wh1/namespaces/a%1Fb/views")
+        else {
+            panic!("multi-level create not classified");
+        };
+        assert!(is_multi_level(&ns));
         assert_eq!(
             classify(&post, "/wh1/namespaces/my%20s/views"),
             Some(("wh1".into(), Target::Create { ns: "my s".into() }))
@@ -1001,7 +1258,9 @@ mod tests {
                 {"action": "set-current-view-version", "view-version-id": -1}
             ]
         });
-        let def = commit_definition(&body).unwrap().unwrap();
+        let Change::Judge(Ok(def)) = commit_change(&body) else {
+            panic!("not judged");
+        };
         assert_eq!(def.sql, "SELECT id, ssn FROM ice.s.pii");
         assert_eq!(def.default_schema.as_deref(), Some("s"));
         assert_eq!(def.default_catalog, None);
@@ -1012,8 +1271,38 @@ mod tests {
     fn a_commit_without_a_new_version_is_not_held() {
         let comment =
             json!({"updates": [{"action": "set-properties", "updates": {"comment": "hello"}}]});
-        assert!(commit_definition(&comment).is_none());
-        assert!(commit_definition(&json!({"updates": []})).is_none());
+        assert_eq!(commit_change(&comment), Change::Untouched);
+        assert_eq!(commit_change(&json!({"updates": []})), Change::Untouched);
+    }
+
+    #[test]
+    fn the_current_version_after_all_updates_is_the_one_judged() {
+        let v = |sql: &str| {
+            json!({"action": "add-view-version", "view-version": {"schema-id": -1,
+                "representations": [{"type": "sql", "sql": sql, "dialect": "trino"}]}})
+        };
+        let schema =
+            json!({"action": "add-schema", "schema": {"schema-id": 1, "fields": [{"name": "a"}]}});
+        let current =
+            |id: i64| json!({"action": "set-current-view-version", "view-version-id": id});
+        // Two versions, `-1`: the last added is judged.
+        let body = json!({"updates": [schema, v("first"), v("second"), current(-1)]});
+        let Change::Judge(Ok(def)) = commit_change(&body) else {
+            panic!("not judged");
+        };
+        assert_eq!(def.sql, "second");
+        // An explicit id, or a set-current with nothing added, is not judged.
+        for body in [
+            json!({"updates": [schema, v("first"), v("second"), current(1)]}),
+            json!({"updates": [current(1)]}),
+            json!({"updates": [current(-1)]}),
+            json!({"updates": [{"action": "set-current-view-version", "view-version-id": "x"}]}),
+        ] {
+            assert!(
+                matches!(commit_change(&body), Change::NotAdded(_)),
+                "{body}"
+            );
+        }
     }
 
     #[test]
@@ -1028,15 +1317,48 @@ mod tests {
         // An add-view-version naming a schema the commit did not add.
         let body = json!({"updates": [{"action": "add-view-version", "view-version": {
             "schema-id": 4, "representations": [{"type": "sql", "sql": "x", "dialect": "trino"}]}}]});
-        assert!(commit_definition(&body).unwrap().is_err());
+        assert!(matches!(commit_change(&body), Change::Judge(Err(_))));
     }
 
     #[test]
-    fn the_refusal_messages_name_their_reason() {
+    fn a_rename_keeps_every_namespace_level() {
+        let body = json!({"source": {"namespace": ["a", "b"], "name": "v"},
+                          "destination": {"namespace": ["s"], "name": "v"}});
+        let (src, dst) = rename_of(&body).unwrap();
+        assert!(is_multi_level(&src.0));
+        assert_eq!(dst, ("s".to_string(), "v".to_string()));
+    }
+
+    #[test]
+    fn the_refusal_messages_name_their_reason_and_what_to_do() {
         assert_eq!(seconds(default_hold_limit()), "60");
         assert_eq!(seconds(Duration::from_millis(1500)), "1.5");
         assert!(Refusal::lineage("boom")
             .0
-            .starts_with("lineage could not be computed: "));
+            .starts_with("lineage could not be computed: boom; "));
+        for r in [
+            Refusal::lineage("x"),
+            Refusal::internal("db", "x"),
+            Refusal::multi_level(),
+            Refusal::older_version("x"),
+            Refusal::locked(default_hold_limit()),
+            Refusal::full(8),
+            Refusal::no_trino(),
+            Refusal::overlap("x"),
+            Refusal::unconfirmed(default_hold_limit(), &["p".into()]),
+        ] {
+            assert!(
+                [
+                    "retry",
+                    "use a single-level",
+                    "CREATE OR REPLACE",
+                    "attach a Trino"
+                ]
+                .iter()
+                .any(|w| r.0.contains(w)),
+                "says what to do: {}",
+                r.0
+            );
+        }
     }
 }

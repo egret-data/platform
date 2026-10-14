@@ -68,7 +68,10 @@ pub use recovery::{
     list_deleted_tabulars, set_protection, undrop_tabular, DeletedTabular, ProtectTarget,
     TabularKindName,
 };
-pub use view_hold::{default_hold_limit, ViewHold, LINEAGE_REFUSAL, UNCONFIRMED_REFUSAL};
+pub use view_hold::{
+    default_hold_limit, view_lock_key, ViewHold, DEFAULT_MAX_HOLDS, EXPLAIN_BUDGET,
+    LINEAGE_REFUSAL, UNCONFIRMED_REFUSAL,
+};
 #[cfg(feature = "test-utils")]
 pub use warehouse::create_memory_warehouse;
 pub use warehouse::{create_lakekeeper_warehouse, S3StorageConfig};

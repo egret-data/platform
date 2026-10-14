@@ -24,7 +24,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use egret_catalog_engine::{
     build_state, catalog_engine_router, create_memory_warehouse, ensure_bootstrapped,
-    front_catalog_router, run_lakekeeper_migrations, ViewHold, LINEAGE_REFUSAL,
+    front_catalog_router, run_lakekeeper_migrations, view_lock_key, ViewHold, LINEAGE_REFUSAL,
     UNCONFIRMED_REFUSAL,
 };
 use egret_metastore::Db;
@@ -83,6 +83,11 @@ impl ExplainRunner for FakeRunner {
             "the default catalog is the registry's"
         );
         assert_eq!(schema, "s");
+        if sql.contains("SLOW15") {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        } else if sql.contains("SLOW1") {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
         if sql.contains("FAIL") {
             return Err("engine trino-1: Access Denied: boom".into());
         }
@@ -114,6 +119,11 @@ async fn observe(State(seen): State<Seen>, req: Request, next: Next) -> Response
 struct Env {
     db: Db,
     app: axum::Router,
+    /// The same lakekeeper with no hold in front, to build fixtures the hold
+    /// would refuse.
+    raw: axum::Router,
+    tag_service: String,
+    tag_service_id: i64,
     prefix: String,
     warehouse_id: Uuid,
     catalog: String,
@@ -166,6 +176,40 @@ async fn classify(db: &Db, warehouse_id: Uuid, table: &str, column: &str) -> Uui
 /// through a fresh profile (with its tag service). `classified` puts a
 /// clearance on `s.pii.ssn`; `s.orders` is never classified here.
 async fn env(limit: Duration, classified: bool) -> Option<Env> {
+    env_with(Opts {
+        limit,
+        classified,
+        ..Opts::default()
+    })
+    .await
+}
+
+struct Opts {
+    limit: Duration,
+    classified: bool,
+    /// The type of the one engine attached to the catalog.
+    engine_type: &'static str,
+    max_holds: usize,
+}
+
+impl Default for Opts {
+    fn default() -> Self {
+        Self {
+            limit: LIMIT,
+            classified: true,
+            engine_type: "trino",
+            max_holds: 8,
+        }
+    }
+}
+
+async fn env_with(o: Opts) -> Option<Env> {
+    let Opts {
+        limit,
+        classified,
+        engine_type,
+        max_holds,
+    } = o;
     let dsn = egret_test_db::url().await?;
     let db = Db::connect(&dsn, 10).await.expect("connect");
     db.migrate().await.expect("migrate");
@@ -185,10 +229,11 @@ async fn env(limit: Duration, classified: bool) -> Option<Env> {
         .create_service(&profile_name, "trino", &json!({"tagService": tag_service}))
         .await
         .expect("profile");
-    policy
+    let tag_service_id = policy
         .create_service(&tag_service, "tag", &json!({}))
         .await
-        .expect("tag service");
+        .expect("tag service")
+        .id;
 
     let ws: Uuid =
         sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,'VH') RETURNING id")
@@ -217,11 +262,12 @@ async fn env(limit: Duration, classified: bool) -> Option<Env> {
     .expect("warehouse");
     let engine: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'trino','egret', \
+         VALUES ($1,$3,'egret', \
                  '{\"trinoConfig\": {\"delegationMode\": \"jwt\"}}'::jsonb,$2) RETURNING id",
     )
     .bind(unique("vh-eng"))
     .bind(profile.id)
+    .bind(engine_type)
     .fetch_one(pool)
     .await
     .expect("engine");
@@ -256,14 +302,20 @@ async fn env(limit: Duration, classified: bool) -> Option<Env> {
         calls: AtomicUsize::new(0),
     });
     let seen: Seen = Arc::default();
+    let raw = front_catalog_router(catalog_engine_router(state.clone()), None, None);
     let inner = catalog_engine_router(state)
         .layer(axum::middleware::from_fn_with_state(seen.clone(), observe));
-    let hold = ViewHold::new(db.clone(), runner.clone()).with_limit(limit);
+    let hold = ViewHold::new(db.clone(), runner.clone())
+        .with_limit(limit)
+        .with_max_holds(max_holds);
     let app = front_catalog_router(inner, None, Some(Arc::new(hold)));
 
     let env = Env {
         db,
         app,
+        raw,
+        tag_service,
+        tag_service_id,
         prefix,
         warehouse_id,
         catalog,
@@ -283,16 +335,31 @@ async fn env(limit: Duration, classified: bool) -> Option<Env> {
 
 impl Env {
     async fn call(&self, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+        Self::send(&self.app, &self.prefix, method, path, body).await
+    }
+
+    /// The same request with no hold in front.
+    async fn call_raw(&self, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+        Self::send(&self.raw, &self.prefix, method, path, body).await
+    }
+
+    async fn send(
+        app: &axum::Router,
+        prefix: &str,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
         let req = axum::http::Request::builder()
             .method(method)
-            .uri(format!("/{}/{path}", self.prefix))
+            .uri(format!("/{prefix}/{path}"))
             .header("content-type", "application/json")
             .body(match body {
                 Some(b) => Body::from(b.to_string()),
                 None => Body::empty(),
             })
             .unwrap();
-        let resp = self.app.clone().oneshot(req).await.unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
@@ -813,4 +880,370 @@ async fn a_profile_with_no_classified_column_commits_without_explain() {
     assert!(env.assignments("v1").await.is_empty());
     assert_eq!(env.lineage("v1").await, RecordedLineage::Missing);
     assert_eq!(env.tag_version().await, before);
+}
+
+// ── fix round 1 ─────────────────────────────────────────────────────────────
+
+/// A view `name` in `s` over `orders` with two stored versions (1 and 2),
+/// both unclassified, so neither was held.
+async fn view_with_two_versions(env: &Env, name: &str) {
+    let (status, body) = env.create(name, "SELECT id, name FROM orders").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let view = env.view(name).await.unwrap();
+    let (status, body) = env
+        .call(
+            "POST",
+            &format!("namespaces/s/views/{name}"),
+            Some(replace_body(
+                &view,
+                "SELECT id, name FROM orders WHERE id > 0",
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// I1: a commit that makes a version current that it does not add (an older
+/// stored one, by id or by `-1` with nothing added) is refused on a
+/// classified profile, and the current version does not move.
+#[tokio::test]
+async fn a_commit_switching_to_an_older_version_is_refused() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    view_with_two_versions(&env, "v1").await;
+    let before = current_sql(&env.view("v1").await.unwrap());
+
+    for id in [1, -1] {
+        let (status, body) = env
+            .call(
+                "POST",
+                "namespaces/s/views/v1",
+                Some(json!({"updates": [
+                    {"action": "set-current-view-version", "view-version-id": id}
+                ]})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "id {id}: {body}");
+        let msg = message(&body);
+        assert!(msg.contains("older"), "{msg}");
+        assert!(msg.contains("CREATE OR REPLACE VIEW"), "{msg}");
+    }
+    assert_eq!(current_sql(&env.view("v1").await.unwrap()), before);
+    assert_eq!(
+        env.reached("POST /namespaces/s/views/v1").len(),
+        1,
+        "only the setup replace"
+    );
+}
+
+/// I1: with two `add-view-version` updates and an explicit current naming
+/// the first, the hold may not judge the second.
+#[tokio::test]
+async fn a_commit_whose_current_is_not_the_last_added_version_is_refused() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let (status, body) = env.create("v1", "SELECT id, name FROM orders").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let view = env.view("v1").await.unwrap();
+    let uuid = view["metadata"]["view-uuid"].as_str().unwrap();
+    let body = json!({
+        "requirements": [{"type": "assert-view-uuid", "uuid": uuid}],
+        "updates": [
+            {"action": "add-schema", "schema": schema(1, &["id", "ssn"])},
+            {"action": "add-view-version", "view-version": version(2, -1, "SELECT id, ssn FROM pii")},
+            {"action": "add-view-version", "view-version": version(3, -1, "SELECT id, name FROM orders WHERE id > 1")},
+            {"action": "set-current-view-version", "view-version-id": 2}
+        ]
+    });
+    let (status, resp) = env.call("POST", "namespaces/s/views/v1", Some(body)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{resp}");
+    assert!(message(&resp).contains("older"), "{resp}");
+    assert_eq!(
+        current_sql(&env.view("v1").await.unwrap()),
+        "SELECT id, name FROM orders"
+    );
+    assert!(env.assignments("v1").await.is_empty());
+}
+
+/// Create the namespace `a`, then `a.b` (lakekeeper's `\u{1f}`).
+async fn nested_namespace(env: &Env) {
+    for ns in [json!(["a"]), json!(["a", "b"])] {
+        let (status, body) = env
+            .call_raw("POST", "namespaces", Some(json!({ "namespace": ns })))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+}
+
+/// I2: a create in a multi-level namespace is refused on a classified
+/// profile, and passes on a profile with no classified column.
+#[tokio::test]
+async fn a_multi_level_namespace_is_refused_only_on_a_classified_profile() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    nested_namespace(&env).await;
+    let (status, body) = env
+        .call(
+            "POST",
+            "namespaces/a%1Fb/views",
+            Some(create_body("vn", "SELECT id, ssn FROM s.pii")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(message(&body).contains("single-level schema"), "{body}");
+    assert!(env.reached("POST /namespaces/a%1Fb/views").is_empty());
+
+    let Some(plain) = env_with(Opts {
+        classified: false,
+        ..Opts::default()
+    })
+    .await
+    else {
+        return;
+    };
+    nested_namespace(&plain).await;
+    let (status, body) = plain
+        .call(
+            "POST",
+            "namespaces/a%1Fb/views",
+            Some(create_body("vn", "SELECT id, ssn FROM s.pii")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// I2: renaming a view out of a multi-level namespace (where it was never
+/// held) into a single-level one is refused on a classified profile.
+#[tokio::test]
+async fn a_rename_out_of_a_multi_level_namespace_is_refused() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    nested_namespace(&env).await;
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces/a%1Fb/views",
+            Some(create_body("vn", "SELECT id, ssn FROM s.pii")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = env
+        .call(
+            "POST",
+            "views/rename",
+            Some(json!({"source": {"namespace": ["a", "b"], "name": "vn"},
+                        "destination": {"namespace": ["s"], "name": "vn"}})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(message(&body).contains("single-level schema"), "{body}");
+    assert!(env.view("vn").await.is_none(), "nothing arrived in s");
+}
+
+/// I3: the EXPLAIN is bounded (5 s), whatever the engine does.
+#[tokio::test]
+async fn a_slow_explain_is_refused_at_its_bound() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let start = Instant::now();
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii -- SLOW15").await;
+    let took = start.elapsed();
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        message(&body).contains("did not answer within 5 s"),
+        "{body}"
+    );
+    assert!(took < Duration::from_secs(7), "{took:?}");
+    assert!(env.view("v1").await.is_none());
+    assert_eq!(env.lineage("v1").await, RecordedLineage::Missing);
+}
+
+/// I3: one deadline from arrival covers the EXPLAIN and the wait together.
+#[tokio::test]
+async fn the_explain_and_the_wait_share_one_deadline() {
+    let limit = Duration::from_secs(3);
+    let Some(env) = env(limit, true).await else {
+        return;
+    };
+    let start = Instant::now();
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii -- SLOW1").await;
+    let took = start.elapsed();
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(message(&body).contains(UNCONFIRMED_REFUSAL), "{body}");
+    assert!(took >= limit, "{took:?}");
+    assert!(
+        took < limit + Duration::from_secs(1),
+        "the deadline was not shared: {took:?}"
+    );
+    assert!(env.assignments("v1").await.is_empty());
+}
+
+/// I3 + I4: a view whose lock another hold has is refused at once, and a view
+/// on a profile with no classified column takes no lock at all.
+#[tokio::test]
+async fn a_busy_view_lock_refuses_at_once_and_an_unclassified_view_takes_none() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let Some(plain) = env_with(Opts {
+        classified: false,
+        ..Opts::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let mut other = env.db.pool.acquire().await.unwrap().detach();
+    for (e, name) in [(&env, "v1"), (&plain, "v1")] {
+        sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+            .bind(view_lock_key(&e.prefix, "s", name))
+            .execute(&mut other)
+            .await
+            .unwrap();
+    }
+
+    let start = Instant::now();
+    let got = tokio::time::timeout(
+        Duration::from_secs(10),
+        env.create("v1", "SELECT id, ssn FROM pii"),
+    )
+    .await;
+    let (status, body) = got.expect("the hold blocked on the lock");
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        message(&body).contains("another change to this view is being held"),
+        "{body}"
+    );
+    assert!(start.elapsed() < Duration::from_secs(2));
+
+    let got = tokio::time::timeout(
+        Duration::from_secs(10),
+        plain.create("v1", "SELECT id, ssn FROM pii"),
+    )
+    .await;
+    let (status, body) = got.expect("an unclassified view waited for a lock");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    sqlx::Connection::close(other).await.unwrap();
+}
+
+/// I4: when the concurrent holds are at their cap, the next is refused fast.
+#[tokio::test]
+async fn a_full_hold_semaphore_refuses_fast() {
+    let Some(env) = env_with(Opts {
+        limit: Duration::from_secs(5),
+        max_holds: 1,
+        ..Opts::default()
+    })
+    .await
+    else {
+        return;
+    };
+    // No plugin polls, so the first hold waits out its 5 s.
+    let (first, (second, took)) =
+        tokio::join!(env.create("v1", "SELECT id, ssn FROM pii"), async {
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            let start = Instant::now();
+            let r = env.create("v2", "SELECT id, ssn FROM pii").await;
+            (r, start.elapsed())
+        });
+    let (status, body) = second;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        message(&body).contains("classified view changes already"),
+        "{body}"
+    );
+    assert!(took < Duration::from_secs(1), "{took:?}");
+    assert_eq!(first.0, StatusCode::CONFLICT, "{}", first.1);
+    assert!(
+        message(&first.1).contains(UNCONFIRMED_REFUSAL),
+        "{}",
+        first.1
+    );
+}
+
+/// M1: no Trino engine is bound to the view's catalog, so no plugin can
+/// confirm: refused at once, and nothing remains.
+#[tokio::test]
+async fn no_bound_trino_engine_refuses_at_once() {
+    let Some(env) = env_with(Opts {
+        engine_type: "starrocks",
+        ..Opts::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let start = Instant::now();
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let msg = message(&body);
+    assert!(msg.contains("no Trino engine"), "{msg}");
+    assert!(msg.contains("attach a Trino engine"), "{msg}");
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(env.view("v1").await.is_none());
+    assert!(env.assignments("v1").await.is_empty());
+    assert_eq!(env.lineage("v1").await, RecordedLineage::Missing);
+}
+
+/// D3: when the view's tags would put two differently-masking tag policies on
+/// one view column, the hold refuses and nothing remains.
+#[tokio::test]
+async fn tags_that_would_overlap_two_masks_on_a_view_column_are_refused() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let ssn_tag = env.clearance.unwrap();
+    let id_tag = classify(&env.db, env.warehouse_id, "pii", "id").await;
+    for (tag, mask) in [(ssn_tag, "MASK_NULL"), (id_tag, "MASK_HASH")] {
+        // A tag policy addresses the tag by NAME (`download_tags` serves names).
+        let key: String = sqlx::query_scalar("SELECT name FROM tags WHERE id = $1")
+            .bind(tag)
+            .fetch_one(&env.db.pool)
+            .await
+            .unwrap();
+        let name = unique("vh-mask");
+        let body = json!({
+            "name": name, "service": env.tag_service, "serviceType": "tag",
+            "policyType": 1, "isEnabled": true, "policyPriority": 0,
+            "resources": {"tag": {"values": [key], "isExcludes": false, "isRecursive": false}},
+            "dataMaskPolicyItems": [{
+                "users": [], "groups": ["public"], "roles": [],
+                "accesses": [{"type": "select", "isAllowed": true}],
+                "dataMaskInfo": {"dataMaskType": mask}
+            }],
+            "policyItems": [], "denyPolicyItems": []
+        });
+        env.policy
+            .create_policy(env.tag_service_id, &name, &body)
+            .await
+            .expect("hand-written tag mask");
+    }
+    let before = env.tag_version().await;
+
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let msg = message(&body);
+    assert!(
+        msg.contains("the classification tags cannot be assigned"),
+        "{msg}"
+    );
+    assert!(msg.contains("resolve the overlapping"), "{msg}");
+    assert!(env.view("v1").await.is_none());
+    assert!(env.assignments("v1").await.is_empty());
+    assert_eq!(env.lineage("v1").await, RecordedLineage::Missing);
+    assert_eq!(
+        env.tag_version().await,
+        before,
+        "the refused write rolled back"
+    );
 }

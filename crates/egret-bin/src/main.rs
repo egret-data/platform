@@ -2011,7 +2011,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             std::sync::Arc::new(egret_query::execution::lineage::TrinoLineageRunner::new(
                 db.pool.clone(),
                 lineage_minter,
-                std::time::Duration::from_secs(30),
+                // The hold bounds the EXPLAIN by the same budget, inside its
+                // one 60 s deadline (`egret_catalog_engine::view_hold`).
+                egret_catalog_engine::EXPLAIN_BUDGET,
             ));
         let view_hold = std::sync::Arc::new(egret_catalog_engine::ViewHold::new(
             db.clone(),
