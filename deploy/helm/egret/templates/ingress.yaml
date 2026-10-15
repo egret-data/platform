@@ -15,20 +15,20 @@ metadata:
     # `ingress_read_timeout_is_the_number_this_module_derives_from` reads this
     # line and fails if the two stop agreeing.
     #
-    # LIMITATION — this annotation is scoped to the INGRESS OBJECT, so it now
-    # applies to every path below, not just /data-api: keycloak at /auth and
-    # the SPA at / — which carries the
+    # LIMITATION — this annotation is scoped to the INGRESS OBJECT, so it
+    # applies to every path of THIS object, not just /data-api: keycloak at
+    # /auth and the SPA at / — which carries the
     # console's own /api calls and its websocket connections (the Data Apps pod
     # proxy, engine log streaming), whose upstream nginx deliberately allows
     # 3600 s (`frontend/nginx-prod.conf`). An idle websocket or a long console
-    # call behind this ingress is now cut at 60 s where it was not before. One
-    # consequence that follows from it is recorded where it bites:
-    # `egret_dataapi::TRIAL_REQUEST_DEADLINE` (a trial past 60 s is answered by
-    # nginx rather than by egret). Fixing it properly means splitting this into
-    # two Ingress objects — one for the machine paths that need the pinned 60 s
-    # and one for everything else — which is a deployment change nothing in
-    # this repo can currently verify, so it is written down rather than
-    # guessed at.
+    # call behind this ingress is cut at 60 s. One consequence that follows
+    # from it is recorded where it bites: `egret_dataapi::try_it` (a trial past
+    # 60 s is answered by nginx rather than by egret). One path has been split
+    # out so far: /catalog has its own object below (`egret-catalog`, 120 s),
+    # because a held view change outlasts 60 s. Splitting the console paths out
+    # the same way is still open; whether ingress-nginx routes a path to the
+    # object with the longest matching prefix over a merged host is not
+    # verified in this repo.
     nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
 spec:
   ingressClassName: {{ .Values.ingress.className }}

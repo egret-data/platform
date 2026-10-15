@@ -33,7 +33,7 @@ Thiết kế: `docs/en/specs/2026-10-13-view-governance-design.md`. Phiên bản
 
 ## Trang phân loại: các view đọc phân loại này
 
-- **Existing materialized views (StarRocks).** Mỗi engine StarRocks đang chạy được hỏi một lần, với tư cách root. Trên StarRocks 4.1.6, root là superuser dưới Ranger và thấy mọi materialized view, nên không policy nào giấu được một view khỏi danh sách này. View khớp khi bản đồ bảng gốc của nó nêu một bảng đã phân loại, hoặc, nếu không có bản đồ, khi định nghĩa của nó nêu catalog và database đã phân loại ("matched by text"). Engine egret không hỏi (external, hoặc không chạy) được ghi "not checked". Engine không kết nối được thì trang nói vậy, không bao giờ hiện "không có".
+- **Existing materialized views (StarRocks).** Mỗi engine StarRocks đang chạy được hỏi một lần, với tư cách root. Trên StarRocks 4.1.6, root là superuser dưới Ranger và thấy mọi materialized view, nên không policy nào giấu được một view khỏi danh sách này. View khớp khi bản đồ bảng gốc của nó nêu một bảng đã phân loại, hoặc, nếu không có bản đồ, khi định nghĩa của nó nêu catalog và database đã phân loại ("matched by text"). Materialized view dựng trên một view đã được liệt kê cũng được liệt kê, ở mọi độ sâu, vì nó chứa cùng giá trị. Engine egret không hỏi (external, hoặc không chạy) được ghi "not checked". Engine không kết nối được thì trang nói vậy, không bao giờ hiện "không có".
 - **Trino views (audit DEFINER).** Mọi view trong catalog của egret có lineage đọc một bảng của phân loại này, hoặc một bảng mà rule mask hay row-filter chọn. Mỗi view hiện:
   - **Mode**: DEFINER hay INVOKER, đọc từ thuộc tính lưu trữ `trino.run-as-owner` (có với DEFINER, giá trị là owner). Không đọc được metadata thì mode là "unknown"; egret không bao giờ đoán DEFINER.
   - **Owner** và **owner clearance**: owner có giữ role cấp clearance của mọi phân loại mà lineage của view chạm tới không. "Clearance unknown" nghĩa là lineage chưa tính được, hoặc một clearance chạm tới chỉ nêu group.
@@ -65,12 +65,13 @@ CREATE VIEW ice.sales.v_orders SECURITY INVOKER AS SELECT ...;
 
 Mọi thay đổi view trên catalog có profile chứa cột đã phân loại đều qua **hold**: create, replace hay rename, dù bảng của chính view có được phân loại hay không.
 
-- **Một hạn 90 s** (gấp ba chu kỳ poll 30 s của plugin) tính từ lúc request đến, bao gồm lock của view, `EXPLAIN` lineage (tối đa 5 s) và thời gian chờ plugin. Trino đã được đo chờ 65 s mà không retry; 90 s chưa được đo với client của Trino.
-- **Proxy đứng trước `/catalog` phải đọc lâu hơn 90 s.** Helm chart của egret định tuyến `/catalog` qua một Ingress riêng với read timeout 120 s. Proxy cắt sớm hơn sẽ trả lỗi gateway cho client trong khi egret vẫn commit hoặc từ chối view.
+- **Một hạn 90 s** (gấp ba chu kỳ poll 30 s của plugin) tính từ lúc request đến, bao gồm lock của view, `EXPLAIN` lineage (tối đa 5 s) và thời gian chờ plugin. Đã đo với client của Trino 483: các commit bị giữ 54 đến 60 s, và một lần từ chối lúc 90.2 s phía server (91.2 s phía client), trong một request, không timeout phía client và không retry.
+- **Proxy đứng trước `/catalog` phải đọc lâu hơn 90 s.** Helm chart của egret định tuyến `/catalog` qua một Ingress riêng với read timeout 120 s. Proxy cắt sớm hơn sẽ trả lỗi gateway cho client trong khi egret vẫn commit hoặc từ chối view. Client ngắt kết nối (Ctrl-C, statement timeout) cũng vậy: hold vẫn chạy đến hết, và thay đổi bị từ chối hay quá hạn vẫn được rollback.
 - **View đọc dữ liệu phân loại chờ một đến hai chu kỳ poll** (30 đến 60 s). Plugin tải tag mới ở lần poll kế tiếp, và chỉ báo version mới ở lần poll sau đó; lần báo đó mới là xác nhận. View không đọc bảng phân loại nào thì không bị trễ.
 - **Tối đa 8 hold cùng lúc** trên mỗi tiến trình egret. Cái thứ chín bị từ chối ngay với thông báo retry, không xếp hàng. dbt chạy hơn 8 thread sẽ gặp vài lần từ chối, retry là thành công.
-- **Lock của view đang bận thì bị từ chối ngay** với "retry".
-- Catalog có profile **không** có cột phân loại thì commit không bao giờ bị giữ hay từ chối; egret vẫn ghi lineage, best-effort.
+- **Lock của view đang bận thì bị từ chối ngay** với "retry": một thay đổi khác của cùng view đang bị hold (có thể chạy hết hạn của nó), hoặc lineage sweep đang tính lại view, giữ lock tối đa một EXPLAIN (5 s).
+- Catalog có profile **không** có cột phân loại thì commit không bao giờ bị giữ hay từ chối; egret vẫn ghi lineage, best-effort. Tối đa 8 lần ghi như vậy cùng lúc; quá mức đó, hoặc khi lock của view đang bị giữ, commit đi qua không EXPLAIN và lineage được để `failed` (hoặc cho writer kia) chờ sweep.
+- **Client của chính engine cần quyền `write` trên warehouse.** Role catalog của client engine Trino phải có grant `write` trên warehouse (`POST /roles/{id}/grants` với `{catalog, write}`), nếu không Trino không tạo được namespace hay view nào ở đó (`role '…' has no grants on warehouse '…'`), và không hold nào bắt đầu.
 
 ### Các lần từ chối và cách xử lý
 
@@ -81,7 +82,7 @@ Mọi lần từ chối là Iceberg `409`, Trino in ra `egret refused the view: 
 | `lineage could not be computed: <detail>; check that a running Trino engine egret provisions in JWT mode has the catalog attached and can plan this SQL, then retry` | Không biết được view đọc bảng nào: EXPLAIN lỗi hoặc quá hạn (`the EXPLAIN did not answer within 5 s`), hoặc không có engine phù hợp. Cũng gồm `the engine reports no input table; egret refuses views it cannot judge` (optimizer cắt hết input: `WHERE false`, `LIMIT 0`, vị từ hằng). | Kiểm tra có engine Trino egret provision, đang chạy, chế độ JWT, đã gắn catalog và plan được SQL. Với lineage rỗng, bỏ vị từ hằng. Rồi retry. |
 | `engines did not confirm the classification tags within 90 s: <plugin ids>; check that the engines are running and polling egret's Ranger endpoint, then retry` | Một plugin Trino không tải tag mới kịp. Tag và lineage đã được rollback. | Kiểm tra engine được nêu đang chạy và tới được Ranger endpoint của egret, rồi retry. |
 | `no Trino engine is bound to the view's catalog, so no plugin can confirm its classification tags; attach a Trino engine to the catalog, then retry` | Không có plugin nào xác nhận được tag. | Gắn một engine Trino vào catalog, rồi retry. |
-| `another change to this view is being held; retry when it has finished (at most 90 s)` | Lock của view đang bị hold khác giữ. | Retry khi nó xong. |
+| `another change to this view is being held, or the lineage sweep is recomputing it; retry when it has finished (at most 90 s)` | Lock của view đang bị hold khác giữ, hoặc bị lineage sweep giữ (tối đa 5 s). | Retry khi nó xong. |
 | `egret is holding 8 classified view changes already, its maximum; retry in a minute` | Đã đạt giới hạn 8 hold. | Retry; với dbt, giảm số thread hoặc chạy lại model lỗi. |
 | `egret could not write the view's classification tags within the view's deadline (90 s), because other classification changes were being written; retry` (hoặc `… in time, because …`) | Các lần ghi phân loại khác giữ lock quá hạn. Không có gì được ghi. | Retry. |
 | `the classification tags cannot be assigned: <detail>; resolve the overlapping mask or row-filter policies, then retry` | Gắn tag cho view sẽ khiến hai policy mask hay row-filter quyết định khác nhau cho cùng một request. | Thu hẹp, xoá hoặc làm khớp một rule (`GET /api/control-plane/perm/overlaps` liệt kê các cặp), rồi retry. |
@@ -118,11 +119,10 @@ Vì vậy 15 phút là lâu nhất một nhánh bị cắt, hay một view commi
 
 ## Giới hạn đã biết trên engine JWT (đang sửa)
 
-Lần chạy thật trên Trino 483 (Task 11) tìm ra ba lỗi nằm ngoài quản trị view. Chúng được sửa trong một gói riêng. Trong lúc chờ:
+Lần chạy thật trên Trino 483 (Task 11) tìm ra hai lỗi nằm ngoài quản trị view vẫn còn mở. Chúng được sửa trong một gói riêng. Trong lúc chờ:
 
 - **Giới hạn tốc độ cấp token của egret làm hỏng truy cập catalog của Trino khi tải cao.** Client Iceberg của Trino lấy một OAuth token mới cho mỗi query session, và egret mặc định cho 60 lần xin token mỗi phút. Khi đó các `CREATE VIEW` đồng thời, và lineage sweep 15 phút, lỗi ngay trong Trino với `RESTException: Unable to process (code: 429, type: slow_down)`. **Cách tạm:** tăng `EGRET_RATE_LIMIT__TOKEN_MAX_ATTEMPTS` (lần chạy thật dùng 100000).
 - **Trino làm mới token Iceberg thất bại với egret.** Khoảng một giờ sau khi Trino khởi động, lần refresh OAuth2 (`grant_type=…token-exchange`) nhận `422 … missing field 'client_id'`, và Trino retry liên tục, làm nặng thêm giới hạn ở trên. **Cách tạm:** khởi động lại engine Trino; nó bắt đầu với token mới (lần chạy thật phục hồi như vậy).
-- **Xoá một policy viết tay trong tag service không đến được plugin.** Lệnh xoá tăng version của tag service nhưng không tăng version của profile Trino được gắn, nên plugin giữ policy đã xoá. **Cách tạm:** ghi bất kỳ thay đổi nào vào profile được gắn (ví dụ lưu một policy bất kỳ trên đó); lần tăng version đó đẩy việc xoá đi.
 
 ## Rủi ro đã chấp nhận
 

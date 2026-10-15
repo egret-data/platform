@@ -186,7 +186,7 @@ The message names the reason and what to do about it. A view that egret cannot j
 - lakekeeper's contract verification is not used. It never runs on view create, and on a commit it runs inside an open Postgres write transaction.
 - Trino 483 sends create as `POST …/namespaces/{ns}/views`, and replace as `POST …/views/{v}` carrying `add-view-version`.
 - `ALTER VIEW … AS` is not in Trino 483's grammar.
-- A 65 s hold succeeded with no client retry, and a 409 is printed verbatim by Trino. The 90 s limit of R7 was not measured against Trino's client.
+- A 65 s hold succeeded with no client retry, and a 409 is printed verbatim by Trino. The 90 s limit of R7 was later measured against Trino 483's client (live result §3.5): held commits of 54-60 s, and a refusal at 90.2 s server side (91.2 s at the client), in one request, with no client retry.
 
 **Requests the layer must handle.**
 - **A commit with no new view version** (`COMMENT ON VIEW`, or a replace whose updates are empty) passes through with no lineage work.

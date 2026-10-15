@@ -33,7 +33,7 @@ Design: `docs/en/specs/2026-10-13-view-governance-design.md`. Engine versions an
 
 The page for one classification shows two lists.
 
-- **Existing materialized views (StarRocks).** Every running StarRocks engine is asked once, as root. On StarRocks 4.1.6 root is a superuser under Ranger and sees every materialized view, so no policy can hide one from this list. A view matches when its base-table map names a classified table, or, if it has no map, when its definition names the classified catalog and database ("matched by text"). An engine egret did not ask (external, or not running) is named "not checked". If an engine cannot be reached, the list says so and never shows "none".
+- **Existing materialized views (StarRocks).** Every running StarRocks engine is asked once, as root. On StarRocks 4.1.6 root is a superuser under Ranger and sees every materialized view, so no policy can hide one from this list. A view matches when its base-table map names a classified table, or, if it has no map, when its definition names the classified catalog and database ("matched by text"). A materialized view over a listed one is listed too, at any depth, since it holds the same values. An engine egret did not ask (external, or not running) is named "not checked". If an engine cannot be reached, the list says so and never shows "none".
 - **Trino views (the DEFINER audit).** Every view in egret's catalogs whose recorded lineage reads a table of this classification, or a table that a mask or row-filter rule selects. For each one the page shows:
   - **Mode**: DEFINER or INVOKER, read from the view's stored `trino.run-as-owner` property (present for DEFINER, with the owner as its value). If the metadata cannot be read the mode is "unknown"; egret never guesses DEFINER.
   - **Owner** and **owner clearance**: whether the owner holds a clearing role of every classification the view's lineage reaches. "Clearance unknown" means the lineage is not computed, or a reached clearance names only groups.
@@ -67,12 +67,13 @@ The page then shows the view as INVOKER.
 
 A view change on a catalog whose profile has a classified column takes a **hold**: a create, a replace or a rename, whether or not the view's own tables are classified.
 
-- **One deadline of 90 s** (three times the 30 s plugin poll interval) from the request's arrival covers everything: the view's lock, the lineage `EXPLAIN` (at most 5 s), and the wait for the plugins. Trino was measured to wait 65 s without retrying; 90 s has not been measured against Trino's client.
-- **A proxy in front of `/catalog` must read for longer than 90 s.** egret's Helm chart routes `/catalog` through its own Ingress with a 120 s read timeout. A proxy that cuts sooner answers the client with a gateway error while egret still commits or refuses the view.
+- **One deadline of 90 s** (three times the 30 s plugin poll interval) from the request's arrival covers everything: the view's lock, the lineage `EXPLAIN` (at most 5 s), and the wait for the plugins. Measured against Trino 483's client: held commits of 54 to 60 s, and a refusal at 90.2 s server side (91.2 s at the client), in one request, with no client timeout and no retry.
+- **A proxy in front of `/catalog` must read for longer than 90 s.** egret's Helm chart routes `/catalog` through its own Ingress with a 120 s read timeout. A proxy that cuts sooner answers the client with a gateway error while egret still commits or refuses the view. A client that disconnects (Ctrl-C, a statement timeout) has the same effect: the hold still runs to its end, and a refused or timed-out change is still rolled back.
 - **A view that reads classified data waits one to two poll intervals** (30 to 60 s) for the plugins to confirm the tags. A plugin downloads the new tags on its next poll, and reports the new version only on the poll after, which is what confirms. A view that reads no classified table is not delayed.
 - **At most 8 holds run at once** per egret process. A ninth one is refused at once with a retry message; it does not queue. A dbt run with more than 8 threads over classified catalogs therefore sees some refusals, which succeed on retry.
-- **A busy view lock is refused at once** with "retry": another change to the same view is being held, and it may run for its whole deadline.
-- On a catalog whose profile has **no** classified column, the commit is never held or refused. egret still records the view's lineage, best-effort, so a later classification re-tags the view.
+- **A busy view lock is refused at once** with "retry": another change to the same view is being held, and it may run for its whole deadline, or the lineage sweep is recomputing the view, which holds its lock for up to one EXPLAIN (5 s).
+- On a catalog whose profile has **no** classified column, the commit is never held or refused. egret still records the view's lineage, best-effort, so a later classification re-tags the view. At most 8 such records run at once; past that, or while the view's lock is taken, the commit passes with no EXPLAIN and the lineage is left `failed` (or to the other writer) for the sweep.
+- **The engine's own client needs `write` on the warehouse.** The catalog role of a Trino engine's client must hold a `write` grant on the warehouse (`POST /roles/{id}/grants` with `{catalog, write}`), or Trino cannot create a namespace or a view there at all (`role '…' has no grants on warehouse '…'`), and no hold starts.
 
 ### Refusals, and what to do about each
 
@@ -83,7 +84,7 @@ Every refusal is an Iceberg `409`, which Trino prints as `egret refused the view
 | `lineage could not be computed: <detail>; check that a running Trino engine egret provisions in JWT mode has the catalog attached and can plan this SQL, then retry` | egret could not learn which tables the view reads: the EXPLAIN failed or timed out (`the EXPLAIN did not answer within 5 s`), or no eligible engine could run it. Also `the engine reports no input table; egret refuses views it cannot judge`: the optimizer pruned every input (`WHERE false`, `LIMIT 0`, a constant predicate). | Check that a provisioned, running, JWT-mode Trino engine has the catalog attached and can plan the SQL. For an empty lineage, remove the constant predicate. Then retry. |
 | `engines did not confirm the classification tags within 90 s: <plugin ids>; check that the engines are running and polling egret's Ranger endpoint, then retry` | A Trino plugin did not download the new tags in time. The tags and lineage are rolled back. | Check that the named engines are running and can reach egret's Ranger endpoint, then retry. |
 | `no Trino engine is bound to the view's catalog, so no plugin can confirm its classification tags; attach a Trino engine to the catalog, then retry` | No plugin exists that could confirm the tags. | Attach a Trino engine to the catalog, then retry. |
-| `another change to this view is being held; retry when it has finished (at most 90 s)` | The view's lock is taken by another hold. | Retry after it finishes. |
+| `another change to this view is being held, or the lineage sweep is recomputing it; retry when it has finished (at most 90 s)` | The view's lock is taken by another hold, or by the lineage sweep (for up to 5 s). | Retry after it finishes. |
 | `egret is holding 8 classified view changes already, its maximum; retry in a minute` | The cap of 8 concurrent holds is reached. | Retry. For dbt, lower the thread count or retry failed models. |
 | `egret could not write the view's classification tags within the view's deadline (90 s), because other classification changes were being written; retry` (or `… in time, because …`) | Other classification writes held the view-tag lock past the deadline. Nothing was written. | Retry. |
 | `the classification tags cannot be assigned: <detail>; resolve the overlapping mask or row-filter policies, then retry` | Tagging the view would make two mask or row-filter policies decide one request differently. | Narrow, delete or align one of the overlapping rules (`GET /api/control-plane/perm/overlaps` lists stored pairs), then retry. |
@@ -120,11 +121,10 @@ A view waits for the **15-minute schedule** instead of the immediate scoped swee
 
 ## Known limits on JWT engines (being fixed)
 
-The live run on Trino 483 (Task 11) found three defects outside view governance. They are being fixed in a separate package. Until then:
+The live run on Trino 483 (Task 11) found two defects outside view governance that are still open. They are being fixed in a separate package. Until then:
 
 - **egret's token rate limit breaks Trino's catalog access under load.** Trino's Iceberg client takes a fresh OAuth token per query session, and egret allows 60 token requests per minute by default. Concurrent `CREATE VIEW`s, and the 15-minute lineage sweep, then fail inside Trino with `RESTException: Unable to process (code: 429, type: slow_down)`. **Workaround:** raise `EGRET_RATE_LIMIT__TOKEN_MAX_ATTEMPTS` (the live run used 100000).
 - **Trino's Iceberg token refresh fails against egret.** About an hour after Trino starts, its OAuth2 refresh (`grant_type=…token-exchange`) is answered `422 … missing field 'client_id'`, and Trino retries in a loop, which feeds the rate limit above. **Workaround:** restart the Trino engine; it starts with fresh tokens (this is how the live run recovered).
-- **Deleting a hand-written policy in a tag service does not reach the plugins.** The delete bumps the tag service's version but not the bound Trino profile's, so plugins keep the deleted policy. **Workaround:** make any write to the bound profile (for example save any policy on it); that bump pushes the deletion.
 
 ## Accepted risks
 
