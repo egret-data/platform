@@ -509,19 +509,89 @@ fn tag_matching_is_case_sensitive_because_the_tag_def_says_so() {
     );
 }
 
-/// The def that decides is the BLOCK's, not the service's. Handed `trino.json`,
-/// no hierarchy contains `tag`, `init` fails and every match is `NONE` — so a
-/// phase that reached for the resource def would answer "nothing applies" with
-/// full confidence.
+/// Two tags, two policies: a DENY on `vgsecret` and a MASK on `vgkey` — the
+/// live shape that found the defect on Trino 483 (plugin 2.5.0).
+fn two_tag_block() -> ServicePolicySet {
+    tagged(json!([
+        tag_policy(
+            9101,
+            "deny-vgsecret",
+            0,
+            json!(["vgsecret"]),
+            deny_select_for_public()
+        ),
+        tag_policy(
+            9102,
+            "mask-vgkey",
+            1,
+            json!(["vgkey"]),
+            mask_for_public("MASK_NULL")
+        ),
+    ]))
+}
+
+/// With the `tag` def, a policy on one tag does not reach a column carrying
+/// only the other — in either direction, for access and for masking.
 #[test]
-fn the_resource_def_cannot_stand_in_for_the_tag_def() {
-    let set = live_download();
-    let d = evaluate_tag_policies(
-        &set,
-        &request("alice", Some(vec![tag("tag", MatchType::Self_)])),
-        &trino_def(),
+fn with_the_tag_def_a_policy_on_one_tag_does_not_reach_a_column_carrying_only_the_other() {
+    let set = two_tag_block();
+    let def = live_tag_def();
+
+    let key_only = request("bob", Some(vec![tag("vgkey", MatchType::Self_)]));
+    let secret_only = request("bob", Some(vec![tag("vgsecret", MatchType::Self_)]));
+
+    assert_eq!(
+        evaluate_tag_policies(&set, &key_only, &def),
+        TagDecision::NotDetermined,
+        "the vgsecret deny must not reach a vgkey-only column"
     );
-    assert_eq!(d, TagDecision::NotDetermined, "{d:?}");
+    match evaluate_tag_policies(&set, &secret_only, &def) {
+        TagDecision::Denied { policy_id, .. } => assert_eq!(policy_id, Some(9101)),
+        other => panic!("the vgsecret deny must reach a vgsecret column: {other:?}"),
+    }
+    assert_eq!(
+        evaluate_tag_data_mask(&set, &secret_only, &def),
+        MaskDecision::NoMask,
+        "the vgkey mask must not reach a vgsecret-only column"
+    );
+    match evaluate_tag_data_mask(&set, &key_only, &def) {
+        MaskDecision::Masked(m) => assert_eq!(m.policy_id, Some(9102)),
+        other => panic!("the vgkey mask must reach a vgkey column: {other:?}"),
+    }
+}
+
+/// **The block's def decides which tag policies RUN, and a def with no `tag`
+/// resource lets every one of them run for every tag.** Measured against the
+/// real jar at 2.5.0, 2.8.0 and 2.9.0 by
+/// `tests/ranger/src/test/java/EgretTagBlockServiceDefTest.java`, and live on
+/// Trino 483: the plugin logs `RangerDefaultPolicyResourceMatcher.init()
+/// failed ... (serviceDef=trino, policyResourceKeys=tag` per policy, and then
+/// a deny on `vgsecret` denied a `vgkey`-only column and a mask on `vgkey`
+/// masked a `vgsecret`-only one.
+///
+/// The mechanism is the candidate filter, not the matcher: a tag request reads
+/// the TAG's match type and never asks the policy's matcher, so the per-resource
+/// trie is the only thing that ties a policy to a tag, and `trino.json` has no
+/// `tag` resource to build one for. This used to answer `NotDetermined` here —
+/// "the failed `init` matches nothing" — which is the matcher's answer, and the
+/// opposite of the engine's: `explain` would have said "nothing applies" about a
+/// download that applied everything.
+#[test]
+fn with_a_def_lacking_a_tag_resource_every_tag_policy_reaches_every_tagged_column() {
+    let set = two_tag_block();
+    let def = trino_def();
+
+    let key_only = request("bob", Some(vec![tag("vgkey", MatchType::Self_)]));
+    let secret_only = request("bob", Some(vec![tag("vgsecret", MatchType::Self_)]));
+
+    match evaluate_tag_policies(&set, &key_only, &def) {
+        TagDecision::Denied { policy_id, .. } => assert_eq!(policy_id, Some(9101)),
+        other => panic!("MEASURED: the vgsecret deny reaches a vgkey-only column: {other:?}"),
+    }
+    match evaluate_tag_data_mask(&set, &secret_only, &def) {
+        MaskDecision::Masked(m) => assert_eq!(m.policy_id, Some(9102)),
+        other => panic!("MEASURED: the vgkey mask masks a vgsecret-only column: {other:?}"),
+    }
 }
 
 // ── the live MASK and ROW-FILTER policies, 8799 and 8805 ─────────────────

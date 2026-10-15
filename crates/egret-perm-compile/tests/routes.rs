@@ -6170,3 +6170,127 @@ async fn attach_fixture_tag_to_whole_table(f: &Fixture, table: &str) {
     .await
     .expect("table-level attachment");
 }
+
+/// **`explain` evaluates the `tagPolicies` block against the `tag` service-def,
+/// whatever the tag service's own `type` is, so it agrees with the engine.**
+///
+/// The live defect (Trino 483, plugin 2.5.0): a tag service made through the
+/// admin API is a `trino` profile, and `download_policies` used to serve the
+/// block with THAT type's def. `artifact_via` mirrors the download, so it
+/// assembled the same wrong def. Two tags here, each on its own table, and one
+/// deny policy on the second: the policy must decide for the table carrying its
+/// tag and must NOT decide for the table carrying only the other one.
+#[tokio::test]
+async fn explain_evaluates_the_tag_block_against_the_tag_def_with_two_tags() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (trino_id, _starrocks_id, catalog_id) = two_profile_catalog(&f, "explain-tagdef").await;
+    let key = assign_tag(&f, catalog_id, "sales", "orders", "").await;
+    let secret = assign_tag(&f, catalog_id, "sales", "secrets", "").await;
+    assert_ne!(key.name, secret.name);
+
+    egret_policy::seed_tag(&f.policy)
+        .await
+        .expect("seed tag def");
+    let trino = f
+        .policy
+        .get_service_by_id(trino_id)
+        .await
+        .expect("trino service row");
+    // The shape the admin API produces: the tag service is a `trino` profile.
+    let tag_service_name = format!("{}_tag", trino.name);
+    let tag_service = f
+        .policy
+        .create_service(&tag_service_name, "trino", &json!({}))
+        .await
+        .expect("create trino-typed tag service");
+    let tag_policy_name = unique("deny-secret");
+    f.policy
+        .create_policy(
+            tag_service.id,
+            &tag_policy_name,
+            &json!({
+                "name": tag_policy_name,
+                "service": tag_service_name,
+                "serviceType": "tag",
+                "policyType": 0,
+                "isEnabled": true,
+                "resources": { "tag": { "values": [secret.name], "isExcludes": false, "isRecursive": false } },
+                "policyItems": [],
+                "denyPolicyItems": [{
+                    "users": ["nobody"],
+                    "accesses": [{"type": "select", "isAllowed": true}],
+                }],
+                "allowExceptions": [],
+                "denyExceptions": [],
+                "isDenyAllElse": false,
+            }),
+        )
+        .await
+        .expect("create tag policy");
+    sqlx::query("UPDATE policy.authz_services SET config_jsonb = $2 WHERE id = $1")
+        .bind(trino_id)
+        .bind(json!({ "tagService": tag_service_name }))
+        .execute(&f.db.pool)
+        .await
+        .expect("bind the tag service");
+
+    let explain = |table: &str| {
+        json!({
+            "subject": { "user": "nobody" },
+            "action": "read",
+            "target": { "catalog_id": catalog_id, "schema": "sales", "table": table, "column": null }
+        })
+    };
+
+    // The table carrying the policy's tag: the tag policy decides.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain("secrets")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let verdict = access_for(profile_for(&body, "trino"), "select");
+    assert_eq!(
+        verdict["decision"]["kind"], "denied",
+        "the tag policy must decide for the table carrying its tag; body: {body}"
+    );
+    assert_eq!(
+        verdict["decision"]["reason"], "deny_policy_item",
+        "through its deny item; body: {body}"
+    );
+
+    // The table carrying only the OTHER tag: the policy must not decide.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain("orders")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let verdict = access_for(profile_for(&body, "trino"), "select");
+    assert_ne!(verdict["decision"]["kind"], "undecidable", "body: {body}");
+    assert_ne!(
+        verdict["decision"]["reason"], "deny_policy_item",
+        "a policy on one tag must not decide for a table carrying only the other; \
+         body: {body}"
+    );
+    assert_ne!(
+        verdict["decision"]["policy_name"],
+        tag_policy_name.as_str(),
+        "body: {body}"
+    );
+}

@@ -2767,11 +2767,33 @@ pub fn may_be_candidate(
 /// the tag `tag_name`: some resource map's match type for `{tag: tag_name}`,
 /// against the tag service-def, is not `NONE`. [`tag_candidates`] filters by
 /// exactly this.
+///
+/// # A def with no `tag` resource narrows NOTHING
+///
+/// For a tag request `RangerDefaultPolicyEvaluator.evaluate` reads the TAG's
+/// match type and never asks the policy's matcher, so the candidate filter —
+/// `RangerPolicyRepository`'s trie map — is the only thing tying a policy to a
+/// tag. That map is built from `serviceDef.getResources()` (the top-level list,
+/// for every policy type; `createResourceTrieMap`, 2.5.0). A def that declares
+/// no `tag` resource there has no `tag` trie, the lookup skips the key and does
+/// not narrow, and every tag policy is a candidate for every tag. MEASURED
+/// against the jar at 2.5.0, 2.8.0 and 2.9.0
+/// (`tests/ranger/src/test/java/EgretTagBlockServiceDefTest.java`) and live on
+/// Trino 483, where egret served `trino.json` in the block: a deny on one tag
+/// denied columns carrying only another. The matcher's answer for that def —
+/// `init()` fails, `NONE` everywhere — is the opposite of the engine's, and is
+/// what this function used to return.
 pub fn may_be_tag_candidate(
     policy: &RangerPolicy,
     tag_name: &str,
     tag_service_def: &ServiceDef,
 ) -> bool {
+    if tag_service_def
+        .resource(PolicyType::Access, TAG_RESOURCE_KEY)
+        .is_none()
+    {
+        return true;
+    }
     let tag_resource = RequestResource::new().with(TAG_RESOURCE_KEY, tag_name);
     match_policy_resources(policy, &tag_resource, tag_service_def)
         .into_iter()
