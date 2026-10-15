@@ -21,7 +21,7 @@
 
 use egret_config::Config;
 use egret_core::ratelimit::RateLimiter;
-use egret_machine_idp::{ClientVerifier, IdpState, SigningKeyStore};
+use egret_machine_idp::{ClientVerifier, IdpState, SigningKeyStore, VerifiedCache};
 use std::sync::Arc;
 
 /// egret's identity and its in-cluster address, derived together from config so
@@ -127,6 +127,7 @@ impl EgretIdentity {
             issuer: self.issuer.clone(),
             verifiers,
             rate_limiter,
+            verified_cache: VerifiedCache::default(),
         }
     }
 }

@@ -23,6 +23,12 @@ pub struct RateLimitConfig {
     /// with a KNOWN `client_id` costs one Argon2 verify — it is a CPU-cost
     /// bound, not a credential-guessing defence (secrets are 256-bit random and
     /// unknown ids never reach the hash).
+    ///
+    /// It counts only requests that are NOT a proven repeat: a secret that
+    /// already verified for a client whose stored hash is unchanged is served
+    /// from the IdP's verification cache without Argon2 and without touching
+    /// this limit (I3 — Trino mints a token per query session). Wrong secrets,
+    /// first-time secrets and anything after a rotation or revoke still count.
     pub token_max_attempts: u32,
     pub token_window_secs: u64,
     pub token_lockout_secs: u64,
