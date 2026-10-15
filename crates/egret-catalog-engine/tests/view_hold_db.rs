@@ -1858,20 +1858,20 @@ async fn a_request_cancelled_during_the_wait_still_compensates() {
         return;
     };
     let before = env.tag_version().await;
-    // No plugin polls, so the hold waits out its deadline.
-    let cancelled = tokio::time::timeout(
-        Duration::from_millis(1000),
-        env.create("v1", "SELECT id, ssn FROM pii"),
-    )
-    .await;
-    assert!(
-        cancelled.is_err(),
-        "the request was meant to be cut mid-wait"
-    );
-    assert!(
-        !env.assignments("v1").await.is_empty(),
-        "step 3 wrote the view's tags before the wait"
-    );
+    // No plugin polls, so the hold waits out its deadline. The request is
+    // dropped the moment step 3's rows exist, i.e. mid-wait.
+    // Boxed, so `drop` drops the handler future itself, as hyper does.
+    let mut request = Box::pin(env.create("v1", "SELECT id, ssn FROM pii"));
+    let written = async {
+        while env.assignments("v1").await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::select! {
+        r = &mut request => panic!("the hold answered before step 3 wrote: {r:?}"),
+        _ = written => {}
+    }
+    drop(request);
 
     let e = &env;
     eventually("the cancelled hold compensated", || async move {
