@@ -136,6 +136,21 @@
 //! `workflow.disabled_triggers` (the runtime switch, W7e) and deletes its
 //! undeclared rows, in the same transaction.
 //!
+//! **W7f (spec §3.7, §3.11): before the upsert, `sync` reads the flow's
+//! trigger rows and then its backfill rows `FOR UPDATE`, each `ORDER BY
+//! trigger_id`.** The decision the upsert's `CASE` encodes (keep the dates,
+//! or re-initialise) is taken in Rust from that locked read, so a
+//! re-initialised schedule with a backfill can be re-derived from it. The
+//! trigger-row read takes the locks the upsert already took, earlier and in
+//! `trigger_id` order instead of declaration order; it waits on a claimed
+//! row exactly as the upsert did, and the backfill rows come after it, so the
+//! lock order stays flow, trigger rows, backfill rows. The rename deadlock
+//! below is unchanged by it: the save's `FOR UPDATE` on the flow against a
+//! pass's `KEY SHARE`, now met at this read rather than at the upsert.
+//! Proved by `tests/runtime.rs`'s
+//! `a_save_that_re_derives_a_backfill_waits_for_a_pause_on_the_flow_row` for
+//! the flow-row serialisation with a (SQL-staged) pause.
+//!
 //! **`resync` is serialised on the flow row, without waiting.** Every other
 //! caller holds the flow row while `sync` runs (a save `FOR NO KEY UPDATE` or
 //! `FOR UPDATE`, `reconcile` `FOR SHARE`), and so does the W7e switch route

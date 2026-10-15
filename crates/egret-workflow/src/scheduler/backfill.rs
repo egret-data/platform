@@ -92,6 +92,23 @@ pub(crate) async fn read_for_update(
     .map_err(db_err)
 }
 
+/// Every backfill row of `flow`, `FOR UPDATE`, in `trigger_id` order
+/// (`sync`, after the flow's trigger rows: the lock order of §3.11).
+pub(crate) async fn read_flow_for_update(
+    conn: &mut PgConnection,
+    flow: Uuid,
+) -> Result<Vec<BackfillRow>> {
+    sqlx::query_as(concat!(
+        "SELECT ",
+        backfill_cols!(),
+        " FROM workflow.trigger_backfills WHERE flow_id = $1 ORDER BY trigger_id FOR UPDATE"
+    ))
+    .bind(flow)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)
+}
+
 impl BackfillRow {
     /// The pure model's window; `paused: false` (a paused row is never
     /// ticked: the claim and `fire_one`'s fresh read exclude it).

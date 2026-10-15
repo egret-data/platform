@@ -413,7 +413,10 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
 /// `policy` is the trigger's `recoverMissedSchedules`; a value `from_model`
 /// does not know is `ALL`, egret's behaviour wherever it does not apply the
 /// property. No tick at all: off the queue (`None`) with `never_fires`.
-fn backfill_ended(
+///
+/// Shared with `sync`, which ends a backfill the same way on a cron change
+/// (§3.7: complete, or over the cap).
+pub(super) fn backfill_ended(
     resolved: &ScheduleTrigger,
     schedule: &Schedule,
     b: &BackfillRow,

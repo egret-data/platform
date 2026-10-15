@@ -1521,6 +1521,135 @@ async fn a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance(pool: s
     assert_eq!(executions_of_flow(&pool, flow).await, 1);
 }
 
+/// **W7f §3.7 / §3.11: a save that re-derives a backfill and a pause of that
+/// backfill serialise on the flow row.** The pause is SQL standing in for
+/// the route (Task 6), in the route's lock order: the flow `FOR NO KEY
+/// UPDATE`, then the trigger row, then the backfill row. It is held right
+/// after its flow lock while a save that changes the cron starts; the save is
+/// observed **blocked on a lock** in `pg_stat_activity`, not inferred from
+/// timing. The pause then locks the trigger, pauses and commits; the save
+/// proceeds, re-derives, and neither write is lost.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_save_that_re_derives_a_backfill_waits_for_a_pause_on_the_flow_row(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let flow = common::seed_flow(&db, ws, user, &cron_flow("pause"), "draft").await;
+    let now: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT date_trunc('hour', now())")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let w0 = now - chrono::Duration::hours(2);
+    common::stage_backfill(
+        &db,
+        flow,
+        "s",
+        (w0, w0 + chrono::Duration::minutes(9)),
+        w0,
+        10,
+        serde_json::json!({}),
+        serde_json::json!([]),
+    )
+    .await;
+    // Three ticks done: `current_tick` on an odd minute.
+    let cur = w0 + chrono::Duration::minutes(3);
+    sqlx::query(
+        "UPDATE workflow.trigger_backfills SET current_tick = $2, ticks_done = 3 WHERE flow_id = $1",
+    )
+    .bind(flow)
+    .bind(cur)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE workflow.triggers SET next_evaluation_date = $2 WHERE flow_id = $1")
+        .bind(flow)
+        .bind(cur)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut pause = pool.begin().await.expect("the pause's transaction");
+    sqlx::query("SELECT id FROM workflow.flows WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(flow)
+        .execute(&mut *pause)
+        .await
+        .expect("the pause's flow lock");
+
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let edited = cron_flow("pause").replace("*/1 * * * *", "*/2 * * * *");
+    let save = tokio::spawn(async move {
+        repo.update(
+            ws,
+            flow,
+            user,
+            &egret_workflow::UpdateFlowInput {
+                source: Some(edited),
+                plan: Some(serde_json::json!({})),
+                ..Default::default()
+            },
+        )
+        .await
+    });
+    wait_until(
+        "the save to be blocked on the flow row the pause holds",
+        Duration::from_secs(60),
+        || async {
+            match lock_waiters(&pool, &["transactionid", "tuple"]).await {
+                0 => Err("no backend waiting on a row lock".into()),
+                _ => Ok(()),
+            }
+        },
+    )
+    .await;
+    assert!(!save.is_finished(), "the save must still be waiting");
+
+    sqlx::query(
+        "SELECT trigger_id FROM workflow.triggers WHERE flow_id = $1 AND trigger_id = 's' FOR UPDATE",
+    )
+    .bind(flow)
+    .execute(&mut *pause)
+    .await
+    .expect("the pause's trigger lock");
+    sqlx::query(
+        "UPDATE workflow.trigger_backfills SET paused = true, paused_at = now() \
+          WHERE flow_id = $1 AND trigger_id = 's'",
+    )
+    .bind(flow)
+    .execute(&mut *pause)
+    .await
+    .expect("pause");
+    pause.commit().await.expect("commit the pause");
+
+    save.await
+        .unwrap()
+        .expect("the save, once the pause committed");
+
+    let (paused, tick, total, done): (bool, chrono::DateTime<chrono::Utc>, i32, i32) =
+        sqlx::query_as(
+            "SELECT paused, current_tick, total_ticks, ticks_done \
+               FROM workflow.trigger_backfills WHERE flow_id = $1 AND trigger_id = 's'",
+        )
+        .bind(flow)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let even = w0 + chrono::Duration::minutes(4);
+    // Left under `*/2` in [w0+4, w0+9]: w0+4, w0+6, w0+8.
+    assert_eq!((paused, tick, total, done), (true, even, 3 + 3, 3));
+    let next: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT next_evaluation_date FROM workflow.triggers WHERE flow_id = $1 AND trigger_id = 's'",
+    )
+    .bind(flow)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        next,
+        Some(even),
+        "the trigger follows the re-derived backfill"
+    );
+}
+
 /// Backends of this test's database waiting on a lock of the kind `what`
 /// (`pg_stat_activity`'s `wait_event`): `advisory` is a held transaction,
 /// `transactionid` or `tuple` a writer queued behind a row lock.

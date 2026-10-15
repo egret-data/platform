@@ -761,3 +761,514 @@ async fn a_kind_change_under_the_same_id_keeps_the_switch() {
         vec!["t".to_string()]
     );
 }
+
+// ---------------------------------------------------------------------------
+// W7f Task 5 (spec §3.7, D19, D20): `sync` re-derives a schedule from its
+// backfill and owns the backfill rows' lifecycle. Backfills are staged with
+// `common::stage_backfill` (the create route is Task 7's); the dates a fire
+// would have advanced are moved by SQL on both rows, as a fire writes them.
+// ---------------------------------------------------------------------------
+
+/// The flow under test: one schedule `s` on `cron`, its task saying `message`
+/// (a different message is "a task edit").
+fn one_schedule(cron: &str, message: &str) -> String {
+    flow_yaml("", &schedule("s", cron, ""), message)
+}
+
+/// The top of the DB clock's hour, two hours back: a past, even-minute
+/// origin for a window of one-minute ticks.
+async fn origin(db: &Db) -> DateTime<Utc> {
+    let now = db_now(db).await;
+    now.date_naive()
+        .and_time(NaiveTime::from_hms_opt(now.hour(), 0, 0).unwrap())
+        .and_utc()
+        - Duration::hours(2)
+}
+
+/// Stage a backfill of `s` over `[w0, w0 + 9min]` (ten ticks of `* * * * *`),
+/// as if `done` ticks had fired, and pin the regular schedule's stored date
+/// to `prev` (both rows, as a fire and the create route write them).
+async fn stage_minutes(
+    db: &Db,
+    flow: Uuid,
+    trig: &str,
+    w0: DateTime<Utc>,
+    done: i32,
+    prev: DateTime<Utc>,
+) {
+    common::stage_backfill(
+        db,
+        flow,
+        trig,
+        (w0, w0 + Duration::minutes(9)),
+        w0,
+        10,
+        serde_json::json!({}),
+        serde_json::json!([]),
+    )
+    .await;
+    move_backfill(db, flow, trig, w0 + Duration::minutes(done.into()), done).await;
+    sqlx::query(
+        "UPDATE workflow.trigger_backfills SET previous_next_evaluation_date = $3 \
+          WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .bind(prev)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+}
+
+/// What a fire writes when it advances a backfill: `current_tick` and
+/// `ticks_done` on the backfill row, the same date on the trigger row.
+async fn move_backfill(db: &Db, flow: Uuid, trig: &str, tick: DateTime<Utc>, done: i32) {
+    let n = sqlx::query(
+        "UPDATE workflow.trigger_backfills SET current_tick = $3, ticks_done = $4 \
+          WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .bind(tick)
+    .bind(done)
+    .execute(&db.pool)
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(n, 1, "the backfill row to move");
+    sqlx::query(
+        "UPDATE workflow.triggers SET next_evaluation_date = $3 \
+          WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .bind(tick)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+}
+
+/// `(current_tick, total_ticks, ticks_done, previous_next_evaluation_date)`.
+type BackfillDates = (DateTime<Utc>, i32, i32, DateTime<Utc>);
+
+async fn backfill(db: &Db, flow: Uuid, trig: &str) -> Option<BackfillDates> {
+    sqlx::query_as(
+        "SELECT current_tick, total_ticks, ticks_done, previous_next_evaluation_date \
+           FROM workflow.trigger_backfills WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .fetch_optional(&db.pool)
+    .await
+    .unwrap()
+}
+
+/// The trigger row's queue state, whole: `(next_evaluation_date,
+/// evaluated_at, last_error)`.
+type QueueState = (Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>);
+
+async fn queue(db: &Db, flow: Uuid, trig: &str) -> Option<QueueState> {
+    sqlx::query_as(
+        "SELECT next_evaluation_date, evaluated_at, last_error FROM workflow.triggers \
+          WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .fetch_optional(&db.pool)
+    .await
+    .unwrap()
+}
+
+/// The first even minute at or after `t` (a whole minute): `*/2 * * * *`.
+fn even_at_or_after(t: DateTime<Utc>) -> DateTime<Utc> {
+    if t.minute().is_multiple_of(2) {
+        t
+    } else {
+        t + Duration::minutes(1)
+    }
+}
+
+const P2: &str = "the backfill ended: the new schedule gives more than 10000 ticks in its window";
+
+impl Fx {
+    /// `create`, under another `flow_id` (a second flow of the workspace).
+    async fn create_as(&self, flow_id: &str, src: &str) -> FlowRow {
+        parses(src);
+        self.repo
+            .create(
+                self.ws,
+                self.user,
+                &CreateFlowInput {
+                    namespace: "t".into(),
+                    flow_id: flow_id.into(),
+                    source: src.into(),
+                    plan: serde_json::json!({}),
+                    folder_id: None,
+                },
+            )
+            .await
+            .expect("create")
+    }
+}
+
+#[tokio::test]
+async fn a_save_that_keeps_the_cron_leaves_the_backfill_and_the_dates() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.create(&one_schedule("* * * * *", "hi")).await;
+    let w0 = origin(&fx.db).await;
+    stage_minutes(&fx.db, flow.id, "s", w0, 3, w0 + Duration::hours(3)).await;
+    let row_before = common::backfill_row(&fx.db, flow.id, "s").await;
+    let queue_before = queue(&fx.db, flow.id, "s").await;
+    assert_eq!(
+        queue_before.as_ref().map(|q| q.0),
+        Some(Some(w0 + Duration::minutes(3))),
+        "control: the trigger follows the backfill"
+    );
+
+    fx.update(flow.id, &one_schedule("* * * * *", "edited"))
+        .await;
+
+    assert_eq!(common::backfill_row(&fx.db, flow.id, "s").await, row_before);
+    assert_eq!(queue(&fx.db, flow.id, "s").await, queue_before);
+}
+
+#[tokio::test]
+async fn a_cron_change_mid_backfill_re_derives_from_the_current_tick() {
+    let Some(fx) = fx().await else { return };
+    // `current_tick` on an odd minute: it moves to the next even one.
+    let flow = fx.create(&one_schedule("* * * * *", "hi")).await;
+    let w0 = origin(&fx.db).await;
+    let prev = w0 + Duration::hours(3) + Duration::minutes(1);
+    stage_minutes(&fx.db, flow.id, "s", w0, 3, prev).await;
+    sqlx::query(
+        "UPDATE workflow.triggers SET evaluated_at = $2, last_error = 'x' WHERE flow_id = $1",
+    )
+    .bind(flow.id)
+    .bind(w0)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+
+    fx.update(flow.id, &one_schedule("*/2 * * * *", "hi")).await;
+
+    let cur = w0 + Duration::minutes(4);
+    assert_eq!(cur, even_at_or_after(w0 + Duration::minutes(3)));
+    // Left under `*/2` in [w0+4, w0+9]: w0+4, w0+6, w0+8.
+    assert_eq!(
+        backfill(&fx.db, flow.id, "s").await,
+        Some((cur, 3 + 3, 3, even_at_or_after(prev))),
+        "current_tick re-derived, total recounted, prev re-snapped, done kept"
+    );
+    assert_eq!(
+        queue(&fx.db, flow.id, "s").await,
+        Some((Some(cur), None, None)),
+        "the trigger follows the backfill, re-initialised"
+    );
+
+    // On an even minute, the current tick is kept exactly.
+    let flow = fx.create_as("g", &one_schedule("* * * * *", "hi")).await;
+    stage_minutes(&fx.db, flow.id, "s", w0, 4, prev).await;
+    fx.update(flow.id, &one_schedule("*/2 * * * *", "hi")).await;
+    assert_eq!(
+        backfill(&fx.db, flow.id, "s").await,
+        Some((w0 + Duration::minutes(4), 4 + 3, 4, even_at_or_after(prev))),
+    );
+    assert_eq!(
+        queue(&fx.db, flow.id, "s").await.map(|q| q.0),
+        Some(Some(w0 + Duration::minutes(4)))
+    );
+}
+
+#[tokio::test]
+async fn a_cron_change_past_the_window_completes_the_backfill() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.create(&one_schedule("* * * * *", "hi")).await;
+    let w0 = origin(&fx.db).await;
+    // An odd minute, in the future: the resume keeps it, snapped to `*/2`.
+    let prev = w0 + Duration::hours(3) + Duration::minutes(1);
+    // The last tick, w0+9, odd: `*/2`'s next is w0+10, past `window_end`.
+    stage_minutes(&fx.db, flow.id, "s", w0, 9, prev).await;
+
+    fx.update(flow.id, &one_schedule("*/2 * * * *", "hi")).await;
+
+    assert_eq!(
+        backfill(&fx.db, flow.id, "s").await,
+        None,
+        "complete: the row goes"
+    );
+    assert_eq!(
+        queue(&fx.db, flow.id, "s").await,
+        Some((Some(even_at_or_after(prev)), None, None)),
+        "the regular schedule resumes at its stored date, on the new cron"
+    );
+}
+
+#[tokio::test]
+async fn a_cron_change_over_the_cap_ends_the_backfill_with_a_reason() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.create(&one_schedule("0 0 * * *", "hi")).await;
+    let now = db_now(&fx.db).await;
+    let midnight = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+    let d0 = midnight - Duration::days(9);
+    // Eight daily ticks, none done; under `* * * * *` the window holds
+    // 7 * 1440 + 1 = 10,081.
+    common::stage_backfill(
+        &fx.db,
+        flow.id,
+        "s",
+        (d0, d0 + Duration::days(7)),
+        d0,
+        8,
+        serde_json::json!({}),
+        serde_json::json!([]),
+    )
+    .await;
+    let prev = midnight + Duration::days(1);
+    sqlx::query("UPDATE workflow.trigger_backfills SET previous_next_evaluation_date = $2 WHERE flow_id = $1")
+        .bind(flow.id)
+        .bind(prev)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+
+    fx.update(flow.id, &one_schedule("* * * * *", "hi")).await;
+
+    assert_eq!(
+        backfill(&fx.db, flow.id, "s").await,
+        None,
+        "ended: the row goes"
+    );
+    assert_eq!(
+        queue(&fx.db, flow.id, "s").await,
+        Some((Some(prev), None, Some(P2.to_string()))),
+        "resumed as a delete does, and says why"
+    );
+}
+
+#[tokio::test]
+async fn a_cron_with_no_tick_ends_the_backfill_off_the_queue() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.create(&one_schedule("* * * * *", "hi")).await;
+    let w0 = origin(&fx.db).await;
+    let prev = w0 + Duration::hours(3) + Duration::minutes(1);
+    stage_minutes(&fx.db, flow.id, "s", w0, 3, prev).await;
+
+    fx.update(flow.id, &one_schedule("0 0 30 2 *", "hi")).await;
+
+    // No tick at or after `current_tick`: complete. No tick at or after the
+    // stored `prev` either (D20): the stored date is kept for the resume,
+    // which finds no tick of the new cron there, so the row goes off the
+    // queue with `never_fires`.
+    assert_eq!(backfill(&fx.db, flow.id, "s").await, None);
+    let (next, evaluated, err) = queue(&fx.db, flow.id, "s").await.expect("the row");
+    assert_eq!((next, evaluated), (None, None));
+    let err = err.expect("a reason");
+    assert!(
+        err.starts_with("the schedule never fires: `0 0 30 2 *` has no tick after"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn a_trigger_off_the_queue_is_re_queued_at_the_current_tick() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.create(&one_schedule("* * * * *", "hi")).await;
+    let w0 = origin(&fx.db).await;
+    stage_minutes(&fx.db, flow.id, "s", w0, 3, w0 + Duration::hours(3)).await;
+    // As `fire::take_off_queue` leaves it.
+    sqlx::query(
+        "UPDATE workflow.triggers SET next_evaluation_date = NULL, last_error = 'refused' \
+          WHERE flow_id = $1",
+    )
+    .bind(flow.id)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+
+    fx.update(flow.id, &one_schedule("* * * * *", "edited"))
+        .await;
+
+    let cur = w0 + Duration::minutes(3);
+    assert_eq!(
+        queue(&fx.db, flow.id, "s").await,
+        Some((Some(cur), None, None)),
+        "re-queued at the backfill's tick, not at the next tick after now"
+    );
+    assert_eq!(
+        backfill(&fx.db, flow.id, "s").await,
+        Some((cur, 10, 3, w0 + Duration::hours(3)))
+    );
+}
+
+#[tokio::test]
+async fn an_unparsable_source_keeps_the_backfill_and_a_fix_re_derives() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.create(&one_schedule("* * * * *", "hi")).await;
+    let w0 = origin(&fx.db).await;
+    stage_minutes(&fx.db, flow.id, "s", w0, 3, w0 + Duration::hours(3)).await;
+    let staged = common::backfill_row(&fx.db, flow.id, "s").await;
+    sqlx::query("UPDATE workflow.flows SET source = 'not: [valid' WHERE id = $1")
+        .bind(flow.id)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+
+    egret_workflow::scheduler::reconcile(&fx.db.pool)
+        .await
+        .expect("reconcile");
+    assert_eq!(
+        trigger_ids(&fx.db, flow.id).await,
+        Vec::<String>::new(),
+        "control: the trigger row went with the source"
+    );
+    assert_eq!(
+        common::backfill_row(&fx.db, flow.id, "s").await,
+        staged,
+        "the backfill is kept, untouched"
+    );
+
+    fx.update(flow.id, &one_schedule("* * * * *", "fixed"))
+        .await;
+    assert_eq!(
+        queue(&fx.db, flow.id, "s").await,
+        Some((Some(w0 + Duration::minutes(3)), None, None)),
+        "re-created at the backfill's tick"
+    );
+}
+
+#[tokio::test]
+async fn removing_a_kind_change_and_a_soft_delete_delete_the_backfills() {
+    let Some(fx) = fx().await else { return };
+    let three = flow_yaml(
+        "",
+        &(schedule("s", "* * * * *", "")
+            + &schedule("s2", "* * * * *", "")
+            + &schedule("s3", "* * * * *", "")),
+        "hi",
+    );
+    let flow = fx.create(&three).await;
+    let other = fx.create_as("g", &one_schedule("* * * * *", "hi")).await;
+    let w0 = origin(&fx.db).await;
+    let prev = w0 + Duration::hours(3);
+    for t in ["s", "s2", "s3"] {
+        stage_minutes(&fx.db, flow.id, t, w0, 3, prev).await;
+    }
+    stage_minutes(&fx.db, other.id, "s", w0, 3, prev).await;
+    let other_before = common::backfill_row(&fx.db, other.id, "s").await;
+    let other_queue = queue(&fx.db, other.id, "s").await;
+    let kept = |db: &Db| {
+        let db = db.clone();
+        let other = other.id;
+        let (row, q) = (other_before.clone(), other_queue.clone());
+        async move {
+            assert_eq!(
+                common::backfill_row(&db, other, "s").await,
+                row,
+                "another flow's backfill"
+            );
+            assert_eq!(queue(&db, other, "s").await, q, "another flow's trigger");
+        }
+    };
+
+    // A removed id: its backfill goes, the others stay.
+    let s_queue = queue(&fx.db, flow.id, "s").await;
+    fx.update(
+        flow.id,
+        &flow_yaml(
+            "",
+            &(schedule("s", "* * * * *", "") + &schedule("s3", "* * * * *", "")),
+            "hi",
+        ),
+    )
+    .await;
+    assert_eq!(backfill(&fx.db, flow.id, "s2").await, None, "removed id");
+    assert!(backfill(&fx.db, flow.id, "s").await.is_some());
+    assert!(backfill(&fx.db, flow.id, "s3").await.is_some());
+    assert_eq!(
+        queue(&fx.db, flow.id, "s").await,
+        s_queue,
+        "no resume elsewhere"
+    );
+    kept(&fx.db).await;
+
+    // A kind change under the same id.
+    let hook = flow_yaml(
+        "",
+        &("  - id: s\n    type: io.kestra.plugin.core.trigger.Webhook\n    key: k\n".to_string()
+            + &schedule("s3", "* * * * *", "")),
+        "hi",
+    );
+    fx.update(flow.id, &hook).await;
+    assert_eq!(backfill(&fx.db, flow.id, "s").await, None, "kind change");
+    assert!(backfill(&fx.db, flow.id, "s3").await.is_some());
+    kept(&fx.db).await;
+
+    // A soft delete: every backfill of the flow.
+    fx.repo.soft_delete(fx.ws, flow.id).await.expect("delete");
+    assert_eq!(backfill(&fx.db, flow.id, "s3").await, None, "soft delete");
+    kept(&fx.db).await;
+}
+
+#[tokio::test]
+async fn reconcile_over_an_unchanged_backfill_changes_nothing() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.create(&one_schedule("* * * * *", "hi")).await;
+    let w0 = origin(&fx.db).await;
+    stage_minutes(&fx.db, flow.id, "s", w0, 3, w0 + Duration::hours(3)).await;
+    let row_before = common::backfill_row(&fx.db, flow.id, "s").await;
+    let queue_before = queue(&fx.db, flow.id, "s").await;
+
+    egret_workflow::scheduler::reconcile(&fx.db.pool)
+        .await
+        .expect("reconcile");
+
+    assert_eq!(common::backfill_row(&fx.db, flow.id, "s").await, row_before);
+    assert_eq!(queue(&fx.db, flow.id, "s").await, queue_before);
+}
+
+/// D20 on the branch where the backfill goes on: the new cron has ticks in
+/// the window but none at or after the stored `previous_next_evaluation_date`
+/// (a date in chrono's last year stands in, since every cron that ticks once
+/// ticks again within the search bound). The stored date is kept; the save
+/// succeeds.
+#[tokio::test]
+async fn a_re_snap_with_no_tick_keeps_the_stored_date() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.create(&one_schedule("0 0 1 1 *", "hi")).await;
+    let y = |y: i32, m: u32| Utc.with_ymd_and_hms(y, m, 1, 0, 0, 0).unwrap();
+    common::stage_backfill(
+        &fx.db,
+        flow.id,
+        "s",
+        (y(2020, 1), y(2022, 1)),
+        y(2020, 1),
+        3,
+        serde_json::json!({}),
+        serde_json::json!([]),
+    )
+    .await;
+    let prev = chrono::NaiveDate::MAX
+        .pred_opt()
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
+    sqlx::query("UPDATE workflow.trigger_backfills SET previous_next_evaluation_date = $2 WHERE flow_id = $1")
+        .bind(flow.id)
+        .bind(prev)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+
+    fx.update(flow.id, &one_schedule("0 0 1 1,7 *", "hi")).await;
+
+    // Under the new cron: 2020-01, 2020-07, 2021-01, 2021-07, 2022-01.
+    assert_eq!(
+        backfill(&fx.db, flow.id, "s").await,
+        Some((y(2020, 1), 5, 0, prev))
+    );
+    assert_eq!(
+        queue(&fx.db, flow.id, "s").await.map(|q| q.0),
+        Some(Some(y(2020, 1)))
+    );
+}
