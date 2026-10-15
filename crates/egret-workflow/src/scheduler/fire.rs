@@ -427,7 +427,7 @@ async fn resync(conn: &mut PgConnection, flow_id: Uuid) -> Result<()> {
 /// Spec §5: `Schedule.inputs` are passed verbatim, because this seam has no
 /// render context. A value carrying template syntax would run with the
 /// literal text where Kestra would have rendered it, so it is refused.
-fn refuse_templated(inputs: &BTreeMap<String, serde_json::Value>) -> Option<String> {
+pub(crate) fn refuse_templated(inputs: &BTreeMap<String, serde_json::Value>) -> Option<String> {
     fn templated(v: &serde_json::Value) -> bool {
         match v {
             serde_json::Value::String(s) => s.contains("{{") || s.contains("{%"),
@@ -439,6 +439,18 @@ fn refuse_templated(inputs: &BTreeMap<String, serde_json::Value>) -> Option<Stri
     inputs.iter().find(|(_, v)| templated(v)).map(|(k, _)| {
         format!("inputs.{k} contains template syntax, which a scheduled execution cannot render")
     })
+}
+
+/// Kestra's `putAll`: `schedule` overlaid by `backfill`, key by key.
+// W7f Task 1 lands this before its caller (Task 5); drop the allow then.
+#[allow(dead_code)]
+pub(crate) fn overlay_inputs(
+    schedule: &BTreeMap<String, serde_json::Value>,
+    backfill: &serde_json::Map<String, serde_json::Value>,
+) -> BTreeMap<String, serde_json::Value> {
+    let mut merged = schedule.clone();
+    merged.extend(backfill.iter().map(|(k, v)| (k.clone(), v.clone())));
+    merged
 }
 
 /// `execution.trigger` for a fired schedule, in the shape Task 1 measured on
@@ -468,6 +480,7 @@ pub(crate) fn schedule_trigger_record(e: &ScheduledExecution) -> serde_json::Val
 mod tests {
     use super::*;
     use crate::trigger::Clock;
+    use serde_json::json;
 
     /// Each captured execution is reproduced from the cron alone: the state
     /// is initialised a minute before the capture, ticked at the captured
@@ -546,5 +559,23 @@ mod tests {
         assert_eq!(refuse_templated(&inputs), None);
         inputs.insert("b".to_string(), serde_json::json!({"k": ["{% if %}"]}));
         assert!(refuse_templated(&inputs).unwrap().contains("inputs.b"));
+    }
+
+    #[test]
+    fn a_backfill_input_overlays_the_schedules_key_by_key() {
+        let schedule: BTreeMap<String, serde_json::Value> =
+            [("a".into(), json!("{{ x }}")), ("b".into(), json!(1))].into();
+        let over = json!({"a": "plain"}).as_object().unwrap().clone();
+        let merged = overlay_inputs(&schedule, &over);
+        assert_eq!(
+            merged,
+            BTreeMap::from([("a".into(), json!("plain")), ("b".into(), json!(1))])
+        );
+        assert_eq!(refuse_templated(&merged), None);
+
+        let extra = json!({"c": 2}).as_object().unwrap().clone();
+        let merged = overlay_inputs(&schedule, &extra);
+        assert_eq!(merged.len(), 3);
+        assert!(refuse_templated(&merged).unwrap().contains("inputs.a"));
     }
 }

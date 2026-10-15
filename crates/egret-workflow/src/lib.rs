@@ -50,6 +50,7 @@ pub mod flow_trigger;
 pub mod graph;
 /// W11: `workflow.task_logs` -- the log vocabulary and `LogRepo`. `pub`
 /// because `tests/task_logs.rs` drives the repository directly.
+pub(crate) mod labels;
 pub mod logs;
 pub mod models;
 /// W7d: what the namespace pages read beyond the repository -- the
@@ -98,7 +99,7 @@ pub mod spec;
 pub mod storage;
 // W6 Tasks 5 and 6: the schedule trigger, its backfill, and the flow
 // trigger's window-free arm. `pub` because the loop that drives the clock
-// lives in `scheduler`, not here, and backfill has no route yet (W7f) -- and
+// lives in `scheduler`, not here, and backfill's routes are `triggers::backfill_routes` (W7f) -- and
 // because NOTHING in `oracle-exec/` can reach it, so its own tests are the
 // whole instrument (see the module doc).
 pub mod trigger;

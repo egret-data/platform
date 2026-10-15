@@ -217,6 +217,15 @@ impl Clock for FixedClock {
     }
 }
 
+/// How a backfill ended, for [`TriggerState::resume_from`] (W7f spec §3.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackfillEnd {
+    /// The window's last tick fired.
+    Completed { window_end: DateTime<Utc> },
+    /// Deleted (or ended by `sync`) with `current_tick` not yet fired.
+    Deleted { current_tick: DateTime<Utc> },
+}
+
 /// `io.kestra.core.scheduler.model.TriggerState`, reduced to what scheduling
 /// needs.
 ///
@@ -225,6 +234,10 @@ impl Clock for FixedClock {
 /// `allowConcurrent` lock, which is W8's `concurrency:` neighbourhood),
 /// `lastEventId` (the event-sourced control plane), `stopAfter` (needs the
 /// terminal state of the execution it started, which arrives on another seam).
+///
+/// The backfill's database home is `workflow.trigger_backfills` (W7f). The pure
+/// [`Backfill`] stays reduced to the window; its inputs and labels live beside
+/// it in that row, not here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerState {
     pub namespace: String,
@@ -260,13 +273,17 @@ impl TriggerState {
         }
     }
 
-    /// `TriggerEventHandler.onCreateBackfill`.
+    /// `TriggerEventHandler.onCreateBackfill`, with one deliberate difference
+    /// (W7f spec D4): the window's start is **inclusive** here and exclusive
+    /// in Kestra. Kestra seeds `currentDate = start` and recomputes with
+    /// `nextAfter(start)`, so a tick exactly at `start` is lost; this takes
+    /// the first tick `>= start`.
     ///
-    /// Attaching a backfill **immediately recomputes the next evaluation
-    /// date**, which is what moves `current_date` off `start` and onto the
-    /// window's first cron tick. Without that step the first tick would be
-    /// refused by `eval`'s `current < date` guard and the window would lose its
-    /// first date.
+    /// Attaching still recomputes the next evaluation date immediately, which
+    /// is what moves `current_date` off `start` and onto the window's first
+    /// tick. Without that step the first tick would be refused by `eval`'s
+    /// `current < date` guard. A window holding no tick attaches nothing and
+    /// the schedule stays on the live clock, where Kestra's recompute lands.
     pub fn attach_backfill(
         &mut self,
         trigger: &ScheduleTrigger,
@@ -275,9 +292,56 @@ impl TriggerState {
         clock: &dyn Clock,
     ) {
         let now = clock.now();
-        self.backfill = Some(Backfill::create(start, end, now));
-        let next = trigger.next_evaluation_date(self.evaluated_at, self.backfill.as_ref(), now);
+        let bf = Backfill::create(start, end, now);
+        let next = trigger
+            .first_tick_at_or_after(bf.start)
+            .filter(|t| *t <= bf.end)
+            .or_else(|| trigger.next_evaluation_date(None, None, now));
+        self.backfill = Some(bf);
+        // Clears the backfill when `next > end`.
         self.update_for_next_evaluation_date(next);
+    }
+
+    /// W7f spec §3.6's `from`: after a completed window, `max(prev, first tick
+    /// after window_end)` (`prev` alone when there is none); after a delete,
+    /// `max(prev, current_tick)`.
+    pub fn resume_from(
+        trigger: &ScheduleTrigger,
+        prev: DateTime<Utc>,
+        end: BackfillEnd,
+    ) -> DateTime<Utc> {
+        match end {
+            BackfillEnd::Completed { window_end } => trigger
+                .first_tick_after(window_end)
+                .map_or(prev, |t| t.max(prev)),
+            BackfillEnd::Deleted { current_tick } => current_tick.max(prev),
+        }
+    }
+
+    /// W7f spec §3.6's rule for where the live schedule resumes. `from > now`
+    /// keeps `from`. Otherwise `All` replays from `from`; `Last` takes the
+    /// latest tick at or before `now` (`from` if none is `>= from`); `None`
+    /// takes the first tick after now, as W7e's skip computes it. A `None`
+    /// result means off the queue.
+    pub fn resume_after_backfill(
+        trigger: &ScheduleTrigger,
+        from: DateTime<Utc>,
+        policy: RecoverMissed,
+        now: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        if from > now {
+            return Some(from);
+        }
+        match policy {
+            RecoverMissed::All => Some(from),
+            RecoverMissed::Last => Some(
+                trigger
+                    .last_tick_at_or_before(now)
+                    .filter(|t| *t >= from)
+                    .unwrap_or(from),
+            ),
+            RecoverMissed::None => trigger.next_evaluation_date(None, None, now),
+        }
     }
 
     /// `TriggerState.updateForNextEvaluationDate` +
@@ -527,8 +591,8 @@ pub fn run_until_idle(
 #[cfg(test)]
 mod tests {
     use super::{
-        run_until_idle, Clock, ScheduleTrigger, SkipReason, SystemClock, TestClock, TickOutcome,
-        TriggerState,
+        run_until_idle, BackfillEnd, Clock, RecoverMissed, ScheduleTrigger, SkipReason,
+        SystemClock, TestClock, TickOutcome, TriggerState,
     };
     use crate::models::Trigger;
     use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -1207,6 +1271,110 @@ mod tests {
             clock.now(),
             at("2020-01-01T00:00:00Z"),
             "and it can go backwards"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // W7f: inclusive start, the resume rule
+    // ---------------------------------------------------------------------
+
+    /// D4: a tick exactly at `start` and one exactly at `end` both belong.
+    #[test]
+    fn an_inclusive_backfill_fires_both_ends_of_the_window() {
+        let clock = TestClock::new(at("2026-06-15T12:00:00Z"));
+        let trigger = sched("0 2 * * *");
+        let mut state = state_at(&trigger, &clock);
+        state.attach_backfill(
+            &trigger,
+            at("2026-06-01T02:00:00Z"),
+            Some(at("2026-06-03T02:00:00Z")),
+            &clock,
+        );
+        let (_, fired, _) = run_until_idle(&trigger, &state, &no_inputs(), &clock, 100);
+        assert_eq!(
+            fired.iter().map(|e| e.scheduled_date).collect::<Vec<_>>(),
+            vec![
+                at("2026-06-01T02:00:00Z"),
+                at("2026-06-02T02:00:00Z"),
+                at("2026-06-03T02:00:00Z"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_window_holding_no_tick_attaches_nothing() {
+        let clock = TestClock::new(at("2026-06-15T12:00:00Z"));
+        let trigger = sched("0 2 * * *");
+        let mut state = state_at(&trigger, &clock);
+        state.attach_backfill(
+            &trigger,
+            at("2026-06-01T03:00:00Z"),
+            Some(at("2026-06-01T04:00:00Z")),
+            &clock,
+        );
+        assert_eq!(state.backfill, None);
+        assert_eq!(
+            state.next_evaluation_date,
+            Some(at("2026-06-16T02:00:00Z")),
+            "the live clock's next tick"
+        );
+    }
+
+    #[test]
+    fn resume_from_takes_the_later_of_prev_and_the_boundary() {
+        let t = sched("0 2 * * *");
+        let end = at("2026-06-03T02:00:00Z");
+        let after_end = at("2026-06-04T02:00:00Z");
+        let completed = BackfillEnd::Completed { window_end: end };
+        assert_eq!(
+            TriggerState::resume_from(&t, at("2026-06-02T02:00:00Z"), completed),
+            after_end
+        );
+        assert_eq!(
+            TriggerState::resume_from(&t, at("2026-06-10T02:00:00Z"), completed),
+            at("2026-06-10T02:00:00Z")
+        );
+        let deleted = BackfillEnd::Deleted {
+            current_tick: at("2026-06-02T02:00:00Z"),
+        };
+        assert_eq!(
+            TriggerState::resume_from(&t, at("2026-06-01T02:00:00Z"), deleted),
+            at("2026-06-02T02:00:00Z")
+        );
+        assert_eq!(
+            TriggerState::resume_from(&t, at("2026-06-09T02:00:00Z"), deleted),
+            at("2026-06-09T02:00:00Z")
+        );
+    }
+
+    #[test]
+    fn resume_after_backfill_applies_the_policy() {
+        let t = sched("*/1 * * * *");
+        let now = at("2026-06-15T10:30:30Z");
+        for p in [RecoverMissed::All, RecoverMissed::Last, RecoverMissed::None] {
+            assert_eq!(
+                TriggerState::resume_after_backfill(&t, at("2026-06-15T10:40:00Z"), p, now),
+                Some(at("2026-06-15T10:40:00Z")),
+                "a future `from` is kept under {p:?}"
+            );
+        }
+        let from = at("2026-06-15T10:20:00Z");
+        assert_eq!(
+            TriggerState::resume_after_backfill(&t, from, RecoverMissed::All, now),
+            Some(from)
+        );
+        assert_eq!(
+            TriggerState::resume_after_backfill(&t, from, RecoverMissed::Last, now),
+            Some(at("2026-06-15T10:30:00Z"))
+        );
+        assert_eq!(
+            TriggerState::resume_after_backfill(&t, from, RecoverMissed::None, now),
+            Some(at("2026-06-15T10:31:00Z"))
+        );
+        let never = sched("0 0 30 2 *");
+        assert_eq!(
+            TriggerState::resume_after_backfill(&never, from, RecoverMissed::None, now),
+            None
         );
     }
 }

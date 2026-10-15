@@ -1424,6 +1424,20 @@ impl ScheduleTrigger {
             .map(|d| d.with_timezone(&Utc))
     }
 
+    /// The first tick `t >= at` (`next_after(at - 1ns)`, as `ticks_through` starts).
+    pub fn first_tick_at_or_after(&self, at: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.cron
+            .next_after(self.in_zone(at) - Duration::nanoseconds(1))
+            .map(|d| d.with_timezone(&Utc))
+    }
+
+    /// The first tick `t > at`.
+    pub fn first_tick_after(&self, at: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.cron
+            .next_after(self.in_zone(at))
+            .map(|d| d.with_timezone(&Utc))
+    }
+
     /// The ticks `t` with `from <= t <= at`, counted up to `cap`:
     /// `(count, more)` where `more` means "there are more than `cap`".
     pub fn ticks_through(&self, from: DateTime<Utc>, at: DateTime<Utc>, cap: u32) -> (u32, bool) {
@@ -3404,6 +3418,31 @@ mod tests {
         assert_eq!(
             ScheduleTrigger::resolve(&webhook),
             Err(ScheduleError::NotASchedule)
+        );
+    }
+
+    #[test]
+    fn first_tick_helpers_are_inclusive_and_exclusive() {
+        let t = sched("*/15 * * * *", false, None);
+        assert_eq!(
+            t.first_tick_at_or_after(at("2026-06-15T10:07:00Z")),
+            Some(at("2026-06-15T10:15:00Z"))
+        );
+        assert_eq!(
+            t.first_tick_at_or_after(at("2026-06-15T10:15:00Z")),
+            Some(at("2026-06-15T10:15:00Z")),
+            "a tick exactly at `at` is included"
+        );
+        assert_eq!(
+            t.first_tick_after(at("2026-06-15T10:15:00Z")),
+            Some(at("2026-06-15T10:30:00Z")),
+            "a tick exactly at `at` is excluded"
+        );
+        let z = sched("0 2 * * *", false, Some("Asia/Ho_Chi_Minh"));
+        assert_eq!(
+            z.first_tick_at_or_after(at("2026-06-15T19:00:00Z")),
+            Some(at("2026-06-15T19:00:00Z")),
+            "02:00 local on 06-16 is itself"
         );
     }
 }

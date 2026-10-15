@@ -369,10 +369,10 @@ pub enum QuotaBehavior {
 /// this crate's interface distinguishes "no labels" from "labels was
 /// explicitly null".
 ///
-/// `pub(super)` (not private) so `trigger.rs` and `execution.rs`, both
+/// `pub(crate)` (not private) so `trigger.rs` and `execution.rs`, both
 /// siblings of this module under `models`, can reuse it for their own
 /// `labels` fields instead of duplicating the map/list dispatch.
-pub(super) fn deserialize_labels<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Label>, D::Error> {
+pub(crate) fn deserialize_labels<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Label>, D::Error> {
     use serde::de::Error as _;
 
     let value = serde_json::Value::deserialize(d)?;
