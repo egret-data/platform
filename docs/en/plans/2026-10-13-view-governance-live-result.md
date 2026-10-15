@@ -662,3 +662,75 @@ Not re-measured live; each change is pinned by tests (Task 12 report).
 - **M-8:** an unknown `consumerType` on `POST /warehouses/{id}/roles` (and `/clients`) answers 400.
 - **I3, I4, I5:** documented in the guide as known limits with workarounds; fixed in a later package.
 - **C1, C3:** fixed on main in a separate PR (`fix/tag-policies-service-def`).
+
+## 3. Post-rebase live recheck (Task 13)
+
+> **Measured:** 2026-10-15 (UTC), branch `feat/view-governance` at `440ee7ed` (rebased onto main `f50eda87`, which
+> holds #673: `tagPolicies` served with the `tag` service-def, migrations 0190/0191). Brief: Task 13.
+
+### 3.0 Predictions (committed before anything was observed)
+
+Written from the guide, spec, Task 12's report and #673's description, before any engine of this run was started.
+Nothing here is edited after observing; a wrong prediction is a finding.
+
+**Setup the predictions are about.** The §2.2 stack, rebuilt: egret image built from `440ee7ed`, DB
+`egret_viewgov_live` dropped and recreated, the same `vg-*` containers on `vg-net`, the provisioner's rendering
+for Trino (the provisioner is unchanged since `e39476a4c`), DEV-1/DEV-2 for the engine rows and the Trino
+attachment. Data: `ice.s.pii(id, ssn, email, name)`. Tags:
+- `vgsecret`, a classification cleared by platform role `vg_clear` (`vcadmin`, `vccleared`, `vcownerc`);
+- `vgkey`, a tag with no clearance, with a hand-written tag mask `MASK_NULL` for `{public}` in `vgtr-tag`.
+
+Assignments: `pii.ssn` carries **both** tags, `pii.email` only `vgsecret`, `pii.id` only `vgkey`, `pii.name` none.
+Uncleared: `vcplain`, `vcowneru`; no grant at all: `vcnobody`.
+
+**1. C1/C3 on Trino with two tags.** Views: `vd2` (DEFINER, owner `vcownerc`) and `vi2` (INVOKER), both
+`SELECT id, ssn, email, name FROM ice.s.pii`. Only clearance-bearing tags follow lineage (R3), so every view column
+carries `vgsecret` and none carries `vgkey`.
+
+| reader | object | engine (Trino 483) | explain (`/perm/explain`, read, column) |
+|---|---|---|---|
+| `vcplain` | `pii.id` (`vgkey` only) | rows, value `NULL` (tag mask). **Not denied** (C3 fixed) | allowed |
+| `vcplain` | `pii.ssn` (both) | denied (`Cannot select from columns [ssn]`) | **denied** by `perm-clearance-…` (C1 fixed), tag `vgsecret` |
+| `vcplain` | `pii.email` (`vgsecret` only) | denied | denied |
+| `vcplain` | `pii.name` | rows, real | allowed |
+| `vcplain` | `vd2.*`, `vi2.*` | denied on every column, `name` and `id` included (over-tagging) | denied on every column |
+| `vccleared` | `pii.id` | `NULL` (tag mask) | allowed |
+| `vccleared` | `pii.ssn` | allowed, value `NULL` (the `vgkey` mask) | allowed |
+| `vccleared` | `pii.email` | allowed, **real** (C3 fixed: the `vgkey` mask no longer reaches a `vgsecret`-only column) | allowed |
+| `vccleared` | `vi2` | `id` `NULL`, `ssn` `NULL`, `email` real, `name` real | allowed on every column |
+| `vccleared` | `vd2` | the same values (the base masks apply as the owner `vcownerc`, who gets the same `vgkey` mask) | allowed |
+
+Explain has no Trino mask line (M-7, by design), so the masked values are compared on access only. 0 access
+differences. The plugin cache file of each Trino plugin (what it downloaded) has `tagPolicies.serviceDef.name =
+"tag"`, with a `tag` resource, and the Trino logs have no `RangerDefaultPolicyResourceMatcher.init() failed`.
+
+**2. StarRocks masked reads outside the measured case.** Explain keeps the `select` verdict in all three (Task 12
+C-1); the engine checks no access on the masked column (§2.3 request evidence), so:
+
+| case | query | engine (StarRocks 4.1.6) | explain | predicted verdict |
+|---|---|---|---|---|
+| 2a `vcnobody`, no grant | `select ssn from ice.s.pii` | **`NULL` rows, no error**: with only masked columns selected, no column is access-checked | `select` **denied**, mask `MASK_NULL`, no `masked_read_skips_access` | **differs** (fail-closed: explain says denied, the engine returns `NULL`s and the row count) |
+| 2a | `select id, ssn from ice.s.pii` | `ERROR 5204 … COLUMN id` (as §2.3) | `pii.id` denied | same |
+| 2b `vcplain` (holds the grant) with a hand-written column deny `select` on `ice.s.pii.ssn` (DEV-3) | `select id, ssn from ice.s.pii` | `id` real, `ssn` `NULL`, no error | `select` **denied** by the hand-written deny, mask `MASK_NULL`, no skip | **differs** (fail-closed) |
+| 2c `vcplain` with a hand-written mask policy `MASK_SHOW_LAST_4` for user `vcplain` on `pii.ssn` (DEV-3, override priority) | `select id, ssn from ice.s.pii` | the user-specific mask decides before the clearance's `{public}` item: `ssn` is `xxx-xx-3333`-shaped, no error | `select` **denied** (clearance deny kept: condition 2 fails), mask line `MASK_SHOW_LAST_4` | **differs, and not fail-closed**: explain says denied while the engine returns part of the value. Critical by the §2.6 rule |
+
+If the engine checks access in any of these (gives `5204`), that cell matches explain instead.
+
+**3. The 90 s hold against a real Trino client** (JWT user `vcownerc`, poll 30000 ms as rendered).
+- 3a. `CREATE OR REPLACE VIEW ice.s.vr` with changed SQL over `pii` (classified): returns after one to two poll
+  intervals, 30–60 s. The proxy log shows one `POST …/views/vr` answered `200` in that time. No client timeout.
+- 3b. The same replace while a forged poller `trino@vgtr-worker-6d5f7c9b8-dead2-vgtr` keeps reporting a stale tag
+  version (polled every 20 s, so it stays inside the 90 s window): the statement returns after ≈ 90.1 s with
+  `egret refused the view: engines did not confirm the classification tags within 90 s: trino@…dead2-vgtr; …`.
+  The proxy log shows exactly one `POST …/views/vr -> 409` of ≈ 90 s: Trino neither times out nor retries. The view
+  keeps its previous definition.
+
+**4. I2 without the hand-written baseline.** No `query_max_run_time` policy is written by hand (DEV-3 keeps only
+the `trinouser` / `queryid` baselines and the test allows). The served transform carries
+`egret-lineage-alter-query_max_run_time`; every lineage EXPLAIN succeeds (the views in 1 and 3 are `computed`), and
+egret's log has no `Cannot set system session property query_max_run_time`.
+
+**5. Two Ingress objects.** Not run live: no kind cluster exists here, and making one with ingress-nginx means a new
+cluster and an image pull, which is not "cheaply available". `helm template` renders two objects for one host:
+`egret` (`proxy-read-timeout: "60"`, no `/catalog` path) and `egret-catalog` (`/catalog` only,
+`proxy-read-timeout: "120"`).
