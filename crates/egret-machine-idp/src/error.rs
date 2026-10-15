@@ -5,7 +5,17 @@ pub enum IdpError {
     /// client_id/secret did not verify.
     #[error("invalid client")]
     InvalidClient,
-    /// grant_type other than `client_credentials`.
+    /// A required form field is missing or malformed (RFC 6749 §5.2
+    /// `invalid_request`). The `&'static str` names the problem for the
+    /// `error_description`; it never echoes request input.
+    #[error("invalid request: {0}")]
+    InvalidRequest(&'static str),
+    /// The presented grant (a token-exchange `subject_token`) is invalid,
+    /// expired, foreign, or no longer backed by a client that may mint
+    /// (RFC 6749 §5.2 `invalid_grant`).
+    #[error("invalid grant")]
+    InvalidGrant,
+    /// grant_type other than `client_credentials` or token exchange.
     #[error("unsupported grant type")]
     UnsupportedGrant,
     /// Too many token requests from one `ip:client_id` pair.

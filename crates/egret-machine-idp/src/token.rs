@@ -38,6 +38,43 @@ pub fn verify_with_jwk(
     Ok(data.claims)
 }
 
+/// Verify `token` against any of `jwks` (by `kid`), require `iss == issuer` and an
+/// unexpired `exp`. Audience is NOT validated here; the caller checks it.
+///
+/// Every way the token can fail — malformed, no `kid`, a `kid` not in `jwks`, a
+/// bad signature, another issuer, expired, a missing `iss`/`exp`/`sub` — is
+/// [`IdpError::InvalidGrant`]: the token is the grant, and it is not good. No
+/// detail is carried, so nothing about the presented token reaches a log line.
+pub fn verify_issued(
+    token: &str,
+    jwks: &[serde_json::Value],
+    issuer: &str,
+) -> Result<serde_json::Value, IdpError> {
+    let header = jsonwebtoken::decode_header(token).map_err(|_| IdpError::InvalidGrant)?;
+    let kid = header.kid.ok_or(IdpError::InvalidGrant)?;
+    let jwk = jwks
+        .iter()
+        .find(|k| k["kid"].as_str() == Some(kid.as_str()))
+        .ok_or(IdpError::InvalidGrant)?;
+    let (Some(n), Some(e)) = (jwk["n"].as_str(), jwk["e"].as_str()) else {
+        return Err(IdpError::InvalidGrant);
+    };
+    let key = DecodingKey::from_rsa_components(n, e).map_err(|_| IdpError::InvalidGrant)?;
+    // RS256 only — `Validation::new` pins the algorithm, so a token whose header
+    // names another one is refused rather than verified under it.
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.validate_aud = false;
+    validation.validate_exp = true;
+    // No grace: this IdP issued the token on its own clock, and the exchange is
+    // the path a client takes BEFORE its token runs out.
+    validation.leeway = 0;
+    validation.set_issuer(&[issuer]);
+    validation.set_required_spec_claims(&["exp", "iss", "sub"]);
+    let data = decode::<serde_json::Value>(token, &key, &validation)
+        .map_err(|_| IdpError::InvalidGrant)?;
+    Ok(data.claims)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -34410,7 +34410,7 @@
         },
         "responses": {
           "200": {
-            "description": "A signed access token (client_credentials grant)",
+            "description": "A signed access token (client_credentials, or an RFC 8693 exchange of an unexpired token this IdP issued for a fresh one with the same client and audience)",
             "content": {
               "application/json": {
                 "schema": {
@@ -34420,7 +34420,7 @@
             }
           },
           "400": {
-            "description": "Unsupported grant_type (OAuth `{ \"error\": ... }` body)",
+            "description": "OAuth `{ \"error\": ... }` body: `invalid_request` (a field the grant requires is missing or malformed; carries `error_description`), `invalid_grant` (the subject_token is invalid, expired, foreign, for another audience, or its client was deleted or its secret rotated), or `unsupported_grant_type`",
             "content": {
               "application/json": {
                 "schema": {
@@ -34440,7 +34440,7 @@
             }
           },
           "429": {
-            "description": "Too many token requests from this ip+client_id (OAuth `{ \"error\": ... }` body)",
+            "description": "Too many token requests from this ip+client_id (or ip+sub for an exchange) (OAuth `{ \"error\": ... }` body)",
             "content": {
               "application/json": {
                 "schema": {
@@ -47779,20 +47779,49 @@
       },
       "TokenForm": {
         "type": "object",
+        "description": "`POST /oauth/token` form. Which fields are required depends on\n`grant_type`, so every field but `grant_type` is optional here and checked\nby the handler — a missing field is a 400 `invalid_request`, never the\nextractor's 422, which no OAuth client reads as a refusal (I4).",
         "required": [
-          "grant_type",
-          "client_id",
-          "client_secret"
+          "grant_type"
         ],
         "properties": {
           "grant_type": {
-            "type": "string"
+            "type": "string",
+            "description": "`client_credentials` or `urn:ietf:params:oauth:grant-type:token-exchange`."
           },
           "client_id": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for `client_credentials`."
           },
           "client_secret": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for `client_credentials`."
+          },
+          "subject_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for token exchange: an unexpired access token this IdP issued.\nA Bearer `Authorization` header alone does not stand in for it."
+          },
+          "subject_token_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for token exchange: `urn:ietf:params:oauth:token-type:access_token`."
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Accepted and ignored."
           }
         }
       },
@@ -51403,7 +51432,7 @@
     },
     {
       "name": "idp",
-      "description": "egret mini machine-IdP: OIDC discovery, JWKS, and client_credentials token minting"
+      "description": "egret mini machine-IdP: OIDC discovery, JWKS, and token minting (client_credentials + RFC 8693 token exchange)"
     },
     {
       "name": "data-api",

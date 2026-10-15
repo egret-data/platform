@@ -10,7 +10,7 @@ mod verified_cache;
 
 pub use error::IdpError;
 pub use keys::{generate_rsa_key, KeyMaterial};
-pub use token::{sign_claims, verify_with_jwk};
+pub use token::{sign_claims, verify_issued, verify_with_jwk};
 pub use verified_cache::VerifiedCache;
 
 use axum::extract::State;
@@ -142,7 +142,7 @@ pub fn idp_router() -> Router<IdpState> {
 #[openapi(
     paths(discovery, jwks, token_endpoint),
     components(schemas(TokenForm, TokenResp, DiscoveryDoc, JwksDoc, ErrorBody)),
-    tags((name = "idp", description = "egret mini machine-IdP: OIDC discovery, JWKS, and client_credentials token minting")),
+    tags((name = "idp", description = "egret mini machine-IdP: OIDC discovery, JWKS, and token minting (client_credentials + RFC 8693 token exchange)")),
 )]
 pub struct IdpApi;
 
@@ -168,7 +168,7 @@ async fn discovery(State(st): State<IdpState>) -> Json<serde_json::Value> {
         "issuer": iss,
         "jwks_uri": format!("{iss}/.well-known/jwks.json"),
         "token_endpoint": format!("{iss}/oauth/token"),
-        "grant_types_supported": ["client_credentials"],
+        "grant_types_supported": ["client_credentials", TOKEN_EXCHANGE_GRANT],
         "id_token_signing_alg_values_supported": ["RS256"],
     }))
 }
@@ -187,11 +187,31 @@ async fn jwks(State(st): State<IdpState>) -> Result<Json<serde_json::Value>, Idp
     Ok(Json(serde_json::json!({ "keys": keys })))
 }
 
+/// The RFC 8693 grant type: trade a token this IdP issued for a fresh one.
+pub const TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
+/// The only `subject_token_type` the exchange accepts (RFC 8693 §3).
+pub const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
+
+/// `POST /oauth/token` form. Which fields are required depends on
+/// `grant_type`, so every field but `grant_type` is optional here and checked
+/// by the handler — a missing field is a 400 `invalid_request`, never the
+/// extractor's 422, which no OAuth client reads as a refusal (I4).
 #[derive(Deserialize, utoipa::ToSchema)]
 struct TokenForm {
+    /// `client_credentials` or `urn:ietf:params:oauth:grant-type:token-exchange`.
     grant_type: String,
-    client_id: String,
-    client_secret: String,
+    /// Required for `client_credentials`.
+    client_id: Option<String>,
+    /// Required for `client_credentials`.
+    client_secret: Option<String>,
+    /// Required for token exchange: an unexpired access token this IdP issued.
+    /// A Bearer `Authorization` header alone does not stand in for it.
+    subject_token: Option<String>,
+    /// Required for token exchange: `urn:ietf:params:oauth:token-type:access_token`.
+    subject_token_type: Option<String>,
+    /// Accepted and ignored.
+    #[allow(dead_code)] // read by nothing: a scope request does not narrow a token here
+    scope: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
@@ -227,10 +247,10 @@ struct JwksDoc {
     tag = "idp",
     request_body(content = TokenForm, content_type = "application/x-www-form-urlencoded"),
     responses(
-        (status = 200, description = "A signed access token (client_credentials grant)", body = TokenResp),
-        (status = 400, description = "Unsupported grant_type (OAuth `{ \"error\": ... }` body)", body = ErrorBody),
+        (status = 200, description = "A signed access token (client_credentials, or an RFC 8693 exchange of an unexpired token this IdP issued for a fresh one with the same client and audience)", body = TokenResp),
+        (status = 400, description = "OAuth `{ \"error\": ... }` body: `invalid_request` (a field the grant requires is missing or malformed; carries `error_description`), `invalid_grant` (the subject_token is invalid, expired, foreign, for another audience, or its client was deleted or its secret rotated), or `unsupported_grant_type`", body = ErrorBody),
         (status = 401, description = "Invalid client credentials (OAuth `{ \"error\": ... }` body)", body = ErrorBody),
-        (status = 429, description = "Too many token requests from this ip+client_id (OAuth `{ \"error\": ... }` body)", body = ErrorBody),
+        (status = 429, description = "Too many token requests from this ip+client_id (or ip+sub for an exchange) (OAuth `{ \"error\": ... }` body)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -239,6 +259,35 @@ async fn token_endpoint(
     headers: HeaderMap,
     Form(f): Form<TokenForm>,
 ) -> Result<Json<TokenResp>, IdpError> {
+    match f.grant_type.as_str() {
+        "client_credentials" => {
+            let (Some(client_id), Some(client_secret)) = (&f.client_id, &f.client_secret) else {
+                return Err(IdpError::InvalidRequest(
+                    "client_credentials requires client_id and client_secret",
+                ));
+            };
+            client_credentials(&st, &headers, client_id, client_secret).await
+        }
+        TOKEN_EXCHANGE_GRANT => token_exchange(&st, &headers, &f).await,
+        _ => {
+            // Limited as before: an unknown grant costs nothing to answer, but
+            // the bucket it counts against is the one its `client_id` names.
+            let ip = client_ip(&headers);
+            let client_id = f.client_id.as_deref().unwrap_or_default();
+            if !st.rate_limiter.check(&format!("{ip}:{client_id}")) {
+                return Err(IdpError::RateLimited);
+            }
+            Err(IdpError::UnsupportedGrant)
+        }
+    }
+}
+
+async fn client_credentials(
+    st: &IdpState,
+    headers: &HeaderMap,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<Json<TokenResp>, IdpError> {
     // A proven repeat first. Trino mints a token per query session, and with
     // the limiter counting every request a busy engine was throttled at the
     // limit (I3). A secret that already verified for this client, while the
@@ -246,10 +295,8 @@ async fn token_endpoint(
     // cost the limiter exists to bound — so it skips both. The registry is
     // still read on every hit (`current`), so a revoke or a rotation refuses
     // the very next request rather than waiting out the cache's TTL.
-    if f.grant_type == "client_credentials" {
-        if let Some(state) = cached_state(&st, &f.client_id, &f.client_secret).await {
-            return mint(&st, &state).await;
-        }
+    if let Some(state) = cached_state(st, client_id, client_secret).await {
+        return mint(st, &state).await;
     }
 
     // Rate-limit ahead of the verifiers, because verifying a known
@@ -263,12 +310,9 @@ async fn token_endpoint(
     // map is never pruned, so the key MUST NOT be stored raw — see the note on
     // `RateLimiter`, which hashes it. How much the `ip:` half is worth depends
     // on the edge; `client_ip` documents which deployments can be trusted.
-    let ip = client_ip(&headers);
-    if !st.rate_limiter.check(&format!("{ip}:{}", f.client_id)) {
+    let ip = client_ip(headers);
+    if !st.rate_limiter.check(&format!("{ip}:{client_id}")) {
         return Err(IdpError::RateLimited);
-    }
-    if f.grant_type != "client_credentials" {
-        return Err(IdpError::UnsupportedGrant);
     }
     // Try every verifier; do NOT short-circuit on the first `Err`. Verifiers own
     // independent audiences, so a transient fault in one (e.g. the catalog's DB)
@@ -279,14 +323,14 @@ async fn token_endpoint(
     let mut verified = None;
     let mut verifier_errors = Vec::new();
     for v in &st.verifiers {
-        match v.verify(&f.client_id, &f.client_secret).await {
+        match v.verify(client_id, client_secret).await {
             Ok(Some(state)) => {
                 verified = Some(state);
                 break;
             }
             Ok(None) => {}
             Err(e) => {
-                tracing::error!(client_id = %f.client_id, error = %e, "client verifier failed");
+                tracing::error!(client_id = %client_id, error = %e, "client verifier failed");
                 verifier_errors.push(e.to_string());
             }
         }
@@ -306,8 +350,113 @@ async fn token_endpoint(
     // could see a rotation that landed after the check and tie the OLD secret
     // to the NEW hash in the cache, serving it unlimited for a TTL.
     st.verified_cache
-        .put(&f.client_id, &f.client_secret, state.secret_hash.clone());
-    mint(&st, &state).await
+        .put(client_id, client_secret, state.secret_hash.clone());
+    mint(st, &state).await
+}
+
+/// RFC 8693 token exchange: an unexpired token this IdP issued buys a fresh
+/// one for the same client and audience. Iceberg's REST client refreshes its
+/// catalog token this way; before this grant existed it got a 422 and retried
+/// in a storm (I4).
+///
+/// An exchange is exactly as strong as `client_credentials` (decision D1): it
+/// succeeds only while the client still exists, may still mint, and stores
+/// the very secret hash the subject token was minted under (`cgen`). There is
+/// no cap on the chain's age — a chain ends when the client is revoked or its
+/// secret rotated, both of which `client_credentials` honours too.
+///
+/// The new token comes from ONE `current` read of the client, never from the
+/// subject token's claims, so a change to the client's roles or TTL reaches
+/// the next refresh. The subject token itself is never logged.
+async fn token_exchange(
+    st: &IdpState,
+    headers: &HeaderMap,
+    f: &TokenForm,
+) -> Result<Json<TokenResp>, IdpError> {
+    if f.subject_token_type.as_deref() != Some(ACCESS_TOKEN_TYPE) {
+        return Err(IdpError::InvalidRequest(
+            "subject_token_type must be urn:ietf:params:oauth:token-type:access_token",
+        ));
+    }
+    // The form field is the grant. A Bearer header is what the client
+    // authenticates its session with, not what it asks to exchange; when both
+    // are sent they must name the same token.
+    let Some(subject_token) = f.subject_token.as_deref() else {
+        return Err(IdpError::InvalidRequest("subject_token is required"));
+    };
+    if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) {
+        let bearer = auth
+            .to_str()
+            .ok()
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(str::trim);
+        if bearer != Some(subject_token) {
+            return Err(IdpError::InvalidRequest(
+                "the Authorization header does not carry the subject_token",
+            ));
+        }
+    }
+
+    // Until a token verifies there is no client to key on, so every failure
+    // shares the IP's `exchange` bucket — a junk flood is limited without
+    // touching any real client's bucket. A verified token counts against
+    // `ip:<sub>` instead.
+    let ip = client_ip(headers);
+    let jwks = st.keys.all_public_jwks().await?;
+    let claims = match token::verify_issued(subject_token, &jwks, st.issuer.trim_end_matches('/')) {
+        Ok(claims) => claims,
+        Err(e) => {
+            if !st.rate_limiter.check(&format!("{ip}:exchange")) {
+                return Err(IdpError::RateLimited);
+            }
+            return Err(e);
+        }
+    };
+    let (Some(sub), Some(aud), Some(cgen)) = (
+        claims["sub"].as_str(),
+        claims["aud"].as_str(),
+        claims["cgen"].as_str(),
+    ) else {
+        return Err(IdpError::InvalidGrant);
+    };
+    if !st.rate_limiter.check(&format!("{ip}:{sub}")) {
+        return Err(IdpError::RateLimited);
+    }
+
+    // The client must still be one that may mint, for the SAME audience: a
+    // token never changes audience across an exchange. Same non-short-circuit
+    // rule as `client_credentials`: one registry's outage must not refuse a
+    // client another registry owns, and an outage is not "no such client".
+    let mut found = None;
+    let mut verifier_errors = Vec::new();
+    for v in &st.verifiers {
+        match v.current(sub).await {
+            Ok(Some(state)) if state.verified.audience == aud => {
+                found = Some(state);
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!(client_id = %sub, error = %e, "client state read failed on token exchange");
+                verifier_errors.push(e.to_string());
+            }
+        }
+    }
+    let state = match found {
+        Some(state) => state,
+        None if !verifier_errors.is_empty() => {
+            return Err(IdpError::VerificationUnavailable(
+                verifier_errors.join("; "),
+            ));
+        }
+        None => return Err(IdpError::InvalidGrant),
+    };
+    // The subject token was minted under the secret the client stores now —
+    // a rotation since ends the chain, as it ends `client_credentials`.
+    if cgen != credential_generation(&state.secret_hash) {
+        return Err(IdpError::InvalidGrant);
+    }
+    mint(st, &state).await
 }
 
 /// The client's current state, if this secret is a proven repeat: it verified
@@ -357,9 +506,19 @@ async fn mint(st: &IdpState, state: &ClientState) -> Result<Json<TokenResp>, Idp
 impl IntoResponse for IdpError {
     fn into_response(self) -> Response {
         use axum::http::StatusCode;
+        if let IdpError::InvalidRequest(why) = self {
+            // RFC 6749 §5.2 `error_description`: a fixed string naming the
+            // missing or malformed field, never request input.
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid_request", "error_description": why })),
+            )
+                .into_response();
+        }
         let (status, err) = match self {
             IdpError::InvalidClient => (StatusCode::UNAUTHORIZED, "invalid_client"),
             IdpError::UnsupportedGrant => (StatusCode::BAD_REQUEST, "unsupported_grant_type"),
+            IdpError::InvalidGrant => (StatusCode::BAD_REQUEST, "invalid_grant"),
             // `slow_down` is the registered OAuth error code for "you are asking
             // too often" (RFC 8628 §3.5); RFC 6749 defines none of its own. The
             // body shape is the same `{ "error": ... }` every other rejection
@@ -629,23 +788,35 @@ mod tests {
     /// Parse an `application/x-www-form-urlencoded` token request body the way
     /// axum's `Form` extractor would (fixtures use no percent-escapes).
     fn parse_token_form(body: &str) -> TokenForm {
-        let mut grant_type = String::new();
-        let mut client_id = String::new();
-        let mut client_secret = String::new();
+        let mut f = TokenForm {
+            grant_type: String::new(),
+            client_id: None,
+            client_secret: None,
+            subject_token: None,
+            subject_token_type: None,
+            scope: None,
+        };
         for pair in body.split('&') {
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            let v = v.to_string();
             match k {
-                "grant_type" => grant_type = v.to_string(),
-                "client_id" => client_id = v.to_string(),
-                "client_secret" => client_secret = v.to_string(),
+                "grant_type" => f.grant_type = v,
+                "client_id" => f.client_id = Some(v),
+                "client_secret" => f.client_secret = Some(v),
+                "subject_token" => f.subject_token = Some(v),
+                "subject_token_type" => f.subject_token_type = Some(v),
+                "scope" => f.scope = Some(v),
                 other => panic!("unexpected form field {other}"),
             }
         }
-        TokenForm {
-            grant_type,
-            client_id,
-            client_secret,
-        }
+        f
+    }
+
+    /// A `client_credentials` form.
+    fn cc_form(client_id: &str, client_secret: &str) -> TokenForm {
+        parse_token_form(&format!(
+            "grant_type=client_credentials&client_id={client_id}&client_secret={client_secret}"
+        ))
     }
 
     /// Drive `POST /oauth/token` with a form body; panics if the IdP rejects it.
@@ -845,11 +1016,7 @@ mod tests {
         let resp = token_endpoint(
             State(st.clone()),
             HeaderMap::new(),
-            Form(TokenForm {
-                grant_type: "client_credentials".into(),
-                client_id: "cid".into(),
-                client_secret: "sec".into(),
-            }),
+            Form(cc_form("cid", "sec")),
         )
         .await
         .unwrap();
@@ -986,11 +1153,7 @@ mod tests {
     async fn post_token_from(st: &IdpState, ip: &str, client_id: &str, secret: &str) -> RawResp {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", ip.parse().unwrap());
-        let form = TokenForm {
-            grant_type: "client_credentials".into(),
-            client_id: client_id.into(),
-            client_secret: secret.into(),
-        };
+        let form = cc_form(client_id, secret);
         let resp = match token_endpoint(State(st.clone()), headers, Form(form)).await {
             Ok(ok) => ok.into_response(),
             Err(e) => e.into_response(),
@@ -1162,17 +1325,9 @@ mod tests {
     #[tokio::test]
     async fn token_endpoint_rejects_bad_secret() {
         let st = state();
-        let err = token_endpoint(
-            State(st),
-            HeaderMap::new(),
-            Form(TokenForm {
-                grant_type: "client_credentials".into(),
-                client_id: "cid".into(),
-                client_secret: "WRONG".into(),
-            }),
-        )
-        .await
-        .unwrap_err();
+        let err = token_endpoint(State(st), HeaderMap::new(), Form(cc_form("cid", "WRONG")))
+            .await
+            .unwrap_err();
         assert!(matches!(err, IdpError::InvalidClient));
     }
 
@@ -1406,5 +1561,376 @@ mod tests {
 
         assert_eq!(r.status, 200, "{}", r.body);
         assert_eq!(counting.verifies(), 2);
+    }
+
+    // ---- I4: RFC 8693 token exchange ---------------------------------------
+
+    /// One client, `m1`/`sec`, whose registry row a test can rewrite between
+    /// requests: rotate its hash, delete it, change its claims or audience.
+    struct MutableVerifier {
+        row: Arc<std::sync::Mutex<Option<ClientState>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ClientVerifier for MutableVerifier {
+        async fn verify(
+            &self,
+            client_id: &str,
+            client_secret: &str,
+        ) -> Result<Option<ClientState>, IdpError> {
+            if client_secret == "sec" {
+                self.current(client_id).await
+            } else {
+                Ok(None)
+            }
+        }
+        async fn current(&self, client_id: &str) -> Result<Option<ClientState>, IdpError> {
+            Ok(self
+                .row
+                .lock()
+                .unwrap()
+                .clone()
+                .filter(|s| s.verified.client_id == client_id))
+        }
+    }
+
+    type Row = Arc<std::sync::Mutex<Option<ClientState>>>;
+
+    fn m1_row(roles: serde_json::Value, hash: &str) -> ClientState {
+        ClientState {
+            verified: VerifiedClient {
+                client_id: "m1".into(),
+                audience: "catalog".into(),
+                extra_claims: serde_json::json!({ "warehouse": "wh1", "roles": roles })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+                ttl_secs: 3600,
+            },
+            secret_hash: hash.into(),
+        }
+    }
+
+    fn exchange_state(max: u32) -> (IdpState, Row) {
+        let row: Row = Arc::new(std::sync::Mutex::new(Some(m1_row(
+            serde_json::json!(["r1"]),
+            FAKE_HASH,
+        ))));
+        let km = generate_rsa_key("kid-t").unwrap();
+        let st = IdpState {
+            keys: Arc::new(FakeKeys(km)),
+            issuer: "http://localhost:8080/".into(),
+            verifiers: vec![Arc::new(MutableVerifier { row: row.clone() })],
+            rate_limiter: RateLimiter::new(max, 3_600, 3_600),
+            verified_cache: VerifiedCache::default(),
+        };
+        (st, row)
+    }
+
+    fn exchange_form(subject_token: &str) -> TokenForm {
+        parse_token_form(&format!(
+            "grant_type={TOKEN_EXCHANGE_GRANT}&subject_token={subject_token}\
+             &subject_token_type={ACCESS_TOKEN_TYPE}&scope=catalog"
+        ))
+    }
+
+    /// Drive the endpoint with explicit headers and form, rendering either
+    /// outcome through `IntoResponse`.
+    async fn post_form(st: &IdpState, headers: HeaderMap, form: TokenForm) -> RawResp {
+        let resp = match token_endpoint(State(st.clone()), headers, Form(form)).await {
+            Ok(ok) => ok.into_response(),
+            Err(e) => e.into_response(),
+        };
+        let status = resp.status().as_u16();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        RawResp {
+            status,
+            body: serde_json::from_slice(&bytes).unwrap(),
+        }
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        h
+    }
+
+    fn now_secs() -> i64 {
+        chrono::Utc::now().timestamp()
+    }
+
+    /// A real subject token, minted by `client_credentials` through the endpoint.
+    async fn mint_m1(st: &IdpState) -> String {
+        let r = post_form(st, HeaderMap::new(), cc_form("m1", "sec")).await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        r.body["access_token"].as_str().unwrap().to_string()
+    }
+
+    /// Sign `claims` with the IdP's own active key.
+    async fn sign_as_idp(st: &IdpState, claims: serde_json::Value) -> String {
+        sign_claims(&st.keys.active().await.unwrap(), &claims).unwrap()
+    }
+
+    fn m1_claims(aud: &str, iss: &str, exp: i64) -> serde_json::Value {
+        serde_json::json!({
+            "warehouse": "wh1",
+            "roles": ["r1"],
+            "iss": iss,
+            "sub": "m1",
+            "aud": aud,
+            "exp": exp,
+            "cgen": credential_generation(FAKE_HASH),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_live_token_exchanges_for_a_fresh_one() {
+        let (st, row) = exchange_state(100);
+        let subject = mint_m1(&st).await;
+        let subject_claims = decode_claims_without_verifying(&subject);
+        // `exp` has one-second resolution; wait one out so "later" is decidable.
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        // The registry's view changes after the subject token was minted.
+        *row.lock().unwrap() = Some(m1_row(serde_json::json!(["r2"]), FAKE_HASH));
+
+        // Iceberg's refresh sends the same token in the header and the form.
+        let r = post_form(&st, bearer(&subject), exchange_form(&subject)).await;
+
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["token_type"], "Bearer");
+        assert_eq!(r.body["expires_in"], 3600);
+        let fresh = r.body["access_token"].as_str().unwrap();
+        let jwk = st.keys.all_public_jwks().await.unwrap()[0].clone();
+        let c = verify_with_jwk(fresh, &jwk).unwrap();
+        assert_eq!(c["sub"], "m1");
+        assert_eq!(c["aud"], "catalog");
+        assert_eq!(c["iss"], "http://localhost:8080");
+        assert_eq!(
+            c["roles"],
+            serde_json::json!(["r2"]),
+            "claims come from the client's current state, not the subject token"
+        );
+        assert_eq!(c["cgen"], credential_generation(FAKE_HASH));
+        assert!(
+            c["exp"].as_i64().unwrap() > subject_claims["exp"].as_i64().unwrap(),
+            "fresh exp {} must be later than the subject's {}",
+            c["exp"],
+            subject_claims["exp"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_bearer_header_alone_is_not_enough() {
+        let (st, _row) = exchange_state(100);
+        let subject = mint_m1(&st).await;
+
+        let mut no_field = exchange_form(&subject);
+        no_field.subject_token = None;
+        let r = post_form(&st, bearer(&subject), no_field).await;
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_request");
+
+        // A header naming a different token than the form field is refused too.
+        let other = sign_as_idp(
+            &st,
+            m1_claims("catalog", "http://localhost:8080", now_secs() + 600),
+        )
+        .await;
+        let r = post_form(&st, bearer(&other), exchange_form(&subject)).await;
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn an_expired_subject_token_is_invalid_grant() {
+        let (st, _row) = exchange_state(100);
+        let expired = sign_as_idp(
+            &st,
+            m1_claims("catalog", "http://localhost:8080", now_secs() - 3_600),
+        )
+        .await;
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&expired)).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn a_foreign_signature_is_invalid_grant() {
+        let (st, _row) = exchange_state(100);
+        // Same `kid` as the IdP's key, different key: only the signature differs.
+        let foreign = generate_rsa_key("kid-t").unwrap();
+        let tok = sign_claims(
+            &foreign,
+            &m1_claims("catalog", "http://localhost:8080", now_secs() + 600),
+        )
+        .unwrap();
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&tok)).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn a_wrong_issuer_is_invalid_grant() {
+        let (st, _row) = exchange_state(100);
+        let tok = sign_as_idp(
+            &st,
+            m1_claims("catalog", "https://evil.example", now_secs() + 600),
+        )
+        .await;
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&tok)).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn a_rotated_secret_ends_the_chain() {
+        let (st, row) = exchange_state(100);
+        let subject = mint_m1(&st).await;
+        *row.lock().unwrap() = Some(m1_row(serde_json::json!(["r1"]), CATALOG_LIKE_HASH));
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&subject)).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn a_deleted_client_ends_the_chain() {
+        let (st, row) = exchange_state(100);
+        let subject = mint_m1(&st).await;
+        *row.lock().unwrap() = None;
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&subject)).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn the_audience_cannot_change() {
+        let (st, row) = exchange_state(100);
+        let mut data_api = m1_row(serde_json::json!(["r1"]), FAKE_HASH);
+        data_api.verified.audience = "data-api".into();
+        *row.lock().unwrap() = Some(data_api);
+        let exp = now_secs() + 600;
+
+        let as_catalog = sign_as_idp(&st, m1_claims("catalog", "http://localhost:8080", exp)).await;
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&as_catalog)).await;
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+
+        // Control: the same token for the audience the client has is good.
+        let as_data_api =
+            sign_as_idp(&st, m1_claims("data-api", "http://localhost:8080", exp)).await;
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&as_data_api)).await;
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+
+    #[tokio::test]
+    async fn a_wrong_subject_token_type_is_invalid_request() {
+        let (st, _row) = exchange_state(100);
+        let subject = mint_m1(&st).await;
+
+        let mut wrong = exchange_form(&subject);
+        wrong.subject_token_type = Some("urn:ietf:params:oauth:token-type:id_token".into());
+        let r = post_form(&st, HeaderMap::new(), wrong).await;
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_request");
+
+        let mut missing = exchange_form(&subject);
+        missing.subject_token_type = None;
+        let r = post_form(&st, HeaderMap::new(), missing).await;
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_request");
+    }
+
+    /// Junk subject tokens share one `ip:exchange` bucket, so a flood of them
+    /// is limited — and a real exchange, keyed on its `sub`, is not caught in it.
+    #[tokio::test]
+    async fn junk_subject_tokens_are_limited_per_ip() {
+        let (st, _row) = exchange_state(2);
+        let subject = mint_m1(&st).await;
+
+        let statuses = [
+            post_form(&st, HeaderMap::new(), exchange_form("junk1"))
+                .await
+                .status,
+            post_form(&st, HeaderMap::new(), exchange_form("junk2"))
+                .await
+                .status,
+            post_form(&st, HeaderMap::new(), exchange_form("junk3"))
+                .await
+                .status,
+        ];
+        assert_eq!(statuses, [400, 400, 429]);
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&subject)).await;
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+
+    #[tokio::test]
+    async fn discovery_lists_both_grants() {
+        let (st, _row) = exchange_state(100);
+        let doc = discovery(State(st)).await.0;
+        assert_eq!(
+            doc["grant_types_supported"],
+            serde_json::json!(["client_credentials", TOKEN_EXCHANGE_GRANT])
+        );
+    }
+
+    /// Through axum's real `Form` extractor: a missing field used to be a 422
+    /// from the extractor (I4), which no OAuth client reads as a refusal.
+    #[tokio::test]
+    async fn client_credentials_without_client_id_is_invalid_request_not_422() {
+        use axum::extract::FromRequest as _;
+        let (st, counting) = counting_state(100);
+        for body in [
+            "grant_type=client_credentials&client_secret=sec",
+            "grant_type=client_credentials&client_id=cid",
+        ] {
+            let req = axum::http::Request::builder()
+                .method("POST")
+                .uri("/oauth/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let form = match Form::<TokenForm>::from_request(req, &()).await {
+                Ok(f) => f,
+                Err(rej) => panic!(
+                    "the extractor refused `{body}` with {}",
+                    rej.into_response().status()
+                ),
+            };
+
+            let r = post_form(&st, HeaderMap::new(), form.0).await;
+
+            assert_eq!(r.status, 400, "{body}: {}", r.body);
+            assert_eq!(r.body["error"], "invalid_request", "{body}");
+        }
+        assert_eq!(counting.verifies(), 0);
+    }
+
+    #[tokio::test]
+    async fn any_other_grant_is_unsupported() {
+        let (st, _row) = exchange_state(100);
+        let r = post_form(
+            &st,
+            HeaderMap::new(),
+            parse_token_form("grant_type=password&client_id=m1&client_secret=sec"),
+        )
+        .await;
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "unsupported_grant_type");
     }
 }

@@ -318,8 +318,21 @@ export const getIdpTokenEndpointUrl = () => {
 export const idpTokenEndpoint = async (tokenForm: TokenForm, options?: Parameters<typeof customInstance>[1]): Promise<idpTokenEndpointResponse> => {
     const formUrlEncoded = new URLSearchParams();
 formUrlEncoded.append(`grant_type`, tokenForm.grant_type);
-formUrlEncoded.append(`client_id`, tokenForm.client_id);
-formUrlEncoded.append(`client_secret`, tokenForm.client_secret);
+if(tokenForm.client_id !== undefined && tokenForm.client_id !== null) {
+ formUrlEncoded.append(`client_id`, tokenForm.client_id);
+ }
+if(tokenForm.client_secret !== undefined && tokenForm.client_secret !== null) {
+ formUrlEncoded.append(`client_secret`, tokenForm.client_secret);
+ }
+if(tokenForm.subject_token !== undefined && tokenForm.subject_token !== null) {
+ formUrlEncoded.append(`subject_token`, tokenForm.subject_token);
+ }
+if(tokenForm.subject_token_type !== undefined && tokenForm.subject_token_type !== null) {
+ formUrlEncoded.append(`subject_token_type`, tokenForm.subject_token_type);
+ }
+if(tokenForm.scope !== undefined && tokenForm.scope !== null) {
+ formUrlEncoded.append(`scope`, tokenForm.scope);
+ }
 
   return customInstance<idpTokenEndpointResponse>(getIdpTokenEndpointUrl(),
   {
