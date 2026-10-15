@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ApiError } from "@/api/client";
 import type { SetTriggerDisabledRequest, TriggerEntryDto } from "@/api/generated/model";
@@ -18,6 +18,27 @@ export type EnableQuestion = { rows: TriggerRow[]; schedules: TriggerRow[]; bulk
 export type BulkRefusal = { flow_uuid: string; trigger_id: string; message: string };
 
 const rowKey = (r: Pick<TriggerRow, "flow_uuid" | "trigger_id">) => `${r.flow_uuid}/${r.trigger_id}`;
+
+/** A trigger's entry as the server answered it, with the flow it belongs to. */
+export type TriggerAnswer = { flow_uuid: string; entry: TriggerEntryDto };
+
+/**
+ * Write the server's entries into the flow's cached triggers, then refresh both
+ * trigger lists: the rows move with the answer (FE-ACTION-2). Shared by the
+ * switch and the backfill actions.
+ */
+export function adoptEntries(queryClient: QueryClient, ws: string, entries: TriggerAnswer[]) {
+  const flows = new Set(entries.map((e) => e.flow_uuid));
+  for (const flowUuid of flows) {
+    queryClient.setQueryData<workflowListFlowTriggersResponse>(workflowsKeys.flowTriggers(flowUuid), (old) => {
+      if (!old || old.status !== 200) return old;
+      const fresh = new Map(entries.filter((e) => e.flow_uuid === flowUuid).map((e) => [e.entry.trigger_id, e.entry]));
+      return { ...old, data: { ...old.data, triggers: old.data.triggers.map((t) => fresh.get(t.trigger_id) ?? t) } };
+    });
+    void queryClient.invalidateQueries({ queryKey: workflowsKeys.flowTriggers(flowUuid) });
+  }
+  void queryClient.invalidateQueries({ queryKey: workflowsKeys.triggers(ws) });
+}
 
 /** What a failed switch says (FE-ACTION-3, FE-COPY-2): the server's sentence, or what to do. */
 export function switchError(e: unknown): string {
@@ -62,19 +83,7 @@ export function useTriggerSwitch(ws: string, { onBulkAnswered }: { onBulkAnswere
       return next;
     });
 
-  /** Write the server's entries into the flow's cached triggers, then refresh both lists. */
-  const adopt = (entries: { flow_uuid: string; entry: TriggerEntryDto }[]) => {
-    const flows = new Set(entries.map((e) => e.flow_uuid));
-    for (const flowUuid of flows) {
-      queryClient.setQueryData<workflowListFlowTriggersResponse>(workflowsKeys.flowTriggers(flowUuid), (old) => {
-        if (!old || old.status !== 200) return old;
-        const fresh = new Map(entries.filter((e) => e.flow_uuid === flowUuid).map((e) => [e.entry.trigger_id, e.entry]));
-        return { ...old, data: { ...old.data, triggers: old.data.triggers.map((t) => fresh.get(t.trigger_id) ?? t) } };
-      });
-      void queryClient.invalidateQueries({ queryKey: workflowsKeys.flowTriggers(flowUuid) });
-    }
-    void queryClient.invalidateQueries({ queryKey: workflowsKeys.triggers(ws) });
-  };
+  const adopt = (entries: TriggerAnswer[]) => adoptEntries(queryClient, ws, entries);
 
   const sendOne = async (row: TriggerRow, body: SetTriggerDisabledRequest): Promise<boolean> => {
     mark([row], true);

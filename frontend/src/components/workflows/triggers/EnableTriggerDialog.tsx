@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { missedLabel, recoverDescription, type EnableChoice } from "@/components/workflows/triggers/triggersModel";
+import { fullTimestamp } from "@/lib/relativeTime";
 
 /**
  * The missed ticks of the schedules asked about, summed. Each count is capped
@@ -112,6 +113,14 @@ export function EnableTriggerDialog({
             </div>
           </div>
         </RadioGroup>
+        {schedules.flatMap((s) =>
+          s.backfill ? (
+            <p key={s.trigger_id} className="text-sm text-muted-foreground">
+              The backfill of {s.trigger_id} resumes at {fullTimestamp(s.backfill.current_tick)}. This choice is about the regular runs that
+              fell due.
+            </p>
+          ) : [],
+        )}
         <DialogFooter>
           <Button
             type="button"

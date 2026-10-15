@@ -1,4 +1,6 @@
 import type {
+  BackfillDto,
+  CannotBackfill,
   FlowTriggersDto,
   MissedTicksDto,
   SetTriggerDisabledRequest,
@@ -6,7 +8,7 @@ import type {
   TriggerKindDto,
 } from "@/api/generated/model";
 import type { Enablement } from "@/components/workflows/draftState";
-import { timeAgo } from "@/lib/relativeTime";
+import { fullTimestamp, timeAgo } from "@/lib/relativeTime";
 
 /**
  * The words and decisions of the Triggers views (W7e spec §4), pure so the flow
@@ -52,6 +54,7 @@ export function statusText(entry: TriggerEntryDto, ctx: FlowContext): string {
   if (entry.schedule?.off_queue) {
     return entry.schedule.last_error ? `Off the queue: ${entry.schedule.last_error}` : "Off the queue";
   }
+  if (entry.backfill) return backfillStatus(entry.backfill);
   if (entry.flow && !entry.flow.listening && entry.flow.not_listening_reason) {
     return `Not listening: ${entry.flow.not_listening_reason}`;
   }
@@ -62,6 +65,54 @@ export function statusText(entry: TriggerEntryDto, ctx: FlowContext): string {
 }
 
 export const MANAGE_REASON = "You need workflow:manage";
+
+/** A backfill's progress, as the server computed it (Kestra's formula, `BackfillDto.progress`). */
+export const progressText = (b: Pick<BackfillDto, "progress">): string => `${b.progress}%`;
+
+/** "Backfilling (40%)", or "Backfill paused (40%)": the status while a backfill is on the trigger. */
+export function backfillStatus(b: BackfillDto): string {
+  return b.paused ? `Backfill paused (${progressText(b)})` : `Backfilling (${progressText(b)})`;
+}
+
+/** "3 of 10 ticks": what the strip and the drawer say of the window's progress. */
+export const ticksText = (b: Pick<BackfillDto, "ticks_done" | "total_ticks">): string =>
+  `${b.ticks_done} of ${b.total_ticks} ticks`;
+
+/** The window's ends in the viewer's time, as the strip and the drawer show them. */
+export const backfillWindowText = (b: Pick<BackfillDto, "start" | "end">): string =>
+  `${fullTimestamp(b.start)} → ${fullTimestamp(b.end)}`;
+
+/** Why the Backfill button is off, in words (FE-ACTION-4); `lastError` is the schedule's, for `off_queue`. */
+export function backfillRefusalText(r: CannotBackfill, lastError?: string | null): string {
+  switch (r) {
+    case "not_schedule":
+      return "Only schedules can be backfilled";
+    case "forbidden":
+      return MANAGE_REASON;
+    case "disabled":
+      return "Enable the trigger to backfill it";
+    case "off_queue":
+      return lastError ? `Off the queue: ${lastError}` : "Off the queue: fix the flow and save it";
+    case "flow_deleted":
+      return "The flow is in the trash";
+    case "running":
+      return "This trigger already has a backfill";
+  }
+}
+
+/** A backfill whose trigger is switched off (YAML or runtime): frozen, it fires nothing until the trigger is on. */
+export const backfillFrozen = (entry: Pick<TriggerEntryDto, "runtime_disabled" | "yaml_disabled">): boolean =>
+  entry.runtime_disabled || entry.yaml_disabled;
+
+/** Whether any listed trigger has a backfill that is running (not paused): the tab polls faster then (§4.1). */
+export const anyBackfillRunning = (triggers: Pick<TriggerEntryDto, "backfill">[]): boolean =>
+  triggers.some((t) => t.backfill != null && !t.backfill.paused);
+
+/** The bulk backfill route's refusal, named for the user: `no_backfill` reads "had no backfill". */
+export function backfillBulkMessage(code: string | null | undefined, message: string | null | undefined): string {
+  if (code === "no_backfill") return "had no backfill";
+  return message ?? code ?? "refused";
+}
 
 const REFUSALS: Record<string, string> = {
   yaml_disabled: "Disabled in the flow's YAML",
@@ -101,7 +152,10 @@ export function needsEnableDialog(entry: TriggerEntryDto, now: number): boolean 
   const s = entry.schedule;
   if (entry.kind !== "schedule" || !s || !entry.runtime_disabled || s.off_queue || !s.next_evaluation_date) return false;
   if (s.missed_ticks) return true;
-  return Date.parse(s.next_evaluation_date) <= now;
+  // While a backfill holds the trigger, its date is the window's tick: the regular schedule's
+  // position is the one the backfill saved (W7f §4.1), so that is what has passed or not.
+  const regular = entry.backfill ? entry.backfill.previous_next_evaluation_date : s.next_evaluation_date;
+  return Date.parse(regular) <= now;
 }
 
 /** What "Recover missed runs" does for a trigger, per its `recoverMissedSchedules` (absent = `ALL`). */
