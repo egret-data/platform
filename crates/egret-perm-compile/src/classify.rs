@@ -8,9 +8,12 @@
 //! reintroduces defects the grammar was built to refuse, so each is derived
 //! from the database here, never assumed:
 //!
-//! - **[`ServiceKind`] and [`EngineType`] come from the service row's `type`**
+//! - **[`ServiceKind`] and [`EngineType`] come from the service row's `type`
+//!   and from whether another profile names it as `tagService`**
 //!   ([`service_target`]). `trino` / `starrocks` are resource services of
-//!   that engine; `tag` is a tag service, and its engine is Trino because only
+//!   that engine; `tag` — or any profile some other profile names as its
+//!   `tagService`, which is what a tag service made through the admin API is —
+//!   is a tag service, and its engine is Trino because only
 //!   a `trino` profile may carry a `tagService` (`egret_policy::store::
 //!   refuse_tag_service_on_non_trino_profile`, and migration 0176's `CHECK`).
 //!   A hard-coded `Resource` would let a tag body stored in a resource service
@@ -166,8 +169,18 @@ pub struct PolicyRecord {
 
 /// Which grammar inputs a service row's `type` implies, or `None` for a type
 /// egret's permission model does not compile to. See the module doc.
-pub fn service_target(service_type: &str) -> Option<(ServiceKind, EngineType)> {
-    if service_type == TAG_DEF_NAME {
+///
+/// `named_as_tag_service` is whether some OTHER profile names this one as its
+/// `tagService`. It makes the profile a tag service whatever its type (live
+/// finding I5's class): the admin API creates only `trino`/`starrocks`
+/// profiles, so a hand-made tag service is a `trino` row, and its policies are
+/// served to each linker's engine as `tagPolicies`. `type = 'tag'` stays a tag
+/// service on its own.
+pub fn service_target(
+    service_type: &str,
+    named_as_tag_service: bool,
+) -> Option<(ServiceKind, EngineType)> {
+    if service_type == TAG_DEF_NAME || named_as_tag_service {
         return Some((ServiceKind::Tag, EngineType::Trino));
     }
     crate::trigger::engine_type_for(service_type).map(|e| (ServiceKind::Resource, e))
@@ -770,18 +783,22 @@ impl ServiceInputs {
         service_id: i64,
     ) -> Result<Self, PolicyStoreError> {
         let svc = get_service_by_id_via(conn, service_id).await?;
-        let target = service_target(&svc.r#type);
+        // The OTHER profiles naming this one as `tagService`. Non-empty makes it
+        // a tag service whatever its `type` (see [`service_target`]).
+        let linked: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM policy.authz_services \
+             WHERE config_jsonb ->> 'tagService' = $1 AND id <> $2",
+        )
+        .bind(&svc.name)
+        .bind(service_id)
+        .fetch_all(&mut *conn)
+        .await?;
+        let target = service_target(&svc.r#type, !linked.is_empty());
 
         // The catalog scope: this profile's engines, or — for a tag service —
         // the engines of every resource profile that names it (module doc).
         let mut scope_profiles = vec![service_id];
         if matches!(target, Some((ServiceKind::Tag, _))) {
-            let linked: Vec<i64> = sqlx::query_scalar(
-                "SELECT id FROM policy.authz_services WHERE config_jsonb ->> 'tagService' = $1",
-            )
-            .bind(&svc.name)
-            .fetch_all(&mut *conn)
-            .await?;
             scope_profiles.extend(linked);
         }
         let mut catalogs: HashMap<String, Uuid> = HashMap::new();
@@ -919,17 +936,22 @@ mod tests {
     #[test]
     fn the_service_type_decides_the_kind_and_engine() {
         assert_eq!(
-            service_target("trino"),
+            service_target("trino", false),
             Some((ServiceKind::Resource, EngineType::Trino))
         );
         assert_eq!(
-            service_target("starrocks"),
+            service_target("starrocks", false),
             Some((ServiceKind::Resource, EngineType::StarRocks))
         );
         assert_eq!(
-            service_target("tag"),
+            service_target("tag", false),
             Some((ServiceKind::Tag, EngineType::Trino))
         );
-        assert_eq!(service_target("hive"), None);
+        assert_eq!(service_target("hive", false), None);
+        // Named as some profile's `tagService`: a tag service whatever its type.
+        assert_eq!(
+            service_target("trino", true),
+            Some((ServiceKind::Tag, EngineType::Trino))
+        );
     }
 }

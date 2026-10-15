@@ -836,3 +836,59 @@ async fn the_missing_level_blocker_states_the_measured_fact() {
         "the old claim is gone: {p}"
     );
 }
+
+/// **A `trino`-typed profile that another profile names as `tagService` is a
+/// tag service** (live finding I5's class). The admin API creates only `trino`
+/// and `starrocks` profiles, so this is how a hand-made tag service looks; its
+/// policies are served to the linker's engine as `tagPolicies`, so they must
+/// classify as TAG policies — a tag mask is migratable as a rule, and a path
+/// body there is the misfiled one.
+#[tokio::test]
+async fn a_trino_typed_profile_named_as_a_tag_service_is_classified_as_a_tag_service() {
+    let Some(f) = setup().await else { return };
+    let store = egret_policy::PolicyStore::new(f.db.clone());
+    let tt = store
+        .create_service(&unique("cls_ttag"), "trino", &json!({}))
+        .await
+        .expect("create trino-typed tag service");
+    store
+        .create_service(
+            &unique("cls_tlink"),
+            "trino",
+            &json!({ "tagService": tt.name }),
+        )
+        .await
+        .expect("create linker");
+
+    let mask = insert(
+        &f,
+        tt.id,
+        "mask phi",
+        "operator",
+        true,
+        tag_mask_policy(&f.tag_same),
+    )
+    .await;
+    let path_here = insert(
+        &f,
+        tt.id,
+        "a grant in the tag service",
+        "operator",
+        true,
+        access_policy(&f.served_catalog, &["select"]),
+    )
+    .await;
+
+    let (status, body) = classify(&f, tt.id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ok = by_id(&body, mask);
+    assert_eq!(
+        ok["migratable"], true,
+        "a tag mask in a tag service is a rule candidate: {ok}"
+    );
+    assert_eq!(ok["proposed"], json!({"grants": 0, "rules": 1}), "{ok}");
+    assert_refused_with(
+        by_id(&body, path_here),
+        &["tag service", "resource profile"],
+    );
+}

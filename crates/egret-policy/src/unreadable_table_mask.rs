@@ -440,6 +440,15 @@ async fn table_level_attachment_of(
 /// guard. A NULL `$1` matches no `perm.rules` row, which is exactly that and is
 /// deliberate, not incidental.
 ///
+/// **"A tag service" is `type = 'tag'` OR named by another profile's
+/// `tagService`** (live finding I5's class). The admin API creates only `trino`
+/// and `starrocks` profiles, so a hand-made tag service is a `trino` row; its
+/// policies are still served to the linker's engine as `tagPolicies`, and a tag
+/// mask there makes a table-attached tag's table unreadable exactly as one in a
+/// `tag` row does. A `trino` profile nobody names stays out — its
+/// `policyType = 1` rows are path masks (see the accept-control
+/// `a_masking_policy_on_a_resource_profile_is_accepted`).
+///
 /// The `ORDER BY 1, 2` puts a `perm.rules` row ahead of an editor policy, which
 /// matters for the message rather than for the verdict: a rule's own compiled
 /// artifact IS one of the `policyType = 1` tag policies the second branch
@@ -461,7 +470,11 @@ async fn tag_mask_naming(
          SELECT 1, p.name \
            FROM policy.authz_policies p \
            JOIN policy.authz_services s \
-             ON s.id = p.service_id AND s.type = 'tag' \
+             ON s.id = p.service_id \
+            AND (s.type = 'tag' \
+                 OR EXISTS (SELECT 1 FROM policy.authz_services l \
+                             WHERE l.config_jsonb ->> 'tagService' = s.name \
+                               AND l.id <> s.id)) \
           WHERE (p.policy_jsonb ->> 'policyType') = '1' \
             AND (p.policy_jsonb -> 'resources' -> 'tag' -> 'values') \
                 @> to_jsonb($2::text) \
