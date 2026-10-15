@@ -540,14 +540,15 @@ impl CatalogStore {
         Ok(())
     }
 
-    /// Verify a client's secret; on success return its warehouse name + role name
-    /// (for the JWT claims), and touch `last_used_at`.
-    pub async fn verify_client(
+    /// The row a Catalog Client mints from: `(id, client_secret_hash,
+    /// warehouse name, role name)`. Read by both [`Self::verify_client`] and the
+    /// `ClientVerifier::current` impl, so the secret path and the secret-free
+    /// path cannot disagree about which clients exist.
+    async fn client_row(
         &self,
         client_id: &str,
-        client_secret: &str,
-    ) -> Result<Option<(String, String)>, CatalogError> {
-        let row: Option<(Uuid, String, String, String)> = sqlx::query_as(
+    ) -> Result<Option<(Uuid, String, String, String)>, CatalogError> {
+        Ok(sqlx::query_as(
             "SELECT c.id, c.client_secret_hash, w.name, r.name \
              FROM catalog.catalog_clients c \
              JOIN catalog.warehouses w ON w.id = c.warehouse_id \
@@ -556,8 +557,17 @@ impl CatalogStore {
         )
         .bind(client_id)
         .fetch_optional(self.pool())
-        .await?;
-        let Some((id, hash, warehouse, role)) = row else {
+        .await?)
+    }
+
+    /// Verify a client's secret; on success return its warehouse name + role name
+    /// (for the JWT claims), and touch `last_used_at`.
+    pub async fn verify_client(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Result<Option<(String, String)>, CatalogError> {
+        let Some((id, hash, warehouse, role)) = self.client_row(client_id).await? else {
             return Ok(None);
         };
         let parsed = PasswordHash::new(&hash)
@@ -597,6 +607,24 @@ impl egret_machine_idp::ClientVerifier for CatalogStore {
             ))),
             None => Ok(None),
         }
+    }
+
+    /// A Catalog Client has no refusal beyond existing: revoking one DELETEs
+    /// its row. So the row read alone is the whole answer.
+    async fn current(
+        &self,
+        client_id: &str,
+    ) -> Result<Option<egret_machine_idp::ClientState>, egret_machine_idp::IdpError> {
+        let row = self
+            .client_row(client_id)
+            .await
+            .map_err(|e| egret_machine_idp::IdpError::Db(e.to_string()))?;
+        Ok(row.map(
+            |(_, secret_hash, warehouse, role)| egret_machine_idp::ClientState {
+                verified: catalog_verified_client(client_id, warehouse, role),
+                secret_hash,
+            },
+        ))
     }
 }
 

@@ -34,6 +34,7 @@ pub trait SigningKeyStore: Send + Sync {
 /// which `aud` it carries, what audience-specific claims it adds, and how long
 /// it lives. That is what lets one IdP serve the Catalog and the Data API
 /// without either knowing about the other.
+#[derive(Clone, Debug, PartialEq)]
 pub struct VerifiedClient {
     pub client_id: String,
     /// The JWT `aud`.
@@ -46,6 +47,18 @@ pub struct VerifiedClient {
     pub ttl_secs: u64,
 }
 
+/// A client's current minting state, read WITHOUT verifying a secret.
+///
+/// No `Debug`: `secret_hash` is not the secret, but it is the offline-crackable
+/// form of it and has no business in a log line.
+#[derive(Clone)]
+pub struct ClientState {
+    /// Exactly what a successful `verify` would return now.
+    pub verified: VerifiedClient,
+    /// The stored secret hash (PHC string) as of this read.
+    pub secret_hash: String,
+}
+
 /// Verifies a client's `client_id`/`client_secret` against one client registry.
 /// Implemented by the Catalog Client registry (`egret-catalog-engine`) and, per
 /// audience, by any other machine-client registry.
@@ -56,6 +69,22 @@ pub trait ClientVerifier: Send + Sync {
         client_id: &str,
         client_secret: &str,
     ) -> Result<Option<VerifiedClient>, IdpError>;
+    /// `None` when the client is unknown or may not mint for ANY reason the
+    /// secret path would refuse (revoked, expired, disabled principal, archived
+    /// workspace, …). Never runs Argon2.
+    async fn current(&self, client_id: &str) -> Result<Option<ClientState>, IdpError>;
+}
+
+/// Digest of a stored secret hash, carried in every minted token as `cgen`.
+/// First 16 hex chars of SHA-256 over the PHC string.
+///
+/// Rotating a secret changes the stored hash (a fresh salt every time), so a
+/// token's `cgen` names the credential generation that minted it without
+/// revealing anything an attacker could crack.
+pub fn credential_generation(secret_hash: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(secret_hash.as_bytes());
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A `ClientVerifier` that always rejects — the placeholder used before the real
@@ -65,6 +94,9 @@ pub struct RejectAllVerifier;
 #[async_trait::async_trait]
 impl ClientVerifier for RejectAllVerifier {
     async fn verify(&self, _: &str, _: &str) -> Result<Option<VerifiedClient>, IdpError> {
+        Ok(None)
+    }
+    async fn current(&self, _: &str) -> Result<Option<ClientState>, IdpError> {
         Ok(None)
     }
 }
@@ -226,7 +258,7 @@ async fn token_endpoint(
     for v in &st.verifiers {
         match v.verify(&f.client_id, &f.client_secret).await {
             Ok(Some(found)) => {
-                vc = Some(found);
+                vc = Some((found, v));
                 break;
             }
             Ok(None) => {}
@@ -236,14 +268,26 @@ async fn token_endpoint(
             }
         }
     }
-    let vc = match vc {
-        Some(vc) => vc,
+    let (vc, verifier) = match vc {
+        Some(found) => found,
         None if !verifier_errors.is_empty() => {
             return Err(IdpError::VerificationUnavailable(
                 verifier_errors.join("; "),
             ));
         }
         None => return Err(IdpError::InvalidClient),
+    };
+    // `cgen` comes from the SAME verifier's `current`, read after the secret
+    // checked out. `None` here means the client stopped being allowed to mint
+    // between the two reads (revoked, disabled, rotated away …): refuse rather
+    // than mint a token for a client that no longer exists in that form.
+    let state = match verifier.current(&f.client_id).await {
+        Ok(Some(state)) => state,
+        Ok(None) => return Err(IdpError::InvalidClient),
+        Err(e) => {
+            tracing::error!(client_id = %f.client_id, error = %e, "client state read failed");
+            return Err(IdpError::VerificationUnavailable(e.to_string()));
+        }
     };
 
     let km = st.keys.active().await?;
@@ -256,6 +300,10 @@ async fn token_endpoint(
     claims.insert("sub".into(), vc.client_id.clone().into());
     claims.insert("aud".into(), vc.audience.clone().into());
     claims.insert("exp".into(), exp.into());
+    claims.insert(
+        "cgen".into(),
+        credential_generation(&state.secret_hash).into(),
+    );
 
     let jwt = sign_claims(&km, &serde_json::Value::Object(claims))?;
     Ok(Json(TokenResp {
@@ -413,7 +461,15 @@ mod tests {
         async fn verify(&self, _: &str, _: &str) -> Result<Option<VerifiedClient>, IdpError> {
             Err(IdpError::Db("simulated outage".into()))
         }
+        async fn current(&self, _: &str) -> Result<Option<ClientState>, IdpError> {
+            Err(IdpError::Db("simulated outage".into()))
+        }
     }
+
+    /// The stored-hash stand-in every `FakeVerifier` client reports.
+    const FAKE_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$ZmFrZQ$ZmFrZS1oYXNo";
+    /// The stored-hash stand-in `CatalogLikeVerifier` reports.
+    const CATALOG_LIKE_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$Y2F0$Y2F0LWhhc2g";
 
     #[async_trait::async_trait]
     impl ClientVerifier for FakeVerifier {
@@ -422,16 +478,25 @@ mod tests {
             client_id: &str,
             client_secret: &str,
         ) -> Result<Option<VerifiedClient>, IdpError> {
-            if client_id == self.client_id && client_secret == self.client_secret {
-                Ok(Some(VerifiedClient {
+            if client_secret == self.client_secret {
+                Ok(self.current(client_id).await?.map(|s| s.verified))
+            } else {
+                Ok(None)
+            }
+        }
+        async fn current(&self, client_id: &str) -> Result<Option<ClientState>, IdpError> {
+            if client_id != self.client_id {
+                return Ok(None);
+            }
+            Ok(Some(ClientState {
+                verified: VerifiedClient {
                     client_id: client_id.to_string(),
                     audience: self.audience.clone(),
                     extra_claims: self.extra_claims.clone(),
                     ttl_secs: self.ttl_secs,
-                }))
-            } else {
-                Ok(None)
-            }
+                },
+                secret_hash: FAKE_HASH.into(),
+            }))
         }
     }
 
@@ -465,8 +530,18 @@ mod tests {
             client_id: &str,
             client_secret: &str,
         ) -> Result<Option<VerifiedClient>, IdpError> {
-            if client_id == "cat1" && client_secret == "s" {
-                Ok(Some(VerifiedClient {
+            if client_secret == "s" {
+                Ok(self.current(client_id).await?.map(|s| s.verified))
+            } else {
+                Ok(None)
+            }
+        }
+        async fn current(&self, client_id: &str) -> Result<Option<ClientState>, IdpError> {
+            if client_id != "cat1" {
+                return Ok(None);
+            }
+            Ok(Some(ClientState {
+                verified: VerifiedClient {
                     client_id: client_id.to_string(),
                     audience: "catalog".into(),
                     extra_claims: serde_json::json!({ "warehouse": "wh1", "roles": ["role1"] })
@@ -474,10 +549,9 @@ mod tests {
                         .cloned()
                         .unwrap(),
                     ttl_secs: 3600,
-                }))
-            } else {
-                Ok(None)
-            }
+                },
+                secret_hash: CATALOG_LIKE_HASH.into(),
+            }))
         }
     }
 
@@ -763,16 +837,30 @@ mod tests {
             client_secret: &str,
         ) -> Result<Option<VerifiedClient>, IdpError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            if client_id == "cid" && client_secret == "sec" {
-                Ok(Some(VerifiedClient {
+            if client_secret == "sec" {
+                Ok(Self::state_of(client_id).map(|s| s.verified))
+            } else {
+                Ok(None)
+            }
+        }
+        /// Not counted: `calls` stands in for the Argon2 cost, which `current`
+        /// never pays.
+        async fn current(&self, client_id: &str) -> Result<Option<ClientState>, IdpError> {
+            Ok(Self::state_of(client_id))
+        }
+    }
+
+    impl CountingVerifier {
+        fn state_of(client_id: &str) -> Option<ClientState> {
+            (client_id == "cid").then(|| ClientState {
+                verified: VerifiedClient {
                     client_id: client_id.to_string(),
                     audience: "data-api".into(),
                     extra_claims: serde_json::Map::new(),
                     ttl_secs: 600,
-                }))
-            } else {
-                Ok(None)
-            }
+                },
+                secret_hash: FAKE_HASH.into(),
+            })
         }
     }
 
@@ -918,6 +1006,98 @@ mod tests {
             401,
             "a different client_id from the same IP must have its own budget"
         );
+    }
+
+    #[test]
+    fn credential_generation_is_16_lowercase_hex_stable_and_input_sensitive() {
+        let g = credential_generation("abc");
+        assert_eq!(g.len(), 16);
+        assert!(
+            g.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "not lowercase hex: {g}"
+        );
+        assert_eq!(g, credential_generation("abc"), "must be stable");
+        assert_ne!(g, credential_generation("abd"));
+        // First 16 hex chars of SHA-256("abc") — pins the algorithm, not just
+        // the shape, so a later change of digest cannot pass silently.
+        assert_eq!(g, "ba7816bf8f01cfea");
+    }
+
+    /// Every token carries `cgen`, the digest of the hash the client's state
+    /// had when it was minted — read through `current` on the verifier that
+    /// matched, not through any other.
+    #[tokio::test]
+    async fn a_minted_token_carries_the_matching_verifiers_cgen() {
+        let st = test_idp_state_with(vec![
+            Arc::new(CatalogLikeVerifier),
+            Arc::new(FakeVerifier::with_extra_claims(serde_json::json!({}))),
+        ])
+        .await;
+
+        let cat = post_token(
+            &st,
+            "grant_type=client_credentials&client_id=cat1&client_secret=s",
+        )
+        .await;
+        assert_eq!(
+            decode_claims_without_verifying(&cat.access_token)["cgen"],
+            credential_generation(CATALOG_LIKE_HASH)
+        );
+
+        let api = post_token(
+            &st,
+            "grant_type=client_credentials&client_id=api1&client_secret=s",
+        )
+        .await;
+        assert_eq!(
+            decode_claims_without_verifying(&api.access_token)["cgen"],
+            credential_generation(FAKE_HASH)
+        );
+    }
+
+    /// A verifier whose client verifies and then is gone by the time `current`
+    /// reads it — a revoke racing the mint. The token must not be minted.
+    struct VanishesAfterVerify;
+
+    #[async_trait::async_trait]
+    impl ClientVerifier for VanishesAfterVerify {
+        async fn verify(
+            &self,
+            client_id: &str,
+            _: &str,
+        ) -> Result<Option<VerifiedClient>, IdpError> {
+            Ok(Some(VerifiedClient {
+                client_id: client_id.to_string(),
+                audience: "data-api".into(),
+                extra_claims: serde_json::Map::new(),
+                ttl_secs: 600,
+            }))
+        }
+        async fn current(&self, _: &str) -> Result<Option<ClientState>, IdpError> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_client_that_changes_between_verify_and_current_is_refused() {
+        let st = test_idp_state_with(vec![Arc::new(VanishesAfterVerify)]).await;
+        let err = post_token_expecting_error(
+            &st,
+            "grant_type=client_credentials&client_id=x&client_secret=y",
+        )
+        .await;
+        assert_eq!(err.status, 401);
+        assert_eq!(err.body["error"], "invalid_client");
+    }
+
+    #[tokio::test]
+    async fn reject_all_has_no_current_state() {
+        assert!(RejectAllVerifier
+            .current("anything")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

@@ -88,11 +88,33 @@ impl ClientStore {
     }
 }
 
-#[async_trait::async_trait]
-impl egret_machine_idp::ClientVerifier for ClientStore {
-    /// Returns `Ok(None)` for EVERY failure — unknown, revoked, expired,
-    /// disabled principal, wrong secret. A distinguishing error here would be a
-    /// free oracle for anyone probing client ids.
+/// `(id, service_account_id, workspace_id, client_secret_hash, expires_at,
+/// revoked_at, users.status, workspaces.status)` — the row before any refusal.
+type RawClientRow = (
+    Uuid,
+    Uuid,
+    Uuid,
+    String,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+    String,
+    String,
+);
+
+/// A client that may mint right now, as far as anything but its secret can
+/// tell. Only [`ClientStore::minting_row`] constructs one.
+struct MintingRow {
+    id: Uuid,
+    service_account_id: Uuid,
+    workspace_id: Uuid,
+    secret_hash: String,
+}
+
+impl ClientStore {
+    /// The ONE place that decides whether a client may mint, short of checking
+    /// its secret. `verify` and `current` both go through it, so the secret
+    /// path and the secret-free path cannot drift apart: a refusal added here
+    /// binds both, and there is nowhere else to add one.
     ///
     /// The `users.status` check is what makes the documented kill switch real.
     /// A stateless token cannot be recalled before it expires, so spec §6.1
@@ -110,22 +132,11 @@ impl egret_machine_idp::ClientVerifier for ClientStore {
     /// credential outliving the only surface that could kill it. Authentication
     /// has to honour the workspace's status itself, because by then nothing else
     /// can.
-    async fn verify(
+    async fn minting_row(
         &self,
         client_id: &str,
-        client_secret: &str,
-    ) -> std::result::Result<Option<egret_machine_idp::VerifiedClient>, egret_machine_idp::IdpError>
-    {
-        let row: Option<(
-            Uuid,
-            Uuid,
-            Uuid,
-            String,
-            Option<DateTime<Utc>>,
-            Option<DateTime<Utc>>,
-            String,
-            String,
-        )> = sqlx::query_as(
+    ) -> std::result::Result<Option<MintingRow>, egret_machine_idp::IdpError> {
+        let row: Option<RawClientRow> = sqlx::query_as(
             "SELECT c.id, c.service_account_id, sa.workspace_id, c.client_secret_hash, \
                         c.expires_at, c.revoked_at, u.status, w.status \
                  FROM dataapi.clients c \
@@ -142,12 +153,12 @@ impl egret_machine_idp::ClientVerifier for ClientStore {
         let Some((id, sa, ws, hash, expires_at, revoked_at, status, ws_status)) = row else {
             return Ok(None);
         };
+        // Checked here rather than in the WHERE clause so they sit together:
+        // one place shows every reason a client may not mint, and all of them
+        // say it the same way.
         if revoked_at.is_some() {
             return Ok(None);
         }
-        // Checked here rather than in the WHERE clause so it sits with the other
-        // rejections: one place shows every reason `verify` says no, and all of
-        // them say it the same way.
         if status != "active" {
             return Ok(None);
         }
@@ -159,7 +170,52 @@ impl egret_machine_idp::ClientVerifier for ClientStore {
                 return Ok(None);
             }
         }
-        let parsed = PasswordHash::new(&hash)
+        Ok(Some(MintingRow {
+            id,
+            service_account_id: sa,
+            workspace_id: ws,
+            secret_hash: hash,
+        }))
+    }
+}
+
+/// The token shape a Data API client gets.
+fn dataapi_verified_client(client_id: &str, row: &MintingRow) -> egret_machine_idp::VerifiedClient {
+    let extra = serde_json::json!({
+        "ws": row.workspace_id.to_string(),
+        "egret_user_id": row.service_account_id.to_string(),
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_default();
+    egret_machine_idp::VerifiedClient {
+        client_id: client_id.to_string(),
+        // The const, not the literal: this is the MINT side and
+        // `serving::verify_serving_token` is the VERIFY side, and a token
+        // whose audience the verifier does not recognise is refused with no
+        // hint as to why. One definition means the two cannot drift apart.
+        audience: crate::serving::DATA_API_AUDIENCE.into(),
+        extra_claims: extra,
+        ttl_secs: DATA_API_TTL_SECS,
+    }
+}
+
+#[async_trait::async_trait]
+impl egret_machine_idp::ClientVerifier for ClientStore {
+    /// Returns `Ok(None)` for EVERY failure — unknown, revoked, expired,
+    /// disabled principal, archived workspace, wrong secret. A distinguishing
+    /// error here would be a free oracle for anyone probing client ids. Every
+    /// reason but the secret lives in [`ClientStore::minting_row`].
+    async fn verify(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+    ) -> std::result::Result<Option<egret_machine_idp::VerifiedClient>, egret_machine_idp::IdpError>
+    {
+        let Some(row) = self.minting_row(client_id).await? else {
+            return Ok(None);
+        };
+        let parsed = PasswordHash::new(&row.secret_hash)
             .map_err(|e| egret_machine_idp::IdpError::Db(format!("hash parse: {e}")))?;
         if Argon2::default()
             .verify_password(client_secret.as_bytes(), &parsed)
@@ -168,23 +224,25 @@ impl egret_machine_idp::ClientVerifier for ClientStore {
             return Ok(None);
         }
         let _ = sqlx::query("UPDATE dataapi.clients SET last_used_at = now() WHERE id = $1")
-            .bind(id)
+            .bind(row.id)
             .execute(&self.db.pool)
             .await;
+        Ok(Some(dataapi_verified_client(client_id, &row)))
+    }
 
-        let extra = serde_json::json!({ "ws": ws.to_string(), "egret_user_id": sa.to_string() })
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
-        Ok(Some(egret_machine_idp::VerifiedClient {
-            client_id: client_id.to_string(),
-            // The const, not the literal: this is the MINT side and
-            // `serving::verify_serving_token` is the VERIFY side, and a token
-            // whose audience the verifier does not recognise is refused with no
-            // hint as to why. One definition means the two cannot drift apart.
-            audience: crate::serving::DATA_API_AUDIENCE.into(),
-            extra_claims: extra,
-            ttl_secs: DATA_API_TTL_SECS,
-        }))
+    /// Same refusals as `verify` — by construction, through
+    /// [`ClientStore::minting_row`] — minus the secret check.
+    async fn current(
+        &self,
+        client_id: &str,
+    ) -> std::result::Result<Option<egret_machine_idp::ClientState>, egret_machine_idp::IdpError>
+    {
+        Ok(self
+            .minting_row(client_id)
+            .await?
+            .map(|row| egret_machine_idp::ClientState {
+                verified: dataapi_verified_client(client_id, &row),
+                secret_hash: row.secret_hash,
+            }))
     }
 }

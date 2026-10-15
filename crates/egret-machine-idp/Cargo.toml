@@ -28,6 +28,9 @@ jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 rsa.workspace = true
 rand.workspace = true
 base64.workspace = true
+# `credential_generation`: the `cgen` claim is a SHA-256 digest of the stored
+# secret hash.
+sha2.workspace = true
 egret-metastore.workspace = true
 egret-core = { workspace = true, features = ["http"] }
 # OpenAPI emit (E0·P4b-1): `#[utoipa::path]` on the IdP router's handlers +

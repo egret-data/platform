@@ -286,3 +286,109 @@ async fn deleting_the_service_account_removes_its_clients() {
         .unwrap()
         .is_none());
 }
+
+// ---- `current`: the same refusals as `verify`, without the secret ----------
+//
+// Each refusal test is a before/after on the SAME client so it cannot pass
+// against a `current` that returns `None` for everything.
+
+async fn assert_current_live(f: &Fixture, client_id: &str) {
+    assert!(
+        f.clients.current(client_id).await.unwrap().is_some(),
+        "must have a current state before the refusal is applied"
+    );
+}
+
+#[tokio::test]
+async fn current_of_a_live_client_matches_verify_and_carries_the_stored_hash() {
+    let f = skip_without_db!();
+    let c = f.clients.create(f.sa, "prod", None, f.admin).await.unwrap();
+
+    let vc = f
+        .clients
+        .verify(&c.client_id, &c.client_secret)
+        .await
+        .unwrap()
+        .expect("must verify");
+    let st = f
+        .clients
+        .current(&c.client_id)
+        .await
+        .unwrap()
+        .expect("a live client has a current state");
+    assert_eq!(st.verified, vc);
+
+    let stored: String =
+        sqlx::query_scalar("SELECT client_secret_hash FROM dataapi.clients WHERE id = $1")
+            .bind(c.id)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(st.secret_hash, stored);
+}
+
+#[tokio::test]
+async fn current_of_a_client_with_a_future_expiry_is_some() {
+    let f = skip_without_db!();
+    let future = chrono::Utc::now() + chrono::Duration::hours(1);
+    let c = f
+        .clients
+        .create(f.sa, "prod", Some(future), f.admin)
+        .await
+        .unwrap();
+    assert!(f.clients.current(&c.client_id).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn current_of_an_unknown_client_is_none() {
+    let f = skip_without_db!();
+    assert!(f.clients.current("nope").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn current_of_a_revoked_client_is_none() {
+    let f = skip_without_db!();
+    let c = f.clients.create(f.sa, "prod", None, f.admin).await.unwrap();
+    assert_current_live(&f, &c.client_id).await;
+    f.clients.revoke(c.id).await.unwrap();
+    assert!(f.clients.current(&c.client_id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn current_of_an_expired_client_is_none() {
+    let f = skip_without_db!();
+    let c = f.clients.create(f.sa, "prod", None, f.admin).await.unwrap();
+    assert_current_live(&f, &c.client_id).await;
+    sqlx::query("UPDATE dataapi.clients SET expires_at = now() - interval '1 hour' WHERE id = $1")
+        .bind(c.id)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    assert!(f.clients.current(&c.client_id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn current_of_a_client_whose_service_account_is_disabled_is_none() {
+    let f = skip_without_db!();
+    let c = f.clients.create(f.sa, "prod", None, f.admin).await.unwrap();
+    assert_current_live(&f, &c.client_id).await;
+    sqlx::query("UPDATE users SET status = 'disabled' WHERE id = $1")
+        .bind(f.sa)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    assert!(f.clients.current(&c.client_id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn current_of_a_client_in_an_archived_workspace_is_none() {
+    let f = skip_without_db!();
+    let c = f.clients.create(f.sa, "prod", None, f.admin).await.unwrap();
+    assert_current_live(&f, &c.client_id).await;
+    sqlx::query("UPDATE workspaces SET status = 'archived' WHERE id = $1")
+        .bind(f.ws)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    assert!(f.clients.current(&c.client_id).await.unwrap().is_none());
+}
