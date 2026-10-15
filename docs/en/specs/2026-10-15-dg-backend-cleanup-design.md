@@ -43,8 +43,15 @@ storm, which feeds I3.
   3. the client named by `sub` still exists in the verifier that owns that audience, and its secret has not been
      rotated since the subject token was minted. Tokens carry a new claim `cgen` (a short digest of the stored
      secret hash at mint time); the exchange compares it with the current one. This lookup does not run Argon2.
-- The new token copies the subject token's claims (including audience-specific extra claims and `cgen`) and gets a
-  fresh `exp` with the same TTL the verifier uses.
+- The new token is minted from the client's **current** state, exactly as `client_credentials` would mint it
+  (current extra claims, current `cgen`, the verifier's TTL). Check 3 runs every revocation condition the verifier
+  applies to a secret login: for Data API clients that includes `revoked_at`, `expires_at`, the service account's
+  user status and the workspace status (`crates/egret-dataapi/src/clients.rs:92-140`). Only the Argon2 step is
+  skipped.
+- Both verifiers gain one trait method that returns the client's current state without verifying a secret:
+  `ClientVerifier::current(client_id) -> Result<Option<ClientState>, IdpError>`, where
+  `ClientState { verified: VerifiedClient, secret_hash: String }` and `None` means "may not mint" for any reason.
+  Section B uses the same method.
 - Rate limiting: the exchange is keyed `ip:sub` on the same limiter. It costs no Argon2, so it is counted only to
   stop floods.
 - Failures answer OAuth errors (`invalid_grant` 400 for a bad/expired/revoked subject token,
@@ -63,10 +70,12 @@ Argon2 CPU, not to stop guessing (secrets are 256-bit random); its own doc says 
 
 **Design:**
 
-- A process-local cache of successful verifications keyed by `(client_id, sha256(presented secret), stored secret
-  hash)`. On a request, the verifier reads the stored hash (one indexed lookup); a cache hit with the same triple
-  skips Argon2.
-- Only cache misses (requests that reach Argon2) count against the limiter. Hits are not limited by it.
+- A process-local cache of successful verifications keyed by `(client_id, sha256(presented secret))`, storing the
+  secret hash that verified. On a request whose pair is cached, the IdP calls `current(client_id)` (no Argon2); if
+  the client may still mint and its `secret_hash` equals the cached one, it mints from that state.
+- Everything else (no cache entry, a changed hash, `current` = `None`) goes the old way: limiter first, then
+  `verify`. So unknown ids and wrong secrets stay limited, and only proven-good repeats skip the limiter and
+  Argon2. On a successful `verify`, the cache is filled from `current(client_id)`.
 - Rotation changes the stored hash, so the next request misses. A deleted client has no row and fails at once.
   The cache never answers "valid" for a client whose row is gone.
 - Bounded size (LRU or capped map) and a TTL (default 10 minutes) so the cache cannot grow without limit.
