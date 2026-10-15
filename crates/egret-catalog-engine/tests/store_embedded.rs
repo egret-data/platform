@@ -104,7 +104,7 @@ async fn current_mirrors_verify_without_the_secret() {
         .await
         .unwrap()
         .expect("a live client has a current state");
-    assert_eq!(state.verified, verified);
+    assert_eq!(state.verified, verified.verified);
 
     let stored_hash: String =
         sqlx::query_scalar("SELECT client_secret_hash FROM catalog.catalog_clients WHERE id = $1")
@@ -113,6 +113,10 @@ async fn current_mirrors_verify_without_the_secret() {
             .await
             .unwrap();
     assert_eq!(state.secret_hash, stored_hash);
+    assert_eq!(
+        verified.secret_hash, stored_hash,
+        "verify must hand back the hash its Argon2 check used"
+    );
 
     assert!(store.current("egret_unknown").await.unwrap().is_none());
 

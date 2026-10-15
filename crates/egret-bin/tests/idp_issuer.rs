@@ -54,9 +54,9 @@ struct OneClient;
 
 #[async_trait::async_trait]
 impl ClientVerifier for OneClient {
-    async fn verify(&self, id: &str, secret: &str) -> Result<Option<VerifiedClient>, IdpError> {
+    async fn verify(&self, id: &str, secret: &str) -> Result<Option<ClientState>, IdpError> {
         if secret == "sec" {
-            Ok(self.current(id).await?.map(|s| s.verified))
+            self.current(id).await
         } else {
             Ok(None)
         }

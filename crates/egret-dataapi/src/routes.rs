@@ -279,6 +279,10 @@ pub struct DataApiClientDto {
     pub name: String,
     pub client_id: String,
     pub expires_at: Option<DateTime<Utc>>,
+    // Last full secret verification. The IdP serves repeats from a
+    // verification cache, so this advances at most about once per 10 minutes
+    // per (client, secret) — not on every token request. (A `//` comment on
+    // purpose: a doc comment would change the checked-in openapi.json.)
     pub last_used_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,

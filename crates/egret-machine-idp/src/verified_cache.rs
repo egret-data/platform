@@ -14,6 +14,10 @@ use std::time::{Duration, Instant};
 ///
 /// Only `put` after a successful verify adds entries, so an attacker cannot
 /// grow the map; the capacity bound is defence in depth.
+///
+/// A hit skips the registry's `verify`, and with it the `last_used_at` UPDATE
+/// both registries do there: that column now advances at most about once per
+/// TTL per (client, secret).
 #[derive(Clone)]
 pub struct VerifiedCache {
     inner: Arc<Mutex<HashMap<(String, String), Entry>>>,
@@ -40,6 +44,8 @@ impl VerifiedCache {
         let key = (client_id.to_string(), secret_digest(secret));
         let mut map = self.lock();
         match map.get(&key) {
+            // A hit deliberately does NOT refresh `inserted`: every client
+            // re-verifies (Argon2 + `last_used_at`) once per TTL however busy.
             Some(e) if e.inserted.elapsed() < self.ttl => Some(e.secret_hash.clone()),
             Some(_) => {
                 map.remove(&key);

@@ -55,9 +55,10 @@ pub struct VerifiedClient {
 /// form of it and has no business in a log line.
 #[derive(Clone)]
 pub struct ClientState {
-    /// Exactly what a successful `verify` would return now.
+    /// The token shape a successful `verify` would mint from now.
     pub verified: VerifiedClient,
-    /// The stored secret hash (PHC string) as of this read.
+    /// The stored secret hash (PHC string) as of this read. From `verify`, it
+    /// is the hash the secret was checked against.
     pub secret_hash: String,
 }
 
@@ -66,11 +67,14 @@ pub struct ClientState {
 /// audience, by any other machine-client registry.
 #[async_trait::async_trait]
 pub trait ClientVerifier: Send + Sync {
+    /// The state the secret was checked against, from the SAME row read the
+    /// Argon2 check used — `secret_hash` is the hash that verified. `None` for
+    /// every refusal, wrong secret included.
     async fn verify(
         &self,
         client_id: &str,
         client_secret: &str,
-    ) -> Result<Option<VerifiedClient>, IdpError>;
+    ) -> Result<Option<ClientState>, IdpError>;
     /// `None` when the client is unknown or may not mint for ANY reason the
     /// secret path would refuse (revoked, expired, disabled principal, archived
     /// workspace, …). Never runs Argon2.
@@ -95,7 +99,7 @@ pub struct RejectAllVerifier;
 
 #[async_trait::async_trait]
 impl ClientVerifier for RejectAllVerifier {
-    async fn verify(&self, _: &str, _: &str) -> Result<Option<VerifiedClient>, IdpError> {
+    async fn verify(&self, _: &str, _: &str) -> Result<Option<ClientState>, IdpError> {
         Ok(None)
     }
     async fn current(&self, _: &str) -> Result<Option<ClientState>, IdpError> {
@@ -272,12 +276,12 @@ async fn token_endpoint(
     // verifier has either declined or failed do we decide what to return: a
     // match wins outright, otherwise an error means "unknown" cannot honestly be
     // claimed (401 would be a lie), so that beats a clean "no match" (401).
-    let mut matched = None;
+    let mut verified = None;
     let mut verifier_errors = Vec::new();
     for v in &st.verifiers {
         match v.verify(&f.client_id, &f.client_secret).await {
-            Ok(Some(_)) => {
-                matched = Some(v);
+            Ok(Some(state)) => {
+                verified = Some(state);
                 break;
             }
             Ok(None) => {}
@@ -287,8 +291,8 @@ async fn token_endpoint(
             }
         }
     }
-    let verifier = match matched {
-        Some(v) => v,
+    let state = match verified {
+        Some(state) => state,
         None if !verifier_errors.is_empty() => {
             return Err(IdpError::VerificationUnavailable(
                 verifier_errors.join("; "),
@@ -296,21 +300,11 @@ async fn token_endpoint(
         }
         None => return Err(IdpError::InvalidClient),
     };
-    // The token is minted from ONE read of the client: the SAME verifier's
-    // `current`, taken after the secret checked out. Claims, audience, TTL and
-    // `cgen` all come from it, never a mix with `verify`'s answer, so a token
-    // cannot carry one generation's roles under another generation's `cgen`.
-    // `None` here means the client stopped being allowed to mint between the
-    // two reads (revoked, disabled, rotated away …): refuse rather than mint a
-    // token for a client that no longer exists in that form.
-    let state = match verifier.current(&f.client_id).await {
-        Ok(Some(state)) => state,
-        Ok(None) => return Err(IdpError::InvalidClient),
-        Err(e) => {
-            tracing::error!(client_id = %f.client_id, error = %e, "client state read failed");
-            return Err(IdpError::VerificationUnavailable(e.to_string()));
-        }
-    };
+    // One read, used whole: `state` is the row the secret was checked
+    // against, so the token's claims, audience, TTL and `cgen` and the hash
+    // cached below are all the ones Argon2 vouched for. A second read here
+    // could see a rotation that landed after the check and tie the OLD secret
+    // to the NEW hash in the cache, serving it unlimited for a TTL.
     st.verified_cache
         .put(&f.client_id, &f.client_secret, state.secret_hash.clone());
     mint(&st, &state).await
@@ -505,7 +499,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ClientVerifier for AlwaysErrorsVerifier {
-        async fn verify(&self, _: &str, _: &str) -> Result<Option<VerifiedClient>, IdpError> {
+        async fn verify(&self, _: &str, _: &str) -> Result<Option<ClientState>, IdpError> {
             Err(IdpError::Db("simulated outage".into()))
         }
         async fn current(&self, _: &str) -> Result<Option<ClientState>, IdpError> {
@@ -524,9 +518,9 @@ mod tests {
             &self,
             client_id: &str,
             client_secret: &str,
-        ) -> Result<Option<VerifiedClient>, IdpError> {
+        ) -> Result<Option<ClientState>, IdpError> {
             if client_secret == self.client_secret {
-                Ok(self.current(client_id).await?.map(|s| s.verified))
+                self.current(client_id).await
             } else {
                 Ok(None)
             }
@@ -577,9 +571,9 @@ mod tests {
             &self,
             client_id: &str,
             client_secret: &str,
-        ) -> Result<Option<VerifiedClient>, IdpError> {
+        ) -> Result<Option<ClientState>, IdpError> {
             if client_secret == "s" {
-                Ok(self.current(client_id).await?.map(|s| s.verified))
+                self.current(client_id).await
             } else {
                 Ok(None)
             }
@@ -881,6 +875,9 @@ mod tests {
     struct CountingVerifier {
         calls: Arc<AtomicUsize>,
         stored: Arc<std::sync::Mutex<Option<String>>>,
+        /// When set, `current` errors (a registry outage) while `verify` keeps
+        /// working off its own read.
+        current_fails: Arc<std::sync::atomic::AtomicBool>,
     }
 
     #[async_trait::async_trait]
@@ -889,10 +886,10 @@ mod tests {
             &self,
             client_id: &str,
             client_secret: &str,
-        ) -> Result<Option<VerifiedClient>, IdpError> {
+        ) -> Result<Option<ClientState>, IdpError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if client_secret == "sec" {
-                Ok(self.current(client_id).await?.map(|s| s.verified))
+                Ok(self.read(client_id))
             } else {
                 Ok(None)
             }
@@ -900,8 +897,17 @@ mod tests {
         /// Not counted: `calls` stands in for the Argon2 cost, which `current`
         /// never pays.
         async fn current(&self, client_id: &str) -> Result<Option<ClientState>, IdpError> {
+            if self.current_fails.load(Ordering::SeqCst) {
+                return Err(IdpError::Db("simulated outage".into()));
+            }
+            Ok(self.read(client_id))
+        }
+    }
+
+    impl CountingVerifier {
+        fn read(&self, client_id: &str) -> Option<ClientState> {
             let stored = self.stored.lock().unwrap().clone();
-            Ok(stored
+            stored
                 .filter(|_| client_id == "cid")
                 .map(|hash| ClientState {
                     verified: VerifiedClient {
@@ -911,7 +917,7 @@ mod tests {
                         ttl_secs: 600,
                     },
                     secret_hash: hash,
-                }))
+                })
         }
     }
 
@@ -920,6 +926,7 @@ mod tests {
     struct Counting {
         calls: Arc<AtomicUsize>,
         stored: Arc<std::sync::Mutex<Option<String>>>,
+        current_fails: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl Counting {
@@ -929,6 +936,9 @@ mod tests {
         fn set_stored(&self, hash: Option<&str>) {
             *self.stored.lock().unwrap() = hash.map(str::to_string);
         }
+        fn fail_current(&self) {
+            self.current_fails.store(true, Ordering::SeqCst);
+        }
     }
 
     /// An `IdpState` whose token endpoint allows `max` requests per key, over a
@@ -937,6 +947,7 @@ mod tests {
     fn counting_state(max: u32) -> (IdpState, Counting) {
         let calls = Arc::new(AtomicUsize::new(0));
         let stored = Arc::new(std::sync::Mutex::new(Some(FAKE_HASH.to_string())));
+        let current_fails = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let km = generate_rsa_key("kid-t").unwrap();
         let st = IdpState {
             keys: Arc::new(FakeKeys(km)),
@@ -944,11 +955,19 @@ mod tests {
             verifiers: vec![Arc::new(CountingVerifier {
                 calls: calls.clone(),
                 stored: stored.clone(),
+                current_fails: current_fails.clone(),
             })],
             rate_limiter: RateLimiter::new(max, 3_600, 3_600),
             verified_cache: VerifiedCache::default(),
         };
-        (st, Counting { calls, stored })
+        (
+            st,
+            Counting {
+                calls,
+                stored,
+                current_fails,
+            },
+        )
     }
 
     fn rate_limited_state(max: u32) -> (IdpState, Arc<AtomicUsize>) {
@@ -1131,41 +1150,6 @@ mod tests {
         );
     }
 
-    /// A verifier whose client verifies and then is gone by the time `current`
-    /// reads it — a revoke racing the mint. The token must not be minted.
-    struct VanishesAfterVerify;
-
-    #[async_trait::async_trait]
-    impl ClientVerifier for VanishesAfterVerify {
-        async fn verify(
-            &self,
-            client_id: &str,
-            _: &str,
-        ) -> Result<Option<VerifiedClient>, IdpError> {
-            Ok(Some(VerifiedClient {
-                client_id: client_id.to_string(),
-                audience: "data-api".into(),
-                extra_claims: serde_json::Map::new(),
-                ttl_secs: 600,
-            }))
-        }
-        async fn current(&self, _: &str) -> Result<Option<ClientState>, IdpError> {
-            Ok(None)
-        }
-    }
-
-    #[tokio::test]
-    async fn a_client_that_changes_between_verify_and_current_is_refused() {
-        let st = test_idp_state_with(vec![Arc::new(VanishesAfterVerify)]).await;
-        let err = post_token_expecting_error(
-            &st,
-            "grant_type=client_credentials&client_id=x&client_secret=y",
-        )
-        .await;
-        assert_eq!(err.status, 401);
-        assert_eq!(err.body["error"], "invalid_client");
-    }
-
     #[tokio::test]
     async fn reject_all_has_no_current_state() {
         assert!(RejectAllVerifier
@@ -1299,41 +1283,34 @@ mod tests {
         );
     }
 
-    /// `verify` and `current` disagree about the token shape (a role changed
-    /// between the two reads). The token must be built from ONE read — the
-    /// `current` state, which also supplies `cgen` — never a mix.
+    /// `verify` and `current` disagree (a role and the hash changed right
+    /// after the Argon2 check). A freshly verified token must be built from
+    /// ONE read — the state `verify` checked the secret against, which also
+    /// supplies `cgen` — never a mix with a later read.
     struct ShapeChangesAfterVerify;
 
-    #[async_trait::async_trait]
-    impl ClientVerifier for ShapeChangesAfterVerify {
-        async fn verify(
-            &self,
-            client_id: &str,
-            _: &str,
-        ) -> Result<Option<VerifiedClient>, IdpError> {
-            Ok(Some(VerifiedClient {
-                client_id: client_id.to_string(),
-                audience: "stale-aud".into(),
-                extra_claims: serde_json::json!({ "roles": ["stale"] })
+    fn shape(aud: &str, role: &str, ttl_secs: u64, hash: &str) -> ClientState {
+        ClientState {
+            verified: VerifiedClient {
+                client_id: "x".into(),
+                audience: aud.into(),
+                extra_claims: serde_json::json!({ "roles": [role] })
                     .as_object()
                     .cloned()
                     .unwrap(),
-                ttl_secs: 3600,
-            }))
+                ttl_secs,
+            },
+            secret_hash: hash.into(),
         }
-        async fn current(&self, client_id: &str) -> Result<Option<ClientState>, IdpError> {
-            Ok(Some(ClientState {
-                verified: VerifiedClient {
-                    client_id: client_id.to_string(),
-                    audience: "fresh-aud".into(),
-                    extra_claims: serde_json::json!({ "roles": ["fresh"] })
-                        .as_object()
-                        .cloned()
-                        .unwrap(),
-                    ttl_secs: 600,
-                },
-                secret_hash: FAKE_HASH.into(),
-            }))
+    }
+
+    #[async_trait::async_trait]
+    impl ClientVerifier for ShapeChangesAfterVerify {
+        async fn verify(&self, _: &str, _: &str) -> Result<Option<ClientState>, IdpError> {
+            Ok(Some(shape("checked-aud", "checked", 600, FAKE_HASH)))
+        }
+        async fn current(&self, _: &str) -> Result<Option<ClientState>, IdpError> {
+            Ok(Some(shape("later-aud", "later", 3600, CATALOG_LIKE_HASH)))
         }
     }
 
@@ -1346,9 +1323,88 @@ mod tests {
         )
         .await;
         let c = decode_claims_without_verifying(&resp.access_token);
-        assert_eq!(c["aud"], "fresh-aud");
-        assert_eq!(c["roles"], serde_json::json!(["fresh"]));
+        assert_eq!(c["aud"], "checked-aud");
+        assert_eq!(c["roles"], serde_json::json!(["checked"]));
         assert_eq!(resp.expires_in, 600);
         assert_eq!(c["cgen"], credential_generation(FAKE_HASH));
+    }
+
+    /// A rotation lands between the Argon2 check and any later read: `verify`
+    /// checked the OLD secret against H1, while `current` already sees H2.
+    /// The cache must hold H1 — the hash Argon2 actually checked — or the old
+    /// secret would be tied to the new hash and served unlimited for a TTL.
+    struct RotatesBetweenReads {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ClientVerifier for RotatesBetweenReads {
+        async fn verify(
+            &self,
+            client_id: &str,
+            client_secret: &str,
+        ) -> Result<Option<ClientState>, IdpError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            // Checked against FAKE_HASH (H1), the hash before the rotation.
+            Ok((client_secret == "old").then(|| ClientState {
+                verified: VerifiedClient {
+                    client_id: client_id.to_string(),
+                    audience: "data-api".into(),
+                    extra_claims: serde_json::Map::new(),
+                    ttl_secs: 600,
+                },
+                secret_hash: FAKE_HASH.into(),
+            }))
+        }
+        async fn current(&self, client_id: &str) -> Result<Option<ClientState>, IdpError> {
+            // The rotation has landed: the registry now stores H2.
+            Ok(Some(ClientState {
+                verified: VerifiedClient {
+                    client_id: client_id.to_string(),
+                    audience: "data-api".into(),
+                    extra_claims: serde_json::Map::new(),
+                    ttl_secs: 600,
+                },
+                secret_hash: CATALOG_LIKE_HASH.into(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_cache_holds_the_hash_argon2_checked_not_a_later_read() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let st = test_idp_state_with(vec![Arc::new(RotatesBetweenReads {
+            calls: calls.clone(),
+        })])
+        .await;
+
+        let _ = post_token_from(&st, "203.0.113.7", "cid", "old").await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let _ = post_token_from(&st, "203.0.113.7", "cid", "old").await;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the old secret must not be served from cache against the rotated hash"
+        );
+    }
+
+    /// A registry error on the hit path is not a refusal and not a pass: the
+    /// request takes the full path and verifies.
+    #[tokio::test]
+    async fn a_registry_error_on_a_hit_falls_through_to_verify() {
+        let (st, counting) = counting_state(100);
+        assert_eq!(
+            post_token_from(&st, "203.0.113.7", "cid", "sec")
+                .await
+                .status,
+            200
+        );
+
+        counting.fail_current();
+        let r = post_token_from(&st, "203.0.113.7", "cid", "sec").await;
+
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(counting.verifies(), 2);
     }
 }

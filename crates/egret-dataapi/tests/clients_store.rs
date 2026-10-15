@@ -102,7 +102,8 @@ async fn a_new_client_verifies_and_carries_its_workspace() {
         .verify(&c.client_id, &c.client_secret)
         .await
         .unwrap()
-        .expect("must verify");
+        .expect("must verify")
+        .verified;
 
     assert_eq!(vc.audience, "data-api");
     assert_eq!(vc.ttl_secs, 600, "short TTL is the revocation mitigation");
@@ -164,7 +165,8 @@ async fn a_client_with_a_future_expiry_verifies() {
         .verify(&c.client_id, &c.client_secret)
         .await
         .unwrap()
-        .expect("a client with a future expires_at must still verify");
+        .expect("a client with a future expires_at must still verify")
+        .verified;
 
     assert_eq!(vc.audience, "data-api");
     assert_eq!(vc.ttl_secs, 600);
@@ -316,7 +318,7 @@ async fn current_of_a_live_client_matches_verify_and_carries_the_stored_hash() {
         .await
         .unwrap()
         .expect("a live client has a current state");
-    assert_eq!(st.verified, vc);
+    assert_eq!(st.verified, vc.verified);
 
     let stored: String =
         sqlx::query_scalar("SELECT client_secret_hash FROM dataapi.clients WHERE id = $1")
@@ -325,6 +327,10 @@ async fn current_of_a_live_client_matches_verify_and_carries_the_stored_hash() {
             .await
             .unwrap();
     assert_eq!(st.secret_hash, stored);
+    assert_eq!(
+        vc.secret_hash, stored,
+        "verify must hand back the hash its Argon2 check used"
+    );
 }
 
 #[tokio::test]

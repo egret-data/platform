@@ -210,7 +210,7 @@ impl egret_machine_idp::ClientVerifier for ClientStore {
         &self,
         client_id: &str,
         client_secret: &str,
-    ) -> std::result::Result<Option<egret_machine_idp::VerifiedClient>, egret_machine_idp::IdpError>
+    ) -> std::result::Result<Option<egret_machine_idp::ClientState>, egret_machine_idp::IdpError>
     {
         let Some(row) = self.minting_row(client_id).await? else {
             return Ok(None);
@@ -223,11 +223,21 @@ impl egret_machine_idp::ClientVerifier for ClientStore {
         {
             return Ok(None);
         }
+        // Only a full verify touches `last_used_at`. The IdP serves a proven
+        // repeat of a secret from its verification cache without calling this,
+        // so the column advances at most about once per cache TTL (600 s) per
+        // (client, secret) — "used within the last ~10 minutes", not "last
+        // request".
         let _ = sqlx::query("UPDATE dataapi.clients SET last_used_at = now() WHERE id = $1")
             .bind(row.id)
             .execute(&self.db.pool)
             .await;
-        Ok(Some(dataapi_verified_client(client_id, &row)))
+        // The row the Argon2 check used, whole: its hash is the one that
+        // verified, which is what the IdP caches.
+        Ok(Some(egret_machine_idp::ClientState {
+            verified: dataapi_verified_client(client_id, &row),
+            secret_hash: row.secret_hash,
+        }))
     }
 
     /// Same refusals as `verify` — by construction, through
