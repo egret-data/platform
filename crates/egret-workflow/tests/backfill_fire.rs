@@ -678,3 +678,106 @@ async fn the_error_paths_leave_the_backfill_alone() {
         w0 + minutes(1)
     );
 }
+
+/// Review follow-up 1 (default decision, 2026-10-15). A backfill tick whose
+/// start is REFUSED (here: the backfill's overlaid input is not a FILE URI)
+/// ends the backfill in the same transaction, as a delete does: the row goes,
+/// the regular schedule resumes at `max(previous_next_evaluation_date,
+/// current_tick)` under its policy, and `last_error` names the backfill. The
+/// trigger stays on the queue: taking it off would leave it stuck, because a
+/// save re-derives the same tick with the same inputs.
+#[tokio::test]
+async fn a_refused_backfill_start_ends_the_backfill() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&flow_yaml(
+            "bf-refused",
+            "inputs:\n  - id: f\n    type: FILE\n    required: false\n",
+            "    inputs:\n      f: null\n",
+        ))
+        .await;
+    let w0 = fx.w0().await;
+    common::stage_backfill(
+        &fx.db,
+        flow,
+        "s",
+        (w0, w0 + minutes(4)),
+        w0,
+        5,
+        json!({"f": 42}),
+        json!([]),
+    )
+    .await;
+    let prev: DateTime<Utc> = sqlx::query_scalar(
+        "SELECT previous_next_evaluation_date FROM workflow.trigger_backfills WHERE flow_id = $1",
+    )
+    .bind(flow)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert!(
+        prev > w0,
+        "the regular schedule stood after the window's tick"
+    );
+
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            errored: 1,
+            ..Default::default()
+        }
+    );
+    assert!(execs(&fx.db, flow).await.is_empty());
+    assert!(
+        common::backfill_row(&fx.db, flow, "s").await.is_none(),
+        "the backfill ended"
+    );
+    let after = row(&fx.db, flow).await;
+    assert_eq!(
+        after.next_evaluation_date,
+        Some(prev),
+        "queued at the resume: max(prev, current_tick) = prev"
+    );
+    let err = after.last_error.expect("the reason");
+    assert!(err.starts_with("backfill ended: "), "{err}");
+    assert!(err.contains("FILE input"), "{err}");
+}
+
+/// Review follow-up 3 (D7). The claim's `NOT EXISTS` is per trigger: a paused
+/// backfill on one schedule does not hold back its sibling in the same flow.
+#[tokio::test]
+async fn a_paused_backfill_does_not_hold_back_a_sibling_schedule() {
+    let Some(fx) = fx().await else { return };
+    let src = format!(
+        "id: siblings\nnamespace: w7f\ntriggers:\n  - id: s\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n  - id: t\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    );
+    let flow = fx.flow(&src).await;
+    let w0 = fx.w0().await;
+    common::stage_backfill(
+        &fx.db,
+        flow,
+        "s",
+        (w0, w0 + minutes(4)),
+        w0,
+        5,
+        json!({}),
+        json!([]),
+    )
+    .await;
+    fx.sql(
+        "UPDATE workflow.trigger_backfills SET paused = true, paused_at = now() WHERE flow_id = $1",
+        flow,
+    )
+    .await;
+    common::make_due(&fx.db, flow, "t", 1).await;
+
+    assert_eq!(fx.pass().await, fired(1), "the sibling fires");
+    let fired_by: Vec<String> = sqlx::query_scalar(
+        "SELECT execution_trigger->>'id' FROM workflow.executions WHERE flow_id = $1",
+    )
+    .bind(flow)
+    .fetch_all(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(fired_by, vec!["t".to_string()]);
+}

@@ -8,7 +8,7 @@ use egret_core::{Error, Result};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use crate::models::TriggerKind;
+use crate::models::{Schedule, TriggerKind};
 use crate::repo::{flow_cols, FlowRow};
 use crate::trigger::{
     tick, BackfillEnd, FixedClock, RecoverMissed, ScheduleTrigger, ScheduledExecution, TickOutcome,
@@ -203,8 +203,9 @@ async fn claim_and_fire(
 /// transaction and after the trigger row (the lock order of §3.11), the
 /// backfill row is advanced to the window's next tick or, when the next tick
 /// passes `window_end`, deleted, with the trigger's next date replaced by the
-/// regular schedule's resume (§3.6). The early returns (`take_off_queue`,
-/// `record_error`, a refused start) leave the backfill row alone.
+/// regular schedule's resume (§3.6). A refused start of a backfill tick ends
+/// the backfill the same way, resuming as a delete does (D25). The early
+/// returns (`take_off_queue`, `record_error`) leave the backfill row alone.
 async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
     let flow = match crate::spec::parse(&c.source) {
         Ok(f) => f,
@@ -277,6 +278,7 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
     };
     let mut t = tick(&resolved, &state, &inputs, &FixedClock(c.db_now));
 
+    let mut refused_backfill = false;
     let (fate, last_error) = match t.outcome {
         // The claim's `WHERE` and `tick` read the same `now()`, and a
         // disabled trigger returned above, so neither can happen. If one did,
@@ -318,6 +320,14 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
                 (Fate::Skipped, Some(why))
             }
             // Deterministic in the source: only the author's next save helps.
+            // A backfill tick's refusal ends the backfill instead (below): a
+            // save would re-derive the same tick with the same inputs, so
+            // taking the trigger off the queue would leave it stuck until the
+            // backfill was deleted (W7f §3.6, default decision 2026-10-15).
+            Started::Refused(why) if e.from_backfill && backfill.is_some() => {
+                refused_backfill = true;
+                (Fate::Errored, Some(format!("backfill ended: {why}")))
+            }
             Started::Refused(why) => {
                 take_off_queue(at.conn(), c, &why).await?;
                 return Ok(Fate::Errored);
@@ -334,13 +344,18 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
 
     let mut last_error = last_error;
     if let Some(b) = &backfill {
-        match &t.state.backfill {
+        let ended = match (&t.state.backfill, refused_backfill) {
+            // A refused start ends the backfill as a delete does: the unfired
+            // `current_tick` and the rest of the window are dropped.
+            (_, true) => Some(BackfillEnd::Deleted {
+                current_tick: b.current_tick,
+            }),
             // The window goes on: the row follows the trigger's next date.
             // `LEAST` (D21): `total_ticks` and this walk use the same cron
             // sequence, so the clamp should never bite; an unclamped write
             // that broke the table's CHECK would fail this transaction and
             // end every pass.
-            Some(next) => {
+            (Some(next), false) => {
                 sqlx::query(
                     "UPDATE workflow.trigger_backfills \
                         SET current_tick = $3, ticks_done = LEAST(ticks_done + 1, total_ticks), \
@@ -353,36 +368,26 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
                 .execute(at.conn())
                 .await
                 .map_err(db_err)?;
+                None
             }
             // The next tick passed `window_end`: the backfill is complete.
-            // The row goes, and the trigger's next date is the regular
-            // schedule's resume, not `tick`'s first tick after now.
-            None => {
-                sqlx::query(
-                    "DELETE FROM workflow.trigger_backfills WHERE flow_id = $1 AND trigger_id = $2",
-                )
-                .bind(c.flow_id)
-                .bind(&c.trigger_id)
-                .execute(at.conn())
-                .await
-                .map_err(db_err)?;
-                // §3.6: a value `from_model` does not know is `ALL`, egret's
-                // behaviour wherever it does not apply the property.
-                let policy = RecoverMissed::from_model(schedule.recover_missed_schedules.as_ref())
-                    .unwrap_or(RecoverMissed::All);
-                let from = TriggerState::resume_from(
-                    &resolved,
-                    b.previous_next_evaluation_date,
-                    BackfillEnd::Completed {
-                        window_end: b.window_end,
-                    },
-                );
-                t.state.next_evaluation_date =
-                    TriggerState::resume_after_backfill(&resolved, from, policy, c.db_now);
-                if t.state.next_evaluation_date.is_none() && last_error.is_none() {
-                    last_error = Some(super::never_fires(schedule.cron.as_deref(), c.db_now));
-                }
-            }
+            (None, false) => Some(BackfillEnd::Completed {
+                window_end: b.window_end,
+            }),
+        };
+        // Ended: the row goes, and the trigger's next date is the regular
+        // schedule's resume, not `tick`'s first tick after now.
+        if let Some(end) = ended {
+            sqlx::query(
+                "DELETE FROM workflow.trigger_backfills WHERE flow_id = $1 AND trigger_id = $2",
+            )
+            .bind(c.flow_id)
+            .bind(&c.trigger_id)
+            .execute(at.conn())
+            .await
+            .map_err(db_err)?;
+            (t.state.next_evaluation_date, last_error) =
+                backfill_ended(&resolved, schedule, b, end, c.db_now, last_error);
         }
     }
 
@@ -400,6 +405,36 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
     .await
     .map_err(db_err)?;
     Ok(fate)
+}
+
+/// Where the regular schedule resumes when backfill `b` ends (W7f §3.6), and
+/// the `last_error` to store with it.
+///
+/// `policy` is the trigger's `recoverMissedSchedules`; a value `from_model`
+/// does not know is `ALL`, egret's behaviour wherever it does not apply the
+/// property. No tick at all: off the queue (`None`) with `never_fires`.
+fn backfill_ended(
+    resolved: &ScheduleTrigger,
+    schedule: &Schedule,
+    b: &BackfillRow,
+    end: BackfillEnd,
+    now: DateTime<Utc>,
+    last_error: Option<String>,
+) -> (Option<DateTime<Utc>>, Option<String>) {
+    let policy = RecoverMissed::from_model(schedule.recover_missed_schedules.as_ref())
+        .unwrap_or(RecoverMissed::All);
+    let from = TriggerState::resume_from(resolved, b.previous_next_evaluation_date, end);
+    let next = TriggerState::resume_after_backfill(resolved, from, policy, now);
+    let last_error = match (next, last_error) {
+        // Both kept, `never_fires` first: it is the state the row stays in.
+        (None, Some(why)) => Some(format!(
+            "{}; {why}",
+            super::never_fires(schedule.cron.as_deref(), now)
+        )),
+        (None, None) => Some(super::never_fires(schedule.cron.as_deref(), now)),
+        (Some(_), why) => why,
+    };
+    (next, last_error)
 }
 
 /// Create the execution inside a savepoint, so that whatever goes wrong in it
@@ -632,8 +667,12 @@ pub mod hold {
     pub fn arm(flow: Uuid) -> Hold {
         let reached = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
-        *ARMED.lock().expect("the hold's lock") =
-            Some((flow, Arc::clone(&reached), Arc::clone(&release)));
+        let mut armed = ARMED.lock().expect("the hold's lock");
+        debug_assert!(
+            armed.is_none(),
+            "the hold is armed twice: the first arm's pass would never be parked"
+        );
+        *armed = Some((flow, Arc::clone(&reached), Arc::clone(&release)));
         Hold { reached, release }
     }
 
@@ -657,6 +696,71 @@ mod tests {
     use super::*;
     use crate::trigger::Clock;
     use serde_json::json;
+
+    /// W7f review follow-up 2: a completed backfill whose regular schedule has
+    /// no tick left goes off the queue with `never_fires`, and says so even
+    /// when the last tick's outcome had already set a `last_error` (both are
+    /// kept, `never_fires` first: it is the state the row stays in).
+    ///
+    /// Pure, because no cron that ticks inside a window can run out of ticks
+    /// within `SEARCH_DAYS` of now through the database: `0 0 30 2 *` (no
+    /// tick ever) stands in for it.
+    #[test]
+    fn a_completion_with_no_tick_left_reports_never_fires() {
+        let src = "id: f\nnamespace: n\ntriggers:\n  - id: s\n    type: io.kestra.plugin.core.trigger.Schedule\n    cron: \"0 0 30 2 *\"\n    recoverMissedSchedules: NONE\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+        let flow = crate::spec::parse(src).unwrap();
+        let TriggerKind::Schedule(schedule) = &flow.triggers[0].kind else {
+            panic!("a schedule")
+        };
+        let resolved = ScheduleTrigger::resolve(&flow.triggers[0]).unwrap();
+        let now: DateTime<Utc> = "2026-10-15T00:00:00Z".parse().unwrap();
+        let b = BackfillRow {
+            id: Uuid::nil(),
+            flow_id: Uuid::nil(),
+            trigger_id: "s".into(),
+            window_start: now - chrono::Duration::days(2),
+            window_end: now - chrono::Duration::days(1),
+            current_tick: now - chrono::Duration::days(1),
+            paused: false,
+            inputs: json!({}),
+            labels: json!([]),
+            previous_next_evaluation_date: now - chrono::Duration::days(3),
+            total_ticks: 1,
+            ticks_done: 0,
+        };
+        let end = BackfillEnd::Completed {
+            window_end: b.window_end,
+        };
+        let never = crate::scheduler::never_fires(Some("0 0 30 2 *"), now);
+
+        let (next, err) = backfill_ended(&resolved, schedule, &b, end, now, None);
+        assert_eq!(next, None, "off the queue");
+        assert_eq!(err.as_deref(), Some(never.as_str()));
+
+        let (next, err) = backfill_ended(
+            &resolved,
+            schedule,
+            &b,
+            end,
+            now,
+            Some("skipped: the last tick".into()),
+        );
+        assert_eq!(next, None);
+        assert_eq!(
+            err.as_deref(),
+            Some(format!("{never}; skipped: the last tick").as_str())
+        );
+    }
+
+    /// W7f review follow-up 4: arming the hold twice is a test bug (the
+    /// first arm's pass would never be parked).
+    #[test]
+    #[should_panic(expected = "armed twice")]
+    fn arming_the_hold_twice_is_a_bug() {
+        let flow = Uuid::new_v4();
+        let _first = hold::arm(flow);
+        let _second = hold::arm(flow);
+    }
 
     /// Each captured execution is reproduced from the cron alone: the state
     /// is initialised a minute before the capture, ticked at the captured
