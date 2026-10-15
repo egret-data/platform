@@ -6,6 +6,16 @@ import { ApiError } from "@/api/client";
 import type { TriggerKindDto, TriggerPageDto, WorkflowListTriggersParams } from "@/api/generated/model";
 import { useWorkflowListFlows, useWorkflowListNamespaces, useWorkflowListTriggers } from "@/api/generated/workflow/workflow";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -202,6 +212,7 @@ export default function TriggersList() {
   const sw = useTriggerSwitch(ws, { onBulkAnswered: () => setSelection(new Set()) });
   const bf = useBackfill(ws, { onBulkAnswered: () => setSelection(new Set()) });
   const [creating, setCreating] = useState<TableRowData | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const reasonsId = useId();
   // The selection and the bulk refusals belong to the page and filters they were made on:
   // another page or filter drops both, and coming back does not bring them back.
@@ -377,7 +388,7 @@ export default function TriggersList() {
               <Play aria-hidden />
               Resume backfills
             </ReasonButton>
-            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-delete-backfills`} variant="outline" busy={bulkBusy} onClick={() => bf.removeMany(selected)}>
+            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-delete-backfills`} variant="outline" busy={bulkBusy} onClick={() => setConfirmingDelete(true)}>
               <Trash2 aria-hidden />
               Delete backfills
             </ReasonButton>
@@ -392,6 +403,27 @@ export default function TriggersList() {
             ]}
           />
         </div>
+        <AlertDialog open={confirmingDelete} onOpenChange={setConfirmingDelete}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete {selected.length === 1 ? "this backfill" : `${selected.length} backfills`}?</AlertDialogTitle>
+              <AlertDialogDescription>
+                Their remaining ticks will not run. Executions already started stay.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => {
+                  setConfirmingDelete(false);
+                  bf.removeMany(selected);
+                }}
+              >
+                Delete backfills
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
         {bf.refusals.length > 0 ? (
           <Alert variant="destructive" data-testid="bulk-backfill-refusals">
             <AlertDescription className="grid gap-1">
