@@ -59,8 +59,10 @@
 //! downloads the new tags on its next poll and reports the version only on
 //! the poll after (live result §2.6 I1, where a 2-interval deadline left a
 //! 0.7 s margin). The third interval is that margin (user ruling 2026-10-15).
-//! Trino was measured to tolerate a 65 s hold with no client retry (live
-//! result §1 Q1); 90 s was not measured.
+//! Trino 483's Iceberg REST client was measured to tolerate the full 90 s
+//! hold with no client timeout and no retry (live result §3.5: held commits
+//! of 54-60 s, and a refusal at 90.2 s server side, 91.2 s at the client, in
+//! one request).
 //!
 //! # Refusal
 //!
@@ -78,6 +80,16 @@
 //! the winner relied on. Holds are capped ([`DEFAULT_MAX_HOLDS`]); past the
 //! cap a request is refused at once, so a burst cannot grow Postgres
 //! connections without bound.
+//!
+//! The best-effort path (step 0, a profile with no classified column) has a
+//! cap of its own, of the same size, taken before its lock connection (final
+//! review I-1). Past it, or with the view's lock busy, the commit passes at
+//! once with no EXPLAIN and no lock connection, and one bounded pooled
+//! transaction records the lineage `failed` if the view's lock is free.
+//!
+//! Once a hold has its lock, the rest of the request runs in a task of its
+//! own (final review I-2): a client that disconnects mid-wait drops only the
+//! handler future, so the wait, the commit and any compensation still run.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -126,12 +138,22 @@ pub fn default_hold_limit() -> Duration {
 
 /// The hold (module doc). Install it with
 /// [`crate::mount::mount_catalog_engine`].
+///
+/// `Clone` is cheap (every field is shared): a held request's work after its
+/// lock runs on a clone, in a task of its own (final review I-2).
+#[derive(Clone)]
 pub struct ViewHold {
     db: Db,
     policy: PolicyStore,
     runner: Arc<dyn ExplainRunner>,
     limit: Duration,
     holds: Arc<Semaphore>,
+    /// The best-effort path's own cap (final review I-1): a commit on a
+    /// profile with no classified column takes one of these before its lock
+    /// connection and its EXPLAIN, or passes through without either. A
+    /// sibling of `holds`, so a burst of unclassified commits cannot refuse a
+    /// classified one.
+    best_effort: Arc<Semaphore>,
     max_holds: usize,
 }
 
@@ -145,6 +167,7 @@ impl ViewHold {
             runner,
             limit: default_hold_limit(),
             holds: Arc::new(Semaphore::new(DEFAULT_MAX_HOLDS)),
+            best_effort: Arc::new(Semaphore::new(DEFAULT_MAX_HOLDS)),
             max_holds: DEFAULT_MAX_HOLDS,
         }
     }
@@ -156,10 +179,12 @@ impl ViewHold {
         self
     }
 
-    /// The same hold with another cap on holds in flight.
+    /// The same hold with another cap on holds in flight, and the same cap
+    /// on best-effort records in flight.
     #[must_use]
     pub fn with_max_holds(mut self, n: usize) -> Self {
         self.holds = Arc::new(Semaphore::new(n));
+        self.best_effort = Arc::new(Semaphore::new(n));
         self.max_holds = n;
         self
     }
@@ -227,7 +252,8 @@ impl Refusal {
     }
     fn locked(limit: Duration) -> Self {
         Self(format!(
-            "another change to this view is being held; retry when it has finished (at most {} s)",
+            "another change to this view is being held, or the lineage sweep is recomputing it; \
+             retry when it has finished (at most {} s)",
             seconds(limit)
         ))
     }
@@ -1228,23 +1254,33 @@ impl ViewHold {
             Ok(h) => h,
             Err(refusal) => return refusal.into_response(),
         };
-        // NM2: the stored metadata is read under the view's lock. The commit's
-        // own path and request metadata (the guard put it there) are taken
-        // out first, since a `Body` is not `Sync`.
-        let path = req.uri().path().to_string();
-        let metadata = request_metadata(&req);
-        let response = match self
-            .definition_of(loader, pending, path, metadata, deadline)
-            .await
-        {
-            Ok(def) => {
-                self.judge(deadline, r.warehouse_id, &catalog, ns, name, def, req, next)
-                    .await
-            }
-            Err(e) => unjudgeable(e).into_response(),
-        };
-        held.release().await;
-        response
+        // I-2: everything under the lock runs in its own task, so a client
+        // that disconnects mid-wait cannot skip the compensation.
+        let this = self.clone();
+        let loader = loader.clone();
+        let (ns, name) = (ns.to_string(), name.to_string());
+        let warehouse_id = r.warehouse_id;
+        uncancellable(async move {
+            // NM2: the stored metadata is read under the view's lock. The
+            // commit's own path and request metadata (the guard put it there)
+            // are taken out first, since a `Body` is not `Sync`.
+            let path = req.uri().path().to_string();
+            let metadata = request_metadata(&req);
+            let response = match this
+                .definition_of(&loader, pending, path, metadata, deadline)
+                .await
+            {
+                Ok(def) => {
+                    this.judge(deadline, warehouse_id, &catalog, &ns, &name, def, req, next)
+                        .await
+                }
+                Err(e) if create => Refusal::create_unjudgeable(e).into_response(),
+                Err(e) => Refusal::unjudgeable(e).into_response(),
+            };
+            held.release().await;
+            response
+        })
+        .await
     }
 
     /// The definition `pending` names. N3: a stored version (or schema) is
@@ -1294,9 +1330,16 @@ impl ViewHold {
     /// Step 0 (Task 9 fix round 1, amended ruling): on a profile with no
     /// classified column, the lineage is computed best-effort and recorded
     /// after lakekeeper answers 2xx: computed (with the columns) on success,
-    /// `failed` with the reason on any failure. It NEVER refuses, and takes
-    /// no view lock: what it records only lets a later classification find
-    /// the view.
+    /// `failed` with the reason on any failure. It NEVER refuses. What it
+    /// records only lets a later classification find the view.
+    ///
+    /// It takes the view's lock (Task 9 fix round 2, N2), as the hold and the
+    /// sweep do, so two writers cannot record out of order; the lock is a
+    /// session-level advisory lock on a connection detached from the pool, so
+    /// it is taken only under a permit of its own cap (final review I-1).
+    /// With no permit free, or the lock busy, it skips the EXPLAIN, lets the
+    /// commit through at once, and records `failed` without waiting
+    /// ([`record_failed_if_free`]).
     #[allow(clippy::too_many_arguments)]
     async fn best_effort(
         &self,
@@ -1314,25 +1357,38 @@ impl ViewHold {
             return next.run(req).await;
         };
         let view = view_ref(&catalog, ns, name);
-        // Fix round 2 (N2): the record takes the view's lock, as the hold and
-        // the sweep do, so two writers cannot record out of order. Busy: no
-        // EXPLAIN, the commit passes at once, and a background task records
-        // `failed` once the other writer is done.
         let key = lock_key(prefix, ns, name);
-        let lock = match try_view_lock(&self.db, &key).await {
-            Ok(Some(conn)) => conn,
-            Ok(None) | Err(_) => {
-                let response = next.run(req).await;
-                if response.status().is_success() {
-                    tokio::spawn(record_failed_when_free(
-                        self.db.clone(),
-                        key,
-                        self.limit,
-                        view,
-                    ));
-                }
-                return response;
+        // I-1: the permit before the lock connection. The permit and the
+        // connection both live until this function returns.
+        let lock = match self.best_effort.clone().try_acquire_owned() {
+            Ok(permit) => match try_view_lock(&self.db, &key).await {
+                Ok(Some(conn)) => Some((permit, conn)),
+                Ok(None) | Err(_) => None,
+            },
+            Err(_) => None,
+        };
+        let Some((_permit, lock)) = lock else {
+            let response = next.run(req).await;
+            if response.status().is_success() {
+                // Bounded (pooled connection, `RECORD_LOCK_WAIT`), so no
+                // task outlives a few seconds.
+                let db = self.db.clone();
+                tokio::spawn(async move {
+                    match record_failed_if_free(db, key, view.clone()).await {
+                        Ok(true) => {}
+                        Ok(false) => tracing::info!(
+                            ?view,
+                            "view hold: the view's lock is busy; its lineage is left to the sweep"
+                        ),
+                        Err(e) => tracing::warn!(
+                            ?view,
+                            error = %e,
+                            "view hold: the failed lineage was not recorded; the sweep repairs it"
+                        ),
+                    }
+                });
             }
+            return response;
         };
         let outcome: Option<(RecordedLineage, Option<Vec<String>>)> = match change {
             Change::Untouched => None,
@@ -1583,12 +1639,19 @@ impl ViewHold {
             Ok(h) => h,
             Err(refusal) => return refusal.into_response(),
         };
-        let response = next.run(req).await;
-        if response.status().is_success() {
-            self.forget_dropped(r.warehouse_id, &view).await;
-        }
-        held.release().await;
-        response
+        // I-2: a drop lakekeeper committed is cleaned up even when the client
+        // has gone.
+        let this = self.clone();
+        let warehouse_id = r.warehouse_id;
+        uncancellable(async move {
+            let response = next.run(req).await;
+            if response.status().is_success() {
+                this.forget_dropped(warehouse_id, &view).await;
+            }
+            held.release().await;
+            response
+        })
+        .await
     }
 
     /// The drop's cleanup, in one transaction. A failure is logged: what it
@@ -1686,11 +1749,17 @@ impl ViewHold {
             Ok(h) => h,
             Err(refusal) => return refusal.into_response(),
         };
-        let response = self
-            .move_view(deadline, warehouse_id, &src, &dst, req, next)
-            .await;
-        held.release().await;
-        response
+        // I-2: the rename's wait, commit and compensation survive a client
+        // that disconnects.
+        let this = self.clone();
+        uncancellable(async move {
+            let response = this
+                .move_view(deadline, warehouse_id, &src, &dst, req, next)
+                .await;
+            held.release().await;
+            response
+        })
+        .await
     }
 
     /// The rename's hold, under its lock.
@@ -1852,38 +1921,57 @@ async fn try_view_lock(db: &Db, key: &str) -> Result<Option<sqlx::PgConnection>,
     }
 }
 
-/// Fix round 2 (N2): a best-effort commit that found the view's lock busy
-/// records the view's lineage `failed` once the lock is free (waiting at most
-/// `wait`), so the sweep a later classification triggers recomputes it. Its
-/// own EXPLAIN was skipped, so any lineage the other writer records may
-/// describe a version older than this commit: `failed` is the honest state.
-/// If the lock stays busy, it records anyway and says so.
-async fn record_failed_when_free(db: Db, key: String, wait: Duration, view: ViewRef) {
+/// How long [`record_failed_if_free`] waits for the view-tag lock.
+const RECORD_LOCK_WAIT: Duration = EXPLAIN_BUDGET;
+
+/// A best-effort commit that skipped its EXPLAIN (no permit, or the view's
+/// lock busy) records the view's lineage `failed`, so the sweep a later
+/// classification triggers recomputes it. Its own EXPLAIN was skipped, so a
+/// lineage another writer records may describe a version older than this
+/// commit: `failed` is the honest state.
+///
+/// Final review I-1 (and Task 9 N8): one pooled transaction, never a
+/// detached connection or a wait for the view's lock. It tries the view's
+/// lock as a transaction-level advisory lock (the same key space as the
+/// session-level one the hold and the sweep take); busy answers `Ok(false)`
+/// and leaves the lineage to the sweep, at most 15 minutes. The view-tag lock
+/// wait is bounded by `lock_timeout` ([`RECORD_LOCK_WAIT`]) set on this same
+/// transaction.
+async fn record_failed_if_free(db: Db, key: String, view: ViewRef) -> Result<bool, sqlx::Error> {
     let detail = "another change to this view was being recorded at the same time; \
                   the next sweep recomputes its lineage";
-    let result = async {
-        let mut conn = db.pool.acquire().await?.detach();
-        sqlx::query("SELECT set_config('lock_timeout', $1, false)")
-            .bind(format!("{}ms", wait.max(MIN_LOCK_WAIT).as_millis()))
-            .execute(&mut conn)
-            .await?;
-        let locked = sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+    let mut tx = db.pool.begin().await?;
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(format!("{}ms", RECORD_LOCK_WAIT.as_millis()))
+        .execute(&mut *tx)
+        .await?;
+    let free: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(&key)
-            .execute(&mut conn)
-            .await;
-        if let Err(e) = &locked {
-            tracing::warn!(?view, error = %e, "view hold: the view stayed busy; recording failed anyway");
-        }
-        let mut tx = db.pool.begin().await?;
-        egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut tx).await?;
-        lineage::record_lineage_failure(&mut tx, &view, detail).await?;
-        tx.commit().await?;
-        let _ = conn.close().await;
-        Ok::<(), sqlx::Error>(())
+            .fetch_one(&mut *tx)
+            .await?;
+    if !free {
+        tx.rollback().await?;
+        return Ok(false);
     }
-    .await;
-    if let Err(e) = result {
-        tracing::warn!(?view, error = %e, "view hold: the failed lineage was not recorded");
+    egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut tx).await?;
+    lineage::record_lineage_failure(&mut tx, &view, detail).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Final review I-2: run a held request's work after its lock in a task of
+/// its own. When the client disconnects, hyper drops the handler future, but
+/// dropping a `JoinHandle` does not cancel its task, so the wait, the commit
+/// and any compensation still run, under the lock and the permit the task
+/// owns.
+async fn uncancellable<F>(work: F) -> Response
+where
+    F: std::future::Future<Output = Response> + Send + 'static,
+{
+    match tokio::spawn(work).await {
+        Ok(response) => response,
+        Err(e) => Refusal::internal("hold task", e).into_response(),
     }
 }
 
@@ -2277,5 +2365,48 @@ mod tests {
                 r.0
             );
         }
+    }
+
+    /// Final review I-1 (Task 9 N8): the failed-lineage record of a busy
+    /// best-effort commit waits for the view-tag lock no longer than its
+    /// bound. Before the fix its transaction had no `lock_timeout` (that was
+    /// set on the other, detached connection), so it waited as long as the
+    /// view-tag lock stayed taken.
+    #[tokio::test]
+    async fn the_failed_record_waits_for_the_view_tag_lock_no_longer_than_its_bound() {
+        let Some(dsn) = egret_test_db::url().await else {
+            return;
+        };
+        let db = Db::connect(&dsn, 4).await.expect("connect");
+        let view = view_ref(
+            "vh_bound_cat",
+            "s",
+            &format!("v_{}", Uuid::new_v4().simple()),
+        );
+        let key = lock_key("vh-bound", "s", &view.name);
+        let mut blocker = db.pool.begin().await.expect("blocker");
+        egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut blocker)
+            .await
+            .expect("take the view-tag lock");
+
+        let start = Instant::now();
+        let outcome = tokio::time::timeout(
+            RECORD_LOCK_WAIT + Duration::from_secs(5),
+            record_failed_if_free(db.clone(), key, view.clone()),
+        )
+        .await;
+        let took = start.elapsed();
+        blocker.rollback().await.expect("release");
+
+        let outcome = outcome.expect("the record waited past its bound");
+        assert!(outcome.is_err(), "the lock wait timed out: {outcome:?}");
+        assert!(took < RECORD_LOCK_WAIT + Duration::from_secs(2), "{took:?}");
+        let mut conn = db.pool.acquire().await.expect("conn");
+        assert_eq!(
+            lineage::recorded_lineage(&mut conn, &view)
+                .await
+                .expect("read"),
+            RecordedLineage::Missing,
+        );
     }
 }

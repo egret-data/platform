@@ -1503,7 +1503,9 @@ async fn a_busy_view_lock_refuses_at_once_and_an_unclassified_view_takes_none() 
     let (status, body) = got.expect("the hold blocked on the lock");
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(
-        message(&body).contains("another change to this view is being held"),
+        message(&body).contains(
+            "another change to this view is being held, or the lineage sweep is recomputing it"
+        ),
         "{body}"
     );
     assert!(start.elapsed() < Duration::from_secs(2));
@@ -1733,10 +1735,10 @@ async fn a_refused_rename_leaves_nothing_on_the_destination() {
 /// takes the view's lock. While another writer holds it (here the test), the
 /// hold does not EXPLAIN a version it might record out of order. The commit
 /// goes through at once, with no wait (an unclassified view never waits on a
-/// lock), and once the lock is free the lineage is recorded `failed`, for the
-/// sweep, rather than a lineage that may be stale.
+/// lock). Final review I-1: no task waits for the lock to free, either; the
+/// other writer records, and the sweep repairs a lineage that may be stale.
 #[tokio::test]
-async fn a_best_effort_record_under_a_busy_view_lock_is_failed() {
+async fn a_best_effort_record_under_a_busy_view_lock_leaves_the_lineage_to_the_sweep() {
     let Some(env) = env(LIMIT, false).await else {
         return;
     };
@@ -1759,6 +1761,9 @@ async fn a_best_effort_record_under_a_busy_view_lock_is_failed() {
         0,
         "no EXPLAIN under a busy lock"
     );
+    // The commit's one try at recording runs in the background, while the
+    // other writer still holds the view.
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(
         env.lineage("v1").await,
         RecordedLineage::Missing,
@@ -1770,11 +1775,115 @@ async fn a_best_effort_record_under_a_busy_view_lock_is_failed() {
         .await
         .unwrap();
 
+    // Final review I-1: no task waits for the lock to free. The other writer
+    // records, and what it records is left to the sweep.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        env.lineage("v1").await,
+        RecordedLineage::Missing,
+        "no background task waited for the view's lock"
+    );
+    sqlx::Connection::close(other).await.unwrap();
+}
+
+/// Final review I-1: a burst of best-effort commits beyond the cap. The
+/// commit that holds the permit runs its EXPLAIN; every other commit passes
+/// through at once, with no EXPLAIN and no lock connection of its own, and its
+/// lineage is recorded `failed` (its view's lock is free) for the sweep.
+#[tokio::test]
+async fn a_best_effort_burst_beyond_the_cap_explains_once_and_never_waits() {
+    let Some(env) = env_with(Opts {
+        classified: false,
+        max_holds: 1,
+        ..Opts::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let names = ["b0", "b1", "b2", "b3"];
+    let start = Instant::now();
+    let (first, rest) = tokio::join!(
+        env.create(names[0], "SELECT id, ssn FROM pii WHERE SLOW1"),
+        async {
+            // The first commit holds the permit across its 1.5 s EXPLAIN.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let started = Instant::now();
+            let sql = "SELECT id, ssn FROM pii WHERE SLOW1";
+            let (a, b, c) = tokio::join!(
+                env.create(names[1], sql),
+                env.create(names[2], sql),
+                env.create(names[3], sql)
+            );
+            (vec![a, b, c], started.elapsed())
+        }
+    );
+    let (others, others_took) = rest;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    for (status, body) in &others {
+        assert_eq!(*status, StatusCode::OK, "{body}");
+    }
+    assert_eq!(
+        env.runner.calls.load(Ordering::SeqCst),
+        1,
+        "only the commit holding the permit runs an EXPLAIN"
+    );
+    assert!(
+        others_took < Duration::from_millis(1200),
+        "the commits past the cap waited: {others_took:?}"
+    );
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert_eq!(
+        env.lineage(names[0]).await,
+        computed(&["pii"], &env.catalog)
+    );
     let e = &env;
-    eventually("the lineage is recorded failed", || async move {
-        matches!(e.lineage("v1").await, RecordedLineage::Failed { .. })
+    for name in &names[1..] {
+        eventually("a commit past the cap is recorded failed", || async move {
+            matches!(e.lineage(name).await, RecordedLineage::Failed { .. })
+        })
+        .await;
+    }
+}
+
+/// Final review I-2: a client that disconnects during the wait (hyper drops
+/// the handler future) does not skip the compensation. The hold's work after
+/// the lock runs in a task the request's cancellation cannot drop, so the
+/// wait still times out, lakekeeper is never asked, and the rows and lineage
+/// step 3 wrote are removed.
+#[tokio::test]
+async fn a_request_cancelled_during_the_wait_still_compensates() {
+    let limit = Duration::from_secs(3);
+    let Some(env) = env(limit, true).await else {
+        return;
+    };
+    let before = env.tag_version().await;
+    // No plugin polls, so the hold waits out its deadline.
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(1000),
+        env.create("v1", "SELECT id, ssn FROM pii"),
+    )
+    .await;
+    assert!(
+        cancelled.is_err(),
+        "the request was meant to be cut mid-wait"
+    );
+    assert!(
+        !env.assignments("v1").await.is_empty(),
+        "step 3 wrote the view's tags before the wait"
+    );
+
+    let e = &env;
+    eventually("the cancelled hold compensated", || async move {
+        e.assignments("v1").await.is_empty() && e.lineage("v1").await == RecordedLineage::Missing
     })
     .await;
+    assert!(env.view("v1").await.is_none(), "lakekeeper never committed");
+    assert!(env.reached("POST /namespaces/s/views").is_empty());
+    assert!(
+        env.tag_version().await > before,
+        "compensation bumped again"
+    );
 }
 
 /// Task 9 fix round 2, N4: the hold's write waits for the view-tag lock no
