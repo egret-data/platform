@@ -1113,6 +1113,11 @@ async fn an_unparsable_source_keeps_the_backfill_and_a_fix_re_derives() {
         .await
         .unwrap();
 
+    // `reconcile` is global: it syncs every flow of the shared test database,
+    // other tests' flows included (as `flow_trigger_sync` already does). That
+    // is harmless (a sync of an unchanged flow changes nothing, test 9), and
+    // no per-flow entry point exists; a save cannot stand in, since a save
+    // writes a source that parses.
     egret_workflow::scheduler::reconcile(&fx.db.pool)
         .await
         .expect("reconcile");
@@ -1271,4 +1276,111 @@ async fn a_re_snap_with_no_tick_keeps_the_stored_date() {
         queue(&fx.db, flow.id, "s").await.map(|q| q.0),
         Some(Some(y(2020, 1)))
     );
+}
+
+/// Spec §3.7: a schedule that no longer resolves (`lateMaximumDelay`) is off
+/// the queue as before, and its backfill is kept and frozen; the save that
+/// resolves again re-derives from it.
+#[tokio::test]
+async fn a_schedule_that_no_longer_resolves_freezes_its_backfill() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.create(&one_schedule("* * * * *", "hi")).await;
+    let w0 = origin(&fx.db).await;
+    stage_minutes(&fx.db, flow.id, "s", w0, 3, w0 + Duration::hours(3)).await;
+    let staged = common::backfill_row(&fx.db, flow.id, "s").await;
+
+    let refused = flow_yaml(
+        "",
+        &schedule("s", "*/2 * * * *", "    lateMaximumDelay: PT1H\n"),
+        "hi",
+    );
+    let t = &parses(&refused).triggers[0];
+    assert!(
+        egret_workflow::trigger::ScheduleTrigger::resolve(t).is_err(),
+        "control: `lateMaximumDelay` is refused"
+    );
+    fx.update(flow.id, &refused).await;
+    let (next, _, err) = queue(&fx.db, flow.id, "s").await.expect("the row");
+    assert_eq!(next, None, "off the queue");
+    assert!(err.is_some(), "with the refusal");
+    assert_eq!(
+        common::backfill_row(&fx.db, flow.id, "s").await,
+        staged,
+        "the backfill is kept, frozen"
+    );
+
+    fx.update(flow.id, &one_schedule("*/2 * * * *", "hi")).await;
+    let cur = w0 + Duration::minutes(4);
+    assert_eq!(
+        queue(&fx.db, flow.id, "s").await,
+        Some((Some(cur), None, None)),
+        "the save that resolves re-derives from the backfill"
+    );
+    assert_eq!(
+        backfill(&fx.db, flow.id, "s")
+            .await
+            .map(|b| (b.0, b.1, b.2)),
+        Some((cur, 3 + 3, 3))
+    );
+}
+
+/// D19's boundary with ticks already done: `ticks_done + left == 10000` is
+/// kept, `10001` ends the backfill. Under `*/2`, a window `[w0, w0 +
+/// 10000min]` holds 5001 ticks; one done puts `current_tick` at w0+2, and
+/// under `* * * * *` 9999 ticks are left (10000 in all); one more minute of
+/// window leaves 10000 (10001 in all).
+#[tokio::test]
+async fn the_cap_counts_the_ticks_already_done() {
+    let Some(fx) = fx().await else { return };
+    let w0 = origin(&fx.db).await - Duration::days(8);
+    let prev = origin(&fx.db).await + Duration::hours(3);
+    for (flow_id, extra, kept) in [("f", 0, true), ("g", 1, false)] {
+        let flow = fx
+            .create_as(flow_id, &one_schedule("*/2 * * * *", "hi"))
+            .await;
+        common::stage_backfill(
+            &fx.db,
+            flow.id,
+            "s",
+            (w0, w0 + Duration::minutes(10_000 + extra)),
+            w0,
+            5001,
+            serde_json::json!({}),
+            serde_json::json!([]),
+        )
+        .await;
+        move_backfill(&fx.db, flow.id, "s", w0 + Duration::minutes(2), 1).await;
+        sqlx::query(
+            "UPDATE workflow.trigger_backfills SET previous_next_evaluation_date = $2 WHERE flow_id = $1",
+        )
+        .bind(flow.id)
+        .bind(prev)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+
+        fx.update(flow.id, &one_schedule("* * * * *", "hi")).await;
+
+        if kept {
+            assert_eq!(
+                backfill(&fx.db, flow.id, "s").await,
+                Some((w0 + Duration::minutes(2), 10_000, 1, prev)),
+                "1 + 9999 == 10000: kept"
+            );
+            assert_eq!(
+                queue(&fx.db, flow.id, "s").await,
+                Some((Some(w0 + Duration::minutes(2)), None, None))
+            );
+        } else {
+            assert_eq!(
+                backfill(&fx.db, flow.id, "s").await,
+                None,
+                "1 + 10000: ended"
+            );
+            assert_eq!(
+                queue(&fx.db, flow.id, "s").await,
+                Some((Some(prev), None, Some(P2.to_string())))
+            );
+        }
+    }
 }

@@ -414,6 +414,12 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
 /// does not know is `ALL`, egret's behaviour wherever it does not apply the
 /// property. No tick at all: off the queue (`None`) with `never_fires`.
 ///
+/// The stored `previous_next_evaluation_date` is first snapped to the
+/// current cron (its first tick at or after it; default decision
+/// 2026-10-15): a cron changed since the backfill began must not queue the
+/// regular schedule on a date that is not one of its ticks. No tick to snap
+/// to: off the queue with `never_fires` (D20).
+///
 /// Shared with `sync`, which ends a backfill the same way on a cron change
 /// (§3.7: complete, or over the cap).
 pub(super) fn backfill_ended(
@@ -426,8 +432,12 @@ pub(super) fn backfill_ended(
 ) -> (Option<DateTime<Utc>>, Option<String>) {
     let policy = RecoverMissed::from_model(schedule.recover_missed_schedules.as_ref())
         .unwrap_or(RecoverMissed::All);
-    let from = TriggerState::resume_from(resolved, b.previous_next_evaluation_date, end);
-    let next = TriggerState::resume_after_backfill(resolved, from, policy, now);
+    let next = resolved
+        .first_tick_at_or_after(b.previous_next_evaluation_date)
+        .and_then(|prev| {
+            let from = TriggerState::resume_from(resolved, prev, end);
+            TriggerState::resume_after_backfill(resolved, from, policy, now)
+        });
     let last_error = match (next, last_error) {
         // Both kept, `never_fires` first: it is the state the row stays in.
         (None, Some(why)) => Some(format!(

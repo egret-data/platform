@@ -293,13 +293,9 @@ enum Rederived {
     },
 }
 
-/// The pure half of [`rederive`].
-///
-/// The regular schedule's stored date is re-snapped to the new cron
-/// **before** the resume reads it, so the resume never lands on a date that
-/// is not a tick of the schedule it resumes; with no tick to snap to (D20)
-/// the resume finds none and the trigger goes off the queue with
-/// `never_fires`.
+/// The pure half of [`rederive`]. An ended backfill resumes through
+/// `fire::backfill_ended`, which snaps the stored date to the new cron (and
+/// goes off the queue with `never_fires` when there is no tick, D20).
 fn decide(
     st: &ScheduleTrigger,
     schedule: &Schedule,
@@ -308,23 +304,7 @@ fn decide(
 ) -> Rederived {
     let snap = st.first_tick_at_or_after(b.previous_next_evaluation_date);
     let ended = |end: BackfillEnd, why: Option<String>| {
-        let (next, last_error) = match snap {
-            Some(prev) => {
-                let snapped = BackfillRow {
-                    previous_next_evaluation_date: prev,
-                    ..b.clone()
-                };
-                super::fire::backfill_ended(st, schedule, &snapped, end, now, why)
-            }
-            None => {
-                let never = super::never_fires(schedule.cron.as_deref(), now);
-                let last_error = match why {
-                    Some(why) => format!("{never}; {why}"),
-                    None => never,
-                };
-                (None, Some(last_error))
-            }
-        };
+        let (next, last_error) = super::fire::backfill_ended(st, schedule, b, end, now, why);
         Rederived::Ended { next, last_error }
     };
     let Some(cur) = st

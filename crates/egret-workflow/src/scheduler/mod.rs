@@ -147,9 +147,12 @@
 //! lock order stays flow, trigger rows, backfill rows. The rename deadlock
 //! below is unchanged by it: the save's `FOR UPDATE` on the flow against a
 //! pass's `KEY SHARE`, now met at this read rather than at the upsert.
-//! Proved by `tests/runtime.rs`'s
-//! `a_save_that_re_derives_a_backfill_waits_for_a_pause_on_the_flow_row` for
-//! the flow-row serialisation with a (SQL-staged) pause.
+//! `tests/runtime.rs`'s
+//! `a_save_that_re_derives_a_backfill_waits_for_a_pause_on_the_flow_row`
+//! proves that a save re-deriving a backfill and a pause of it (SQL standing
+//! in for the route, in its lock order) serialise on the flow row and do not
+//! lose each other's writes: the end state has both `paused = true` and the
+//! re-derived dates.
 //!
 //! **`resync` is serialised on the flow row, without waiting.** Every other
 //! caller holds the flow row while `sync` runs (a save `FOR NO KEY UPDATE` or
