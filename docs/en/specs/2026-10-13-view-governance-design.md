@@ -32,6 +32,7 @@ Effective access is therefore the union of the direct path and the view path. It
 | R5 | Privileges of the lineage principal (2026-10-14, after Task 5 measured that EXPLAIN needs `select`) | **It reads everything egret governs, and only on engines egret provisions.** Revised 2026-10-14 (Task 7 fix round 1): no stored policy names `egret-lineage`. egret adds its material **at download time, per plugin**, and only for a plugin of a Trino engine egret provisions in JWT delegation mode. That material is `use`+`select` on every governed catalog, an exception from every served deny and allow-write, a leading no-transform item in every served mask and row filter (hand-written included), and a deny of every other access type. Every other plugin gets the stored policies, so lineage fails closed there. Only egret holds its credential, and egret's client sends nothing but EXPLAIN as it. |
 | R6 | An empty lineage (2026-10-14) | **Refuse the view, and sweep.** A view whose EXPLAIN reports no input table is refused with a reason. The B3 sweep re-runs EXPLAIN on a schedule to catch branches the optimizer pruned. |
 | R4 | The window between a view existing and its tags reaching the engines | **Hold the commit until every engine has the tags.** If that cannot be done in time, refuse the view, with a reason. |
+| R7 | The hold limit (2026-10-15, after Task 11 measured holds of up to two poll intervals, finding I1) | **3 × the plugin poll interval** (`RANGER_POLL_INTERVAL_MS`), 90 s today. The confirmation rule is unchanged: every plugin id seen within the last three intervals reports `lastKnownVersion ≥ V`. The EXPLAIN stays at most 5 s inside the deadline. |
 
 ## Part A — StarRocks
 
@@ -39,7 +40,13 @@ StarRocks has no tag service (upstream `starrocks#67458`), so a clearance compil
 
 ### A1. Keep the column deny for direct reads
 
-There is no change here. The deny on `{catalog, database, table, column}`, with the cleared users in `denyExceptions` and the access type `select`, keeps refusing an uncleared direct read with `ERROR 5204`.
+There is no change here. The deny on `{catalog, database, table, column}`, with the cleared users in `denyExceptions` and the access type `select`, stays.
+
+**Measured on 4.1.6 (Task 11, finding C2): once A2's mask exists, the deny does not decide a direct read.** StarRocks asks Ranger for no access decision on a column that a mask transforms: the FE's debug log asked `policyType=0` only for the unmasked column of the read. So an uncleared direct read of a classified column returns `NULL` from the A2 mask, not `ERROR 5204`. No value leaks either way. The deny still matters:
+- for a column with no mask, for example a download from before the first compile that adds A2;
+- for engines that do check access on a masked column (Trino does).
+
+`explain` mirrors the engine (Part C).
 
 ### A2. Add a MASK_NULL policy per classified column, folded with the rule masks
 
@@ -163,21 +170,21 @@ Two paths commit before the view's tags are on the engines. Both close within on
 
 A held write waits for the view-tag lock no longer than its deadline (`lock_timeout`, at least 1 s). Past it, the write rolls back and the view is refused with a retry message (fix round 2).
 
-**Throughput (Task 8 fix rounds).** One held request has one deadline of 2 × the poll interval (60 s) from its arrival, covering its lock, its EXPLAIN (at most 5 s) and its wait. At most 8 holds run at once per egret process. Any view change on a catalog with classified columns takes a hold (a create, a replace or a rename, whether or not its own tables are classified). A ninth one at once is refused with a retry message; it does not queue. So a run of many concurrent classified view changes (a dbt run with more than 8 threads, for example) sees some refusals, and they succeed on retry. Task 11 measures the refusal rate.
+**Throughput (Task 8 fix rounds).** One held request has one deadline of 3 × the poll interval (90 s, ruling R7) from its arrival, covering its lock, its EXPLAIN (at most 5 s) and its wait. At most 8 holds run at once per egret process. Any view change on a catalog with classified columns takes a hold (a create, a replace or a rename, whether or not its own tables are classified). A ninth one at once is refused with a retry message; it does not queue. So a run of many concurrent classified view changes (a dbt run with more than 8 threads, for example) sees some refusals, and they succeed on retry. Task 11 measures the refusal rate.
 
 **Refusal.** egret refuses the create or replace, rolls back the tag assignments and the lineage, and answers with an error the engine shows the user, in each of these cases:
 - the lineage cannot be computed (EXPLAIN fails, or no engine is reachable);
-- an engine does not confirm the new tag version within the hold limit, which is 2 × the plugin poll interval (60 s with today's 30 s).
+- an engine does not confirm the new tag version within the hold limit, which is 3 × the plugin poll interval (90 s with today's 30 s; ruling R7, 2026-10-15; it was 2 × until Task 11 measured a 0.7 s margin).
 
 The message names the reason and what to do about it. A view that egret cannot judge is never committed untagged.
 
-**Cost.** A `CREATE VIEW` that reads classified data waits up to one poll interval. A view that reads no classified table is not delayed.
+**Cost.** A `CREATE VIEW` that reads classified data waits one to two poll intervals (measured in Task 11: 33.8–60.4 s with a 30 s interval). A plugin downloads the new tags on its next poll, and reports `lastKnownVersion ≥ V` only on the poll after, which is what confirms. A view that reads no classified table is not delayed.
 
 **Where to hook (measured, live result §1 Q1).** An axum layer in front of the mounted Iceberg router (`egret-catalog-engine/src/mount.rs`).
 - lakekeeper's contract verification is not used. It never runs on view create, and on a commit it runs inside an open Postgres write transaction.
 - Trino 483 sends create as `POST …/namespaces/{ns}/views`, and replace as `POST …/views/{v}` carrying `add-view-version`.
 - `ALTER VIEW … AS` is not in Trino 483's grammar.
-- A 65 s hold succeeded with no client retry, and a 409 is printed verbatim by Trino.
+- A 65 s hold succeeded with no client retry, and a 409 is printed verbatim by Trino. The 90 s limit of R7 was not measured against Trino's client.
 
 **Requests the layer must handle.**
 - **A commit with no new view version** (`COMMENT ON VIEW`, or a replace whose updates are empty) passes through with no lineage work.
@@ -273,7 +280,8 @@ These limits are stated in the guide and on the classification page:
   - The differential corpus gains a folded-mask profile and a materialized-view deny profile.
   - Both run against the real jars at every modelled pair, and must show 0 disagreements.
 - **`explain`.**
-  - For an uncleared reader of a classified StarRocks column, explain names the clearance in two places: as the deny for a direct read, and as `MASK_NULL` when the request is masked.
+  - For an uncleared reader of a classified StarRocks column, explain answers with the clearance's `MASK_NULL` ("returns NULL"), attributed to the clearance, and gives no `select` verdict: StarRocks checks no access on a column a mask transforms (A1, Task 12). This is labelled StarRocks behaviour. A classified column with no mask still shows the deny.
+  - Explain does not answer `create materialized view` (Task 12, M-4). The A3 deny is engine-wide, so the page states the rule instead of a verdict for one database.
   - On Trino, a view column denied by a propagated tag names the classification and the base table that caused it, read from the stored lineage.
 - **Migration.**
   - A2 and A3 add policies, which count against the probe budget, so the plan measures the new worst shape against `MAX_PROBE_WORK`.

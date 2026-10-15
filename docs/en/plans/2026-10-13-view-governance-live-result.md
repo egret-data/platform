@@ -588,7 +588,8 @@ browser prints the same ("select Allowed … Tags that could decide here vgsecre
 **Minor:**
 
 - M-1: the guide says an uncleared reader gets `NULL` through an INVOKER view. On 4.1.6 it is refused (S1d),
-  which is fail-closed.
+  which is fail-closed. *(Task 12: the guide now says plain and nested views give `NULL` and an INVOKER view is
+  refused.)*
 - M-2: `COMMENT ON COLUMN` and a replace that adds no tag do not wait (0.45 s). This is correct behaviour; the
   prediction was wrong.
 - M-3: each Trino plugin sends **two** tag downloads per poll under one `pluginId` (138 requests for 64 polls).
@@ -638,3 +639,23 @@ browser prints the same ("select Allowed … Tags that could decide here vgsecre
 - **Untouched:** DB `egret`, every other `egret-dev-*` container, `egret-w7e-postgres`, and ports 5173, 5000 and
   8080.
 - **Worktree:** clean. The scratch render test was deleted, and no product code was changed.
+
+### 2.9 What Task 12 changed (2026-10-15)
+
+Not re-measured live; each change is pinned by tests (Task 12 report).
+
+- **I1:** the hold limit is 3 × the poll interval, 90 s (user ruling, spec R7). The confirmation rule is unchanged.
+  Spec B2 and the guide say a hold takes one to two intervals, and why.
+- **I2:** the served `egret-lineage` transform allows `alter` on `systemproperty` = `query_max_run_time` only.
+  Ordinary JWT users are not covered by this; see the Task 12 report for that finding.
+- **C2:** explain mirrors StarRocks: for a column a mask transforms it gives no `select` verdict and answers with
+  the mask ("returns NULL"), labelled engine-specific. A column with no mask still shows the deny. Trino is
+  unchanged. Spec A1 and the guide are corrected.
+- **C4:** the classification page's view warning states the measured behaviour.
+- **M-4 / N2:** explain no longer answers `create materialized view`; the page states the engine-wide rule.
+- **M-5:** the explain page's limits text names the StarRocks mask line instead of contradicting it.
+- **M-6:** the classification counts are labelled "BI objects": `assignment_count` counts BI objects only, never
+  catalog columns, base or derived.
+- **M-8:** an unknown `consumerType` on `POST /warehouses/{id}/roles` (and `/clients`) answers 400.
+- **I3, I4, I5:** documented in the guide as known limits with workarounds; fixed in a later package.
+- **C1, C3:** fixed on main in a separate PR (`fix/tag-policies-service-def`).

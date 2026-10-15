@@ -27,7 +27,7 @@
 **Trino lineage and the commit hold**
 - **Lineage is table-level and comes only from the engine** (`EXPLAIN (TYPE IO, FORMAT JSON)`). egret does not parse view SQL.
 - **The `egret-lineage` principal** is used only for `EXPLAIN`. egret's client refuses any other statement before it reaches the engine.
-- **Hold limit:** 2 × `egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS`, which is 60 s today.
+- **Hold limit:** 3 × `egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS`, which is 90 s today (user ruling 2026-10-15, spec R7; it was 2 ×, 60 s, until Task 11's finding I1).
 - **Confirmation** waits for every plugin id seen for the service within the last 3 poll intervals.
 
 **Process**
