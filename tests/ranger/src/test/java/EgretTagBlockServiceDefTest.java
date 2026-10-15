@@ -55,8 +55,9 @@ import org.junit.Test;
  * <p>Both halves are asserted against the real jar: with {@code tag.json} a policy on one tag does
  * not touch a column carrying only the other; with {@code trino.json} it does. The second half is
  * the fail-open, kept as a measurement so a {@code ranger.version} bump that changes it is loud —
- * and so {@code egret_ranger_eval}'s refusal of a block whose def has no {@code tag} resource
- * ({@code UndecidableCause::TagBlockServiceDefHasNoTagResource}) cites something measured.
+ * and so {@code egret_ranger_eval::eval::may_be_tag_candidate}, which returns {@code true} (no
+ * narrowing) for a block whose def has no top-level {@code tag} resource, cites something
+ * measured.
  */
 public class EgretTagBlockServiceDefTest {
 

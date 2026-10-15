@@ -10,6 +10,13 @@
 //! shape, and one whose tag service is `tag`-typed) move by exactly one, and a
 //! profile with no `tagService`, a profile with `"tagService": null`, and the
 //! tag services themselves do not move.
+//!
+//! **What this does NOT reproduce:** at real migration time 0190 runs under
+//! 0182's trigger (`WHEN NEW.type = 'tag'`); here it runs under 0191's, which
+//! fires for every bumped row and cascades to that row's own linkers. The
+//! fixture has no profile naming a linker, so both triggers give the same
+//! result; the test pins the migration's PREDICATE (which rows it bumps), not
+//! its interaction with whichever trigger is live.
 use egret_metastore::Db;
 use egret_policy::{seed_tag, seed_trino, PolicyStore};
 use serde_json::json;

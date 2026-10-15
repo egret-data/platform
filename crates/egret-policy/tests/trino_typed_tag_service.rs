@@ -272,8 +272,9 @@ async fn the_overlap_unit_of_a_trino_typed_tag_service_is_its_linker() {
 
 /// **A cycle terminates.** With 0182's `type = 'tag'` guard gone, two `trino`
 /// profiles naming each other would cascade A → B → A → … until Postgres'
-/// stack-depth limit aborted the writer's transaction. `pg_trigger_depth()`
-/// stops the cascade after one hop: each side moves exactly once.
+/// stack-depth limit aborted the writer's transaction. 0191's re-entry flag
+/// (`egret.tag_cascade`) stops the cascade after one hop: each side moves
+/// exactly once.
 #[tokio::test]
 async fn two_profiles_naming_each_other_bump_once_and_terminate() {
     let Some(f) = fixture().await else { return };
@@ -303,4 +304,72 @@ async fn two_profiles_naming_each_other_bump_once_and_terminate() {
         (1, 1),
         "one hop each way: the writer bumps A, the trigger bumps B, and B's own firing stops"
     );
+}
+
+/// **A bump issued from ANOTHER trigger still reaches the linker** (review I1).
+///
+/// 0191 first stopped the cascade with `pg_trigger_depth() > 1`. That also
+/// dropped every cascade whose originating bump ran inside some other trigger —
+/// and `feat/view-governance`'s 0187 (`engines_binding_bumps_profiles`) is one
+/// such source. The guard is now a transaction-local "inside my own cascade"
+/// flag, so only the cascade's own re-entry is stopped. Everything here runs in
+/// one transaction that is rolled back, so the throwaway trigger never outlives
+/// the test.
+#[tokio::test]
+async fn a_bump_from_another_trigger_still_reaches_the_linker() {
+    let Some(f) = fixture().await else { return };
+    let mut tx = f.db.pool.begin().await.unwrap();
+    for stmt in [
+        "CREATE TEMP TABLE tt_bump_source (n int) ON COMMIT DROP",
+        "CREATE FUNCTION pg_temp.tt_bump() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           UPDATE policy.authz_services SET policy_version = policy_version + 1 \
+            WHERE id = TG_ARGV[0]::bigint; \
+           RETURN NULL; \
+         END $$",
+    ] {
+        sqlx::raw_sql(stmt).execute(&mut *tx).await.unwrap();
+    }
+    // TG_ARGV must be a literal, so the id is formatted in; it is an i64.
+    let create_trigger = format!(
+        "CREATE TRIGGER tt_bump_t AFTER INSERT ON tt_bump_source \
+         FOR EACH ROW EXECUTE FUNCTION pg_temp.tt_bump('{}')",
+        f.tag_svc
+    );
+    sqlx::raw_sql(sqlx::AssertSqlSafe(create_trigger))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    async fn v(tx: &mut sqlx::PgConnection, id: i64) -> i64 {
+        sqlx::query_scalar("SELECT policy_version FROM policy.authz_services WHERE id = $1")
+            .bind(id)
+            .fetch_one(tx)
+            .await
+            .unwrap()
+    }
+    let (t0, l0, b0) = (
+        v(&mut tx, f.tag_svc).await,
+        v(&mut tx, f.linker).await,
+        v(&mut tx, f.bystander).await,
+    );
+    sqlx::raw_sql("INSERT INTO tt_bump_source VALUES (1)")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let (t1, l1, b1) = (
+        v(&mut tx, f.tag_svc).await,
+        v(&mut tx, f.linker).await,
+        v(&mut tx, f.bystander).await,
+    );
+    tx.rollback().await.unwrap();
+
+    assert_eq!(t1 - t0, 1, "the throwaway trigger bumped the tag service");
+    assert_eq!(
+        l1 - l0,
+        1,
+        "a tag-service bump that originates inside another trigger must still reach the \
+         profile that downloads it as tagPolicies"
+    );
+    assert_eq!(b1, b0, "the bystander must not move");
 }
