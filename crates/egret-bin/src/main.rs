@@ -2813,6 +2813,98 @@ mod catalog_guard_audience_tests {
             .expect_err("a data-api token must not reach the catalog");
         assert_eq!(err.0, axum::http::StatusCode::UNAUTHORIZED, "{}", err.1);
     }
+
+    /// Final review M-7: the view hold passes an unknown prefix through
+    /// unheld, which is safe only because this guard refuses any prefix that
+    /// is not byte-identical to the warehouse's `lakekeeper_warehouse_id`.
+    /// lakekeeper itself accepts the uppercase, simple and `urn:` forms of the
+    /// same UUID, so each of those must be a 403 here, before the hold runs.
+    /// The canonical prefix is the control: it passes the prefix check and is
+    /// refused only for having no grant.
+    #[tokio::test]
+    async fn an_alias_of_the_warehouse_prefix_is_refused_before_the_hold() {
+        let Some(g) = guard().await else {
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+            return;
+        };
+        let pool = g.catalog.pool();
+        let s = uuid::Uuid::new_v4().simple().to_string();
+        let ws: uuid::Uuid =
+            sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,'G') RETURNING id")
+                .bind(format!("guard-ws-{s}"))
+                .fetch_one(pool)
+                .await
+                .expect("workspace");
+        let sc: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+             VALUES ($1,'us-east-1','b','AK') RETURNING id",
+        )
+        .bind(format!("guard-sc-{s}"))
+        .fetch_one(pool)
+        .await
+        .expect("storage connection");
+        let lakekeeper_id = uuid::Uuid::new_v4();
+        let warehouse = format!("guard_wh_{s}");
+        sqlx::query(
+            "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id, \
+             lakekeeper_warehouse_id) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(&warehouse)
+        .bind(ws)
+        .bind(sc)
+        .bind(lakekeeper_id.to_string())
+        .execute(pool)
+        .await
+        .expect("warehouse");
+        let km = g.keys.active().await.expect("active key");
+        let token = egret_machine_idp::sign_claims(
+            &km,
+            &serde_json::json!({
+                "sub": "c", "aud": CATALOG_AUDIENCE, "warehouse": warehouse,
+                "roles": ["guard-role"], "exp": chrono::Utc::now().timestamp() + 600,
+            }),
+        )
+        .expect("sign");
+
+        let canonical = lakekeeper_id.hyphenated().to_string();
+        let err = g
+            .check(
+                "POST",
+                &format!("/{canonical}/namespaces/s/views"),
+                None,
+                Some(&token),
+            )
+            .await
+            .expect_err("no grant");
+        assert!(
+            err.1.contains("has no grants"),
+            "the canonical prefix passed: {}",
+            err.1
+        );
+
+        for alias in [
+            canonical.to_uppercase(),
+            lakekeeper_id.simple().to_string(),
+            format!("urn:uuid:{canonical}"),
+        ] {
+            let err = g
+                .check(
+                    "POST",
+                    &format!("/{alias}/namespaces/s/views"),
+                    None,
+                    Some(&token),
+                )
+                .await
+                .expect_err("an alias prefix must be refused");
+            assert_eq!(
+                err.0,
+                axum::http::StatusCode::FORBIDDEN,
+                "{alias}: {}",
+                err.1
+            );
+            assert_eq!(err.1, "token is not scoped to this warehouse", "{alias}");
+        }
+    }
 }
 
 /// Lists a StarRocks database's materialized views through the engine-mgmt
