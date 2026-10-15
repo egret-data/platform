@@ -287,6 +287,7 @@ async fn setup() -> Option<Fixture> {
         sessions: sessions.clone(),
         engine_egret_url: "http://egret:8080".into(),
         pdp,
+        recompiler: Arc::new(egret_perm_compile::PermRecompiler),
     });
     let resource_tags = egret_bi::resource_tags_router().with_state(st);
     let ranger = egret_policy::ranger_router(RangerState {

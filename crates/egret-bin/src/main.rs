@@ -2158,6 +2158,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         engine_egret_url: engine_egret_url.clone(),
         pdp: pdp.clone(),
+        // Final review I-3: an editor write to a StarRocks data mask refolds the
+        // clearance masks in the same transaction.
+        recompiler: std::sync::Arc::new(egret_perm_compile::PermRecompiler),
     });
 
     // Data-permission model surface (SP4a Task 9): grants/rules/explain, plus

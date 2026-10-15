@@ -1113,3 +1113,224 @@ async fn a_stored_per_database_mv_deny_from_the_first_draft_is_swept_on_recompil
         "the engine-wide deny replaces it"
     );
 }
+
+/// No engine bindings: the editor routes these tests drive never read them.
+struct NoEngines;
+#[async_trait::async_trait]
+impl egret_policy::EngineBindingReader for NoEngines {
+    async fn list_engine_bindings(
+        &self,
+    ) -> Result<Vec<egret_policy::EngineBinding>, egret_policy::EngineReadError> {
+        Ok(vec![])
+    }
+    async fn engine_catalog_names(
+        &self,
+        _e: Uuid,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        Ok(vec![])
+    }
+    async fn warehouse_schemas(
+        &self,
+        _w: Uuid,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        Ok(vec![])
+    }
+    async fn warehouse_tables(
+        &self,
+        _w: Uuid,
+        _s: &str,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        Ok(vec![])
+    }
+    async fn warehouse_columns(
+        &self,
+        _w: Uuid,
+        _s: &str,
+        _t: &str,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        Ok(vec![])
+    }
+}
+
+/// The policy editor's router as egret-bin mounts it (with the real
+/// recompile seam), and a platform admin's session token.
+async fn editor(db: &Db, policy: &PolicyStore) -> (axum::Router, String) {
+    use std::sync::Arc;
+    let sessions = egret_auth::session::SessionService::new(
+        db.clone(),
+        chrono::Duration::hours(24),
+        chrono::Duration::minutes(60),
+    );
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let uid = egret_auth::users::UserRepo::new(db.clone())
+        .insert_local(&format!("{}@egret.local", unique("refold")), "T", "x")
+        .await
+        .expect("insert user")
+        .0;
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $1, id, 'platform', NULL FROM roles \
+          WHERE scope='platform' AND name='platform_admin'",
+    )
+    .bind(uid)
+    .execute(&db.pool)
+    .await
+    .expect("grant platform_admin");
+    let token = sessions
+        .create(egret_core::UserId(uid), "test", "127.0.0.1")
+        .await
+        .expect("session")
+        .token;
+    let app = egret_policy::policy_admin_router().with_state(egret_policy::PolicyAdminState {
+        store: policy.clone(),
+        engines: Arc::new(NoEngines),
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        groups: egret_auth::groups::GroupRepo::new(db.clone()),
+        sessions,
+        engine_egret_url: "http://egret:8080".into(),
+        pdp,
+        recompiler: Arc::new(egret_perm_compile::PermRecompiler),
+    });
+    (app, token)
+}
+
+async fn call(
+    app: &axum::Router,
+    token: &str,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (axum::http::StatusCode, Value) {
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
+    let req = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("Cookie", format!("egret_session={token}"))
+        .header("content-type", "application/json")
+        .body(match body {
+            Some(b) => axum::body::Body::from(b.to_string()),
+            None => axum::body::Body::empty(),
+        })
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// Final review I-3: the clearance mask folds, for each cleared user, what the
+/// profile's OTHER masks give them, hand-written ones included. Every editor
+/// write of a hand-written data mask on the profile (enable, edit, disable,
+/// delete) refolds it in the same transaction. Before the fix only an
+/// unrelated grant, rule or tag write did, so tightening a hand-written mask
+/// left the cleared users on the old, looser fold (fail-open). (The editor's
+/// create is refused on a compiled profile, which a recompile stamps
+/// `generated`, so the hand-written mask is seeded as an operator's from
+/// before; it starts disabled.)
+#[tokio::test]
+async fn every_editor_write_of_a_hand_written_mask_refolds_the_clearance_mask() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, _key) = new_tag(&db).await;
+    tag_column(&db, tag_id, f.warehouse_id, "orders", "ssn").await;
+    let (ann, bob) = cleared_pair(&db, tag_id).await;
+    let name = unique("hand-mask");
+    let lvl =
+        |v: &str| serde_json::json!({"values": [v], "isExcludes": false, "isRecursive": false});
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+         VALUES ($1, $2, $3, false, 'operator') RETURNING id",
+    )
+    .bind(f.service_id)
+    .bind(&name)
+    .bind(serde_json::json!({
+        "name": name, "service": "x", "serviceType": "starrocks",
+        "policyType": 1, "isEnabled": false,
+        "resources": {"catalog": lvl(&f.catalog_name), "database": lvl("sales"),
+                      "table": lvl("orders"), "column": lvl("ssn")},
+        "dataMaskPolicyItems": [{
+            "users": [], "groups": ["public"], "roles": [],
+            "accesses": [{"type": "select", "isAllowed": true}],
+            "dataMaskInfo": {"dataMaskType": "MASK"}
+        }],
+        "policyItems": [], "denyPolicyItems": []
+    }))
+    .fetch_one(&db.pool)
+    .await
+    .expect("hand-written mask");
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+    let mut both = vec![ann, bob];
+    both.sort();
+    let folded = |cleared: &str| {
+        vec![
+            (both.clone(), vec![], cleared.to_string()),
+            (vec![], vec!["public".to_string()], "MASK_NULL".to_string()),
+        ]
+    };
+    let fold = || async {
+        mask_items(
+            &clearance_mask(&db, f.service_id, tag_id, &f.catalog_name, "orders", "ssn")
+                .await
+                .expect("clearance mask"),
+        )
+    };
+    assert_eq!(fold().await, folded("MASK_NONE"), "the hand mask is off");
+
+    let (app, token) = editor(&db, &f.policy).await;
+    let profile: String =
+        sqlx::query_scalar("SELECT name FROM policy.authz_services WHERE id = $1")
+            .bind(f.service_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("profile name");
+    let form = |mask: &str| {
+        serde_json::json!({
+            "kind": "masking", "name": name, "service": profile, "isEnabled": true,
+            "resources": {"catalog": {"values": [f.catalog_name]}, "database": {"values": ["sales"]},
+                          "table": {"values": ["orders"]}, "column": {"values": ["ssn"]}},
+            "items": [{"groups": ["public"], "maskType": mask}]
+        })
+    };
+
+    // Enable: tightens the cleared users' outcome.
+    let enabled = |on: bool| serde_json::json!({ "enabled": on });
+    let uri = format!("/policies/{id}/enabled");
+    let (status, body) = call(&app, &token, "PUT", &uri, Some(enabled(true))).await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(fold().await, folded("MASK"), "enable refolds");
+
+    // Edit.
+    let (status, body) = call(
+        &app,
+        &token,
+        "PUT",
+        &format!("/policies/{id}"),
+        Some(form("MASK_HASH")),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(fold().await, folded("MASK_HASH"), "edit refolds");
+
+    // Disable, then enable.
+    let (status, body) = call(&app, &token, "PUT", &uri, Some(enabled(false))).await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(fold().await, folded("MASK_NONE"), "disable refolds");
+    let (status, body) = call(&app, &token, "PUT", &uri, Some(enabled(true))).await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(fold().await, folded("MASK_HASH"), "enable refolds");
+
+    // Delete.
+    let (status, body) = call(&app, &token, "DELETE", &format!("/policies/{id}"), None).await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(fold().await, folded("MASK_NONE"), "delete refolds");
+}

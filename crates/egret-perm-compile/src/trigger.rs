@@ -1706,6 +1706,41 @@ pub async fn lock_services_in_tx(
         .map_err(db_err)
 }
 
+/// The policy editor's recompile seam (final review I-3): an editor write that
+/// changes a data mask on a StarRocks profile recompiles that profile in the
+/// editor's own transaction, so the clearance mask's fold of the profile's
+/// other masks is never stale (read [`egret_policy::ProfileRecompiler`]).
+/// A refusal of the recompile refuses the editor's write: an overlap with its
+/// structured body, an unfoldable mask as a 409 that says why.
+pub struct PermRecompiler;
+
+#[async_trait::async_trait]
+impl egret_policy::ProfileRecompiler for PermRecompiler {
+    async fn recompile_in_tx(
+        &self,
+        tx: &mut Transaction<'static, Postgres>,
+        service_ids: &[i64],
+    ) -> Result<(), egret_policy::PolicyHttpError> {
+        use egret_policy::PolicyHttpError;
+        match recompile_services_in_tx(tx, service_ids).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(match crate::overlap::refusal_body(&e) {
+                Some(body) => PolicyHttpError::Overlap { body },
+                None => match e {
+                    CompileError::Db(detail) => {
+                        tracing::error!(%detail, ?service_ids, "editor write: recompile failed");
+                        PolicyHttpError::Internal
+                    }
+                    other => PolicyHttpError::Conflict(format!(
+                        "the profile cannot be recompiled with this change, which its \
+                         classification masks depend on: {other}"
+                    )),
+                },
+            }),
+        }
+    }
+}
+
 /// Recompile every service in `service_ids` on the CALLER's open transaction.
 /// Stops at the first failure and propagates it, so the caller's `?` rolls the
 /// model write back with it: a grant or rule that is stored but never compiled

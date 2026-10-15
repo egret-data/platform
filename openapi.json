@@ -8858,7 +8858,7 @@
             }
           },
           "409": {
-            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the mask/row-filter body would form a rule overlap with another policy or compiled rule that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the sentence names both and suggests Override where a priority can fix it). An overlap body adds `code: \"rule_overlap\"`, `rules` (both members: a compiled rule's `id` and name, `id` null for a hand-written policy), `coordinate` and `kind` (`mask` | `row_filter`)",
+            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the mask/row-filter body would form a rule overlap with another policy or compiled rule that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the sentence names both and suggests Override where a priority can fix it). An overlap body adds `code: \"rule_overlap\"`, `rules` (both members: a compiled rule's `id` and name, `id` null for a hand-written policy), `coordinate` and `kind` (`mask` | `row_filter`), or the change is a data mask on a StarRocks profile and the profile cannot be recompiled with it (its classification masks fold the profile's other masks, so the write recompiles the profile in the same transaction and is refused when that recompile is)",
             "content": {
               "application/json": {
                 "schema": {
@@ -8932,7 +8932,7 @@
             }
           },
           "409": {
-            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
+            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the change is a data mask on a StarRocks profile and the profile cannot be recompiled with it (its classification masks fold the profile's other masks, so the write recompiles the profile in the same transaction and is refused when that recompile is)",
             "content": {
               "application/json": {
                 "schema": {
@@ -9018,7 +9018,7 @@
             }
           },
           "409": {
-            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
+            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the change is a data mask on a StarRocks profile and the profile cannot be recompiled with it (its classification masks fold the profile's other masks, so the write recompiles the profile in the same transaction and is refused when that recompile is)",
             "content": {
               "application/json": {
                 "schema": {

@@ -147,6 +147,7 @@ async fn env() -> Option<Env> {
         sessions: sessions.clone(),
         engine_egret_url: "http://egret:8080".into(),
         pdp: pdp.clone(),
+        recompiler: Arc::new(egret_perm_compile::PermRecompiler),
     });
     let app = perm_router()
         .with_state(PermState {

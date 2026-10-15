@@ -2172,6 +2172,58 @@ pub async fn set_policy_enabled_via(
     Ok(())
 }
 
+/// Delete policy `id` on the caller's connection (final review I-3: the policy
+/// editor recompiles a StarRocks profile in the same transaction). The
+/// refusals of [`PolicyStore::delete_policy`], in its order; a refusal leaves
+/// the caller's transaction to roll back.
+pub async fn delete_policy_via(
+    conn: &mut sqlx::PgConnection,
+    id: i64,
+) -> Result<(), PolicyStoreError> {
+    // Look the policy up BEFORE deleting — Task 8's guard must refuse the
+    // delete outright, not delete-then-refuse (which would leave the policy
+    // gone despite the 409).
+    let row: Option<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
+        r#"SELECT service_id, name FROM policy.authz_policies WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((service_id, current_name)) = row else {
+        return Err(PolicyStoreError::NotFound(format!("policy {id}")));
+    };
+    refuse_if_compiler_owned(conn, service_id, &current_name).await?;
+    refuse_if_infrastructure_owned(conn, id).await?;
+    // SP4d-3 Task 7 (review I-3): a migrated original is referenced by
+    // `perm.migrated_from.policy_id` (ON DELETE NO ACTION, migration 0181).
+    // Deleting it would make the undo impossible, so the violation is
+    // answered as an ownership refusal (409) naming the remedy, not a 500.
+    if let Err(e) = sqlx::query(r#"DELETE FROM policy.authz_policies WHERE id = $1"#)
+        .bind(id)
+        .execute(&mut *conn)
+        .await
+    {
+        if matches!(&e, sqlx::Error::Database(d)
+            if d.is_foreign_key_violation()
+                && d.constraint() == Some("migrated_from_policy_id_fkey"))
+        {
+            return Err(PolicyStoreError::CompilerOwned(format!(
+                "policy {current_name:?} was migrated into the permission model and is \
+                 kept, switched off, so the migration can be undone; undo the migration \
+                 before deleting it"
+            )));
+        }
+        return Err(e.into());
+    }
+    sqlx::query(
+        r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
+    )
+    .bind(service_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 /// One registry catalog: `(id, name)`.
 #[derive(Debug, sqlx::FromRow)]
 pub struct CatalogRow {
@@ -2369,55 +2421,8 @@ impl PolicyStore {
 
     pub async fn delete_policy(&self, id: i64) -> Result<(), PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
-        // Look the policy up BEFORE deleting — Task 8's guard must refuse the
-        // delete outright, not delete-then-refuse (which would leave the
-        // policy gone despite the 409).
-        let row: Option<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
-            r#"SELECT service_id, name FROM policy.authz_policies WHERE id = $1"#,
-        )
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some((service_id, current_name)) = row else {
-            tx.rollback().await?;
-            return Err(PolicyStoreError::NotFound(format!("policy {id}")));
-        };
-        if let Err(e) = refuse_if_compiler_owned(&mut tx, service_id, &current_name).await {
-            tx.rollback().await?;
-            return Err(e);
-        }
-        if let Err(e) = refuse_if_infrastructure_owned(&mut tx, id).await {
-            tx.rollback().await?;
-            return Err(e);
-        }
-        // SP4d-3 Task 7 (review I-3): a migrated original is referenced by
-        // `perm.migrated_from.policy_id` (ON DELETE NO ACTION, migration 0181).
-        // Deleting it would make the undo impossible, so the violation is
-        // answered as an ownership refusal (409) naming the remedy, not a 500.
-        if let Err(e) = sqlx::query(r#"DELETE FROM policy.authz_policies WHERE id = $1"#)
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-        {
-            if matches!(&e, sqlx::Error::Database(d)
-                if d.is_foreign_key_violation()
-                    && d.constraint() == Some("migrated_from_policy_id_fkey"))
-            {
-                tx.rollback().await?;
-                return Err(PolicyStoreError::CompilerOwned(format!(
-                    "policy {current_name:?} was migrated into the permission model and is \
-                     kept, switched off, so the migration can be undone; undo the migration \
-                     before deleting it"
-                )));
-            }
-            return Err(e.into());
-        }
-        sqlx::query(
-            r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
-        )
-        .bind(service_id)
-        .execute(&mut *tx)
-        .await?;
+        // A refusal drops `tx`, which rolls it back.
+        delete_policy_via(&mut tx, id).await?;
         tx.commit().await?;
         Ok(())
     }
