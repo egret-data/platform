@@ -46,6 +46,11 @@ fn literal_engine_refs(src: &str) -> Vec<String> {
         let mut from = 0;
         while let Some(off) = src[from..].find(needle) {
             let mut start = from + off;
+            let after = from + off + needle.len();
+            if !src[after..].starts_with(|c: char| c.is_ascii_alphanumeric()) {
+                from = after;
+                continue;
+            }
             // Take in any registry prefix (`docker.io/`, a mirror host).
             while start > 0 && ref_char(src[..start].chars().next_back().unwrap()) {
                 start -= src[..start].chars().next_back().unwrap().len_utf8();
@@ -226,4 +231,19 @@ fn the_frontend_names_only_pinned_engine_images_and_displays_the_server_defaults
         let literal = decl.split(';').next().unwrap().trim();
         assert_eq!(literal, format!("\"{value}\""), "{name}");
     }
+}
+
+#[test]
+fn a_regex_alternation_is_not_an_image_ref() {
+    let src = r#"if (/jdbc|sql|query|duckdb|postgres|trino|starrocks/.test(type)) return x;"#;
+    assert_eq!(literal_engine_refs(src), Vec::<String>::new());
+}
+
+#[test]
+fn an_unpinned_image_is_still_found() {
+    let src = r#"const img = "starrocks/fe-ubuntu:latest";"#;
+    assert_eq!(
+        literal_engine_refs(src),
+        vec!["starrocks/fe-ubuntu:latest".to_string()]
+    );
 }
