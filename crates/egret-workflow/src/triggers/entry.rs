@@ -248,15 +248,15 @@ fn entry(
 /// Where a schedule's missed ticks are counted from (D12): during a backfill
 /// the stored date is a window tick, so the regular ticks waiting are counted
 /// from the backfill's `previous_next_evaluation_date`; otherwise from the
-/// stored date.
+/// stored date. Off the queue (`next` is `None`) nothing is missed, backfill
+/// or not: `take_off_queue` keeps a backfill row, and an off-queue schedule
+/// offers no recovery.
 pub(crate) fn missed_from(
     next: Option<DateTime<Utc>>,
     backfill: Option<&BackfillStateRow>,
 ) -> Option<DateTime<Utc>> {
-    match backfill {
-        Some(b) => Some(b.previous_next_evaluation_date),
-        None => next,
-    }
+    let next = next?;
+    Some(backfill.map_or(next, |b| b.previous_next_evaluation_date))
 }
 
 fn backfill_dto(b: &BackfillStateRow) -> BackfillDto {
@@ -869,6 +869,23 @@ mod tests {
             r(one(&on, &off, true, false)),
             (false, Some(CannotBackfill::OffQueue))
         );
+        // Off the queue with a backfill (`take_off_queue` keeps the row):
+        // `off_queue` before `running`.
+        off.backfills
+            .insert((Uuid::nil(), "s".into()), backfill(now()));
+        assert_eq!(
+            r(one(&on, &off, true, false)),
+            (false, Some(CannotBackfill::OffQueue))
+        );
+        // `not_schedule` before `forbidden`; `flow_deleted` before `not_schedule`.
+        assert_eq!(
+            r(one(&hook, &st, false, false)),
+            (false, Some(CannotBackfill::NotSchedule))
+        );
+        assert_eq!(
+            r(one(&hook, &st, false, true)),
+            (false, Some(CannotBackfill::FlowDeleted))
+        );
         // A webhook carries no backfill.
         assert!(one(&hook, &st, true, false).backfill.is_none());
     }
@@ -911,6 +928,27 @@ mod tests {
             one(&on, &st, true, false).schedule.unwrap().missed_ticks,
             None
         );
+
+        // Off the queue with a backfill whose resume position has passed:
+        // `off_queue`, so nothing is missed (the enable dialog is not offered).
+        let mut off = StateRows::empty(now());
+        off.schedules.insert(
+            (Uuid::nil(), "s".into()),
+            ScheduleRow {
+                flow_id: Uuid::nil(),
+                trigger_id: "s".into(),
+                next_evaluation_date: None,
+                evaluated_at: None,
+                last_error: Some("gone".into()),
+            },
+        );
+        off.backfills.insert(
+            (Uuid::nil(), "s".into()),
+            backfill(minute - Duration::minutes(2)),
+        );
+        let s = one(&on, &off, true, false).schedule.unwrap();
+        assert!(s.off_queue);
+        assert_eq!(s.missed_ticks, None);
     }
 
     #[test]

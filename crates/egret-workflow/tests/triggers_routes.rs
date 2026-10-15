@@ -1532,7 +1532,7 @@ async fn re_enabling_during_a_backfill_keeps_its_place() {
         .iter()
         .map(|(id, r, _)| schedule_recovering(id, *r))
         .collect();
-    let triggers = format!("{triggers}{}", schedule("ahead"));
+    let triggers = format!("{triggers}{}{}", schedule("ahead"), schedule("offq"));
     let flow = common::seed_flow(&db, ws, user, &src("company.a", "bf", &triggers), "draft").await;
     let app = flagged_app(&db).await;
     let minute: chrono::DateTime<chrono::Utc> =
@@ -1560,6 +1560,18 @@ async fn re_enabling_during_a_backfill_keeps_its_place() {
     .await;
     common::stage_backfill(&db, flow, "ahead", (w0, w1), w0, 61, json!({}), json!([])).await;
     switch(&app, ws, user, flow, "ahead", true, false).await;
+    // Overdue, then taken off the queue during the backfill (as
+    // `take_off_queue` does: the backfill row stays).
+    common::make_due(&db, flow, "offq", 3).await;
+    common::stage_backfill(&db, flow, "offq", (w0, w1), w0, 61, json!({}), json!([])).await;
+    switch(&app, ws, user, flow, "offq", true, false).await;
+    sql(
+        &db,
+        "UPDATE workflow.triggers SET next_evaluation_date = NULL, last_error = 'gone' \
+          WHERE flow_id = $1 AND trigger_id = 'offq'",
+        flow,
+    )
+    .await;
     common::audit_mutations(&app);
 
     // Skip (`false`, or `NONE`): the date is kept; the resume position moves
@@ -1617,6 +1629,21 @@ async fn re_enabling_during_a_backfill_keeps_its_place() {
     let dates = backfill_dates(&db, flow, "ahead").await;
     switch(&app, ws, user, flow, "ahead", false, false).await;
     assert_eq!(backfill_dates(&db, flow, "ahead").await, dates);
+    assert_eq!(
+        common::audit_mutations(&app)[0].2,
+        json!({"recover_missed": false, "next_evaluation_date": null, "backfill_resume_from": null})
+    );
+
+    // Off the queue: the dialog is not offered, so a skip moves nothing --
+    // neither date -- and the entry counts no missed tick.
+    let row = schedule_row(&db, flow, "offq").await;
+    let dates = backfill_dates(&db, flow, "offq").await;
+    assert!(dates.1 <= minute, "offq: the resume position has passed");
+    let e = switch(&app, ws, user, flow, "offq", false, false).await;
+    assert_eq!(schedule_row(&db, flow, "offq").await, row);
+    assert_eq!(backfill_dates(&db, flow, "offq").await, dates);
+    assert_eq!(e["schedule"]["off_queue"], json!(true), "{e}");
+    assert_eq!(e["schedule"]["missed_ticks"], json!(null), "{e}");
     assert_eq!(
         common::audit_mutations(&app)[0].2,
         json!({"recover_missed": false, "next_evaluation_date": null, "backfill_resume_from": null})

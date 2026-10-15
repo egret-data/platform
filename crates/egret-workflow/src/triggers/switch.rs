@@ -253,15 +253,19 @@ pub(crate) async fn set_disabled(
             .await
             .map_err(db_err)?;
         if let Some(b) = backfill {
-            resume_moved_to = skip_backfill_resume(
-                &mut *conn,
-                flow,
-                t,
-                recover,
-                b.previous_next_evaluation_date,
-                db_now,
-            )
-            .await?;
+            // Off the queue (`take_off_queue` keeps the backfill row), no
+            // choice was offered: neither date moves.
+            if next.is_some() {
+                resume_moved_to = skip_backfill_resume(
+                    &mut *conn,
+                    flow,
+                    t,
+                    recover,
+                    b.previous_next_evaluation_date,
+                    db_now,
+                )
+                .await?;
+            }
         } else if next.is_some_and(|n| n <= db_now) {
             // A schedule that no longer resolves: its dates are left alone. Its
             // row is already off the queue, or `fire_due` takes it off (with the
