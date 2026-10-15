@@ -696,6 +696,52 @@ impl Cron {
         None
     }
 
+    /// The ticks `t` with `after < t <= until`, counted up to `cap`:
+    /// `(count, more)`, `more` meaning "there are more than `cap`".
+    ///
+    /// Exactly the sequence that repeated [`next_after`](Self::next_after)
+    /// walks from `after` -- the same days, the same `> previous` filter, the
+    /// same [`SEARCH_DAYS`] bound counted from each tick's day -- but each
+    /// day's candidates are built once, not once per tick: a seconds cron
+    /// builds 86,400 candidates per `next_after`, so counting 10,000 of its
+    /// ticks one call at a time costs 864 million (minutes of CPU in a debug
+    /// build, W7f Task 7). Pinned to the one-call-at-a-time walk by
+    /// `count_through_is_the_next_after_walk`.
+    pub fn count_through(&self, after: DateTime<Tz>, until: DateTime<Tz>, cap: u32) -> (u32, bool) {
+        let tz = after.timezone();
+        let mut last = after;
+        let mut day = after.naive_local().date();
+        // Days looked at since the walk's position (`after`, then the last
+        // tick), as `next_after` counts them from its own start.
+        let mut searched = 0i64;
+        let mut n = 0u32;
+        while searched < SEARCH_DAYS {
+            if self.date_matches(day) {
+                for c in self.candidates_on(tz, day) {
+                    if c <= last {
+                        continue;
+                    }
+                    if c > until {
+                        return (n, false);
+                    }
+                    if n == cap {
+                        return (n, true);
+                    }
+                    n += 1;
+                    last = c;
+                    // `next_after(c)` starts on `c`'s local date: this one.
+                    searched = 0;
+                }
+            }
+            let Some(next) = day.succ_opt() else {
+                break;
+            };
+            day = next;
+            searched += 1;
+        }
+        (n, false)
+    }
+
     /// The last tick **strictly before** `before`, or `None`.
     pub fn last_before(&self, before: DateTime<Tz>) -> Option<DateTime<Tz>> {
         let tz = before.timezone();
@@ -1441,22 +1487,11 @@ impl ScheduleTrigger {
     /// The ticks `t` with `from <= t <= at`, counted up to `cap`:
     /// `(count, more)` where `more` means "there are more than `cap`".
     pub fn ticks_through(&self, from: DateTime<Utc>, at: DateTime<Utc>, cap: u32) -> (u32, bool) {
-        let end = self.in_zone(at);
-        let mut n = 0u32;
-        let mut cur = self
-            .cron
-            .next_after(self.in_zone(from) - Duration::nanoseconds(1));
-        while let Some(t) = cur {
-            if t > end {
-                break;
-            }
-            if n == cap {
-                return (n, true);
-            }
-            n += 1;
-            cur = self.cron.next_after(t);
-        }
-        (n, false)
+        self.cron.count_through(
+            self.in_zone(from) - Duration::nanoseconds(1),
+            self.in_zone(at),
+            cap,
+        )
     }
 
     /// `Schedule.handleMaxDelay`.
@@ -1753,6 +1788,78 @@ mod tests {
             z.last_tick_at_or_before(at("2026-06-15T20:00:00Z")),
             Some(at("2026-06-15T19:00:00Z"))
         );
+    }
+
+    /// The one-call-at-a-time walk `count_through` replaces: the oracle.
+    fn ticks_through_by_next_after(
+        s: &ScheduleTrigger,
+        from: DateTime<Utc>,
+        at: DateTime<Utc>,
+        cap: u32,
+    ) -> (u32, bool) {
+        let end = s.in_zone(at);
+        let mut n = 0u32;
+        let mut cur = s
+            .cron
+            .next_after(s.in_zone(from) - Duration::nanoseconds(1));
+        while let Some(t) = cur {
+            if t > end {
+                break;
+            }
+            if n == cap {
+                return (n, true);
+            }
+            n += 1;
+            cur = s.cron.next_after(t);
+        }
+        (n, false)
+    }
+
+    /// `count_through` answers what the `next_after` walk answers: across both
+    /// of a zone's DST changes (a gap and an overlap), for a seconds cron, a
+    /// sparse cron, a cron with no tick, at and around the cap, and for a
+    /// window that starts or ends exactly on a tick.
+    #[test]
+    fn count_through_is_the_next_after_walk() {
+        let crons: [(&str, bool, Option<&str>); 6] = [
+            ("*/7 * * * * *", true, Some("Europe/Berlin")),
+            ("*/1 * * * *", false, Some("Europe/Berlin")),
+            ("30 2 * * *", false, Some("Europe/Berlin")),
+            ("0 2 * * *", false, None),
+            ("0 0 29 2 *", false, None),
+            ("0 0 30 2 *", false, None),
+        ];
+        let windows = [
+            // Two minutes around each of Berlin's changes (01:00Z both days).
+            ("2026-03-29T00:59:00Z", "2026-03-29T01:01:00Z"),
+            ("2026-10-25T00:59:00Z", "2026-10-25T01:01:00Z"),
+            // Berlin's spring-forward and fall-back days, a few hours each.
+            ("2026-03-29T00:00:00Z", "2026-03-29T03:00:00Z"),
+            ("2026-10-24T23:00:00Z", "2026-10-25T02:30:00Z"),
+            // On a tick at both ends, and a multi-year span for the sparse ones.
+            ("2026-06-15T10:00:00Z", "2026-06-15T10:00:00Z"),
+            ("2026-06-15T10:00:00Z", "2026-06-17T02:00:00Z"),
+            ("2024-01-01T00:00:00Z", "2032-03-01T00:00:00Z"),
+        ];
+        for (cron, secs, tz) in crons {
+            let s = sched(cron, secs, tz);
+            for (i, (from, to)) in windows.into_iter().enumerate() {
+                for cap in [0, 1, 5, 400, 10_000] {
+                    // The oracle builds a whole day's candidates per tick
+                    // (12,960 for the seconds cron, 1,440 for the minutely
+                    // one): the seconds cron gets the two-minute windows
+                    // only, the minutely one the caps up to 400.
+                    if (secs && i > 1) || (cron.starts_with("*/1 ") && cap > 400) {
+                        continue;
+                    }
+                    assert_eq!(
+                        s.ticks_through(at(from), at(to), cap),
+                        ticks_through_by_next_after(&s, at(from), at(to), cap),
+                        "{cron} {tz:?} [{from}, {to}] cap {cap}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

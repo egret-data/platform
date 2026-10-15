@@ -1,6 +1,8 @@
 //! Reading triggers (W7e spec §3.5, §3.6): a flow's, and the workspace's.
 //! Switching them on and off at runtime (§3.3, §3.7) is [`switch`], behind
-//! the two `PUT` routes in [`routes`].
+//! the two `PUT` routes in [`routes`]. A schedule's backfill (W7f §3.4,
+//! §3.5) is created, paused, resumed and deleted by [`backfill`], behind the
+//! five routes in [`backfill_routes`].
 //!
 //! # What is read, from where
 //!
@@ -33,6 +35,8 @@
 //! CPU at the bound must not pin a runtime worker that also runs the
 //! scheduler, the reaper and lease renewal.
 
+pub(crate) mod backfill;
+pub(crate) mod backfill_routes;
 pub(crate) mod entry;
 pub(crate) mod routes;
 pub(crate) mod state;

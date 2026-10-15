@@ -786,15 +786,17 @@ pub struct SetTriggersDisabledRequest {
 pub struct BulkResultDto {
     pub flow_id: Uuid,
     pub trigger_id: String,
-    /// Switched (and committed).
+    /// Switched, or the backfill paused, resumed or deleted (and committed).
     pub ok: bool,
     /// Why not: `not_found`, `source_does_not_parse`,
     /// `trigger_disabled_in_source`, `trigger_not_supported`,
-    /// `recover_missed_unknown`.
+    /// `recover_missed_unknown` (the switch); `not_found`,
+    /// `source_does_not_parse`, `backfill_not_supported`, `no_backfill` (the
+    /// backfill routes).
     pub code: Option<String>,
     /// The refusal's sentence.
     pub message: Option<String>,
-    /// The trigger's entry after the switch, when `ok`.
+    /// The trigger's entry after the change, when `ok`.
     pub trigger: Option<TriggerEntryDto>,
 }
 
@@ -816,11 +818,21 @@ pub const TOO_MANY_TRIGGERS: &str = "too_many_triggers";
 /// delete does): over the cap is a 413, anything else a 400, each with its
 /// code and `ErrorBody`.
 fn body_refusal(r: JsonRejection, shape: &str) -> TriggerRouteError {
+    body_refusal_saying(r, shape, "nothing was switched")
+}
+
+/// [`body_refusal`], saying what was not done (`nothing`) in the 413's
+/// sentence; the backfill routes' too.
+pub(crate) fn body_refusal_saying(
+    r: JsonRejection,
+    shape: &str,
+    nothing: &str,
+) -> TriggerRouteError {
     match r.status() {
         StatusCode::PAYLOAD_TOO_LARGE => TriggerRouteError::Coded {
             status: StatusCode::PAYLOAD_TOO_LARGE,
             code: TRIGGER_BODY_TOO_LARGE,
-            message: "the body is over this route's size cap; nothing was switched".to_string(),
+            message: format!("the body is over this route's size cap; {nothing}"),
         },
         _ => TriggerRouteError::Coded {
             status: StatusCode::BAD_REQUEST,
@@ -830,7 +842,7 @@ fn body_refusal(r: JsonRejection, shape: &str) -> TriggerRouteError {
     }
 }
 
-const TRIGGER_GONE: &str = "This trigger no longer exists in the flow; reload";
+pub(crate) const TRIGGER_GONE: &str = "This trigger no longer exists in the flow; reload";
 
 /// A refusal's status, code and sentence.
 fn refusal_parts(r: &SwitchRefusal) -> (StatusCode, &'static str, String) {
@@ -880,6 +892,39 @@ impl From<SwitchRefusal> for TriggerRouteError {
     }
 }
 
+/// The entry of `trigger_id` (its first declaration) of a flow a write just
+/// changed, read **in the write's transaction**, so the answer is what is
+/// committed. The caller holds `workflow:manage`; the flow is not in the
+/// trash (every write refuses a trashed flow).
+pub(crate) async fn entry_in(
+    conn: &mut sqlx::PgConnection,
+    ws_slug: &str,
+    flow: &crate::repo::FlowRow,
+    parsed: &crate::models::Flow,
+    trigger_id: &str,
+) -> egret_core::Result<TriggerEntryDto> {
+    let state = read_state(&mut *conn, &[flow.id]).await?;
+    let fctx = FlowCtx {
+        id: flow.id,
+        ws_slug,
+        namespace: &flow.namespace,
+        flow_id: &flow.flow_id,
+        state: &flow.state,
+        deleted: false,
+    };
+    let Some(at) = parsed.triggers.iter().position(|t| t.id == trigger_id) else {
+        return Err(egret_core::Error::Internal(anyhow::anyhow!(
+            "the written trigger {trigger_id} vanished from its parsed flow"
+        )));
+    };
+    let mut e = entry::entries_for_flow(&fctx, parsed, &state, true, Detail::Full).swap_remove(at);
+    let key: Key = (flow.id, trigger_id.to_string());
+    e.last_execution = last_executions(&mut *conn, std::slice::from_ref(&key))
+        .await?
+        .remove(&key);
+    Ok(e)
+}
+
 /// One switch in its own transaction: [`switch::set_disabled`], then the
 /// trigger's entry read **in that transaction** (so the answer is what was
 /// committed), the commit, and the audit event. The caller has passed
@@ -912,27 +957,7 @@ async fn switch_one(
             return Ok(Err(refusal));
         }
     };
-    let state = read_state(&mut tx, &[flow]).await?;
-    let fctx = FlowCtx {
-        id: sw.flow.id,
-        ws_slug,
-        namespace: &sw.flow.namespace,
-        flow_id: &sw.flow.flow_id,
-        state: &sw.flow.state,
-        deleted: false,
-    };
-    // The first declaration with this id: the one the switch resolved.
-    let Some(at) = sw.parsed.triggers.iter().position(|t| t.id == trigger_id) else {
-        return Err(egret_core::Error::Internal(anyhow::anyhow!(
-            "the switched trigger {trigger_id} vanished from its parsed flow"
-        )));
-    };
-    let mut e =
-        entry::entries_for_flow(&fctx, &sw.parsed, &state, true, Detail::Full).swap_remove(at);
-    let key: Key = (flow, trigger_id.to_string());
-    e.last_execution = last_executions(&mut tx, std::slice::from_ref(&key))
-        .await?
-        .remove(&key);
+    let e = entry_in(&mut tx, ws_slug, &sw.flow, &sw.parsed, trigger_id).await?;
     tx.commit().await.map_err(db_err)?;
     // Only a real change is audited: off when already off, or on when
     // already on, wrote nothing.

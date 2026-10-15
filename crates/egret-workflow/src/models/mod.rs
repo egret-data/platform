@@ -12,8 +12,7 @@ mod wire;
 pub use execution::{
     Execution, ExecutionKind, StateHistory, StateTransition, TaskRun, TaskRunAttempt,
 };
-// W7f Task 1 lands the re-export before its caller (Task 5); drop the allow then.
-#[allow(unused_imports)]
+// The backfill create route's `labels` (W7f D24).
 pub(crate) use flow::deserialize_labels;
 pub use flow::{
     Check, CheckBehavior, CheckStyle, Concurrency, ConcurrencyBehavior, Flow, FlowOutput, Label,

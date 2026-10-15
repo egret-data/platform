@@ -2904,3 +2904,250 @@ async fn a_pause_between_the_claim_and_the_backfill_read_fires_nothing(pool: sql
         "the backfill row untouched"
     );
 }
+
+/// An hourly schedule (W7f Task 7's concurrency tests): its regular next
+/// date is the next top of the hour, so a pass right after the test's writes
+/// finds nothing regular due.
+fn hourly_flow(id: &str) -> String {
+    cron_flow(id).replace("*/1 * * * *", "0 * * * *")
+}
+
+/// Waits out the last minute of an hour, so the regular next date of an
+/// [`hourly_flow`] stays in the future for the test's length.
+async fn clear_of_the_hour(pool: &sqlx::PgPool) {
+    let left: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM date_trunc('hour', now()) + interval '1 hour' - now())::float8",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    if left < 60.0 {
+        tokio::time::sleep(Duration::from_secs_f64(left + 0.5)).await;
+    }
+}
+
+/// `POST …/backfill` for `flow`'s `s` over the hours `[h − from, h − to]`
+/// before the current hour `h`, from a task of its own.
+fn create_by_route(
+    app: &Arc<common::App>,
+    ws: Uuid,
+    user: egret_core::UserId,
+    flow: Uuid,
+    window: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
+) -> tokio::task::JoinHandle<(axum::http::StatusCode, serde_json::Value)> {
+    let app = app.clone();
+    tokio::spawn(async move {
+        let res = common::post(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows/{flow}/triggers/s/backfill"),
+            user,
+            serde_json::json!({"start": window.0, "end": window.1}),
+        )
+        .await;
+        let status = res.status();
+        (status, common::json(res).await)
+    })
+}
+
+/// **W7f §3.11: a backfill delete that meets a pass holding the trigger row
+/// waits, and the pass's fire is the last of the window.**
+///
+/// The pass is held at its final `UPDATE workflow.triggers` (after it fired
+/// the window's first tick and advanced the backfill row), as in
+/// [`a_switch_off_that_meets_a_claimed_trigger_waits_and_the_pass_fires_last`].
+/// The route takes the flow `FOR NO KEY UPDATE`, which the pass's `KEY SHARE`
+/// does not block, and is observed blocked on the trigger row. Released, the
+/// pass commits; the delete then reads the advanced rows, removes the
+/// backfill and writes the regular resume. A second pass fires nothing from
+/// the window.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_backfill_delete_that_meets_a_claimed_pass_waits_and_the_pass_fires_first(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    clear_of_the_hour(&pool).await;
+    let flow = common::seed_flow(&db, ws, user, &hourly_flow("bfdel"), "draft").await;
+    let app = Arc::new(common::app(&db).await);
+    let h: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT date_trunc('hour', now())")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let regular = h + chrono::Duration::hours(1);
+    let (w0, w1) = (
+        h - chrono::Duration::hours(5),
+        h - chrono::Duration::hours(1),
+    );
+    let (status, body) = create_by_route(&app, ws, user, flow, (w0, w1))
+        .await
+        .unwrap();
+    assert_eq!(status, axum::http::StatusCode::CREATED, "{body}");
+
+    let mut release = pool.acquire().await.expect("a connection for the release");
+    advisory(&mut release, "SELECT pg_advisory_lock(1392)").await;
+    for ddl in [
+        "CREATE FUNCTION public.w7f_hold_pass() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN IF NEW.next_evaluation_date IS DISTINCT FROM OLD.next_evaluation_date THEN \
+           PERFORM pg_advisory_xact_lock_shared(1392); END IF; RETURN NEW; END $$",
+        "CREATE TRIGGER w7f_hold_pass BEFORE UPDATE ON workflow.triggers \
+         FOR EACH ROW EXECUTE FUNCTION public.w7f_hold_pass()",
+    ] {
+        sqlx::query(ddl)
+            .execute(&pool)
+            .await
+            .expect("install the hold");
+    }
+
+    let pass = {
+        let pool = pool.clone();
+        tokio::spawn(async move { egret_workflow::scheduler::fire_due(&pool).await })
+    };
+    wait_for_waiters(
+        &pool,
+        "the pass to be held inside its transaction, at its final UPDATE",
+        &["advisory"],
+    )
+    .await;
+    let route = {
+        let app = app.clone();
+        tokio::spawn(async move {
+            let res = common::delete(
+                &app,
+                &format!("/api/ws/{ws}/workflows/flows/{flow}/triggers/s/backfill"),
+                user,
+            )
+            .await;
+            let status = res.status();
+            (status, common::json(res).await)
+        })
+    };
+    wait_for_waiters(
+        &pool,
+        "the delete route to be blocked on the claimed trigger's row lock",
+        &["transactionid", "tuple"],
+    )
+    .await;
+    assert!(!route.is_finished(), "the route must still be waiting");
+    assert!(!pass.is_finished(), "the pass is still held");
+
+    advisory(&mut release, "SELECT pg_advisory_unlock(1392)").await;
+    let report = pass.await.unwrap().expect("the pass");
+    assert_eq!(report.fired, 1, "{report:?}");
+    let (status, body) = route.await.unwrap();
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["backfill"], serde_json::Value::Null);
+    sqlx::query("DROP TRIGGER w7f_hold_pass ON workflow.triggers")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(common::backfill_row(&db, flow, "s").await, None);
+    let next: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT next_evaluation_date FROM workflow.triggers WHERE flow_id = $1")
+            .bind(flow)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(next, Some(regular), "the regular resume, not a window tick");
+    assert_eq!(common::scheduled_dates(&db, flow).await, vec![w0]);
+
+    let report = egret_workflow::scheduler::fire_due(&pool)
+        .await
+        .expect("a later pass");
+    assert_eq!(report.fired, 0, "{report:?}");
+    assert_eq!(
+        common::scheduled_dates(&db, flow).await,
+        vec![w0],
+        "no window tick after the delete answered"
+    );
+}
+
+/// **W7f §3.11: two creates on one trigger serialise on the flow row: one
+/// 201, one 409 `backfill_exists`, one row.** The first is held at its
+/// backfill `INSERT` (a `BEFORE INSERT` trigger on
+/// `workflow.trigger_backfills`), after it locked the flow and the trigger
+/// row; the second is observed blocked on a row lock; released, the first
+/// commits and the second finds its row.
+#[sqlx::test(migrations = "../../migrations")]
+async fn two_concurrent_backfill_creates_make_one_backfill(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let flow = common::seed_flow(&db, ws, user, &hourly_flow("bftwo"), "draft").await;
+    let app = Arc::new(common::app(&db).await);
+    let h: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT date_trunc('hour', now())")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let mut release = pool.acquire().await.expect("a connection for the release");
+    advisory(&mut release, "SELECT pg_advisory_lock(1393)").await;
+    for ddl in [
+        "CREATE FUNCTION public.w7f_hold_insert() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN PERFORM pg_advisory_xact_lock_shared(1393); RETURN NEW; END $$",
+        "CREATE TRIGGER w7f_hold_insert BEFORE INSERT ON workflow.trigger_backfills \
+         FOR EACH ROW EXECUTE FUNCTION public.w7f_hold_insert()",
+    ] {
+        sqlx::query(ddl)
+            .execute(&pool)
+            .await
+            .expect("install the hold");
+    }
+
+    let first = create_by_route(
+        &app,
+        ws,
+        user,
+        flow,
+        (
+            h - chrono::Duration::hours(5),
+            h - chrono::Duration::hours(1),
+        ),
+    );
+    wait_for_waiters(
+        &pool,
+        "the first create to be held at its INSERT",
+        &["advisory"],
+    )
+    .await;
+    let second = create_by_route(
+        &app,
+        ws,
+        user,
+        flow,
+        (
+            h - chrono::Duration::hours(3),
+            h - chrono::Duration::hours(2),
+        ),
+    );
+    wait_for_waiters(
+        &pool,
+        "the second create to be blocked on a row lock the first holds",
+        &["transactionid", "tuple"],
+    )
+    .await;
+    assert!(!first.is_finished() && !second.is_finished());
+
+    advisory(&mut release, "SELECT pg_advisory_unlock(1393)").await;
+    let (s1, b1) = first.await.unwrap();
+    let (s2, b2) = second.await.unwrap();
+    assert_eq!(s1, axum::http::StatusCode::CREATED, "{b1}");
+    assert_eq!(s2, axum::http::StatusCode::CONFLICT, "{b2}");
+    assert_eq!(b2["code"], serde_json::json!("backfill_exists"));
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workflow.trigger_backfills WHERE flow_id = $1")
+            .bind(flow)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 1);
+    let row = common::backfill_row(&db, flow, "s").await.unwrap();
+    assert_eq!(
+        row["total_ticks"],
+        serde_json::json!(5),
+        "the first's window"
+    );
+}

@@ -3,14 +3,8 @@
 
 use crate::models::Label;
 
-// W7f Task 1 lands this before its callers (Tasks 4-7); drop the allow then.
-#[allow(dead_code)]
 pub(crate) const MAX_BACKFILL_LABELS: usize = 50;
-// W7f Task 1 lands this before its callers (Tasks 4-7); drop the allow then.
-#[allow(dead_code)]
 pub(crate) const MAX_LABEL_KEY_CHARS: usize = 128;
-// W7f Task 1 lands this before its callers (Tasks 4-7); drop the allow then.
-#[allow(dead_code)]
 pub(crate) const MAX_LABEL_VALUE_CHARS: usize = 1024;
 
 /// Kestra's `Execution.newExecution` + `Label.deduplicate`: `flow` then `own`,
@@ -41,8 +35,6 @@ pub(crate) fn own_labels(v: Option<&serde_json::Value>) -> Vec<Label> {
 }
 
 /// §3.4's label rules; `Some(sentence naming the label)` on the first breach.
-// W7f Task 1 lands this before its callers (Tasks 4-7); drop the allow then.
-#[allow(dead_code)]
 pub(crate) fn backfill_labels_refusal(labels: &[Label]) -> Option<String> {
     if labels.len() > MAX_BACKFILL_LABELS {
         return Some(format!(

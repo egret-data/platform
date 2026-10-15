@@ -202,6 +202,9 @@ mod sync;
 #[cfg(any(test, feature = "test-util"))]
 pub use fire::hold as test_hold;
 pub use fire::{fire_due, PassReport};
+// The backfill routes (`triggers::backfill`) check a backfill's inputs as a
+// fire merges them, and end a deleted backfill as a refused fire does (D26).
+pub(crate) use fire::{backfill_ended, overlay_inputs, refuse_templated};
 // The switch route (`triggers::switch`) writes the same effective value `sync`
 // does; the read routes report it.
 pub(crate) use sync::{effective_disabled, never_fires};

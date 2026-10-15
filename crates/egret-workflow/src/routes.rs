@@ -17,6 +17,11 @@
 //! GET    /api/ws/{workspace}/workflows/triggers
 //! PUT    /api/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/disabled
 //! PUT    /api/ws/{workspace}/workflows/triggers/disabled
+//! POST   /api/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/backfill   (triggers::backfill_routes)
+//! PUT    /api/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/backfill/paused
+//! DELETE /api/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/backfill
+//! PUT    /api/ws/{workspace}/workflows/triggers/backfill/paused
+//! POST   /api/ws/{workspace}/workflows/triggers/backfill/delete
 //! POST   /api/ws/{workspace}/workflows/flows/graph
 //! GET    /api/ws/{workspace}/workflows/flows/{id}/graph
 //! POST   /api/ws/{workspace}/workflows/flows/{id}/executions
@@ -3395,6 +3400,44 @@ pub fn management_router() -> Router<WorkflowState> {
                 ),
             )),
         )
+        // W7f: the backfill routes, each body under its own cap.
+        .route(
+            "/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/backfill",
+            post(axum::handler::Handler::layer(
+                crate::triggers::backfill_routes::create_trigger_backfill,
+                axum::extract::DefaultBodyLimit::max(
+                    crate::triggers::backfill_routes::MAX_BACKFILL_BODY_BYTES,
+                ),
+            ))
+            .delete(crate::triggers::backfill_routes::delete_trigger_backfill),
+        )
+        .route(
+            "/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/backfill/paused",
+            put(axum::handler::Handler::layer(
+                crate::triggers::backfill_routes::set_trigger_backfill_paused,
+                axum::extract::DefaultBodyLimit::max(
+                    crate::triggers::backfill_routes::MAX_BACKFILL_BODY_BYTES,
+                ),
+            )),
+        )
+        .route(
+            "/ws/{workspace}/workflows/triggers/backfill/paused",
+            put(axum::handler::Handler::layer(
+                crate::triggers::backfill_routes::set_triggers_backfill_paused,
+                axum::extract::DefaultBodyLimit::max(
+                    crate::triggers::backfill_routes::MAX_BACKFILL_BODY_BYTES,
+                ),
+            )),
+        )
+        .route(
+            "/ws/{workspace}/workflows/triggers/backfill/delete",
+            post(axum::handler::Handler::layer(
+                crate::triggers::backfill_routes::delete_triggers_backfill,
+                axum::extract::DefaultBodyLimit::max(
+                    crate::triggers::backfill_routes::MAX_BACKFILL_BODY_BYTES,
+                ),
+            )),
+        )
         .route(
             "/ws/{workspace}/workflows/flows/{id}/versions/{version}",
             get(get_flow_version),
@@ -3543,6 +3586,11 @@ pub fn management_router() -> Router<WorkflowState> {
         crate::triggers::routes::list_triggers,
         crate::triggers::routes::set_trigger_disabled,
         crate::triggers::routes::set_triggers_disabled,
+        crate::triggers::backfill_routes::create_trigger_backfill,
+        crate::triggers::backfill_routes::set_trigger_backfill_paused,
+        crate::triggers::backfill_routes::delete_trigger_backfill,
+        crate::triggers::backfill_routes::set_triggers_backfill_paused,
+        crate::triggers::backfill_routes::delete_triggers_backfill,
         crate::storage::nsfiles::routes::download_namespace_file,
         crate::storage::nsfiles::routes::namespace_file_stats,
         crate::storage::nsfiles::routes::namespace_file_revisions,
@@ -3611,6 +3659,10 @@ pub fn management_router() -> Router<WorkflowState> {
         crate::triggers::routes::SetTriggersDisabledRequest,
         crate::triggers::routes::BulkResultDto,
         crate::triggers::routes::BulkResultsDto,
+        crate::triggers::backfill_routes::CreateBackfillRequest,
+        crate::triggers::backfill_routes::SetBackfillPausedRequest,
+        crate::triggers::backfill_routes::SetBackfillsPausedRequest,
+        crate::triggers::backfill_routes::DeleteBackfillsRequest,
         crate::storage::routes::FileMetasDto,
         crate::storage::routes::FilePreviewDto,
         crate::storage::nsfiles::routes::NsFileStatsDto,

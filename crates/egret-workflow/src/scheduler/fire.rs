@@ -422,7 +422,7 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
 ///
 /// Shared with `sync`, which ends a backfill the same way on a cron change
 /// (§3.7: complete, or over the cap).
-pub(super) fn backfill_ended(
+pub(crate) fn backfill_ended(
     resolved: &ScheduleTrigger,
     schedule: &Schedule,
     b: &BackfillRow,

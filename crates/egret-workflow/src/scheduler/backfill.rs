@@ -45,9 +45,8 @@ macro_rules! backfill_cols {
     };
 }
 
-// Read by Tasks 5-9 (sync and the routes select the same columns).
-#[allow(dead_code)]
-pub(crate) const BACKFILL_COLS: &str = backfill_cols!();
+// The create route's `INSERT … RETURNING` selects the same columns.
+pub(crate) use backfill_cols;
 
 fn db_err(e: sqlx::Error) -> Error {
     Error::Internal(anyhow::anyhow!("{e}"))

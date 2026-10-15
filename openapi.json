@@ -30173,6 +30173,398 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/backfill": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "create_trigger_backfill",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "trigger_id",
+            "in": "path",
+            "description": "The trigger's `id` in the flow's YAML",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBackfillRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created. The window `[start, end]` is inclusive at both ends; the trigger's next date moves to the window's first tick, so the scheduler fires the window one tick per pass, then resumes the regular schedule from where it stood under its `recoverMissedSchedules`. The answer is the trigger's entry as `GET .../triggers` returns it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerEntryDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`code: source_does_not_parse`, `invalid_body`, `backfill_window_invalid` (start not before end), `backfill_end_in_future` (the message gives the server's time), `backfill_start_too_early` (more than ten years back), `backfill_no_ticks`, `backfill_too_many_ticks` (over 10000), `backfill_inputs_invalid` (not an object, a FILE input, template syntax after the merge with the schedule's inputs, a required input missing; the message names the input) or `backfill_labels_invalid`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such flow in this workspace, the flow is in the trash, or its source declares no trigger with this id (`code: not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`code: backfill_not_supported` (not a Schedule), `trigger_disabled` (the trigger is effective-disabled), `trigger_off_queue` (the schedule has no next date; the message gives why) or `backfill_exists`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 64 KiB (`code: body_too_large`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "delete_trigger_backfill",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "trigger_id",
+            "in": "path",
+            "description": "The trigger's `id` in the flow's YAML",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted. The ticks not yet fired are dropped; the executions already fired stay. The regular schedule resumes from the later of where it stood at create and the backfill's next tick, under its `recoverMissedSchedules` (absent: ALL); a schedule off the queue stays off until the flow is saved. A fire already claimed commits first, and no window tick fires after the answer. The answer is the trigger's entry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerEntryDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`code: source_does_not_parse`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`code: not_found` (no such flow or trigger) or `no_backfill`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`code: backfill_not_supported` (not a Schedule)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/backfill/paused": {
+      "put": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "set_trigger_backfill_paused",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "trigger_id",
+            "in": "path",
+            "description": "The trigger's `id` in the flow's YAML",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetBackfillPausedRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Paused or resumed (idempotent: already in that state is a 200 with no write and no audit event). Only the backfill row is written: a paused backfill is not fired, and a resumed one fires its next tick on the next pass. A switched-off trigger's backfill can be paused and resumed. The answer is the trigger's entry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerEntryDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`code: source_does_not_parse` or `invalid_body`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`code: not_found` (no such flow or trigger) or `no_backfill`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`code: backfill_not_supported` (not a Schedule)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 64 KiB (`code: body_too_large`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/flows/{id}/triggers/{trigger_id}/disabled": {
       "put": {
         "tags": [
@@ -33101,6 +33493,204 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/triggers/backfill/delete": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "delete_triggers_backfill",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteBackfillsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A result per entry, in the order given. Each backfill is deleted in its own transaction, as the per-trigger route does, and a refusal (`ok: false` with its `code`: `no_backfill`, `not_found` for a flow outside this workspace, never a 403) does not stop the next. A `POST`, because a `DELETE` with a body is not portable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkResultsDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "More than 100 entries (`code: too_many_triggers`; nothing is deleted), or `invalid_body`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 64 KiB (`code: body_too_large`); nothing is deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error; entries before the failing one may be deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/triggers/backfill/paused": {
+      "put": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "set_triggers_backfill_paused",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetBackfillsPausedRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A result per entry, in the order given. Each entry is paused or resumed in its own transaction, as the per-trigger route does, and a refusal (`ok: false` with its `code`: `no_backfill`, `not_found` for a flow outside this workspace, never a 403) does not stop the next.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkResultsDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "More than 100 entries (`code: too_many_triggers`; nothing is changed), or `invalid_body`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 64 KiB (`code: body_too_large`); nothing is changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error; entries before the failing one may be changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/triggers/disabled": {
       "put": {
         "tags": [
@@ -35384,14 +35974,14 @@
           },
           "ok": {
             "type": "boolean",
-            "description": "Switched (and committed)."
+            "description": "Switched, or the backfill paused, resumed or deleted (and committed)."
           },
           "code": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Why not: `not_found`, `source_does_not_parse`,\n`trigger_disabled_in_source`, `trigger_not_supported`,\n`recover_missed_unknown`."
+            "description": "Why not: `not_found`, `source_does_not_parse`,\n`trigger_disabled_in_source`, `trigger_not_supported`,\n`recover_missed_unknown` (the switch); `not_found`,\n`source_does_not_parse`, `backfill_not_supported`, `no_backfill` (the\nbackfill routes)."
           },
           "message": {
             "type": [
@@ -35407,7 +35997,7 @@
               },
               {
                 "$ref": "#/components/schemas/TriggerEntryDto",
-                "description": "The trigger's entry after the switch, when `ok`."
+                "description": "The trigger's entry after the change, when `ok`."
               }
             ]
           }
@@ -36537,6 +37127,42 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "CreateBackfillRequest": {
+        "type": "object",
+        "description": "Create a backfill of a `Schedule` trigger.",
+        "required": [
+          "start"
+        ],
+        "properties": {
+          "start": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The window's first instant (inclusive): the first tick at or after it\nfires first."
+          },
+          "end": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The window's last instant (inclusive); absent: the server's now. Must\nnot be after the server's now."
+          },
+          "inputs": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Overlaid on the schedule's `inputs:` key by key. An object; no key may\nname a `FILE` input."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LabelDto"
+            },
+            "description": "Added to every execution the backfill fires, in this order. A list of\n`{key, value}` or a map."
           }
         }
       },
@@ -38688,6 +39314,22 @@
           },
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "DeleteBackfillsRequest": {
+        "type": "object",
+        "description": "Delete up to 100 backfills, each on its own.",
+        "required": [
+          "triggers"
+        ],
+        "properties": {
+          "triggers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkTriggerRef"
+            },
+            "description": "At most 100."
           }
         }
       },
@@ -45377,6 +46019,38 @@
         ],
         "properties": {
           "active": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SetBackfillPausedRequest": {
+        "type": "object",
+        "description": "Pause or resume one backfill.",
+        "required": [
+          "paused"
+        ],
+        "properties": {
+          "paused": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SetBackfillsPausedRequest": {
+        "type": "object",
+        "description": "Pause or resume up to 100 backfills, each on its own.",
+        "required": [
+          "triggers",
+          "paused"
+        ],
+        "properties": {
+          "triggers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkTriggerRef"
+            },
+            "description": "At most 100."
+          },
+          "paused": {
             "type": "boolean"
           }
         }
