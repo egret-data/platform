@@ -10,7 +10,8 @@ Thiết kế: `docs/en/specs/2026-10-13-view-governance-design.md`. Phiên bản
 
 ### StarRocks
 
-- **Đọc trực tiếp trả về `NULL`.** Mỗi cột đã phân loại có một clearance mask: `MASK_NULL` cho người chưa được cấp clearance, không biến đổi cho người đã được cấp. StarRocks 4.1.6 không kiểm quyền truy cập trên cột mà nó mask, nên `SELECT` cột đã phân loại của người chưa được cấp trả về `NULL`, không phải `ERROR 5204`. Deny của clearance vẫn được compile; nó từ chối khi cột không có mask, ví dụ trước lần compile đầu tiên thêm mask. Explain cũng nói vậy: "returns NULL" từ mask, và không có verdict truy cập cho cột đó.
+- **Đọc trực tiếp của người có grant trên bảng trả về `NULL`.** Mỗi cột đã phân loại có một clearance mask: `MASK_NULL` cho người chưa được cấp clearance, không biến đổi cho người đã được cấp. Đã đo trên StarRocks 4.1.6: người chưa được cấp clearance nhưng có grant trên bảng nhận `NULL` cho cột đã phân loại, không phải `ERROR 5204`, vì StarRocks không kiểm quyền truy cập trên cột nó mask theo cách này. Explain hiện trường hợp đó là "returns NULL" từ mask, không có verdict truy cập.
+- **Mọi lần đọc trực tiếp khác vẫn theo câu trả lời của deny.** Người không có grant, hoặc bị một deny khác (ví dụ deny cả bảng), chưa được đo khi chỉ đọc cột bị mask, nên explain hiện lần từ chối. Deny cũng quyết định khi egret bỏ qua clearance mask của một cột: engine có plugin egret không mô hình hoá, các plugin được gắn fold khác nhau, hoặc một mask trên cột nêu group khác `public` hay một role. Lần recompile báo việc bỏ qua đó.
 - **View trả về `NULL`, hoặc bị từ chối.** Mask trên cột gốc áp dụng qua plain view và view lồng nhau, nên người chưa được cấp nhận `NULL`. Qua view INVOKER, StarRocks 4.1.6 từ chối người chưa được cấp (`ERROR 5204 … SELECT privilege(s) on COLUMN …`). Cả hai đều fail-closed.
 - **Materialized view mới bị từ chối.** Materialized view lưu giá trị thật, và mask không đi theo dữ liệu đã lưu. Vì vậy trên mỗi profile StarRocks có cột đã phân loại, `create materialized view` bị deny trên `default_catalog`, mọi database. StarRocks chỉ tạo materialized view trong `default_catalog` và kiểm quyền trên database đích, nên deny có hiệu lực toàn engine.
 
@@ -64,6 +65,7 @@ CREATE VIEW ice.sales.v_orders SECURITY INVOKER AS SELECT ...;
 Mọi thay đổi view trên catalog có profile chứa cột đã phân loại đều qua **hold**: create, replace hay rename, dù bảng của chính view có được phân loại hay không.
 
 - **Một hạn 90 s** (gấp ba chu kỳ poll 30 s của plugin) tính từ lúc request đến, bao gồm lock của view, `EXPLAIN` lineage (tối đa 5 s) và thời gian chờ plugin. Trino đã được đo chờ 65 s mà không retry; 90 s chưa được đo với client của Trino.
+- **Proxy đứng trước `/catalog` phải đọc lâu hơn 90 s.** Helm chart của egret định tuyến `/catalog` qua một Ingress riêng với read timeout 120 s. Proxy cắt sớm hơn sẽ trả lỗi gateway cho client trong khi egret vẫn commit hoặc từ chối view.
 - **View đọc dữ liệu phân loại chờ một đến hai chu kỳ poll** (30 đến 60 s). Plugin tải tag mới ở lần poll kế tiếp, và chỉ báo version mới ở lần poll sau đó; lần báo đó mới là xác nhận. View không đọc bảng phân loại nào thì không bị trễ.
 - **Tối đa 8 hold cùng lúc** trên mỗi tiến trình egret. Cái thứ chín bị từ chối ngay với thông báo retry, không xếp hàng. dbt chạy hơn 8 thread sẽ gặp vài lần từ chối, retry là thành công.
 - **Lock của view đang bận thì bị từ chối ngay** với "retry".

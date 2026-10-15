@@ -42,9 +42,11 @@ StarRocks has no tag service (upstream `starrocks#67458`), so a clearance compil
 
 There is no change here. The deny on `{catalog, database, table, column}`, with the cleared users in `denyExceptions` and the access type `select`, stays.
 
-**Measured on 4.1.6 (Task 11, finding C2): once A2's mask exists, the deny does not decide a direct read.** StarRocks asks Ranger for no access decision on a column that a mask transforms: the FE's debug log asked `policyType=0` only for the unmasked column of the read. So an uncleared direct read of a classified column returns `NULL` from the A2 mask, not `ERROR 5204`. No value leaks either way. The deny still matters:
-- for a column with no mask, for example a download from before the first compile that adds A2;
-- for engines that do check access on a masked column (Trino does).
+**Measured on 4.1.6 (Task 11, finding C2), for one reader: an uncleared reader who holds the table grant.** For that reader, with A2's `MASK_NULL` on the column, StarRocks asked Ranger for no access decision on the masked column (the FE's debug log asked `policyType=0` only for the unmasked column of the read), and the direct read returned `NULL`, not `ERROR 5204`. No value leaks either way.
+
+Nothing else was measured. A reader with no grant (every query run as one was refused, `5204`), a reader with another deny (for example table-level), and mask types other than the clearance's `MASK_NULL` keep the deny's answer until they are measured (fix round 1, C-1). The deny also decides:
+- for a column whose clearance mask the compiler **skips** (A2 "Skip, never guess": an unmodelled plugin, bound plugins that fold differently, or a mask on the column naming a group other than `public` or a role). The recompile then reports a `SkippedItem` and compiles only the deny;
+- on engines that check access on a masked column (Trino does).
 
 `explain` mirrors the engine (Part C).
 
@@ -280,7 +282,7 @@ These limits are stated in the guide and on the classification page:
   - The differential corpus gains a folded-mask profile and a materialized-view deny profile.
   - Both run against the real jars at every modelled pair, and must show 0 disagreements.
 - **`explain`.**
-  - For an uncleared reader of a classified StarRocks column, explain answers with the clearance's `MASK_NULL` ("returns NULL"), attributed to the clearance, and gives no `select` verdict: StarRocks checks no access on a column a mask transforms (A1, Task 12). This is labelled StarRocks behaviour. A classified column with no mask still shows the deny.
+  - In the measured case of A1 only, explain answers with the clearance's `MASK_NULL` ("returns NULL"), attributed to the clearance, gives no `select` verdict, and labels this StarRocks behaviour. The case is: StarRocks, the clearance's `MASK_NULL` applies, the clearance's own column deny refuses `select`, and the read is allowed once the clearance's access policies are set aside. Every other case keeps the `select` verdict (Task 12 fix round 1, C-1). When the mask verdict is undecidable, the page says the access verdict is provisional.
   - Explain does not answer `create materialized view` (Task 12, M-4). The A3 deny is engine-wide, so the page states the rule instead of a verdict for one database.
   - On Trino, a view column denied by a propagated tag names the classification and the base table that caused it, read from the stored lineage.
 - **Migration.**

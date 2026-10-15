@@ -2211,6 +2211,39 @@ mod tests {
         assert_eq!(dst, ("s".to_string(), "v".to_string()));
     }
 
+    /// Task 12 fix round 1 (review I-1): egret's own chart must not cut a hold.
+    /// The Ingress object that routes `/catalog` must read for longer than the
+    /// hold limit, or nginx answers 504 while egret goes on to commit or refuse
+    /// the view. Reads the template, so a chart edit cannot drift silently.
+    #[test]
+    fn the_chart_reads_catalog_requests_for_longer_than_a_hold() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../deploy/helm/egret/templates/ingress.yaml"
+        );
+        let chart = std::fs::read_to_string(path).expect("ingress.yaml missing");
+        let objects: Vec<&str> = chart
+            .split("\n---")
+            .filter(|o| o.contains("- path: /catalog\n"))
+            .collect();
+        assert_eq!(objects.len(), 1, "exactly one Ingress routes /catalog");
+        let key = "nginx.ingress.kubernetes.io/proxy-read-timeout: \"";
+        let at = objects[0]
+            .find(key)
+            .expect("the /catalog Ingress pins its read timeout")
+            + key.len();
+        let secs: u64 = objects[0][at..]
+            .split('"')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .expect("a whole number of seconds");
+        assert!(
+            secs > default_hold_limit().as_secs(),
+            "/catalog is read for {secs} s, not longer than the {} s hold limit",
+            default_hold_limit().as_secs()
+        );
+    }
+
     #[test]
     fn the_refusal_messages_name_their_reason_and_what_to_do() {
         assert_eq!(seconds(default_hold_limit()), "90");

@@ -889,9 +889,10 @@ function ProfileBlock({
             data-testid="explain-access-not-checked"
             className="rounded-md border border-border p-3 text-sm text-muted-foreground"
           >
-            <span className="font-mono text-xs">select</span> is not checked: StarRocks does not
-            check access on a column it masks, so the mask below decides what this read returns.
-            This is StarRocks behaviour (measured on 4.1.6); Trino checks access on a masked column.
+            <span className="font-mono text-xs">select</span> is not checked: for a reader who holds
+            the grant, StarRocks does not check access on a column the clearance masks to NULL, so
+            the mask below decides what this read returns. This is StarRocks behaviour (measured
+            on 4.1.6); Trino checks access on a masked column.
           </li>
         )}
         {profile.accesses.length === 0 && !profile.masked_read_skips_access && (
@@ -899,6 +900,14 @@ function ProfileBlock({
         )}
       </ul>
       {profile.mask && <MaskLine mask={profile.mask} />}
+      {/* Fix round 1 (m-5): StarRocks checks no access on a column it masks,
+          so with the mask unknown the access verdict above may not apply. */}
+      {profile.mask?.decision.kind === "undecidable" && (
+        <p data-testid="explain-mask-provisional" className="text-xs text-muted-foreground">
+          The access verdict above is provisional: if StarRocks does apply a mask here, it does not
+          check this access.
+        </p>
+      )}
       {/* Task 12, M-4: the materialized-view deny is engine-wide, so the page
           states the rule instead of a verdict for one database. */}
       {profile.engine === "starrocks" && (
@@ -984,7 +993,8 @@ function ProfileTags({
   const noTagPolicies = profile.tag_policies_in_download === 0;
   return (
     <div className="space-y-1.5 border-t border-border pt-2">
-      <Label className="text-xs">Tags that could decide here</Label>
+      {/* A heading, not a form label: nothing here is a control. */}
+      <p className="text-xs font-medium leading-none">Tags that could decide here</p>
       {declined ? (
         <p data-testid="profile-tags-declined" className="text-xs text-muted-foreground">
           Not resolved — see the reason above. This is not the same as there being none.

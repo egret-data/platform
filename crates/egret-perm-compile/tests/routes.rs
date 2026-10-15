@@ -3789,12 +3789,13 @@ async fn explain_answers_an_uncleared_starrocks_read_of_a_masked_column_with_the
     lift_gate(&f, tag_id).await;
 }
 
-/// Task 12 (C2), the engine split: the same `{public}` `MASK_NULL` on the same
-/// column in both profiles' downloads. StarRocks consults no access for the
-/// masked column; Trino does, so its `select` verdict stays and nothing is
-/// skipped there.
+/// Task 12 (C2, fix round 1 C-1): the same hand-written `{public}` `MASK_NULL`
+/// on the same column in both profiles' downloads, for a subject with no grant.
+/// This is not the measured StarRocks case (no clearance deny decides here, and
+/// the subject would not pass `select` anyway), so both profiles keep their
+/// `select` verdict and neither claims the read returns NULL without one.
 #[tokio::test]
-async fn only_starrocks_skips_the_access_check_on_a_masked_column() {
+async fn a_masked_column_keeps_its_access_verdict_outside_the_measured_case() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
     let (trino_id, starrocks_id, catalog_id) = two_profile_catalog(&f, "explain-masked").await;
@@ -3836,7 +3837,15 @@ async fn only_starrocks_skips_the_access_check_on_a_masked_column() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
 
     let starrocks = profile_for(&body, "starrocks");
-    assert_eq!(starrocks["masked_read_skips_access"], true, "body: {body}");
+    assert!(
+        starrocks.get("masked_read_skips_access").is_none(),
+        "body: {body}"
+    );
+    assert_eq!(
+        access_for(starrocks, "select")["decision"]["kind"],
+        "denied",
+        "body: {body}"
+    );
     assert_eq!(
         starrocks["mask"]["decision"]["result"]["mask_type"], "MASK_NULL",
         "body: {body}"
@@ -3850,6 +3859,106 @@ async fn only_starrocks_skips_the_access_check_on_a_masked_column() {
         trino.get("masked_read_skips_access").is_none(),
         "body: {body}"
     );
+}
+
+/// A reader with no catalog grant at all, minted after the fixture (fix round 1).
+async fn ungranted_reader(f: &Fixture) -> String {
+    let id = f
+        .users
+        .insert_local(
+            &format!("{}@example.com", unique("ungranted")),
+            "ungranted",
+            "x",
+        )
+        .await
+        .expect("insert user")
+        .0;
+    let mut conn = f.db.pool.acquire().await.expect("acquire conn");
+    egret_auth::users::ensure_username_via(&mut conn, egret_core::UserId(id))
+        .await
+        .expect("mint username")
+}
+
+/// Fix round 1 (review C-1): a reader with NO grant reads a classified
+/// StarRocks column that carries the clearance mask. The live run measured the
+/// skip only for a reader who holds the grant; a reader without one was refused
+/// (`5204`) on every query run. So explain keeps the `select` verdict, denied,
+/// and never answers "returns NULL" with no access verdict.
+#[tokio::test]
+async fn explain_denies_an_ungranted_reader_of_a_masked_classified_column() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, _cleared, _uncleared) = clearance_readers(&f, &token).await;
+    let nobody = ungranted_reader(&f).await;
+
+    let body = explain_column(&f, &token, &nobody).await;
+    let profile = profile_for(&body, "starrocks");
+    assert_eq!(
+        profile["mask"]["decision"]["result"]["mask_type"], "MASK_NULL",
+        "the clearance mask applies to this reader too; body: {body}"
+    );
+    assert!(
+        profile.get("masked_read_skips_access").is_none(),
+        "body: {body}"
+    );
+    assert_eq!(
+        access_for(profile, "select")["decision"]["kind"],
+        "denied",
+        "body: {body}"
+    );
+    lift_gate(&f, tag_id).await;
+}
+
+/// Fix round 1 (review C-1): a hand-written deny on the whole table for a
+/// reader who holds the grant. Removing the clearance's own deny would still
+/// leave a refusal, so this is not the measured case: the verdict stays denied.
+#[tokio::test]
+async fn a_table_level_deny_on_a_masked_classified_column_stays_denied() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, _cleared, uncleared) = clearance_readers(&f, &token).await;
+    let body = explain_column(&f, &token, &uncleared).await;
+    let service_id = profile_for(&body, "starrocks")["service_id"]
+        .as_i64()
+        .expect("service id");
+    let catalog: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(f.catalog_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("catalog name");
+    let lvl = |v: &str| json!({"values": [v], "isExcludes": false, "isRecursive": false});
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+         VALUES ($1, 'hand table deny', $2, true, 'operator')",
+    )
+    .bind(service_id)
+    .bind(json!({
+        "name": "hand table deny", "policyType": 0, "isEnabled": true, "policyPriority": 0,
+        "resources": {"catalog": lvl(&catalog), "database": lvl("sales"),
+                      "table": lvl("orders"), "column": lvl("*")},
+        "policyItems": [],
+        "denyPolicyItems": [{"users": [uncleared.clone()], "groups": [], "roles": [],
+            "accesses": [{"type": "select", "isAllowed": true}]}],
+        "allowExceptions": [], "denyExceptions": []
+    }))
+    .execute(&f.db.pool)
+    .await
+    .expect("hand table deny");
+
+    let body = explain_column(&f, &token, &uncleared).await;
+    let profile = profile_for(&body, "starrocks");
+    assert!(
+        profile.get("masked_read_skips_access").is_none(),
+        "body: {body}"
+    );
+    assert_eq!(
+        access_for(profile, "select")["decision"]["kind"],
+        "denied",
+        "body: {body}"
+    );
+    lift_gate(&f, tag_id).await;
 }
 
 /// Task 12 (C2), the other half: a classified column with a deny and NO mask

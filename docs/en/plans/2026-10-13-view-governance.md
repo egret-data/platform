@@ -425,7 +425,7 @@ Each is a design question for the user.
 
 **Refusal.** A `409` Iceberg REST error, which Trino prints verbatim (measured). The message names one of the reasons:
 - `lineage could not be computed: …`;
-- `engines did not confirm the classification tags within 60 s: <plugin ids>`.
+- `engines did not confirm the classification tags within 60 s: <plugin ids>`. *(Task 12: the limit is now 90 s, per the Global Constraints.)*
 
 - [ ] **Step 1: Write the failing DB tests.**
   1. With the fake plugin polling, the view is committed only after the plugin's download shows version ≥ V. Assert this by ordering: the commit observed at time T, the download at time ≤ T.
@@ -525,7 +525,7 @@ Each is a design question for the user.
 - [ ] **Step 3: Observe on Trino 483**, with an Iceberg catalog served by egret:
   - a DEFINER view by a cleared owner is refused to an uncleared reader on the **first** read after `CREATE VIEW` returns (run the read immediately, in the same script);
   - a cleared reader reads it;
-  - `CREATE VIEW` over a classified table returns after at most one poll interval;
+  - `CREATE VIEW` over a classified table returns after at most one poll interval; *(Task 11 measured one to two intervals, finding I1.)*
   - stopping the engine's polling (pause the container) gives the refusal message, and no view is created;
   - classifying a base column after the view exists denies the view to the uncleared reader once the tags arrive;
   - whether Trino workers, not only the coordinator, poll tags (from the plugin ledger), and that the hold waits for all of them;

@@ -648,9 +648,12 @@ Not re-measured live; each change is pinned by tests (Task 12 report).
   Spec B2 and the guide say a hold takes one to two intervals, and why.
 - **I2:** the served `egret-lineage` transform allows `alter` on `systemproperty` = `query_max_run_time` only.
   Ordinary JWT users are not covered by this; see the Task 12 report for that finding.
-- **C2:** explain mirrors StarRocks: for a column a mask transforms it gives no `select` verdict and answers with
-  the mask ("returns NULL"), labelled engine-specific. A column with no mask still shows the deny. Trino is
-  unchanged. Spec A1 and the guide are corrected.
+- **C2:** explain mirrors StarRocks in the measured case only: an uncleared reader who holds the grant, with the
+  clearance's `MASK_NULL` on the column. There it gives no `select` verdict and answers with the mask ("returns
+  NULL"), labelled engine-specific. Every other case (no grant, another deny, another mask type) keeps the
+  `select` verdict until measured (fix round 1, C-1). Trino is unchanged. Spec A1 and the guide are corrected.
+- **I1, proxy:** the Helm chart routes `/catalog` through its own Ingress with a 120 s read timeout, longer than
+  the hold (fix round 1, I-1).
 - **C4:** the classification page's view warning states the measured behaviour.
 - **M-4 / N2:** explain no longer answers `create materialized view`; the page states the engine-wide rule.
 - **M-5:** the explain page's limits text names the StarRocks mask line instead of contradicting it.

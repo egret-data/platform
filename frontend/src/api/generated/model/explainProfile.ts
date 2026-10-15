@@ -93,15 +93,21 @@ export interface ExplainProfile {
   tag_policies_in_download: number;
   mask?: null | ExplainMask;
   /**
-     * `true` when the engine does not check access on the target column
-     * because a mask transforms it, so [`ExplainProfile::accesses`] carries no
-     * `select` verdict and [`ExplainProfile::mask`] is the answer (an
-     * uncleared reader of a classified column reads `NULL`). Engine-specific:
-     * StarRocks 4.1.6 asks Ranger for no access decision on a column that has
-     * a mask expression (view governance Task 11, finding C2: the FE asked
-     * `policyType=0` only for the unmasked column). A `MASK_NONE` (or a mask
-     * with no type) transforms nothing, so the access is checked as usual.
-     * Never set on Trino, which checks access on a masked column too.
+     * `true` in the one case measured on StarRocks 4.1.6 (Task 11, finding
+     * C2): the clearance's own `MASK_NULL` applies to the column, the
+     * clearance's own column deny is what refuses `select`, and without the
+     * clearance's access policies the read would be allowed (the reader holds
+     * the grant). There the FE asked no access decision for the masked column
+     * and the read returned `NULL`, so [`ExplainProfile::accesses`] carries no
+     * `select` verdict and [`ExplainProfile::mask`] is the answer.
+     *
+     * Every other case keeps the `select` verdict (fix round 1, C-1): a reader
+     * with no grant, a table-level or any other deny, a mask type other than
+     * `MASK_NULL`, a rule or hand-written mask. Those were not measured, and
+     * the engine may refuse there. When the mask verdict is undecidable the
+     * access verdict is provisional: if the engine does apply a mask, StarRocks
+     * does not check that access. Never set on Trino, which checks access on a
+     * masked column.
      *
      * (Explain no longer answers `create materialized view`, Task 12 M-4: the
      * A3 deny is engine-wide, so no single database's verdict says more than

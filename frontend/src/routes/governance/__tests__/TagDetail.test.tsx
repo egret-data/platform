@@ -200,9 +200,13 @@ describe("TagDetail", () => {
 
       expect(screen.queryByText(/returns it in full to a user without clearance/i)).not.toBeInTheDocument();
       expect(screen.queryByText(/not covered on either engine/i)).not.toBeInTheDocument();
-      const box = screen.getByText(/a view over a classified column carries the classification/i);
-      expect(box).toHaveTextContent(/on trino a user without clearance is refused through the view/i);
-      expect(box).toHaveTextContent(/on starrocks they read null/i);
+      // Fix round 1 (review m-4): limited to what was measured, and the two
+      // holes the guide lists are named.
+      const box = screen.getByText(/trino views in egret.s catalogs carry the classification/i);
+      expect(box).toHaveTextContent(/a user without clearance is refused through them/i);
+      expect(box).toHaveTextContent(/on starrocks a reader who holds the grant reads null through a plain or nested view/i);
+      expect(box).toHaveTextContent(/an invoker view is refused/i);
+      expect(box).toHaveTextContent(/existing starrocks materialized views, and views of other connectors, are not covered/i);
       expect(box).toHaveTextContent(/an uncleared owner.s definer view blocks everybody, the cleared included/i);
     });
 

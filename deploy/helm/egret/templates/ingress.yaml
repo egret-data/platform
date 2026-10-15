@@ -16,8 +16,8 @@ metadata:
     # line and fails if the two stop agreeing.
     #
     # LIMITATION — this annotation is scoped to the INGRESS OBJECT, so it now
-    # applies to every path below, not just /data-api: keycloak at /auth, the
-    # Iceberg REST catalog at /catalog, and the SPA at / — which carries the
+    # applies to every path below, not just /data-api: keycloak at /auth and
+    # the SPA at / — which carries the
     # console's own /api calls and its websocket connections (the Data Apps pod
     # proxy, engine log streaming), whose upstream nginx deliberately allows
     # 3600 s (`frontend/nginx-prod.conf`). An idle websocket or a long console
@@ -65,17 +65,8 @@ spec:
               service:
                 name: egret
                 port: { number: 8080 }
-          # Embedded lakekeeper Iceberg REST catalog, nested at /catalog/v1 by
-          # egret-server. The warehouse detail page tells the user to paste
-          # `{origin}/catalog` into Spark and Trino, so this path has to reach the
-          # backend or that instruction is wrong. Machine traffic with its own
-          # bearer auth, already CSRF-exempt.
-          - path: /catalog
-            pathType: Prefix
-            backend:
-              service:
-                name: egret
-                port: { number: 8080 }
+          # /catalog is routed by the `egret-catalog` Ingress below, which
+          # reads for longer than a view-governance hold.
           # The machine-IdP's two discovery documents. EXACT paths, not the
           # /.well-known/ prefix: ACME http-01 challenges, security.txt and
           # anything else under /.well-known belong to the SPA and must keep
@@ -111,4 +102,44 @@ spec:
               service:
                 name: egret-frontend
                 port: { number: 80 }
+---
+# The embedded lakekeeper Iceberg REST catalog, nested at /catalog/v1 by
+# egret-server. The warehouse detail page tells the user to paste
+# `{origin}/catalog` into Spark and Trino, so this path has to reach the
+# backend or that instruction is wrong. Machine traffic with its own bearer
+# auth, already CSRF-exempt.
+#
+# Its own Ingress object because of the read timeout: a view change on a
+# classified catalog is HELD until every Trino plugin confirms the new tags,
+# for up to `egret_catalog_engine::default_hold_limit()` (3 x the plugin poll
+# interval, 90 s). The `egret` object above pins 60 s, which would answer an
+# external client 504 while egret goes on to commit or refuse the view. 120 s
+# is the hold limit plus a margin; the test
+# `the_chart_reads_catalog_requests_for_longer_than_a_hold` reads this line
+# and fails if it is not longer than the hold limit.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: egret-catalog
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+{{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host }}
+      secretName: {{ .Values.ingress.tls.secretName | default "egret-ingress-tls" }}
+{{- end }}
+  rules:
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
+          - path: /catalog
+            pathType: Prefix
+            backend:
+              service:
+                name: egret
+                port: { number: 8080 }
 {{- end }}

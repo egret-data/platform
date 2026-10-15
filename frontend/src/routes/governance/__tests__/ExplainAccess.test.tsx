@@ -1989,6 +1989,8 @@ describe("ExplainAccess — the StarRocks mask and the materialized-view rule", 
     const skipped = within(profile).getByTestId("explain-access-not-checked");
     expect(skipped).toHaveTextContent(/not checked/i);
     expect(skipped).toHaveTextContent(/StarRocks behaviour/i);
+    // Fix round 1 (C-1): the claim is limited to the measured reader.
+    expect(skipped).toHaveTextContent(/a reader who holds the grant/i);
     // No verdict badge at all: nothing says "denied" for this read.
     expect(within(profile).queryByTestId("decision-badge")).not.toBeInTheDocument();
     expect(profile).not.toHaveTextContent(/No access type was evaluated/i);
@@ -2043,6 +2045,55 @@ describe("ExplainAccess — the StarRocks mask and the materialized-view rule", 
     expect(within(profile).getByTestId("explain-mv-rule")).toHaveTextContent(
       /in every database to anyone not cleared for every classification/i,
     );
+  });
+
+  // Fix round 1 (review m-5): with an undecidable mask the access verdict is
+  // kept, and the page says it is provisional.
+  test("an undecidable StarRocks mask marks the access verdict provisional", async () => {
+    const undecidable: ExplainResponse = {
+      outcome: "per_profile",
+      profiles: [
+        {
+          ...UNCLEARED_MASKED.profiles[0],
+          masked_read_skips_access: undefined,
+          accesses: [
+            {
+              access_type: "select",
+              decision: {
+                kind: "denied",
+                policy_id: 2,
+                policy_name: "perm-clearance-t1-sales.public.orders.ssn",
+                reason: "deny_policy_item",
+              },
+              attribution: null,
+            },
+          ],
+          mask: {
+            access_type: "select",
+            decision: { kind: "undecidable", why: [{ kind: "tags_unresolved" }] },
+            attribution: null,
+          },
+        },
+      ],
+    } as unknown as ExplainResponse;
+    mutateAsync.mockResolvedValue({ status: 200, data: undecidable });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const profile = await screen.findByTestId("explain-profile");
+    expect(within(profile).getByTestId("explain-mask-provisional")).toHaveTextContent(
+      /provisional/i,
+    );
+  });
+
+  test("a decided mask carries no provisional note", async () => {
+    mutateAsync.mockResolvedValue({ status: 200, data: UNCLEARED_MASKED });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+    const profile = await screen.findByTestId("explain-profile");
+    expect(within(profile).queryByTestId("explain-mask-provisional")).not.toBeInTheDocument();
   });
 
   test("a profile with no mask verdict shows no mask line", async () => {

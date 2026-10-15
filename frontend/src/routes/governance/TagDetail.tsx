@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -389,10 +389,11 @@ export default function TagDetail() {
               className="w-fit items-start gap-1.5 whitespace-normal text-left font-normal"
             >
               <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-              A view over a classified column carries the classification. On Trino a user without
-              clearance is refused through the view. On StarRocks they read NULL through it, or are
-              refused through an INVOKER view. On Trino an uncleared owner&apos;s DEFINER view blocks
-              everybody, the cleared included.
+              Trino views in egret&apos;s catalogs carry the classification: a user without
+              clearance is refused through them. On StarRocks a reader who holds the grant reads
+              NULL through a plain or nested view, and an INVOKER view is refused. Existing StarRocks
+              materialized views, and views of other connectors, are not covered. On Trino an
+              uncleared owner&apos;s DEFINER view blocks everybody, the cleared included.
             </Badge>
             <p className="text-xs text-muted-foreground">
               A StarRocks clearance expands to one policy per tagged column, counted per profile:
@@ -477,6 +478,7 @@ function ClearanceTable({
 }) {
   const [type, setType] = useState<ClearanceType>("role");
   const [open, setOpen] = useState(false);
+  const listId = useId();
   const [q, setQ] = useState("");
   const [pending, setPending] = useState<Option | null>(null);
 
@@ -510,6 +512,8 @@ function ClearanceTable({
               <Button
                 variant="outline"
                 role="combobox"
+                aria-expanded={open}
+                aria-controls={listId}
                 aria-label={`${type === "role" ? "Role" : "Group"} to add`}
                 className="w-56 justify-between font-normal"
               >
@@ -526,7 +530,7 @@ function ClearanceTable({
                   onChange={(e) => setQ(e.target.value)}
                 />
               </div>
-              <div className="max-h-64 overflow-y-auto py-1">
+              <div id={listId} className="max-h-64 overflow-y-auto py-1">
                 {matches.length === 0 ? (
                   <p className="px-3 py-2 text-sm text-muted-foreground">No {type}s found.</p>
                 ) : (
