@@ -18,7 +18,9 @@
 //!   classified `catalog.db.table` in a catalog attached to THAT engine;
 //! - **by text**, only when the view has no base-table map: its definition
 //!   contains the classified catalog and database names. Flagged, because an
-//!   unqualified or aliased reference is missed and a mention is not a read.
+//!   unqualified or aliased reference is missed and a mention is not a read;
+//! - **through another listed view**, to a fixpoint ([`matched_rows`]): a
+//!   view over a matched materialized view, at any depth.
 //!
 //! **Null means "could not list", never "none".** `starrocksMaterializedViews`
 //! is `null` exactly when at least one running engine's listing failed, and
@@ -307,6 +309,64 @@ fn match_row(engine: &ClassifiedEngine, row: &MvRow) -> Option<MatchedBy> {
     }
 }
 
+/// The rows of one engine's listing that match, to a fixpoint (final review,
+/// Task 4b M-1): a materialized view that reads a matched materialized view
+/// holds the same classified values, so it matches too, at any depth and in
+/// any listing order. The listing is one engine's: StarRocks keeps every
+/// materialized view in `default_catalog`, so a view over another names it as
+/// `default_catalog.<db>.<name>` in its base map, or, with no map, by its
+/// database and name in its text.
+fn matched_rows(engine: &ClassifiedEngine, rows: Vec<MvRow>) -> Vec<(MvRow, MatchedBy)> {
+    let mut matched: Vec<Option<MatchedBy>> = rows.iter().map(|r| match_row(engine, r)).collect();
+    loop {
+        let inner: Vec<(String, String)> = rows
+            .iter()
+            .zip(&matched)
+            .filter(|(_, m)| m.is_some())
+            .map(|(r, _)| (r.database.clone(), r.name.clone()))
+            .collect();
+        let mut grew = false;
+        for (row, m) in rows.iter().zip(matched.iter_mut()) {
+            if m.is_none() {
+                *m = reads_a_matched_view(row, &inner);
+                grew |= m.is_some();
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    rows.into_iter()
+        .zip(matched)
+        .filter_map(|(row, m)| m.map(|m| (row, m)))
+        .collect()
+}
+
+/// How `row` reads one of the `matched` materialized views
+/// (`(database, name)`), if it does. Case-insensitive, as [`match_row`].
+fn reads_a_matched_view(row: &MvRow, matched: &[(String, String)]) -> Option<MatchedBy> {
+    match &row.base_tables {
+        Some(bases) => bases
+            .iter()
+            .any(|base| {
+                matched.iter().any(|(db, name)| {
+                    base.eq_ignore_ascii_case(&format!("{MV_CATALOG}.{db}.{name}"))
+                })
+            })
+            .then_some(MatchedBy::BaseTable),
+        None => {
+            let text = row.definition.to_ascii_lowercase();
+            matched
+                .iter()
+                .any(|(db, name)| {
+                    text.contains(&db.to_ascii_lowercase())
+                        && text.contains(&name.to_ascii_lowercase())
+                })
+                .then_some(MatchedBy::Text)
+        }
+    }
+}
+
 /// Ask every engine concurrently, all under one shared deadline; collect what
 /// matched and what failed. The caller decides that ANY failure withholds the
 /// whole list.
@@ -337,14 +397,14 @@ async fn list_all(
     let mut failures = Vec::new();
     for (e, listed) in results {
         match listed {
-            Ok(rows) => views.extend(rows.into_iter().filter_map(|row| {
-                match_row(e, &row).map(|matched_by| ViewExposureItem {
+            Ok(rows) => views.extend(matched_rows(e, rows).into_iter().map(|(row, matched_by)| {
+                ViewExposureItem {
                     engine: e.engine_name.clone(),
                     catalog: MV_CATALOG.to_string(),
                     database: row.database,
                     name: row.name,
                     matched_by,
-                })
+                }
             })),
             Err(err) => failures.push(format!(
                 "could not list materialized views on engine {}: {err}",

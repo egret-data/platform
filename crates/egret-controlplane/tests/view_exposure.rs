@@ -1578,3 +1578,45 @@ async fn a_tag_rule_a_row_filter_and_a_glob_path_each_select_their_table() {
         );
     }
 }
+
+/// Final review (Task 4b M-1): a materialized view over a matched
+/// materialized view holds the same classified values, so it is listed too,
+/// at any depth (a fixpoint within one engine's listing). Its base map names
+/// the inner view as `default_catalog.<db>.<name>`; one with no map matches
+/// by text when its definition names the inner view's database and name.
+#[tokio::test]
+async fn a_materialized_view_over_a_matched_one_is_listed_at_any_depth() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: no test database");
+        return;
+    };
+    let s = seed(&f).await;
+    let lister = Arc::new(FakeLister::default());
+    let classified = format!("{}.sales.orders", s.catalog);
+    lister.answer(
+        &s.engine_name,
+        Ok(vec![
+            // Listed before the view it reads: the order does not matter.
+            mv("db3", "mv_layer3", &["default_catalog.db2.mv_layer2"]),
+            mv("db2", "mv_layer2", &["DEFAULT_CATALOG.db1.mv_base"]),
+            mv("db1", "mv_base", &[&classified]),
+            mv_text("db4", "mv_text_layer", "SELECT * FROM db3.mv_layer3"),
+            // Over an unmatched view: not listed.
+            mv("db1", "mv_plain", &["ice.other.t"]),
+            mv("db5", "mv_over_plain", &["default_catalog.db1.mv_plain"]),
+        ]),
+    );
+
+    let j = exposure(&f, lister, s.tag_id).await;
+
+    assert_eq!(
+        listed(&j),
+        vec![
+            row(&s.engine_name, "db1", "mv_base", "baseTable"),
+            row(&s.engine_name, "db2", "mv_layer2", "baseTable"),
+            row(&s.engine_name, "db3", "mv_layer3", "baseTable"),
+            row(&s.engine_name, "db4", "mv_text_layer", "text"),
+        ],
+        "body={j}"
+    );
+}
