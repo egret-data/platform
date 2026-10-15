@@ -137,6 +137,14 @@
 //! BLOCKED (§4c) and declined to call them measured. The ruling is to state the
 //! limit, not to block view creation, so it is stated in D0b, in D5's
 //! acceptance criterion, and in the UI where a clearance is authored.
+//!
+//! **Amended by view governance A2 (2026-10-13) for StarRocks.** The per-column
+//! deny above is unchanged and still withholds only the DIRECT read. Each
+//! tagged column now also gets a priority-1 `MASK_NULL` clearance mask, which a
+//! base-column mask applies through every view kind; this module hands the
+//! (tag, column, cleared) triples to `crate::trigger`, which folds them through
+//! the evaluator once the whole desired set is known. See
+//! `crate::clearance_mask`.
 
 use std::collections::BTreeMap;
 
@@ -150,7 +158,8 @@ use egret_policy::admin::{
 };
 use egret_policy::{tagged_columns_for_service_via, COMPILER_CLEARANCE_PREFIX};
 
-use crate::grants::PolicyTarget;
+use crate::clearance_mask::PendingMask;
+use crate::grants::{level, PolicyTarget};
 use crate::rules::{column_resources, stamp_service_type, TaggedColumn, PUBLIC_GROUP};
 use crate::trigger::{SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING};
 
@@ -185,6 +194,11 @@ struct GateRow {
 pub(crate) struct Clearances {
     pub(crate) policies: Vec<(String, Value)>,
     pub(crate) skipped: Vec<SkippedItem>,
+    /// StarRocks only (view governance A2): one entry per (gated tag, tagged
+    /// column), for `crate::trigger` to fold into a priority-1 clearance MASK
+    /// once the whole desired set is known — the fold reads the profile's other
+    /// masks, which this function cannot see. Empty on Trino.
+    pub(crate) masks: Vec<PendingMask>,
 }
 
 /// Compile every gated tag into a clearance deny for one profile.
@@ -226,6 +240,7 @@ pub(crate) async fn compile_clearance(
     let mut out = Clearances {
         policies: Vec::new(),
         skipped: Vec::new(),
+        masks: Vec::new(),
     };
     if gates.is_empty() {
         return Ok(out);
@@ -370,12 +385,94 @@ pub(crate) async fn compile_clearance(
                         name,
                         stamp_service_type(access_to_ranger_json(&input), engine),
                     ));
+                    // The deny withholds a DIRECT read only; a plain view reads
+                    // straight through it. The column's mask (A2) is what holds
+                    // through views — see `crate::clearance_mask`.
+                    out.masks.push(PendingMask {
+                        tag_id: g.tag_id,
+                        column: col.clone(),
+                        cleared: cleared.clone(),
+                    });
                 }
             }
         }
     }
 
+    if engine == EngineType::StarRocks {
+        for (name, input) in mv_deny_inputs(&out.masks, service) {
+            out.policies.push((
+                name,
+                stamp_service_type(access_to_ranger_json(&input), engine),
+            ));
+        }
+    }
+
     Ok(out)
+}
+
+/// The access type that lets a user store a query result as a materialized
+/// view. Spelled as in `service-defs/starrocks.json`, where it is an access type
+/// of the `database` resource.
+pub(crate) const CREATE_MV_ACCESS: &str = "create materialized view";
+
+/// The only catalog StarRocks creates a materialized view in.
+pub const MV_CATALOG: &str = "default_catalog";
+
+/// What follows [`COMPILER_CLEARANCE_PREFIX`] in the name of the A3 deny
+/// (`perm-clearance-mv`). `crate::attribute_policy_name` reads it back.
+pub(crate) const MV_DENY_SUFFIX: &str = "mv";
+
+/// A3 (revised 2026-10-14): at most ONE deny per StarRocks profile. Denying
+/// `create materialized view` to `{public}` keeps an uncleared user from
+/// building a view that STORES real values (a mask does not follow stored data).
+///
+/// **Why engine-wide.** Measured on StarRocks 4.1.6
+/// (`docs/en/plans/2026-10-14-starrocks-mv-placement-measurement.md`): a
+/// materialized view can only be created in `default_catalog`, and the privilege
+/// is checked on the TARGET database `default_catalog.<db>`, never on the base
+/// table's catalog or database. The first draft's deny on `{<external catalog>,
+/// <database>}` therefore matched no real `CREATE MATERIALIZED VIEW`, and the
+/// target database is any one the builder may write to, so the resource is
+/// `{catalog: default_catalog, database: *}`. The first draft's
+/// `…mv-{catalog}.{database}` policies are swept by the compiler prefix.
+///
+/// The exceptions are the users cleared for EVERY classification with a column
+/// on the profile: the intersection across every pending (gate, column) pair.
+/// An empty intersection leaves no exception, so the deny holds for everyone.
+/// **Cost (accepted by the user):** a user not cleared for every classification
+/// on the engine cannot create any materialized view there, including over
+/// unclassified data.
+///
+/// `pending` is one entry per (gate, column), as `compile_clearance` records
+/// them. A group-only gate is skipped before it records any, so it neither
+/// creates the deny nor narrows its exceptions (the same skip as the column
+/// deny). A profile with no classified column gets no policy.
+pub(crate) fn mv_deny_inputs(
+    pending: &[PendingMask],
+    service: &str,
+) -> Vec<(String, AccessPolicyInput)> {
+    let mut cleared: Option<Vec<String>> = None;
+    for p in pending {
+        cleared = Some(match cleared.take() {
+            None => p.cleared.clone(),
+            Some(have) => have.into_iter().filter(|u| p.cleared.contains(u)).collect(),
+        });
+    }
+    let Some(cleared) = cleared else {
+        return Vec::new();
+    };
+    let name = format!("{COMPILER_CLEARANCE_PREFIX}{MV_DENY_SUFFIX}");
+    let mut resources = BTreeMap::new();
+    resources.insert("catalog".to_string(), level(MV_CATALOG.to_string()));
+    resources.insert("database".to_string(), level("*".to_string()));
+    let input = clearance_input(
+        name.clone(),
+        service.to_string(),
+        resources,
+        &[CREATE_MV_ACCESS.to_string()],
+        cleared,
+    );
+    vec![(name, input)]
 }
 
 /// The one clearance policy shape, built once for both engines: deny `{public}`
@@ -502,4 +599,74 @@ fn withheld_accesses(engine: EngineType) -> Result<Vec<String>, CompileError> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending(tag: u128, catalog: &str, db: &str, cleared: &[&str]) -> PendingMask {
+        PendingMask {
+            tag_id: Uuid::from_u128(tag),
+            column: TaggedColumn {
+                catalog: catalog.into(),
+                schema: db.into(),
+                table: "t".into(),
+                column: "c".into(),
+            },
+            cleared: cleared.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn exceptions(i: &AccessPolicyInput) -> Vec<String> {
+        i.deny_exceptions[0].users.clone()
+    }
+
+    /// A3 (revised 2026-10-14): StarRocks creates a materialized view only in
+    /// `default_catalog` and checks the privilege on the TARGET database, so the
+    /// deny is one policy on `default_catalog`/`*` whatever databases the
+    /// classified columns live in, excepting the users cleared for every
+    /// classification on the service.
+    #[test]
+    fn a_service_with_two_classifications_gets_one_engine_wide_deny_excepting_the_intersection() {
+        let got = mv_deny_inputs(
+            &[
+                pending(1, "lake", "sales", &["ann", "bob"]),
+                pending(1, "lake", "sales", &["ann", "bob"]),
+                pending(2, "ice", "hr", &["bob", "cy"]),
+            ],
+            "sr",
+        );
+        assert_eq!(got.len(), 1, "{got:?}");
+        let (name, i) = &got[0];
+        assert_eq!(name, &format!("{COMPILER_CLEARANCE_PREFIX}mv"));
+        assert_eq!(i.name, *name);
+        assert_eq!(i.service, "sr");
+        assert_eq!(i.resources.len(), 2);
+        assert_eq!(i.resources["catalog"].values, vec!["default_catalog"]);
+        assert_eq!(i.resources["database"].values, vec!["*"]);
+        assert_eq!(i.items[0].groups, vec!["public"]);
+        assert_eq!(i.items[0].accesses, vec!["create materialized view"]);
+        assert_eq!(i.items[0].effect, "deny");
+        assert_eq!(exceptions(i), vec!["bob"]);
+    }
+
+    #[test]
+    fn a_service_with_no_classified_column_gets_no_deny() {
+        assert!(mv_deny_inputs(&[], "sr").is_empty());
+    }
+
+    #[test]
+    fn an_empty_intersection_denies_everyone() {
+        let got = mv_deny_inputs(
+            &[
+                pending(1, "lake", "sales", &["ann"]),
+                pending(2, "lake", "hr", &["bob"]),
+            ],
+            "sr",
+        );
+        assert_eq!(got.len(), 1);
+        assert!(exceptions(&got[0].1).is_empty());
+        assert_eq!(got[0].1.items[0].groups, vec!["public"]);
+    }
 }

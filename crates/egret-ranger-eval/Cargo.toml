@@ -40,6 +40,6 @@ crosscheck-prepared = []
 # stays `serde` + `serde_json` only — the discipline above is about `src/`.
 [dev-dependencies]
 egret-perm.workspace = true
-egret-perm-compile.workspace = true
+egret-perm-compile = { workspace = true, features = ["harness"] }
 egret-policy.workspace = true
 uuid.workspace = true

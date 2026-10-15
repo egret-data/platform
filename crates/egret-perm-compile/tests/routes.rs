@@ -3578,16 +3578,17 @@ async fn a_clearance_deny_in_the_artifact_refuses_the_uncleared_and_not_the_clea
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    let verdict = access_for(profile_for(&body, "starrocks"), "select");
+    // View governance Task 12 (C2): StarRocks 4.1.6 checks no access on a
+    // column it masks, so for this uncleared subject the clearance answers as
+    // its `MASK_NULL`, not as the deny.
+    let starrocks = profile_for(&body, "starrocks");
+    assert_eq!(starrocks["masked_read_skips_access"], true, "body: {body}");
+    let verdict = &starrocks["mask"];
     assert_eq!(
-        verdict["decision"]["kind"], "denied",
+        verdict["decision"]["result"]["mask_type"], "MASK_NULL",
         "a caller-supplied role must not clear a subject who does not hold it — this is \
          the live gate's `{{\"user\":\"analyst\",\"roles\":[\"sp4c_cleared\"]}}` answering \
          `allowed` for the user both engines refuse; body: {body}"
-    );
-    assert_eq!(
-        verdict["decision"]["reason"], "deny_policy_item",
-        "and the refusal must be the clearance's own deny, not a grant miss; body: {body}"
     );
     assert_eq!(
         verdict["attribution"]["kind"], "clearance",
@@ -3644,6 +3645,554 @@ async fn a_clearance_deny_in_the_artifact_refuses_the_uncleared_and_not_the_clea
         .expect("lift the gate");
 }
 
+/// View governance Task 3. Gates the fixture's tag on a fresh role, mints one
+/// reader who holds it and one who does not, and gives both a read grant, so the
+/// clearance is the only thing that can tell them apart. Returns
+/// `(tag_id, role, cleared, uncleared)`. The caller lifts the gate.
+async fn clearance_readers(f: &Fixture, token: &str) -> (Uuid, String, String, String) {
+    let tag_id: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
+        .bind(&f.tag_key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("the fixture's tag");
+    let role_name = unique("viewgov-clearing-role");
+    let role_id: Uuid =
+        sqlx::query_scalar("INSERT INTO roles (scope, name) VALUES ('platform', $1) RETURNING id")
+            .bind(&role_name)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("clearing role");
+    let mut names = Vec::new();
+    for label in ["cleared", "uncleared"] {
+        let id = f
+            .users
+            .insert_local(&format!("{}@example.com", unique(label)), label, "x")
+            .await
+            .expect("insert user")
+            .0;
+        let mut conn = f.db.pool.acquire().await.expect("acquire conn");
+        let name = egret_auth::users::ensure_username_via(&mut conn, egret_core::UserId(id))
+            .await
+            .expect("mint username");
+        drop(conn);
+        if label == "cleared" {
+            sqlx::query(
+                "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, \
+                 scope_id) VALUES ('user', $1, $2, 'platform', NULL)",
+            )
+            .bind(id)
+            .bind(role_id)
+            .execute(&f.db.pool)
+            .await
+            .expect("role grant");
+        }
+        names.push(name);
+    }
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, '{}') \
+         ON CONFLICT (tag_id) DO UPDATE SET required_roles = EXCLUDED.required_roles",
+    )
+    .bind(tag_id)
+    .bind(vec![role_name.clone()])
+    .execute(&f.db.pool)
+    .await
+    .expect("gate the tag");
+    for name in &names {
+        let (status, body) = into_json(
+            f.app()
+                .oneshot(req(
+                    "POST",
+                    "/perm/grants",
+                    token,
+                    Some(grant_body(f.catalog_id, name)),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    }
+    let uncleared = names.pop().unwrap();
+    let cleared = names.pop().unwrap();
+    (tag_id, role_name, cleared, uncleared)
+}
+
+async fn explain_column(f: &Fixture, token: &str, user: &str) -> Value {
+    let mut body = explain_body(f.catalog_id, user);
+    body["target"]["column"] = json!("email");
+    let (status, out) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", token, Some(body)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {out}");
+    out
+}
+
+async fn lift_gate(f: &Fixture, tag_id: Uuid) {
+    sqlx::query("DELETE FROM classification_policies WHERE tag_id = $1")
+        .bind(tag_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("lift the gate");
+}
+
+/// View governance Task 12 (live finding C2). StarRocks 4.1.6 asks no access
+/// check for a column that a mask transforms (the FE's debug log asked
+/// `policyType=0` only for the unmasked column), so an uncleared direct read
+/// of a classified column returns `NULL` from the clearance's `MASK_NULL`,
+/// not `ERROR 5204` from its deny. Explain mirrors that: no `select` verdict,
+/// `masked_read_skips_access`, and the mask attributed to the clearance.
+/// Trino checks access on a masked column, so its profile is unchanged.
+#[tokio::test]
+async fn explain_answers_an_uncleared_starrocks_read_of_a_masked_column_with_the_mask() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, role, _cleared, uncleared) = clearance_readers(&f, &token).await;
+
+    let body = explain_column(&f, &token, &uncleared).await;
+    let profile = profile_for(&body, "starrocks");
+    assert_eq!(profile["masked_read_skips_access"], true, "body: {body}");
+    assert!(
+        !access_types(profile).contains(&"select".to_string()),
+        "the engine asks no `select` for a masked column, so explain gives none; body: {body}"
+    );
+
+    let mask = &profile["mask"];
+    assert_eq!(mask["access_type"], "select", "body: {body}");
+    assert_eq!(mask["decision"]["kind"], "masked", "body: {body}");
+    assert_eq!(
+        mask["decision"]["result"]["mask_type"], "MASK_NULL",
+        "body: {body}"
+    );
+    assert_eq!(mask["attribution"]["kind"], "clearance", "body: {body}");
+    assert_eq!(
+        mask["attribution"]["tag_id"],
+        tag_id.to_string(),
+        "body: {body}"
+    );
+    assert_eq!(
+        mask["attribution"]["required_roles"],
+        json!([role]),
+        "body: {body}"
+    );
+    assert!(
+        mask["decision"]["result"]["policy_name"]
+            .as_str()
+            .is_some_and(|n| n.contains("-mask-")),
+        "the mask names the compiled mask policy, not the deny; body: {body}"
+    );
+    lift_gate(&f, tag_id).await;
+}
+
+/// Final review V-1: the same hand-written `{public}` `MASK_NULL` on the same
+/// column in both profiles' downloads, for a subject with no grant. StarRocks
+/// keys the skip on the deciding mask's TYPE, whichever policy decided it (live
+/// §3.4: 2b's hand-written deny was not applied under the clearance `MASK_NULL`,
+/// 2c's `MASK_HASH` column was checked), so the StarRocks profile skips the
+/// column's `select` verdict. Trino checks access on a masked column, so its
+/// profile keeps it.
+#[tokio::test]
+async fn a_hand_written_mask_null_skips_the_starrocks_access_check_but_not_trinos() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (trino_id, starrocks_id, catalog_id) = two_profile_catalog(&f, "explain-masked").await;
+    let catalog: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(catalog_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("catalog name");
+    let lvl = |v: &str| json!({"values": [v], "isExcludes": false, "isRecursive": false});
+    for (service_id, middle) in [(trino_id, "schema"), (starrocks_id, "database")] {
+        sqlx::query(
+            "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+             VALUES ($1, 'hand mask', $2, true, 'operator')",
+        )
+        .bind(service_id)
+        .bind(json!({
+            "name": "hand mask", "policyType": 1, "isEnabled": true, "policyPriority": 0,
+            "resources": {"catalog": lvl(&catalog), middle: lvl("sales"),
+                          "table": lvl("orders"), "column": lvl("email")},
+            "dataMaskPolicyItems": [{"users": [], "groups": ["public"], "roles": [],
+                "accesses": [{"type": "select", "isAllowed": true}],
+                "dataMaskInfo": {"dataMaskType": "MASK_NULL"}}],
+            "policyItems": [], "denyPolicyItems": [],
+            "allowExceptions": [], "denyExceptions": []
+        }))
+        .execute(&f.db.pool)
+        .await
+        .expect("hand mask");
+    }
+    let mut ask = explain_body(catalog_id, "analyst");
+    ask["target"]["column"] = json!("email");
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", &token, Some(ask)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let starrocks = profile_for(&body, "starrocks");
+    assert_eq!(starrocks["masked_read_skips_access"], true, "body: {body}");
+    assert!(
+        !access_types(starrocks).contains(&"select".to_string()),
+        "StarRocks asks no `select` for a MASK_NULL column; body: {body}"
+    );
+    assert_eq!(
+        starrocks["mask"]["decision"]["result"]["mask_type"], "MASK_NULL",
+        "body: {body}"
+    );
+    assert_eq!(
+        starrocks["mask"]["decision"]["result"]["policy_name"], "hand mask",
+        "a hand-written mask decides here, not the clearance's; body: {body}"
+    );
+    let trino = profile_for(&body, "trino");
+    assert!(
+        access_types(trino).contains(&"select".to_string()),
+        "Trino checks access on a masked column; body: {body}"
+    );
+    assert!(
+        trino.get("masked_read_skips_access").is_none(),
+        "body: {body}"
+    );
+}
+
+/// A reader with no catalog grant at all, minted after the fixture (fix round 1).
+async fn ungranted_reader(f: &Fixture) -> String {
+    let id = f
+        .users
+        .insert_local(
+            &format!("{}@example.com", unique("ungranted")),
+            "ungranted",
+            "x",
+        )
+        .await
+        .expect("insert user")
+        .0;
+    let mut conn = f.db.pool.acquire().await.expect("acquire conn");
+    egret_auth::users::ensure_username_via(&mut conn, egret_core::UserId(id))
+        .await
+        .expect("mint username")
+}
+
+/// Final review V-1 (live 2a): a reader with NO grant reads a classified
+/// StarRocks column that carries the clearance mask. The engine refused that
+/// reader (`5204`), but through ANOTHER column (`id`, or `___count___` for
+/// `count(*)`), never through the masked one. So the masked column's own
+/// `select` is not consulted: explain skips it and the mask is the answer.
+/// Which other column refuses depends on the query, which explain does not see.
+#[tokio::test]
+async fn an_ungranted_reader_of_a_masked_classified_column_is_not_checked_on_that_column() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, _cleared, _uncleared) = clearance_readers(&f, &token).await;
+    let nobody = ungranted_reader(&f).await;
+
+    let body = explain_column(&f, &token, &nobody).await;
+    let profile = profile_for(&body, "starrocks");
+    assert_eq!(
+        profile["mask"]["decision"]["result"]["mask_type"], "MASK_NULL",
+        "the clearance mask applies to this reader too; body: {body}"
+    );
+    assert_eq!(profile["masked_read_skips_access"], true, "body: {body}");
+    assert!(
+        !access_types(profile).contains(&"select".to_string()),
+        "body: {body}"
+    );
+    lift_gate(&f, tag_id).await;
+}
+
+/// Final review V-1: a hand-written deny on the whole table (`column: *`) for a
+/// reader who holds the grant. On the MASK_NULL column StarRocks consults no
+/// access policy at all, so this deny is not applied there either: the skip
+/// holds. (The query is still refused through any other column it reads.)
+#[tokio::test]
+async fn a_table_level_deny_does_not_reach_a_mask_null_column_on_starrocks() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, _cleared, uncleared) = clearance_readers(&f, &token).await;
+    let body = explain_column(&f, &token, &uncleared).await;
+    let service_id = profile_for(&body, "starrocks")["service_id"]
+        .as_i64()
+        .expect("service id");
+    let catalog: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(f.catalog_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("catalog name");
+    let lvl = |v: &str| json!({"values": [v], "isExcludes": false, "isRecursive": false});
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+         VALUES ($1, 'hand table deny', $2, true, 'operator')",
+    )
+    .bind(service_id)
+    .bind(json!({
+        "name": "hand table deny", "policyType": 0, "isEnabled": true, "policyPriority": 0,
+        "resources": {"catalog": lvl(&catalog), "database": lvl("sales"),
+                      "table": lvl("orders"), "column": lvl("*")},
+        "policyItems": [],
+        "denyPolicyItems": [{"users": [uncleared.clone()], "groups": [], "roles": [],
+            "accesses": [{"type": "select", "isAllowed": true}]}],
+        "allowExceptions": [], "denyExceptions": []
+    }))
+    .execute(&f.db.pool)
+    .await
+    .expect("hand table deny");
+
+    let body = explain_column(&f, &token, &uncleared).await;
+    let profile = profile_for(&body, "starrocks");
+    assert_eq!(profile["masked_read_skips_access"], true, "body: {body}");
+    assert!(
+        !access_types(profile).contains(&"select".to_string()),
+        "body: {body}"
+    );
+    lift_gate(&f, tag_id).await;
+}
+
+/// Inserts a hand-written column `select` deny for `user` on `sales.orders.email`
+/// into the StarRocks profile `service_id` serves.
+async fn hand_column_deny(f: &Fixture, service_id: i64, user: &str) {
+    let catalog: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(f.catalog_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("catalog name");
+    let lvl = |v: &str| json!({"values": [v], "isExcludes": false, "isRecursive": false});
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+         VALUES ($1, 'hand column deny', $2, true, 'operator')",
+    )
+    .bind(service_id)
+    .bind(json!({
+        "name": "hand column deny", "policyType": 0, "isEnabled": true, "policyPriority": 0,
+        "resources": {"catalog": lvl(&catalog), "database": lvl("sales"),
+                      "table": lvl("orders"), "column": lvl("email")},
+        "policyItems": [],
+        "denyPolicyItems": [{"users": [user], "groups": [], "roles": [],
+            "accesses": [{"type": "select", "isAllowed": true}]}],
+        "allowExceptions": [], "denyExceptions": []
+    }))
+    .execute(&f.db.pool)
+    .await
+    .expect("hand column deny");
+}
+
+/// Final review V-1, live 2b (red on `1fe70ea8`): a hand-written column
+/// `select` deny plus the clearance `MASK_NULL`, for a reader who holds the
+/// grant. StarRocks 4.1.6 returned `NULL` for the column: the hand-written deny
+/// was not applied, because a MASK_NULL column is not access-checked. The old
+/// rule kept `select` denied here, which understated the exposure.
+#[tokio::test]
+async fn a_hand_written_column_deny_under_the_clearance_mask_null_is_skipped_on_starrocks() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, _cleared, uncleared) = clearance_readers(&f, &token).await;
+    let body = explain_column(&f, &token, &uncleared).await;
+    let service_id = profile_for(&body, "starrocks")["service_id"]
+        .as_i64()
+        .expect("service id");
+    hand_column_deny(&f, service_id, &uncleared).await;
+
+    let body = explain_column(&f, &token, &uncleared).await;
+    let profile = profile_for(&body, "starrocks");
+    assert_eq!(
+        profile["mask"]["decision"]["result"]["mask_type"], "MASK_NULL",
+        "body: {body}"
+    );
+    assert_eq!(profile["masked_read_skips_access"], true, "body: {body}");
+    assert!(
+        !access_types(profile).contains(&"select".to_string()),
+        "body: {body}"
+    );
+    lift_gate(&f, tag_id).await;
+}
+
+/// Final review V-1, live 2c: a rule `MASK_HASH` folded into the clearance mask
+/// for a cleared reader, plus a hand-written column `select` deny. StarRocks
+/// refused that read (`5204`): a `MASK_HASH` column IS access-checked. So the
+/// `select` verdict stays, denied, and nothing claims a skip. Keying the skip
+/// on "any mask" instead of `MASK_NULL` turns this red.
+#[tokio::test]
+async fn a_mask_hash_column_keeps_its_starrocks_access_verdict() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, cleared, _uncleared) = clearance_readers(&f, &token).await;
+    let rule = json!({
+        "name": unique("v1-2c-hash"),
+        "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+        "selector": { "type": "path", "catalog_id": f.catalog_id,
+                      "schema": "sales", "table": "orders", "column": "email" },
+        "exempt": { "include": [], "exclude": [] }
+    });
+    let (status, written) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/rules", &token, Some(rule)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {written}");
+    let rule_id = written["id"].as_str().expect("rule id").to_string();
+    let body = explain_column(&f, &token, &cleared).await;
+    let service_id = profile_for(&body, "starrocks")["service_id"]
+        .as_i64()
+        .expect("service id");
+    hand_column_deny(&f, service_id, &cleared).await;
+
+    let body = explain_column(&f, &token, &cleared).await;
+    let profile = profile_for(&body, "starrocks");
+    assert_eq!(
+        profile["mask"]["decision"]["result"]["mask_type"], "MASK_HASH",
+        "the cleared reader is folded the rule's MASK_HASH; body: {body}"
+    );
+    assert!(
+        profile.get("masked_read_skips_access").is_none(),
+        "body: {body}"
+    );
+    assert_eq!(
+        access_for(profile, "select")["decision"]["kind"],
+        "denied",
+        "body: {body}"
+    );
+    let (status, _) = into_json(
+        f.app()
+            .oneshot(req(
+                "DELETE",
+                &format!("/perm/rules/{rule_id}"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(status.is_success(), "delete the rule: {status}");
+    lift_gate(&f, tag_id).await;
+}
+
+/// Task 12 (C2), the other half: a classified column with a deny and NO mask
+/// (for example a download from before the clearance's first compile, which
+/// carried only the deny) is still checked, so explain still says denied.
+#[tokio::test]
+async fn explain_still_denies_a_classified_starrocks_column_with_no_mask() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, _cleared, uncleared) = clearance_readers(&f, &token).await;
+    let body = explain_column(&f, &token, &uncleared).await;
+    let service_id = profile_for(&body, "starrocks")["service_id"]
+        .as_i64()
+        .expect("service id");
+    // Take the clearance's mask out of the served download, keeping its deny.
+    let removed = sqlx::query(
+        "DELETE FROM policy.authz_policies WHERE service_id = $1 \
+         AND name LIKE 'perm-clearance-%' AND name LIKE '%-mask-%'",
+    )
+    .bind(service_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("remove the mask")
+    .rows_affected();
+    assert!(
+        removed > 0,
+        "the fixture compiled a clearance mask; body: {body}"
+    );
+
+    let body = explain_column(&f, &token, &uncleared).await;
+    let profile = profile_for(&body, "starrocks");
+    assert!(
+        profile.get("masked_read_skips_access").is_none(),
+        "body: {body}"
+    );
+    let deny = access_for(profile, "select");
+    assert_eq!(deny["decision"]["kind"], "denied", "body: {body}");
+    assert_eq!(
+        deny["decision"]["reason"], "deny_policy_item",
+        "body: {body}"
+    );
+    assert_eq!(deny["attribution"]["kind"], "clearance", "body: {body}");
+    lift_gate(&f, tag_id).await;
+}
+
+/// Task 12 (live finding M-4, Task 10 deferred N2): explain no longer answers
+/// `create materialized view`. It used to ask `default_catalog.<the target's
+/// schema>`, a database nothing is created in, and showed a cleared reader a
+/// red "denied" there (no policy matched). The A3 deny is engine-wide, so the
+/// page states the rule instead of a per-database verdict.
+#[tokio::test]
+async fn explain_gives_no_materialized_view_row() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, cleared, uncleared) = clearance_readers(&f, &token).await;
+    for reader in [&cleared, &uncleared] {
+        let body = explain_column(&f, &token, reader).await;
+        assert!(
+            profile_for(&body, "starrocks")
+                .get("materialized_view")
+                .is_none(),
+            "body: {body}"
+        );
+    }
+    lift_gate(&f, tag_id).await;
+}
+
+/// The other reader kind: a CLEARED reader is allowed by their grant, and the
+/// mask the clearance folded for them transforms nothing (`MASK_NONE`) — the
+/// page must not tell them their column is nulled.
+#[tokio::test]
+async fn explain_shows_a_cleared_reader_the_clearance_mask_as_no_transform() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let (tag_id, _role, cleared, _uncleared) = clearance_readers(&f, &token).await;
+
+    let body = explain_column(&f, &token, &cleared).await;
+    let profile = profile_for(&body, "starrocks");
+    assert_eq!(
+        access_for(profile, "select")["decision"]["kind"],
+        "allowed",
+        "body: {body}"
+    );
+    let mask = &profile["mask"];
+    assert_eq!(mask["decision"]["kind"], "masked", "body: {body}");
+    assert_eq!(
+        mask["decision"]["result"]["mask_type"], "MASK_NONE",
+        "body: {body}"
+    );
+    assert_eq!(mask["attribution"]["kind"], "clearance", "body: {body}");
+
+    // A target that names no column has no mask to report.
+    let (status, table_level) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain_body(f.catalog_id, &cleared)),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {table_level}");
+    assert!(
+        profile_for(&table_level, "starrocks").get("mask").is_none(),
+        "a table-level explain carries no mask; body: {table_level}"
+    );
+    lift_gate(&f, tag_id).await;
+}
+
 // ---------------------------------------------------------------------------
 // compile (the manual repair trigger)
 // ---------------------------------------------------------------------------
@@ -3652,6 +4201,79 @@ async fn a_clearance_deny_in_the_artifact_refuses_the_uncleared_and_not_the_clea
 /// after something outside the model made it drift. Proven by deleting the
 /// compiled policy row directly — the one thing no endpoint does — and
 /// watching the trigger restore it.
+/// View governance A2, fix round 1: a StarRocks clearance whose mask cannot be
+/// folded because the bound engine runs an unmodelled image is a SKIP, and the
+/// skip reaches the wire — `POST /perm/compile`'s `skipped` list carries it as a
+/// `clearance` item naming the engine and the remedy, while the call succeeds.
+#[tokio::test]
+async fn compile_reports_a_skipped_clearance_mask_on_the_wire() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let tag_id: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
+        .bind(&f.tag_key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("fixture tag");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, ARRAY[$2], ARRAY[]::uuid[])",
+    )
+    .bind(tag_id)
+    .bind(unique("viewgov-role"))
+    .execute(&f.db.pool)
+    .await
+    .expect("gate the fixture tag");
+    let engine_name: String = sqlx::query_scalar(
+        "UPDATE engine_mgmt.engines \
+            SET spec = '{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:3.3.0\"}}'::jsonb \
+          WHERE authz_service_id = $1 RETURNING name",
+    )
+    .bind(f.service_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("an unmodelled image");
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                &format!("/perm/compile/{}", f.service_id),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let skips: Vec<&Value> = body["skipped"]
+        .as_array()
+        .expect("skipped")
+        .iter()
+        .filter(|s| s["id"] == json!(tag_id.to_string()))
+        .collect();
+    assert_eq!(skips.len(), 1, "body: {body}");
+    assert_eq!(
+        skips[0]["source_kind"].as_str(),
+        Some("clearance"),
+        "body: {body}"
+    );
+    let reason = skips[0]["reason"].as_str().expect("reason");
+    assert!(
+        reason.contains("view protection (clearance mask) not active"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains(&format!("engine {engine_name} ")),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("docs/en/guides/engine-versions.md"),
+        "{reason}"
+    );
+}
+
 #[tokio::test]
 async fn compile_restores_a_profile_that_drifted() {
     let Some(f) = setup().await else { return };

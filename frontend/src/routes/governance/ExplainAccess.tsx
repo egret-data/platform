@@ -621,21 +621,23 @@ function RawPolicy({
  * rot on a delete-and-recreate.
  */
 function DecidedBy({
-  decision,
+  policyName,
+  policyId,
   attribution,
 }: {
-  decision: DecidedDecision;
+  policyName: string;
+  policyId?: number | null;
   attribution?: ExplainAttribution | null;
 }) {
   const ranger = (
     <span className="text-muted-foreground">
-      Ranger policy <span className="font-mono">{decision.policy_name}</span>, id{" "}
-      <span className="font-mono">{decision.policy_id ?? "unknown"}</span>
+      Ranger policy <span className="font-mono">{policyName}</span>, id{" "}
+      <span className="font-mono">{policyId ?? "unknown"}</span>
     </span>
   );
 
   if (!attribution) {
-    return <RawPolicy policyName={decision.policy_name} policyId={decision.policy_id} />;
+    return <RawPolicy policyName={policyName} policyId={policyId} />;
   }
 
   if (attribution.kind === "grant") {
@@ -669,6 +671,20 @@ function DecidedBy({
             expansion <span className="font-mono">{attribution.locator}</span>
           </span>
         )}
+        {ranger}
+      </div>
+    );
+  }
+
+  // The engine-wide `create materialized view` deny (view governance A3). It
+  // belongs to no single tag, so there is no tag or role to name.
+  if (attribution.kind === "materialized_view_deny") {
+    return (
+      <div className="space-y-1 text-xs">
+        <p className="text-muted-foreground">
+          The engine-wide materialized-view deny: only users cleared for every classification
+          with a column on this engine may create a materialized view on it.
+        </p>
         {ranger}
       </div>
     );
@@ -827,7 +843,11 @@ function AccessRow({
           </ul>
         ) : (
           namesADecidingPolicy(verdict.decision) && (
-            <DecidedBy decision={verdict.decision} attribution={verdict.attribution} />
+            <DecidedBy
+              policyName={verdict.decision.policy_name}
+              policyId={verdict.decision.policy_id}
+              attribution={verdict.attribution}
+            />
           )
         )}
       </div>
@@ -868,12 +888,102 @@ function ProfileBlock({
         {profile.accesses.map((verdict) => (
           <AccessRow key={verdict.access_type} verdict={verdict} declined={declined} />
         ))}
-        {profile.accesses.length === 0 && (
+        {/* Final review V-1: StarRocks asks no access decision for a column
+            whose deciding mask is MASK_NULL, from whichever policy, so there is
+            no verdict to show, only the mask below. Explain does not know the
+            query's other columns, so the query-level consequence is stated. */}
+        {profile.masked_read_skips_access && (
+          <li
+            data-testid="explain-access-not-checked"
+            className="rounded-md border border-border p-3 text-sm text-muted-foreground"
+          >
+            This column is not access-checked on StarRocks: its mask is MASK_NULL, so the read
+            returns NULL for it, whoever denies it. The query as a whole is still refused unless the
+            reader may select another column it reads; when it selects only such columns, StarRocks
+            checks the table’s first unmasked column (or{" "}
+            <span className="font-mono text-xs">___count___</span> for{" "}
+            <span className="font-mono text-xs">count(*)</span>). Measured on StarRocks 4.1.6;
+            Trino checks access on a masked column.
+          </li>
+        )}
+        {profile.accesses.length === 0 && !profile.masked_read_skips_access && (
           <li className="text-sm text-muted-foreground">No access type was evaluated.</li>
         )}
       </ul>
+      {profile.mask && <MaskLine mask={profile.mask} />}
+      {/* Fix round 1 (m-5), V-1: StarRocks checks no access on a MASK_NULL
+          column, so with the mask unknown the access verdict above may not apply. */}
+      {profile.mask?.decision.kind === "undecidable" && (
+        <p data-testid="explain-mask-provisional" className="text-xs text-muted-foreground">
+          The access verdict above is provisional: if StarRocks applies a MASK_NULL mask here, it
+          does not check this access.
+        </p>
+      )}
+      {/* Task 12, M-4: the materialized-view deny is engine-wide, so the page
+          states the rule instead of a verdict for one database. */}
+      {profile.engine === "starrocks" && (
+        <p data-testid="explain-mv-rule" className="text-xs text-muted-foreground">
+          Materialized views: when this profile holds a classified column, StarRocks refuses{" "}
+          <span className="font-mono">create materialized view</span> in every database to anyone
+          not cleared for every classification on the profile. Explain does not answer it per
+          database.
+        </p>
+      )}
       <ProfileTags profile={profile} declined={declined} />
     </section>
+  );
+}
+
+/**
+ * The masked-read verdict for the target column (StarRocks, view governance
+ * A2). Plain on purpose: the DG frontend is redesigned later as its own spec.
+ */
+function MaskLine({ mask }: { mask: NonNullable<ExplainProfile["mask"]> }) {
+  const d = mask.decision;
+  return (
+    <div className="space-y-1">
+      <MaskSentence mask={mask} />
+      {/* Final review V-1 / Task 10 M4: any policy's MASK_NULL can decide the
+          skip, so the steward sees which perm object (or raw policy) it was. */}
+      {d.kind === "masked" && (
+        <div data-testid="explain-mask-decided-by">
+          <DecidedBy
+            policyName={d.result.policy_name}
+            policyId={d.result.policy_id}
+            attribution={mask.attribution}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MaskSentence({ mask }: { mask: NonNullable<ExplainProfile["mask"]> }) {
+  const d = mask.decision;
+  return (
+    <p data-testid="explain-mask" className="text-xs text-muted-foreground">
+      Mask on {mask.access_type}:{" "}
+      {d.kind === "masked" && d.result.mask_type === "MASK_NONE" ? (
+        <>
+          not transformed (<span className="font-mono">MASK_NONE</span>, Ranger policy{" "}
+          <span className="font-mono">{d.result.policy_name}</span>)
+        </>
+      ) : d.kind === "masked" && d.result.mask_type === "MASK_NULL" ? (
+        <>
+          returns NULL (<span className="font-mono">MASK_NULL</span>, Ranger policy{" "}
+          <span className="font-mono">{d.result.policy_name}</span>)
+        </>
+      ) : d.kind === "masked" ? (
+        <>
+          masked to <span className="font-mono">{d.result.mask_type}</span> by Ranger policy{" "}
+          <span className="font-mono">{d.result.policy_name}</span>
+        </>
+      ) : d.kind === "no_mask" ? (
+        "no mask applies"
+      ) : (
+        `undecidable (${d.why.map((c) => c.kind).join(", ")})`
+      )}
+    </p>
   );
 }
 
@@ -914,7 +1024,8 @@ function ProfileTags({
   const noTagPolicies = profile.tag_policies_in_download === 0;
   return (
     <div className="space-y-1.5 border-t border-border pt-2">
-      <Label className="text-xs">Tags that could decide here</Label>
+      {/* A heading, not a form label: nothing here is a control. */}
+      <p className="text-xs font-medium leading-none">Tags that could decide here</p>
       {declined ? (
         <p data-testid="profile-tags-declined" className="text-xs text-muted-foreground">
           Not resolved — see the reason above. This is not the same as there being none.
@@ -1312,13 +1423,15 @@ export default function ExplainAccess() {
                   So this states the limit and dates nothing. Replacing it with a
                   new promise would reintroduce exactly the same defect the first
                   time a package slipped. */}
+              {/* Task 12, M-5: this used to say "ACCESS only" under a StarRocks
+                  mask line, which contradicted it. It now names what is shown. */}
               <p>
-                This answers about ACCESS only. A column the engine masks, or a table whose
-                rows it filters, is reported here exactly like one it does not: the verdict
-                says whether the read is permitted, never that what comes back is redacted —
-                so a target this page calls <span className="font-medium">Allowed</span> can
-                still return masked values, filtered rows, or an error from a mask the engine
-                cannot apply. Asking which takes the engine.
+                On a StarRocks profile, a read of a column also shows the mask the engine
+                applies to it. Apart from that this answers about access only: row filters,
+                and masks on Trino, are not reported, so a target this page calls{" "}
+                <span className="font-medium">Allowed</span> can still return masked values,
+                filtered rows, or an error from a mask the engine cannot apply. Asking which
+                takes the engine.
               </p>
               <p>
                 Each plugin polls for its policy set on an interval, so an engine can still

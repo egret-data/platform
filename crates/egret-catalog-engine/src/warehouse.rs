@@ -92,3 +92,32 @@ pub async fn create_lakekeeper_warehouse(
 
     Ok(response.warehouse_id().to_string())
 }
+
+/// Create the lakekeeper warehouse `name` on lakekeeper's in-memory storage
+/// (`test-utils` only), for tests that commit tables and views without an
+/// object store. Returns the lakekeeper warehouse id.
+#[cfg(feature = "test-utils")]
+pub async fn create_memory_warehouse(
+    engine_state: ApiContext<EngineState>,
+    system_user: &str,
+    name: &str,
+) -> Result<String, CatalogEngineError> {
+    let metadata = system_request_metadata(system_user)?;
+    let storage_profile: StorageProfile = serde_json::from_value(serde_json::json!({
+        "type": "memory",
+        "base-location": format!("memory://test-{}", uuid::Uuid::new_v4()),
+    }))
+    .context("building memory storage profile")?;
+    let request = CreateWarehouseRequest::builder()
+        .warehouse_name(name.to_string())
+        .storage_profile(storage_profile)
+        .build();
+    let response = <EngineApiServer as WarehouseService<
+        PostgresBackend,
+        AllowAllAuthorizer,
+        SecretsState,
+    >>::create_warehouse(request, engine_state, metadata)
+    .await
+    .map_err(|e| CatalogEngineError::from_lakekeeper("lakekeeper create_warehouse", e))?;
+    Ok(response.warehouse_id().to_string())
+}

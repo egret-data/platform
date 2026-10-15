@@ -1683,7 +1683,11 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     const result = await screen.findByTestId("explain-result");
     const limits = within(result).getByTestId("honest-limits");
 
-    expect(limits).toHaveTextContent(/answers about ACCESS only/i);
+    // Task 12, M-5: the limit names what IS shown (the StarRocks mask), so it
+    // no longer contradicts the mask line above it.
+    expect(limits).toHaveTextContent(/answers about access only/i);
+    expect(limits).toHaveTextContent(/On a StarRocks profile, a read of a column also shows the mask/i);
+    expect(limits).not.toHaveTextContent(/ACCESS only\. A column the engine masks/);
     // ⚠ No dated promise, in either direction: not this package, not a successor.
     expect(limits).not.toHaveTextContent(/arrive with/i);
     expect(limits).not.toHaveTextContent(/SP4d/i);
@@ -1735,7 +1739,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     const limits = within(result).getByTestId("honest-limits");
     expect(limits).not.toHaveTextContent(/each profile’s tag list/i);
     expect(limits).not.toHaveTextContent(/those sets are for the resource/i);
-    expect(limits).toHaveTextContent(/answers about ACCESS only/i);
+    expect(limits).toHaveTextContent(/answers about access only/i);
   });
 
   /**
@@ -1931,5 +1935,262 @@ describe("ExplainAccess — the subject's ref is the allocated username (fact 5/
 
     expect(await screen.findByText(/no allocated username yet/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Bob Roe/ })).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * View governance Task 10, revised in Task 12. A StarRocks read explain of a
+ * column carries the masked-read verdict (`mask`). StarRocks checks no access on
+ * a column a mask transforms (live finding C2), so then there is no `select`
+ * verdict and `masked_read_skips_access` is set. The `create materialized view`
+ * row is gone (M-4, N2): the page states the engine-wide rule instead.
+ */
+describe("ExplainAccess — the StarRocks mask and the materialized-view rule", () => {
+  const UNCLEARED_MASKED: ExplainResponse = {
+    outcome: "per_profile",
+    profiles: [
+      {
+        service_id: 12,
+        service_name: "egret-starrocks-prod",
+        engine: "starrocks",
+        tags: [],
+        tag_policies_in_download: 0,
+        accesses: [],
+        masked_read_skips_access: true,
+        mask: {
+          access_type: "select",
+          decision: {
+            kind: "masked",
+            result: {
+              policy_id: 1,
+              policy_name: "perm-clearance-t1-mask-sales.public.orders.ssn",
+              mask_type: "MASK_NULL",
+              masked_value: null,
+              mask_condition: null,
+            },
+          },
+          attribution: null,
+        },
+      },
+    ],
+  };
+
+  test("an uncleared read of a masked StarRocks column says NULL via the mask, not denied", async () => {
+    mutateAsync.mockResolvedValue({ status: 200, data: UNCLEARED_MASKED });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const profile = await screen.findByTestId("explain-profile");
+    const mask = within(profile).getByTestId("explain-mask");
+    expect(mask).toHaveTextContent(/returns NULL/i);
+    expect(mask).toHaveTextContent("MASK_NULL");
+    expect(mask).toHaveTextContent("perm-clearance-t1-mask-sales.public.orders.ssn");
+    const skipped = within(profile).getByTestId("explain-access-not-checked");
+    expect(skipped).toHaveTextContent(/not access-checked on StarRocks/i);
+    // Final review V-1: keyed on the mask type, whoever denies the column, and
+    // the query-level consequence explain cannot evaluate is stated.
+    expect(skipped).toHaveTextContent(/its mask is MASK_NULL/i);
+    expect(skipped).toHaveTextContent(/whoever denies it/i);
+    expect(skipped).toHaveTextContent(/unless the reader may select another column it reads/i);
+    expect(skipped).toHaveTextContent(/first unmasked column/i);
+    expect(skipped).toHaveTextContent("___count___");
+    expect(skipped).not.toHaveTextContent(/a reader who holds the grant/i);
+    // No verdict badge at all: nothing says "denied" for this read.
+    expect(within(profile).queryByTestId("decision-badge")).not.toBeInTheDocument();
+    expect(profile).not.toHaveTextContent(/No access type was evaluated/i);
+  });
+
+  test("a cleared reader's MASK_NONE is not called masked, and no materialized-view verdict is shown", async () => {
+    const cleared: ExplainResponse = {
+      outcome: "per_profile",
+      profiles: [
+        {
+          ...UNCLEARED_MASKED.profiles[0],
+          masked_read_skips_access: undefined,
+          accesses: [
+            {
+              access_type: "select",
+              decision: { kind: "allowed", policy_id: 4, policy_name: "perm-grant-g1" },
+              attribution: null,
+            },
+          ],
+          mask: {
+            access_type: "select",
+            decision: {
+              kind: "masked",
+              result: {
+                policy_id: 1,
+                policy_name: "perm-clearance-t1-mask-sales.public.orders.ssn",
+                mask_type: "MASK_NONE",
+                masked_value: null,
+                mask_condition: null,
+              },
+            },
+            attribution: null,
+          },
+        },
+      ],
+    };
+    mutateAsync.mockResolvedValue({ status: 200, data: cleared });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const profile = await screen.findByTestId("explain-profile");
+    const mask = within(profile).getByTestId("explain-mask");
+    expect(mask).not.toHaveTextContent(/masked to/i);
+    expect(mask).not.toHaveTextContent(/returns NULL/i);
+    expect(mask).toHaveTextContent(/not transformed/i);
+    expect(within(profile).queryByTestId("explain-access-not-checked")).not.toBeInTheDocument();
+    // N2: no red "denied" materialized-view row for a cleared reader; the rule instead.
+    expect(profile).not.toHaveTextContent(/default_catalog\./);
+    const rows = within(profile).getAllByTestId("explain-access");
+    expect(rows.some((r) => r.textContent?.includes("create materialized view"))).toBe(false);
+    expect(within(profile).getByTestId("explain-mv-rule")).toHaveTextContent(
+      /in every database to anyone not cleared for every classification/i,
+    );
+  });
+
+  // Fix round 1 (review m-5): with an undecidable mask the access verdict is
+  // kept, and the page says it is provisional.
+  test("an undecidable StarRocks mask marks the access verdict provisional", async () => {
+    const undecidable: ExplainResponse = {
+      outcome: "per_profile",
+      profiles: [
+        {
+          ...UNCLEARED_MASKED.profiles[0],
+          masked_read_skips_access: undefined,
+          accesses: [
+            {
+              access_type: "select",
+              decision: {
+                kind: "denied",
+                policy_id: 2,
+                policy_name: "perm-clearance-t1-sales.public.orders.ssn",
+                reason: "deny_policy_item",
+              },
+              attribution: null,
+            },
+          ],
+          mask: {
+            access_type: "select",
+            decision: { kind: "undecidable", why: [{ kind: "tags_unresolved" }] },
+            attribution: null,
+          },
+        },
+      ],
+    } as unknown as ExplainResponse;
+    mutateAsync.mockResolvedValue({ status: 200, data: undecidable });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const profile = await screen.findByTestId("explain-profile");
+    const note = within(profile).getByTestId("explain-mask-provisional");
+    expect(note).toHaveTextContent(/provisional/i);
+    expect(note).toHaveTextContent(/if StarRocks applies a MASK_NULL mask here/i);
+  });
+
+  // Final review V-1 / Task 10 M4: once any policy's MASK_NULL can decide, the
+  // steward needs to see which one, so the mask line carries its attribution.
+  test("the mask line names the perm object that decided the mask", async () => {
+    const attributed: ExplainResponse = {
+      outcome: "per_profile",
+      profiles: [
+        {
+          ...UNCLEARED_MASKED.profiles[0],
+          mask: {
+            ...UNCLEARED_MASKED.profiles[0].mask!,
+            attribution: {
+              kind: "clearance",
+              tag_id: "33333333-3333-4333-8333-333333333333",
+              tag: "pii",
+              required_roles: ["pii_cleared"],
+              locator: "mask-sales.public.orders.ssn",
+            },
+          },
+        },
+      ],
+    };
+    mutateAsync.mockResolvedValue({ status: 200, data: attributed });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+    const profile = await screen.findByTestId("explain-profile");
+    const by = within(profile).getByTestId("explain-mask-decided-by");
+    expect(within(by).getByTestId("clearance-attribution")).toHaveTextContent("pii");
+    expect(by).toHaveTextContent("pii_cleared");
+  });
+
+  test("a hand-written mask is named as outside the permission model", async () => {
+    const hand: ExplainResponse = {
+      outcome: "per_profile",
+      profiles: [
+        {
+          ...UNCLEARED_MASKED.profiles[0],
+          mask: {
+            access_type: "select",
+            decision: {
+              kind: "masked",
+              result: {
+                policy_id: 31,
+                policy_name: "hand mask",
+                mask_type: "MASK_NULL",
+                masked_value: null,
+                mask_condition: null,
+              },
+            },
+            attribution: null,
+          },
+        },
+      ],
+    };
+    mutateAsync.mockResolvedValue({ status: 200, data: hand });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+    const profile = await screen.findByTestId("explain-profile");
+    const by = within(profile).getByTestId("explain-mask-decided-by");
+    expect(by).toHaveTextContent(/did not mint this policy/i);
+    expect(by).toHaveTextContent("hand mask");
+  });
+
+  test("an undecidable or absent mask names no deciding policy", async () => {
+    const none: ExplainResponse = {
+      outcome: "per_profile",
+      profiles: [
+        {
+          ...UNCLEARED_MASKED.profiles[0],
+          masked_read_skips_access: undefined,
+          mask: { access_type: "select", decision: { kind: "no_mask" }, attribution: null },
+        },
+      ],
+    } as unknown as ExplainResponse;
+    mutateAsync.mockResolvedValue({ status: 200, data: none });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+    const profile = await screen.findByTestId("explain-profile");
+    expect(within(profile).getByTestId("explain-mask")).toHaveTextContent(/no mask applies/i);
+    expect(within(profile).queryByTestId("explain-mask-decided-by")).not.toBeInTheDocument();
+  });
+
+  test("a decided mask carries no provisional note", async () => {
+    mutateAsync.mockResolvedValue({ status: 200, data: UNCLEARED_MASKED });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+    const profile = await screen.findByTestId("explain-profile");
+    expect(within(profile).queryByTestId("explain-mask-provisional")).not.toBeInTheDocument();
+  });
+
+  test("a profile with no mask verdict shows no mask line", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    await screen.findByTestId("explain-result");
+    expect(screen.queryByTestId("explain-mask")).not.toBeInTheDocument();
   });
 });

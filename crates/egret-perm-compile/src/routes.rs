@@ -70,7 +70,7 @@ use egret_policy::{
 };
 use egret_policy_api::ServicePolicies;
 use egret_ranger_eval::eval::{
-    AccessRequest, Decision, EngineConfig, TagServiceResource, UnenrichedTags,
+    AccessRequest, Decision, EngineConfig, MaskDecision, TagServiceResource, UnenrichedTags,
 };
 use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::{requests_all_values, RequestResource};
@@ -78,7 +78,7 @@ use egret_ranger_eval::servicedef::ServiceDef;
 use sqlx::{Postgres, Transaction};
 
 use crate::attribution::{attribute_policy_name, PolicyAttribution};
-use crate::explain_wire::{WireDecision, WireEngineType};
+use crate::explain_wire::{WireDecision, WireEngineType, WireMaskDecision};
 use crate::grants::{resource_level_names, validate_grant_shape};
 use crate::rules::validate_rule_shape;
 use crate::trigger::{
@@ -199,13 +199,15 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         // from `WireDecision`, which is why they are listed: `WireDecision`'s
         // `Undecidable` arm carries `WireUndecidableCause`, which carries
         // `WireUnmodelled`/`WireServiceDefIssue`, which carry the four leaf
-        // enums. The mask and row-filter mirrors in that module
-        // (`WireMaskDecision`, `WireRowFilterDecision`, and their results) are
-        // deliberately NOT registered: no response shape carries one yet, and a
-        // registered-but-unreachable schema is a contract claim nothing
-        // honours. Register them in the same breath as the field that returns
-        // one.
+        // enums. The mask mirrors (`WireMaskDecision`, `WireMaskResult`) are
+        // registered because `ExplainProfile::mask` returns one (view governance
+        // Task 3). The row-filter mirrors are deliberately NOT: no response
+        // shape carries one yet, and a registered-but-unreachable schema is a
+        // contract claim nothing honours. Register them in the same breath as
+        // the field that returns one.
         crate::explain_wire::WireDecision,
+        crate::explain_wire::WireMaskDecision,
+        crate::explain_wire::WireMaskResult,
         crate::explain_wire::WireDenyReason,
         crate::explain_wire::WireUndecidableCause,
         crate::explain_wire::WireUnmodelled,
@@ -493,6 +495,11 @@ pub enum ExplainAttribution {
         required_roles: Option<Vec<String>>,
         locator: Option<String>,
     },
+    /// `perm-clearance-mv`: a StarRocks profile's engine-wide `create
+    /// materialized view` deny (view governance A3). Its exceptions are the
+    /// users cleared for EVERY classification with a column on the profile,
+    /// so it names no single tag.
+    MaterializedViewDeny,
 }
 
 /// One Ranger ACCESS TYPE's verdict inside one profile.
@@ -516,6 +523,18 @@ pub struct ExplainAccess {
     /// [`ExplainAttribution`]. Always `None` for `Undecidable`, which has no
     /// single deciding policy.
     pub attribution: Option<ExplainAttribution>,
+}
+
+/// Whether the deciding mask is `MASK_NULL`, whichever policy decided it
+/// (final review V-1). StarRocks 4.1.6 asks no access decision for such a
+/// column (live §3.4: 2b's hand-written deny was not applied under it; 2c's
+/// `MASK_HASH` column was checked). Keyed on the TYPE rather than on the
+/// clearance's own policy, where only the clearance's was measured: if a
+/// hand-written `MASK_NULL` turns out to be checked, explain overstates the
+/// exposure, which is the safe direction. Any other type keeps the verdict.
+fn is_mask_null(decision: &WireMaskDecision) -> bool {
+    matches!(decision, WireMaskDecision::Masked { result }
+        if result.mask_type.as_deref() == Some("MASK_NULL"))
 }
 
 /// One policy profile's answer: the artifact ITS plugin downloads, evaluated
@@ -591,6 +610,54 @@ pub struct ExplainProfile {
     /// column is tagged — the question H1's steward is left with otherwise — and
     /// it is the predicate [`ExplainProfile::tags`] is narrowed by.
     pub tag_policies_in_download: usize,
+    /// What the engine masks the target COLUMN to for this subject — where a
+    /// StarRocks clearance shows (view governance A2). The clearance is a
+    /// per-column deny AND a priority-1 data mask that applies through every
+    /// view. For an uncleared reader the mask is `MASK_NULL`, and then the deny
+    /// is not consulted: see [`ExplainProfile::masked_read_skips_access`].
+    ///
+    /// Present only for a `read` explain of a COLUMN on a StarRocks profile. A
+    /// table-level target has no column to mask, a `write` has no masked request,
+    /// and Trino's masks come from the tag service, which the evaluator refuses
+    /// (tier c), so none is asked there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mask: Option<ExplainMask>,
+    /// `true` when StarRocks consults no access policy for the target column:
+    /// a `read` of a column whose deciding mask is `MASK_NULL`, from whichever
+    /// policy (final review V-1, live §3.4 cases 2a/2b/2c). The read returns
+    /// `NULL` for the column whoever denies it, so
+    /// [`ExplainProfile::accesses`] carries no `select` verdict and
+    /// [`ExplainProfile::mask`] is the answer.
+    ///
+    /// What this cannot say is the query-level consequence: the query as a
+    /// whole is still refused unless the reader may select another column it
+    /// reads, and when it selects only such columns StarRocks checks the
+    /// table's first unmasked column (or `___count___` for `count(*)`).
+    /// Explain does not know the query's other columns.
+    ///
+    /// Any other mask type keeps the `select` verdict (`MASK_HASH` was measured
+    /// checked; the rest are unmeasured), and so does no mask. When the mask
+    /// verdict is undecidable the access verdict is kept and is provisional: if
+    /// StarRocks applies a `MASK_NULL` there, it does not check that access.
+    /// Never set on Trino, which checks access on a masked column.
+    ///
+    /// (Explain no longer answers `create materialized view`, Task 12 M-4: the
+    /// A3 deny is engine-wide, so no single database's verdict says more than
+    /// the rule, and the database it asked about held nothing.)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub masked_read_skips_access: bool,
+}
+
+/// The data-mask verdict for the target column: Ranger's `select` request
+/// evaluated as a masked read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainMask {
+    /// Always `select`: a mask is applied to a read.
+    pub access_type: String,
+    pub decision: WireMaskDecision,
+    /// The deciding mask policy's `perm` model object, as for an access verdict;
+    /// `None` for no mask or an undecidable answer.
+    pub attribution: Option<ExplainAttribution>,
 }
 
 /// One tag egret resolved for the target, and **where the attachment that
@@ -1830,7 +1897,7 @@ async fn explain(
             continue;
         };
 
-        let artifact = artifact_via(&mut conn, &svc).await?;
+        let artifact = served_artifact_via(&mut conn, &svc).await?;
         // `ServiceDef::parse` of the envelope's OWN `serviceDef`, not of a def
         // looked up separately: the plugin evaluates against the def it was
         // handed, and the tag block's def (which the tag-policy tier check also
@@ -1885,6 +1952,47 @@ async fn explain(
             ..EngineConfig::without_super_users()
         };
 
+        // The masked-read question, asked only where a mask can be the answer.
+        // Asked BEFORE the accesses, because on StarRocks it decides whether
+        // the column's access is consulted at all (Task 12, C2).
+        let mask = if body.action == Action::Read
+            && engine == EngineType::StarRocks
+            && body.target.column.is_some()
+        {
+            let request = AccessRequest {
+                user: body.subject.user.clone(),
+                groups: BTreeSet::new(),
+                roles: BTreeSet::new(),
+                access_type: "select".to_string(),
+                resource: resource.clone(),
+                owner: None,
+                // StarRocks has no tag service: no tag can reach a mask.
+                resolved_tags: None,
+            };
+            let decision = egret_ranger_eval::eval::evaluate_data_mask(
+                &artifact,
+                &request,
+                &service_def,
+                &config,
+            );
+            let attribution = match &decision {
+                MaskDecision::Masked(m) => attribution_for_name(&mut *conn, &m.policy_name).await?,
+                MaskDecision::NoMask | MaskDecision::Undecidable { .. } => None,
+            };
+            Some(ExplainMask {
+                access_type: "select".to_string(),
+                decision: WireMaskDecision::from(&decision),
+                attribution,
+            })
+        } else {
+            None
+        };
+        // StarRocks asks no access decision for a column whose deciding mask
+        // is `MASK_NULL` (`ExplainProfile::masked_read_skips_access`, V-1).
+        // `mask` is only ever `Some` for a StarRocks column read.
+        let masked_read_skips_access = engine == EngineType::StarRocks
+            && mask.as_ref().is_some_and(|m| is_mask_null(&m.decision));
+
         let mut accesses = Vec::new();
         for access_type in engine_accesses(body.action, engine)? {
             let request = AccessRequest {
@@ -1913,6 +2021,9 @@ async fn explain(
             };
             let decision =
                 egret_ranger_eval::eval::evaluate(&artifact, &request, &service_def, &config);
+            if masked_read_skips_access && access_type == "select" {
+                continue;
+            }
             // `&mut *conn` and not `&mut conn`: `attribution_for` is generic
             // over `ClearanceLookups`, which `sqlx::PgConnection` implements,
             // and a `PoolConnection` does not — inference needs the deref.
@@ -1938,6 +2049,8 @@ async fn explain(
             accesses,
             tags: tags_for_profile(&resolved_for_display, tag_policies_in_download),
             tag_policies_in_download,
+            mask,
+            masked_read_skips_access,
         });
     }
 
@@ -2407,7 +2520,7 @@ async fn profile_plugin_version(
 /// The plugin version of egret's own default image for an engine type: what an
 /// UNBOUND profile is evaluated at. Refused, naming the image, when that pair
 /// is not one the evaluator models.
-fn default_image_plugin_version(
+pub(crate) fn default_image_plugin_version(
     engine: egret_ranger_eval::eval::EngineType,
 ) -> Result<egret_ranger_eval::eval::PluginVersion, String> {
     use egret_ranger_eval::eval::EngineType as E;
@@ -2512,6 +2625,57 @@ pub(crate) async fn artifact_via(
     conn: &mut sqlx::PgConnection,
     svc: &ServiceRow,
 ) -> Result<ServicePolicySet, PermHttpError> {
+    let envelope = envelope_via(conn, svc).await?;
+    to_policy_set(&envelope)
+}
+
+/// [`artifact_via`] as a provisioned JWT-mode Trino engine's plugin receives
+/// it: with the `egret-lineage` download transform applied when the profile's
+/// engines are eligible (`egret_policy::lineage_transform`, view governance R5,
+/// Task 7 fix round 1). The same function the download route calls, so
+/// `explain` evaluates what the engine downloads. The migration gate keeps
+/// [`artifact_via`]: the transform is a function of the envelope, so it adds
+/// the same material before and after a migration and proves nothing there.
+pub(crate) async fn served_artifact_via(
+    conn: &mut sqlx::PgConnection,
+    svc: &ServiceRow,
+) -> Result<ServicePolicySet, PermHttpError> {
+    use egret_policy::lineage_transform as lt;
+    let mut envelope = envelope_via(conn, svc).await?;
+    // Fix round 2, N4: the download's own per-poller decision, asked for a
+    // representative coordinator pod of the first engine bound to the profile,
+    // so explain and the download cannot diverge.
+    let engines: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM engine_mgmt.engines WHERE authz_service_id = $1 ORDER BY name",
+    )
+    .bind(svc.id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(PermHttpError::db)?;
+    if let Some(engine) = engines.first() {
+        let plugin_id = lt::representative_plugin_id(engine, &svc.name);
+        if let Some(catalogs) =
+            lt::lineage_catalogs_for_poll_via(conn, svc.id, &svc.name, Some(&plugin_id)).await?
+        {
+            lt::apply_lineage_transform(&mut envelope, &catalogs);
+        }
+    }
+    to_policy_set(&envelope)
+}
+
+fn to_policy_set(envelope: &ServicePolicies) -> Result<ServicePolicySet, PermHttpError> {
+    // Through JSON on purpose: the plugin reads JSON, and
+    // `ServicePolicySet`'s `Deserialize` is where every `Unmodelled` construct
+    // in the download is detected. Going round the serialiser would skip the
+    // detection pass that makes the refusals possible.
+    let wire = serde_json::to_value(envelope).map_err(PermHttpError::db)?;
+    serde_json::from_value::<ServicePolicySet>(wire).map_err(PermHttpError::db)
+}
+
+async fn envelope_via(
+    conn: &mut sqlx::PgConnection,
+    svc: &ServiceRow,
+) -> Result<ServicePolicies, PermHttpError> {
     let def = get_service_def_via(conn, &svc.r#type).await?.def_jsonb;
     let policies = enabled_policies_for_service_via(conn, svc.id).await?;
     let tag_service = svc
@@ -2549,12 +2713,7 @@ pub(crate) async fn artifact_via(
             )));
         }
     }
-    // Through JSON on purpose: the plugin reads JSON, and
-    // `ServicePolicySet`'s `Deserialize` is where every `Unmodelled` construct
-    // in the download is detected. Going round the serialiser would skip the
-    // detection pass that makes the refusals possible.
-    let wire = serde_json::to_value(&envelope).map_err(PermHttpError::db)?;
-    serde_json::from_value::<ServicePolicySet>(wire).map_err(PermHttpError::db)
+    Ok(envelope)
 }
 
 /// Map the DECIDING policy's Ranger name back to its `perm` model object, if
@@ -2580,6 +2739,15 @@ async fn attribution_for<L: ClearanceLookups + Send>(
         Decision::Allowed { policy_name, .. } | Decision::Denied { policy_name, .. } => policy_name,
         Decision::Undecidable { .. } => return Ok(None),
     };
+    attribution_for_name(conn, name).await
+}
+
+/// [`attribution_for`] for a deciding policy's NAME, which is all a mask
+/// verdict carries.
+async fn attribution_for_name<L: ClearanceLookups + Send>(
+    conn: &mut L,
+    name: &str,
+) -> Result<Option<ExplainAttribution>, PermHttpError> {
     Ok(match attribute_policy_name(name) {
         None => None,
         Some(PolicyAttribution::Grant(grant_id)) => Some(ExplainAttribution::Grant { grant_id }),
@@ -2591,6 +2759,9 @@ async fn attribution_for<L: ClearanceLookups + Send>(
         // `required_roles` are the two facts a steward needs and neither is on
         // the wire the engine sees, so both are reconstructed here — `tags.key`
         // (not `tags.name`), and the gate's roles keyed by that same key.
+        Some(PolicyAttribution::MaterializedViewDeny) => {
+            Some(ExplainAttribution::MaterializedViewDeny)
+        }
         Some(PolicyAttribution::Clearance { tag_id, locator }) => {
             let tag = conn.tag_key(tag_id).await?;
             // The gate is keyed by `tags.key`, so with no key there is no
@@ -2735,7 +2906,7 @@ impl ClearanceLookups for sqlx::PgConnection {
 /// | `tag_keys_for_resource_via`'s result | **no** | the attribution list: `tags.key`, exact-match only. Reusing it here is the fail-open D3 names |
 /// | `catalog_tag_assignments.warehouse_id`, `tags.id`, `tags.key` | **no** | not on the tag wire the plugin matches against |
 /// | the profile, its service def, its `tagService` | **no** | one resolution per TARGET answers every profile; nothing about a profile changes what the enricher would resolve for a resource. The def-dependent half — the enricher's DROP — is the evaluator's `enriched_tags`, which holds the resource def this function does not |
-async fn resolved_tags_for_target<L: TagLookups + Send>(
+pub(crate) async fn resolved_tags_for_target<L: TagLookups + Send>(
     conn: &mut L,
     target: &Scope,
 ) -> Result<Result<UnenrichedTags, ExplainTagDecline>, PermHttpError> {
@@ -3195,7 +3366,7 @@ fn tags_for_profile(
 ///
 /// Both methods are `-> impl Future + Send` rather than `async fn` for the reason
 /// on [`ClearanceLookups`]: the caller is an axum handler.
-trait TagLookups {
+pub(crate) trait TagLookups {
     /// `tag_assignment_coordinates_via` — every distinct
     /// `(schema_name, table_name, column_name)` this catalog's tag assignments
     /// carry. The RULING on them is [`stored_coordinate_is_fold_divergent`]'s, in

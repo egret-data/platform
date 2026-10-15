@@ -1965,6 +1965,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     > = None;
     let mut catalog_browser: Option<std::sync::Arc<dyn egret_catalog_engine::WarehouseBrowser>> =
         None;
+    // View governance B3: the lineage sweep, run on a schedule here and on
+    // demand from the classification page. With no embedded catalog there is
+    // nothing to sweep, and the route says so.
+    let mut lineage_sweeper: std::sync::Arc<dyn egret_catalog_engine::LineageSweeper> =
+        std::sync::Arc::new(egret_catalog_engine::NoCatalogSweeper);
+    // View governance B5: the DEFINER audit reads the views of egret's
+    // catalogs. With no embedded catalog there are none.
+    let mut view_catalog: std::sync::Arc<dyn egret_catalog_engine::ViewCatalog> =
+        std::sync::Arc::new(egret_catalog_engine::NoViewCatalog);
     let catalog_engine: Option<axum::Router> = if config.catalog.enabled {
         let dsn = config.database.url.as_str();
         egret_catalog_engine::run_lakekeeper_migrations(dsn)
@@ -1995,9 +2004,72 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
                 catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
             });
+        // View governance B2: a classified view's commit waits until every
+        // Ranger plugin holds its tags. The lineage EXPLAIN runs as
+        // `egret-lineage` on a provisioned JWT-mode Trino engine
+        // (`egret_query::execution::lineage`), with a token only egret mints.
+        let lineage_minter =
+            std::sync::Arc::new(egret_bin::engine_minter::MachineIdpEngineMinter::new(
+                egret_machine_idp::PgSigningKeyStore::new(db.clone()),
+                egret_auth::users::UserRepo::new(db.clone()),
+                egret_auth::groups::GroupRepo::new(db.clone()),
+                identity.issuer().to_string(),
+                900,
+            ));
+        let lineage_runner =
+            std::sync::Arc::new(egret_query::execution::lineage::TrinoLineageRunner::new(
+                db.pool.clone(),
+                lineage_minter,
+                // The hold bounds the EXPLAIN by the same budget, inside its
+                // one 90 s deadline (`egret_catalog_engine::view_hold`).
+                egret_catalog_engine::EXPLAIN_BUDGET,
+            ));
+        let view_hold = std::sync::Arc::new(egret_catalog_engine::ViewHold::new(
+            db.clone(),
+            lineage_runner.clone(),
+        ));
+        let sweep = std::sync::Arc::new(egret_catalog_engine::LineageSweep::new(
+            db.clone(),
+            engine_state.clone(),
+            config.catalog.system_user.clone(),
+            lineage_runner,
+        ));
+        lineage_sweeper = sweep.clone();
+        view_catalog = std::sync::Arc::new(egret_catalog_engine::EmbeddedViewCatalog::new(
+            db.clone(),
+            engine_state.clone(),
+            config.catalog.system_user.clone(),
+        ));
+        // Task 9 fix round 1: after each classification write commits, sweep
+        // the views with no computed lineage that its profiles reach.
+        egret_catalog_engine::spawn_classification_sweeps(sweep.clone(), db.clone());
+        // The scheduled sweep (spec B3, R6). The first run waits one period,
+        // so a boot does not EXPLAIN every view before the engines are up. A
+        // run that overlaps an on-demand one is skipped (`SweepError::Busy`).
+        tokio::spawn(async move {
+            use egret_catalog_engine::LineageSweeper as _;
+            let period = egret_catalog_engine::LINEAGE_SWEEP_INTERVAL;
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            // M6: a sweep longer than the period does not trigger a burst.
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                match sweep.sweep().await {
+                    Ok(report) if !report.failures.is_empty() => tracing::warn!(
+                        failures = report.failures.len(),
+                        first = ?report.failures.first(),
+                        "lineage sweep: some views' lineage could not be computed; their tags \
+                         are unchanged"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "lineage sweep did not run"),
+                }
+            }
+        });
         Some(egret_catalog_engine::mount_catalog_engine(
             engine_state,
             Some(guard),
+            Some(view_hold),
         ))
     } else {
         None
@@ -2040,30 +2112,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .public_url
         .clone()
         .unwrap_or_else(|| "http://egret:8080".to_string());
-
-    // Control plane: global platform-admin Storage + Secrets + Access console.
-    // Keeps `storage` (CatalogStore) + `browser` for the Storage router's
-    // credential-rotation push-down onto provisioned warehouses; the warehouse
-    // admin router itself moved to egret-catalog-engine (E3d-3, see
-    // `catalog_admin` below).
-    let control_plane = Some(egret_controlplane::CpState {
-        storage: egret_catalog_engine::CatalogStore::new(db.clone()),
-        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
-        users: egret_auth::users::UserRepo::new(db.clone()),
-        groups: egret_auth::groups::GroupRepo::new(db.clone()),
-        roles: egret_auth::roles::RoleRepo::new(db.clone(), bus.clone()),
-        access_resolver: egret_auth::effective::AccessResolver::new(db.clone()),
-        secrets: workspace_secrets.clone(),
-        sessions: sessions.clone(),
-        browser: catalog_browser.clone(),
-        pdp: pdp.clone(),
-        audit: audit_sink.clone(),
-        audit_store: audit_store.clone(),
-        tags: egret_bi::TagRepo::new(db.clone()),
-        // SAME `bus` as `roles` so a classification-policy change publishes the
-        // RolesChanged reload the Cedar PDP subscribes to (Access P3.3).
-        classification_policies: egret_bi::ClassificationPolicyRepo::new(db.clone(), bus.clone()),
-    });
 
     // Recompiles a catalog's implicit assignment grant (SP4a Task 16, D3
     // defects 2 and 3) — built once here, shared (as two DIFFERENT trait
@@ -2110,6 +2158,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         engine_egret_url: engine_egret_url.clone(),
         pdp: pdp.clone(),
+        // Final review I-3: an editor write to a StarRocks data mask refolds the
+        // clearance masks in the same transaction.
+        recompiler: std::sync::Arc::new(egret_perm_compile::PermRecompiler),
     });
 
     // Data-permission model surface (SP4a Task 9): grants/rules/explain, plus
@@ -2191,6 +2242,44 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         ),
         catalog_assignment_compiler: Some(profile_compiler.clone()
             as std::sync::Arc<dyn egret_catalog_registry::CatalogAssignmentCompiler>),
+    });
+
+    // Control plane: global platform-admin Storage + Secrets + Access console.
+    // Keeps `storage` (CatalogStore) + `browser` for the Storage router's
+    // credential-rotation push-down onto provisioned warehouses; the warehouse
+    // admin router itself moved to egret-catalog-engine (E3d-3, see
+    // `catalog_admin` below).
+    let control_plane = Some(egret_controlplane::CpState {
+        storage: egret_catalog_engine::CatalogStore::new(db.clone()),
+        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        groups: egret_auth::groups::GroupRepo::new(db.clone()),
+        roles: egret_auth::roles::RoleRepo::new(db.clone(), bus.clone()),
+        access_resolver: egret_auth::effective::AccessResolver::new(db.clone()),
+        secrets: workspace_secrets.clone(),
+        sessions: sessions.clone(),
+        browser: catalog_browser.clone(),
+        pdp: pdp.clone(),
+        audit: audit_sink.clone(),
+        audit_store: audit_store.clone(),
+        tags: egret_bi::TagRepo::new(db.clone()),
+        // SAME `bus` as `roles` so a classification-policy change publishes the
+        // RolesChanged reload the Cedar PDP subscribes to (Access P3.3).
+        classification_policies: egret_bi::ClassificationPolicyRepo::new(db.clone(), bus.clone()),
+        db: db.clone(),
+        // The classification page's materialized-view report dials the same
+        // engines, through the same admin connection, as the catalog apply path
+        // — hence built from the engine-mgmt state, and placed after it.
+        mv_list_timeout: std::time::Duration::from_secs(15),
+        mv_lister: std::sync::Arc::new(EngineMaterializedViewLister {
+            engine_mgmt: engine_mgmt
+                .clone()
+                .expect("engine-mgmt state is built just above"),
+        }),
+        lineage_sweeper: lineage_sweeper.clone(),
+        view_catalog: view_catalog.clone(),
+        // The same budget as the StarRocks half's listings.
+        view_audit_timeout: std::time::Duration::from_secs(15),
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).
@@ -2726,5 +2815,125 @@ mod catalog_guard_audience_tests {
             .await
             .expect_err("a data-api token must not reach the catalog");
         assert_eq!(err.0, axum::http::StatusCode::UNAUTHORIZED, "{}", err.1);
+    }
+
+    /// Final review M-7: the view hold passes an unknown prefix through
+    /// unheld, which is safe only because this guard refuses any prefix that
+    /// is not byte-identical to the warehouse's `lakekeeper_warehouse_id`.
+    /// lakekeeper itself accepts the uppercase, simple and `urn:` forms of the
+    /// same UUID, so each of those must be a 403 here, before the hold runs.
+    /// The canonical prefix is the control: it passes the prefix check and is
+    /// refused only for having no grant.
+    #[tokio::test]
+    async fn an_alias_of_the_warehouse_prefix_is_refused_before_the_hold() {
+        let Some(g) = guard().await else {
+            eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+            return;
+        };
+        let pool = g.catalog.pool();
+        let s = uuid::Uuid::new_v4().simple().to_string();
+        let ws: uuid::Uuid =
+            sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,'G') RETURNING id")
+                .bind(format!("guard-ws-{s}"))
+                .fetch_one(pool)
+                .await
+                .expect("workspace");
+        let sc: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+             VALUES ($1,'us-east-1','b','AK') RETURNING id",
+        )
+        .bind(format!("guard-sc-{s}"))
+        .fetch_one(pool)
+        .await
+        .expect("storage connection");
+        let lakekeeper_id = uuid::Uuid::new_v4();
+        let warehouse = format!("guard_wh_{s}");
+        sqlx::query(
+            "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id, \
+             lakekeeper_warehouse_id) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(&warehouse)
+        .bind(ws)
+        .bind(sc)
+        .bind(lakekeeper_id.to_string())
+        .execute(pool)
+        .await
+        .expect("warehouse");
+        let km = g.keys.active().await.expect("active key");
+        let token = egret_machine_idp::sign_claims(
+            &km,
+            &serde_json::json!({
+                "sub": "c", "aud": CATALOG_AUDIENCE, "warehouse": warehouse,
+                "roles": ["guard-role"], "exp": chrono::Utc::now().timestamp() + 600,
+            }),
+        )
+        .expect("sign");
+
+        let canonical = lakekeeper_id.hyphenated().to_string();
+        let err = g
+            .check(
+                "POST",
+                &format!("/{canonical}/namespaces/s/views"),
+                None,
+                Some(&token),
+            )
+            .await
+            .expect_err("no grant");
+        assert!(
+            err.1.contains("has no grants"),
+            "the canonical prefix passed: {}",
+            err.1
+        );
+
+        for alias in [
+            canonical.to_uppercase(),
+            lakekeeper_id.simple().to_string(),
+            format!("urn:uuid:{canonical}"),
+        ] {
+            let err = g
+                .check(
+                    "POST",
+                    &format!("/{alias}/namespaces/s/views"),
+                    None,
+                    Some(&token),
+                )
+                .await
+                .expect_err("an alias prefix must be refused");
+            assert_eq!(
+                err.0,
+                axum::http::StatusCode::FORBIDDEN,
+                "{alias}: {}",
+                err.1
+            );
+            assert_eq!(err.1, "token is not scoped to this warehouse", "{alias}");
+        }
+    }
+}
+
+/// Lists a StarRocks database's materialized views through the engine-mgmt
+/// admin connection (view governance A4). The control plane owns the route and
+/// cannot depend on the engine-mgmt crate, so the composition root bridges them.
+struct EngineMaterializedViewLister {
+    engine_mgmt: egret_engine_mgmt::EngineMgmtState,
+}
+
+#[async_trait::async_trait]
+impl egret_controlplane::MaterializedViewLister for EngineMaterializedViewLister {
+    async fn list(
+        &self,
+        engine: &egret_controlplane::ExposureEngine,
+    ) -> Result<Vec<egret_controlplane::MvRow>, String> {
+        Ok(
+            egret_engine_mgmt::list_materialized_views(&self.engine_mgmt, engine.id)
+                .await?
+                .into_iter()
+                .map(|r| egret_controlplane::MvRow {
+                    database: r.database,
+                    name: r.name,
+                    base_tables: r.base_tables,
+                    definition: r.definition,
+                })
+                .collect(),
+        )
     }
 }

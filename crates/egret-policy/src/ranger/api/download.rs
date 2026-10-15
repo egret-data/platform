@@ -1,10 +1,12 @@
 //! Policy download + tags download endpoints (Ranger plugin polling protocol).
 
+use crate::plugin_downloads::DownloadKind;
 use crate::ranger::dto::{ServicePolicies, ServiceTags, TagAssignment};
 use crate::ranger::error::RangerError;
 use crate::ranger::routes::{
     RangerErrorBody, RangerServicePolicies, RangerServiceTags, RangerState,
 };
+use crate::PolicyStore;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -17,6 +19,57 @@ pub struct DownloadParams {
     /// The plugin's cached policy version; a match yields `304 Not Modified`.
     #[serde(rename = "lastKnownVersion")]
     pub last_known_version: Option<i64>,
+}
+
+/// The plugin's identity on a poll (`<appId>@<host>-<service>`). Read apart
+/// from [`DownloadParams`] so the documented query surface is unchanged.
+#[derive(Deserialize)]
+pub struct PluginParams {
+    #[serde(rename = "pluginId")]
+    pub plugin_id: Option<String>,
+}
+
+/// Longest `pluginId` recorded (`<appId>@<host>-<service>` is far shorter).
+const MAX_PLUGIN_ID_BYTES: usize = 256;
+
+/// Record this poll in the plugin download ledger (view governance B4).
+///
+/// Never changes the download: a poll with no `pluginId` records nothing, and a
+/// ledger error is logged and swallowed. The caller has already resolved the
+/// service, so an unknown service never reaches here.
+async fn record_poll(
+    store: &PolicyStore,
+    service_id: i64,
+    plugin_id: Option<&str>,
+    kind: DownloadKind,
+    last_known: Option<i64>,
+    served: Option<i64>,
+) {
+    let Some(plugin_id) = plugin_id.filter(|p| !p.is_empty()) else {
+        return;
+    };
+    if plugin_id.len() > MAX_PLUGIN_ID_BYTES {
+        // Never log the raw value: the endpoint is anonymous, and an id can be
+        // as long as the URI limit.
+        tracing::warn!(
+            service_id,
+            id_len = plugin_id.len(),
+            id_prefix = %String::from_utf8_lossy(&plugin_id.as_bytes()[..64]),
+            "plugin id over {MAX_PLUGIN_ID_BYTES} bytes; not recorded"
+        );
+        return;
+    }
+    if let Err(e) = store
+        .record_plugin_download(service_id, plugin_id, kind, last_known, served)
+        .await
+    {
+        tracing::warn!(
+            error = %e,
+            service_id,
+            plugin_id,
+            "could not record a plugin download; serving the download anyway"
+        );
+    }
 }
 
 /// `GET /plugins/policies/download/{service}?lastKnownVersion=N`
@@ -42,9 +95,20 @@ pub async fn download_policies(
     State(s): State<RangerState>,
     Path(service): Path<String>,
     Query(q): Query<DownloadParams>,
+    Query(p): Query<PluginParams>,
 ) -> Result<Response, RangerError> {
     let svc = s.store.get_service(&service).await?; // 404 if unknown
-    if q.last_known_version == Some(svc.policy_version) {
+    let not_modified = q.last_known_version == Some(svc.policy_version);
+    record_poll(
+        &s.store,
+        svc.id,
+        p.plugin_id.as_deref(),
+        DownloadKind::Policies,
+        q.last_known_version,
+        (!not_modified).then_some(svc.policy_version),
+    )
+    .await;
+    if not_modified {
         return Ok(StatusCode::NOT_MODIFIED.into_response());
     }
     let def = s.store.get_service_def(&svc.r#type).await?.def_jsonb;
@@ -136,6 +200,26 @@ pub async fn download_policies(
             Err(e) => return Err(e.into()),
         }
     }
+    // View governance R5: decided per POLLER (fix round 2, N1). Only a pod of
+    // a Trino engine egret provisions in JWT mode, bound to this profile, is
+    // served the `egret-lineage` transform; every other poller gets the stored
+    // policies (`crate::lineage_transform::lineage_catalogs_for_poll_via`).
+    let mut conn = s
+        .store
+        .pool()
+        .acquire()
+        .await
+        .map_err(crate::PolicyStoreError::from)?;
+    if let Some(catalogs) = crate::lineage_transform::lineage_catalogs_for_poll_via(
+        &mut conn,
+        sp.service_id,
+        &service_name,
+        p.plugin_id.as_deref(),
+    )
+    .await?
+    {
+        crate::lineage_transform::apply_lineage_transform(&mut sp, &catalogs);
+    }
     Ok(Json(sp).into_response())
 }
 
@@ -164,9 +248,22 @@ pub async fn download_tags(
     State(s): State<RangerState>,
     Path(service): Path<String>,
     Query(q): Query<DownloadParams>,
+    Query(p): Query<PluginParams>,
 ) -> Result<Response, RangerError> {
     let svc = s.store.get_service(&service).await?; // 404 if unknown
-    if q.last_known_version == Some(svc.tag_version) {
+    let not_modified = q.last_known_version == Some(svc.tag_version);
+    // Keyed by the service the poll names: Trino polls tags under its RESOURCE
+    // service, not under the tag service.
+    record_poll(
+        &s.store,
+        svc.id,
+        p.plugin_id.as_deref(),
+        DownloadKind::Tags,
+        q.last_known_version,
+        (!not_modified).then_some(svc.tag_version),
+    )
+    .await;
+    if not_modified {
         return Ok(StatusCode::NOT_MODIFIED.into_response());
     }
     let assignments = s

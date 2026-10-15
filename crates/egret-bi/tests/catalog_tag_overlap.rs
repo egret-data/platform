@@ -444,3 +444,77 @@ async fn a_rename_into_a_hand_written_masks_tag_name_completing_a_pair_is_409() 
         .await
         .expect("a rename into an unaddressed name passes");
 }
+
+/// Task 9 fix round 1, I4: a tag that gains its clearance travels to the
+/// views reading a table that carries it. When that puts it beside another
+/// masked tag on a view column, the clearance write is refused like any
+/// other assignment that completes an overlapping pair, and nothing changes.
+#[tokio::test]
+async fn a_clearance_that_completes_an_overlap_on_a_view_column_is_refused() {
+    let _serial = SERIAL.lock().await;
+    let Some(e) = env().await else { return };
+    let u = trino_unit(&e).await;
+    let (a, a_name) = new_tag(&e, "a").await;
+    let (b, b_name) = new_tag(&e, "b").await;
+    hand_tag_mask(&e, &u, &unique("mask a"), &a_name, "MASK").await;
+    hand_tag_mask(&e, &u, &unique("hash b"), &b_name, "MASK_HASH").await;
+    // A view over `sales.orders`, its lineage and columns as the hold records them.
+    let view = egret_perm_compile::lineage::ViewRef {
+        catalog: u.catalog.clone(),
+        schema: "sales".into(),
+        name: unique("v_ovl"),
+    };
+    {
+        let mut conn = e.db.pool.acquire().await.unwrap();
+        let tables = std::collections::BTreeSet::from([(
+            u.catalog.clone(),
+            "sales".to_string(),
+            "orders".to_string(),
+        )]);
+        egret_perm_compile::lineage::write_lineage(&mut conn, &view, &tables)
+            .await
+            .unwrap();
+        egret_perm_compile::lineage::set_view_columns(
+            &mut conn,
+            &view,
+            Some(&["email".to_string()]),
+        )
+        .await
+        .unwrap();
+    }
+    // `a` on the view column by hand; `b`, not yet a clearance, on the base.
+    e.repo
+        .assign_catalog(a, u.warehouse_id, "sales", &view.name, "email", Some(e.by))
+        .await
+        .expect("a on the view");
+    assign(&e, &u, b, "email").await.expect("b on the base");
+    let policies =
+        egret_bi::ClassificationPolicyRepo::new(e.db.clone(), egret_events::EventBus::new());
+
+    let got = policies
+        .set_policy(b, &[unique("ovl-role")], &[], None)
+        .await;
+
+    assert!(
+        matches!(got, Err(egret_bi::BiError::Overlap { .. })),
+        "the clearance must be refused: {got:?}"
+    );
+    let on_view: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM catalog_tag_assignments \
+          WHERE warehouse_id = $1 AND table_name = $2 AND tag_id = $3",
+    )
+    .bind(u.warehouse_id)
+    .bind(&view.name)
+    .bind(b)
+    .fetch_one(&e.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(on_view, 0, "b never reaches the view");
+    let gated: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM classification_policies WHERE tag_id = $1")
+            .bind(b)
+            .fetch_one(&e.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(gated, 0, "the clearance is rolled back");
+}

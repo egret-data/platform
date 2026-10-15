@@ -36,4 +36,7 @@ pub use store::{
     AttachedCatalog, AttachmentRow, CatalogEngineRow, CatalogFilter, CatalogRow,
     CatalogWorkspaceRow, NewAttachment, RegistryStore, WarehouseIdentity,
 };
-pub use tag_version::{bump_bound_tag_versions, services_bound_to_warehouse};
+pub use tag_version::{
+    bump_bound_tag_versions, bump_tag_versions_for_warehouses, services_bound_to_warehouse,
+    services_bound_to_warehouses,
+};

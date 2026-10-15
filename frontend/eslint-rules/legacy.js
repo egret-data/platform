@@ -88,7 +88,6 @@ export const legacy = {
     "src/routes/explore/dataapi/ClientCreate.tsx",
     "src/routes/explore/dataapi/detail/TryIt.tsx",
     "src/routes/explore/settings/RolesPermissions.tsx",
-    "src/routes/governance/ExplainAccess.tsx",
     "src/routes/governance/GrantDialog.tsx",
     "src/routes/governance/RuleDialog.tsx",
   ],
@@ -108,6 +107,5 @@ export const legacy = {
     "src/components/chart/settings/CurrencySelect.tsx",
     "src/routes/control-plane/access/AccessExplorer.tsx",
     "src/routes/control-plane/access/GroupDetail.tsx",
-    "src/routes/governance/TagDetail.tsx",
   ],
 };

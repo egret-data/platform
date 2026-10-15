@@ -29,8 +29,10 @@ import type {
   CreateTag,
   ErrorBody,
   SetAccessPolicy,
+  SweepReport,
   TagDto,
-  UpdateTag
+  UpdateTag,
+  ViewExposureDto
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -54,6 +56,232 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   }
   return result;
 };
+
+export type controlPlaneTagsRunLineageSweepResponse200 = {
+  data: SweepReport
+  status: 200
+}
+
+export type controlPlaneTagsRunLineageSweepResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneTagsRunLineageSweepResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneTagsRunLineageSweepResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneTagsRunLineageSweepResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneTagsRunLineageSweepResponseSuccess = (controlPlaneTagsRunLineageSweepResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneTagsRunLineageSweepResponseError = (controlPlaneTagsRunLineageSweepResponse401 | controlPlaneTagsRunLineageSweepResponse403 | controlPlaneTagsRunLineageSweepResponse409 | controlPlaneTagsRunLineageSweepResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneTagsRunLineageSweepResponse = (controlPlaneTagsRunLineageSweepResponseSuccess | controlPlaneTagsRunLineageSweepResponseError)
+
+export const getControlPlaneTagsRunLineageSweepUrl = () => {
+
+
+
+
+  return `/api/control-plane/classifications/lineage-sweep`
+}
+
+export const controlPlaneTagsRunLineageSweep = async ( options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneTagsRunLineageSweepResponse> => {
+
+  return customInstance<controlPlaneTagsRunLineageSweepResponse>(getControlPlaneTagsRunLineageSweepUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneTagsRunLineageSweepMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneTagsRunLineageSweep>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneTagsRunLineageSweep>>, TError,void, TContext> => {
+
+const mutationKey = ['controlPlaneTagsRunLineageSweep'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneTagsRunLineageSweep>>, void> = () => {
+
+
+          return  controlPlaneTagsRunLineageSweep(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneTagsRunLineageSweepMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneTagsRunLineageSweep>>>
+
+    export type ControlPlaneTagsRunLineageSweepMutationError = ErrorBody
+
+    export const useControlPlaneTagsRunLineageSweep = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneTagsRunLineageSweep>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneTagsRunLineageSweep>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getControlPlaneTagsRunLineageSweepMutationOptions(options), queryClient);
+    }
+    export type controlPlaneTagsGetViewExposureResponse200 = {
+  data: ViewExposureDto
+  status: 200
+}
+
+export type controlPlaneTagsGetViewExposureResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneTagsGetViewExposureResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneTagsGetViewExposureResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneTagsGetViewExposureResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneTagsGetViewExposureResponseSuccess = (controlPlaneTagsGetViewExposureResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneTagsGetViewExposureResponseError = (controlPlaneTagsGetViewExposureResponse401 | controlPlaneTagsGetViewExposureResponse403 | controlPlaneTagsGetViewExposureResponse404 | controlPlaneTagsGetViewExposureResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneTagsGetViewExposureResponse = (controlPlaneTagsGetViewExposureResponseSuccess | controlPlaneTagsGetViewExposureResponseError)
+
+export const getControlPlaneTagsGetViewExposureUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/classifications/${encodeURIComponent(id)}/view-exposure`
+}
+
+export const controlPlaneTagsGetViewExposure = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneTagsGetViewExposureResponse> => {
+
+  return customInstance<controlPlaneTagsGetViewExposureResponse>(getControlPlaneTagsGetViewExposureUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneTagsGetViewExposureQueryKey = (id: string,) => {
+    return [
+    `/api/control-plane/classifications/${encodeURIComponent(id)}/view-exposure`
+    ] as const;
+    }
+
+
+export const getControlPlaneTagsGetViewExposureQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneTagsGetViewExposureQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>> = ({ signal }) => controlPlaneTagsGetViewExposure(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneTagsGetViewExposureQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>>
+export type ControlPlaneTagsGetViewExposureQueryError = ErrorBody
+
+
+export function useControlPlaneTagsGetViewExposure<TData = Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneTagsGetViewExposure<TData = Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneTagsGetViewExposure<TData = Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlaneTagsGetViewExposure<TData = Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneTagsGetViewExposure>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneTagsGetViewExposureQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
 
 export type controlPlaneTagsListTagsResponse200 = {
   data: TagDto[]

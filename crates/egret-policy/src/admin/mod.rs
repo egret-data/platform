@@ -93,6 +93,84 @@ pub struct PolicyAdminState {
     /// Policy decision point: every route gates on `egret_core::authz::require`
     /// (B1b-2). `platform_admin` still bypasses inside the PDP.
     pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+    /// Recompiles a StarRocks profile inside an editor write that changes one
+    /// of its data masks (final review I-3). Not optional: an editor without
+    /// it would leave the clearance-mask fold stale.
+    pub recompiler: Arc<dyn ProfileRecompiler>,
+}
+
+/// Recompiles policy profiles on the caller's open transaction — the seam
+/// `egret-perm-compile` fills (this crate cannot depend on it).
+///
+/// # Why the editor needs it (final review I-3)
+///
+/// On StarRocks the clearance's priority-1 mask folds, for each cleared user,
+/// what the profile's OTHER data masks give that user, hand-written ones
+/// included (`egret_perm_compile::clearance_mask`). The fold is computed at
+/// compile time, so an editor write that creates, edits, enables, disables or
+/// deletes a hand-written data mask on a StarRocks profile must recompile that
+/// profile in the same transaction; otherwise the plugin keeps serving the
+/// old fold above the edited mask, and a tightened mask stays loose for the
+/// cleared users (fail-open) until some unrelated write recompiles.
+#[async_trait::async_trait]
+pub trait ProfileRecompiler: Send + Sync {
+    /// Recompile `service_ids` (ascending) on `conn`. An error refuses the
+    /// editor's write, which rolls back with it.
+    async fn recompile_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<(), PolicyHttpError>;
+}
+
+/// Whether a write to `body` under `service_id` changes what a StarRocks
+/// clearance mask folds: a data mask (`policyType` 1) on a StarRocks profile.
+async fn changes_the_clearance_fold(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    body: &Value,
+) -> Result<bool, PolicyHttpError> {
+    if body.get("policyType").and_then(Value::as_i64) != Some(1) {
+        return Ok(false);
+    }
+    let service_type: Option<String> =
+        sqlx::query_scalar("SELECT type FROM policy.authz_services WHERE id = $1")
+            .bind(service_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(crate::PolicyStoreError::from)?;
+    Ok(service_type.as_deref() == Some(crate::STARROCKS_DEF_NAME))
+}
+
+/// The stored `(service_id, policy_jsonb)` of policy `id`, if it exists.
+async fn stored_policy(
+    conn: &mut sqlx::PgConnection,
+    id: i64,
+) -> Result<Option<(i64, Value)>, PolicyHttpError> {
+    Ok(sqlx::query_as::<_, (i64, Value)>(
+        "SELECT service_id, policy_jsonb FROM policy.authz_policies WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(crate::PolicyStoreError::from)?)
+}
+
+/// Whether removing, disabling or enabling stored policy `id` changes a
+/// StarRocks clearance fold; when it does, its profile's row is locked first,
+/// in the order a recompile takes it (I-3). Returns the profile to recompile.
+async fn fold_profile_of_stored(
+    conn: &mut sqlx::PgConnection,
+    id: i64,
+) -> Result<Option<i64>, PolicyHttpError> {
+    let Some((service_id, body)) = stored_policy(conn, id).await? else {
+        return Ok(None);
+    };
+    if !changes_the_clearance_fold(conn, service_id, &body).await? {
+        return Ok(None);
+    }
+    crate::lock_service_rows_via(conn, &[service_id]).await?;
+    Ok(Some(service_id))
 }
 
 impl FromRef<PolicyAdminState> for SessionService {
@@ -1278,6 +1356,17 @@ async fn write_policy_checked(
         PolicyWrite::Create => None,
         PolicyWrite::Replace(id) => Some(id),
     };
+    // Final review I-3: a data mask written on a StarRocks profile (or one a
+    // replace overwrites) changes what the clearance mask folds.
+    let replaced_was_fold_input = match replacing {
+        Some(id) => match stored_policy(&mut tx, id).await? {
+            Some((sid, body)) => changes_the_clearance_fold(&mut tx, sid, &body).await?,
+            None => false,
+        },
+        None => false,
+    };
+    let refold = replaced_was_fold_input
+        || changes_the_clearance_fold(&mut tx, service_id, &pol.body).await?;
     refuse_ambiguous_arbitration(&mut tx, service_id, replacing, pol).await?;
     // SP4d-4 Task 11: a save that filled emptied levels with `*` lowers the
     // policy's evalOrder; report whom it now precedes. Runs after the
@@ -1317,6 +1406,11 @@ async fn write_policy_checked(
             id
         }
     };
+    if refold {
+        st.recompiler
+            .recompile_in_tx(&mut tx, &[service_id])
+            .await?;
+    }
     tx.commit().await.map_err(crate::PolicyStoreError::from)?;
     Ok((id, shifts))
 }
@@ -1703,7 +1797,7 @@ async fn create_policy(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
-        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the mask/row-filter body would form a rule overlap with another policy or compiled rule that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the sentence names both and suggests Override where a priority can fix it). An overlap body adds `code: \"rule_overlap\"`, `rules` (both members: a compiled rule's `id` and name, `id` null for a hand-written policy), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
+        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the mask/row-filter body would form a rule overlap with another policy or compiled rule that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the sentence names both and suggests Override where a priority can fix it). An overlap body adds `code: \"rule_overlap\"`, `rules` (both members: a compiled rule's `id` and name, `id` null for a hand-written policy), `coordinate` and `kind` (`mask` | `row_filter`), or the change is a data mask on a StarRocks profile and the profile cannot be recompiled with it (its classification masks fold the profile's other masks, so the write recompiles the profile in the same transaction and is refused when that recompile is)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1772,7 +1866,7 @@ async fn update_policy(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:delete permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
-        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
+        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the change is a data mask on a StarRocks profile and the profile cannot be recompiled with it (its classification masks fold the profile's other masks, so the write recompiles the profile in the same transaction and is refused when that recompile is)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1782,7 +1876,17 @@ async fn delete_policy_handler(
     Path(id): Path<i64>,
 ) -> Result<StatusCode, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:delete").await?;
-    st.store.delete_policy(id).await?;
+    // Final review I-3: deleting a StarRocks data mask refolds the profile's
+    // clearance masks in the same transaction.
+    let mut tx = st.store.begin().await?;
+    let refold = fold_profile_of_stored(&mut tx, id).await?;
+    crate::delete_policy_via(&mut tx, id).await?;
+    if let Some(service_id) = refold {
+        st.recompiler
+            .recompile_in_tx(&mut tx, &[service_id])
+            .await?;
+    }
+    tx.commit().await.map_err(crate::PolicyStoreError::from)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1803,7 +1907,7 @@ pub struct EnabledBody {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
-        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
+        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the change is a data mask on a StarRocks profile and the profile cannot be recompiled with it (its classification masks fold the profile's other masks, so the write recompiles the profile in the same transaction and is refused when that recompile is)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1814,7 +1918,16 @@ async fn set_policy_enabled(
     Json(b): Json<EnabledBody>,
 ) -> Result<StatusCode, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
-    st.store.set_policy_enabled(id, b.enabled).await?;
+    // Final review I-3: as delete, for an enabled flag.
+    let mut tx = st.store.begin().await?;
+    let refold = fold_profile_of_stored(&mut tx, id).await?;
+    crate::set_policy_enabled_via(&mut tx, id, b.enabled).await?;
+    if let Some(service_id) = refold {
+        st.recompiler
+            .recompile_in_tx(&mut tx, &[service_id])
+            .await?;
+    }
+    tx.commit().await.map_err(crate::PolicyStoreError::from)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

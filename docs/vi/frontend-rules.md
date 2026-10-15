@@ -300,11 +300,11 @@ Mỗi dòng là một danh sách legacy trong `frontend/eslint-rules/legacy.js`:
 | FE-A11Y-1 | `jsx-a11y/aria-role` | 3 | |
 | FE-A11Y-1 | `jsx-a11y/click-events-have-key-events` | 4 | |
 | FE-A11Y-1 | `jsx-a11y/heading-has-content` | 2 | |
-| FE-A11Y-1, FE-FORM-2 | `jsx-a11y/label-has-associated-control` | 36 | |
+| FE-A11Y-1, FE-FORM-2 | `jsx-a11y/label-has-associated-control` | 35 | |
 | FE-A11Y-1 | `jsx-a11y/no-noninteractive-element-interactions` | 3 | |
 | FE-A11Y-1 | `jsx-a11y/no-noninteractive-tabindex` | 2 | |
 | FE-A11Y-1 | `jsx-a11y/no-static-element-interactions` | 1 | |
-| FE-A11Y-1 | `jsx-a11y/role-has-required-aria-props` | 4 | |
+| FE-A11Y-1 | `jsx-a11y/role-has-required-aria-props` | 3 | |
 
 ### Nợ kiểm bằng review
 

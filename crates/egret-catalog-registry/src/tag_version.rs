@@ -55,6 +55,18 @@ pub async fn bump_bound_tag_versions(
     conn: &mut sqlx::PgConnection,
     warehouse_id: Uuid,
 ) -> Result<(), sqlx::Error> {
+    bump_tag_versions_for_warehouses(conn, &[warehouse_id]).await
+}
+
+/// [`bump_bound_tag_versions`] over several warehouses at once: every service
+/// any of them reaches is bumped EXACTLY ONCE. View governance B3 (Task 9): a
+/// base column's classification and the re-tag of the views that read it are
+/// one change, so the base's warehouse and the dependent views' warehouses are
+/// bumped together, and a service that serves both moves by one version.
+pub async fn bump_tag_versions_for_warehouses(
+    conn: &mut sqlx::PgConnection,
+    warehouse_ids: &[Uuid],
+) -> Result<(), sqlx::Error> {
     // SP4a Task 9 review, I-2: resolve the affected ids FIRST, then take their
     // row locks in ASCENDING order, and only then bump.
     //
@@ -77,7 +89,7 @@ pub async fn bump_bound_tag_versions(
              FROM registry.catalogs c \
              JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
              JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
-             WHERE c.warehouse_id = $1 AND e.authz_service_id IS NOT NULL \
+             WHERE c.warehouse_id = ANY($1) AND e.authz_service_id IS NOT NULL \
          ) \
          SELECT s.id FROM policy.authz_services s \
           WHERE s.id IN (SELECT id FROM profiles) \
@@ -89,7 +101,7 @@ pub async fn bump_bound_tag_versions(
              ) \
           ORDER BY s.id",
     )
-    .bind(warehouse_id)
+    .bind(warehouse_ids)
     .fetch_all(&mut *conn)
     .await?;
 
@@ -142,6 +154,28 @@ where
          ORDER BY 1",
     )
     .bind(warehouse_id)
+    .fetch_all(executor)
+    .await
+}
+
+/// [`services_bound_to_warehouse`] over several warehouses: the union,
+/// ascending, each id once.
+pub async fn services_bound_to_warehouses<'e, E>(
+    executor: E,
+    warehouse_ids: &[Uuid],
+) -> Result<Vec<i64>, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query_scalar::<_, i64>(
+        "SELECT DISTINCT e.authz_service_id \
+         FROM registry.catalogs c \
+         JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
+         JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
+         WHERE c.warehouse_id = ANY($1) AND e.authz_service_id IS NOT NULL \
+         ORDER BY 1",
+    )
+    .bind(warehouse_ids)
     .fetch_all(executor)
     .await
 }

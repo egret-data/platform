@@ -417,6 +417,12 @@ pub async fn ensure_username_via(conn: &mut sqlx::PgConnection, user_id: UserId)
         } else {
             format!("{base}-{n}")
         };
+        // A principal egret itself runs as on an engine (`egret-lineage`) is
+        // never a human's name: the engine JWT would carry its grants. Treated
+        // as taken; migration 0187 also makes it unrepresentable.
+        if egret_core::engine_principals::is_reserved_engine_username(&cand) {
+            continue;
+        }
         let mut sp = conn.begin().await.map_err(db_err)?;
         let res = sqlx::query("UPDATE users SET username = $2 WHERE id = $1 AND username IS NULL")
             .bind(user_id.0)
