@@ -11533,6 +11533,16 @@
               }
             }
           },
+          "400": {
+            "description": "Unknown consumerType (engine or external)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Not authenticated",
             "content": {
@@ -12465,6 +12475,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CatalogRoleDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown consumerType (engine or external)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -39744,6 +39764,21 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "`perm-clearance-mv`: a StarRocks profile's engine-wide `create\nmaterialized view` deny (view governance A3). Its exceptions are the\nusers cleared for EVERY classification with a column on the profile,\nso it names no single tag.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "materialized_view_deny"
+                ]
+              }
+            }
           }
         ],
         "description": "The `perm` model object the DECIDING policy's Ranger NAME maps back to —\n[`crate::attribute_policy_name`], resolved per decision.\n\n**`None` on the owning [`ExplainAccess`] is a real answer, not a gap.**\nFour live categories of policy have no model object at all — the\n`egret-admin`/`all` hierarchies auto-bind seeds onto every generated\nprofile, `egret-engine-mgmt`'s delegator plumbing, operator-written raw\nJSON, and Ranger's own `superuser` short-circuit — and every one of them\ncan decide a real request. They are reported by their Ranger name and id on\nthe decision itself and never dropped: dropping what egret's compiler does\nnot own is exactly the blindness this endpoint was rerouted to remove."
@@ -39833,9 +39868,13 @@
               },
               {
                 "$ref": "#/components/schemas/ExplainMask",
-                "description": "What the engine masks the target COLUMN to for this subject — the second\nplace a StarRocks clearance shows (view governance A2). The clearance is a\nper-column deny for a direct read (`accesses`) AND a priority-1 data mask\nthat applies through every view, so an uncleared reader sees both reasons:\nthe deny, and `MASK_NULL` here.\n\nPresent only for a `read` explain of a COLUMN on a StarRocks profile. A\ntable-level target has no column to mask, a `write` has no masked request,\nand Trino's masks come from the tag service, which the evaluator refuses\n(tier c), so none is asked there."
+                "description": "What the engine masks the target COLUMN to for this subject — where a\nStarRocks clearance shows (view governance A2). The clearance is a\nper-column deny AND a priority-1 data mask that applies through every\nview. For an uncleared reader the mask is `MASK_NULL`, and then the deny\nis not consulted: see [`ExplainProfile::masked_read_skips_access`].\n\nPresent only for a `read` explain of a COLUMN on a StarRocks profile. A\ntable-level target has no column to mask, a `write` has no masked request,\nand Trino's masks come from the tag service, which the evaluator refuses\n(tier c), so none is asked there."
               }
             ]
+          },
+          "masked_read_skips_access": {
+            "type": "boolean",
+            "description": "`true` in the one case measured on StarRocks 4.1.6 (Task 11, finding\nC2): the clearance's own `MASK_NULL` applies to the column, the\nclearance's own column deny is what refuses `select`, and without the\nclearance's access policies the read would be allowed (the reader holds\nthe grant). There the FE asked no access decision for the masked column\nand the read returned `NULL`, so [`ExplainProfile::accesses`] carries no\n`select` verdict and [`ExplainProfile::mask`] is the answer.\n\nEvery other case keeps the `select` verdict (fix round 1, C-1): a reader\nwith no grant, a table-level or any other deny, a mask type other than\n`MASK_NULL`, a rule or hand-written mask. Those were not measured, and\nthe engine may refuse there. When the mask verdict is undecidable the\naccess verdict is provisional: if the engine does apply a mask, StarRocks\ndoes not check that access. Never set on Trino, which checks access on a\nmasked column.\n\n(Explain no longer answers `create materialized view`, Task 12 M-4: the\nA3 deny is engine-wide, so no single database's verdict says more than\nthe rule, and the database it asked about held nothing.)"
           }
         }
       },
@@ -41076,6 +41115,15 @@
         },
         "additionalProperties": false
       },
+      "LineageState": {
+        "type": "string",
+        "description": "What egret has recorded of a Trino view's lineage (spec B1).",
+        "enum": [
+          "computed",
+          "missing",
+          "failed"
+        ]
+      },
       "ListingDto": {
         "type": "object",
         "required": [
@@ -41284,7 +41332,8 @@
         "description": "How a view was matched to the classification.",
         "enum": [
           "baseTable",
-          "text"
+          "text",
+          "lineage"
         ]
       },
       "MeResponse": {
@@ -45196,6 +45245,15 @@
           }
         }
       },
+      "SecurityMode": {
+        "type": "string",
+        "description": "A Trino view's security mode, read from its stored `trino.run-as-owner`\nproperty and never from the statement.",
+        "enum": [
+          "definer",
+          "invoker",
+          "unknown"
+        ]
+      },
       "SeedResult": {
         "type": "object",
         "description": "Doc-only mirror of the `{ \"created\": <n> }` body `seed_defaults` returns.",
@@ -47170,6 +47228,80 @@
         ],
         "description": "A row of the workspace list: the flow, then the entry's fields.\n\nThe flow's uuid is `flow_uuid`, not `flow`: the entry is flattened in, and\nits own `flow` (a `Flow` trigger's info) would otherwise be a second key\nof the same name in one object."
       },
+      "TrinoViewItem": {
+        "type": "object",
+        "description": "One Trino view in the DEFINER audit (spec B5).",
+        "required": [
+          "catalog",
+          "schema",
+          "name",
+          "securityMode",
+          "reason",
+          "lineageState",
+          "matchedBy"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "string",
+            "description": "The registry catalog name."
+          },
+          "schema": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "securityMode": {
+            "$ref": "#/components/schemas/SecurityMode"
+          },
+          "securityModeError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the mode is `unknown`, as a short message (the detail is in the\nserver log); `null` otherwise."
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The DEFINER's `trino.run-as-owner`; `null` for any other mode."
+          },
+          "ownerCleared": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the owner is cleared for every classification the lineage\nreaches. `null` when it cannot be said: not DEFINER, lineage not\ncomputed, or a reached clearance names only groups. Read from current\nrole membership; the engine enforces the last compile, so after a\ngrant expires the two differ until the next recompile."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/TrinoViewReason"
+          },
+          "lineageState": {
+            "$ref": "#/components/schemas/LineageState"
+          },
+          "lineageDetail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the lineage failed; `null` otherwise."
+          },
+          "matchedBy": {
+            "$ref": "#/components/schemas/MatchedBy",
+            "description": "Always `lineage`."
+          }
+        }
+      },
+      "TrinoViewReason": {
+        "type": "string",
+        "description": "Why a Trino view is listed.",
+        "enum": [
+          "classified",
+          "mask_or_row_filter"
+        ]
+      },
       "TryRequest": {
         "type": "object",
         "required": [
@@ -48058,8 +48190,7 @@
       "ViewExposureDto": {
         "type": "object",
         "required": [
-          "enginesNotChecked",
-          "trinoViews"
+          "enginesNotChecked"
         ],
         "properties": {
           "starrocksMaterializedViews": {
@@ -48087,11 +48218,21 @@
             "description": "Engines that reach the classification but were not asked (external, or\nnot running). Their views are unknown, not absent."
           },
           "trinoViews": {
-            "type": "array",
+            "type": [
+              "array",
+              "null"
+            ],
             "items": {
-              "$ref": "#/components/schemas/ViewExposureItem"
+              "$ref": "#/components/schemas/TrinoViewItem"
             },
-            "description": "Always empty until Trino views are reported."
+            "description": "The views in egret's catalogs that the DEFINER audit lists (spec B5):\ntheir lineage reaches a table of this classification, or a table a mask\nor row-filter rule selects, or is unknown. `null` when egret's catalogs\ncould not all be listed; see `trino_list_error`."
+          },
+          "trinoListError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set exactly when `trino_views` is `null`; names what could not be\nlisted."
           }
         }
       },
