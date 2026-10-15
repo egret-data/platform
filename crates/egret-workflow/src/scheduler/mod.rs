@@ -75,12 +75,16 @@
 //!
 //! [`start_execution_in`](crate::worker::start_execution_in) runs in a
 //! savepoint inside the claim's transaction. Its `workflow.executions` insert
-//! carries `scheduled_date`, and `workflow_executions_one_per_schedule_tick`
-//! (migration 0156, `(flow_id, execution_trigger->>'id', scheduled_date)`)
-//! makes a second execution for one tick **unrepresentable** rather than
-//! merely avoided. A violation of that index rolls back the savepoint and is a
-//! consumed tick (`PassReport::skipped`), not an error. Under statement 1 it
-//! never fires; it is there for the day statement 1 is wrong.
+//! carries `scheduled_date`, and two unique indexes make a second execution
+//! for one tick **unrepresentable** rather than merely avoided:
+//! `workflow_executions_one_per_schedule_tick` (migration 0156, rebuilt by
+//! 0192: `(flow_id, execution_trigger->>'id', scheduled_date)` over regular
+//! fires, `backfill_id IS NULL`) and `workflow_executions_one_per_backfill_tick`
+//! (0192: `(backfill_id, scheduled_date)` over a backfill's fires, W7f D2; a
+//! backfill re-runs dates that already ran, so it is outside the first). A
+//! violation of either rolls back the savepoint and is a consumed tick
+//! (`PassReport::skipped`), not an error. Under statement 1 neither fires;
+//! they are there for the day statement 1 is wrong.
 //!
 //! Proved real by `tests/scheduler_fire.rs`'s
 //! `the_unique_index_refuses_a_second_fire` (the constraint name, with a

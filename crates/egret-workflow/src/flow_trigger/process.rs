@@ -1010,6 +1010,8 @@ async fn start_fire(
             replayed_from_execution_id: None,
             id: None,
             input_files: Vec::new(),
+            labels: None,
+            backfill_id: None,
         },
     )
     .await;

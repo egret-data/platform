@@ -663,6 +663,8 @@ async fn delete_of_its_trigger_executions_file_is_refused_and_the_file_stays() {
             replayed_from_execution_id: None,
             id: None,
             input_files: Vec::new(),
+            labels: None,
+            backfill_id: None,
         },
     )
     .await
@@ -826,6 +828,8 @@ async fn start_with(
             replayed_from_execution_id: None,
             id: Some(id),
             input_files: input.into_iter().collect(),
+            labels: None,
+            backfill_id: None,
         },
     )
     .await

@@ -258,8 +258,10 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
         TickOutcome::Fired(_) if refused.is_some() => (Fate::Skipped, refused),
         TickOutcome::Fired(e) => match start(at, c, &e).await? {
             Started::Yes => (Fate::Fired, None),
-            // The unique index says this tick already has its execution: the
-            // tick is consumed, not refired and not taken off the queue.
+            // A unique index (the per-tick one, or the per-backfill-tick one
+            // for a backfill's fire) says this tick already has its
+            // execution: the tick is consumed, not refired and not taken off
+            // the queue.
             // Under statement 1 of `scheduler`'s safety section this never
             // happens, so it is a warning, not a routine skip.
             Started::AlreadyFired(why) => {
@@ -330,6 +332,8 @@ async fn start(at: &mut Txn, c: &Claimed, e: &ScheduledExecution) -> Result<Star
             replayed_from_execution_id: None,
             id: None,
             input_files: Vec::new(),
+            labels: None,
+            backfill_id: None,
         },
     )
     .await;

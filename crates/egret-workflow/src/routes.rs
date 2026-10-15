@@ -2679,6 +2679,8 @@ async fn read_parts_and_start(
                 replayed_from_execution_id: None,
                 id: Some(execution),
                 input_files: files.clone(),
+                labels: None,
+                backfill_id: None,
             },
         )
         .await
@@ -2956,6 +2958,8 @@ async fn replay_execution(
                 replayed_from_execution_id: Some(id),
                 id: None,
                 input_files: Vec::new(),
+                labels: None,
+                backfill_id: None,
             },
         )
         .await
