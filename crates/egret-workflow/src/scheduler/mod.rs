@@ -170,12 +170,19 @@
 //! A save that does not rename takes `FOR NO KEY UPDATE`, which `KEY SHARE`
 //! does not conflict with. Unproved: no test stages it.
 
+/// W7f: the backfill row and its reads, shared with `sync` and the trigger
+/// routes.
+pub(crate) mod backfill;
 mod fire;
 /// Shared with `flow_trigger` (W13a Task 4): the off switches' SQL and the
 /// classification of a failed start.
 pub(crate) mod start;
 mod sync;
 
+/// Test-only (`test-util`; W7f D22): park a pass between its claim and its
+/// read of the backfill row. See `fire::hold`.
+#[cfg(any(test, feature = "test-util"))]
+pub use fire::hold as test_hold;
 pub use fire::{fire_due, PassReport};
 // The switch route (`triggers::switch`) writes the same effective value `sync`
 // does; the read routes report it.

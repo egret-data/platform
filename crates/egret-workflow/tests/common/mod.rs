@@ -1131,3 +1131,81 @@ pub async fn run_with_labels(
     drive_to(db, id, "SUCCESS").await;
     id
 }
+
+// ---------------------------------------------------------------------------
+// W7f: staging a backfill until the create route (Task 7) exists
+// ---------------------------------------------------------------------------
+
+/// Insert a backfill for `trig` exactly as the create route will: the row,
+/// the trigger's `next_evaluation_date` moved to `first_tick`, its old value
+/// kept as `previous_next_evaluation_date`. One transaction, the trigger row
+/// locked first (the route's order: trigger row, then backfill row). Returns
+/// the backfill id.
+#[allow(clippy::too_many_arguments)]
+pub async fn stage_backfill(
+    db: &Db,
+    flow: Uuid,
+    trig: &str,
+    window: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
+    first_tick: chrono::DateTime<chrono::Utc>,
+    total_ticks: i32,
+    inputs: serde_json::Value,
+    labels: serde_json::Value,
+) -> Uuid {
+    let mut tx = db.pool.begin().await.expect("begin");
+    let prev: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT next_evaluation_date FROM workflow.triggers \
+          WHERE flow_id = $1 AND trigger_id = $2 FOR UPDATE",
+    )
+    .bind(flow)
+    .bind(trig)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("the trigger row to stage a backfill on");
+    let prev = prev.expect("a trigger on the queue (the route refuses `off_queue`)");
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO workflow.trigger_backfills \
+           (flow_id, trigger_id, workspace_id, window_start, window_end, current_tick, \
+            inputs, labels, previous_next_evaluation_date, total_ticks) \
+         SELECT f.id, $2, f.workspace_id, $3, $4, $5, $6, $7, $8, $9 \
+           FROM workflow.flows f WHERE f.id = $1 \
+         RETURNING id",
+    )
+    .bind(flow)
+    .bind(trig)
+    .bind(window.0)
+    .bind(window.1)
+    .bind(first_tick)
+    .bind(inputs)
+    .bind(labels)
+    .bind(prev)
+    .bind(total_ticks)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("insert the backfill");
+    sqlx::query(
+        "UPDATE workflow.triggers SET next_evaluation_date = $3, updated_at = now() \
+          WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .bind(first_tick)
+    .execute(&mut *tx)
+    .await
+    .expect("move the trigger to the first tick");
+    tx.commit().await.expect("commit the staged backfill");
+    id
+}
+
+/// The backfill row of `(flow, trig)`, whole (`row_to_json`), or `None`.
+pub async fn backfill_row(db: &Db, flow: Uuid, trig: &str) -> Option<serde_json::Value> {
+    sqlx::query_scalar(
+        "SELECT row_to_json(b) FROM workflow.trigger_backfills b \
+          WHERE b.flow_id = $1 AND b.trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .fetch_optional(&db.pool)
+    .await
+    .expect("read the backfill row")
+}

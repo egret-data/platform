@@ -2679,3 +2679,99 @@ async fn the_reaper_tick_sweeps_the_configured_runners_orphans(pool: sqlx::PgPoo
     cancel.cancel();
     handle.join().await;
 }
+
+/// **A pause that commits between a pass's claim and its read of the backfill
+/// row writes nothing** (W7f spec §3.6, D22).
+///
+/// The claim's snapshot predates the pause, so the claim's `NOT EXISTS (…
+/// paused)` lets the trigger through; `fire_one`'s fresh read of the backfill,
+/// a later statement, sees the committed pause and returns `Frozen`. The pass
+/// is parked right after its claim by the test-only hook
+/// (`scheduler::test_hold`, armed for this flow only), the pause is written
+/// while it is parked -- the pass holds the trigger row, not the backfill
+/// row, so the write does not wait -- and then the pass is released.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_pause_between_the_claim_and_the_backfill_read_fires_nothing(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let flow = common::seed_flow(&db, ws, user, &cron_flow("bfpause"), "draft").await;
+    let w0: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT date_trunc('minute', now()) - interval '10 minutes'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    common::stage_backfill(
+        &db,
+        flow,
+        "s",
+        (w0, w0 + chrono::Duration::minutes(4)),
+        w0,
+        5,
+        serde_json::json!({}),
+        serde_json::json!([]),
+    )
+    .await;
+    let trigger_row = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT row_to_json(t) FROM workflow.triggers t WHERE flow_id = $1",
+            )
+            .bind(flow)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let trigger_before = trigger_row().await;
+
+    let hold = egret_workflow::scheduler::test_hold::arm(flow);
+    let pass = {
+        let pool = pool.clone();
+        tokio::spawn(async move { egret_workflow::scheduler::fire_due(&pool).await })
+    };
+    tokio::time::timeout(Duration::from_secs(60), hold.reached())
+        .await
+        .expect("the pass to be parked after its claim");
+    sqlx::query(
+        "UPDATE workflow.trigger_backfills SET paused = true, paused_at = now() \
+          WHERE flow_id = $1",
+    )
+    .bind(flow)
+    .execute(&pool)
+    .await
+    .expect("pause while the pass is parked");
+    let backfill_paused = common::backfill_row(&db, flow, "s").await;
+    hold.release();
+
+    let report = tokio::time::timeout(Duration::from_secs(60), pass)
+        .await
+        .expect("the pass to finish once released")
+        .expect("the pass task")
+        .expect("the pass");
+    assert_eq!(
+        report,
+        egret_workflow::scheduler::PassReport {
+            frozen: 1,
+            ..Default::default()
+        }
+    );
+    let executions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workflow.executions WHERE flow_id = $1")
+            .bind(flow)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(executions, 0, "nothing fired");
+    assert_eq!(
+        trigger_row().await,
+        trigger_before,
+        "the trigger row untouched"
+    );
+    assert_eq!(
+        common::backfill_row(&db, flow, "s").await,
+        backfill_paused,
+        "the backfill row untouched"
+    );
+}
