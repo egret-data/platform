@@ -734,3 +734,195 @@ egret's log has no `Cannot set system session property query_max_run_time`.
 cluster and an image pull, which is not "cheaply available". `helm template` renders two objects for one host:
 `egret` (`proxy-read-timeout: "60"`, no `/catalog` path) and `egret-catalog` (`/catalog` only,
 `proxy-read-timeout: "120"`).
+
+### 3.1 Result (read this first)
+
+**DONE_WITH_CONCERNS.** #673 fixed C1 and C3 on the engine and in explain: 36 of 36 Trino access cells agree, the
+plugins download the `tag` service-def, and cross-tag application is gone. The 90 s hold was measured against a
+real Trino client: replaces take 54–60 s, and a forced refusal returns at 90.2 s server side (91.2 s at the client)
+with no timeout and no retry. I2 is fixed: lineage works with no hand-written `query_max_run_time` allow. #673 also
+fixed I5.
+
+**New finding (Critical by the §2.6 rule, fail-closed): the StarRocks access skip follows the mask TYPE, not the
+clearance.** A `MASK_NULL` column is never access-checked, whoever denies it (2b: a hand-written deny, the engine
+returns `NULL`, explain says denied). A `MASK_HASH` column **is** checked (2c: the same kind of deny gives
+`ERROR 5204`). Task 12's condition 2 (the mask is `MASK_NULL`) is the right one; conditions 3 and 4 (the deny must be
+the clearance's, the reader must hold the grant) are too narrow. Two predictions were wrong in the favourable
+direction (2a, 2c), and 2c's setup had to change (DEV-12).
+
+### 3.2 Stack and deviations
+
+The §2.2 stack, rebuilt from scratch: image `egret-backend:vg-t13` built from `440ee7ed`
+(`deploy/docker/backend.Dockerfile`), container `vg-egret-core` behind the logging proxy `vg-egret` (DEV-4), DB
+`egret_viewgov_live` dropped and recreated, then `egret migrate` (through 0191) and `egret init`; `vg-rustfs`
+(`rustfs/rustfs:1.0.1`); `vg-trino-coord` / `vg-trino-worker` (Trino 483, digest `db58cc93…`, the provisioner's
+rendering reused from §2.2: `crates/egret-provisioner` has no change between `e39476a4c` and `440ee7ed`); `vg-sr`
+(allin1 4.1.6-6862092). Log line `kubernetes unavailable; engine provisioning disabled`. `select version()` = `483`,
+`current_version()` = `4.1.6-6862092`.
+
+- **DEV-1 (SQL):** engine rows `vgtr` and `vgsr` inserted as in §2.2 (`origin = 'provisioned'`, `status =
+  'running'`, the JWT spec, the coordinator cert), bound to profiles `vgtr` (id 2) and `vgsr` (id 3).
+- **DEV-2 (SQL):** the `vgtr`→`ice` attachment inserted as `applied`. The StarRocks attach went through
+  `POST /engines/{id}/catalogs/{cid}` (201, `applied`, a real `CREATE EXTERNAL CATALOG`), and the workspace
+  assignment of `vgtr` through `PUT /engines/{id}/workspaces`.
+- **DEV-3 (SQL + API):** `origin = 'manual'` set before each hand-written policy. Hand-written: `base-impersonate`
+  (`trinouser:*`), `base-queryid` (`queryid:*`), `vcadmin` all, `{public}` `use`/`show`/`select` on `ice.s` (Trino),
+  the StarRocks user allows of §2.2, the tag mask `hw-tagmask-vgkey` (`MASK_NULL`, `{public}`, in `vgtr-tag`), and
+  the 2b/2c denies. **No `query_max_run_time` policy** (item 4): the DB holds none, and the transform's
+  `egret-lineage-alter-query_max_run_time` is appended at download.
+- **DEV-4:** the logging proxy, as §2.2.
+- **DEV-5:** `EGRET_RATE_LIMIT__TOKEN_MAX_ATTEMPTS = 100000` **from the start** (I3 is not being measured). No
+  `429`/`slow_down` appeared.
+- **DEV-6:** engine JWTs minted with egret's own signing key (read from `catalog.oidc_signing_keys`), claims as §2.2.
+- **DEV-7:** StarRocks poll 5000 ms; its users and `vgdb` created as root before Ranger.
+- **DEV-8:** the self-made leaf coordinator cert of §2.2 (valid to 2026-11-13), reused.
+- **DEV-9 (setup):** the engine's catalog role needed `POST /roles/{id}/grants {catalog, write}` before Trino could
+  create a namespace (`role 'vg-engine' has no grants on warehouse 'ice'`). §2.2 does not mention this step.
+- **DEV-10 (harness):** item 3b used a forged tag poller (`curl` every 20 s,
+  `pluginId=trino@vgtr-worker-6d5f7c9b8-dead2-vgtr`, `lastKnownVersion=10`), killed by PID after the measurement.
+- **DEV-11 (harness):** the downloaded body for item 1 was read from each plugin's own cache file
+  (`/tmp/ranger/vgtr/policycache/trino_vgtr.json`) rather than by polling, because a poll under a new `pluginId`
+  enters the ledger and would block holds for 90 s.
+- **DEV-12 (setup change against 3.0):** 2c as predicted is not writable. A hand-written override mask on
+  `pii.ssn` is refused 409 (`two mask policies would be served at policyPriority 1 …`: the clearance mask is
+  already an override); a rule mask on `ssn` is refused 409 (it overlaps the `vgkey` tag mask); and StarRocks
+  declares no `MASK_SHOW_LAST_4` (400). 2c was run instead with rule `vg-rule-hash-email` (`MASK_HASH` on
+  `pii.email`), which the compiler folds into the clearance mask for the cleared users, and a hand-written
+  `select` deny on `pii.email` for `vccleared`. That is the only reader for whom a non-NULL mask decides while
+  something denies.
+
+Data: `ice.s.pii(id, ssn, email, name)` (3 rows), `ice.s.pub`. Tags as 3.0 (`vgsecret` cleared by `vg_clear` =
+`vcadmin`, `vccleared`, `vcownerc`; `vgkey` with no clearance). Assignments as 3.0, through
+`PUT /warehouses/{id}/resource-tags`.
+
+### 3.3 Item 1: C1/C3 on Trino with two tags
+
+Downloaded body (both plugins' cache files, `policyVersion 12`): `tagPolicies.serviceName = vgtr-tag`,
+`tagPolicies.serviceDef.name = "tag"`, resources `[tag]`, tag policies `perm-clearance-3132c9f8…` (access) and
+`hw-tagmask-vgkey` (mask). Trino logs: **0** `RangerDefaultPolicyResourceMatcher.init() failed` (Task 11: one per
+tag policy per switch).
+
+| reader | `pii.id` (`vgkey`) | `pii.ssn` (both) | `pii.email` (`vgsecret`) | `pii.name` |
+|---|---|---|---|---|
+| `vcplain` | `NULL` ×3 / allowed | denied / denied | denied / denied | real / allowed |
+| `vccleared` | `NULL` ×3 / allowed | `NULL` ×3 / allowed | **real** / allowed | real / allowed |
+| `vcowneru` | `NULL` ×3 / allowed | denied / denied | denied / denied | real / allowed |
+
+(engine / explain). Explain's denials name `perm-clearance-3132c9f8…` with attribution `clearance`, tag `vgsecret`,
+`required_roles [vg_clear]`; its `tags` list `vgkey, vgsecret` for `ssn`.
+
+Views `vd2` (DEFINER, `vcownerc`) and `vi2` (INVOKER) over all four columns: lineage `computed`, base `ice.s.pii`;
+every view column carries only `vgsecret`. `vcplain` and `vcowneru`: every column of both views denied
+(`Cannot select from columns [name] in table or view vd2`, …), explain denied on all 16 cells. `vccleared`: both
+views give `id` `NULL`, `ssn` `NULL`, `email` real, `name` real; explain allowed on all 8 cells.
+
+**36 of 36 access cells agree; every cell matched its prediction.** C1 and C3 are fixed. (Values under masks are
+not compared with explain: it has no Trino mask line, M-7.)
+
+### 3.4 Item 2: StarRocks masked reads outside the measured case
+
+| case | query | engine | explain (StarRocks profile) | verdict |
+|---|---|---|---|---|
+| measured case (control) | `vcplain` `select id, ssn` | `ssn` `NULL` ×3 | no `select`, `MASK_NULL`, `masked_read_skips_access` | same |
+| 2a `vcnobody`, no grant | `select ssn` | **`ERROR 5204 … COLUMN id`** | `select` denied (`perm-clearance-…-ice.s.pii.ssn`), `MASK_NULL`, no skip | same; **prediction wrong** (favourable) |
+| 2a | `select id, ssn`; `select email`; `select ssn, email` | `5204 … COLUMN id` | denied | same |
+| 2a | `select count(*)` / `select name` | `5204 … COLUMN ___count___` / `… COLUMN name` | — | — |
+| 2b `vcplain` + hand-written deny `select` on `pii.ssn` | `select id, ssn` | `id` real, `ssn` `NULL` ×3, no error | `select` **denied** (`hw-deny-vcplain-ssn`), `MASK_NULL`, no skip | **differs** (fail-closed), as predicted |
+| 2b | `select ssn` | `NULL` ×3, no error | as above | differs |
+| 2c control: `vccleared`, rule `MASK_HASH`, no deny | `select id, email` | hashes (hex SHA-256) | allowed, `MASK_HASH` | same |
+| 2c `vccleared`, `MASK_HASH` + hand-written deny on `pii.email` | `select id, email` / `select email` | **`ERROR 5204 … COLUMN email`** | `select` denied (`hw-deny-vccleared-email`), `MASK_HASH` | same; **prediction wrong** (favourable) |
+| 2c | `vcownerc` (no deny) `select id, email` | hashes | allowed, `MASK_HASH` | same |
+
+What the cells show about StarRocks 4.1.6:
+- A query that selects only masked columns still checks one column: the first unmasked one (`id`), or
+  `___count___` for `count(*)`. So a reader with no grant is refused (2a), and that half of the C-1 narrowing is
+  right.
+- **The skip depends on the mask type.** A column whose decided mask is `MASK_NULL` is not access-checked, whoever
+  denies it (2b). A column whose decided mask is `MASK_HASH` is checked (2c). This is consistent with StarRocks
+  rewriting a `MASK_NULL` column to a `NULL` literal before the privilege check sees it; the mechanism is inferred,
+  not read in the source.
+- So explain's condition 2 (`MASK_NULL`) is the operative one. Conditions 3 and 4 make explain answer "denied" for
+  2b, where the engine returns `NULL` (**finding V-1**).
+
+### 3.5 Item 3: the 90 s hold against a real Trino client
+
+Poll interval 30000 ms as rendered (both plugins polled every 30 s in the proxy log). JWT user `vcownerc`.
+
+| statement | client wall time | proxy log (start, status, server time) |
+|---|---|---|
+| `CREATE VIEW vd2 …` (4 columns over `pii`) | 39.82 s | `04:57:56.116Z POST …/views -> 200 38.827s` |
+| `CREATE VIEW vi2 SECURITY INVOKER …` | 59.69 s | `04:58:35.980Z … -> 200 58.890s` |
+| `CREATE VIEW vr AS SELECT id, ssn …` | 54.96 s | `05:00:40.431Z … -> 200 54.146s` |
+| 3a `CREATE OR REPLACE VIEW vr AS SELECT id, ssn, email …` | 59.88 s | `05:01:35.444Z POST …/views/vr -> 200 59.146s` |
+| 3a `CREATE OR REPLACE VIEW vr AS SELECT id, ssn, email, name …` | 60.00 s | `05:02:35.464Z POST …/views/vr -> 200 59.264s` |
+| (forged poller running) `CREATE OR REPLACE VIEW vr AS SELECT id, ssn …` | 1.22 s | `05:03:56.858Z … -> 200 0.475s`: a revert to an existing version, no new tag, not held (as §2.7 M5) |
+| **3b** `CREATE OR REPLACE VIEW vr AS SELECT id, ssn AS ssn_b …` (forged poller running) | **91.16 s** | `05:04:11.290Z POST …/views/vr -> 409 90.204s` |
+
+3b: Trino printed `Commit failed: egret refused the view: engines did not confirm the classification tags within
+90 s: trino@vgtr-worker-6d5f7c9b8-dead2-vgtr; check that the engines are running and polling egret's Ranger
+endpoint, then retry`. Exactly one `POST …/views/vr` between 05:04:00 and 05:05:45: no client timeout, no retry.
+`SHOW CREATE VIEW vr` afterwards is the previous definition (`id, ssn`). egret logged one `view hold refused a view
+commit`.
+
+Verdict: **3a matches** (30–60 s; back-to-back holds again sit at about 59 s, two intervals, now with about 30 s of
+margin to the deadline); **3b matches** (≈ 90.2 s, one request). Task 12's concern 1 ("90 s against Trino's client
+not measured") is closed for Trino 483's Iceberg REST client.
+
+A side observation: the forged id would have **stopped blocking** if it had polled only once, because a plugin not
+seen for 90 s (`RECENT`) is no longer waited on, and the deadline is also 90 s from the request. A single stale
+poll just before a hold therefore ends ≈ 1 s before the deadline with a confirmation. That is the designed window,
+and fail-open only for a plugin that has stopped polling.
+
+### 3.6 Item 4: I2 without the hand-written baseline
+
+No hand-written `query_max_run_time` policy existed (`select count(*) … like '%query_max_run_time%'` = 0 in
+`policy.authz_policies`). Both plugins' downloads carry `egret-lineage-alter-query_max_run_time` next to the
+`egret-lineage-deny-*` set. `system.runtime.queries` lists the two `EXPLAIN (TYPE IO, FORMAT JSON) SELECT …` of
+user `egret-lineage`, both `FINISHED`; `view_lineage_state` is `computed` for `vd2`, `vi2` (and `vr`), and egret's
+log has no `Cannot set system session property`. **Matches; I2 is fixed** for `egret-lineage`. (Ordinary JWT users
+still need the hand-written `trinouser`/`queryid` baselines here; Task 12's report names that gap.)
+
+### 3.7 Item 5: two Ingress objects
+
+Not run live: no kind cluster exists on this machine (`kind get clusters`: none), there is no ingress-nginx image
+locally, and creating a cluster would also switch the shared `~/.kube/config` context. `helm template` with
+`ingress.enabled=true` renders, for one host and class `nginx`:
+- `egret`: `proxy-read-timeout: "60"`, paths `/auth`, `/data-api`, `/oauth`, `/.well-known/openid-configuration`,
+  `/.well-known/jwks.json`, `/`;
+- `egret-catalog`: `proxy-read-timeout: "120"`, path `/catalog` only.
+
+Matches the prediction. Whether ingress-nginx routes `/catalog` to the 120 s object (longest prefix over a merged
+host) and not to `/` stays unverified.
+
+### 3.8 Extra: I5 after #673
+
+Deleting `hw-tagmask-vgkey` (policy 22 in `vgtr-tag`) bumped `vgtr-tag` 3→4 **and `vgtr` 13→14**. After the plugins
+reported 14, `vcplain` read `pii.id` as `1, 2, 3` (it had been `NULL`). I5 is fixed by #673.
+
+### 3.9 Findings
+
+- **V-1 (Critical by the §2.6 rule; fail-closed, no value leaks).** Explain's StarRocks masked-read rule is narrower
+  than the engine. With the clearance's `MASK_NULL` deciding and a non-clearance `select` deny on the column, the
+  engine returns `NULL` (2b) while explain answers `select` denied. Evidence: 2b and 2c together show the skip is
+  keyed by the mask type (`MASK_NULL` skipped, `MASK_HASH` checked), and 2a shows the "no grant" population is
+  refused through another column. Likely fix: drop condition 3, and replace condition 4 with "the query's other
+  columns are checked" — or state per column that the access verdict does not apply to a `MASK_NULL` column.
+  The guide's "Every other direct read keeps the clearance deny's answer" is wrong for 2b.
+- **V-2 (Minor).** For a reader with no grant who selects only masked columns, StarRocks names a **different**
+  column in its refusal (`COLUMN id`, or `___count___`), while explain attributes the refusal to the clearance deny
+  on the selected column. The verdict agrees; the reason does not.
+- **V-3 (Minor, setup).** The guide and §2.2 do not say that an engine client's catalog role needs a `write` grant
+  on the warehouse before Trino can create anything (DEV-9).
+
+No other new finding. C1, C3, I2 and I5 are fixed as measured; I1's cost (1–2 intervals) is unchanged and now fits
+the 90 s deadline.
+
+### 3.10 Left behind
+
+- **Stopped and removed:** containers `vg-egret`, `vg-egret-core`, `vg-trino-coord`, `vg-trino-worker`, `vg-sr`,
+  `vg-rustfs`; network `vg-net`; image `egret-backend:vg-t13`. The forged-poller loop was killed by its PID.
+- **Kept:** database `egret_viewgov_live` (throwaway); image `egret-backend:vg-t11` (not built by this task); the
+  scratchpad `t13/` (logs, evidence files). Its proxy log and `client.json` hold a catalog client secret of the
+  throwaway DB, and `egret-sign.pem` is that DB's signing key.
+- **Untouched:** DB `egret`, every `egret-dev-*` container (including the running `egret-dev-valkey-1` and
+  `egret-dev-rustfs-1`), `egret-w7e-postgres`, ports 5173, 5000 and 8080. No product code changed.
