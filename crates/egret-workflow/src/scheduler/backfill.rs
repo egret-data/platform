@@ -73,8 +73,6 @@ pub(crate) async fn read(
 }
 
 /// The same, `FOR UPDATE` (the routes and `sync`, after the trigger row).
-// Its callers land in Tasks 5-7.
-#[allow(dead_code)]
 pub(crate) async fn read_for_update(
     conn: &mut PgConnection,
     flow: Uuid,

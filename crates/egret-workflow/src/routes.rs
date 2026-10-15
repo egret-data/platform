@@ -3600,6 +3600,8 @@ pub fn management_router() -> Router<WorkflowState> {
         crate::triggers::routes::FlowTriggerInfoDto,
         crate::triggers::routes::WebhookInfoDto,
         crate::triggers::routes::LastExecutionDto,
+        crate::triggers::routes::BackfillDto,
+        crate::triggers::routes::CannotBackfill,
         crate::triggers::routes::TriggerEntryDto,
         crate::triggers::routes::FlowTriggersDto,
         crate::triggers::routes::TriggerRowDto,

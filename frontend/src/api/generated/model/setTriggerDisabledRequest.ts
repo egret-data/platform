@@ -18,7 +18,8 @@ export interface SetTriggerDisabledRequest {
      * skips the missed ticks (the next date becomes the first tick after
      * now); `true` follows the trigger's `recoverMissedSchedules` (absent or
      * `ALL`: every missed tick runs; `NONE`: skip; `LAST`: the latest one
-     * runs). Ignored otherwise.
+     * runs). Ignored otherwise. During a backfill the choice applies to the
+     * regular schedule's resume position, not to the backfill's tick.
      */
   recover_missed?: boolean;
 }

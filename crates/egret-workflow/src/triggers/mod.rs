@@ -7,12 +7,14 @@
 //! - **The declared triggers** come from the flow's saved draft, parsed with
 //!   `spec::parse` -- the source every execution runs. Only the source knows a
 //!   `Webhook` or a `Leaf` trigger: neither has a row anywhere.
-//! - **Their state** comes from four tables, one statement each, for the flow
+//! - **Their state** comes from five tables, one statement each, for the flow
 //!   ids in scope ([`state::read_state`]): the runtime switch
 //!   (`workflow.disabled_triggers`, with the switcher's display name), the
 //!   schedule rows (`workflow.triggers`), the listener rows
-//!   (`workflow.flow_listeners`) and the open `dependsOn` windows
-//!   (`workflow.flow_trigger_windows`), plus the database's `now()`.
+//!   (`workflow.flow_listeners`), the open `dependsOn` windows
+//!   (`workflow.flow_trigger_windows`) and the schedule backfills
+//!   (`workflow.trigger_backfills`, with the creator's and pauser's names;
+//!   W7f), plus the database's `now()`.
 //! - **The last execution** of each trigger is §3.6's statement
 //!   ([`state::LAST_EXECUTION_SQL`]), read for one flow's triggers or for one
 //!   page of the workspace list, never for the whole match.

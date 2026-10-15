@@ -30229,7 +30229,7 @@
         },
         "responses": {
           "200": {
-            "description": "Switched (idempotent: off twice, or on with no switch, is a 200). The answer is the trigger's entry as `GET .../triggers` returns it. Off stops the trigger's schedule claim, Flow-trigger listener and webhook; a fire already claimed commits first, and no new schedule fire starts after the answer. A Flow-trigger pass or a webhook request that read the switch before it changed may still fire once more after the answer. A re-enabled `Schedule` (one that was switched off) whose next date has passed skips the missed ticks, or with `recover_missed: true` follows its `recoverMissedSchedules`; enabling a trigger that is already on changes nothing and is not audited.",
+            "description": "Switched (idempotent: off twice, or on with no switch, is a 200). The answer is the trigger's entry as `GET .../triggers` returns it. Off stops the trigger's schedule claim, Flow-trigger listener and webhook; a fire already claimed commits first, and no new schedule fire starts after the answer. A Flow-trigger pass or a webhook request that read the switch before it changed may still fire once more after the answer. A re-enabled `Schedule` (one that was switched off) whose next date has passed skips the missed ticks, or with `recover_missed: true` follows its `recoverMissedSchedules`; enabling a trigger that is already on changes nothing and is not audited. During a backfill the stored date (the backfill's tick) is kept for every choice, so the backfill resumes where it stopped; the choice applies to the regular schedule's resume position (`backfill.previous_next_evaluation_date`) instead, which a skip moves to the first tick after now when it has passed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -32993,6 +32993,18 @@
             }
           },
           {
+            "name": "backfill",
+            "in": "query",
+            "description": "`running` (a backfill that is not paused), `paused` or `any`. Anything\nelse is a 400. Empty (`backfill=`) is no filter.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "q",
             "in": "query",
             "description": "A case-insensitive substring of the trigger id, the flow id or the\nnamespace.",
@@ -33027,7 +33039,7 @@
         ],
         "responses": {
           "200": {
-            "description": "One page of the triggers of the workspace's flows not in the trash, by namespace, flow id and declaration order. Rows carry no `depends_on.conditions` and no `webhook` (read the per-flow route). `unparsable` counts the flows in scope whose source did not parse.",
+            "description": "One page of the triggers of the workspace's flows not in the trash, by namespace, flow id and declaration order. Rows carry no `depends_on.conditions` and no `webhook` (read the per-flow route), and carry `backfill`, `can_backfill` and `backfill_refusal` as the per-flow route does. `unparsable` counts the flows in scope whose source did not parse.",
             "content": {
               "application/json": {
                 "schema": {
@@ -33037,7 +33049,7 @@
             }
           },
           "400": {
-            "description": "`namespace_prefix` is not a valid namespace name, or `kind`/`state` holds an unknown value, or the query string does not decode",
+            "description": "`namespace_prefix` is not a valid namespace name, or `kind`/`state`/`backfill` holds an unknown value, or the query string does not decode",
             "content": {
               "application/json": {
                 "schema": {
@@ -35244,6 +35256,107 @@
           }
         }
       },
+      "BackfillDto": {
+        "type": "object",
+        "description": "A `Schedule` trigger's backfill in progress (W7f spec §3.9). Its inputs\nand labels are shown to `workflow:read`, as every execution's inputs are.",
+        "required": [
+          "id",
+          "start",
+          "end",
+          "current_tick",
+          "paused",
+          "inputs",
+          "labels",
+          "created_at",
+          "previous_next_evaluation_date",
+          "total_ticks",
+          "ticks_done",
+          "progress"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "This backfill's id, written on every execution it fires\n(`backfill_id`)."
+          },
+          "start": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The window's first instant (inclusive)."
+          },
+          "end": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The window's last instant (inclusive)."
+          },
+          "current_tick": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The next window tick to fire."
+          },
+          "paused": {
+            "type": "boolean",
+            "description": "Paused: no window tick fires until it is resumed."
+          },
+          "paused_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The pauser's display name."
+          },
+          "paused_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "inputs": {
+            "type": "object",
+            "description": "Overlaid on the schedule's `inputs:` key by key."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LabelDto"
+            },
+            "description": "Added to every execution it fires, in this order."
+          },
+          "created_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The creator's display name."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "previous_next_evaluation_date": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Where the regular schedule resumes when the backfill ends (its\n`recoverMissedSchedules` applies from here)."
+          },
+          "total_ticks": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The window's ticks, counted at create."
+          },
+          "ticks_done": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The ticks fired (or skipped) so far."
+          },
+          "progress": {
+            "type": "integer",
+            "format": "int32",
+            "description": "0-100: Kestra's `(current_tick − start) / (end − start)`, rounded, clamped; 100 for an empty span.",
+            "minimum": 0
+          }
+        }
+      },
       "Branch": {
         "type": "string",
         "enum": [
@@ -35357,6 +35470,18 @@
           }
         },
         "additionalProperties": false
+      },
+      "CannotBackfill": {
+        "type": "string",
+        "description": "Why the Backfill button is unusable, the first that applies: the flow is\nin the trash, the trigger is not a `Schedule`, the caller lacks\n`workflow:manage`, the trigger is effective-disabled, its schedule is off\nthe queue, a backfill already exists.",
+        "enum": [
+          "flow_deleted",
+          "not_schedule",
+          "forbidden",
+          "disabled",
+          "off_queue",
+          "running"
+        ]
       },
       "CardInput": {
         "type": "object",
@@ -44708,7 +44833,7 @@
               },
               {
                 "$ref": "#/components/schemas/MissedTicksDto",
-                "description": "On the queue and overdue (`next_evaluation_date <= now`, which a\nswitched-off schedule becomes, since it keeps its date): the ticks from\n`next_evaluation_date` through now. `null` otherwise."
+                "description": "On the queue and overdue (`next_evaluation_date <= now`, which a\nswitched-off schedule becomes, since it keeps its date): the ticks from\n`next_evaluation_date` through now. During a backfill, the regular\nticks waiting instead: from `backfill.previous_next_evaluation_date`\nthrough now. `null` otherwise."
               }
             ]
           },
@@ -45388,7 +45513,7 @@
           },
           "recover_missed": {
             "type": "boolean",
-            "description": "On a re-enable of a switched-off, overdue `Schedule` only (an already-on\ntrigger keeps its dates): `false` (the default)\nskips the missed ticks (the next date becomes the first tick after\nnow); `true` follows the trigger's `recoverMissedSchedules` (absent or\n`ALL`: every missed tick runs; `NONE`: skip; `LAST`: the latest one\nruns). Ignored otherwise."
+            "description": "On a re-enable of a switched-off, overdue `Schedule` only (an already-on\ntrigger keeps its dates): `false` (the default)\nskips the missed ticks (the next date becomes the first tick after\nnow); `true` follows the trigger's `recoverMissedSchedules` (absent or\n`ALL`: every missed tick runs; `NONE`: skip; `LAST`: the latest one\nruns). Ignored otherwise. During a backfill the choice applies to the\nregular schedule's resume position, not to the backfill's tick."
           }
         }
       },
@@ -46732,7 +46857,8 @@
           "runtime_disabled",
           "effective_disabled",
           "can_toggle",
-          "duplicate_id"
+          "duplicate_id",
+          "can_backfill"
         ],
         "properties": {
           "trigger_id": {
@@ -46835,6 +46961,32 @@
               },
               {
                 "$ref": "#/components/schemas/LastExecutionDto"
+              }
+            ]
+          },
+          "backfill": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BackfillDto",
+                "description": "A `Schedule`'s backfill in progress; `null` for none and for every\nother kind."
+              }
+            ]
+          },
+          "can_backfill": {
+            "type": "boolean",
+            "description": "Whether the Backfill button is usable; the create route checks for itself."
+          },
+          "backfill_refusal": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CannotBackfill",
+                "description": "Why `can_backfill` is false."
               }
             ]
           }

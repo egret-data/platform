@@ -80,6 +80,29 @@ pub(crate) struct WindowRow {
     pub results: serde_json::Value,
 }
 
+/// A row of `workflow.trigger_backfills` (W7f spec §3.9): a schedule's
+/// backfill in progress, with its creator's and pauser's display names read
+/// in the same statement, as [`Switch::disabled_by_name`] is.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub(crate) struct BackfillStateRow {
+    pub flow_id: Uuid,
+    pub trigger_id: String,
+    pub id: Uuid,
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    pub current_tick: DateTime<Utc>,
+    pub paused: bool,
+    pub paused_by_name: Option<String>,
+    pub paused_at: Option<DateTime<Utc>>,
+    pub inputs: serde_json::Value,
+    pub labels: serde_json::Value,
+    pub created_by_name: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub previous_next_evaluation_date: DateTime<Utc>,
+    pub total_ticks: i32,
+    pub ticks_done: i32,
+}
+
 /// `(flow id, trigger id)`: the key of every trigger table.
 pub(crate) type Key = (Uuid, String);
 
@@ -92,6 +115,8 @@ pub(crate) struct StateRows {
     pub schedules: HashMap<Key, ScheduleRow>,
     pub listeners: HashMap<Key, ListenerRow>,
     pub windows: HashMap<Key, WindowRow>,
+    /// The schedule backfills in progress (W7f).
+    pub backfills: HashMap<Key, BackfillStateRow>,
     /// The database's `now()`, the clock the scheduler compares against.
     pub db_now: DateTime<Utc>,
 }
@@ -105,6 +130,7 @@ impl StateRows {
             schedules: HashMap::new(),
             listeners: HashMap::new(),
             windows: HashMap::new(),
+            backfills: HashMap::new(),
             db_now,
         }
     }
@@ -114,8 +140,11 @@ fn keyed<T>(rows: Vec<T>, key: impl Fn(&T) -> Key) -> HashMap<Key, T> {
     rows.into_iter().map(|r| (key(&r), r)).collect()
 }
 
-/// The four state tables for `flows`, one statement each, and `now()`. The
+/// The five state tables for `flows`, one statement each, and `now()`. The
 /// caller runs it in one transaction, so `now()` is the transaction's.
+///
+/// The backfill rows are keyed by `flow_id` like every other statement here,
+/// never by `trigger_backfills.workspace_id` (a copy, not an authority).
 pub(crate) async fn read_state(conn: &mut PgConnection, flows: &[Uuid]) -> Result<StateRows> {
     let db_now: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
         .fetch_one(&mut *conn)
@@ -154,11 +183,27 @@ pub(crate) async fn read_state(conn: &mut PgConnection, flows: &[Uuid]) -> Resul
     .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?;
+    let backfills: Vec<BackfillStateRow> = sqlx::query_as(
+        "SELECT b.flow_id, b.trigger_id, b.id, b.window_start, b.window_end, b.current_tick, \
+                b.paused, COALESCE(NULLIF(p.name, ''), p.email::text) AS paused_by_name, \
+                b.paused_at, b.inputs, b.labels, \
+                COALESCE(NULLIF(c.name, ''), c.email::text) AS created_by_name, b.created_at, \
+                b.previous_next_evaluation_date, b.total_ticks, b.ticks_done \
+           FROM workflow.trigger_backfills b \
+           LEFT JOIN users p ON p.id = b.paused_by \
+           LEFT JOIN users c ON c.id = b.created_by \
+          WHERE b.flow_id = ANY($1)",
+    )
+    .bind(flows)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
     Ok(StateRows {
         switches: keyed(switches, |r| (r.flow_id, r.trigger_id.clone())),
         schedules: keyed(schedules, |r| (r.flow_id, r.trigger_id.clone())),
         listeners: keyed(listeners, |r| (r.flow_id, r.trigger_id.clone())),
         windows: keyed(windows, |r| (r.flow_id, r.trigger_id.clone())),
+        backfills: keyed(backfills, |r| (r.flow_id, r.trigger_id.clone())),
         db_now,
     })
 }

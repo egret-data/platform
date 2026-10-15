@@ -41,6 +41,8 @@ pub(crate) struct Switched {
     pub parsed: Flow,
     /// The schedule's new `next_evaluation_date`, when a re-enable moved it.
     pub moved_to: Option<DateTime<Utc>>,
+    /// A re-enable during a backfill moved the regular schedule's resume position here (§3.8).
+    pub resume_moved_to: Option<DateTime<Utc>>,
     /// The switch row was inserted (off) or deleted (on). `false`: the
     /// trigger already was in the asked state, nothing was written, and no
     /// audit event is due.
@@ -234,18 +236,36 @@ pub(crate) async fn set_disabled(
     //    `evaluated_at` is never written, nor is `last_error` except as `sync`
     //    writes it for a cron with no tick left; a row off the queue stays off
     //    (the next save re-queues it).
+    //
+    //    During a backfill (W7f §3.8, D11) the stored date is the backfill's
+    //    `current_tick` and is kept for every choice, so the backfill resumes
+    //    at the tick it stopped on; the choice moves the regular schedule's
+    //    resume position (`previous_next_evaluation_date`) instead.
     let mut moved_to = None;
-    if let (true, StateTable::Schedule, Some((Some(next), evaluated_at))) =
-        (re_enabled, table, state_row)
+    let mut resume_moved_to = None;
+    if let (true, StateTable::Schedule, Some((next, evaluated_at))) = (re_enabled, table, state_row)
     {
+        // The backfill row, after the trigger row (§3.11's lock order).
+        let backfill =
+            crate::scheduler::backfill::read_for_update(&mut *conn, flow, trigger_id).await?;
         let db_now: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
             .fetch_one(&mut *conn)
             .await
             .map_err(db_err)?;
-        // A schedule that no longer resolves: its dates are left alone. Its
-        // row is already off the queue, or `fire_due` takes it off (with the
-        // reason in `last_error`) when this date comes due.
-        if next <= db_now {
+        if let Some(b) = backfill {
+            resume_moved_to = skip_backfill_resume(
+                &mut *conn,
+                flow,
+                t,
+                recover,
+                b.previous_next_evaluation_date,
+                db_now,
+            )
+            .await?;
+        } else if next.is_some_and(|n| n <= db_now) {
+            // A schedule that no longer resolves: its dates are left alone. Its
+            // row is already off the queue, or `fire_due` takes it off (with the
+            // reason in `last_error`) when this date comes due.
             if let Ok(st) = ScheduleTrigger::resolve(t) {
                 let skip = || {
                     Target::Date(
@@ -307,6 +327,46 @@ pub(crate) async fn set_disabled(
         flow: row,
         parsed,
         moved_to,
+        resume_moved_to,
         changed,
     }))
+}
+
+/// Step 7 during a backfill (W7f §3.8): a skip (`recover_missed: false`, or
+/// `NONE`) moves the regular schedule's resume position to the first tick
+/// after `db_now`, when that position has passed (as W7e's skip moves only an
+/// overdue date); `ALL` and `LAST` leave it, and §3.6 applies the policy when
+/// the backfill ends. A cron with no tick after now leaves it too: the
+/// backfill's end takes the trigger off the queue then (D26). The answer is
+/// the date written, if any. The caller holds the backfill row.
+async fn skip_backfill_resume(
+    conn: &mut PgConnection,
+    flow: Uuid,
+    t: &crate::models::Trigger,
+    recover: Option<RecoverMissed>,
+    resume: DateTime<Utc>,
+    db_now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>> {
+    if !matches!(recover, None | Some(RecoverMissed::None)) || resume > db_now {
+        return Ok(None);
+    }
+    let Ok(st) = ScheduleTrigger::resolve(t) else {
+        return Ok(None);
+    };
+    let Some(date) =
+        TriggerState::initialise(&st, "", "", &FixedClock(db_now)).next_evaluation_date
+    else {
+        return Ok(None);
+    };
+    sqlx::query(
+        "UPDATE workflow.trigger_backfills SET previous_next_evaluation_date = $3, updated_at = now() \
+          WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(&t.id)
+    .bind(date)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    Ok(Some(date))
 }

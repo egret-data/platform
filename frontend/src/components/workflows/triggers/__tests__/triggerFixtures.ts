@@ -23,6 +23,9 @@ export function entry(over: Partial<TriggerEntryDto> = {}): TriggerEntryDto {
     flow: null,
     webhook: null,
     last_execution: null,
+    backfill: null,
+    can_backfill: true,
+    backfill_refusal: null,
     ...over,
   };
 }
