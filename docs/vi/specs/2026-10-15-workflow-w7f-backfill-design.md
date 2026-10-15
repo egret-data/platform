@@ -34,7 +34,7 @@ Bộ rule frontend `docs/en/frontend-rules.md` ràng buộc mọi dòng code fro
 - D14. Các route nằm dưới route của W7e: create, pause/resume và delete theo từng trigger, `workflow:manage`; pause/resume và delete hàng loạt theo lựa chọn, tối đa 100, đồng bộ, có kết quả cho từng mục. Không có create hàng loạt (như Kestra). Một audit event cho mỗi thay đổi (§3.10).
 - D15. `TriggerEntryDto` thêm `backfill`, `can_backfill` và `backfill_refusal`; tiến độ là công thức thời gian của Kestra, do server tính, cộng số tick chính xác (§3.9).
 - D16. Form tạo là một chunk lazy; ngày dùng control `datetime-local` gốc với `max` đặt bằng bây giờ; input dùng lại mô hình và control của form Run (§4.3).
-- D17. Migration là **0191** (§3.1). Quyết định mặc định (2026-10-15): 0190 đang do một file chưa track ở worktree khác (`egret-tagdef`) giữ.
+- D17. Migration là **0192** (§3.1). Quyết định mặc định (2026-10-15): 0190 và 0191 do worktree `egret-tagdef` (nhánh `fix/tag-policies-service-def`) giữ.
 - D18 (P1). **Danh sách** execution mang `labels` riêng của execution cộng `backfill_id`; **chi tiết** (`ExecutionDto`) mang `effective_labels`, phép gộp (§3.3). Quyết định mặc định (2026-10-15).
 - D19 (P2). Một thay đổi cron sẽ cho backfill hơn 10.000 tick thì **kết thúc nó**: `sync` cho schedule thường tiếp tục và ghi `last_error` (§3.7). Quyết định mặc định (2026-10-15).
 - D20 (P3). Một lần snap lại không tìm được tick thì **giữ** `previous_next_evaluation_date` đã lưu (§3.7). Quyết định mặc định (2026-10-15).
@@ -73,7 +73,7 @@ Bộ rule frontend `docs/en/frontend-rules.md` ràng buộc mọi dòng code fro
 
 ### 3.1 Bảng backfill (D1, D17)
 
-Migration `0191_workflow_trigger_backfills.sql` (quyết định mặc định, 2026-10-15). Main kết thúc ở `0189`; nhánh chưa merge `feat/view-governance` giữ `0186`-`0188` (kiểm bằng `git ls-tree` trên mọi ref cục bộ và remote, 2026-10-15, và trên đĩa của mọi worktree). `0190` đã bị một file chưa track ở worktree khác (`egret-tagdef`) giữ, nên gói này dùng `0191`, không va với cái nào ở mọi thứ tự merge; kiểm lại mọi ref và worktree trước khi merge, vì không gian số là dùng chung.
+Migration `0192_workflow_trigger_backfills.sql` (quyết định mặc định, 2026-10-15). Main kết thúc ở `0189`; nhánh chưa merge `feat/view-governance` giữ `0186`-`0188` (kiểm bằng `git ls-tree` trên mọi ref cục bộ và remote, 2026-10-15, và trên đĩa của mọi worktree). `0190` và `0191` do worktree `egret-tagdef` (nhánh `fix/tag-policies-service-def`) giữ (kiểm lại 2026-10-15 khi làm Task 2), nên gói này dùng `0192`, không va với cái nào ở mọi thứ tự merge; kiểm lại mọi ref và worktree trước khi merge, vì không gian số là dùng chung.
 
 ```sql
 CREATE TABLE workflow.trigger_backfills (
@@ -142,7 +142,7 @@ CREATE UNIQUE INDEX workflow_executions_one_per_backfill_tick
 - **Không có foreign key** tới `workflow.trigger_backfills`: dòng bị xoá khi backfill kết thúc, còn các execution của nó vẫn ở lại.
 - **Tính idempotent của một tick backfill.** Nó là một lần bắn schedule như mọi lần khác, nên ba câu lệnh của W12 giữ nguyên (`scheduler/mod.rs` "## 1." đến "## 3."): claim khoá dòng trigger `FOR UPDATE SKIP LOCKED` (`fire.rs:145-166`), nên hai replica không bao giờ đánh giá một trigger cùng lúc; việc insert execution và việc advance commit trong một transaction (`fire.rs:289-302`), nên một lượt được thử lại hoặc thấy advance hoặc làm lại toàn bộ tick; và `workflow_executions_one_per_backfill_tick` là chốt chặn mà `classify` ánh xạ sang `AlreadyFired` như nó ánh xạ index theo tick (một hằng số mới bên cạnh `ONE_PER_TICK`, `start.rs:72`).
 - **Việc dựng lại không dùng `CONCURRENTLY`** và chặn ghi vào `workflow.executions` trong một lượt quét qua các execution theo schedule (các dòng của partial index), như 0189 nói về index của chính nó (`0189:43-48`). sqlx chạy file trong một transaction, nên không có khoảnh khắc nào thiếu cả hai index.
-- **Phần văn xuôi của 0156 không bị sửa** (văn xuôi migration là chỉ-thêm); 0191 nêu vị từ mới. Doc của câu lệnh 2 trong `scheduler/mod.rs` ("the unique index is the backstop") gọi tên cả hai index.
+- **Phần văn xuôi của 0156 không bị sửa** (văn xuôi migration là chỉ-thêm); 0192 nêu vị từ mới. Doc của câu lệnh 2 trong `scheduler/mod.rs` ("the unique index is the backstop") gọi tên cả hai index.
 
 ### 3.3 Label của execution (D3)
 

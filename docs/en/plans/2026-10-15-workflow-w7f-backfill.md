@@ -37,8 +37,8 @@
   - list filter `backfill=running|paused|any`;
   - audit actions `workflow_trigger:backfill_create`, `:backfill_pause`, `:backfill_resume`, `:backfill_delete`, resource `workflow_trigger`, id `{flow uuid}/{trigger_id}`, only on a real change;
   - the strip polls every **5 s** while a backfill of the shown flow is running, else W7e's 30 s.
-- **Migration number: `0191`, not `0190`.** Checked 2026-10-15 with `git ls-tree` on every local and remote ref **and on the disk of every worktree**: refs hold `0186`–`0188` (`feat/view-governance`) and `0189` (main); but the worktree `data-portal/egret-tagdef` (branch `fix/tag-policies-service-def`) has an **untracked** `migrations/0190_tag_block_serves_the_tag_def.sql`. `0191` collides with nothing. Re-check every ref and every worktree's `migrations/` before Task 2 and before merging; take the next free number if `0191` is gone, and say so in the migration's first line, as `0189` does. The number space is shared (memory `migration-numbers-are-a-shared-namespace`).
-- **Migration prose is append-only:** `0156` and `0189` are not edited; 0191 states the new predicate of the rebuilt index.
+- **Migration number: `0192` (was `0191`; re-checked during Task 2: `egret-tagdef` now commits 0190 and 0191).** Original note: Checked 2026-10-15 with `git ls-tree` on every local and remote ref **and on the disk of every worktree**: refs hold `0186`–`0188` (`feat/view-governance`) and `0189` (main); but the worktree `data-portal/egret-tagdef` (branch `fix/tag-policies-service-def`) has an **untracked** `migrations/0190_tag_block_serves_the_tag_def.sql`. `0191` collides with nothing. Re-check every ref and every worktree's `migrations/` before Task 2 and before merging; take the next free number if `0191` is gone, and say so in the migration's first line, as `0189` does. The number space is shared (memory `migration-numbers-are-a-shared-namespace`).
+- **Migration prose is append-only:** `0156` and `0189` are not edited; 0192 states the new predicate of the rebuilt index.
 - **Earlier rulings hold:** every execution runs the saved draft; W7e's lock order (flow row `FOR NO KEY UPDATE` → the trigger's `workflow.triggers` row `FOR UPDATE` → here, then the backfill row), and `fire::resync`'s `FOR SHARE SKIP LOCKED` (`scheduler/fire.rs:382-425`); the list-row DTO's flow key is `flow_uuid` (`triggers/routes.rs:209-226`); the webhook key stays masked in every view that shows a trigger's YAML (`triggerYaml.ts`); W7a/W7c's lazy-chunk discipline: new heavy UI goes through `lazy()`, gets a marker in `frontend/scripts/assert-workflows-lazy.mjs`, and the marker is proven by a scratch static import that makes the script fail naming it.
 - **A parsed model property changes `crates/egret-workflow/src/spec/schema/property-treatment.json`.** This plan adds none (a backfill lives in the database, not the YAML). If a task does add one, it regenerates the file in the same task with `EGRET_WRITE_PROPERTY_TREATMENT=1 cargo test -p egret-workflow --lib the_committed_property_treatment_is_what_egret_does_today` and commits it.
 - **Tests before code, in every task.** Each task's Step 1 writes the tests, Step 2 runs them and records the failure (the test name and the assertion or compile error that failed). A test that passes before the code exists is reported, with why. Each named mutation is applied, the named test is seen to fail, and the mutation is reverted; the report says which test died.
@@ -82,7 +82,7 @@
 | `crates/egret-workflow/src/trigger/mod.rs` | 1 | inclusive `attach_backfill`; `resume_from`, `resume_after_backfill`, `BackfillEnd`; doc of `TriggerState` (§3.12) |
 | `crates/egret-workflow/src/labels.rs` (new), `src/lib.rs` | 1 | `execution_labels`, `own_labels`, `backfill_labels_refusal` |
 | `crates/egret-workflow/src/scheduler/fire.rs` | 1, 4 | `overlay_inputs`, `refuse_templated` lifted (1); the fire wiring (4) |
-| `migrations/0191_workflow_trigger_backfills.sql` | 2 | §3.1–§3.3's SQL |
+| `migrations/0192_workflow_trigger_backfills.sql` | 2 | §3.1–§3.3's SQL |
 | `crates/egret-workflow/src/scheduler/start.rs`, `scheduler/mod.rs` | 2 | `ONE_PER_BACKFILL_TICK`, `classify`; statement 2's doc |
 | `crates/egret-workflow/src/worker/claim.rs` + every `NewExecution {` | 2 | `labels`, `backfill_id` |
 | `crates/egret-workflow/src/worker/render.rs`, `flow_trigger/process.rs`, `worker/replay.rs`, `worker/spawn.rs`, `routes.rs` (replay, DTOs), `repo.rs` (`ExecutionRow`, `execution_cols!`) | 3 | labels read, merged, copied, shown |
@@ -190,7 +190,7 @@ pub fn attach_backfill(&mut self, trigger: &ScheduleTrigger, start: DateTime<Utc
 ### Task 2: The migration, `backfill_id` and `labels` on an execution (§3.1, §3.2, §3.3 SQL) — **opus**
 
 **Files:**
-- Create: `migrations/0191_workflow_trigger_backfills.sql`.
+- Create: `migrations/0192_workflow_trigger_backfills.sql`.
 - Modify: `crates/egret-workflow/src/scheduler/start.rs:70-116` (`ONE_PER_BACKFILL_TICK`, `classify`, `Started::AlreadyFired`'s doc), `scheduler/mod.rs:74-91` (statement 2 names both indexes, §3.12), `scheduler/fire.rs:261-264` (the comment).
 - Modify: `crates/egret-workflow/src/worker/claim.rs:2605-2653` (`NewExecution`), `:2699-2760` (destructure, the `INSERT` binds `labels` and `backfill_id`).
 - Modify — every construction, each passing `labels: None, backfill_id: None` (the compiler lists them; at `d01224556` there are 16): `src/routes.rs:2668, 2944`; `src/scheduler/fire.rs:318`; `src/flow_trigger/process.rs:996`; `src/worker/claim.rs:2572`; `tests/storage_tasks.rs:652, 815`; `tests/storage_render.rs:332`; `tests/prefetch_hold.rs:1669`; `tests/worker.rs:8101, 8131, 8170, 8252, 8377, 8579`. (The spec's list at §3.3 names only the `src/` ones.) Task 3 changes the replay route's value; Task 4 the fire's.
@@ -206,7 +206,7 @@ pub labels: Option<serde_json::Value>,
 pub backfill_id: Option<Uuid>,
 
 // scheduler/start.rs
-/// One execution per (backfill, tick) (migration 0191).
+/// One execution per (backfill, tick) (migration 0192).
 pub(crate) const ONE_PER_BACKFILL_TICK: &str = "workflow_executions_one_per_backfill_tick";
 // classify: Some(ONE_PER_BACKFILL_TICK) => Started::AlreadyFired(format!(
 //     "this backfill tick already has an execution: {err}")),
@@ -697,5 +697,5 @@ Handlers: `require(WF_MANAGE)` first, then the body (`body_refusal`), then one t
 ## Self-review (done while writing)
 
 - **Spec coverage:** §3.1 → Task 2; §3.2 → Tasks 2 (indexes, `classify`), 4 (the fire); §3.3 → Tasks 1 (merge), 2 (column, `NewExecution`), 3 (render, source, copies, DTOs); §3.4 → Tasks 1 (inclusive start, overlay), 7 (route); §3.5 → Tasks 4 (claim term), 7 (routes); §3.6 → Tasks 1 (resume), 4; §3.7 → Task 5; §3.8 → Task 6; §3.9 → Task 6; §3.10 → Task 7; §3.11 → Tasks 5, 7 (concurrency tests), 4 (P5); §3.12 → Tasks 1 (`lib.rs`, `TriggerState`), 2 (`fire.rs:261-264`, `scheduler/mod.rs` statement 2), 10 (the W7e spec note); §4.1, §4.2, §4.4 → Task 8; §4.3 → Task 9; §5 → Task 7; §6 → every task's tests and Task 10; §7 → Task 10; §8 → Global Constraints; §9 → nothing built; §10 → nothing.
-- **Deviations from the spec, each stated where it is used:** migration `0191` (0190 is held, uncommitted, in `egret-tagdef`); P1 (list labels own, detail merged); P2 (over-cap recount ends the backfill); P3 (re-snap with no tick keeps the value); P4 (`LEAST`); P5 (a test-only hook for the fresh read); P6 (a `backfill` bundle flag); P7 (`deserialize_labels` lifted). §3.3's `source_of` is `load_source`; §3.3's construction list omits ten test sites.
+- **Deviations from the spec, each stated where it is used:** migration `0192` (0190 and 0191 are held by `egret-tagdef`, branch `fix/tag-policies-service-def`); P1 (list labels own, detail merged); P2 (over-cap recount ends the backfill); P3 (re-snap with no tick keeps the value); P4 (`LEAST`); P5 (a test-only hook for the fresh read); P6 (a `backfill` bundle flag); P7 (`deserialize_labels` lifted). §3.3's `source_of` is `load_source`; §3.3's construction list omits ten test sites.
 - **Type consistency:** `BackfillRow` (scheduler, Task 4) and `BackfillStateRow` (reads, Task 6) are different on purpose: the second carries the two display names. `CannotBackfill` (read) vs `BackfillRefusal` (write) likewise. `LabelDto` is defined once in `routes.rs` (Task 3) and reused by `BackfillDto` and `CreateBackfillRequest`'s schema.

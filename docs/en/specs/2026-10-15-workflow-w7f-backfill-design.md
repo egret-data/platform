@@ -32,7 +32,7 @@ The frontend rulebook `docs/en/frontend-rules.md` binds every frontend line.
 - D14. Routes under W7e's: create, pause/resume and delete per trigger, `workflow:manage`; bulk pause/resume and delete by selection, at most 100, synchronous, a result per entry. No bulk create (as Kestra). An audit event per change (§3.10).
 - D15. `TriggerEntryDto` gains `backfill`, `can_backfill` and `backfill_refusal`; the progress is Kestra's time formula, computed by the server, plus exact tick counts (§3.9).
 - D16. The create form is a lazy chunk; dates use the native `datetime-local` control with `max` set to now; the inputs reuse the Run form's model and controls (§4.3).
-- D17. The migration is **0191** (§3.1). Default decision (2026-10-15): 0190 is held by an untracked file in another worktree (`egret-tagdef`).
+- D17. The migration is **0192** (§3.1). Default decision (2026-10-15): 0190 and 0191 are held by the `egret-tagdef` worktree (branch `fix/tag-policies-service-def`).
 - D18 (P1). The execution **list** carries the execution's own `labels` plus `backfill_id`; the **detail** (`ExecutionDto`) carries `effective_labels`, the merge (§3.3). Default decision (2026-10-15).
 - D19 (P2). A cron change that would give a backfill more than 10,000 ticks **ends it**: `sync` resumes the regular schedule and writes `last_error` (§3.7). Default decision (2026-10-15).
 - D20 (P3). A re-snap that finds no tick **keeps** the stored `previous_next_evaluation_date` (§3.7). Default decision (2026-10-15).
@@ -71,7 +71,7 @@ The frontend rulebook `docs/en/frontend-rules.md` binds every frontend line.
 
 ### 3.1 The backfill table (D1, D17)
 
-Migration `0191_workflow_trigger_backfills.sql` (default decision, 2026-10-15). Main ends at `0189`; the unmerged branch `feat/view-governance` holds `0186`-`0188` (checked with `git ls-tree` on every local and remote ref, 2026-10-15, and on the disk of every worktree). `0190` is taken by an untracked file in another worktree (`egret-tagdef`), so this package uses `0191`, which collides with none of them in any merge order; re-check every ref and worktree before merging, since the number space is shared.
+Migration `0192_workflow_trigger_backfills.sql` (default decision, 2026-10-15). Main ends at `0189`; the unmerged branch `feat/view-governance` holds `0186`-`0188` (checked with `git ls-tree` on every local and remote ref, 2026-10-15, and on the disk of every worktree). `0190` and `0191` are taken by the `egret-tagdef` worktree (branch `fix/tag-policies-service-def`, re-checked 2026-10-15 during Task 2), so this package uses `0192`, which collides with none of them in any merge order; re-check every ref and worktree before merging, since the number space is shared.
 
 ```sql
 CREATE TABLE workflow.trigger_backfills (
@@ -140,7 +140,7 @@ CREATE UNIQUE INDEX workflow_executions_one_per_backfill_tick
 - **No foreign key** to `workflow.trigger_backfills`: the row is deleted when the backfill ends, and its executions stay.
 - **Idempotency of a backfill tick.** It is a schedule fire like any other, so W12's three statements hold unchanged (`scheduler/mod.rs` "## 1." to "## 3."): the claim locks the trigger row `FOR UPDATE SKIP LOCKED` (`fire.rs:145-166`), so two replicas never evaluate one trigger at once; the execution's insert and the advance commit in one transaction (`fire.rs:289-302`), so a retried pass either sees the advance or redoes the whole tick; and `workflow_executions_one_per_backfill_tick` is the backstop that `classify` maps to `AlreadyFired` as it maps the per-tick index (a new constant beside `ONE_PER_TICK`, `start.rs:72`).
 - **The rebuild is not `CONCURRENTLY`** and blocks writes to `workflow.executions` for one pass over the scheduled executions (the partial index's rows), as 0189 states for its own index (`0189:43-48`). sqlx runs the file in one transaction, so there is no moment without either index.
-- **0156's prose is not edited** (migration prose is append-only); 0191 states the new predicate. The doc of `scheduler/mod.rs` statement 2 ("the unique index is the backstop") names both indexes.
+- **0156's prose is not edited** (migration prose is append-only); 0192 states the new predicate. The doc of `scheduler/mod.rs` statement 2 ("the unique index is the backstop") names both indexes.
 
 ### 3.3 Execution labels (D3)
 
