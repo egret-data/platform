@@ -169,7 +169,7 @@ impl Surface {
     pub(super) async fn load(conn: &mut PgConnection, ctx: &ExecutionCtx) -> Result<Self> {
         let row = sqlx::query(
             "SELECT inputs, state, created_at, loop_index, loop_value, \
-                    parent_execution_id, parent_run_ix, trigger_execution_id \
+                    parent_execution_id, parent_run_ix, trigger_execution_id, labels \
                FROM workflow.executions WHERE id = $1",
         )
         .bind(ctx.id)
@@ -244,11 +244,14 @@ impl Surface {
         // for the path and not for a phrase), both in a `Log`, both SUCCESS in
         // the golden. No other system label is supplied, so an expression over
         // one still fails.
+        //
+        // The flow's labels first, then the execution's own (a backfill's, a
+        // replay's copy), the later value winning (W7f spec §3.3).
+        let own = crate::labels::own_labels(row.get::<Option<Value>, _>("labels").as_ref());
+        let flow_labels = flow.as_ref().map(|f| f.labels.as_slice()).unwrap_or(&[]);
         let mut labels = serde_json::Map::new();
-        if let Some(f) = &flow {
-            for label in &f.labels {
-                labels.insert(label.key.clone(), Value::String(label.value.clone()));
-            }
+        for label in crate::labels::execution_labels(flow_labels, &own) {
+            labels.insert(label.key, Value::String(label.value));
         }
         let started_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
         let execution = json!({

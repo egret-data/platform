@@ -1094,3 +1094,40 @@ pub async fn switched_off(db: &Db, flow: Uuid) -> Vec<String> {
     .await
     .expect("read the switch rows")
 }
+
+/// Start `source` carrying `labels` of its own (a jsonb list of `{key, value}`)
+/// and finish it SUCCESS through the real worker.
+pub async fn run_with_labels(
+    db: &Db,
+    ws: Uuid,
+    flow: Uuid,
+    source: &str,
+    labels: Option<serde_json::Value>,
+) -> Uuid {
+    let mut tx = db.pool.begin().await.expect("begin");
+    let id = egret_workflow::worker::start_execution_in(
+        &mut tx,
+        egret_workflow::worker::NewExecution {
+            workspace_id: ws,
+            flow_id: Some(flow),
+            source,
+            inputs: serde_json::json!({}),
+            trigger: None,
+            scheduled_date: None,
+            trigger_execution_id: None,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
+            born_failed: false,
+            replayed_from_execution_id: None,
+            id: None,
+            input_files: Vec::new(),
+            labels,
+            backfill_id: None,
+        },
+    )
+    .await
+    .expect("start with labels");
+    tx.commit().await.expect("commit");
+    drive_to(db, id, "SUCCESS").await;
+    id
+}

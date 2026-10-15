@@ -1031,6 +1031,77 @@ async fn the_render_surface_reaches_inputs_and_outputs_and_still_refuses_labels(
     );
 }
 
+/// **An execution's own labels reach the render surface, merged over the
+/// flow's** (W7f spec §3.3): `labels.team` is the execution's `ops`, not the
+/// flow's `data`; `labels.env` is the flow's; `labels.reason` exists only on
+/// the execution. The control starts the same flow with no own labels, where
+/// `labels.reason` must still FAIL the run -- nothing invents the key.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_executions_own_labels_render_over_its_flows(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = "id: own-labels\nnamespace: t\nlabels:\n  team: data\n  env: prod\ntasks:\n\
+         \x20 - id: r\n    type: io.kestra.plugin.core.debug.Return\n    \
+         format: \"{{ labels.team }}/{{ labels.env }}/{{ labels.reason }}\"\n";
+    let start = |labels: Option<serde_json::Value>| {
+        let pool = pool.clone();
+        async move {
+            let mut tx = pool.begin().await.expect("begin");
+            let id = start_execution_in(
+                &mut tx,
+                NewExecution {
+                    workspace_id: ws,
+                    flow_id: None,
+                    source,
+                    inputs: serde_json::json!({}),
+                    trigger: None,
+                    scheduled_date: None,
+                    trigger_execution_id: None,
+                    execution_depth: 0,
+                    flow_trigger_event_id: None,
+                    born_failed: false,
+                    replayed_from_execution_id: None,
+                    id: None,
+                    input_files: Vec::new(),
+                    labels,
+                    backfill_id: None,
+                },
+            )
+            .await
+            .expect("start");
+            tx.commit().await.expect("commit");
+            id
+        }
+    };
+    let with = start(Some(serde_json::json!([
+        {"key": "team", "value": "ops"},
+        {"key": "reason", "value": "x"}
+    ])))
+    .await;
+    let without = start(None).await;
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
+    assert_eq!(
+        (
+            run_state(&pool, with, "r").await,
+            run_outputs(&pool, with, "r").await
+        ),
+        (
+            Some("SUCCESS".to_string()),
+            Some(serde_json::json!({"value": "ops/prod/x"}))
+        ),
+        "the execution's `team` wins over the flow's, `env` stays the flow's"
+    );
+    assert_eq!(
+        run_state(&pool, without, "r").await.as_deref(),
+        Some("FAILED"),
+        "with no own labels `labels.reason` does not exist, and the run fails"
+    );
+}
+
 /// **"No output" is `{}` and never an absent key, through the durable path.**
 ///
 /// The W3b Task 3 brief said the opposite — that a `Log`, a `Sleep` and a falsy
@@ -1921,6 +1992,77 @@ async fn a_sub_execution_inherits_the_posted_inputs_of_its_parent(pool: sqlx::Pg
         "and the `then` branch is never created -- asserted so the test cannot \
          pass by running BOTH"
     );
+}
+
+/// **A `Loop` iteration copies its parent's own labels; a `Subflow` child does
+/// not** (W7f spec §3.3). The parent carries `reason: backfill`; the loop's
+/// iteration row has the same list (so `{{ labels.reason }}` renders there),
+/// and the subflow child -- `inheritLabels` is not honoured -- has none.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_iteration_copies_its_parents_labels_and_a_subflow_child_does_not(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(&db, ws, user, &one_task("child")).await;
+    let source = "id: lbl-parent\nnamespace: t\ntasks:\n  - id: loop\n    \
+         type: io.kestra.plugin.core.flow.Loop\n    values: '[\"1\"]'\n    \
+         concurrencyLimit: 0\n    tasks:\n      - id: body\n        \
+         type: io.kestra.plugin.core.debug.Return\n        format: \"{{ labels.reason }}\"\n  \
+         - id: sub\n    type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+         flowId: child\n";
+    let own = serde_json::json!([{"key": "reason", "value": "backfill"}]);
+    let mut tx = pool.begin().await.expect("begin");
+    let parent = start_execution_in(
+        &mut tx,
+        NewExecution {
+            workspace_id: ws,
+            flow_id: None,
+            source,
+            inputs: serde_json::json!({}),
+            trigger: None,
+            scheduled_date: None,
+            trigger_execution_id: None,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
+            born_failed: false,
+            replayed_from_execution_id: None,
+            id: None,
+            input_files: Vec::new(),
+            labels: Some(own.clone()),
+            backfill_id: None,
+        },
+    )
+    .await
+    .expect("start");
+    tx.commit().await.expect("commit");
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
+
+    let iteration: (Option<serde_json::Value>, Uuid) =
+        sqlx::query_as("SELECT labels, id FROM workflow.executions WHERE parent_execution_id = $1")
+            .bind(parent)
+            .fetch_one(&pool)
+            .await
+            .expect("the iteration");
+    assert_eq!(iteration.0, Some(own), "the iteration copies the labels");
+    assert_eq!(
+        run_outputs(&pool, iteration.1, "body").await,
+        Some(serde_json::json!({"value": "backfill"})),
+        "and renders them"
+    );
+    let child: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT labels FROM workflow.executions WHERE trigger_execution_id = $1",
+    )
+    .bind(parent)
+    .fetch_one(&pool)
+    .await
+    .expect("the subflow child");
+    assert_eq!(child, None, "`inheritLabels` is not honoured");
 }
 
 /// **The brief's property: a `Loop` over two values spawns two executions,

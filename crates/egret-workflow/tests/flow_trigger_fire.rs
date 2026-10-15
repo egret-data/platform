@@ -325,6 +325,52 @@ async fn a_success_fires_the_listener_once() {
     assert_eq!(executions_of(&fx.db, listener).await, 1, "once");
 }
 
+/// W7f spec §3.3: the source's `executionLabels` are its EXECUTION's labels
+/// (the flow's, then its own), not only the flow's. The producer declares no
+/// label; one execution carries `reason: backfill`, and the fired execution's
+/// stored `trigger.variables.executionLabels` shows it. Control: a producer
+/// execution without own labels fires with `{}`.
+///
+/// (A Flow trigger's `inputs:` cannot render `trigger.*` -- Task 1 measured
+/// that, see the test below -- so the stored trigger record is where the value
+/// is observable.)
+#[tokio::test]
+async fn the_source_executions_own_labels_reach_the_trigger_variables() {
+    let Some(fx) = fx().await else { return };
+    let producer_src = source_yaml("producer");
+    let producer = fx.flow(&producer_src).await;
+    fx.flow(&listening_to("listener", "producer")).await;
+    let with = common::run_with_labels(
+        &fx.db,
+        fx.ws,
+        producer,
+        &producer_src,
+        Some(serde_json::json!([{"key": "reason", "value": "backfill"}])),
+    )
+    .await;
+    fx.pass().await;
+    let without = fx.run(producer, &producer_src, serde_json::json!({})).await;
+    fx.pass().await;
+    let labels_of = |source: Uuid| {
+        let pool = fx.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT execution_trigger->'variables'->'executionLabels' \
+                   FROM workflow.executions WHERE trigger_execution_id = $1",
+            )
+            .bind(source)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        labels_of(with).await,
+        serde_json::json!({"reason": "backfill"})
+    );
+    assert_eq!(labels_of(without).await, serde_json::json!({}), "control");
+}
+
 /// Task 1 measured it (`listener_run1_FAILED_bad_inputs`): `{{
 /// trigger.executionId }}` in a Flow trigger's `inputs` fails with "Unable to
 /// find `trigger`", and Kestra STILL creates the listener's execution:

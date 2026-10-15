@@ -39236,7 +39236,8 @@
             "required": [
               "source",
               "runs",
-              "can_manage"
+              "can_manage",
+              "effective_labels"
             ],
             "properties": {
               "source": {
@@ -39253,6 +39254,13 @@
               "can_manage": {
                 "type": "boolean",
                 "description": "Whether the caller may resume and replay this execution: they hold\n`workflow:manage` in this workspace. A detail page hides both actions\nwhen this is false; the routes still check for themselves."
+              },
+              "effective_labels": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/LabelDto"
+                },
+                "description": "What the run sees as `labels`: the flow's, then `labels`, the later key\nwinning. Empty when the frozen source does not parse."
               }
             }
           }
@@ -39423,6 +39431,24 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "labels": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/LabelDto"
+            },
+            "description": "The labels this execution was started with beyond its flow's own\n`labels:` (a backfill's, a replay's copy); `null` for none. Not the flow's."
+          },
+          "backfill_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The backfill that fired this execution (W7f), `null` otherwise."
           }
         }
       },
@@ -40837,6 +40863,22 @@
           "expired": {
             "type": "boolean",
             "description": "This revision has expired: it is not served."
+          }
+        }
+      },
+      "LabelDto": {
+        "type": "object",
+        "description": "One execution label.",
+        "required": [
+          "key",
+          "value"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
           }
         }
       },

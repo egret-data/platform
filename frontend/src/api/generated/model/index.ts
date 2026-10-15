@@ -256,6 +256,7 @@ export * from './kvEntryDto';
 export * from './kvInheritedDto';
 export * from './kvKeysBody';
 export * from './kvRevisionDto';
+export * from './labelDto';
 export * from './lastExecutionDto';
 export * from './limitsSpec';
 export * from './listingDto';

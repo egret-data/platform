@@ -15,8 +15,6 @@ pub(crate) const MAX_LABEL_VALUE_CHARS: usize = 1024;
 
 /// Kestra's `Execution.newExecution` + `Label.deduplicate`: `flow` then `own`,
 /// an empty key or value dropped, the LAST value kept in the FIRST key's position.
-// W7f Task 1 lands this before its callers (Tasks 4-7); drop the allow then.
-#[allow(dead_code)]
 pub(crate) fn execution_labels(flow: &[Label], own: &[Label]) -> Vec<Label> {
     let mut out: Vec<Label> = Vec::new();
     for label in flow.iter().chain(own) {
@@ -32,8 +30,6 @@ pub(crate) fn execution_labels(flow: &[Label], own: &[Label]) -> Vec<Label> {
 }
 
 /// `workflow.executions.labels` read back: NULL or a malformed item is no label.
-// W7f Task 1 lands this before its callers (Tasks 4-7); drop the allow then.
-#[allow(dead_code)]
 pub(crate) fn own_labels(v: Option<&serde_json::Value>) -> Vec<Label> {
     let Some(serde_json::Value::Array(items)) = v else {
         return Vec::new();

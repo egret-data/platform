@@ -1462,10 +1462,35 @@ pub struct ExecutionListItemDto {
     pub ended_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The labels this execution was started with beyond its flow's own
+    /// `labels:` (a backfill's, a replay's copy); `null` for none. Not the flow's.
+    pub labels: Option<Vec<LabelDto>>,
+    /// The backfill that fired this execution (W7f), `null` otherwise.
+    pub backfill_id: Option<Uuid>,
+}
+
+/// One execution label.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LabelDto {
+    pub key: String,
+    pub value: String,
+}
+
+impl From<crate::models::Label> for LabelDto {
+    fn from(l: crate::models::Label) -> Self {
+        Self {
+            key: l.key,
+            value: l.value,
+        }
+    }
 }
 
 impl From<ExecutionRow> for ExecutionListItemDto {
     fn from(r: ExecutionRow) -> Self {
+        let own: Vec<LabelDto> = crate::labels::own_labels(r.labels.as_ref())
+            .into_iter()
+            .map(LabelDto::from)
+            .collect();
         Self {
             id: r.id,
             flow_id: r.flow_id,
@@ -1489,6 +1514,8 @@ impl From<ExecutionRow> for ExecutionListItemDto {
             ended_at: r.ended_at,
             created_at: r.created_at,
             updated_at: r.updated_at,
+            labels: (!own.is_empty()).then_some(own),
+            backfill_id: r.backfill_id,
         }
     }
 }
@@ -1650,11 +1677,24 @@ pub struct ExecutionDto {
     // the execution itself because its flow may be trashed (a 404 to read)
     // while the execution is still readable.
     pub can_manage: bool,
+    /// What the run sees as `labels`: the flow's, then `labels`, the later key
+    /// winning. Empty when the frozen source does not parse.
+    pub effective_labels: Vec<LabelDto>,
 }
 
 impl ExecutionDto {
     fn new(d: ExecutionDetail, can_manage: bool) -> Self {
+        let own = crate::labels::own_labels(d.execution.labels.as_ref());
+        let flow_labels = crate::spec::parse(&d.source)
+            .ok()
+            .map(|f| f.labels)
+            .unwrap_or_default();
+        let effective_labels = crate::labels::execution_labels(&flow_labels, &own)
+            .into_iter()
+            .map(LabelDto::from)
+            .collect();
         Self {
+            effective_labels,
             execution: ExecutionListItemDto::from(d.execution),
             source: d.source,
             runs: d.runs.into_iter().map(TaskRunDto::from).collect(),
@@ -2958,7 +2998,9 @@ async fn replay_execution(
                 replayed_from_execution_id: Some(id),
                 id: None,
                 input_files: Vec::new(),
-                labels: None,
+                // The run's own labels travel with it; the backfill that fired
+                // the original does not (W7f spec §3.3).
+                labels: source.execution.labels.clone(),
                 backfill_id: None,
             },
         )
@@ -3533,6 +3575,7 @@ pub fn management_router() -> Router<WorkflowState> {
         crate::graph::FlowGraph,
         crate::graph::ExecutionGraph,
         ExecutionListItemDto,
+        LabelDto,
         TaskRunDto,
         ExecutionDto,
         ExecutionPageDto,
