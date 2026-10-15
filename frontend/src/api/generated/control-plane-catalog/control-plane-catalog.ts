@@ -1170,6 +1170,11 @@ export type controlPlaneCatalogCreateClientResponse201 = {
   status: 201
 }
 
+export type controlPlaneCatalogCreateClientResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
 export type controlPlaneCatalogCreateClientResponse401 = {
   data: ErrorBody
   status: 401
@@ -1193,7 +1198,7 @@ export type controlPlaneCatalogCreateClientResponse500 = {
 export type controlPlaneCatalogCreateClientResponseSuccess = (controlPlaneCatalogCreateClientResponse201) & {
   headers: Headers;
 };
-export type controlPlaneCatalogCreateClientResponseError = (controlPlaneCatalogCreateClientResponse401 | controlPlaneCatalogCreateClientResponse403 | controlPlaneCatalogCreateClientResponse404 | controlPlaneCatalogCreateClientResponse500) & {
+export type controlPlaneCatalogCreateClientResponseError = (controlPlaneCatalogCreateClientResponse400 | controlPlaneCatalogCreateClientResponse401 | controlPlaneCatalogCreateClientResponse403 | controlPlaneCatalogCreateClientResponse404 | controlPlaneCatalogCreateClientResponse500) & {
   headers: Headers;
 };
 
@@ -2532,6 +2537,11 @@ export type controlPlaneCatalogCreateRoleResponse201 = {
   status: 201
 }
 
+export type controlPlaneCatalogCreateRoleResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
 export type controlPlaneCatalogCreateRoleResponse401 = {
   data: ErrorBody
   status: 401
@@ -2555,7 +2565,7 @@ export type controlPlaneCatalogCreateRoleResponse500 = {
 export type controlPlaneCatalogCreateRoleResponseSuccess = (controlPlaneCatalogCreateRoleResponse201) & {
   headers: Headers;
 };
-export type controlPlaneCatalogCreateRoleResponseError = (controlPlaneCatalogCreateRoleResponse401 | controlPlaneCatalogCreateRoleResponse403 | controlPlaneCatalogCreateRoleResponse409 | controlPlaneCatalogCreateRoleResponse500) & {
+export type controlPlaneCatalogCreateRoleResponseError = (controlPlaneCatalogCreateRoleResponse400 | controlPlaneCatalogCreateRoleResponse401 | controlPlaneCatalogCreateRoleResponse403 | controlPlaneCatalogCreateRoleResponse409 | controlPlaneCatalogCreateRoleResponse500) & {
   headers: Headers;
 };
 

@@ -882,24 +882,33 @@ function ProfileBlock({
         {profile.accesses.map((verdict) => (
           <AccessRow key={verdict.access_type} verdict={verdict} declined={declined} />
         ))}
-        {profile.accesses.length === 0 && (
+        {/* Task 12, C2: StarRocks asks no access decision for a column a mask
+            transforms, so there is no verdict to show, only the mask below. */}
+        {profile.masked_read_skips_access && (
+          <li
+            data-testid="explain-access-not-checked"
+            className="rounded-md border border-border p-3 text-sm text-muted-foreground"
+          >
+            <span className="font-mono text-xs">select</span> is not checked: StarRocks does not
+            check access on a column it masks, so the mask below decides what this read returns.
+            This is StarRocks behaviour (measured on 4.1.6); Trino checks access on a masked column.
+          </li>
+        )}
+        {profile.accesses.length === 0 && !profile.masked_read_skips_access && (
           <li className="text-sm text-muted-foreground">No access type was evaluated.</li>
         )}
-        {profile.materialized_view && (
-          <AccessRow verdict={profile.materialized_view.verdict} declined={declined} />
-        )}
       </ul>
-      {profile.materialized_view && (
-        <p data-testid="explain-mv-scope" className="text-xs text-muted-foreground">
-          The materialized-view row asks about{" "}
-          <span className="font-mono">
-            {profile.materialized_view.catalog}.{profile.materialized_view.database}
-          </span>
-          , because StarRocks creates materialized views only in default_catalog. Only a refusal
-          by the engine-wide materialized-view deny comes from a classification.
+      {profile.mask && <MaskLine mask={profile.mask} />}
+      {/* Task 12, M-4: the materialized-view deny is engine-wide, so the page
+          states the rule instead of a verdict for one database. */}
+      {profile.engine === "starrocks" && (
+        <p data-testid="explain-mv-rule" className="text-xs text-muted-foreground">
+          Materialized views: when this profile holds a classified column, StarRocks refuses{" "}
+          <span className="font-mono">create materialized view</span> in every database to anyone
+          not cleared for every classification on the profile. Explain does not answer it per
+          database.
         </p>
       )}
-      {profile.mask && <MaskLine mask={profile.mask} />}
       <ProfileTags profile={profile} declined={declined} />
     </section>
   );
@@ -917,6 +926,11 @@ function MaskLine({ mask }: { mask: NonNullable<ExplainProfile["mask"]> }) {
       {d.kind === "masked" && d.result.mask_type === "MASK_NONE" ? (
         <>
           not transformed (<span className="font-mono">MASK_NONE</span>, Ranger policy{" "}
+          <span className="font-mono">{d.result.policy_name}</span>)
+        </>
+      ) : d.kind === "masked" && d.result.mask_type === "MASK_NULL" ? (
+        <>
+          returns NULL (<span className="font-mono">MASK_NULL</span>, Ranger policy{" "}
           <span className="font-mono">{d.result.policy_name}</span>)
         </>
       ) : d.kind === "masked" ? (
@@ -1368,13 +1382,15 @@ export default function ExplainAccess() {
                   So this states the limit and dates nothing. Replacing it with a
                   new promise would reintroduce exactly the same defect the first
                   time a package slipped. */}
+              {/* Task 12, M-5: this used to say "ACCESS only" under a StarRocks
+                  mask line, which contradicted it. It now names what is shown. */}
               <p>
-                This answers about ACCESS only. A column the engine masks, or a table whose
-                rows it filters, is reported here exactly like one it does not: the verdict
-                says whether the read is permitted, never that what comes back is redacted —
-                so a target this page calls <span className="font-medium">Allowed</span> can
-                still return masked values, filtered rows, or an error from a mask the engine
-                cannot apply. Asking which takes the engine.
+                On a StarRocks profile, a read of a column also shows the mask the engine
+                applies to it. Apart from that this answers about access only: row filters,
+                and masks on Trino, are not reported, so a target this page calls{" "}
+                <span className="font-medium">Allowed</span> can still return masked values,
+                filtered rows, or an error from a mask the engine cannot apply. Asking which
+                takes the engine.
               </p>
               <p>
                 Each plugin polls for its policy set on an interval, so an engine can still

@@ -2021,7 +2021,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 db.pool.clone(),
                 lineage_minter,
                 // The hold bounds the EXPLAIN by the same budget, inside its
-                // one 60 s deadline (`egret_catalog_engine::view_hold`).
+                // one 90 s deadline (`egret_catalog_engine::view_hold`).
                 egret_catalog_engine::EXPLAIN_BUDGET,
             ));
         let view_hold = std::sync::Arc::new(egret_catalog_engine::ViewHold::new(

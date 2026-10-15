@@ -183,13 +183,12 @@ describe("TagDetail", () => {
       expect(screen.queryByText(/not enforced in the engine/i)).not.toBeInTheDocument();
     });
 
-    // SP4c Task 7 / D0b / D5: the view bypass, measured on both engines. The
-    // Trino half is asserted separately because it is the surprising one —
-    // an operator told only "views are not covered" would not expect a
-    // CLEARED user to be blocked by an uncleared view owner, and a test that
-    // stopped at the first sentence would pass against a warning that left
-    // the two-directional failure out.
-    test("a role-gated tag says a view bypasses the clearance on both engines, in both directions", async () => {
+    // View governance Task 12 (live finding C4). This box used to say a view
+    // returns a classified column "in full to a user without clearance" on both
+    // engines. Measured after view governance (Task 11): Trino refuses the
+    // uncleared reader through a view, StarRocks returns NULL (and refuses
+    // through an INVOKER view). The DEFINER owner direction still holds on Trino.
+    test("a role-gated tag states what a view over a classified column returns on each engine", async () => {
       vi.mocked(tagsApi.useTags).mockReturnValue({
         data: [{ ...TAG, required_roles: ["finance_cleared"] }],
         isLoading: false,
@@ -199,21 +198,12 @@ describe("TagDetail", () => {
       renderPage();
       await screen.findByRole("heading", { name: "PII" });
 
-      expect(
-        screen.getByText(
-          /a view over a classified column is not covered on either engine: reading the column through a view returns it in full to a user without clearance/i,
-        ),
-      ).toBeInTheDocument();
-      expect(
-        screen.getByText(
-          /on trino a view runs with its owner.s rights, so it fails both ways/i,
-        ),
-      ).toBeInTheDocument();
-      expect(
-        screen.getByText(
-          /a cleared owner.s view hands the column to the uncleared, and an uncleared owner.s view blocks everybody, the cleared included/i,
-        ),
-      ).toBeInTheDocument();
+      expect(screen.queryByText(/returns it in full to a user without clearance/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/not covered on either engine/i)).not.toBeInTheDocument();
+      const box = screen.getByText(/a view over a classified column carries the classification/i);
+      expect(box).toHaveTextContent(/on trino a user without clearance is refused through the view/i);
+      expect(box).toHaveTextContent(/on starrocks they read null/i);
+      expect(box).toHaveTextContent(/an uncleared owner.s definer view blocks everybody, the cleared included/i);
     });
 
     // The ceiling is PER PROFILE, not installation-wide: the compiler counts

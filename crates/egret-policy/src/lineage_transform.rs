@@ -35,11 +35,13 @@
 //!    `egret-lineage` on the non-read accesses that policy grants (review I2: a
 //!    `{public}` write allow would otherwise reach the principal). This also
 //!    covers tag-phase allows, which no resource deny can reach.
-//! 4. **Its own two policy kinds, appended.** `use`+`select` on every catalog
-//!    the profile's engines attach (`catalog/*/*/*`), and, per resource
-//!    hierarchy of the service-def, an override-priority DENY of every access
-//!    type except what EXPLAIN needs ([`kept_accesses`]), narrowed further on
-//!    `trinouser` (itself only) and `systemproperty` (`query_max_run_time`).
+//! 4. **Its own policies, appended.** `use`+`select` on every catalog the
+//!    profile's engines attach (`catalog/*/*/*`); `alter` on the system
+//!    session property `query_max_run_time` ([`LINEAGE_SYSTEM_PROPERTY`],
+//!    Task 12, live finding I2); and, per resource hierarchy of the
+//!    service-def, an override-priority DENY of every access type except what
+//!    EXPLAIN needs ([`kept_accesses`]), narrowed further on `trinouser`
+//!    (itself only) and `systemproperty` (`query_max_run_time`).
 //!
 //! **Who is served it is decided per POLLER** (fix round 2, N1): the
 //! `pluginId`'s hostname must be a coordinator or worker pod of an eligible
@@ -68,6 +70,13 @@ use crate::PolicyStoreError;
 
 /// The read accesses the principal holds on data.
 pub const LINEAGE_READ_ACCESSES: [&str; 2] = ["select", "use"];
+
+/// The one system session property egret's client sets on every statement
+/// (`egret_query`'s Trino connector). The lineage EXPLAIN is refused without
+/// `alter` on it, and on a JWT engine nothing else grants it: the
+/// `egret-query-timeout` seed is written for impersonate engines only (live
+/// result §2.6 I2). So the transform allows it, and only it.
+pub const LINEAGE_SYSTEM_PROPERTY: &str = "query_max_run_time";
 
 /// Name prefix of the policies the transform appends. They exist only in a
 /// download, never in `policy.authz_policies`.
@@ -116,7 +125,7 @@ pub fn kept_accesses(leaf: &str) -> &'static [&'static str] {
 fn narrowed(leaf: &str) -> Option<(&'static str, &'static [&'static str])> {
     match leaf {
         "trinouser" => Some(("impersonate", &[LINEAGE_PRINCIPAL])),
-        "systemproperty" => Some(("alter", &["query_max_run_time"])),
+        "systemproperty" => Some(("alter", &[LINEAGE_SYSTEM_PROPERTY])),
         _ => None,
     }
 }
@@ -320,6 +329,19 @@ fn appended_policies(service: &str, service_def: &Value, catalogs: &[String]) ->
         ));
         id += 1;
     }
+    // The system property egret's client sets (I2). Allowed here; every other
+    // value stays denied by the narrowed deny below.
+    let mut prop = serde_json::Map::new();
+    prop.insert("systemproperty".into(), level(LINEAGE_SYSTEM_PROPERTY));
+    out.push(appended_policy(
+        id,
+        format!("{LINEAGE_POLICY_PREFIX}alter-{LINEAGE_SYSTEM_PROPERTY}"),
+        service,
+        prop,
+        Some(vec!["alter".to_string()]),
+        None,
+    ));
+    id += 1;
 
     let all: Vec<String> = service_def
         .get("accessTypes")
@@ -704,14 +726,19 @@ mod tests {
         }
     }
 
+    /// Beyond `select` and `use`, the one allow is `alter` on the single
+    /// system property egret's client sets (I2).
     #[test]
     fn no_appended_policy_allows_more_than_select_and_use() {
         let mut sp = envelope(Vec::new());
         apply_lineage_transform(&mut sp, &["ice".into()]);
+        let property = json!({"systemproperty": level(LINEAGE_SYSTEM_PROPERTY)});
         for p in &sp.policies {
             for item in p["policyItems"].as_array().unwrap() {
                 for a in item_accesses(item) {
-                    assert!(LINEAGE_READ_ACCESSES.contains(&a.as_str()), "{p}");
+                    let read = LINEAGE_READ_ACCESSES.contains(&a.as_str());
+                    let the_property = a == "alter" && p["resources"] == property;
+                    assert!(read || the_property, "{p}");
                 }
             }
             for item in p["denyPolicyItems"].as_array().unwrap() {

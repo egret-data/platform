@@ -211,7 +211,6 @@ export * from './expansionReason';
 export * from './explainAccess';
 export * from './explainAttribution';
 export * from './explainMask';
-export * from './explainMaterializedView';
 export * from './explainOutcome';
 export * from './explainProfile';
 export * from './explainRequest';

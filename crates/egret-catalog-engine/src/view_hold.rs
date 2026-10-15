@@ -53,10 +53,14 @@
 //!
 //! # One deadline
 //!
-//! Every held request has ONE deadline, [`ViewHold::limit`] (2 × the poll
-//! interval, 60 s) from its arrival, covering the lock, the EXPLAIN and the
-//! wait together. Trino was measured to tolerate a 65 s hold (live result §1
-//! Q1), so a refusal arrives as a refusal rather than as a client timeout.
+//! Every held request has ONE deadline, [`ViewHold::limit`] (3 × the poll
+//! interval, 90 s) from its arrival, covering the lock, the EXPLAIN and the
+//! wait together. A confirmation takes one to two intervals: a plugin
+//! downloads the new tags on its next poll and reports the version only on
+//! the poll after (live result §2.6 I1, where a 2-interval deadline left a
+//! 0.7 s margin). The third interval is that margin (user ruling 2026-10-15).
+//! Trino was measured to tolerate a 65 s hold with no client retry (live
+//! result §1 Q1); 90 s was not measured.
 //!
 //! # Refusal
 //!
@@ -102,7 +106,7 @@ pub const UNCONFIRMED_REFUSAL: &str = "engines did not confirm the classificatio
 
 /// The longest the lineage EXPLAIN may take. `EXPLAIN (TYPE IO)` plans and
 /// reads no data; planning a view loads its tables' metadata from egret's own
-/// catalog. 5 s is far above that, and leaves 55 s of the 60 s deadline for
+/// catalog. 5 s is far above that, and leaves 85 s of the 90 s deadline for
 /// the plugins to confirm. The production runner gets the same timeout.
 pub const EXPLAIN_BUDGET: Duration = Duration::from_secs(5);
 
@@ -112,10 +116,11 @@ pub const DEFAULT_MAX_HOLDS: usize = 8;
 /// Largest view request body the hold reads.
 const MAX_BODY: usize = 16 << 20;
 
-/// The hold limit: 2 × the plugin poll interval (spec B2), 60 s today.
+/// The hold limit: 3 × the plugin poll interval (spec B2, user ruling
+/// 2026-10-15), 90 s today.
 pub fn default_hold_limit() -> Duration {
     Duration::from_millis(
-        2 * u64::from(egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS),
+        3 * u64::from(egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS),
     )
 }
 
@@ -2208,7 +2213,7 @@ mod tests {
 
     #[test]
     fn the_refusal_messages_name_their_reason_and_what_to_do() {
-        assert_eq!(seconds(default_hold_limit()), "60");
+        assert_eq!(seconds(default_hold_limit()), "90");
         assert_eq!(seconds(Duration::from_millis(1500)), "1.5");
         assert!(Refusal::lineage("boom")
             .0

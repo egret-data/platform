@@ -7,7 +7,6 @@
  */
 import type { ExplainAccess } from './explainAccess';
 import type { ExplainMask } from './explainMask';
-import type { ExplainMaterializedView } from './explainMaterializedView';
 import type { ExplainResolvedTag } from './explainResolvedTag';
 import type { WireEngineType } from './wireEngineType';
 
@@ -93,5 +92,20 @@ export interface ExplainProfile {
      */
   tag_policies_in_download: number;
   mask?: null | ExplainMask;
-  materialized_view?: null | ExplainMaterializedView;
+  /**
+     * `true` when the engine does not check access on the target column
+     * because a mask transforms it, so [`ExplainProfile::accesses`] carries no
+     * `select` verdict and [`ExplainProfile::mask`] is the answer (an
+     * uncleared reader of a classified column reads `NULL`). Engine-specific:
+     * StarRocks 4.1.6 asks Ranger for no access decision on a column that has
+     * a mask expression (view governance Task 11, finding C2: the FE asked
+     * `policyType=0` only for the unmasked column). A `MASK_NONE` (or a mask
+     * with no type) transforms nothing, so the access is checked as usual.
+     * Never set on Trino, which checks access on a masked column too.
+     *
+     * (Explain no longer answers `create materialized view`, Task 12 M-4: the
+     * A3 deny is engine-wide, so no single database's verdict says more than
+     * the rule, and the database it asked about held nothing.)
+     */
+  masked_read_skips_access?: boolean;
 }

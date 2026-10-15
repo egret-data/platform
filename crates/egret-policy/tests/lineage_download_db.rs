@@ -199,6 +199,61 @@ async fn a_provisioned_jwt_trino_plugin_is_served_the_transform_and_nothing_is_s
     assert!(!stored.iter().any(names_lineage), "{stored:?}");
 }
 
+/// Task 12 (live finding I2): egret's client sets the system session
+/// property `query_max_run_time` on every statement, so the lineage EXPLAIN
+/// needs `alter` on it. On a JWT engine nothing else grants it (the
+/// `egret-query-timeout` seed is for impersonate engines only), so the served
+/// transform allows it, and only it.
+#[tokio::test]
+async fn the_served_transform_allows_query_max_run_time_and_no_other_system_property() {
+    use egret_ranger_eval::eval::{
+        evaluate, AccessRequest, Decision, EngineConfig, EngineType, PluginVersion,
+    };
+    use egret_ranger_eval::model::ServicePolicySet;
+    use egret_ranger_eval::resource::RequestResource;
+    use egret_ranger_eval::servicedef::ServiceDef;
+
+    let Some(db) = db().await else { return };
+    let f = setup(db, "provisioned", "jwt").await;
+    let (status, body) = download(
+        &f.store,
+        &uri(&f.name, Some(&pod_plugin(&f.engine, &f.name))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let set: ServicePolicySet = serde_json::from_value(body.clone()).unwrap();
+    let def = ServiceDef::parse(&body["serviceDef"]);
+    let ask = |user: &str, property: &str| {
+        evaluate(
+            &set,
+            &AccessRequest {
+                user: user.into(),
+                groups: Default::default(),
+                roles: Default::default(),
+                access_type: "alter".into(),
+                resource: RequestResource::new().with("systemproperty", property),
+                owner: None,
+                resolved_tags: None,
+            },
+            &def,
+            &EngineConfig {
+                engine: Some(EngineType::Trino),
+                plugin_version: Some(PluginVersion::Ranger2_8_0),
+                ..EngineConfig::without_super_users()
+            },
+        )
+    };
+    let d = ask("egret-lineage", "query_max_run_time");
+    assert!(matches!(d, Decision::Allowed { .. }), "{d:?}");
+    for other in ["query_max_memory", "join_distribution_type"] {
+        let d = ask("egret-lineage", other);
+        assert!(!matches!(d, Decision::Allowed { .. }), "{other}: {d:?}");
+    }
+    // The allow names the principal only: nobody else gains the property.
+    let d = ask("alice", "query_max_run_time");
+    assert!(!matches!(d, Decision::Allowed { .. }), "{d:?}");
+}
+
 #[tokio::test]
 async fn every_other_poller_gets_the_stored_policies() {
     let Some(db) = db().await else { return };

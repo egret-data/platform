@@ -525,6 +525,14 @@ pub struct ExplainAccess {
     pub attribution: Option<ExplainAttribution>,
 }
 
+/// Whether a mask verdict transforms the value: a decided mask whose type is
+/// neither absent nor `MASK_NONE` (Ranger's `isMaskEnabled`). An undecidable
+/// verdict is not known to transform, so the access stays checked.
+fn mask_transforms(decision: &WireMaskDecision) -> bool {
+    matches!(decision, WireMaskDecision::Masked { result }
+        if result.mask_type.as_deref().is_some_and(|t| t != "MASK_NONE"))
+}
+
 /// One policy profile's answer: the artifact ITS plugin downloads, evaluated
 /// for its own engine.
 ///
@@ -598,11 +606,11 @@ pub struct ExplainProfile {
     /// column is tagged — the question H1's steward is left with otherwise — and
     /// it is the predicate [`ExplainProfile::tags`] is narrowed by.
     pub tag_policies_in_download: usize,
-    /// What the engine masks the target COLUMN to for this subject — the second
-    /// place a StarRocks clearance shows (view governance A2). The clearance is a
-    /// per-column deny for a direct read (`accesses`) AND a priority-1 data mask
-    /// that applies through every view, so an uncleared reader sees both reasons:
-    /// the deny, and `MASK_NULL` here.
+    /// What the engine masks the target COLUMN to for this subject — where a
+    /// StarRocks clearance shows (view governance A2). The clearance is a
+    /// per-column deny AND a priority-1 data mask that applies through every
+    /// view. For an uncleared reader the mask is `MASK_NULL`, and then the deny
+    /// is not consulted: see [`ExplainProfile::masked_read_skips_access`].
     ///
     /// Present only for a `read` explain of a COLUMN on a StarRocks profile. A
     /// table-level target has no column to mask, a `write` has no masked request,
@@ -610,32 +618,21 @@ pub struct ExplainProfile {
     /// (tier c), so none is asked there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mask: Option<ExplainMask>,
-    /// Whether the subject may `create materialized view` on this StarRocks
-    /// engine (view governance A3; Task 3 review M-4). StarRocks creates a
-    /// materialized view only in `default_catalog`, and checks the privilege
-    /// on the TARGET database, so this asks for `default_catalog.<the
-    /// target's database>`; the A3 deny covers every database alike. For an
-    /// uncleared user the deny decides it, attributed
-    /// `materialized_view_deny`.
+    /// `true` when the engine does not check access on the target column
+    /// because a mask transforms it, so [`ExplainProfile::accesses`] carries no
+    /// `select` verdict and [`ExplainProfile::mask`] is the answer (an
+    /// uncleared reader of a classified column reads `NULL`). Engine-specific:
+    /// StarRocks 4.1.6 asks Ranger for no access decision on a column that has
+    /// a mask expression (view governance Task 11, finding C2: the FE asked
+    /// `policyType=0` only for the unmasked column). A `MASK_NONE` (or a mask
+    /// with no type) transforms nothing, so the access is checked as usual.
+    /// Never set on Trino, which checks access on a masked column too.
     ///
-    /// Present only for a `read` explain on a StarRocks profile whose target
-    /// names a database.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub materialized_view: Option<ExplainMaterializedView>,
-}
-
-/// The `create materialized view` verdict of [`ExplainProfile::materialized_view`],
-/// with the resource it was asked for. Only a verdict attributed
-/// `materialized_view_deny` is the clearance's doing; any other refusal (for
-/// example no policy matched, since egret grants nothing on
-/// `default_catalog`) is not caused by a classification.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
-pub struct ExplainMaterializedView {
-    /// Always `default_catalog`.
-    pub catalog: String,
-    /// The explain target's database, the one asked about.
-    pub database: String,
-    pub verdict: ExplainAccess,
+    /// (Explain no longer answers `create materialized view`, Task 12 M-4: the
+    /// A3 deny is engine-wide, so no single database's verdict says more than
+    /// the rule, and the database it asked about held nothing.)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub masked_read_skips_access: bool,
 }
 
 /// The data-mask verdict for the target column: Ranger's `select` request
@@ -1942,8 +1939,51 @@ async fn explain(
             ..EngineConfig::without_super_users()
         };
 
+        // The masked-read question, asked only where a mask can be the answer.
+        // Asked BEFORE the accesses, because on StarRocks it decides whether
+        // the column's access is consulted at all (Task 12, C2).
+        let mask = if body.action == Action::Read
+            && engine == EngineType::StarRocks
+            && body.target.column.is_some()
+        {
+            let request = AccessRequest {
+                user: body.subject.user.clone(),
+                groups: BTreeSet::new(),
+                roles: BTreeSet::new(),
+                access_type: "select".to_string(),
+                resource: resource.clone(),
+                owner: None,
+                // StarRocks has no tag service: no tag can reach a mask.
+                resolved_tags: None,
+            };
+            let decision = egret_ranger_eval::eval::evaluate_data_mask(
+                &artifact,
+                &request,
+                &service_def,
+                &config,
+            );
+            let attribution = match &decision {
+                MaskDecision::Masked(m) => attribution_for_name(&mut *conn, &m.policy_name).await?,
+                MaskDecision::NoMask | MaskDecision::Undecidable { .. } => None,
+            };
+            Some(ExplainMask {
+                access_type: "select".to_string(),
+                decision: WireMaskDecision::from(&decision),
+                attribution,
+            })
+        } else {
+            None
+        };
+        // StarRocks checks no access on a column whose mask transforms it
+        // (`ExplainProfile::masked_read_skips_access`).
+        let masked_read_skips_access = engine == EngineType::StarRocks
+            && mask.as_ref().is_some_and(|m| mask_transforms(&m.decision));
+
         let mut accesses = Vec::new();
         for access_type in engine_accesses(body.action, engine)? {
+            if masked_read_skips_access && access_type == "select" {
+                continue;
+            }
             let request = AccessRequest {
                 user: body.subject.user.clone(),
                 // **Both empty, and that is the answer, not a shortcut.** See
@@ -1988,72 +2028,6 @@ async fn explain(
         // whose block is present but empty (`bind_trino_profile` creates exactly
         // that): in both cases no tag policy of any kind can decide here.
         let tag_policies_in_download = artifact.tag_policies.len();
-        // The masked-read question, asked only where a mask can be the answer.
-        let mask = if body.action == Action::Read
-            && engine == EngineType::StarRocks
-            && body.target.column.is_some()
-        {
-            let request = AccessRequest {
-                user: body.subject.user.clone(),
-                groups: BTreeSet::new(),
-                roles: BTreeSet::new(),
-                access_type: "select".to_string(),
-                resource: resource.clone(),
-                owner: None,
-                // StarRocks has no tag service: no tag can reach a mask.
-                resolved_tags: None,
-            };
-            let decision = egret_ranger_eval::eval::evaluate_data_mask(
-                &artifact,
-                &request,
-                &service_def,
-                &config,
-            );
-            let attribution = match &decision {
-                MaskDecision::Masked(m) => attribution_for_name(&mut *conn, &m.policy_name).await?,
-                MaskDecision::NoMask | MaskDecision::Undecidable { .. } => None,
-            };
-            Some(ExplainMask {
-                access_type: "select".to_string(),
-                decision: WireMaskDecision::from(&decision),
-                attribution,
-            })
-        } else {
-            None
-        };
-        // The A3 question: may this subject store a query result as a
-        // materialized view on this engine? See `ExplainProfile::materialized_view`.
-        let materialized_view = match (engine, body.action, body.target.schema.as_deref()) {
-            (EngineType::StarRocks, Action::Read, Some(database)) => {
-                let names = resource_level_names(engine);
-                let mut mv_resource = RequestResource::new();
-                mv_resource.insert(names[0], crate::clearance::MV_CATALOG);
-                mv_resource.insert(names[1], database);
-                let request = AccessRequest {
-                    user: body.subject.user.clone(),
-                    groups: BTreeSet::new(),
-                    roles: BTreeSet::new(),
-                    access_type: crate::clearance::CREATE_MV_ACCESS.to_string(),
-                    resource: mv_resource,
-                    owner: None,
-                    // StarRocks has no tag service.
-                    resolved_tags: None,
-                };
-                let decision =
-                    egret_ranger_eval::eval::evaluate(&artifact, &request, &service_def, &config);
-                let attribution = attribution_for(&mut *conn, &decision).await?;
-                Some(ExplainMaterializedView {
-                    catalog: crate::clearance::MV_CATALOG.to_string(),
-                    database: database.to_string(),
-                    verdict: ExplainAccess {
-                        access_type: crate::clearance::CREATE_MV_ACCESS.to_string(),
-                        decision: WireDecision::from(&decision),
-                        attribution,
-                    },
-                })
-            }
-            _ => None,
-        };
         profiles.push(ExplainProfile {
             service_id,
             service_name: svc.name,
@@ -2062,7 +2036,7 @@ async fn explain(
             tags: tags_for_profile(&resolved_for_display, tag_policies_in_download),
             tag_policies_in_download,
             mask,
-            materialized_view,
+            masked_read_skips_access,
         });
     }
 

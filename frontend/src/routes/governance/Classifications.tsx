@@ -128,7 +128,9 @@ export default function Classifications() {
     },
     {
       key: "objects",
-      label: "Objects",
+      // `assignment_count` counts BI objects only, never catalog columns (base
+      // or derived from a view's lineage), so the label says so (Task 12, M-6).
+      label: "BI objects",
       sortable: true,
       value: (t) => t.assignment_count,
       cell: (t) => <Badge variant="secondary">{t.assignment_count}</Badge>,
@@ -240,7 +242,7 @@ export default function Classifications() {
               items={[
                 { label: "tags", value: rows.length },
                 { label: "gated", value: gatedCount },
-                { label: "tagged objects", value: totalObjects },
+                { label: "tagged BI objects", value: totalObjects },
               ]}
             />
             <FilterableTable

@@ -3578,16 +3578,17 @@ async fn a_clearance_deny_in_the_artifact_refuses_the_uncleared_and_not_the_clea
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    let verdict = access_for(profile_for(&body, "starrocks"), "select");
+    // View governance Task 12 (C2): StarRocks 4.1.6 checks no access on a
+    // column it masks, so for this uncleared subject the clearance answers as
+    // its `MASK_NULL`, not as the deny.
+    let starrocks = profile_for(&body, "starrocks");
+    assert_eq!(starrocks["masked_read_skips_access"], true, "body: {body}");
+    let verdict = &starrocks["mask"];
     assert_eq!(
-        verdict["decision"]["kind"], "denied",
+        verdict["decision"]["result"]["mask_type"], "MASK_NULL",
         "a caller-supplied role must not clear a subject who does not hold it — this is \
          the live gate's `{{\"user\":\"analyst\",\"roles\":[\"sp4c_cleared\"]}}` answering \
          `allowed` for the user both engines refuse; body: {body}"
-    );
-    assert_eq!(
-        verdict["decision"]["reason"], "deny_policy_item",
-        "and the refusal must be the clearance's own deny, not a grant miss; body: {body}"
     );
     assert_eq!(
         verdict["attribution"]["kind"], "clearance",
@@ -3739,12 +3740,15 @@ async fn lift_gate(f: &Fixture, tag_id: Uuid) {
         .expect("lift the gate");
 }
 
-/// View governance Task 3. For an UNCLEARED reader of a classified StarRocks
-/// column, explain names the clearance twice: as the deny for the direct read,
-/// and as `MASK_NULL` for the masked request. Both carry the clearance
-/// attribution, and the mask's is the compiled mask policy, not the deny.
+/// View governance Task 12 (live finding C2). StarRocks 4.1.6 asks no access
+/// check for a column that a mask transforms (the FE's debug log asked
+/// `policyType=0` only for the unmasked column), so an uncleared direct read
+/// of a classified column returns `NULL` from the clearance's `MASK_NULL`,
+/// not `ERROR 5204` from its deny. Explain mirrors that: no `select` verdict,
+/// `masked_read_skips_access`, and the mask attributed to the clearance.
+/// Trino checks access on a masked column, so its profile is unchanged.
 #[tokio::test]
-async fn explain_names_the_clearance_as_deny_and_as_mask_for_an_uncleared_reader() {
+async fn explain_answers_an_uncleared_starrocks_read_of_a_masked_column_with_the_mask() {
     let Some(f) = setup().await else { return };
     let _lock = exclusive(&f).await;
     let token = admin_session(&f).await;
@@ -3752,13 +3756,11 @@ async fn explain_names_the_clearance_as_deny_and_as_mask_for_an_uncleared_reader
 
     let body = explain_column(&f, &token, &uncleared).await;
     let profile = profile_for(&body, "starrocks");
-    let deny = access_for(profile, "select");
-    assert_eq!(deny["decision"]["kind"], "denied", "body: {body}");
-    assert_eq!(
-        deny["decision"]["reason"], "deny_policy_item",
-        "body: {body}"
+    assert_eq!(profile["masked_read_skips_access"], true, "body: {body}");
+    assert!(
+        !access_types(profile).contains(&"select".to_string()),
+        "the engine asks no `select` for a masked column, so explain gives none; body: {body}"
     );
-    assert_eq!(deny["attribution"]["kind"], "clearance", "body: {body}");
 
     let mask = &profile["mask"];
     assert_eq!(mask["access_type"], "select", "body: {body}");
@@ -3784,68 +3786,136 @@ async fn explain_names_the_clearance_as_deny_and_as_mask_for_an_uncleared_reader
             .is_some_and(|n| n.contains("-mask-")),
         "the mask names the compiled mask policy, not the deny; body: {body}"
     );
-    assert_ne!(
-        deny["decision"]["policy_name"], mask["decision"]["result"]["policy_name"],
-        "two reasons, two policies; body: {body}"
-    );
     lift_gate(&f, tag_id).await;
 }
 
-/// View governance Task 10 (Task 3 review M-4): explain surfaces the A3
-/// engine-wide materialized-view deny. On a StarRocks profile a read explain
-/// also answers `create materialized view` on `default_catalog.<the target's
-/// database>`, and for an uncleared reader the deny decides it, attributed to
-/// the materialized-view deny rather than to nothing.
+/// Task 12 (C2), the engine split: the same `{public}` `MASK_NULL` on the same
+/// column in both profiles' downloads. StarRocks consults no access for the
+/// masked column; Trino does, so its `select` verdict stays and nothing is
+/// skipped there.
 #[tokio::test]
-async fn explain_names_the_materialized_view_deny_for_an_uncleared_reader() {
+async fn only_starrocks_skips_the_access_check_on_a_masked_column() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (trino_id, starrocks_id, catalog_id) = two_profile_catalog(&f, "explain-masked").await;
+    let catalog: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(catalog_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("catalog name");
+    let lvl = |v: &str| json!({"values": [v], "isExcludes": false, "isRecursive": false});
+    for (service_id, middle) in [(trino_id, "schema"), (starrocks_id, "database")] {
+        sqlx::query(
+            "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+             VALUES ($1, 'hand mask', $2, true, 'operator')",
+        )
+        .bind(service_id)
+        .bind(json!({
+            "name": "hand mask", "policyType": 1, "isEnabled": true, "policyPriority": 0,
+            "resources": {"catalog": lvl(&catalog), middle: lvl("sales"),
+                          "table": lvl("orders"), "column": lvl("email")},
+            "dataMaskPolicyItems": [{"users": [], "groups": ["public"], "roles": [],
+                "accesses": [{"type": "select", "isAllowed": true}],
+                "dataMaskInfo": {"dataMaskType": "MASK_NULL"}}],
+            "policyItems": [], "denyPolicyItems": [],
+            "allowExceptions": [], "denyExceptions": []
+        }))
+        .execute(&f.db.pool)
+        .await
+        .expect("hand mask");
+    }
+    let mut ask = explain_body(catalog_id, "analyst");
+    ask["target"]["column"] = json!("email");
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", &token, Some(ask)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let starrocks = profile_for(&body, "starrocks");
+    assert_eq!(starrocks["masked_read_skips_access"], true, "body: {body}");
+    assert_eq!(
+        starrocks["mask"]["decision"]["result"]["mask_type"], "MASK_NULL",
+        "body: {body}"
+    );
+    let trino = profile_for(&body, "trino");
+    assert!(
+        access_types(trino).contains(&"select".to_string()),
+        "Trino checks access on a masked column; body: {body}"
+    );
+    assert!(
+        trino.get("masked_read_skips_access").is_none(),
+        "body: {body}"
+    );
+}
+
+/// Task 12 (C2), the other half: a classified column with a deny and NO mask
+/// (for example a download from before the clearance's first compile, which
+/// carried only the deny) is still checked, so explain still says denied.
+#[tokio::test]
+async fn explain_still_denies_a_classified_starrocks_column_with_no_mask() {
     let Some(f) = setup().await else { return };
     let _lock = exclusive(&f).await;
     let token = admin_session(&f).await;
     let (tag_id, _role, _cleared, uncleared) = clearance_readers(&f, &token).await;
+    let body = explain_column(&f, &token, &uncleared).await;
+    let service_id = profile_for(&body, "starrocks")["service_id"]
+        .as_i64()
+        .expect("service id");
+    // Take the clearance's mask out of the served download, keeping its deny.
+    let removed = sqlx::query(
+        "DELETE FROM policy.authz_policies WHERE service_id = $1 \
+         AND name LIKE 'perm-clearance-%' AND name LIKE '%-mask-%'",
+    )
+    .bind(service_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("remove the mask")
+    .rows_affected();
+    assert!(
+        removed > 0,
+        "the fixture compiled a clearance mask; body: {body}"
+    );
 
     let body = explain_column(&f, &token, &uncleared).await;
-    let checked = &profile_for(&body, "starrocks")["materialized_view"];
-    assert_eq!(checked["catalog"], "default_catalog", "body: {body}");
-    assert_eq!(checked["database"], "sales", "body: {body}");
-    let mv = &checked["verdict"];
-    assert_eq!(
-        mv["access_type"], "create materialized view",
+    let profile = profile_for(&body, "starrocks");
+    assert!(
+        profile.get("masked_read_skips_access").is_none(),
         "body: {body}"
     );
-    assert_eq!(mv["decision"]["kind"], "denied", "body: {body}");
+    let deny = access_for(profile, "select");
+    assert_eq!(deny["decision"]["kind"], "denied", "body: {body}");
     assert_eq!(
-        mv["decision"]["policy_name"], "perm-clearance-mv",
+        deny["decision"]["reason"], "deny_policy_item",
         "body: {body}"
     );
-    assert_eq!(
-        mv["attribution"]["kind"], "materialized_view_deny",
-        "body: {body}"
-    );
+    assert_eq!(deny["attribution"]["kind"], "clearance", "body: {body}");
     lift_gate(&f, tag_id).await;
 }
 
-/// Fix round 1 (review M3): a CLEARED reader is excepted from the A3 deny, so
-/// whatever decides their `create materialized view` row, it is never the
-/// materialized-view deny, and the row names the database it checked.
+/// Task 12 (live finding M-4, Task 10 deferred N2): explain no longer answers
+/// `create materialized view`. It used to ask `default_catalog.<the target's
+/// schema>`, a database nothing is created in, and showed a cleared reader a
+/// red "denied" there (no policy matched). The A3 deny is engine-wide, so the
+/// page states the rule instead of a per-database verdict.
 #[tokio::test]
-async fn explain_never_attributes_a_cleared_readers_materialized_view_row_to_the_deny() {
+async fn explain_gives_no_materialized_view_row() {
     let Some(f) = setup().await else { return };
     let _lock = exclusive(&f).await;
     let token = admin_session(&f).await;
-    let (tag_id, _role, cleared, _uncleared) = clearance_readers(&f, &token).await;
-
-    let body = explain_column(&f, &token, &cleared).await;
-    let checked = &profile_for(&body, "starrocks")["materialized_view"];
-    assert_eq!(checked["catalog"], "default_catalog", "body: {body}");
-    assert_eq!(checked["database"], "sales", "body: {body}");
-    assert_ne!(
-        checked["verdict"]["attribution"]["kind"], "materialized_view_deny",
-        "body: {body}"
-    );
-    assert_ne!(
-        checked["verdict"]["decision"]["policy_name"], "perm-clearance-mv",
-        "body: {body}"
-    );
+    let (tag_id, _role, cleared, uncleared) = clearance_readers(&f, &token).await;
+    for reader in [&cleared, &uncleared] {
+        let body = explain_column(&f, &token, reader).await;
+        assert!(
+            profile_for(&body, "starrocks")
+                .get("materialized_view")
+                .is_none(),
+            "body: {body}"
+        );
+    }
     lift_gate(&f, tag_id).await;
 }
 

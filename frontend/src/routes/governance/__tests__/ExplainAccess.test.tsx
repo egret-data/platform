@@ -1683,7 +1683,11 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     const result = await screen.findByTestId("explain-result");
     const limits = within(result).getByTestId("honest-limits");
 
-    expect(limits).toHaveTextContent(/answers about ACCESS only/i);
+    // Task 12, M-5: the limit names what IS shown (the StarRocks mask), so it
+    // no longer contradicts the mask line above it.
+    expect(limits).toHaveTextContent(/answers about access only/i);
+    expect(limits).toHaveTextContent(/On a StarRocks profile, a read of a column also shows the mask/i);
+    expect(limits).not.toHaveTextContent(/ACCESS only\. A column the engine masks/);
     // ⚠ No dated promise, in either direction: not this package, not a successor.
     expect(limits).not.toHaveTextContent(/arrive with/i);
     expect(limits).not.toHaveTextContent(/SP4d/i);
@@ -1735,7 +1739,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     const limits = within(result).getByTestId("honest-limits");
     expect(limits).not.toHaveTextContent(/each profile’s tag list/i);
     expect(limits).not.toHaveTextContent(/those sets are for the resource/i);
-    expect(limits).toHaveTextContent(/answers about ACCESS only/i);
+    expect(limits).toHaveTextContent(/answers about access only/i);
   });
 
   /**
@@ -1935,13 +1939,14 @@ describe("ExplainAccess — the subject's ref is the allocated username (fact 5/
 });
 
 /**
- * View governance Task 10 (Task 3 review M-6, M-4). A StarRocks read explain of
- * a column also carries the masked-read verdict (`mask`) and the
- * `create materialized view` verdict (`materialized_view`). Both are shown, in a
- * plain form.
+ * View governance Task 10, revised in Task 12. A StarRocks read explain of a
+ * column carries the masked-read verdict (`mask`). StarRocks checks no access on
+ * a column a mask transforms (live finding C2), so then there is no `select`
+ * verdict and `masked_read_skips_access` is set. The `create materialized view`
+ * row is gone (M-4, N2): the page states the engine-wide rule instead.
  */
-describe("ExplainAccess — the StarRocks mask and materialized-view verdicts", () => {
-  const WITH_MASK_AND_MV: ExplainResponse = {
+describe("ExplainAccess — the StarRocks mask and the materialized-view rule", () => {
+  const UNCLEARED_MASKED: ExplainResponse = {
     outcome: "per_profile",
     profiles: [
       {
@@ -1950,24 +1955,8 @@ describe("ExplainAccess — the StarRocks mask and materialized-view verdicts", 
         engine: "starrocks",
         tags: [],
         tag_policies_in_download: 0,
-        accesses: [
-          {
-            access_type: "select",
-            decision: {
-              kind: "denied",
-              policy_id: 2,
-              policy_name: "perm-clearance-t1-sales.public.orders.ssn",
-              reason: "deny_policy_item",
-            },
-            attribution: {
-              kind: "clearance",
-              tag_id: "t1",
-              tag: "pii",
-              required_roles: ["cleared"],
-              locator: "sales.public.orders.ssn",
-            },
-          },
-        ],
+        accesses: [],
+        masked_read_skips_access: true,
         mask: {
           access_type: "select",
           decision: {
@@ -1982,53 +1971,43 @@ describe("ExplainAccess — the StarRocks mask and materialized-view verdicts", 
           },
           attribution: null,
         },
-        materialized_view: {
-          catalog: "default_catalog",
-          database: "sales",
-          verdict: {
-            access_type: "create materialized view",
-            decision: {
-              kind: "denied",
-              policy_id: 3,
-              policy_name: "perm-clearance-mv",
-              reason: "deny_policy_item",
-            },
-            attribution: { kind: "materialized_view_deny" },
-          },
-        },
       },
     ],
   };
 
-  test("renders the mask type and the materialized-view deny", async () => {
-    mutateAsync.mockResolvedValue({ status: 200, data: WITH_MASK_AND_MV });
+  test("an uncleared read of a masked StarRocks column says NULL via the mask, not denied", async () => {
+    mutateAsync.mockResolvedValue({ status: 200, data: UNCLEARED_MASKED });
     const user = userEvent.setup();
     renderPage();
     await submit(user);
 
     const profile = await screen.findByTestId("explain-profile");
     const mask = within(profile).getByTestId("explain-mask");
-    expect(mask).toHaveTextContent(/masked/i);
+    expect(mask).toHaveTextContent(/returns NULL/i);
     expect(mask).toHaveTextContent("MASK_NULL");
     expect(mask).toHaveTextContent("perm-clearance-t1-mask-sales.public.orders.ssn");
-
-    const rows = within(profile).getAllByTestId("explain-access");
-    const mv = rows.find((r) => r.textContent?.includes("create materialized view"));
-    expect(mv).toBeDefined();
-    expect(within(mv as HTMLElement).getByTestId("decision-badge")).toHaveTextContent(/refused by a deny item/i);
-    expect(mv).toHaveTextContent(/materialized-view deny/i);
-    expect(mv).toHaveTextContent(/cleared for every classification/i);
-    expect(within(profile).getByTestId("explain-mv-scope")).toHaveTextContent(
-      "default_catalog.sales",
-    );
+    const skipped = within(profile).getByTestId("explain-access-not-checked");
+    expect(skipped).toHaveTextContent(/not checked/i);
+    expect(skipped).toHaveTextContent(/StarRocks behaviour/i);
+    // No verdict badge at all: nothing says "denied" for this read.
+    expect(within(profile).queryByTestId("decision-badge")).not.toBeInTheDocument();
+    expect(profile).not.toHaveTextContent(/No access type was evaluated/i);
   });
 
-  test("a cleared reader's MASK_NONE is not called masked, and a refusal not caused by the deny says so", async () => {
+  test("a cleared reader's MASK_NONE is not called masked, and no materialized-view verdict is shown", async () => {
     const cleared: ExplainResponse = {
       outcome: "per_profile",
       profiles: [
         {
-          ...WITH_MASK_AND_MV.profiles[0],
+          ...UNCLEARED_MASKED.profiles[0],
+          masked_read_skips_access: undefined,
+          accesses: [
+            {
+              access_type: "select",
+              decision: { kind: "allowed", policy_id: 4, policy_name: "perm-grant-g1" },
+              attribution: null,
+            },
+          ],
           mask: {
             access_type: "select",
             decision: {
@@ -2043,20 +2022,6 @@ describe("ExplainAccess — the StarRocks mask and materialized-view verdicts", 
             },
             attribution: null,
           },
-          materialized_view: {
-            catalog: "default_catalog",
-            database: "sales",
-            verdict: {
-              access_type: "create materialized view",
-              decision: {
-                kind: "denied",
-                policy_id: null,
-                policy_name: "",
-                reason: "no_policy_matched",
-              },
-              attribution: null,
-            },
-          },
         },
       ],
     };
@@ -2068,9 +2033,15 @@ describe("ExplainAccess — the StarRocks mask and materialized-view verdicts", 
     const profile = await screen.findByTestId("explain-profile");
     const mask = within(profile).getByTestId("explain-mask");
     expect(mask).not.toHaveTextContent(/masked to/i);
+    expect(mask).not.toHaveTextContent(/returns NULL/i);
     expect(mask).toHaveTextContent(/not transformed/i);
-    expect(within(profile).getByTestId("explain-mv-scope")).toHaveTextContent(
-      /only a refusal by the engine-wide materialized-view deny comes from a classification/i,
+    expect(within(profile).queryByTestId("explain-access-not-checked")).not.toBeInTheDocument();
+    // N2: no red "denied" materialized-view row for a cleared reader; the rule instead.
+    expect(profile).not.toHaveTextContent(/default_catalog\./);
+    const rows = within(profile).getAllByTestId("explain-access");
+    expect(rows.some((r) => r.textContent?.includes("create materialized view"))).toBe(false);
+    expect(within(profile).getByTestId("explain-mv-rule")).toHaveTextContent(
+      /in every database to anyone not cleared for every classification/i,
     );
   });
 

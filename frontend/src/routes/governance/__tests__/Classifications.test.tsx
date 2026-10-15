@@ -181,6 +181,17 @@ describe("Classifications", () => {
     expect(screen.getByText("internal")).toBeInTheDocument();
   });
 
+  // View governance Task 12 (live finding M-6): `assignment_count` counts BI
+  // objects only, never catalog columns (base or derived from a view's
+  // lineage), so the header said "0 tagged objects" while columns carried the
+  // tag. The labels name what is counted.
+  test("the object counts say they count BI objects, not catalog columns", async () => {
+    renderPage();
+    await screen.findByText("PII");
+    expect(screen.getByText(/tagged BI objects/)).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: /BI objects/ })).toBeInTheDocument();
+  });
+
   test("links each tag name to its Governance detail page", async () => {
     renderPage();
     expect(await screen.findByRole("link", { name: "PII" })).toHaveAttribute("href", "/governance/classifications/t1");

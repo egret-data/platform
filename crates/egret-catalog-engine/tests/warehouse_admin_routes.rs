@@ -970,3 +970,41 @@ async fn a_view_undrop_on_a_classified_warehouse_is_refused() {
         assert!(UNDROPPED.lock().unwrap().contains(&id), "{kind} restored");
     }
 }
+
+/// View governance Task 12 (live finding M-8): an unknown `consumerType` is
+/// the caller's mistake, answered 400 naming the accepted values, not a 500
+/// from the table's CHECK constraint. Checked before any lookup, so no
+/// warehouse needs to exist.
+#[tokio::test]
+async fn an_unknown_consumer_type_is_a_bad_request() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "consumer_type_400", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    for (path, body) in [
+        (
+            format!("/warehouses/{wh}/roles"),
+            serde_json::json!({"name": "r", "consumerType": "notebook"}),
+        ),
+        (
+            format!("/warehouses/{wh}/clients"),
+            serde_json::json!({"name": "c", "consumerType": "spark",
+                "workspaceId": Uuid::new_v4(), "catalogRoleId": Uuid::new_v4()}),
+        ),
+    ] {
+        let resp = f
+            .app
+            .clone()
+            .oneshot(req("POST", &path, &token, Some(body)))
+            .await
+            .unwrap();
+        let (status, body) = into_json(resp).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: body={body}");
+        assert!(
+            body.to_string().contains("engine") && body.to_string().contains("external"),
+            "{path}: names the accepted values; body={body}"
+        );
+    }
+}

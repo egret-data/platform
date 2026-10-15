@@ -561,6 +561,22 @@ impl From<crate::CatalogRole> for RoleDto {
         }
     }
 }
+/// The consumer types the catalog tables accept (their CHECK constraints,
+/// migration 0169).
+const CONSUMER_TYPES: [&str; 2] = ["engine", "external"];
+
+/// An unknown consumer type is the caller's mistake: 400 naming the accepted
+/// values, not a 500 from the CHECK constraint (Task 12, M-8).
+fn check_consumer_type(t: &str) -> Result<(), CatalogHttpError> {
+    if CONSUMER_TYPES.contains(&t) {
+        return Ok(());
+    }
+    Err(CatalogHttpError::BadRequest(format!(
+        "consumerType must be one of {}; got {t:?}",
+        CONSUMER_TYPES.join(", ")
+    )))
+}
+
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CreateRoleBody {
@@ -606,6 +622,7 @@ async fn list_roles(
     request_body = CreateRoleBody,
     responses(
         (status = 201, description = "Catalog role created", body = RoleDto),
+        (status = 400, description = "Unknown consumerType (engine or external)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:create permission", body = ErrorBody),
         (status = 409, description = "A role with this name already exists", body = ErrorBody),
@@ -619,6 +636,7 @@ async fn create_role(
     Json(b): Json<CreateRoleBody>,
 ) -> Result<(StatusCode, Json<RoleDto>), CatalogHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "catalog_registry:create").await?;
+    check_consumer_type(&b.consumer_type)?;
     let desc = b.description.as_deref().filter(|d| !d.trim().is_empty());
     let r = st
         .store
@@ -827,6 +845,7 @@ async fn list_clients(
     request_body = CreateClientBody,
     responses(
         (status = 201, description = "Catalog Client created; client_secret is shown ONCE", body = CreatedClientDto),
+        (status = 400, description = "Unknown consumerType (engine or external)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:create permission", body = ErrorBody),
         (status = 404, description = "No such warehouse or catalog role", body = ErrorBody),
@@ -840,6 +859,7 @@ async fn create_client(
     Json(b): Json<CreateClientBody>,
 ) -> Result<(StatusCode, Json<CreatedClientDto>), CatalogHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "catalog_registry:create").await?;
+    check_consumer_type(&b.consumer_type)?;
     let c = st
         .store
         .create_client(&NewClient {
