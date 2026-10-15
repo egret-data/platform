@@ -670,7 +670,7 @@ async fn backfill_id_needs_a_scheduled_date_and_labels_are_a_list() {
         .expect_err("labels as an object");
     assert_eq!(
         refused_by(err, "23514").as_deref(),
-        Some("executions_labels_check")
+        Some("workflow_executions_labels_are_a_list")
     );
     copy_as(&fx.db, flow, false, None, Some("[]"))
         .await
@@ -685,6 +685,40 @@ async fn backfill_id_needs_a_scheduled_date_and_labels_are_a_list() {
     .await
     .expect("a list of labels");
     assert_eq!(executions_of(&fx.db, flow).await, 4);
+}
+
+/// 0192: a backfill's next tick stays inside its window. The row is deleted
+/// once the next tick passes `window_end` (spec §3.6, §3.7).
+#[tokio::test]
+async fn a_backfill_tick_stays_inside_its_window() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.flow(&flow_yaml("bf-window", "", "")).await;
+    let row = |past_end: i32| {
+        sqlx::query(
+            "INSERT INTO workflow.trigger_backfills \
+               (flow_id, trigger_id, workspace_id, window_start, window_end, current_tick, \
+                previous_next_evaluation_date, total_ticks) \
+             VALUES ($1, 's', $2, '2026-10-01T00:00:00Z', '2026-10-01T01:00:00Z', \
+                     '2026-10-01T01:00:00Z'::timestamptz + make_interval(mins => $3), \
+                     now(), 61)",
+        )
+        .bind(flow)
+        .bind(fx.ws)
+        .bind(past_end)
+    };
+    let err = row(1)
+        .execute(&fx.db.pool)
+        .await
+        .expect_err("a tick after window_end");
+    assert_eq!(
+        refused_by(err, "23514").as_deref(),
+        Some("workflow_trigger_backfills_tick_within_window")
+    );
+    // Control: the last tick of the window itself is accepted.
+    row(0)
+        .execute(&fx.db.pool)
+        .await
+        .expect("current_tick = window_end");
 }
 
 /// The first execution of `flow`: its source and trigger record, to start

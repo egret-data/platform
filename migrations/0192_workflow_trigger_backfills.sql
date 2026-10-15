@@ -46,11 +46,30 @@ CREATE TABLE workflow.trigger_backfills (
   PRIMARY KEY (flow_id, trigger_id),
   CHECK (window_start < window_end),
   CHECK (current_tick >= window_start),
+  -- A backfill whose next tick passes `window_end` is complete and its row is
+  -- deleted (by the fire, or by `sync` on a cron change); create refuses a
+  -- window with no tick. So the tick never leaves the window.
+  CONSTRAINT workflow_trigger_backfills_tick_within_window CHECK (current_tick <= window_end),
   CHECK (jsonb_typeof(inputs) = 'object'),
   CHECK (jsonb_typeof(labels) = 'array'),
   CHECK (paused = (paused_at IS NOT NULL)),
   CHECK (total_ticks BETWEEN 1 AND 10000 AND ticks_done BETWEEN 0 AND total_ticks)
 );
+
+-- **This file locks `workflow.executions` ACCESS EXCLUSIVE from its first
+-- `ALTER TABLE` below until it commits, blocking READS as well as writes**:
+-- the execution lists and details, workers claiming and settling runs, the
+-- scheduler and the Flow-trigger processor all wait for the deploy's
+-- migration. `ADD COLUMN`, `ADD CONSTRAINT` and `DROP INDEX` each take that
+-- lock, and a lock is held to the end of the transaction. The window is about
+-- four full scans of the table: the two CHECKs are validated against every
+-- row (both new columns are NULL everywhere, but Postgres still reads the
+-- heap), and each partial unique index is built by reading the whole heap,
+-- not just the rows its predicate keeps. Not `CONCURRENTLY`: sqlx runs this
+-- file in one transaction, where `CREATE INDEX CONCURRENTLY` cannot run, and
+-- opting the file out would make the table and comments above non-atomic
+-- with it and leave a moment with no per-tick index. (0189 states a
+-- narrower window for its own index; this file's is wider.)
 
 -- The backfill that fired this execution (D2). No foreign key to
 -- workflow.trigger_backfills: the row is deleted when the backfill ends, and
@@ -66,14 +85,8 @@ ALTER TABLE workflow.executions ADD CONSTRAINT workflow_executions_backfill_is_a
 -- `workflow_executions_one_per_backfill_tick` keeps one execution per
 -- (backfill, tick); `scheduler::start::classify` maps a violation of either to
 -- `AlreadyFired`.
---
--- **Not `CONCURRENTLY`, so the rebuild blocks writes to `workflow.executions`
--- for its duration during the deploy** (as 0189's index does). sqlx runs this
--- file in one transaction, and `CREATE INDEX CONCURRENTLY` cannot run in a
--- transaction block; opting the file out would make the table and comments
--- above non-atomic with it, and would leave a moment with no per-tick index.
--- The window is one pass over the scheduled executions, the only rows the
--- partial indexes hold.
+-- Dropped and re-created in the same transaction, so no other session ever
+-- sees the table without it (see the lock note above).
 DROP INDEX workflow.workflow_executions_one_per_schedule_tick;
 CREATE UNIQUE INDEX workflow_executions_one_per_schedule_tick
   ON workflow.executions (flow_id, (execution_trigger->>'id'), scheduled_date)
@@ -85,4 +98,5 @@ CREATE UNIQUE INDEX workflow_executions_one_per_backfill_tick
 -- ([{key, value}], Kestra's list shape). NULL: none. The flow's labels are
 -- read from `source`, which is the execution's frozen copy.
 ALTER TABLE workflow.executions ADD COLUMN labels jsonb
+  CONSTRAINT workflow_executions_labels_are_a_list
   CHECK (labels IS NULL OR jsonb_typeof(labels) = 'array');

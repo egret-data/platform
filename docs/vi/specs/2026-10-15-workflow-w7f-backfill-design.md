@@ -109,6 +109,9 @@ CREATE TABLE workflow.trigger_backfills (
   PRIMARY KEY (flow_id, trigger_id),
   CHECK (window_start < window_end),
   CHECK (current_tick >= window_start),
+  -- Dòng bị xoá khi tick kế tiếp vượt quá window_end (§3.6, §3.7),
+  -- và lệnh tạo từ chối cửa sổ không có tick nào (§3.4).
+  CONSTRAINT workflow_trigger_backfills_tick_within_window CHECK (current_tick <= window_end),
   CHECK (jsonb_typeof(inputs) = 'object'),
   CHECK (jsonb_typeof(labels) = 'array'),
   CHECK (paused = (paused_at IS NOT NULL)),
@@ -141,7 +144,7 @@ CREATE UNIQUE INDEX workflow_executions_one_per_backfill_tick
 - **Vì sao là id của backfill chứ không phải một boolean:** `(backfill_id, scheduled_date)` chính xác là "một execution cho mỗi (trigger, backfill, tick)". Một boolean sẽ làm backfill thứ hai trên cùng cửa sổ va với cái đầu.
 - **Không có foreign key** tới `workflow.trigger_backfills`: dòng bị xoá khi backfill kết thúc, còn các execution của nó vẫn ở lại.
 - **Tính idempotent của một tick backfill.** Nó là một lần bắn schedule như mọi lần khác, nên ba câu lệnh của W12 giữ nguyên (`scheduler/mod.rs` "## 1." đến "## 3."): claim khoá dòng trigger `FOR UPDATE SKIP LOCKED` (`fire.rs:145-166`), nên hai replica không bao giờ đánh giá một trigger cùng lúc; việc insert execution và việc advance commit trong một transaction (`fire.rs:289-302`), nên một lượt được thử lại hoặc thấy advance hoặc làm lại toàn bộ tick; và `workflow_executions_one_per_backfill_tick` là chốt chặn mà `classify` ánh xạ sang `AlreadyFired` như nó ánh xạ index theo tick (một hằng số mới bên cạnh `ONE_PER_TICK`, `start.rs:72`).
-- **Việc dựng lại không dùng `CONCURRENTLY`** và chặn ghi vào `workflow.executions` trong một lượt quét qua các execution theo schedule (các dòng của partial index), như 0189 nói về index của chính nó (`0189:43-48`). sqlx chạy file trong một transaction, nên không có khoảnh khắc nào thiếu cả hai index.
+- **Migration khoá `workflow.executions` ở mức ACCESS EXCLUSIVE từ câu `ALTER TABLE` đầu tiên cho tới khi commit**, chặn cả đọc lẫn ghi (danh sách execution, worker claim, scheduler): `ADD COLUMN`, `ADD CONSTRAINT` và `DROP INDEX` đều lấy khoá đó, giữ tới hết transaction. Khoảng chặn là chừng bốn lượt quét toàn bảng: hai lần kiểm CHECK, và hai lần dựng partial index, mỗi lần đọc toàn bộ heap. Việc dựng lại không dùng `CONCURRENTLY`, vì sqlx chạy file trong một transaction, nên không có khoảnh khắc nào thiếu cả hai index. (Ghi chú của 0189, `0189:43-48`, tả một khoảng hẹp hơn cho index của chính nó; nó không áp dụng ở đây.)
 - **Phần văn xuôi của 0156 không bị sửa** (văn xuôi migration là chỉ-thêm); 0192 nêu vị từ mới. Doc của câu lệnh 2 trong `scheduler/mod.rs` ("the unique index is the backstop") gọi tên cả hai index.
 
 ### 3.3 Label của execution (D3)
@@ -151,6 +154,7 @@ CREATE UNIQUE INDEX workflow_executions_one_per_backfill_tick
 -- ([{key, value}], Kestra's list shape). NULL: none. The flow's labels are
 -- read from `source`, which is the execution's frozen copy.
 ALTER TABLE workflow.executions ADD COLUMN labels jsonb
+  CONSTRAINT workflow_executions_labels_are_a_list
   CHECK (labels IS NULL OR jsonb_typeof(labels) = 'array');
 ```
 

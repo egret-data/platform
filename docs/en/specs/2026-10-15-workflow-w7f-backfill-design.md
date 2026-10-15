@@ -107,6 +107,9 @@ CREATE TABLE workflow.trigger_backfills (
   PRIMARY KEY (flow_id, trigger_id),
   CHECK (window_start < window_end),
   CHECK (current_tick >= window_start),
+  -- The row is deleted once the next tick passes window_end (§3.6, §3.7),
+  -- and create refuses a window with no tick (§3.4).
+  CONSTRAINT workflow_trigger_backfills_tick_within_window CHECK (current_tick <= window_end),
   CHECK (jsonb_typeof(inputs) = 'object'),
   CHECK (jsonb_typeof(labels) = 'array'),
   CHECK (paused = (paused_at IS NOT NULL)),
@@ -139,7 +142,7 @@ CREATE UNIQUE INDEX workflow_executions_one_per_backfill_tick
 - **Why the backfill's id and not a boolean:** `(backfill_id, scheduled_date)` is exactly "one execution per (trigger, backfill, tick)". A boolean would make a second backfill over the same window collide with the first.
 - **No foreign key** to `workflow.trigger_backfills`: the row is deleted when the backfill ends, and its executions stay.
 - **Idempotency of a backfill tick.** It is a schedule fire like any other, so W12's three statements hold unchanged (`scheduler/mod.rs` "## 1." to "## 3."): the claim locks the trigger row `FOR UPDATE SKIP LOCKED` (`fire.rs:145-166`), so two replicas never evaluate one trigger at once; the execution's insert and the advance commit in one transaction (`fire.rs:289-302`), so a retried pass either sees the advance or redoes the whole tick; and `workflow_executions_one_per_backfill_tick` is the backstop that `classify` maps to `AlreadyFired` as it maps the per-tick index (a new constant beside `ONE_PER_TICK`, `start.rs:72`).
-- **The rebuild is not `CONCURRENTLY`** and blocks writes to `workflow.executions` for one pass over the scheduled executions (the partial index's rows), as 0189 states for its own index (`0189:43-48`). sqlx runs the file in one transaction, so there is no moment without either index.
+- **The migration locks `workflow.executions` ACCESS EXCLUSIVE from its first `ALTER TABLE` until it commits**, blocking reads as well as writes (execution lists, workers claiming, the scheduler): `ADD COLUMN`, `ADD CONSTRAINT` and `DROP INDEX` each take that lock, held to the end of the transaction. The window is about four full scans of the table: the two CHECK validations, and the two partial-index builds, each of which reads the whole heap. The rebuild is not `CONCURRENTLY`, since sqlx runs the file in one transaction, so there is no moment without either index. (0189's note, `0189:43-48`, describes a narrower window for its own index; it does not apply here.)
 - **0156's prose is not edited** (migration prose is append-only); 0192 states the new predicate. The doc of `scheduler/mod.rs` statement 2 ("the unique index is the backstop") names both indexes.
 
 ### 3.3 Execution labels (D3)
@@ -149,6 +152,7 @@ CREATE UNIQUE INDEX workflow_executions_one_per_backfill_tick
 -- ([{key, value}], Kestra's list shape). NULL: none. The flow's labels are
 -- read from `source`, which is the execution's frozen copy.
 ALTER TABLE workflow.executions ADD COLUMN labels jsonb
+  CONSTRAINT workflow_executions_labels_are_a_list
   CHECK (labels IS NULL OR jsonb_typeof(labels) = 'array');
 ```
 
