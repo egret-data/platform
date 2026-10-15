@@ -1,6 +1,6 @@
 # W7f — Workflows UI, part 6: schedule-trigger backfill
 
-**Status:** design, 2026-10-15. Nothing is built. Every claim about egret's code was checked in the worktree `egret-w7f` at `f73c13647` (main, migrations up to 0189) and is cited `path:line` from `crates/egret-workflow/src/` unless another root is given. Kestra is the checkout at `data-portal/kestra`, `96893b589`; its paths are relative to it.
+**Status:** built and verified, 2026-10-15 (backend and frontend gates green; §7 measured against Kestra 28f59bf175e1; the Playwright suite passes 8/8 on a private stack). Rows measured in §7 are **observed**; the rest are **read in source**. Every claim about egret's code was checked in the worktree `egret-w7f` at `f73c13647` (main, migrations up to 0189) and is cited `path:line` from `crates/egret-workflow/src/` unless another root is given. Kestra is the checkout at `data-portal/kestra`, `96893b589`; its paths are relative to it.
 
 **Depends on:**
 - W7e (#672, `f73c13647`): the trigger routes, `TriggerEntryDto`, the lock order, the Triggers tab, the global Triggers page, `useTriggerSwitch`, the enable dialog. Its spec is `docs/en/specs/2026-10-14-workflow-w7e-triggers-design.md`; §9 there reserved this package's place.
@@ -54,8 +54,9 @@ The frontend rulebook `docs/en/frontend-rules.md` binds every frontend line.
 | Kestra | egret | Why |
 |---|---|---|
 | **Read.** Create, pause, resume and delete validate nothing on the server: no `start < end`, no end-in-future check, no "already has one" (a create replaces the running backfill), no check that the trigger is a `Schedule` (`TriggerController.java:222-314`; `TriggerEventHandler.java:154-183`). The UI blocks future dates and `start > end` (`ui/src/components/flows/FlowTriggers.vue:262-277`), required inputs and half-filled labels (`:509-540`) | The server refuses each (D8, §3.4), with a code; a second create is 409 `backfill_exists` | An API caller must not get a 200 for a request the UI would never send, and a silent replace loses a window in progress |
-| **Read.** Pause, resume or delete with no backfill does nothing and answers 200 (`TriggerEventHandler.java:193, 214`) | 404 `no_backfill` | Says what happened |
+| **Observed.** Pause, resume or delete with no backfill answers 200 on Kestra (`PUT .../backfill/pause`, `.../unpause`, `POST .../delete`; probe run 2026-10-15) | 404 `no_backfill` | Says what happened |
 | **Read.** The window excludes a tick exactly at `start`: create recomputes the next date from `currentDate = start` with `executionTime.nextExecution`, which is strictly after (`TriggerEventHandler.java:177-179`, `Schedule.java:247-249, 273, 466-468`). It includes a tick at `end` (`TriggerState.java:338-342`: cleared only when `next > end`) | `[start, end]`, both ends included (D4) | "Backfill 1 to 7 October" on a midnight cron should run 7 times, not 6 |
+| **Observed (2026-10-15): differs.** After pause and delete, Kestra restored the regular position (10:49, the stored `previousNextExecutionDate`), not a window date, and the regular ticks 10:49 and 10:50 then ran. The read below is therefore wrong for this version. | — | — |
 | **Read.** Creating stores `previousNextExecutionDate = nextEvaluationDate`, and so does every pause and resume, because both rebuild the backfill through the same `TriggerState.backfill(...)` (`TriggerState.java:229-239`; `TriggerEventHandler.java:211-220`). After a pause, delete restores a **window date** (`:190-203`), and the scheduler then replays every regular tick from that date to now. With no stored date, delete would throw (`TriggerState.java:204-206`) | Stored once, at create (D5); delete resumes the regular schedule as §3.6 says | The quirk replays ticks nobody asked for |
 | **Read.** On natural completion the next date is the next tick after **now** (`Schedule.java:278-280`): the regular ticks that fell due during the backfill are skipped. On delete, the old next date is restored, so they are replayed. The two ends disagree | Both ends resume from the regular schedule's own position and apply the trigger's `recoverMissedSchedules` (absent = `ALL`) to the regular ticks that fell due meanwhile (D6) | A backfill should not silently cost the regular runs, and how it ends should not decide whether they run |
 | **Read.** A paused backfill is evaluated every pass and skipped (`Schedule.java:342-345`); its next date stays in the past | A paused backfill is not claimed (D7) | No work and no row write per paused trigger per second |
@@ -386,6 +387,28 @@ The overview's labels chips and the "Backfill" mark (§3.3). No list filter (§1
 ## 7. Comparing with Kestra
 
 The plan's last task runs on the local image `kestra/kestra` `28f59bf175e1` (`server local`, a throwaway container), with §6's scenario 1-3 and 5 on a `* * * * *` flow, and checks each **read** row of §2: a window starting exactly on a tick (exclusive start); a window over executed dates (a second execution); a backfill label with the flow label's key (which wins); inputs overriding the schedule's; pause, resume, delete (which date is restored, and whether regular ticks replay); natural completion with a regular tick inside the backfill's duration (skipped); the API with `end` in the future, `start > end`, a second create, pause with no backfill; bulk by triggers (202); the progress formula on screen. Each measured row becomes **observed**; a difference found is added to §2 (FE-REF-2).
+
+
+**Observed results (2026-10-15).** Probe flow `* * * * *` UTC, creates at 10:48:05, Kestra `server local` image `28f59bf175e1`; the raw log and the execution listing are in the worktree's scratch area, not in git.
+
+| Row | Result |
+|---|---|
+| Exclusive start | MATCHES: tick exactly on `start` not fired (10:45, 10:49) |
+| End tick included | MATCHES: 10:51 fired for end 10:51 |
+| Re-run over executed dates | MATCHES: second execution at 10:46 and 10:47 |
+| Backfill label vs flow label, same key | MATCHES: backfill label value wins |
+| Inputs override schedule inputs | MATCHES |
+| Pause, delete: restored date | DIFFERS: regular position, not a window date; regular ticks replayed |
+| Natural completion skips regular ticks | MATCHES |
+| Runtime disable freezes; enable (skip) loses one window tick | MATCHES |
+| Create end in future / start > end / second create | MATCHES: all 200, second create replaces |
+| Pause, resume, delete with no backfill | MATCHES: 200 |
+| Bulk by triggers | MATCHES: 202 with operation id |
+| Progress formula | UI-only (BackfillBanner.vue); no API field |
+
+Limit: backfills created without inputs or labels cannot be told apart from regular executions by greeting, so their verdicts rest on the backfill state.
+
+**egret, verified.** The backend gate and the frontend gate pass (counts in the commit message). The Playwright suite `frontend/tests/e2e/workflows-backfill.spec.ts` passes 8/8 on a private stack. Its measurements found: the global page's Backfill column is outside the visible table area at 1280 px and at 390 px (the table scrolls); the create dialog has no side gutter at 390 px. Both are open.
 
 ## 8. Rules this package must meet
 
