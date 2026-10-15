@@ -621,21 +621,23 @@ function RawPolicy({
  * rot on a delete-and-recreate.
  */
 function DecidedBy({
-  decision,
+  policyName,
+  policyId,
   attribution,
 }: {
-  decision: DecidedDecision;
+  policyName: string;
+  policyId?: number | null;
   attribution?: ExplainAttribution | null;
 }) {
   const ranger = (
     <span className="text-muted-foreground">
-      Ranger policy <span className="font-mono">{decision.policy_name}</span>, id{" "}
-      <span className="font-mono">{decision.policy_id ?? "unknown"}</span>
+      Ranger policy <span className="font-mono">{policyName}</span>, id{" "}
+      <span className="font-mono">{policyId ?? "unknown"}</span>
     </span>
   );
 
   if (!attribution) {
-    return <RawPolicy policyName={decision.policy_name} policyId={decision.policy_id} />;
+    return <RawPolicy policyName={policyName} policyId={policyId} />;
   }
 
   if (attribution.kind === "grant") {
@@ -841,7 +843,11 @@ function AccessRow({
           </ul>
         ) : (
           namesADecidingPolicy(verdict.decision) && (
-            <DecidedBy decision={verdict.decision} attribution={verdict.attribution} />
+            <DecidedBy
+              policyName={verdict.decision.policy_name}
+              policyId={verdict.decision.policy_id}
+              attribution={verdict.attribution}
+            />
           )
         )}
       </div>
@@ -882,17 +888,22 @@ function ProfileBlock({
         {profile.accesses.map((verdict) => (
           <AccessRow key={verdict.access_type} verdict={verdict} declined={declined} />
         ))}
-        {/* Task 12, C2: StarRocks asks no access decision for a column a mask
-            transforms, so there is no verdict to show, only the mask below. */}
+        {/* Final review V-1: StarRocks asks no access decision for a column
+            whose deciding mask is MASK_NULL, from whichever policy, so there is
+            no verdict to show, only the mask below. Explain does not know the
+            query's other columns, so the query-level consequence is stated. */}
         {profile.masked_read_skips_access && (
           <li
             data-testid="explain-access-not-checked"
             className="rounded-md border border-border p-3 text-sm text-muted-foreground"
           >
-            <span className="font-mono text-xs">select</span> is not checked: for a reader who holds
-            the grant, StarRocks does not check access on a column the clearance masks to NULL, so
-            the mask below decides what this read returns. This is StarRocks behaviour (measured
-            on 4.1.6); Trino checks access on a masked column.
+            This column is not access-checked on StarRocks: its mask is MASK_NULL, so the read
+            returns NULL for it, whoever denies it. The query as a whole is still refused unless the
+            reader may select another column it reads; when it selects only such columns, StarRocks
+            checks the table’s first unmasked column (or{" "}
+            <span className="font-mono text-xs">___count___</span> for{" "}
+            <span className="font-mono text-xs">count(*)</span>). Measured on StarRocks 4.1.6;
+            Trino checks access on a masked column.
           </li>
         )}
         {profile.accesses.length === 0 && !profile.masked_read_skips_access && (
@@ -900,12 +911,12 @@ function ProfileBlock({
         )}
       </ul>
       {profile.mask && <MaskLine mask={profile.mask} />}
-      {/* Fix round 1 (m-5): StarRocks checks no access on a column it masks,
-          so with the mask unknown the access verdict above may not apply. */}
+      {/* Fix round 1 (m-5), V-1: StarRocks checks no access on a MASK_NULL
+          column, so with the mask unknown the access verdict above may not apply. */}
       {profile.mask?.decision.kind === "undecidable" && (
         <p data-testid="explain-mask-provisional" className="text-xs text-muted-foreground">
-          The access verdict above is provisional: if StarRocks does apply a mask here, it does not
-          check this access.
+          The access verdict above is provisional: if StarRocks applies a MASK_NULL mask here, it
+          does not check this access.
         </p>
       )}
       {/* Task 12, M-4: the materialized-view deny is engine-wide, so the page
@@ -928,6 +939,26 @@ function ProfileBlock({
  * A2). Plain on purpose: the DG frontend is redesigned later as its own spec.
  */
 function MaskLine({ mask }: { mask: NonNullable<ExplainProfile["mask"]> }) {
+  const d = mask.decision;
+  return (
+    <div className="space-y-1">
+      <MaskSentence mask={mask} />
+      {/* Final review V-1 / Task 10 M4: any policy's MASK_NULL can decide the
+          skip, so the steward sees which perm object (or raw policy) it was. */}
+      {d.kind === "masked" && (
+        <div data-testid="explain-mask-decided-by">
+          <DecidedBy
+            policyName={d.result.policy_name}
+            policyId={d.result.policy_id}
+            attribution={mask.attribution}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MaskSentence({ mask }: { mask: NonNullable<ExplainProfile["mask"]> }) {
   const d = mask.decision;
   return (
     <p data-testid="explain-mask" className="text-xs text-muted-foreground">

@@ -93,21 +93,24 @@ export interface ExplainProfile {
   tag_policies_in_download: number;
   mask?: null | ExplainMask;
   /**
-     * `true` in the one case measured on StarRocks 4.1.6 (Task 11, finding
-     * C2): the clearance's own `MASK_NULL` applies to the column, the
-     * clearance's own column deny is what refuses `select`, and without the
-     * clearance's access policies the read would be allowed (the reader holds
-     * the grant). There the FE asked no access decision for the masked column
-     * and the read returned `NULL`, so [`ExplainProfile::accesses`] carries no
-     * `select` verdict and [`ExplainProfile::mask`] is the answer.
+     * `true` when StarRocks consults no access policy for the target column:
+     * a `read` of a column whose deciding mask is `MASK_NULL`, from whichever
+     * policy (final review V-1, live §3.4 cases 2a/2b/2c). The read returns
+     * `NULL` for the column whoever denies it, so
+     * [`ExplainProfile::accesses`] carries no `select` verdict and
+     * [`ExplainProfile::mask`] is the answer.
      *
-     * Every other case keeps the `select` verdict (fix round 1, C-1): a reader
-     * with no grant, a table-level or any other deny, a mask type other than
-     * `MASK_NULL`, a rule or hand-written mask. Those were not measured, and
-     * the engine may refuse there. When the mask verdict is undecidable the
-     * access verdict is provisional: if the engine does apply a mask, StarRocks
-     * does not check that access. Never set on Trino, which checks access on a
-     * masked column.
+     * What this cannot say is the query-level consequence: the query as a
+     * whole is still refused unless the reader may select another column it
+     * reads, and when it selects only such columns StarRocks checks the
+     * table's first unmasked column (or `___count___` for `count(*)`).
+     * Explain does not know the query's other columns.
+     *
+     * Any other mask type keeps the `select` verdict (`MASK_HASH` was measured
+     * checked; the rest are unmeasured), and so does no mask. When the mask
+     * verdict is undecidable the access verdict is kept and is provisional: if
+     * StarRocks applies a `MASK_NULL` there, it does not check that access.
+     * Never set on Trino, which checks access on a masked column.
      *
      * (Explain no longer answers `create materialized view`, Task 12 M-4: the
      * A3 deny is engine-wide, so no single database's verdict says more than

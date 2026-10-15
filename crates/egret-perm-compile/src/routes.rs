@@ -70,8 +70,7 @@ use egret_policy::{
 };
 use egret_policy_api::ServicePolicies;
 use egret_ranger_eval::eval::{
-    AccessRequest, Decision, DenyReason, EngineConfig, MaskDecision, TagServiceResource,
-    UnenrichedTags,
+    AccessRequest, Decision, EngineConfig, MaskDecision, TagServiceResource, UnenrichedTags,
 };
 use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::{requests_all_values, RequestResource};
@@ -526,32 +525,16 @@ pub struct ExplainAccess {
     pub attribution: Option<ExplainAttribution>,
 }
 
-/// Whether a mask verdict is the clearance's own `MASK_NULL` (a compiled
-/// `perm-clearance-…-mask-…` policy). Other mask types, rule masks and
-/// hand-written masks were not measured skipping the access check (fix round
-/// 1, C-1), so they never qualify.
-fn is_clearance_mask_null(decision: &WireMaskDecision) -> bool {
+/// Whether the deciding mask is `MASK_NULL`, whichever policy decided it
+/// (final review V-1). StarRocks 4.1.6 asks no access decision for such a
+/// column (live §3.4: 2b's hand-written deny was not applied under it; 2c's
+/// `MASK_HASH` column was checked). Keyed on the TYPE rather than on the
+/// clearance's own policy, where only the clearance's was measured: if a
+/// hand-written `MASK_NULL` turns out to be checked, explain overstates the
+/// exposure, which is the safe direction. Any other type keeps the verdict.
+fn is_mask_null(decision: &WireMaskDecision) -> bool {
     matches!(decision, WireMaskDecision::Masked { result }
-        if result.mask_type.as_deref() == Some("MASK_NULL")
-            && result.policy_name.starts_with(egret_policy::COMPILER_CLEARANCE_PREFIX)
-            && result.policy_name.contains("-mask-"))
-}
-
-/// Whether an access verdict is a refusal by a clearance deny item.
-fn is_clearance_deny(decision: &Decision) -> bool {
-    matches!(decision, Decision::Denied { policy_name, reason: DenyReason::DenyPolicyItem, .. }
-        if policy_name.starts_with(egret_policy::COMPILER_CLEARANCE_PREFIX))
-}
-
-/// The served set without the clearance's ACCESS policies (its column denies
-/// and the materialized-view deny), to ask whether anything but the clearance
-/// would refuse a read.
-fn without_clearance_access_policies(artifact: &ServicePolicySet) -> ServicePolicySet {
-    let mut set = artifact.clone();
-    set.policies.retain(|p| {
-        !(p.policy_type == 0 && p.name.starts_with(egret_policy::COMPILER_CLEARANCE_PREFIX))
-    });
-    set
+        if result.mask_type.as_deref() == Some("MASK_NULL"))
 }
 
 /// One policy profile's answer: the artifact ITS plugin downloads, evaluated
@@ -639,21 +622,24 @@ pub struct ExplainProfile {
     /// (tier c), so none is asked there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mask: Option<ExplainMask>,
-    /// `true` in the one case measured on StarRocks 4.1.6 (Task 11, finding
-    /// C2): the clearance's own `MASK_NULL` applies to the column, the
-    /// clearance's own column deny is what refuses `select`, and without the
-    /// clearance's access policies the read would be allowed (the reader holds
-    /// the grant). There the FE asked no access decision for the masked column
-    /// and the read returned `NULL`, so [`ExplainProfile::accesses`] carries no
-    /// `select` verdict and [`ExplainProfile::mask`] is the answer.
+    /// `true` when StarRocks consults no access policy for the target column:
+    /// a `read` of a column whose deciding mask is `MASK_NULL`, from whichever
+    /// policy (final review V-1, live §3.4 cases 2a/2b/2c). The read returns
+    /// `NULL` for the column whoever denies it, so
+    /// [`ExplainProfile::accesses`] carries no `select` verdict and
+    /// [`ExplainProfile::mask`] is the answer.
     ///
-    /// Every other case keeps the `select` verdict (fix round 1, C-1): a reader
-    /// with no grant, a table-level or any other deny, a mask type other than
-    /// `MASK_NULL`, a rule or hand-written mask. Those were not measured, and
-    /// the engine may refuse there. When the mask verdict is undecidable the
-    /// access verdict is provisional: if the engine does apply a mask, StarRocks
-    /// does not check that access. Never set on Trino, which checks access on a
-    /// masked column.
+    /// What this cannot say is the query-level consequence: the query as a
+    /// whole is still refused unless the reader may select another column it
+    /// reads, and when it selects only such columns StarRocks checks the
+    /// table's first unmasked column (or `___count___` for `count(*)`).
+    /// Explain does not know the query's other columns.
+    ///
+    /// Any other mask type keeps the `select` verdict (`MASK_HASH` was measured
+    /// checked; the rest are unmeasured), and so does no mask. When the mask
+    /// verdict is undecidable the access verdict is kept and is provisional: if
+    /// StarRocks applies a `MASK_NULL` there, it does not check that access.
+    /// Never set on Trino, which checks access on a masked column.
     ///
     /// (Explain no longer answers `create materialized view`, Task 12 M-4: the
     /// A3 deny is engine-wide, so no single database's verdict says more than
@@ -2001,13 +1987,11 @@ async fn explain(
         } else {
             None
         };
-        // Whether the clearance's own `MASK_NULL` applies: the first half of
-        // the measured StarRocks case (`ExplainProfile::masked_read_skips_access`).
-        let clearance_mask_nulls = engine == EngineType::StarRocks
-            && mask
-                .as_ref()
-                .is_some_and(|m| is_clearance_mask_null(&m.decision));
-        let mut masked_read_skips_access = false;
+        // StarRocks asks no access decision for a column whose deciding mask
+        // is `MASK_NULL` (`ExplainProfile::masked_read_skips_access`, V-1).
+        // `mask` is only ever `Some` for a StarRocks column read.
+        let masked_read_skips_access = engine == EngineType::StarRocks
+            && mask.as_ref().is_some_and(|m| is_mask_null(&m.decision));
 
         let mut accesses = Vec::new();
         for access_type in engine_accesses(body.action, engine)? {
@@ -2037,25 +2021,7 @@ async fn explain(
             };
             let decision =
                 egret_ranger_eval::eval::evaluate(&artifact, &request, &service_def, &config);
-            // The second half of the measured case: the clearance's own column
-            // deny is what refuses `select`, and without the clearance's access
-            // policies the same request is allowed (the reader holds the grant
-            // and nothing else refuses). Only then does StarRocks 4.1.6 return
-            // the mask's NULL instead of refusing (Task 11 C2; fix round 1 C-1).
-            if clearance_mask_nulls
-                && access_type == "select"
-                && is_clearance_deny(&decision)
-                && matches!(
-                    egret_ranger_eval::eval::evaluate(
-                        &without_clearance_access_policies(&artifact),
-                        &request,
-                        &service_def,
-                        &config,
-                    ),
-                    Decision::Allowed { .. }
-                )
-            {
-                masked_read_skips_access = true;
+            if masked_read_skips_access && access_type == "select" {
                 continue;
             }
             // `&mut *conn` and not `&mut conn`: `attribution_for` is generic
