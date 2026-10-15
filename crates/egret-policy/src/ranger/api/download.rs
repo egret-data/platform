@@ -58,7 +58,7 @@ pub async fn download_policies(
         .map(str::to_owned);
     let service_name = svc.name.clone();
     let mut sp = ServicePolicies::new(svc.name, svc.id, svc.policy_version, def, policies, None);
-    // Embed the tag service's def + policies as `tagPolicies` so the Trino
+    // Embed the `tag` service-def + the tag service's policies as `tagPolicies` so the Trino
     // apache-ranger plugin turns on tag-based masking/row-filter evaluation and
     // its tag enricher. Without this, tag policies download fine on their own
     // service but the resource plugin never consults them → masking silently
@@ -100,7 +100,20 @@ pub async fn download_policies(
     if let Some(name) = tag_service {
         match s.store.get_service(&name).await {
             Ok(tsvc) => {
-                let tdef = s.store.get_service_def(&tsvc.r#type).await?.def_jsonb;
+                // The `tag` service-def, NEVER `tsvc.r#type`'s. Real Ranger Admin
+                // serves this block with the tag def, and the plugin relies on it:
+                // its candidate filter for a tag request is a trie per resource of
+                // THIS def, so a def with no `tag` resource (`trino.json` — the
+                // type every tag service made through the admin API has) builds no
+                // trie, stops narrowing, and applies every tag policy to every
+                // tagged column. Measured live on Trino 483 / plugin 2.5.0 and in
+                // `tests/ranger/src/test/java/EgretTagBlockServiceDefTest.java`.
+                // `egret_perm_compile::routes::artifact_via` mirrors this line.
+                let tdef = s
+                    .store
+                    .get_service_def(crate::TAG_DEF_NAME)
+                    .await?
+                    .def_jsonb;
                 let tpolicies = s.store.enabled_policies_for_service(tsvc.id).await?;
                 sp.tag_policies = Some(Box::new(ServicePolicies::new(
                     tsvc.name,

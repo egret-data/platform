@@ -2533,7 +2533,11 @@ pub(crate) async fn artifact_via(
     if let Some(name) = tag_service {
         if let Some(tid) = service_id_by_name_via(conn, &name).await? {
             let tsvc = get_service_by_id_via(conn, tid).await?;
-            let tdef = get_service_def_via(conn, &tsvc.r#type).await?.def_jsonb;
+            // The `tag` def, never `tsvc.r#type`'s — exactly as the download
+            // route serves it; see the comment on the same line there.
+            let tdef = get_service_def_via(conn, egret_policy::TAG_DEF_NAME)
+                .await?
+                .def_jsonb;
             let tpolicies = enabled_policies_for_service_via(conn, tsvc.id).await?;
             envelope.tag_policies = Some(Box::new(ServicePolicies::new(
                 tsvc.name,
