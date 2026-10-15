@@ -284,6 +284,8 @@ impl TriggerState {
     /// tick. Without that step the first tick would be refused by `eval`'s
     /// `current < date` guard. A window holding no tick attaches nothing and
     /// the schedule stays on the live clock, where Kestra's recompute lands.
+    /// A cron that never fires leaves the window attached with no date to fire;
+    /// the route's caller refuses that case before it gets here (`backfill_no_ticks`, Tasks 4 and 7).
     pub fn attach_backfill(
         &mut self,
         trigger: &ScheduleTrigger,
@@ -1375,6 +1377,73 @@ mod tests {
         assert_eq!(
             TriggerState::resume_after_backfill(&never, from, RecoverMissed::None, now),
             None
+        );
+    }
+
+    #[test]
+    fn resume_from_a_completed_window_with_no_later_tick_keeps_prev() {
+        let never = sched("0 0 30 2 *");
+        let prev = at("2026-06-02T02:00:00Z");
+        assert_eq!(
+            TriggerState::resume_from(
+                &never,
+                prev,
+                BackfillEnd::Completed {
+                    window_end: at("2026-06-03T02:00:00Z")
+                }
+            ),
+            prev
+        );
+    }
+
+    #[test]
+    fn resume_after_backfill_boundaries() {
+        let t = sched("*/1 * * * *");
+        let now = at("2026-06-15T10:30:30Z");
+        // `from == now` is not in the future: `None` skips to the next tick.
+        assert_eq!(
+            TriggerState::resume_after_backfill(&t, now, RecoverMissed::None, now),
+            Some(at("2026-06-15T10:31:00Z"))
+        );
+        // `Last` never goes back before `from`: the latest tick (10:30) is
+        // earlier than `from` (10:30:10), so `from` stays.
+        let from = at("2026-06-15T10:30:10Z");
+        assert_eq!(
+            TriggerState::resume_after_backfill(&t, from, RecoverMissed::Last, now),
+            Some(from)
+        );
+        // `now` exactly on a tick: "at or before" includes it.
+        let on_tick = at("2026-06-15T10:30:00Z");
+        assert_eq!(
+            TriggerState::resume_after_backfill(
+                &t,
+                at("2026-06-15T10:20:00Z"),
+                RecoverMissed::Last,
+                on_tick
+            ),
+            Some(on_tick)
+        );
+    }
+
+    /// A cron that never fires leaves `next_evaluation_date` `None` and the
+    /// window attached at `start`, firing nothing; Task 4/7's caller refuses it first
+    /// (`backfill_no_ticks`). Pinned so a change to this path is noticed.
+    #[test]
+    fn a_never_firing_cron_attaches_nothing() {
+        let clock = TestClock::new(at("2026-06-15T12:00:00Z"));
+        let trigger = sched("0 0 30 2 *");
+        let mut state = state_at(&trigger, &clock);
+        state.attach_backfill(
+            &trigger,
+            at("2026-06-01T00:00:00Z"),
+            Some(at("2026-06-05T00:00:00Z")),
+            &clock,
+        );
+        assert_eq!(state.next_evaluation_date, None);
+        assert_eq!(
+            state.backfill.as_ref().map(|b| b.current_date),
+            Some(at("2026-06-01T00:00:00Z")),
+            "the window stays attached at `start`, with no date to fire"
         );
     }
 }

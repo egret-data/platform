@@ -1,17 +1,22 @@
 //! Execution labels for a backfill (W7f spec §3.4): Kestra's merge and the
 //! checks a backfill's own labels pass before they are stored.
 
-// W7f Task 1 lands the model before its callers (Tasks 4-7); drop this then.
-#![allow(dead_code)]
-
 use crate::models::Label;
 
+// W7f Task 1 lands this before its callers (Tasks 4-7); drop the allow then.
+#[allow(dead_code)]
 pub(crate) const MAX_BACKFILL_LABELS: usize = 50;
+// W7f Task 1 lands this before its callers (Tasks 4-7); drop the allow then.
+#[allow(dead_code)]
 pub(crate) const MAX_LABEL_KEY_CHARS: usize = 128;
+// W7f Task 1 lands this before its callers (Tasks 4-7); drop the allow then.
+#[allow(dead_code)]
 pub(crate) const MAX_LABEL_VALUE_CHARS: usize = 1024;
 
 /// Kestra's `Execution.newExecution` + `Label.deduplicate`: `flow` then `own`,
 /// an empty key or value dropped, the LAST value kept in the FIRST key's position.
+// W7f Task 1 lands this before its callers (Tasks 4-7); drop the allow then.
+#[allow(dead_code)]
 pub(crate) fn execution_labels(flow: &[Label], own: &[Label]) -> Vec<Label> {
     let mut out: Vec<Label> = Vec::new();
     for label in flow.iter().chain(own) {
@@ -27,6 +32,8 @@ pub(crate) fn execution_labels(flow: &[Label], own: &[Label]) -> Vec<Label> {
 }
 
 /// `workflow.executions.labels` read back: NULL or a malformed item is no label.
+// W7f Task 1 lands this before its callers (Tasks 4-7); drop the allow then.
+#[allow(dead_code)]
 pub(crate) fn own_labels(v: Option<&serde_json::Value>) -> Vec<Label> {
     let Some(serde_json::Value::Array(items)) = v else {
         return Vec::new();
@@ -38,6 +45,8 @@ pub(crate) fn own_labels(v: Option<&serde_json::Value>) -> Vec<Label> {
 }
 
 /// §3.4's label rules; `Some(sentence naming the label)` on the first breach.
+// W7f Task 1 lands this before its callers (Tasks 4-7); drop the allow then.
+#[allow(dead_code)]
 pub(crate) fn backfill_labels_refusal(labels: &[Label]) -> Option<String> {
     if labels.len() > MAX_BACKFILL_LABELS {
         return Some(format!(
@@ -45,11 +54,14 @@ pub(crate) fn backfill_labels_refusal(labels: &[Label]) -> Option<String> {
             labels.len()
         ));
     }
-    for Label { key, value } in labels {
-        if key.is_empty() {
-            return Some("a label key is empty".to_string());
+    for (i, Label { key, value }) in labels.iter().enumerate() {
+        if key.trim().is_empty() {
+            return Some("a label key is empty or only whitespace".to_string());
         }
-        if key.starts_with("system.") {
+        if labels[..i].iter().any(|l| l.key == *key) {
+            return Some(format!("label `{key}` is given more than once"));
+        }
+        if key.to_lowercase().starts_with("system.") {
             return Some(format!(
                 "label `{key}` is reserved: keys starting with `system.` belong to the engine"
             ));
@@ -129,6 +141,9 @@ mod tests {
         let cases: Vec<(Vec<Label>, &str)> = vec![
             (vec![l("system.x", "v")], "system.x"),
             (vec![l("", "v")], "empty"),
+            (vec![l("  ", "v")], "whitespace"),
+            (vec![l("System.Y", "v")], "System.Y"),
+            (vec![l("dup", "1"), l("dup", "2")], "dup"),
             (vec![l("k1", "")], "k1"),
             (vec![l("k2", "a {{ b }}")], "k2"),
             (vec![l("k3", "a {% b %}")], "k3"),
@@ -144,10 +159,29 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_own_value_cannot_erase_a_flow_label() {
+        let flow = [l("team", "data")];
+        let own = [l("team", "")];
+        assert_eq!(execution_labels(&flow, &own), vec![l("team", "data")]);
+    }
+
+    /// The caps count Unicode scalar values (the spec says characters), not bytes.
+    #[test]
+    fn the_caps_count_characters_not_bytes() {
+        let key_ok = "\u{e9}".repeat(MAX_LABEL_KEY_CHARS);
+        let key_over = "\u{e9}".repeat(MAX_LABEL_KEY_CHARS + 1);
+        let val_ok = "\u{e9}".repeat(MAX_LABEL_VALUE_CHARS);
+        let val_over = "\u{e9}".repeat(MAX_LABEL_VALUE_CHARS + 1);
+        assert_eq!(backfill_labels_refusal(&[l(&key_ok, &val_ok)]), None);
+        assert!(backfill_labels_refusal(&[l(&key_over, "v")]).is_some());
+        assert!(backfill_labels_refusal(&[l("k", &val_over)]).is_some());
+    }
+
+    #[test]
     fn labels_at_the_caps_pass() {
         let labels: Vec<Label> = (0..MAX_BACKFILL_LABELS)
             .map(|i| {
-                let key = format!("{i:0<width$}", width = MAX_LABEL_KEY_CHARS);
+                let key = format!("{i:k<width$}", width = MAX_LABEL_KEY_CHARS);
                 l(&key, &"v".repeat(MAX_LABEL_VALUE_CHARS))
             })
             .collect();

@@ -3445,4 +3445,37 @@ mod tests {
             "02:00 local on 06-16 is itself"
         );
     }
+
+    /// DST, fall-back (Paris 2026-10-25: 03:00 CEST becomes 02:00 CET, so
+    /// 02:30 local happens twice, at 00:30Z and at 01:30Z) and spring-forward
+    /// (2026-03-29: 02:00 CET jumps to 03:00 CEST, so 02:30 local never
+    /// happens). Whatever the cron does with the ambiguous or missing hour,
+    /// the wrappers must be consistent with `next_after` and never go
+    /// backwards.
+    #[test]
+    fn first_tick_helpers_across_dst() {
+        let t = sched("30 2 * * *", false, Some("Europe/Paris"));
+        // The second occurrence of 02:30 local.
+        let second = at("2026-10-25T01:30:00Z");
+        let after = t.first_tick_after(second).unwrap();
+        let on_or_after = t.first_tick_at_or_after(second).unwrap();
+        assert!(after > second);
+        assert!(on_or_after >= second && on_or_after <= after);
+        assert_eq!(
+            t.first_tick_after(on_or_after),
+            Some(after),
+            "at-or-after then after walks the same ticks"
+        );
+        assert_eq!(after, at("2026-10-26T01:30:00Z"), "next day 02:30 CET");
+
+        // The gap: no 02:30 local on 03-29, whatever the cron does with it.
+        let before_gap = at("2026-03-28T12:00:00Z");
+        let day = t.first_tick_at_or_after(before_gap).unwrap();
+        assert_eq!(
+            day,
+            at("2026-03-30T00:30:00Z"),
+            "the cron skips the day whose 02:30 does not exist (02:30 CEST)"
+        );
+        assert_eq!(t.first_tick_after(day), Some(at("2026-03-31T00:30:00Z")));
+    }
 }
