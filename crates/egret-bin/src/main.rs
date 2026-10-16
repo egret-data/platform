@@ -2249,7 +2249,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // seeds it too; this pass is what reaches engines deployed before the
     // baseline existed, with no reapply (each plugin picks the rows up on its
     // next policy poll). Best-effort: a failing profile is logged, not fatal.
-    if config.ranger.enabled {
+    //
+    // Not gated on `config.ranger.enabled` (final review F6): the apply path
+    // seeds any engine bound to a profile whatever that flag says, and an
+    // engine bound while it was on keeps its profile after it is turned off.
+    // `seed_engine_user_baseline` skips every engine bound to no profile.
+    {
         let st = engine_mgmt
             .as_ref()
             .expect("engine-mgmt state is built just above");
