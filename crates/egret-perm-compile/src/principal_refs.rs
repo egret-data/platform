@@ -1,0 +1,285 @@
+//! **Every principal ref a grant or rule names must name someone egret knows**
+//! (finding J-F3, `docs/en/specs/2026-10-17-perm-principal-ref-validation-design.md`).
+//!
+//! # Why an unknown ref is a security defect and not a typo
+//!
+//! The compiler writes a ref through verbatim (`crate::grants`'s module doc), so a
+//! ref that matches nobody compiles to a Ranger item naming nobody. Where that
+//! lands decides which way it fails:
+//!
+//! - an **allow include** fails closed: the grant grants nobody;
+//! - a **deny include**, or **any exclude** (a grant's `principals.exclude`, a
+//!   rule's `exempt.exclude`), fails **OPEN**: the deny or the subtract silently
+//!   evaporates and the compiled policy allows more than the model states;
+//! - a rule's **`exempt.include`** fails closed the other way: the mask applies to
+//!   someone the author meant to exempt.
+//!
+//! None of these is reported by anything: the policy compiles, deploys and is
+//! listed live. The case that surfaced it was `{kind: "user", ref: "<user
+//! UUID>"}`, which `POST /perm/grants` accepted and compiled as the Ranger user
+//! name. `egret_perm::CompileError::UnusableUserRef` already said where the fix
+//! belongs — "canonicalise at the authoring boundary, where `users.username` is
+//! readable, not in the compiler" — and could catch only an empty ref or an `@`,
+//! because the compiler does no I/O.
+//!
+//! # The source of truth, per kind
+//!
+//! Each kind is checked against the table its DOWNSTREAM resolution reads, so a
+//! ref this module accepts is one that resolution can actually find:
+//!
+//! - **`user`** — `users.username` (`migrations/0040_user_username.sql:1`,
+//!   `citext UNIQUE`). The bare username is the only identity an engine ever sees
+//!   for a person (SP4a D7; `crate::members`' module doc, "the name emitted is the
+//!   STORED `users.username`"), and `egret_perm::eval::matches_principal`
+//!   (`crates/egret-perm/src/eval.rs:311`) compares it byte-for-byte. citext makes
+//!   the lookup case-insensitive, so the ref is REWRITTEN to the stored spelling:
+//!   `Analyst` and `analyst` are one person to egret but two strings to Ranger.
+//!   A ref that is a user's id or email is refused with the username to use
+//!   instead — never silently rewritten, because a write that stores something
+//!   other than what the author sent should be one the author sees.
+//! - **`group`** — `groups.name` (`migrations/0002_identity.sql:15-19`), plus
+//!   [`egret_perm::PUBLIC_GROUP`], which every Ranger plugin resolves for every
+//!   user and has no row. egret serves Ranger NO user/group document: its Ranger
+//!   router has exactly two download routes, policies and tags
+//!   (`crates/egret-policy/src/ranger/routes.rs:15-31`), and egret runs no
+//!   usersync, so a group other than `public` reaches no engine at all (D7,
+//!   `crate::members`' module doc). There is therefore no "group egret serves to
+//!   Ranger" to check against; `groups` is the one group store egret owns — the
+//!   one `user_groups` and the OIDC group sync write, and the one the authoring
+//!   picker searches (`crates/egret-policy/src/admin/mod.rs:1109-1123`,
+//!   `list_principals`). Checking against it is the most this boundary can read.
+//!   It does not make a named group enforceable on an engine — that is D7's
+//!   unchanged limitation, and `explain` reports such an access as unenforceable
+//!   (`egret_perm::eval`'s `matched_only_via_group`).
+//! - **`role`** — `roles.name`, in any scope (`migrations/0003_workspace_rbac.sql:21-27`).
+//!   A role is NOT free text: it is expanded at compile time into its holders'
+//!   usernames by `crate::members::role_usernames`, which joins `roles` by name
+//!   with no scope filter (`crates/egret-perm-compile/src/members.rs:155-162`).
+//!   A name with no `roles` row expands to nobody — on an exclude, the same fail
+//!   open. The picker's free-text role input (`PrincipalPicker.tsx`) is a UI
+//!   shortcut, not a statement that roles are external.
+//! - **`workspace_members`** — `workspaces.id`. Expanded at compile time by
+//!   `crate::members::expand_enumerated_principals`, which expands a ref that is
+//!   not a uuid, or names no workspace, to nobody. (No authoring path may write
+//!   one today — `validate_grant_shape` refuses the kind — but a ref that names
+//!   nothing is still named as such, so the two refusals stay distinguishable.)
+//!
+//! # What this does NOT do
+//!
+//! It does not rewrite stored rows, and it does not refuse a write because a
+//! principal it does not touch was deleted after it was validly written (design
+//! R5/R6): nobody carries a deleted name, so a deny or exclude on it still denies
+//! everyone who does. A user ref that is empty or a reserved engine principal is
+//! left to `validate_user_ref`, which already refuses both with a sentence of its
+//! own.
+
+use std::fmt::Write as _;
+
+use sqlx::PgConnection;
+use uuid::Uuid;
+
+use egret_perm::{Principal, PrincipalKind, PrincipalSet, PUBLIC_GROUP};
+
+use crate::routes::PermHttpError;
+
+/// One ref that matched nobody: what the author wrote, where, and why.
+struct Unknown {
+    kind: PrincipalKind,
+    r#ref: String,
+    position: String,
+    why: String,
+}
+
+/// Resolve every principal in `set` (include AND exclude) against the table its
+/// kind is resolved from downstream (module doc), canonicalising a username's
+/// spelling in place, and refuse the write if any ref names nobody.
+///
+/// `field` is the set's name on the wire (`principals` for a grant, `exempt` for
+/// a rule), so a refusal can say exactly which entry to fix. EVERY unknown ref is
+/// named in one 400, not just the first: an author fixing a long list should not
+/// discover the problems one round trip at a time.
+///
+/// Canonicalising can make two entries equal (`Analyst` and `analyst`), and the
+/// stored table's primary key is `(id, kind, ref, mode)`, so each list is
+/// deduplicated afterwards, first occurrence kept.
+pub(crate) async fn resolve_principal_refs(
+    conn: &mut PgConnection,
+    field: &str,
+    set: &mut PrincipalSet,
+) -> Result<(), PermHttpError> {
+    let mut unknown = Vec::new();
+    for (mode, list) in [("include", &mut set.include), ("exclude", &mut set.exclude)] {
+        for (i, p) in list.iter_mut().enumerate() {
+            if let Some(why) = resolve_one(conn, p).await? {
+                unknown.push(Unknown {
+                    kind: p.kind,
+                    r#ref: p.r#ref.clone(),
+                    position: format!("{field}.{mode}[{i}]"),
+                    why,
+                });
+            }
+        }
+        dedup_keeping_first(list);
+    }
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let mut msg = String::from(
+        "these principal refs match nobody egret knows — a policy naming nobody grants \
+         nobody as an allow, and as a deny or an exclude it silently allows more than the \
+         model states:",
+    );
+    for u in &unknown {
+        let _ = write!(
+            msg,
+            " {} {:?} ({}): {};",
+            u.kind.as_str(),
+            u.r#ref,
+            u.position,
+            u.why
+        );
+    }
+    msg.pop();
+    Err(PermHttpError::BadRequest(msg))
+}
+
+/// `None` when `p` resolves (rewriting a username to its stored spelling);
+/// `Some(reason)` when it names nobody.
+async fn resolve_one(
+    conn: &mut PgConnection,
+    p: &mut Principal,
+) -> Result<Option<String>, PermHttpError> {
+    match p.kind {
+        PrincipalKind::User => resolve_user(conn, p).await,
+        PrincipalKind::Group => {
+            if p.r#ref == PUBLIC_GROUP {
+                return Ok(None);
+            }
+            let found: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM groups WHERE name = $1)")
+                    .bind(&p.r#ref)
+                    .fetch_one(&mut *conn)
+                    .await
+                    .map_err(PermHttpError::db)?;
+            Ok((!found).then(|| "no group has this name".to_string()))
+        }
+        PrincipalKind::Role => {
+            let found: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM roles WHERE name = $1)")
+                    .bind(&p.r#ref)
+                    .fetch_one(&mut *conn)
+                    .await
+                    .map_err(PermHttpError::db)?;
+            Ok((!found).then(|| {
+                "no role has this name — a role is expanded into its holders at compile \
+                 time, and a name with no role expands to nobody"
+                    .to_string()
+            }))
+        }
+        PrincipalKind::WorkspaceMembers => {
+            let Ok(id) = p.r#ref.parse::<Uuid>() else {
+                return Ok(Some("a workspace ref is a workspace id".to_string()));
+            };
+            let found: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM workspaces WHERE id = $1)")
+                    .bind(id)
+                    .fetch_one(&mut *conn)
+                    .await
+                    .map_err(PermHttpError::db)?;
+            Ok((!found).then(|| "no workspace has this id".to_string()))
+        }
+    }
+}
+
+/// A `user` ref must equal a stored `users.username` (case-insensitively; it is
+/// rewritten to the stored spelling). Tried as a username FIRST: a username is a
+/// `[a-z0-9_-]` slug, so a uuid-shaped string can be a real one.
+async fn resolve_user(
+    conn: &mut PgConnection,
+    p: &mut Principal,
+) -> Result<Option<String>, PermHttpError> {
+    // Left to `validate_user_ref`, which refuses both with its own sentence.
+    if p.r#ref.is_empty() || egret_core::engine_principals::is_reserved_engine_username(&p.r#ref) {
+        return Ok(None);
+    }
+    let canonical: Option<String> =
+        sqlx::query_scalar("SELECT username::text FROM users WHERE username = $1::citext")
+            .bind(&p.r#ref)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(PermHttpError::db)?;
+    if let Some(name) = canonical {
+        p.r#ref = name;
+        return Ok(None);
+    }
+
+    // Not a username. If it is a user's id or email, say whose username to use —
+    // that is the mistake the finding was, and the author can act on the answer.
+    let (what, row): (&str, Option<Option<String>>) = if let Ok(id) = p.r#ref.parse::<Uuid>() {
+        let row = sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(PermHttpError::db)?;
+        ("id", row)
+    } else if p.r#ref.contains('@') {
+        let row = sqlx::query_scalar("SELECT username::text FROM users WHERE email = $1::citext")
+            .bind(&p.r#ref)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(PermHttpError::db)?;
+        ("email", row)
+    } else {
+        ("", None)
+    };
+    Ok(Some(match row {
+        Some(Some(username)) => format!(
+            "this is a user's {what}, and an engine knows a person only by their username — \
+             use {username:?}"
+        ),
+        Some(None) => format!(
+            "this is a user's {what}, and that user has no username yet (one is minted the \
+             first time they use an engine), so no engine can name them"
+        ),
+        None => "no user has this username — a user ref is the bare username, never an \
+                 email or an id"
+            .to_string(),
+    }))
+}
+
+fn dedup_keeping_first(list: &mut Vec<Principal>) {
+    let mut seen = std::collections::HashSet::new();
+    list.retain(|p| seen.insert((p.kind.as_str(), p.r#ref.clone())));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(r: &str) -> Principal {
+        Principal {
+            kind: PrincipalKind::User,
+            r#ref: r.to_string(),
+        }
+    }
+
+    #[test]
+    fn dedup_keeps_the_first_of_equal_entries_and_every_distinct_one() {
+        let mut list = vec![
+            user("analyst"),
+            Principal {
+                kind: PrincipalKind::Group,
+                r#ref: "analyst".to_string(),
+            },
+            user("analyst"),
+            user("bob"),
+        ];
+        dedup_keeping_first(&mut list);
+        assert_eq!(
+            list.iter()
+                .map(|p| (p.kind.as_str(), p.r#ref.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("user", "analyst"), ("group", "analyst"), ("user", "bob")]
+        );
+    }
+}

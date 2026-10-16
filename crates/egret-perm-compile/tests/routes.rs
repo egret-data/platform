@@ -333,6 +333,7 @@ async fn setup() -> Option<Fixture> {
             .await
             .expect("build CedarPdp"),
     );
+    ensure_fixture_principals(&pool).await;
 
     Some(Fixture {
         dsn,
@@ -346,6 +347,57 @@ async fn setup() -> Option<Fixture> {
         catalog_id,
         tag_key,
     })
+}
+
+/// The bare usernames the tests here author grants for (`grant_body(..,
+/// "analyst")` and friends), and the role names they exempt.
+///
+/// **Since J-F3 every ref must name someone egret knows**, or the write is
+/// refused (`egret_perm_compile::principal_refs`): a ref naming nobody fails OPEN
+/// as a deny or an exclude. So these exist as real `users.username` / `roles.name`
+/// rows rather than as strings nothing resolves. Idempotent and shared by every
+/// test in the database (`ON CONFLICT DO NOTHING` — on the username as much as
+/// the email, so a person some other test already minted as `analyst` serves just
+/// as well: what matters is that the name resolves).
+const FIXTURE_USERNAMES: &[&str] = &["alice", "analyst", "auditor", "contractor", "unused"];
+const FIXTURE_ROLES: &[&str] = &["auditor"];
+
+async fn ensure_fixture_principals(pool: &sqlx::PgPool) {
+    for name in FIXTURE_USERNAMES {
+        sqlx::query(
+            "INSERT INTO users (provider, email, username) VALUES ('local', $1, $2) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(format!("{name}@perm-routes-fixture.egret.local"))
+        .bind(name)
+        .execute(pool)
+        .await
+        .expect("fixture user");
+    }
+    for name in FIXTURE_ROLES {
+        sqlx::query(
+            "INSERT INTO roles (scope, name, description) \
+             VALUES ('workspace', $1, 'perm routes test fixture') ON CONFLICT DO NOTHING",
+        )
+        .bind(name)
+        .execute(pool)
+        .await
+        .expect("fixture role");
+    }
+}
+
+/// A user whose `users.username` is exactly `username` — for the tests that
+/// mint a unique subject name and then grant to it (J-F3: the grant is refused
+/// unless the name resolves). Returns the name, so a call site reads as the
+/// `unique(..)` it replaces.
+async fn known_user(f: &Fixture, username: String) -> String {
+    sqlx::query("INSERT INTO users (provider, email, username) VALUES ('local', $1, $2)")
+        .bind(format!("{username}@perm-routes-fixture.egret.local"))
+        .bind(&username)
+        .execute(&f.db.pool)
+        .await
+        .expect("known user");
+    username
 }
 
 async fn into_json(resp: Response) -> (StatusCode, Value) {
@@ -3033,6 +3085,13 @@ async fn a_group_only_grant_is_refused_by_the_artifact_the_engine_downloads() {
     let token = admin_session(&f).await;
 
     let group = unique("contractors");
+    // A real `groups` row (J-F3: a group ref must name one) — still one no
+    // engine can see, which is the point of this test.
+    sqlx::query("INSERT INTO groups (name) VALUES ($1)")
+        .bind(&group)
+        .execute(&f.db.pool)
+        .await
+        .expect("insert group");
     let mut grant = grant_body(f.catalog_id, "unused");
     grant["principals"] = json!({
         "include": [{ "kind": "group", "ref": group }],
@@ -4922,7 +4981,7 @@ async fn explain_answers_once_per_profile_naming_the_profile_and_its_engine() {
     let token = admin_session(&f).await;
     let (trino_id, starrocks_id, catalog_id) = two_profile_catalog(&f, "explain-two").await;
 
-    let user = unique("two-profile-reader");
+    let user = known_user(&f, unique("two-profile-reader")).await;
     let (status, body) = into_json(
         f.app()
             .oneshot(req(
@@ -5037,7 +5096,7 @@ async fn a_write_explain_reports_one_verdict_per_ranger_access_type() {
     let (_trino_id, starrocks_id, catalog_id) = two_profile_catalog(&f, "explain-write").await;
     let catalog = catalog_name(&f, catalog_id).await;
 
-    let user = unique("two-profile-writer");
+    let user = known_user(&f, unique("two-profile-writer")).await;
 
     // One raw deny, on ONE of the three StarRocks access types. Written BEFORE
     // the grant on purpose: the first recompile stamps the profile
@@ -6390,7 +6449,7 @@ async fn the_artifact_answer_and_the_model_oracle_agree_on_the_happy_path() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
 
-    let granted = unique("oracle-granted");
+    let granted = known_user(&f, unique("oracle-granted")).await;
     let stranger = unique("oracle-stranger");
     let (status, body) = into_json(
         f.app()
@@ -6504,7 +6563,7 @@ async fn explain_reads_the_profile_through_the_download_routes_own_assembler() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
 
-    let user = unique("assembler-subject");
+    let user = known_user(&f, unique("assembler-subject")).await;
     let (status, body) = into_json(
         f.app()
             .oneshot(req(
@@ -6914,5 +6973,412 @@ async fn explain_evaluates_the_tag_block_against_the_tag_def_with_two_tags() {
         verdict["decision"]["policy_name"],
         tag_policy_name.as_str(),
         "body: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// J-F3: every principal ref must name someone egret knows
+// ---------------------------------------------------------------------------
+//
+// A ref that matches nobody fails CLOSED on an allow include (the grant grants
+// nobody) but OPEN on a deny include or on any exclude: the deny or the subtract
+// evaporates and the compiled policy allows more than the model states. Every
+// write path (create, patch, the rolled-back preview, and so the migration) goes
+// through `write_grant`/`write_rule`, so these drive the HTTP routes and assert
+// both the refusal and that nothing was stored.
+
+/// A fresh user WITH a minted `users.username`, as `(id, email, username)`.
+async fn named_user(f: &Fixture, tag: &str) -> (Uuid, String, String) {
+    let id = new_user(f, tag).await;
+    let email: String = sqlx::query_scalar("SELECT email::text FROM users WHERE id = $1")
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("read email");
+    let username = f
+        .users
+        .ensure_username(egret_core::UserId(id))
+        .await
+        .expect("mint username");
+    (id, email, username)
+}
+
+/// One POST/PATCH through the router.
+async fn send(
+    f: &Fixture,
+    method: &str,
+    uri: &str,
+    token: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    into_json(
+        f.app()
+            .oneshot(req(method, uri, token, Some(body)))
+            .await
+            .unwrap(),
+    )
+    .await
+}
+
+fn grant_with(catalog_id: Uuid, effect: &str, include: Value, exclude: Value) -> Value {
+    json!({
+        "effect": effect,
+        "actions": ["read"],
+        "scope": { "catalog_id": catalog_id, "schema": "sales", "table": "orders", "column": null },
+        "principals": { "include": include, "exclude": exclude }
+    })
+}
+
+/// The stored refs of one grant, in `mode` then `ref` order.
+async fn stored_grant_refs(f: &Fixture, grant_id: &str) -> Vec<(String, String, String)> {
+    sqlx::query_as(
+        "SELECT kind::text, ref, mode::text FROM perm.grant_principals \
+          WHERE grant_id = $1::uuid ORDER BY mode, ref",
+    )
+    .bind(grant_id)
+    .fetch_all(&f.db.pool)
+    .await
+    .expect("read grant principals")
+}
+
+/// **R2, the finding itself.** `POST /perm/grants` accepted a user's UUID as the
+/// ref and compiled it as the Ranger user name, which no engine principal
+/// carries. It is refused, and the refusal names the username to use instead —
+/// the id resolves to exactly one person, so saying who is the useful answer.
+#[tokio::test]
+async fn a_user_ref_that_is_a_user_id_is_refused_naming_the_username() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (id, _, username) = named_user(&f, "jf3_by_id").await;
+    let before = f.grant_count().await;
+
+    let (status, body) = send(
+        &f,
+        "POST",
+        "/perm/grants",
+        &token,
+        grant_body(f.catalog_id, &id.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(msg.contains(&id.to_string()), "names the ref; got {msg:?}");
+    assert!(
+        msg.contains(&format!("{username:?}")),
+        "names the username to use instead; got {msg:?}"
+    );
+    assert_eq!(f.grant_count().await, before, "nothing stored");
+}
+
+/// The email twin of the id case: refused, naming the username. (Before J-F3
+/// the compiler's `UnusableUserRef` caught an email too, but could not say whose
+/// username to use — it has no store handle.)
+#[tokio::test]
+async fn a_user_ref_that_is_an_email_is_refused_naming_the_username() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (_, email, username) = named_user(&f, "jf3_by_email").await;
+    let before = f.grant_count().await;
+
+    // Upper-cased: `users.email` is citext, so the lookup must not depend on case.
+    let (status, body) = send(
+        &f,
+        "POST",
+        "/perm/grants",
+        &token,
+        grant_body(f.catalog_id, &email.to_uppercase()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains(&format!("{username:?}")),
+        "names the username to use instead; got {msg:?}"
+    );
+    assert_eq!(f.grant_count().await, before, "nothing stored");
+}
+
+/// R1, R3, R4: a ref of each kind that names nothing egret knows is a 400 naming
+/// the kind and the ref, and nothing is stored.
+#[tokio::test]
+async fn an_unknown_user_group_role_or_workspace_ref_is_refused_by_name() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let before = f.grant_count().await;
+
+    for (kind, r#ref) in [
+        ("user", unique("jf3_nobody")),
+        ("group", unique("jf3_no_group")),
+        ("role", unique("jf3_no_role")),
+        ("workspace_members", Uuid::new_v4().to_string()),
+        ("workspace_members", "not-a-uuid".to_string()),
+    ] {
+        let (status, body) = send(
+            &f,
+            "POST",
+            "/perm/grants",
+            &token,
+            grant_with(
+                f.catalog_id,
+                "allow",
+                json!([{ "kind": kind, "ref": r#ref }]),
+                json!([]),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{kind} {ref:?}: body: {body}"
+        );
+        let msg = body["error"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains(&format!("{kind} {:?}", r#ref)),
+            "{kind}: the refusal names the kind and the ref; got {msg:?}"
+        );
+        assert!(
+            msg.contains("principals.include[0]"),
+            "{kind}: and its position; got {msg:?}"
+        );
+    }
+    assert_eq!(f.grant_count().await, before, "nothing stored");
+}
+
+/// **The positions that fail OPEN**, refused exactly like the include of an
+/// allow — and EVERY unknown ref is named, not just the first, so an author
+/// fixing a long principal list does not discover them one round trip at a time.
+#[tokio::test]
+async fn a_deny_include_and_every_exclude_are_refused_and_every_unknown_ref_is_named() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let before = f.grant_count().await;
+    let (a, b, c) = (
+        unique("jf3_ghost_a"),
+        unique("jf3_ghost_b"),
+        unique("jf3_ghost_c"),
+    );
+
+    let (status, body) = send(
+        &f,
+        "POST",
+        "/perm/grants",
+        &token,
+        grant_with(
+            f.catalog_id,
+            "deny",
+            json!([{ "kind": "user", "ref": "analyst" }, { "kind": "user", "ref": a }]),
+            json!([{ "kind": "group", "ref": b }, { "kind": "user", "ref": c }]),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    for needle in [
+        format!("user {a:?} (principals.include[1])"),
+        format!("group {b:?} (principals.exclude[0])"),
+        format!("user {c:?} (principals.exclude[1])"),
+    ] {
+        assert!(msg.contains(&needle), "missing {needle:?} in {msg:?}");
+    }
+    assert!(
+        !msg.contains("\"analyst\""),
+        "a ref that resolves is not named; got {msg:?}"
+    );
+
+    // An ALLOW grant whose only unknown is in the exclude: the subtract would
+    // evaporate, so it is refused too.
+    let (status, body) = send(
+        &f,
+        "POST",
+        "/perm/grants",
+        &token,
+        grant_with(
+            f.catalog_id,
+            "allow",
+            json!([{ "kind": "user", "ref": "analyst" }]),
+            json!([{ "kind": "user", "ref": c }]),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(f.grant_count().await, before, "nothing stored");
+}
+
+/// A rule's exemption is a `PrincipalSet` too, and an unknown ref there masks
+/// someone the author meant to exempt. Refused on the rule route the same way.
+#[tokio::test]
+async fn a_rule_exemption_naming_nobody_is_refused() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let name = unique("jf3_rule");
+    let ghost = unique("jf3_ghost");
+
+    let (status, body) = send(
+        &f,
+        "POST",
+        "/perm/rules",
+        &token,
+        json!({
+            "name": name,
+            "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+            "selector": { "type": "path", "catalog_id": f.catalog_id,
+                          "schema": "sales", "table": "orders", "column": "email" },
+            "exempt": { "include": [{ "kind": "user", "ref": ghost }], "exclude": [] }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains(&format!("user {ghost:?} (exempt.include[0])")),
+        "got {msg:?}"
+    );
+    assert_eq!(rules_named(&f, &name).await, 0, "nothing stored");
+}
+
+/// R2's other half: `users.username` is citext, so a username in another case
+/// names the same person — and the STORED ref is the stored spelling, because
+/// the compiler emits the ref byte-for-byte and the engine's user is the
+/// canonical one. Two spellings of one person collapse to one row (the table's
+/// primary key would otherwise refuse the write with a 500).
+#[tokio::test]
+async fn a_username_in_another_case_is_stored_in_its_canonical_spelling() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (_, _, username) = named_user(&f, "jf3_canon").await;
+
+    let id = create_grant_returning_id(
+        &f,
+        &token,
+        grant_with(
+            f.catalog_id,
+            "allow",
+            json!([
+                { "kind": "user", "ref": username.to_uppercase() },
+                { "kind": "user", "ref": username },
+            ]),
+            json!([]),
+        ),
+    )
+    .await;
+    assert_eq!(
+        stored_grant_refs(&f, &id).await,
+        vec![("user".to_string(), username.clone(), "include".to_string())]
+    );
+}
+
+/// The patch and the preview run the same `write_grant`, so they refuse the same
+/// refs — and a refused patch leaves the stored row as it was.
+#[tokio::test]
+async fn a_patch_and_a_preview_naming_nobody_are_refused() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let ghost = unique("jf3_ghost");
+    let id = create_grant_returning_id(&f, &token, grant_body(f.catalog_id, "analyst")).await;
+
+    let (status, body) = send(
+        &f,
+        "PATCH",
+        &format!("/perm/grants/{id}"),
+        &token,
+        grant_with(
+            f.catalog_id,
+            "allow",
+            json!([{ "kind": "user", "ref": "analyst" }]),
+            json!([{ "kind": "user", "ref": ghost }]),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains(&ghost),
+        "body: {body}"
+    );
+    assert_eq!(
+        stored_grant_refs(&f, &id).await,
+        vec![(
+            "user".to_string(),
+            "analyst".to_string(),
+            "include".to_string()
+        )],
+        "the refused patch changed nothing"
+    );
+
+    let (status, body) = send(
+        &f,
+        "POST",
+        "/perm/preview",
+        &token,
+        json!({ "grant": grant_body(f.catalog_id, &ghost) }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains(&ghost),
+        "body: {body}"
+    );
+}
+
+/// The refs that DO resolve are accepted: `public` (no `groups` row, and every
+/// engine resolves it), a group in `groups`, a role in `roles`, and a username.
+/// A `workspace_members` ref naming a REAL workspace is past this check and
+/// refused by the shape check instead (no authoring path may write one), which
+/// is what tells R4's "unknown workspace" refusal apart from that one.
+#[tokio::test]
+async fn refs_that_resolve_are_accepted() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let group = unique("jf3_group");
+    sqlx::query("INSERT INTO groups (name) VALUES ($1)")
+        .bind(&group)
+        .execute(&f.db.pool)
+        .await
+        .expect("insert group");
+    let role = unique("jf3_role");
+    sqlx::query("INSERT INTO roles (scope, name) VALUES ('workspace', $1)")
+        .bind(&role)
+        .execute(&f.db.pool)
+        .await
+        .expect("insert role");
+
+    // In the exclude of a deny — the position that fails open, so the one
+    // where a false refusal would be most tempting to "fix" by loosening.
+    for exclude in [
+        json!([{ "kind": "group", "ref": "public" }]),
+        json!([{ "kind": "group", "ref": group }]),
+        json!([{ "kind": "role", "ref": role }]),
+    ] {
+        create_grant_returning_id(
+            &f,
+            &token,
+            grant_with(
+                f.catalog_id,
+                "deny",
+                json!([{ "kind": "user", "ref": "analyst" }]),
+                exclude,
+            ),
+        )
+        .await;
+    }
+
+    let ws = new_workspace(&f, "jf3_ws").await;
+    let (status, body) = send(
+        &f,
+        "POST",
+        "/perm/grants",
+        &token,
+        grant_with(
+            f.catalog_id,
+            "allow",
+            json!([{ "kind": "workspace_members", "ref": ws }]),
+            json!([]),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        !msg.contains("principals.include[0]"),
+        "a real workspace is not an unknown ref; got {msg:?}"
     );
 }

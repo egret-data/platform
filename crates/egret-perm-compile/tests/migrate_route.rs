@@ -142,6 +142,7 @@ async fn setup() -> Option<Fixture> {
             .await
             .expect("build CedarPdp"),
     );
+    ensure_fixture_usernames(&pool).await;
     let users = UserRepo::new(db.clone());
     let uid = users
         .insert_local(
@@ -184,6 +185,33 @@ async fn setup() -> Option<Fixture> {
         warehouse_id,
         dsn,
     })
+}
+
+/// Every bare username the hand-written policies below name — `alice`, `bob`,
+/// `mallory`, and the `user{i}`/`migrant{i}` the size tests mint.
+///
+/// **A migration writes through `write_grant`/`write_rule`, so since J-F3 every
+/// user it migrates must be a real `users.username`** (`egret_perm_compile::
+/// principal_refs`): a migrated deny or exclude naming nobody would fail open
+/// exactly as an authored one does. Idempotent and shared across the database
+/// (`ON CONFLICT DO NOTHING`, on the username as much as the email: whoever
+/// already holds the name serves, because only the name has to resolve).
+async fn ensure_fixture_usernames(pool: &sqlx::PgPool) {
+    let mut names: Vec<String> = ["alice", "bob", "mallory"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    names.extend((0..40).map(|i| format!("user{i}")));
+    names.extend((0..20).map(|i| format!("migrant{i}")));
+    sqlx::query(
+        "INSERT INTO users (provider, email, username) \
+         SELECT 'local', n || '@perm-migrate-fixture.egret.local', n FROM unnest($1::text[]) n \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&names)
+    .execute(pool)
+    .await
+    .expect("fixture usernames");
 }
 
 fn level(values: &[&str]) -> Value {

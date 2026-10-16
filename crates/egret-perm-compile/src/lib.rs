@@ -87,6 +87,9 @@ pub mod migrate;
 // SP4d-4 Task 3: overlapping mask/row-filter rules across the tag/resource
 // boundary, named by rule, answered 409 — see that module's own doc comment.
 pub mod overlap;
+// J-F3: every principal ref a grant or rule names must name someone egret
+// knows, or a deny/exclude on it fails open — see that module's doc comment.
+pub(crate) mod principal_refs;
 pub mod role_membership;
 pub mod routes;
 pub mod rules;

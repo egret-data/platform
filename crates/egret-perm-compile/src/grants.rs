@@ -29,10 +29,12 @@
 //!   NO canonicalisation. It emits `r#ref` byte-for-byte and refuses
 //!   (`CompileError::UnusableUserRef`) a `User` ref that's empty or
 //!   contains `@`, since either one is a sign the value reaching this
-//!   function was never resolved to `users.username` in the first place. A
-//!   later, I/O-capable task (username resolution belongs at the authoring
-//!   boundary, where `users.username` is readable) owns turning an email
-//!   into the real, collision-resolved username.
+//!   function was never resolved to `users.username` in the first place. The
+//!   I/O-capable half lives at the authoring boundary, where `users.username`
+//!   is readable: `crate::principal_refs` (J-F3) checks every ref of every
+//!   kind before a write is stored, rewrites a username to its stored
+//!   spelling, and refuses an email or a user id with the username to use —
+//!   it never silently rewrites one into the other.
 //!
 //! **Groups still compile through**, unchanged, even though D7
 //! (`docs/en/plans/2026-09-24-permission-model-sp4a-d7-result.md`) found

@@ -80,6 +80,7 @@ use sqlx::{Postgres, Transaction};
 use crate::attribution::{attribute_policy_name, PolicyAttribution};
 use crate::explain_wire::{WireDecision, WireEngineType, WireMaskDecision};
 use crate::grants::{resource_level_names, validate_grant_shape};
+use crate::principal_refs::resolve_principal_refs;
 use crate::rules::validate_rule_shape;
 use crate::trigger::{
     affected_services_for_grant, affected_services_for_rule, engine_type_for, lock_services_in_tx,
@@ -1045,12 +1046,23 @@ pub(crate) async fn write_grant(
         None => (Vec::new(), GrantOrigin::Explicit),
     };
 
+    // **Every ref must name someone egret knows** (J-F3) — include AND exclude,
+    // on create, patch and preview alike, since all three are this function. A
+    // ref naming nobody fails closed on an allow include but OPEN on a deny
+    // include or any exclude: the deny or the subtract evaporates and the
+    // compiled policy allows more than the model states, with nothing reporting
+    // it. Before the shape check, because it also rewrites a username to its
+    // stored spelling and the shape check should see what will be stored. See
+    // `crate::principal_refs` for the source of truth per kind.
+    let mut principals = body.principals;
+    resolve_principal_refs(tx, "principals", &mut principals).await?;
+
     let g = Grant {
         id: id.unwrap_or_else(Uuid::nil),
         effect: body.effect,
         actions: body.actions,
         scope: body.scope,
-        principals: body.principals,
+        principals,
         origin,
     };
     // The recompile below refuses a grant that cannot compile — but only for
@@ -1187,12 +1199,18 @@ pub(crate) async fn write_rule(
         None => Vec::new(),
     };
 
+    // Same check, same position and same reason as [`write_grant`]'s: an
+    // `exempt.include` naming nobody masks someone the author meant to exempt,
+    // and an `exempt.exclude` naming nobody would subtract nobody.
+    let mut exempt = body.exempt;
+    resolve_principal_refs(tx, "exempt", &mut exempt).await?;
+
     let r = Rule {
         id: id.unwrap_or_else(Uuid::nil),
         name: body.name,
         kind: body.kind,
         selector: body.selector,
-        exempt: body.exempt,
+        exempt,
     };
     // Same reason as the grant path: an empty affected set validates nothing.
     validate_rule_shape(&r)?;
