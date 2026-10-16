@@ -24,6 +24,7 @@ other sub-projects get their own short spec on this frame.
 | F8 | The browse API uses egret's existing internal metadata identity per engine (see §2.3); widening any of its privileges is asked first | default decision (2026-10-16) |
 | F9 | Tag assignment from the object page works on egret-managed catalogs only in #1 (the tag API is warehouse-keyed); external catalogs show it disabled with the reason | default decision (2026-10-16) |
 | F10 | The object page lists the rules that select a column, never a client-side "who sees what"; only explain evaluates | default decision (2026-10-16) |
+| F11 | Engine-level permissions (Trino `trinouser` impersonate, `queryid` execute/kill, `systemproperty`/`sessionproperty` alter, function/procedure execute; StarRocks `system`, resource group, global function) become real grants in egret's model with an `engine` scope, compiled by perm-compile, granted from an "Engine permissions" tab on each engine's page in Engine & policy. Data `read`/`write` stay on the Data object page. Needs a backend package before #4 | user, 2026-10-16 |
 
 ## Part 1. Information architecture (all sub-projects)
 
@@ -36,7 +37,7 @@ Governance sidebar, top to bottom:
 | People & groups | a user, group or role and their effective access | #2 | Explain access; the flat Data permissions and Mask & filter rules lists |
 | Classification | the tag and clearance catalogue | #4 | Classifications, TagDetail |
 | Lineage | the dependency graph | #5 | the Data Lineage placeholder |
-| Engine & policy (last group, admin) | one page per engine: profile, compiled and hand-written policies, overlaps, migrate, plugin download state | #4 | Policies, ProfileDetail, PolicyEditor, PolicyMigration, OverlapReport |
+| Engine & policy (last group, admin) | one page per engine: **Engine permissions** (engine-scoped grants, F11; egret's seeded baselines shown as managed, read-only), profile, compiled and hand-written policies, overlaps, migrate, plugin download state | #4 (after the engine-grants backend package) | Policies, ProfileDetail, PolicyEditor, PolicyMigration, OverlapReport |
 
 - Until #3 lands, the Governance index opens Data.
 - Data permissions and Mask & filter rules stay in the sidebar until #2 replaces them, as audit lists; after #1
