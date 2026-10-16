@@ -1107,3 +1107,109 @@ Not predicted with confidence: whether Trino's catalog visibility check (`use` o
 compiled table grant alone. If it does not, J2 fails with a catalog error, and that is a third member of the set.
 
 No `429` / `slow_down` is expected (no catalog OAuth2 traffic at all in this run).
+
+### 4.8 Task 6b: result (read this first)
+
+**DONE.** The minimal per-user baseline a non-admin user needs to run a query through `POST
+/api/ws/default/queries` on a JWT-delegation Trino 483 engine is **three** allows, not two. All three are needed,
+and they are checked in this order:
+
+| # | resource (Trino service-def) | access | users | what fails without it |
+|---|---|---|---|---|
+| 1 | `trinouser` = `{USER}` | `impersonate` | `{USER}` | `Access Denied: Principal vcplain cannot become user vcplain` |
+| 2 | `queryid` = `*` | `execute` | `{USER}` | `Access Denied: Cannot execute query` |
+| 3 | `systemproperty` = `query_max_run_time` | `alter` | `{USER}` | `Access Denied: Cannot set system session property query_max_run_time` |
+
+Plus the user's own grant, which the compiler writes (`perm-grant-<id>`, `select` on `tpch.tiny.nation.*`). Without
+it the query stops at `Access Denied: Cannot access catalog tpch`. The table grant alone is enough for Trino's
+catalog check; no separate `use` policy is needed.
+
+The prediction (two allows, no `trinouser`) was wrong on #1. Trino's Ranger plugin implements
+`checkCanSetUser(principal, user)` as an `impersonate` check on `trinouser = <user>`. Trino calls it whenever a
+session is built, so it runs even when the principal and `X-Trino-User` are the same name (`javap` of
+`io.trino_trino-ranger-483.jar`: `checkCanSetUser` → `hasPermission(forUser(user), principal, IMPERSONATE,
+"SetUser")` → `denySetUser`). `checkCanImpersonateUser`, the check that runs only when the names differ, is a
+separate method.
+
+### 4.9 Task 6b: stack and deviations
+
+Image `egret-backend:vg-dg6b` built from `3aa3c8fa` (`deploy/docker/backend.Dockerfile`). Containers: `vg-egret`
+(serve, `:8096`, no logging proxy), `vg-rustfs` (`rustfs/rustfs:1.0.1`, bucket `warehouse`; egret's apps API
+will not start without `[storage]`), and `vg-trino-coord` (`trinodb/trino` image `db58cc93e593`, `/v1/info` →
+`"version":"483"`, host name `vgtr-coordinator-6d5f7c9b8-ab1cd`, aliases `vgtr-trino` and
+`vgtr-trino.egret-engines.svc`), all on `vg-net`. DB `egret_dgpkg_live`: `egret migrate`, `egret init`, then
+`serve`. Log line: `kubernetes unavailable; engine provisioning disabled`. Users: the bootstrap admin, and
+`vcplain` (local login, `ws_editor` in `default`, no platform role).
+
+- **DEV-1 (SQL):** engine row `vgtr` (`provisioned`, `running`, namespace `egret-engines`, spec
+  `trinoConfig = {delegationMode: jwt, auth: {jwt: {}}}`, `workerReplicas: 0`, a self-made leaf coordinator cert),
+  bound to profile `vgtr` (id 1). `PUT /engines/{id}/workspaces` then materialized
+  `vgtr-trino.egret-engines.svc:8443` (`http_scheme: https`, pinned cert). The Trino files were hand-rendered from
+  `config_properties` (the JWT and TLS lines in §4.7) and `ranger_plugin_files` (service `vgtr`,
+  `http://vg-egret:8096`).
+- **DEV-2 (SQL):** attachment `vgtr` → registry catalog `tpch` inserted as `applied`.
+- **DEV-3 (SQL):** `UPDATE policy.authz_services SET origin = 'manual'` before every hand-written policy write or
+  toggle, because the API refuses them on a compiled profile. That refusal was measured first (finding B-F2).
+- **DEV-7' (config):** Ranger poll 5000 ms instead of 30000 ms. Before each query the plugin's `Switched policy
+  engine to [n]` log line was awaited, with `n` equal to the profile's `policy_version`.
+- **DEV-12:** the catalog was never assigned to the workspace (no `workspace_members` grant).
+- **DEV-14 (setup):** a `tpch` registry catalog (`POST /catalogs {kind: tpch}`, Trino `connector.name=tpch`)
+  instead of Iceberg; `catalog.enabled = false`. Every check in the table above is about the session, not the
+  connector, and the catalog-OAuth2 path (I3/I4) is out of the measurement.
+- **Harness:** two policy downloads under `pluginId=probe-t6b` (to read the served set).
+- `EGRET_RATE_LIMIT__TOKEN_MAX_ATTEMPTS` default; `EGRET_RANGER__AUTH_TOKEN` unset.
+
+**J-F1 fix, observed.** `catalog.oidc_signing_keys` held 0 rows after `init`. The first `GET
+/.well-known/jwks.json` (02:55:03) answered one key, `08eeb31d…`, created by that request. Trino was started
+after that, at 02:56:57. All 11 `POST /v1/statement` of the run answered `200` in Trino's `http-request.log`, with
+no `401`, no `502 engine authentication failed`, and no `429` / `slow_down` anywhere.
+
+### 4.10 Task 6b: every step
+
+`vcplain` ran `SELECT * FROM tpch.tiny.nation` through `POST /api/ws/default/queries` (`202 queued`, then `GET
+…/queries/{id}`). The error column is egret's `error` field, verbatim. Hand-written policies (`{USER}` = the user
+macro): `hw-qmrt` = #3, `hw-queryid` = #2, `hw-self-impersonate` = #1 of §4.8.
+
+| step | time (UTC) | served set (besides the compiled grant) | result | prediction | verdict |
+|---|---|---|---|---|---|
+| login check (admin, `SELECT 1`) | 02:57:35 | none | `failed`, `engine: Access Denied: Principal admin cannot become user admin` (Trino POST 200: the JWT was accepted) | not a 502 | match (login works) |
+| J0 | 02:57:54 | none | `failed`, `engine: Access Denied: Principal vcplain cannot become user vcplain` | `Cannot execute query` | **mismatch** |
+| J1 | 02:59:12 | `hw-qmrt` | same as J0 | `Cannot execute query` | **mismatch** |
+| J2 | 02:59:22 | + `hw-queryid` | same as J0 | rows | **mismatch** |
+| J3 | 02:59:32 | + `hw-self-impersonate` | `finished`, 4 columns, 25 nations (`count(*)` = 25 at 03:00:22) | not needed | **mismatch: needed** |
+| J-min a | 02:59:51 | J3 minus `hw-qmrt` | `engine: Access Denied: Cannot set system session property query_max_run_time` | same | match |
+| J-min b | 02:59:57 | J3 minus `hw-queryid` | `engine: Access Denied: Cannot execute query` | same | match |
+| J-min c | 03:00:02 | J3 minus `hw-self-impersonate` | `engine: Access Denied: Principal vcplain cannot become user vcplain` | (not predicted) | — |
+| J-min d | 03:00:26 | J3, grant deleted (`DELETE /perm/grants/{id}`, 1 policy reaped) | `engine: Access Denied: Cannot access catalog tpch` | `Cannot select from columns …` | **mismatch** (the catalog check comes first) |
+| extra | 03:00:41 | J3's three, no grant | admin `SELECT 1` → `finished`, `1` | — | — |
+
+The order of the checks is: set user (`trinouser`), execute (`queryid`), system session property
+(`systemproperty`), catalog, table. One allow is missing at each of J0–J2, so each of those steps stops at the
+first check. The hand-written policies survived the recompile that the grant delete triggered.
+
+### 4.11 Task 6b: findings
+
+- **B-F1 (Important).** On a JWT-delegation Trino engine whose profile holds only what egret writes, **every**
+  delegated query fails with `Principal <u> cannot become user <u>`, a platform admin's included (DEV-1 skips
+  `seed_admin_all_access`; the login check shows the admin refused the same way). egret writes no `trinouser`,
+  `queryid` or `systemproperty` policy for a grant, and Trino 483's Ranger plugin checks all three on every
+  query. `crates/egret-provisioner/src/trino.rs` says that principal == user "is a self-impersonation Ranger allows
+  by default". That is false on 483: `checkCanSetUser` asks Ranger. The three allows of §4.8 (all `{USER}`) are
+  the minimal fix.
+- **B-F2 (Important).** An operator cannot add those allows through the API once the profile holds any grant:
+  `POST /policies` → `409 conflict: profile 1 is compiled by the SP4a permission model — edit its grants and
+  rules instead of writing a policy directly`. So the baseline must come from egret itself (the compiler or the
+  profile's creation), not from a hand-written policy.
+- **B-O1 (observation).** After the grant delete reaped the profile's last compiled policy, `origin` stayed
+  `manual` (DEV-3's value). Earlier runs saw compiler writes stamp `generated` again. Not investigated.
+- **B-O2 (observation).** Trino's `http-request.log` logs the user of every `/v1/statement` request as `null`, so
+  it cannot show who a 401 or 200 was for.
+
+### 4.12 Task 6b: left behind
+
+- **Removed:** containers `vg-egret`, `vg-trino-coord`, `vg-rustfs`; network `vg-net`; image
+  `egret-backend:vg-dg6b`; DB `egret_dgpkg_live` (dropped). Nothing left running.
+- **Kept:** scratchpad `t6b/` (step outputs, served policy sets, Trino request log, the public cert, Trino files),
+  with no secrets in it: the env file, passwords, cookie jars, TLS key and keystore were deleted.
+- **Untouched:** DB `egret`, every `egret-dev-*` container, `egret-w7f-postgres`, ports 5173, 5000, 8080. No
+  product code changed. (`w7f-rustfs`, running at the start, was gone by the end; this run never addressed it.)
