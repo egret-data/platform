@@ -1734,21 +1734,46 @@ fn walk_task(
             // drop). `namespaceFiles` and `inputFiles` run in the prepare claim
             // (spec §5.1), so neither is refused. Task 7 removes each remaining
             // refusal when its property runs.
-            for (property, present) in [
-                ("outputFiles", w.output_files.is_some()),
-                ("cache", w.cache.is_some()),
-            ] {
-                if present {
-                    report.errors.push(Finding {
-                        code: "working_directory_property_not_yet_run",
+            // `outputFiles` is collected by the finish claim (spec §5.5), and each
+            // name must be one `output_problem` accepts; a name it refuses fails the
+            // publish here, not the run.
+            if let Some(declared) = &w.output_files {
+                let names: Option<Vec<&str>> = match declared {
+                    serde_json::Value::Array(items) => items.iter().map(|v| v.as_str()).collect(),
+                    _ => None,
+                };
+                match names {
+                    None => report.errors.push(Finding {
+                        code: "working_directory_output_files_invalid",
                         message: format!(
-                            "task '{}' has type '{}', and its '{property}' is not run by egret \
-                             yet, so the flow cannot be published or started",
-                            task.id, task.r#type
+                            "task '{}': 'outputFiles' is a list of file names",
+                            task.id
                         ),
-                        path: format!("{path}.{property}"),
-                    });
+                        path: format!("{path}.outputFiles"),
+                    }),
+                    Some(names) => {
+                        for name in names {
+                            if let Some(problem) = crate::worker::commands::output_problem(name) {
+                                report.errors.push(Finding {
+                                    code: "working_directory_output_files_invalid",
+                                    message: format!("task '{}': {problem}", task.id),
+                                    path: format!("{path}.outputFiles"),
+                                });
+                            }
+                        }
+                    }
                 }
+            }
+            if w.cache.is_some() {
+                report.errors.push(Finding {
+                    code: "working_directory_property_not_yet_run",
+                    message: format!(
+                        "task '{}' has type '{}', and its 'cache' is not run by egret \
+                         yet, so the flow cannot be published or started",
+                        task.id, task.r#type
+                    ),
+                    path: format!("{path}.cache"),
+                });
             }
         }
         // (Wherever this comment says "warns", read "is refused": both
@@ -4687,8 +4712,9 @@ mod tests {
         vec![
             "id: c".into(),
             format!("type: {ty}"),
-            "outputFiles:".into(),
-            "  - out.txt".into(),
+            "cache:".into(),
+            "  patterns:".into(),
+            "    - x.txt".into(),
             "tasks:".into(),
             "  - id: inner".into(),
             "    type: core.log".into(),
@@ -4751,8 +4777,8 @@ mod tests {
                 "core.WorkingDirectory",
             ],
             body: working_directory_property_body,
-            suffix: ".outputFiles",
-            hints: &["'outputFiles'"],
+            suffix: ".cache",
+            hints: &["'cache'"],
         },
         Refused {
             code: "unsupported_loop_until_property",

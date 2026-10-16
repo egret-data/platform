@@ -663,6 +663,46 @@ async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name
     }
 }
 
+/// Plan Task 7 (spec §5.5): an `outputFiles` name the finish claim cannot
+/// collect is refused at publish, by name, at its own path. A `**` is not
+/// implemented by egret; a plain name and a file-name pattern are accepted.
+#[tokio::test]
+async fn a_working_directory_output_file_egret_cannot_collect_is_refused_at_publish() {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let bad = "id: wd-out-bad
+namespace: w9b.wd
+tasks:
+  - id: wd
+    type: io.kestra.plugin.core.flow.WorkingDirectory
+    outputFiles:
+      - \"**/x.txt\"
+    tasks:
+      - id: t
+        type: io.kestra.plugin.core.log.Log
+        message: hi
+";
+    let draft = common::draft(&repo, ws, user, bad).await;
+    let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "")
+        .await
+        .expect_err("a `**` output must not publish");
+    match err {
+        egret_core::Error::InvalidInput(m) => {
+            assert!(m.contains("(tasks.wd.outputFiles)"), "{m}");
+            assert!(m.contains("not implemented by egret"), "{m}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let good = "id: wd-out-good
+namespace: w9b.wd
+tasks:\n  - id: wd\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    outputFiles:\n      - out.txt\n      - \"*.csv\"\n    tasks:\n      - id: t\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n";
+    let draft = common::draft(&repo, ws, user, good).await;
+    egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "")
+        .await
+        .expect("plain names and file-name patterns publish");
+}
+
 /// The block is kept in the model, verbatim: serialize -> parse -> equal,
 /// and the parse of the kept value is the parse of the written one.
 #[tokio::test]

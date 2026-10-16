@@ -64,6 +64,7 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result};
+use serde_json::Value;
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
@@ -83,6 +84,7 @@ use crate::executor::{
 };
 #[cfg(any(test, feature = "test-util"))]
 use crate::storage::prefetch::Prefetch;
+use crate::storage::StoredFile;
 
 /// Keeps the `sqlx::Error` as the source rather than flattening it to text:
 /// the Display is unchanged, and `scheduler::fire` downcasts it to tell a
@@ -274,7 +276,7 @@ impl Claimed {
         // A child of a WorkingDirectory block starts on its block's snapshot;
         // one that cannot is failed by name, never started on an empty
         // directory (spec §5.2).
-        let (working_dir, budget) = match super::working_dir::carry_of(self) {
+        let (working_dir, budget) = match super::working_dir::carry_of(self, &flow, &render) {
             Ok(carry) => (carry, budget),
             Err(message) => (None, Budget::Refused(message)),
         };
@@ -1400,6 +1402,19 @@ async fn run_one(
             c.execution_id
         )));
     }
+    // A child's declared outputs are checked against the directory it left,
+    // before its outcome is recorded: a problem fails the child by name, and
+    // the block stops there (spec §5.3). A child that copied nothing out is
+    // not checked; it has already failed for that, or it has no block.
+    let outcome = match (outcome, &input.working_dir) {
+        (Ok(found), Some(wd)) if !wd.outputs.is_empty() => {
+            match super::working_dir::check_child_outputs(wd).await {
+                Ok(()) => Ok(found),
+                Err(problem) => Ok(Outcome::failed_with(problem)),
+            }
+        }
+        (other, _) => other,
+    };
     if let Ok(Outcome {
         state: RunState::Failed,
         message: Some(message),
@@ -1547,7 +1562,7 @@ async fn run_block_claim(
         };
         apply_block_claim_with(at, &renewed, &done).await
     })?;
-    if done == BlockDone::Finished {
+    if matches!(done, BlockDone::Finished { .. }) {
         working_dir::discard(c).await;
     }
     Ok(Committed::Yes)
@@ -1581,33 +1596,44 @@ async fn apply_block_claim_on(
             format!("negative run_ix {}", claimed.run_ix),
         ))
     })?;
-    let (message, snapshot) = match done {
-        BlockDone::Prepared { snapshot } => (None, Some(snapshot.as_str())),
-        BlockDone::Finished => (None, None),
-        BlockDone::Failed(reason) => (Some(reason.as_str()), None),
+    let (message, snapshot, outputs, files): (
+        Option<&str>,
+        Option<&str>,
+        Option<Value>,
+        &[StoredFile],
+    ) = match done {
+        BlockDone::Prepared { snapshot } => (None, Some(snapshot.as_str()), None, &[]),
+        BlockDone::Finished { outputs, files } => (None, None, outputs.clone(), files),
+        BlockDone::Failed(reason) => (Some(reason.as_str()), None, None, &[]),
     };
-    // The fence, on the block's own row, as an outcome's write is.
+    // The fence, on the block's own row, as an outcome's write is. The block's
+    // `outputs` are written here too, for the finish claim (spec §5.5).
     let hit = sqlx::query(
         "UPDATE workflow.task_runs \
-            SET message = $1, working_dir_snapshot = COALESCE($2, working_dir_snapshot) \
+            SET message = $1, working_dir_snapshot = COALESCE($2, working_dir_snapshot), \
+                outputs = COALESCE($5, outputs) \
           WHERE id = $3 AND claimed_at = $4",
     )
     .bind(message)
     .bind(snapshot)
     .bind(claimed.id)
     .bind(claimed.claimed_at)
+    .bind(outputs.as_ref())
     .execute(&mut *conn)
     .await
     .map_err(db_err)?;
     if hit.rows_affected() == 0 {
         return Err(worker_err(WorkerError::LeaseLost(claimed.id)));
     }
+    // The block's stored files are indexed under the block run, behind the
+    // same fence (spec §4.3), as an outcome's files are.
+    crate::storage::index_task_files(conn, claimed.workspace_id, claimed.id, files).await?;
     let cmd = match done {
         BlockDone::Failed(_) => Command::SetRunState {
             run,
             state: RunState::Failed,
         },
-        BlockDone::Prepared { .. } | BlockDone::Finished => {
+        BlockDone::Prepared { .. } | BlockDone::Finished { .. } => {
             Command::CompleteWorkingDirectoryClaim { run }
         }
     };

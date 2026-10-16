@@ -188,6 +188,10 @@ pub struct WorkingDirCarry {
     pub carry_to: String,
     /// `max_task_bytes`: an archive over it fails the child and names the cap.
     pub cap: u64,
+    /// The block's rendered `outputFiles` names (spec §2.2). A child's copy-out
+    /// is checked against them before the child's outcome is recorded; empty
+    /// when the block declares none.
+    pub outputs: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

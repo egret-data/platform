@@ -17,17 +17,21 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use super::claim::Claimed;
-use super::commands::{relative_problem, StoredInput, WORKING_DIR};
+use super::commands::{
+    output_problem, relative_problem, CollectTo, Naming, StoredInput, WORKING_DIR,
+};
 use super::handlers::script::{STORAGE_SCHEME, WORKING_DIR_VAR};
 use super::WorkingDirCarry;
 use crate::models::{Flow, Task, TaskKind, WorkingDirectory};
 use crate::runners::files::is_namespace_file_uri;
 use crate::runners::{render_str, RenderContext};
+use crate::storage::collect::collect_one;
+use crate::storage::nsfiles::glob::wildcard_match;
 use crate::storage::nsfiles::stage::{
     check_task_bytes, merge, resolve_ns_file, stage, NamespaceFilesSpec,
 };
-use crate::storage::transfer::{write_tar, TarSource};
-use crate::storage::FileStore;
+use crate::storage::transfer::{write_tar, EntryKind, TarReader, TarSource};
+use crate::storage::{FileStore, StoredFile};
 
 /// The object a block's prepare claim writes: the directory the first child
 /// starts from. Its name is under the block's prefix, so the finish claim's
@@ -35,13 +39,17 @@ use crate::storage::FileStore;
 const PREPARE_OBJECT: &str = "prepare.tar";
 
 /// What a block's own claim produced, for `claim::run_block_claim` to commit.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BlockDone {
     /// The prepare claim is done; `snapshot` is the pointer the first child
     /// starts from.
     Prepared { snapshot: String },
-    /// The finish claim is done. Its work (`outputFiles`, cache) is Task 7's.
-    Finished,
+    /// The finish claim is done: the block's `outputs` (the `outputFiles` map,
+    /// when any is declared) and the files it stored, to index under the block.
+    Finished {
+        outputs: Option<Value>,
+        files: Vec<StoredFile>,
+    },
     /// The claim could not be completed; the block fails with this reason.
     Failed(String),
 }
@@ -49,7 +57,11 @@ pub(crate) enum BlockDone {
 /// The carry of a child of a `WorkingDirectory` block, or `Err` with the reason
 /// it cannot start: a block that has run no prepare claim has no snapshot, and
 /// a child on an empty directory would be a silent wrong answer (spec §5.2).
-pub(crate) fn carry_of(c: &Claimed) -> Result<Option<WorkingDirCarry>, String> {
+pub(crate) fn carry_of(
+    c: &Claimed,
+    flow: &Flow,
+    render: &RenderContext,
+) -> Result<Option<WorkingDirCarry>, String> {
     let Some(block) = c.block_id else {
         return Ok(None);
     };
@@ -66,6 +78,14 @@ pub(crate) fn carry_of(c: &Claimed) -> Result<Option<WorkingDirCarry>, String> {
             c.task_id
         ));
     };
+    // The block's declared outputs, rendered as the block does: a child checks
+    // its own copy-out against them (spec §5.3, `check_child_outputs`).
+    let Some(parent) = parent_block_of(flow, &c.task_id) else {
+        return Err(format!(
+            "corrupt: {} is a child of a WorkingDirectory that its flow does not declare",
+            c.task_id
+        ));
+    };
     Ok(Some(WorkingDirCarry {
         start_from,
         carry_to: store.working_dir_uri(
@@ -75,6 +95,7 @@ pub(crate) fn carry_of(c: &Claimed) -> Result<Option<WorkingDirCarry>, String> {
             &format!("{}.tar", c.id),
         ),
         cap: store.caps.max_task_bytes,
+        outputs: rendered_outputs(render, parent)?,
     }))
 }
 
@@ -94,7 +115,10 @@ pub(crate) async fn run_claim(pool: &PgPool, c: &Claimed, render: &RenderContext
             Ok(snapshot) => BlockDone::Prepared { snapshot },
             Err(reason) => BlockDone::Failed(reason),
         },
-        Some("FINISHING") => BlockDone::Finished,
+        Some("FINISHING") => match finish(pool, &store, c, render).await {
+            Ok((outputs, files)) => BlockDone::Finished { outputs, files },
+            Err(reason) => BlockDone::Failed(reason),
+        },
         other => BlockDone::Failed(format!(
             "the WorkingDirectory {} was claimed in {other:?}, which is not a phase it runs",
             c.task_id
@@ -342,6 +366,251 @@ async fn write_archive(
     }
 }
 
+/// The `WorkingDirectory` whose `tasks` hold the child `child`, found in the
+/// frozen flow. `None` when no block of the flow holds it.
+fn parent_block_of<'a>(flow: &'a Flow, child: &str) -> Option<&'a WorkingDirectory> {
+    fn walk<'a>(task: &'a Task, child: &str) -> Option<&'a WorkingDirectory> {
+        if let TaskKind::WorkingDirectory(w) = &task.kind {
+            if w.tasks.iter().any(|t| t.id == child) {
+                return Some(w);
+            }
+        }
+        task.children()
+            .into_iter()
+            .chain(task.error_children())
+            .find_map(|c| walk(c, child))
+    }
+    flow.tasks.iter().find_map(|t| walk(t, child))
+}
+
+/// The block's `outputFiles`, rendered and checked (spec §2.2): a list of names
+/// whose wildcards are the ones [`output_problem`] accepts. Empty when the
+/// block declares none.
+fn rendered_outputs(
+    render: &RenderContext,
+    block: &WorkingDirectory,
+) -> Result<Vec<String>, String> {
+    let Some(declared) = &block.output_files else {
+        return Ok(Vec::new());
+    };
+    let Value::Array(items) = declared else {
+        return Err("outputFiles is not a list of names".to_string());
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Value::String(raw) = item else {
+            return Err("outputFiles: a name is not a string".to_string());
+        };
+        let name = render_with(render, "outputFiles", raw)?;
+        if let Some(problem) = output_problem(&name) {
+            return Err(format!("outputFiles: {problem}"));
+        }
+        out.push(name);
+    }
+    Ok(out)
+}
+
+/// How a declared name meets an archive entry's name: `Some(true)` when a
+/// literal name is that entry, `Some(false)` when only a `*`/`?` pattern
+/// matches it, `None` when neither does. A pattern matches within the one
+/// directory the declared name gives (spec §2.2, as a script task's does).
+fn declared_hit(globs: &[String], name: &str) -> Option<bool> {
+    if globs
+        .iter()
+        .any(|g| !crate::worker::commands::is_pattern(g) && g == name)
+    {
+        return Some(true);
+    }
+    let matches_pattern = globs.iter().any(|g| {
+        if !crate::worker::commands::is_pattern(g) {
+            return false;
+        }
+        let (gdir, gfile) = g.rsplit_once('/').unwrap_or(("", g));
+        let (ndir, nfile) = name.rsplit_once('/').unwrap_or(("", name));
+        gdir == ndir && wildcard_match(gfile, nfile)
+    });
+    matches_pattern.then_some(false)
+}
+
+/// The refusal for a declared name that names a directory or a non-file,
+/// which cannot be collected. A pattern never gets one: it skips such entries.
+fn not_collectable(name: &str, kind: &EntryKind) -> String {
+    match kind {
+        EntryKind::Directory => format!(
+            "`outputFiles` declares {name:?}, which is a DIRECTORY; name the files inside it \
+             instead, or write them to the output directory (`outputDirectory: true`)"
+        ),
+        _ => format!("`outputFiles` declares {name:?}, which is not a regular file"),
+    }
+}
+
+/// A child's copy-out checked against the block's declared outputs, before the
+/// child's outcome is recorded (spec §5.3): a declared name that is a directory
+/// or a non-file, or a file over a cap, fails the child by name. A copy-out
+/// that left no object is not checked here; the child already failed for it.
+pub(crate) async fn check_child_outputs(wd: &WorkingDirCarry) -> Result<(), String> {
+    let Some(store) = crate::storage::current() else {
+        return Ok(());
+    };
+    if !matches!(store.store.head(&wd.carry_to).await, Ok(Some(_))) {
+        return Ok(());
+    }
+    let mut src = store
+        .store
+        .get_stream(&wd.carry_to)
+        .await
+        .map_err(|e| format!("the directory left by the child could not be read: {e}"))?;
+    let mut reader = TarReader::new(&mut src);
+    let mut total: u64 = 0;
+    while let Some(entry) = reader
+        .next_entry()
+        .await
+        .map_err(|e| format!("the directory left by the child could not be read: {e}"))?
+    {
+        // A directory's entry is named with its trailing `/`, which a declared
+        // name never has.
+        let bare = entry.name.trim_end_matches('/');
+        let Some(literal) = declared_hit(&wd.outputs, bare) else {
+            continue;
+        };
+        match entry.kind {
+            EntryKind::File => {
+                if entry.size > store.caps.max_file_bytes {
+                    return Err(format!(
+                        "the output file {:?} is {} bytes, over the {} one file may be \
+                         (workflow.storage.max_file_bytes)",
+                        entry.name, entry.size, store.caps.max_file_bytes
+                    ));
+                }
+                total = total.saturating_add(entry.size);
+                if total > store.caps.max_task_bytes {
+                    return Err(format!(
+                        "the output files of this WorkingDirectory come to {total} bytes with \
+                         {:?}, over the {} one task run may store (workflow.storage.max_task_bytes)",
+                        entry.name, store.caps.max_task_bytes
+                    ));
+                }
+            }
+            EntryKind::Directory if !literal => {}
+            kind => {
+                if literal {
+                    return Err(not_collectable(bare, &kind));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The finish claim's `outputFiles` (spec §5.5): every file of the last
+/// snapshot that a declared name matches is collected into internal storage
+/// under the block run's own task prefix, and the block's outputs map each
+/// name to its `kestra://` URI. `Ok((None, []))` when no output is declared.
+async fn finish(
+    pool: &PgPool,
+    store: &FileStore,
+    c: &Claimed,
+    render: &RenderContext,
+) -> Result<(Option<Value>, Vec<StoredFile>), String> {
+    let flow = crate::spec::parse(&c.source).map_err(|e| {
+        format!(
+            "the WorkingDirectory {} cannot be finished: its flow does not parse: {}",
+            c.task_id, e.message
+        )
+    })?;
+    let Some(block) = block_of(&flow, &c.task_id) else {
+        return Err(format!(
+            "the WorkingDirectory {} is not a block of its flow",
+            c.task_id
+        ));
+    };
+    let globs = rendered_outputs(render, block)?;
+    if globs.is_empty() {
+        return Ok((None, Vec::new()));
+    }
+    let pointer: Option<String> =
+        sqlx::query_scalar("SELECT working_dir_snapshot FROM workflow.task_runs WHERE id = $1")
+            .bind(c.id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                format!(
+                    "the WorkingDirectory {} could not read its snapshot: {e}",
+                    c.task_id
+                )
+            })?;
+    let Some(pointer) = pointer else {
+        return Err(format!(
+            "corrupt: the WorkingDirectory {} has no snapshot to collect its outputs from",
+            c.task_id
+        ));
+    };
+    let task_prefix = crate::storage::uri::task_prefix(
+        &flow.namespace,
+        &flow.id,
+        c.execution_id,
+        &c.task_id,
+        c.id,
+    )
+    .map_err(|e| format!("the WorkingDirectory {}: {e}", c.task_id))?;
+    let to = CollectTo {
+        workspace: c.workspace_id,
+        task_prefix,
+        naming: Naming::KestraOutputName,
+    };
+    let collected = collect_outputs(store, &pointer, &to, &globs).await?;
+    let map: serde_json::Map<String, Value> = collected
+        .iter()
+        .map(|(name, file)| (name.clone(), Value::String(file.uri.clone())))
+        .collect();
+    let outputs = serde_json::json!({ "outputFiles": map });
+    Ok((Some(outputs), collected.into_values().collect()))
+}
+
+/// Collect the files of the archive at `uri` that `globs` name (see
+/// [`declared_hit`]), in archive order, into internal storage under `to`. A
+/// directory or non-file named literally fails the block, naming it.
+async fn collect_outputs(
+    store: &FileStore,
+    uri: &str,
+    to: &CollectTo,
+    globs: &[String],
+) -> Result<BTreeMap<String, StoredFile>, String> {
+    let unread = |e: &dyn std::fmt::Display| format!("the snapshot {uri} could not be read: {e}");
+    let mut src = store.store.get_stream(uri).await.map_err(|e| unread(&e))?;
+    let mut reader = TarReader::new(&mut src);
+    let mut out = BTreeMap::new();
+    let mut total: u64 = 0;
+    while let Some(entry) = reader.next_entry().await.map_err(|e| unread(&e))? {
+        let bare = entry.name.trim_end_matches('/');
+        let Some(literal) = declared_hit(globs, bare) else {
+            continue;
+        };
+        match entry.kind {
+            EntryKind::File => {
+                let file = collect_one(
+                    store,
+                    to,
+                    &entry.name,
+                    &mut reader.body(),
+                    entry.size,
+                    &mut total,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                out.insert(entry.name.clone(), file);
+            }
+            EntryKind::Directory if !literal => {}
+            kind => {
+                if literal {
+                    return Err(not_collectable(bare, &kind));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Remove every snapshot of block run `c.id`, after its finish claim has
 /// committed. Best effort: an object left behind is the pruner's to sweep
 /// (spec §7.2), and the block is already finished.
@@ -365,16 +634,74 @@ mod tests {
     use super::*;
     use crate::storage::nsfiles::stage::testing::{self as ns};
     use crate::storage::transfer::TarReader;
-    use crate::worker::{start_execution, tick_with, Handlers, WorkerTiming};
+    use crate::worker::{
+        start_execution, tick_with, Handlers, Outcome, Registry, TaskInput, WorkerTiming,
+    };
     use serde_json::json;
+    use std::sync::Mutex;
     use tokio::io::AsyncReadExt;
 
-    /// One flow of two `Return` children, with `block_props` written under
-    /// the block (indented to its `tasks:` level).
-    fn block_flow(namespace: &str, block_props: &str) -> String {
-        format!(
-            "id: wd-props\nnamespace: {namespace}\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n{block_props}    tasks:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n      - id: b\n        type: io.kestra.plugin.core.debug.Return\n        format: b\n"
-        )
+    /// The real handlers, and a record of the snapshot each child starts from,
+    /// read while the child runs. The finish claim discards every snapshot once
+    /// the block ends, so a test cannot read the directory afterwards.
+    struct CaptureStart {
+        inner: Handlers,
+    }
+
+    /// `(execution, archive)` of each child that started on a snapshot, for
+    /// every registry of this binary. A tick runs other tests' children with its
+    /// own registry, so the record cannot live in one registry.
+    static CHILD_STARTS: Mutex<Vec<(uuid::Uuid, Vec<u8>)>> = Mutex::new(Vec::new());
+
+    #[async_trait::async_trait]
+    impl Registry for CaptureStart {
+        async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+            if let (Some(wd), Some(store)) = (&task.working_dir, crate::storage::current()) {
+                if let Ok(bytes) = store.store.get(&wd.start_from).await {
+                    CHILD_STARTS
+                        .lock()
+                        .expect("the lock")
+                        .push((task.execution_id, bytes));
+                }
+            }
+            self.inner.run(task).await
+        }
+        async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+            self.inner.cancel(task).await
+        }
+        async fn release(&self, task: &TaskInput) -> egret_core::Result<()> {
+            self.inner.release(task).await
+        }
+        fn log_sink(
+            &self,
+        ) -> (
+            std::sync::Arc<dyn crate::worker::handlers::LogSink>,
+            crate::logs::LogLimits,
+        ) {
+            self.inner.log_sink()
+        }
+        fn orphan_sweep(&self) -> Option<std::sync::Arc<dyn crate::worker::commands::OrphanSweep>> {
+            self.inner.orphan_sweep()
+        }
+    }
+
+    impl CaptureStart {
+        fn new(fs: std::sync::Arc<crate::storage::FileStore>) -> Self {
+            Self {
+                inner: Handlers::with_core_tasks(Some(fs)),
+            }
+        }
+
+        /// The archive the first child of execution `ex` started from.
+        fn first_start(&self, ex: uuid::Uuid) -> Vec<u8> {
+            CHILD_STARTS
+                .lock()
+                .expect("the lock")
+                .iter()
+                .find(|(e, _)| *e == ex)
+                .map(|(_, bytes)| bytes.clone())
+                .expect("a child of this execution started")
+        }
     }
 
     /// The task types this test binary serves: the Docker set a deployment with
@@ -385,22 +712,17 @@ mod tests {
         crate::runtime::install_served_for_tests(crate::runtime::served_for(&cfg));
     }
 
-    /// The block's `working_dir_snapshot`, once it is set.
-    async fn snapshot_of(pool: &PgPool, ex: uuid::Uuid) -> Option<String> {
-        sqlx::query_scalar(
-            "SELECT working_dir_snapshot FROM workflow.task_runs \
-              WHERE execution_id = $1 AND task_id = 'block'",
+    /// One flow of two `Return` children, with `block_props` written under
+    /// the block (indented to its `tasks:` level).
+    fn block_flow(namespace: &str, block_props: &str) -> String {
+        format!(
+            "id: wd-props\nnamespace: {namespace}\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n{block_props}    tasks:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n      - id: b\n        type: io.kestra.plugin.core.debug.Return\n        format: b\n"
         )
-        .bind(ex)
-        .fetch_one(pool)
-        .await
-        .expect("the block's run")
     }
 
-    /// Every regular file of the archive at `uri`, as `name -> contents`.
-    async fn files_in(fs: &crate::storage::FileStore, uri: &str) -> BTreeMap<String, String> {
-        let bytes = fs.store.get(uri).await.expect("the snapshot object");
-        let mut src: &[u8] = &bytes;
+    /// Every regular file of the archive `bytes`, as `name -> contents`.
+    async fn files_in(bytes: &[u8]) -> BTreeMap<String, String> {
+        let mut src: &[u8] = bytes;
         let mut reader = TarReader::new(&mut src);
         let mut out = BTreeMap::new();
         while let Some(entry) = reader.next_entry().await.expect("a header") {
@@ -417,30 +739,8 @@ mod tests {
         out
     }
 
-    /// Tick until this execution's block is `PREPARED`. The lib tests share one
-    /// database, so a tick may claim another test's run; the loop answers for
-    /// this block alone.
-    async fn tick_until_prepared(pool: &PgPool, reg: &Handlers, ex: uuid::Uuid) {
-        for _ in 0..60 {
-            tick_with(pool, 8, reg, WorkerTiming::default())
-                .await
-                .expect("a tick");
-            let phase: Option<String> = sqlx::query_scalar(
-                "SELECT working_dir FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'block'",
-            )
-            .bind(ex)
-            .fetch_one(pool)
-            .await
-            .expect("the block");
-            if phase.as_deref() == Some("PREPARED") {
-                return;
-            }
-        }
-        panic!("the block was not prepared in 60 ticks");
-    }
-
-    /// Tick until the block is terminal.
-    async fn settle(pool: &PgPool, reg: &Handlers, ex: uuid::Uuid) {
+    /// Tick until the block is terminal, or fail after `rounds` ticks.
+    async fn settle(pool: &PgPool, reg: &dyn Registry, ex: uuid::Uuid) {
         for _ in 0..60 {
             tick_with(pool, 8, reg, WorkerTiming::default())
                 .await
@@ -459,9 +759,20 @@ mod tests {
         panic!("the block did not settle");
     }
 
+    /// `(state, message)` of the block.
+    async fn block_state(pool: &PgPool, ex: uuid::Uuid) -> (String, Option<String>) {
+        sqlx::query_as(
+            "SELECT state, message FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'block'",
+        )
+        .bind(ex)
+        .fetch_one(pool)
+        .await
+        .expect("the block")
+    }
+
     /// Spec §2.2 (`namespaceFiles` loads before the first child): the file
     /// the flow's own namespace holds is in the directory the first child
-    /// starts from, and publish no longer refuses the property by name.
+    /// starts from, and publish no longer refuses the property.
     #[tokio::test]
     async fn namespace_files_are_in_the_directory_the_first_child_starts_from() {
         install_served();
@@ -486,17 +797,13 @@ mod tests {
             "namespaceFiles publishes once it runs: {refused:?}"
         );
 
-        let reg = Handlers::with_core_tasks(Some(fs.clone()));
+        let reg = CaptureStart::new(fs.clone());
         let ex = start_execution(&pool, ws, None, &src, json!({}))
             .await
             .expect("start");
-        // The prepare claim. The finish claim discards the snapshot after the
-        // block ends, so the directory is read while it is PREPARED.
-        tick_until_prepared(&pool, &reg, ex).await;
-        let uri = snapshot_of(&pool, ex)
-            .await
-            .expect("the prepare claim's pointer");
-        let files = files_in(&fs, &uri).await;
+        settle(&pool, &reg, ex).await;
+
+        let files = files_in(&reg.first_start(ex)).await;
         assert_eq!(
             files.get("data/ref.txt").map(String::as_str),
             Some("from-namespace"),
@@ -506,7 +813,6 @@ mod tests {
             !files.contains_key("other.txt"),
             "the exclusion is the block's include: {files:?}"
         );
-        settle(&pool, &reg, ex).await;
     }
 
     /// Spec §2.2 (the W9b ruling, which holds here): `inputFiles` load after
@@ -536,25 +842,13 @@ mod tests {
             "inputFiles publishes once it runs: {refused:?}"
         );
 
-        let reg = Handlers::with_core_tasks(Some(fs.clone()));
+        let reg = CaptureStart::new(fs.clone());
         let ex = start_execution(&pool, ws, None, &src, json!({}))
             .await
             .expect("start");
-        tick_until_prepared(&pool, &reg, ex).await;
-        let uri = match snapshot_of(&pool, ex).await {
-            Some(uri) => uri,
-            None => {
-                let row: (String, Option<String>) = sqlx::query_as(
-                    "SELECT state, message FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'block'",
-                )
-                .bind(ex)
-                .fetch_one(&pool)
-                .await
-                .expect("the block");
-                panic!("the prepare claim wrote no pointer: block {row:?}");
-            }
-        };
-        let files = files_in(&fs, &uri).await;
+        settle(&pool, &reg, ex).await;
+
+        let files = files_in(&reg.first_start(ex)).await;
         assert_eq!(
             files.get("shared.txt").map(String::as_str),
             Some("from-input"),
@@ -570,6 +864,82 @@ mod tests {
             Some("from-wd-props"),
             "the contents render with the flow's context: {files:?}"
         );
+    }
+
+    /// The block's `outputs` column, as the finish claim wrote it.
+    async fn outputs_of(pool: &PgPool, ex: uuid::Uuid) -> Option<Value> {
+        sqlx::query_scalar(
+            "SELECT outputs FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'block'",
+        )
+        .bind(ex)
+        .fetch_one(pool)
+        .await
+        .expect("the block's run")
+    }
+
+    /// Spec §5.5, plan Task 7 Step 1: `outputFiles` is collected from the
+    /// directory after the last child, and the block's outputs carry each
+    /// matched file under its name, as a `kestra://` URI whose bytes are the
+    /// file's. A literal name and a `*` pattern both match; a file that
+    /// matches neither is not collected.
+    #[tokio::test]
+    async fn output_files_are_collected_from_the_directory_when_the_block_finishes() {
+        install_served();
+        let pool = ns::pool().await.expect("the test database");
+        let fs = crate::storage::install_mem_for_tests();
+        let ws = ns::workspace(&pool).await;
+        let src = block_flow(
+            "w11.out",
+            "    inputFiles:\n      out.txt: hi\n      a.csv: \"1\"\n      b.csv: \"2\"\n      other.txt: x\n    outputFiles:\n      - out.txt\n      - \"*.csv\"\n",
+        );
+        let reg = CaptureStart::new(fs.clone());
+        let ex = start_execution(&pool, ws, None, &src, json!({}))
+            .await
+            .expect("start");
         settle(&pool, &reg, ex).await;
+
+        let (state, _) = block_state(&pool, ex).await;
+        assert_eq!(state, "SUCCESS");
+        let outputs = outputs_of(&pool, ex).await.expect("the block's outputs");
+        let collected = outputs["outputFiles"]
+            .as_object()
+            .expect("a map of outputFiles");
+        let names: Vec<&str> = collected.keys().map(String::as_str).collect();
+        assert_eq!(names, ["a.csv", "b.csv", "out.txt"], "{outputs}");
+        for (name, want) in [("out.txt", "hi"), ("a.csv", "1"), ("b.csv", "2")] {
+            let uri = collected[name].as_str().expect("a URI");
+            assert!(uri.starts_with("kestra:///"), "{uri}");
+            let object = fs.object_uri(ws, uri).expect("the object of the URI");
+            let bytes = fs.store.get(&object).await.expect("the collected bytes");
+            assert_eq!(bytes, want.as_bytes(), "{name}");
+        }
+    }
+
+    /// Spec §5.3 and §5.5: a declared output that is a directory cannot be
+    /// collected, so the finish claim fails the block, naming it. The block
+    /// is `FAILED` with the reason, not `SUCCESS` with the directory missing.
+    #[tokio::test]
+    async fn a_declared_output_that_is_a_directory_fails_the_block_at_finish() {
+        install_served();
+        let pool = ns::pool().await.expect("the test database");
+        let fs = crate::storage::install_mem_for_tests();
+        let ws = ns::workspace(&pool).await;
+        let src = block_flow(
+            "w11.outdir",
+            "    inputFiles:\n      sub/x.txt: x\n    outputFiles:\n      - sub\n",
+        );
+        let reg = CaptureStart::new(fs.clone());
+        let ex = start_execution(&pool, ws, None, &src, json!({}))
+            .await
+            .expect("start");
+        settle(&pool, &reg, ex).await;
+
+        let (state, message) = block_state(&pool, ex).await;
+        assert_eq!(state, "FAILED");
+        let message = message.expect("the reason");
+        assert!(
+            message.contains("sub") && message.contains("DIRECTORY"),
+            "{message}"
+        );
     }
 }

@@ -3966,8 +3966,8 @@ mod tests {
             probes.push(("unsupported_allow_failure_retry", with_retry));
         }
         // Plan Task 3: a `WorkingDirectory` plans and is refused only for a
-        // property its claims do not run yet (`outputFiles`, `cache`), by name,
-        // until Task 7 removes each.
+        // property its claims do not run yet (`cache`), by name, until Task 7
+        // removes it.
         for ty in [
             "io.kestra.plugin.core.flow.WorkingDirectory",
             "core.workingdirectory",
@@ -3976,7 +3976,7 @@ mod tests {
             probes.push((
                 "working_directory_property_not_yet_run",
                 format!(
-                    "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n    outputFiles:\n      - out.txt\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
+                    "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n    cache:\n      patterns: [x.txt]\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
                 ),
             ));
         }

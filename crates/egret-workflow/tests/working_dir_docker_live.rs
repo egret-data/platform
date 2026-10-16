@@ -247,3 +247,138 @@ async fn the_snapshot_cost_of_a_hundred_megabyte_directory_is_measured(pool: PgP
         );
     }
 }
+
+/// A block with `props` (indented four spaces, as its own keys) and `children`.
+fn block_with(props: &str, children: &[String]) -> String {
+    format!(
+        "id: wd-live\nnamespace: w6.live\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n{props}    tasks:\n{}",
+        children.concat()
+    )
+}
+
+/// The `outputs` column of the block, as the finish claim wrote it.
+async fn block_outputs(pool: &PgPool, ex: uuid::Uuid) -> Option<serde_json::Value> {
+    sqlx::query_scalar(
+        "SELECT outputs FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'block'",
+    )
+    .bind(ex)
+    .fetch_one(pool)
+    .await
+    .expect("the block's run")
+}
+
+/// The bytes of the file a block output names.
+async fn collected_bytes(ws: uuid::Uuid, uri: &str) -> Vec<u8> {
+    let fs = egret_workflow::storage::install_mem_for_tests();
+    let object = fs.object_uri(ws, uri).expect("the object of the URI");
+    fs.store.get(&object).await.expect("the collected bytes")
+}
+
+/// **`outputFiles` is collected from the directory the last child left** (spec
+/// §5.5): the file a child wrote, and a `*` match, are the block's outputs with
+/// the bytes the child wrote.
+#[sqlx::test(migrations = "../../migrations")]
+async fn output_files_are_collected_after_the_last_child_through_docker(pool: PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    require_docker();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    common::enable_feature(&db, ws, "workflow_containers").await;
+    let reg = registry(&pool);
+
+    let source = block_with(
+        "    outputFiles:\n      - out.txt\n      - \"*.log\"\n",
+        &[
+            child("writer", &["echo hello > out.txt", "echo one > a.log"]),
+            child("reader", &["test \"$(cat out.txt)\" = hello"]),
+        ],
+    );
+    let ex =
+        egret_workflow::worker::start_execution(&pool, ws, None, &source, serde_json::json!({}))
+            .await
+            .expect("start");
+    settle(&pool, &reg, ex, 200).await;
+
+    assert_eq!(state_of(&pool, ex, "block").await.0, "SUCCESS");
+    let outputs = block_outputs(&pool, ex).await.expect("the block's outputs");
+    let files = outputs["outputFiles"].as_object().expect("a map");
+    assert_eq!(files.len(), 2, "{outputs}");
+    let out = files["out.txt"].as_str().expect("a URI");
+    assert_eq!(collected_bytes(ws, out).await, b"hello\n");
+    let log = files["a.log"].as_str().expect("a URI");
+    assert_eq!(collected_bytes(ws, log).await, b"one\n");
+}
+
+/// **A failed child still leaves its outputs** (V2, measured on the image): the
+/// child writes `out.txt` and fails; the block stops, and its `outputFiles` are
+/// collected from the directory the failed child left.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_failed_child_still_leaves_its_output_files(pool: PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    require_docker();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    common::enable_feature(&db, ws, "workflow_containers").await;
+    let reg = registry(&pool);
+
+    let source = block_with(
+        "    outputFiles:\n      - out.txt\n",
+        &[
+            child("failing", &["echo kept > out.txt", "exit 1"]),
+            child("after", &["echo never > after.txt"]),
+        ],
+    );
+    let ex =
+        egret_workflow::worker::start_execution(&pool, ws, None, &source, serde_json::json!({}))
+            .await
+            .expect("start");
+    settle(&pool, &reg, ex, 200).await;
+
+    assert_eq!(state_of(&pool, ex, "failing").await.0, "FAILED");
+    assert_eq!(state_of(&pool, ex, "block").await.0, "FAILED");
+    let outputs = block_outputs(&pool, ex).await.expect("the block's outputs");
+    let uri = outputs["outputFiles"]["out.txt"].as_str().expect("a URI");
+    assert_eq!(collected_bytes(ws, uri).await, b"kept\n");
+}
+
+/// **A declared output that is a directory fails the child that left it, by
+/// name** (spec §5.3): the block stops, and the next child gets no run.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_declared_output_that_is_a_directory_fails_the_child_by_name(pool: PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    require_docker();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    common::enable_feature(&db, ws, "workflow_containers").await;
+    let reg = registry(&pool);
+
+    let source = block_with(
+        "    outputFiles:\n      - sub\n",
+        &[
+            child("maker", &["mkdir -p sub && echo x > sub/x.txt"]),
+            child("after", &["echo never > after.txt"]),
+        ],
+    );
+    let ex =
+        egret_workflow::worker::start_execution(&pool, ws, None, &source, serde_json::json!({}))
+            .await
+            .expect("start");
+    settle(&pool, &reg, ex, 200).await;
+
+    let (state, message) = state_of(&pool, ex, "maker").await;
+    assert_eq!(state, "FAILED");
+    let message = message.expect("the reason");
+    assert!(
+        message.contains("sub") && message.contains("DIRECTORY"),
+        "{message}"
+    );
+    assert_eq!(state_of(&pool, ex, "block").await.0, "FAILED");
+    let runs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'after'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("count");
+    assert_eq!(runs, 0, "the sibling after the failed child gets no run");
+}

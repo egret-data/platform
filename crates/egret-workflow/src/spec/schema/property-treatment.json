@@ -663,7 +663,7 @@
       "logLevel": "ignored",
       "logToFile": "ignored",
       "namespaceFiles": "honoured",
-      "outputFiles": "refused",
+      "outputFiles": "honoured",
       "policyRefs": "ignored",
       "retry": "honoured",
       "runIf": "honoured",
