@@ -2915,7 +2915,7 @@ mod tests {
     // ----------------------------------------------------------------------
 
     /// **`build_plan` never panics and never refuses a corpus flow it can
-    /// parse**, over all 345 of them.
+    /// parse**, over all 351 of them.
     ///
     /// A panic is not covered by the oracle's baseline, so a flow that crashes
     /// the builder fails the ratchet unconditionally; this finds that here,
@@ -2929,8 +2929,10 @@ mod tests {
         let flows = every_corpus_flow();
         assert_eq!(
             flows.len(),
-            345,
-            "the corpus is 345 flows (317 valids + 28 invalids); if that has moved, \
+            // 345 -> 351 at WorkingDirectory Task 8: the six `working-directory-real-*`
+            // flows (317 valids -> 323 valids + 28 invalids).
+            351,
+            "the corpus is 351 flows (323 valids + 28 invalids); if that has moved, \
              oracle-exec/README.md is stale"
         );
 
@@ -4499,8 +4501,10 @@ mod tests {
             })
             .collect();
         assert_eq!(
+            // 295 -> 301 and 345 -> 351 at WorkingDirectory Task 8: the six
+            // `working-directory-real-*` flows publish (200) and are in the corpus.
             (published.len(), entries.len()),
-            (295, 345),
+            (301, 351),
             "the population, derived from corpus.json's own `publish_status`. \
              If it moves, the corpus or the harvest has changed and this \
              sweep's exception table must be re-measured"
@@ -4822,8 +4826,11 @@ mod tests {
         }
 
         assert_eq!(
+            // 2050 -> 2080 executions and 4215 -> 4300 taskruns at WorkingDirectory
+            // Task 8: the six harvested flows, one execution and 17 taskruns each in
+            // each of the five rounds (6 x 5 = 30; 17 x 5 = 85).
             (docs, runs),
-            (2050, 4215),
+            (2080, 4300),
             "the captured population: 2050 execution records holding 4215 \
              taskruns. 4215 is the same number `oracle-exec/README.md` quotes \
              for the happens-before endpoint measurement, by a different route"
@@ -7245,7 +7252,8 @@ tasks:
         }
         println!("corpus flows declaring a runIf anywhere: {with_run_if}");
         assert_eq!(
-            with_run_if, 9,
+            // 9 -> 10 at WorkingDirectory Task 8: `working-directory-real-runif-false`.
+            with_run_if, 10,
             "the population this is a statement about; if it moves, re-derive \
              the `runIf:` numbers in oracle-exec/README.md in the same commit"
         );
@@ -7445,7 +7453,8 @@ tasks:
             }
         }
         assert_eq!(
-            with_run_if, 9,
+            // 9 -> 10 at WorkingDirectory Task 8: `working-directory-real-runif-false`.
+            with_run_if, 10,
             "the control: this must find the flows that declare a `runIf:` at all"
         );
         assert_eq!(
