@@ -542,26 +542,48 @@ impl PgSigningKeyStore {
     }
 }
 
+/// Serialises first-key creation across egret replicas and concurrent tasks:
+/// without it two callers that both see "no active key" each insert one.
+const SIGNING_KEY_CREATE_LOCK: i64 = 0x4547_5245_5453_4b31; // "EGRETSK1"
+
+/// The newest non-retired key, read on `conn`.
+async fn newest_active(conn: &mut sqlx::PgConnection) -> Result<Option<KeyMaterial>, IdpError> {
+    // jsonb is read as ::text to avoid needing sqlx's `json` feature.
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT kid, private_pem, public_jwk::text FROM catalog.oidc_signing_keys \
+         WHERE retired_at IS NULL ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_optional(conn)
+    .await?;
+    row.map(|(kid, private_pem, jwk_text)| {
+        let public_jwk =
+            serde_json::from_str(&jwk_text).map_err(|e| IdpError::Crypto(e.to_string()))?;
+        Ok(KeyMaterial {
+            kid,
+            private_pem,
+            public_jwk,
+        })
+    })
+    .transpose()
+}
+
 #[async_trait::async_trait]
 impl SigningKeyStore for PgSigningKeyStore {
     async fn active(&self) -> Result<KeyMaterial, IdpError> {
-        // jsonb is read as ::text to avoid needing sqlx's `json` feature.
-        let row: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT kid, private_pem, public_jwk::text FROM catalog.oidc_signing_keys \
-             WHERE retired_at IS NULL ORDER BY created_at DESC LIMIT 1",
-        )
-        .fetch_optional(&self.db.pool)
-        .await?;
-        if let Some((kid, private_pem, jwk_text)) = row {
-            let public_jwk =
-                serde_json::from_str(&jwk_text).map_err(|e| IdpError::Crypto(e.to_string()))?;
-            return Ok(KeyMaterial {
-                kid,
-                private_pem,
-                public_jwk,
-            });
+        let mut conn = self.db.pool.acquire().await?;
+        if let Some(km) = newest_active(&mut conn).await? {
+            return Ok(km);
         }
-        // No active key — mint one and persist it.
+        // No active key — create one under an advisory lock, re-checking inside
+        // it so the loser of a race adopts the winner's key.
+        let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SIGNING_KEY_CREATE_LOCK)
+            .execute(&mut *tx)
+            .await?;
+        if let Some(km) = newest_active(&mut tx).await? {
+            return Ok(km);
+        }
         let kid = uuid::Uuid::new_v4().to_string();
         let km = generate_rsa_key(&kid)?;
         let jwk_text =
@@ -573,12 +595,17 @@ impl SigningKeyStore for PgSigningKeyStore {
         .bind(&km.kid)
         .bind(&km.private_pem)
         .bind(&jwk_text)
-        .execute(&self.db.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(km)
     }
 
     async fn all_public_jwks(&self) -> Result<Vec<serde_json::Value>, IdpError> {
+        // Never publish an empty set: an engine that reads it first would cache
+        // it and reject every delegated query until its TTL. `active()` creates
+        // and persists the key when none exists, so reuse that path.
+        self.active().await?;
         let rows: Vec<String> = sqlx::query_scalar(
             "SELECT public_jwk::text FROM catalog.oidc_signing_keys \
              WHERE retired_at IS NULL ORDER BY created_at DESC",
@@ -698,6 +725,53 @@ mod tests {
                 secret_hash: FAKE_HASH.into(),
             }))
         }
+    }
+
+    #[test]
+    fn database_url_is_exported_rather_than_read_from_dotenv() {
+        egret_test_db::assert_database_url_is_exported();
+    }
+
+    /// J-F1: a fresh deployment has no key row until the first mint, and an
+    /// engine that read the JWKS first cached an empty set.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn jwks_on_a_fresh_store_is_never_empty(pool: sqlx::PgPool) {
+        let store = PgSigningKeyStore::new(egret_metastore::Db { pool });
+        let keys = store.all_public_jwks().await.unwrap();
+        assert_eq!(keys.len(), 1, "a fresh store must publish one key");
+        let active = store.active().await.unwrap();
+        assert_eq!(keys[0]["kid"], active.kid.as_str(), "no second key");
+        assert_eq!(store.all_public_jwks().await.unwrap().len(), 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn concurrent_first_calls_end_with_one_active_key(pool: sqlx::PgPool) {
+        let store = PgSigningKeyStore::new(egret_metastore::Db { pool: pool.clone() });
+        let (a, b, c, d) = tokio::join!(
+            store.active(),
+            store.all_public_jwks(),
+            store.active(),
+            store.all_public_jwks()
+        );
+        let (a, c) = (a.unwrap(), c.unwrap());
+        assert_eq!(a.kid, c.kid);
+        assert_eq!(b.unwrap().len(), 1);
+        assert_eq!(d.unwrap().len(), 1);
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM catalog.oidc_signing_keys WHERE retired_at IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn jwks_endpoint_on_a_fresh_store_answers_one_key(pool: sqlx::PgPool) {
+        let mut st = state();
+        st.keys = Arc::new(PgSigningKeyStore::new(egret_metastore::Db { pool }));
+        let Json(body) = jwks(State(st)).await.unwrap();
+        assert_eq!(body["keys"].as_array().unwrap().len(), 1);
     }
 
     fn state() -> IdpState {

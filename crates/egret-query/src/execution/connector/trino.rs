@@ -771,12 +771,30 @@ async fn send_once(req: reqwest::RequestBuilder) -> Attempt {
         if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
             return Attempt::Retry(parse_retry_after(resp.headers()));
         }
-        // Per-user delegation: a 401/403 means the engine rejected THIS user's
-        // identity or denied the tables (bad/expired JWT, or a Ranger/file-ACL deny).
-        // Surface a clean Forbidden (→ HTTP 403 with a data-access message) instead of
-        // an opaque engine error, so the BI client can explain it.
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        // Per-user delegation. 403 is the engine denying an authenticated user
+        // (Ranger/file-ACL deny): a clean Forbidden. 401 is the engine failing
+        // to AUTHENTICATE egret's JWT (expired, bad signature, empty JWKS) —
+        // not an access denial, so it gets its own variant and its reason is
+        // logged. Only the engine's response body is logged, never the request.
+        if status == reqwest::StatusCode::FORBIDDEN {
             return Attempt::Done(Err(EngineError::Forbidden));
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            let www = resp
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let body = resp.text().await.unwrap_or_default();
+            let reason: String = body.chars().take(300).collect();
+            tracing::warn!(
+                %status,
+                www_authenticate = %www,
+                reason = %reason,
+                "trino rejected egret's credentials (engine authentication failed)"
+            );
+            return Attempt::Done(Err(EngineError::AuthFailed(reason)));
         }
         return Attempt::Done(Err(EngineError::Engine(format!("http {status}"))));
     }
@@ -1225,6 +1243,33 @@ mod tests {
             !enc.contains(['\r', '\n', '=', ',']),
             "no raw control byte or header-structural character may survive: {enc:?}"
         );
+    }
+
+    /// J-F2: an engine 401 is a login failure, a 403 a denial; the 401 carries
+    /// the engine's reason.
+    #[tokio::test]
+    async fn engine_401_is_auth_failed_and_403_is_forbidden() {
+        use axum::{http::StatusCode, routing::get, Router};
+        let app = Router::new()
+            .route(
+                "/u",
+                get(|| async { (StatusCode::UNAUTHORIZED, "Unable to verify JWT") }),
+            )
+            .route("/f", get(|| async { (StatusCode::FORBIDDEN, "denied") }));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let srv = tokio::spawn(async move { axum::serve(l, app).await });
+        let client = reqwest::Client::new();
+        let r401 = send_once(client.get(format!("http://{addr}/u"))).await;
+        let r403 = send_once(client.get(format!("http://{addr}/f"))).await;
+        srv.abort();
+        match r401 {
+            Attempt::Done(Err(EngineError::AuthFailed(why))) => {
+                assert!(why.contains("Unable to verify JWT"), "{why}")
+            }
+            _ => panic!("401 must be AuthFailed"),
+        }
+        assert!(matches!(r403, Attempt::Done(Err(EngineError::Forbidden))));
     }
 
     // --- offline request shape (fix round 1, Minor 2) ---

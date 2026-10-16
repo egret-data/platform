@@ -3476,6 +3476,7 @@ dependencies = [
  "chrono",
  "egret-core",
  "egret-metastore",
+ "egret-test-db",
  "jsonwebtoken",
  "rand 0.8.7",
  "rsa",
