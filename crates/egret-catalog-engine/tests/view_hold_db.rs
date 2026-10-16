@@ -114,15 +114,25 @@ type Seen = Arc<Mutex<Vec<(Instant, String)>>>;
 /// first read and before its after-commit record (Task 9 fix round 2, N6).
 type OnReach = Arc<Mutex<Option<(Uuid, Uuid, String, String)>>>;
 
-/// Records when a request reaches lakekeeper (inside the hold), and runs the
-/// pending [`OnReach`] classification, if any.
+/// A request to stall right after lakekeeper answers it 2xx: `(what,
+/// signal)`, `what` as [`Seen`] records it. The observer signals and then
+/// sleeps [`STALL`] before the answer goes back to the hold, so a test can
+/// drop the request between lakekeeper's commit and the hold's record.
+type AfterCommit = Arc<Mutex<Option<(String, Arc<tokio::sync::Notify>)>>>;
+
+/// How long an [`AfterCommit`] request stalls.
+const STALL: Duration = Duration::from_millis(500);
+
+/// Records when a request reaches lakekeeper (inside the hold), runs the
+/// pending [`OnReach`] classification, if any, and stalls a matching
+/// [`AfterCommit`] request once lakekeeper has answered it.
 async fn observe(
-    State((seen, on_reach, db)): State<(Seen, OnReach, Db)>,
+    State((seen, on_reach, after_commit, db)): State<(Seen, OnReach, AfterCommit, Db)>,
     req: Request,
     next: Next,
 ) -> Response {
     let what = format!("{} {}", req.method(), req.uri().path());
-    seen.lock().unwrap().push((Instant::now(), what));
+    seen.lock().unwrap().push((Instant::now(), what.clone()));
     let pending = on_reach.lock().unwrap().take();
     if let Some((tag, warehouse, table, column)) = pending {
         sqlx::query(
@@ -138,7 +148,21 @@ async fn observe(
         .await
         .expect("classify on reach");
     }
-    next.run(req).await
+    let response = next.run(req).await;
+    if response.status().is_success() {
+        let armed = {
+            let mut slot = after_commit.lock().unwrap();
+            match slot.as_ref() {
+                Some((w, _)) if *w == what => slot.take().map(|(_, signal)| signal),
+                _ => None,
+            }
+        };
+        if let Some(signal) = armed {
+            signal.notify_one();
+            tokio::time::sleep(STALL).await;
+        }
+    }
+    response
 }
 
 struct Env {
@@ -158,6 +182,7 @@ struct Env {
     runner: Arc<FakeRunner>,
     seen: Seen,
     on_reach: OnReach,
+    after_commit: AfterCommit,
     /// The clearance-bearing tag on `s.pii.ssn` (when classified).
     clearance: Option<Uuid>,
 }
@@ -329,9 +354,15 @@ async fn env_with(o: Opts) -> Option<Env> {
     });
     let seen: Seen = Arc::default();
     let on_reach: OnReach = Arc::default();
+    let after_commit: AfterCommit = Arc::default();
     let raw = front_catalog_router(catalog_engine_router(state.clone()), None, None);
     let inner = catalog_engine_router(state).layer(axum::middleware::from_fn_with_state(
-        (seen.clone(), on_reach.clone(), db.clone()),
+        (
+            seen.clone(),
+            on_reach.clone(),
+            after_commit.clone(),
+            db.clone(),
+        ),
         observe,
     ));
     let hold = ViewHold::new(db.clone(), runner.clone())
@@ -354,6 +385,7 @@ async fn env_with(o: Opts) -> Option<Env> {
         runner,
         seen,
         on_reach,
+        after_commit,
         clearance,
     };
     let (status, body) = env
@@ -481,6 +513,30 @@ impl Env {
             .filter(|(_, w)| *w == what)
             .map(|(t, _)| *t)
             .collect()
+    }
+
+    /// Drive `request` until lakekeeper has answered `what` 2xx, then drop
+    /// it, as hyper drops the handler future of a client that disconnects.
+    /// `what` is `"<METHOD> /<path after the prefix>"`.
+    async fn cancel_after_commit<F>(&self, what: &str, request: F)
+    where
+        F: std::future::Future<Output = (StatusCode, Value)>,
+    {
+        let (method, path) = what.split_once(' ').unwrap();
+        let signal = Arc::new(tokio::sync::Notify::new());
+        *self.after_commit.lock().unwrap() =
+            Some((format!("{method} /{}{path}", self.prefix), signal.clone()));
+        // Boxed, so `drop` drops the handler future itself.
+        let mut request = Box::pin(request);
+        tokio::select! {
+            r = &mut request => panic!("{what} answered before lakekeeper committed: {r:?}"),
+            _ = signal.notified() => {}
+        }
+        drop(request);
+        assert!(
+            self.after_commit.lock().unwrap().is_none(),
+            "{what} was stalled"
+        );
     }
 
     fn expected_pii_tags(&self, columns: &[&str]) -> BTreeSet<(Uuid, String)> {
@@ -1788,8 +1844,10 @@ async fn a_best_effort_record_under_a_busy_view_lock_leaves_the_lineage_to_the_s
 
 /// Final review I-1: a burst of best-effort commits beyond the cap. The
 /// commit that holds the permit runs its EXPLAIN; every other commit passes
-/// through at once, with no EXPLAIN and no lock connection of its own, and its
-/// lineage is recorded `failed` (its view's lock is free) for the sweep.
+/// through at once, with no EXPLAIN and no lock connection of its own. Its
+/// lineage is never computed: re-review N-6 records it `failed` only when a
+/// permit is free by then, and otherwise leaves it to the sweep
+/// (`overflow_records_never_hold_more_connections_than_the_cap`).
 #[tokio::test]
 async fn a_best_effort_burst_beyond_the_cap_explains_once_and_never_waits() {
     let Some(env) = env_with(Opts {
@@ -1837,12 +1895,15 @@ async fn a_best_effort_burst_beyond_the_cap_explains_once_and_never_waits() {
         env.lineage(names[0]).await,
         computed(&["pii"], &env.catalog)
     );
-    let e = &env;
     for name in &names[1..] {
-        eventually("a commit past the cap is recorded failed", || async move {
-            matches!(e.lineage(name).await, RecordedLineage::Failed { .. })
-        })
-        .await;
+        let lineage = env.lineage(name).await;
+        assert!(
+            matches!(
+                lineage,
+                RecordedLineage::Missing | RecordedLineage::Failed { .. }
+            ),
+            "{name}: {lineage:?}"
+        );
     }
 }
 
@@ -1953,4 +2014,195 @@ async fn a_classification_during_a_step_two_commit_reaches_the_view() {
         env.expected_pii_tags(&["id", "ssn"])
     );
     assert_eq!(env.derived_flags("v1").await, vec![true, true]);
+}
+
+/// Re-review N-1: on a profile with no classified column, a client that
+/// disconnects after lakekeeper commits the view but before the hold records
+/// its lineage does not skip the record. The best-effort path's work after
+/// its permit runs in a task the request's cancellation cannot drop.
+#[tokio::test]
+async fn a_best_effort_commit_cancelled_after_lakekeeper_commits_still_records() {
+    let Some(env) = env(LIMIT, false).await else {
+        return;
+    };
+
+    env.cancel_after_commit(
+        "POST /namespaces/s/views",
+        env.create("v1", "SELECT id, ssn FROM pii"),
+    )
+    .await;
+
+    assert!(env.view("v1").await.is_some(), "lakekeeper committed");
+    let e = &env;
+    eventually("the cancelled best-effort commit recorded", || async move {
+        e.lineage("v1").await == computed(&["pii"], &e.catalog)
+    })
+    .await;
+    assert_eq!(
+        env.columns("v1").await,
+        Some(vec!["id".into(), "ssn".into()])
+    );
+    assert_eq!(env.runner.calls.load(Ordering::SeqCst), 1);
+}
+
+/// Re-review test gap: a classified rename whose client disconnects after
+/// lakekeeper commits still drops what the source held.
+#[tokio::test]
+async fn a_rename_cancelled_after_lakekeeper_commits_still_moves_everything() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let plugin = env.start_plugin();
+    plugin.polled().await;
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let tags = env.assignments("v1").await;
+    assert!(!tags.is_empty());
+
+    env.cancel_after_commit(
+        "POST /views/rename",
+        env.call(
+            "POST",
+            "views/rename",
+            Some(json!({"source": {"namespace": ["s"], "name": "v1"},
+                        "destination": {"namespace": ["s"], "name": "v2"}})),
+        ),
+    )
+    .await;
+
+    let e = &env;
+    eventually(
+        "the cancelled rename dropped the source's rows",
+        || async move {
+            e.assignments("v1").await.is_empty()
+                && e.lineage("v1").await == RecordedLineage::Missing
+        },
+    )
+    .await;
+    assert!(env.view("v1").await.is_none());
+    assert!(env.view("v2").await.is_some());
+    assert_eq!(env.assignments("v2").await, tags);
+    assert_eq!(env.lineage("v2").await, computed(&["pii"], &env.catalog));
+}
+
+/// Re-review test gap: a classified drop whose client disconnects after
+/// lakekeeper commits still forgets the view's lineage and derived tags.
+#[tokio::test]
+async fn a_drop_cancelled_after_lakekeeper_commits_still_forgets_the_view() {
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let plugin = env.start_plugin();
+    plugin.polled().await;
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!env.assignments("v1").await.is_empty());
+
+    env.cancel_after_commit(
+        "DELETE /namespaces/s/views/v1",
+        env.call("DELETE", "namespaces/s/views/v1", None),
+    )
+    .await;
+
+    let e = &env;
+    eventually("the cancelled drop forgot the view", || async move {
+        e.assignments("v1").await.is_empty() && e.lineage("v1").await == RecordedLineage::Missing
+    })
+    .await;
+    assert!(env.view("v1").await.is_none());
+}
+
+/// How many backends hold the transaction-level advisory lock
+/// `record_failed_if_free` takes on one of `keys`: the overflow record tasks
+/// that hold a pooled connection right now.
+async fn record_holders(conn: &mut sqlx::PgConnection, keys: &[String]) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(DISTINCT l.pid) FROM pg_locks l \
+           JOIN (SELECT hashtextextended(k, 0) AS h FROM unnest($1::text[]) k) x \
+             ON l.locktype = 'advisory' AND l.granted AND l.objsubid = 1 \
+            AND l.classid = ((x.h >> 32) & 4294967295)::oid \
+            AND l.objid = (x.h & 4294967295)::oid \
+          WHERE l.database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+    )
+    .bind(keys)
+    .fetch_one(conn)
+    .await
+    .unwrap()
+}
+
+/// Re-review N-6: the overflow records are bounded by the best-effort cap.
+/// With the cap at 1, held by a commit whose EXPLAIN is slow, and the
+/// view-tag lock held here, ten commits past the cap each return at once and
+/// no more than `cap` record tasks hold a pooled connection at any moment.
+/// Without a permit the record is skipped: the view's lineage is left to the
+/// sweep.
+#[tokio::test]
+async fn overflow_records_never_hold_more_connections_than_the_cap() {
+    const CAP: usize = 1;
+    let Some(env) = env_with(Opts {
+        classified: false,
+        max_holds: CAP,
+        ..Opts::default()
+    })
+    .await
+    else {
+        return;
+    };
+    // The blocker and the sampler stay out of the hold's own pool.
+    let dsn = egret_test_db::url().await.expect("database");
+    let side = Db::connect(&dsn, 2).await.expect("connect");
+    let mut sampler = side.pool.acquire().await.unwrap();
+    let mut blocker = side.pool.begin().await.unwrap();
+    egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut blocker)
+        .await
+        .expect("take the view-tag lock");
+    let names: Vec<String> = (0..10).map(|i| format!("o{i}")).collect();
+    let keys: Vec<String> = names
+        .iter()
+        .map(|n| view_lock_key(&env.prefix, "s", n))
+        .collect();
+
+    // The first commit holds the one permit across its EXPLAIN (5 s budget).
+    let first = env.create("p0", "SELECT id, ssn FROM pii WHERE SLOW15");
+    let rest = async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut set = tokio::task::JoinSet::new();
+        for name in &names {
+            let (app, prefix) = (env.app.clone(), env.prefix.clone());
+            let body = create_body(name, "SELECT id FROM orders");
+            set.spawn(async move {
+                let started = Instant::now();
+                let got = Env::send(&app, &prefix, "POST", "namespaces/s/views", Some(body)).await;
+                (got, started.elapsed())
+            });
+        }
+        let mut most = 0;
+        let sampled_until = Instant::now() + Duration::from_millis(2500);
+        while Instant::now() < sampled_until {
+            most = most.max(record_holders(&mut sampler, &keys).await);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let answers: Vec<_> = set.join_all().await;
+        blocker.rollback().await.unwrap();
+        (answers, most)
+    };
+    let (first, (answers, most)) = tokio::join!(first, rest);
+
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    assert_eq!(answers.len(), names.len());
+    for ((status, body), took) in &answers {
+        assert_eq!(*status, StatusCode::OK, "{body}");
+        assert!(
+            *took < Duration::from_millis(1200),
+            "a commit past the cap waited {took:?}"
+        );
+    }
+    assert!(
+        most <= CAP as i64,
+        "{most} overflow record tasks held a connection at once (cap {CAP})"
+    );
+    // Every record was skipped (the permit stayed taken): the sweep's job.
+    for name in &names {
+        assert_eq!(env.lineage(name).await, RecordedLineage::Missing, "{name}");
+    }
 }
