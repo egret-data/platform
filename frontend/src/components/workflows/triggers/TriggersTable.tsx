@@ -9,6 +9,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { StateChip } from "@/components/workflows/StateChip";
+import { cn } from "@/lib/utils";
 import { BackfillCell, BackfillStrip } from "@/components/workflows/triggers/BackfillStrip";
 import {
   FLOW_DISABLED_STATUS,
@@ -130,8 +131,8 @@ export function TriggersTable({
           <TableHead>ID</TableHead>
           {variant === "global" ? <TableHead>Flow</TableHead> : null}
           <TableHead>Type</TableHead>
-          <TableHead>Next run</TableHead>
-          <TableHead>
+          <TableHead className={variant === "global" ? "whitespace-normal" : undefined}>Next run</TableHead>
+          <TableHead className={variant === "global" ? "whitespace-normal" : undefined}>
             <span className="inline-flex items-center gap-1">
               Last evaluated
               <Tooltip>
@@ -148,7 +149,7 @@ export function TriggersTable({
               </Tooltip>
             </span>
           </TableHead>
-          <TableHead>Last execution</TableHead>
+          <TableHead className={variant === "global" ? "whitespace-normal" : undefined}>Last execution</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Enabled</TableHead>
           <TableHead>Backfill</TableHead>
@@ -216,16 +217,16 @@ export function TriggersTable({
                   <span className="inline-flex items-center gap-1.5" title={variant === "flow" ? row.type : undefined}>
                     <KindIcon aria-hidden className="h-4 w-4 text-muted-foreground" />
                     <span className="sr-only">{kindLabel(row.kind)}: </span>
-                    {shortType(row.type)}
+                    <span className={variant === "global" ? "hidden 2xl:inline" : undefined}>{shortType(row.type)}</span>
                   </span>
                 </TableCell>
-                <TableCell className="text-muted-foreground">
+                <TableCell className={cn("text-muted-foreground", variant === "global" && "whitespace-normal")}>
                   {row.schedule?.next_evaluation_date ? <RelativeTime iso={row.schedule.next_evaluation_date} /> : "—"}
                 </TableCell>
-                <TableCell className="text-muted-foreground">
+                <TableCell className={cn("text-muted-foreground", variant === "global" && "whitespace-normal")}>
                   {row.schedule?.evaluated_at ? <RelativeTime iso={row.schedule.evaluated_at} /> : "—"}
                 </TableCell>
-                <TableCell>
+                <TableCell className={variant === "global" ? "whitespace-normal" : undefined}>
                   {row.last_execution ? (
                     <span className="inline-flex flex-wrap items-center gap-1.5">
                       <StateChip state={row.last_execution.state} kind="execution" />
