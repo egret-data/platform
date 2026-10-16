@@ -318,6 +318,25 @@ describe("RuleDialog — full-body PATCH and verbatim refusals", () => {
     ).toBeInTheDocument();
   });
 
+  /**
+   * J-F3: an exemption naming nobody egret knows is refused by the PREVIEW
+   * (it runs the same `write_rule`), so that is where the author first sees it.
+   * The save path is covered above; this is the preview's, which GrantDialog
+   * already pins and this dialog did not.
+   */
+  test("a preview refusal naming an unknown exemption is shown verbatim, and blocks Save", async () => {
+    const user = userEvent.setup();
+    const REFUSAL =
+      'bad request: these principal refs match nobody egret knows: user "ghost" (exempt.include[0]): no user has this username';
+    previewMutateAsync.mockRejectedValueOnce(new ApiError(400, REFUSAL));
+    renderDialog({ existing: EXISTING });
+
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+
+    expect(await screen.findByText(REFUSAL)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+  });
+
   const SENTENCE =
     'two mask policies would be served at policyPriority 0 that may both decide one request: rule "mask-ssn" and rule "null ssn".';
 
