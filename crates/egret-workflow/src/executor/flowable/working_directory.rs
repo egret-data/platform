@@ -188,6 +188,44 @@ mod tests {
             .clone()
     }
 
+    /// **A child of a `WorkingDirectory` does not pass through `SUBMITTED`; a
+    /// `Runnable` outside one does.**
+    ///
+    /// Measured, not assumed. In `golden.json` every child of a block reads
+    /// `CREATED RUNNING <terminal>` (`valids/working-directory-real-child-fails`,
+    /// `-shared-file`, `-cache`, `-input-output-files` and
+    /// `valids/task-runif-workingdirectory`), and the raw captured trace of
+    /// `working-directory-real-child-fails` has no `SUBMITTED` on its `fails`
+    /// run, so the normaliser is not removing it. A top-level `Return` still
+    /// reads `CREATED SUBMITTED RUNNING SUCCESS`. The fixture is driven through
+    /// [`drive_block`], which plays the worker's claims: a child of a block is
+    /// only created once the prepare claim is done.
+    #[test]
+    fn a_working_directory_child_is_not_submitted_and_a_plain_runnable_is() {
+        let src = format!(
+            "id: wd\nnamespace: io.kestra.tests\ntasks:\n  - id: outside\n    type: io.kestra.plugin.core.debug.Return\n    format: o\n{}",
+            TWO.split_once("tasks:\n").expect("the fixture has a task list").1
+        );
+        let t = drive_block(&src, &[], FailClaim::Never);
+        assert_eq!(
+            history_of(&t.plan, &t.state, "outside"),
+            [
+                RunState::Created,
+                RunState::Submitted,
+                RunState::Running,
+                RunState::Success
+            ],
+            "a top-level runnable is submitted to the worker"
+        );
+        for child in ["a", "b"] {
+            assert_eq!(
+                history_of(&t.plan, &t.state, child),
+                [RunState::Created, RunState::Running, RunState::Success],
+                "child {child} of a WorkingDirectory must not pass through SUBMITTED"
+            );
+        }
+    }
+
     /// The §5.3 row V1 and V2 measured on the image: child `a` fails without
     /// `allowFailure:`, so `b` gets no run, and the finish claim still runs.
     #[test]
