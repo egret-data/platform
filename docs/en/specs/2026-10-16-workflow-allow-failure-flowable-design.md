@@ -63,14 +63,20 @@ The `WARNING` that `AllowFailure.resolveState` returns for a failed block is a *
 
 Add `TaskKind::AllowFailure { tasks: Vec<TaskIx> }`, planned by `flatten_flow` from the `AllowFailure` node the way `Sequential` is, with the `errors:` and `finally:` lists carried as they are for every flowable. Its handler is `executor/flowable/allow_failure.rs`, which calls `sequential::drive` for the children, `errors` and `finally`, and changes only the **terminal** state it returns:
 
-| Children (`tasks`) | Errors ran | Block state |
-|---|---|---|
-| all `SUCCESS` | no | `SUCCESS` |
-| a child `FAILED`, no retry pending | either | `WARNING` (§3.1) |
-| a child `WARNING` | either | `WARNING`, or `SUCCESS` if the block's `allowWarning:` is set (§3.2) |
-| `KILLED` or `CANCELLED` | either | the same as a `Sequential` |
+| Children (`tasks`) | Errors ran | Block state | Measured on the image (`28f59bf175e1`) |
+|---|---|---|---|
+| all `SUCCESS` | no | `SUCCESS` | `probe-allsuccess`: block `SUCCESS` |
+| a child `FAILED`, no retry pending | either | `WARNING` (§3.1) | errors ran: `allow-failure`, `finally-allowfailure` (both `WARNING`); no errors: `probe-noerrors` `WARNING`; errors that succeed: `probe-errors-ok` `WARNING`; block `allowWarning: true`, child `FAILED`: `probe-failwarn` `WARNING` |
+| a child `WARNING` | either | `WARNING`, or `SUCCESS` if the block's `allowWarning:` is set (§3.2) | no `allowWarning`: `probe-combo-nowarn` `WARNING`; `allowWarning: true`: `probe-combo-warn` `SUCCESS` |
+| `KILLED` or `CANCELLED` | either | the same as a `Sequential` | **not measured**: no kill was observed (see the measurement note) |
 
-The table is the design; the plan's first task confirms each row against the image before any code relies on it.
+Measured on 2026-10-16 in a throwaway Kestra started from the oracle's `docker-compose.yml` (project `allowfail-probe`, containers `allowfail-probe-*`, removed after). Terminal states of every task run and the execution agree with `oracle-exec/golden.json` for `valids/allow-failure`, `valids/allow-failure-with-retry` and `valids/finally-allowfailure` (the golden's intermediate states were not compared one by one). The sibling after a failed child is not run in any of the measured blocks.
+
+Measurement notes:
+
+- **Retry.** `valids/allow-failure-with-retry` puts `retry:` on the failing *child*, not on the block: the child runs three attempts (`FAILED`, `RETRYING` twice, then `FAILED`), the block is `WARNING`, and `error_handler` and `finally_task` run. Egret's child retry (`RetryPending`) already covers this shape.
+- **Block-level retry (non-goal, §2).** `valids/retry-with-flowable-errors` run once on the image: the block carries no attempts of its own; the retry lands on the child `run_script` (two attempts, `FAILED` then `RETRYING` then `SUCCESS`), the block is `SUCCESS`, and `errors:` does not run. The golden records the same shape. So the image applies a block's `retry:` to its failing child; §2's statement that egret has "no measured retry for a flowable" is about Egret's side, not the image's. The row stays baselined and the refusal stays (plan Task 3); this measurement is the evidence for a later package.
+- **KILLED / CANCELLED.** The kill route tried (`POST` and `DELETE` on `/api/v1/main/executions/{id}/kill`) answered 405 and 404, and a 60 s `Sleep` finished `SUCCESS` before a kill landed. The row is the design only and is not banked by this package.
 
 ### 5.2 Where the change lands
 
