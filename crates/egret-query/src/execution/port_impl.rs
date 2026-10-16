@@ -65,7 +65,8 @@ fn describe_error(e: EngineError) -> Error {
         // `Cancelled` is unreachable on this path: `describe_as` never triggers
         // its token. Internal rather than a 400, so if it ever does fire it reads
         // as the bug it would be.
-        EngineError::Connect(_)
+        EngineError::AuthFailed(_)
+        | EngineError::Connect(_)
         | EngineError::Storage(_)
         | EngineError::Db(_)
         | EngineError::Cancelled => Error::Internal(anyhow::anyhow!("query port: {detail}")),
@@ -131,9 +132,13 @@ fn execute_error(e: EngineError) -> Error {
         // has already dropped the connector future — so the connector is never
         // around to observe it and report `Cancelled`. (That path surfaces as
         // `Timeout` instead, mapped above.)
-        EngineError::Db(_) | EngineError::Storage(_) | EngineError::Cancelled => {
-            Error::Internal(anyhow::anyhow!("query port: {detail}"))
-        }
+        // `AuthFailed`: egret's credential to the engine was refused. An operator
+        // problem, not the author's SQL and not a policy denial; the engine's
+        // reason is in `detail`, which `Internal` logs and redacts on the wire.
+        EngineError::AuthFailed(_)
+        | EngineError::Db(_)
+        | EngineError::Storage(_)
+        | EngineError::Cancelled => Error::Internal(anyhow::anyhow!("query port: {detail}")),
     }
 }
 
@@ -389,6 +394,19 @@ mod tests {
             matches!(execute_error(EngineError::Forbidden), Error::Forbidden),
             "and the split must not have changed that on the execute path"
         );
+    }
+
+    #[test]
+    fn an_engine_login_failure_is_not_a_policy_denial() {
+        for e in [
+            describe_error(EngineError::AuthFailed("jwks".into())),
+            execute_error(EngineError::AuthFailed("jwks".into())),
+        ] {
+            assert!(
+                matches!(e, Error::Internal(_)),
+                "engine 401 must not read as Forbidden: {e:?}"
+            );
+        }
     }
 
     #[test]

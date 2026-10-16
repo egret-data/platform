@@ -6,10 +6,12 @@
 mod error;
 mod keys;
 mod token;
+mod verified_cache;
 
 pub use error::IdpError;
 pub use keys::{generate_rsa_key, KeyMaterial};
-pub use token::{sign_claims, verify_with_jwk};
+pub use token::{sign_claims, verify_issued, verify_with_jwk};
+pub use verified_cache::VerifiedCache;
 
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -34,6 +36,7 @@ pub trait SigningKeyStore: Send + Sync {
 /// which `aud` it carries, what audience-specific claims it adds, and how long
 /// it lives. That is what lets one IdP serve the Catalog and the Data API
 /// without either knowing about the other.
+#[derive(Clone, Debug, PartialEq)]
 pub struct VerifiedClient {
     pub client_id: String,
     /// The JWT `aud`.
@@ -46,16 +49,48 @@ pub struct VerifiedClient {
     pub ttl_secs: u64,
 }
 
+/// A client's current minting state, read WITHOUT verifying a secret.
+///
+/// No `Debug`: `secret_hash` is not the secret, but it is the offline-crackable
+/// form of it and has no business in a log line.
+#[derive(Clone)]
+pub struct ClientState {
+    /// The token shape a successful `verify` would mint from now.
+    pub verified: VerifiedClient,
+    /// The stored secret hash (PHC string) as of this read. From `verify`, it
+    /// is the hash the secret was checked against.
+    pub secret_hash: String,
+}
+
 /// Verifies a client's `client_id`/`client_secret` against one client registry.
 /// Implemented by the Catalog Client registry (`egret-catalog-engine`) and, per
 /// audience, by any other machine-client registry.
 #[async_trait::async_trait]
 pub trait ClientVerifier: Send + Sync {
+    /// The state the secret was checked against, from the SAME row read the
+    /// Argon2 check used — `secret_hash` is the hash that verified. `None` for
+    /// every refusal, wrong secret included.
     async fn verify(
         &self,
         client_id: &str,
         client_secret: &str,
-    ) -> Result<Option<VerifiedClient>, IdpError>;
+    ) -> Result<Option<ClientState>, IdpError>;
+    /// `None` when the client is unknown or may not mint for ANY reason the
+    /// secret path would refuse (revoked, expired, disabled principal, archived
+    /// workspace, …). Never runs Argon2.
+    async fn current(&self, client_id: &str) -> Result<Option<ClientState>, IdpError>;
+}
+
+/// Digest of a stored secret hash, carried in every minted token as `cgen`.
+/// First 16 hex chars of SHA-256 over the PHC string.
+///
+/// Rotating a secret changes the stored hash (a fresh salt every time), so a
+/// token's `cgen` names the credential generation that minted it without
+/// revealing anything an attacker could crack.
+pub fn credential_generation(secret_hash: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(secret_hash.as_bytes());
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A `ClientVerifier` that always rejects — the placeholder used before the real
@@ -64,7 +99,10 @@ pub struct RejectAllVerifier;
 
 #[async_trait::async_trait]
 impl ClientVerifier for RejectAllVerifier {
-    async fn verify(&self, _: &str, _: &str) -> Result<Option<VerifiedClient>, IdpError> {
+    async fn verify(&self, _: &str, _: &str) -> Result<Option<ClientState>, IdpError> {
+        Ok(None)
+    }
+    async fn current(&self, _: &str) -> Result<Option<ClientState>, IdpError> {
         Ok(None)
     }
 }
@@ -79,8 +117,13 @@ pub struct IdpState {
     pub verifiers: Vec<Arc<dyn ClientVerifier>>,
     /// Guards `POST /oauth/token`, which is reachable from the internet and runs
     /// one Argon2 verify per request with a known `client_id`. Keyed on
-    /// `ip:client_id` — see [`token_endpoint`].
+    /// `ip:client_id`; a token exchange's refusals count against `ip:exchange`
+    /// or `ip:<sub>` — see [`client_credentials`] and [`token_exchange`].
     pub rate_limiter: RateLimiter,
+    /// Secrets already proven good for a client whose stored hash has not
+    /// changed since. A hit skips the limiter and the Argon2 verify — see
+    /// [`token_endpoint`].
+    pub verified_cache: VerifiedCache,
 }
 
 /// The mini-IdP router: discovery + JWKS + the client_credentials token endpoint.
@@ -100,7 +143,7 @@ pub fn idp_router() -> Router<IdpState> {
 #[openapi(
     paths(discovery, jwks, token_endpoint),
     components(schemas(TokenForm, TokenResp, DiscoveryDoc, JwksDoc, ErrorBody)),
-    tags((name = "idp", description = "egret mini machine-IdP: OIDC discovery, JWKS, and client_credentials token minting")),
+    tags((name = "idp", description = "egret mini machine-IdP: OIDC discovery, JWKS, and token minting (client_credentials + RFC 8693 token exchange)")),
 )]
 pub struct IdpApi;
 
@@ -126,7 +169,7 @@ async fn discovery(State(st): State<IdpState>) -> Json<serde_json::Value> {
         "issuer": iss,
         "jwks_uri": format!("{iss}/.well-known/jwks.json"),
         "token_endpoint": format!("{iss}/oauth/token"),
-        "grant_types_supported": ["client_credentials"],
+        "grant_types_supported": ["client_credentials", TOKEN_EXCHANGE_GRANT],
         "id_token_signing_alg_values_supported": ["RS256"],
     }))
 }
@@ -145,11 +188,32 @@ async fn jwks(State(st): State<IdpState>) -> Result<Json<serde_json::Value>, Idp
     Ok(Json(serde_json::json!({ "keys": keys })))
 }
 
+/// The RFC 8693 grant type: trade a token this IdP issued for a fresh one.
+pub const TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
+/// The only `subject_token_type` the exchange accepts (RFC 8693 §3).
+pub const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
+
+/// `POST /oauth/token` form. Which fields are required depends on
+/// `grant_type`, so every field — `grant_type` included — is optional here and
+/// checked by the handler: a missing field is a 400 `invalid_request`, never
+/// the extractor's 422, which no OAuth client reads as a refusal (I4).
 #[derive(Deserialize, utoipa::ToSchema)]
 struct TokenForm {
-    grant_type: String,
-    client_id: String,
-    client_secret: String,
+    /// Required: `client_credentials` or
+    /// `urn:ietf:params:oauth:grant-type:token-exchange`.
+    grant_type: Option<String>,
+    /// Required for `client_credentials`.
+    client_id: Option<String>,
+    /// Required for `client_credentials`.
+    client_secret: Option<String>,
+    /// Required for token exchange: an unexpired access token this IdP issued.
+    /// A Bearer `Authorization` header alone does not stand in for it.
+    subject_token: Option<String>,
+    /// Required for token exchange: `urn:ietf:params:oauth:token-type:access_token`.
+    subject_token_type: Option<String>,
+    /// Accepted and ignored.
+    #[allow(dead_code)] // read by nothing: a scope request does not narrow a token here
+    scope: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
@@ -185,10 +249,10 @@ struct JwksDoc {
     tag = "idp",
     request_body(content = TokenForm, content_type = "application/x-www-form-urlencoded"),
     responses(
-        (status = 200, description = "A signed access token (client_credentials grant)", body = TokenResp),
-        (status = 400, description = "Unsupported grant_type (OAuth `{ \"error\": ... }` body)", body = ErrorBody),
+        (status = 200, description = "A signed access token (client_credentials, or an RFC 8693 exchange of an unexpired token this IdP issued for a fresh one with the same client and audience)", body = TokenResp),
+        (status = 400, description = "OAuth `{ \"error\": ... }` body: `invalid_request` (a field the grant requires is missing or malformed; carries `error_description`), `invalid_grant` (the subject_token is invalid, expired, foreign, for another audience, or its client was deleted or its secret rotated), or `unsupported_grant_type`", body = ErrorBody),
         (status = 401, description = "Invalid client credentials (OAuth `{ \"error\": ... }` body)", body = ErrorBody),
-        (status = 429, description = "Too many token requests from this ip+client_id (OAuth `{ \"error\": ... }` body)", body = ErrorBody),
+        (status = 429, description = "Too many failed token requests (OAuth `{ \"error\": ... }` body). client_credentials counts every request that runs a secret check, per ip+client_id; a token exchange counts a subject token that fails verification per ip, and one that names its client but no longer matches it (deleted, other audience, secret rotated) per ip+sub. A proven repeat of a good secret, and an exchange that matches its client's current state, are never counted", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -197,7 +261,50 @@ async fn token_endpoint(
     headers: HeaderMap,
     Form(f): Form<TokenForm>,
 ) -> Result<Json<TokenResp>, IdpError> {
-    // Rate-limit FIRST — ahead of the verifiers, because verifying a known
+    let Some(grant_type) = f.grant_type.as_deref() else {
+        return Err(IdpError::InvalidRequest("grant_type is required"));
+    };
+    match grant_type {
+        "client_credentials" => {
+            let (Some(client_id), Some(client_secret)) = (&f.client_id, &f.client_secret) else {
+                return Err(IdpError::InvalidRequest(
+                    "client_credentials requires client_id and client_secret",
+                ));
+            };
+            client_credentials(&st, &headers, client_id, client_secret).await
+        }
+        TOKEN_EXCHANGE_GRANT => token_exchange(&st, &headers, &f).await,
+        _ => {
+            // Limited as before: an unknown grant costs nothing to answer, but
+            // the bucket it counts against is the one its `client_id` names.
+            let ip = client_ip(&headers);
+            let client_id = f.client_id.as_deref().unwrap_or_default();
+            if !st.rate_limiter.check(&format!("{ip}:{client_id}")) {
+                return Err(IdpError::RateLimited);
+            }
+            Err(IdpError::UnsupportedGrant)
+        }
+    }
+}
+
+async fn client_credentials(
+    st: &IdpState,
+    headers: &HeaderMap,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<Json<TokenResp>, IdpError> {
+    // A proven repeat first. Trino mints a token per query session, and with
+    // the limiter counting every request a busy engine was throttled at the
+    // limit (I3). A secret that already verified for this client, while the
+    // registry still stores the hash it verified against, is not the Argon2
+    // cost the limiter exists to bound — so it skips both. The registry is
+    // still read on every hit (`current`), so a revoke or a rotation refuses
+    // the very next request rather than waiting out the cache's TTL.
+    if let Some(state) = cached_state(st, client_id, client_secret).await {
+        return mint(st, &state).await;
+    }
+
+    // Rate-limit ahead of the verifiers, because verifying a known
     // `client_id` costs an Argon2 hash and this endpoint is published at the
     // edge. Keyed on the PAIR `ip:client_id`, mirroring login's `ip:email`: a
     // `client_id` is not a secret, so keying on it alone would let anyone lock a
@@ -208,12 +315,9 @@ async fn token_endpoint(
     // map is never pruned, so the key MUST NOT be stored raw — see the note on
     // `RateLimiter`, which hashes it. How much the `ip:` half is worth depends
     // on the edge; `client_ip` documents which deployments can be trusted.
-    let ip = client_ip(&headers);
-    if !st.rate_limiter.check(&format!("{ip}:{}", f.client_id)) {
+    let ip = client_ip(headers);
+    if !st.rate_limiter.check(&format!("{ip}:{client_id}")) {
         return Err(IdpError::RateLimited);
-    }
-    if f.grant_type != "client_credentials" {
-        return Err(IdpError::UnsupportedGrant);
     }
     // Try every verifier; do NOT short-circuit on the first `Err`. Verifiers own
     // independent audiences, so a transient fault in one (e.g. the catalog's DB)
@@ -221,23 +325,23 @@ async fn token_endpoint(
     // verifier has either declined or failed do we decide what to return: a
     // match wins outright, otherwise an error means "unknown" cannot honestly be
     // claimed (401 would be a lie), so that beats a clean "no match" (401).
-    let mut vc = None;
+    let mut verified = None;
     let mut verifier_errors = Vec::new();
     for v in &st.verifiers {
-        match v.verify(&f.client_id, &f.client_secret).await {
-            Ok(Some(found)) => {
-                vc = Some(found);
+        match v.verify(client_id, client_secret).await {
+            Ok(Some(state)) => {
+                verified = Some(state);
                 break;
             }
             Ok(None) => {}
             Err(e) => {
-                tracing::error!(client_id = %f.client_id, error = %e, "client verifier failed");
+                tracing::error!(client_id = %client_id, error = %e, "client verifier failed");
                 verifier_errors.push(e.to_string());
             }
         }
     }
-    let vc = match vc {
-        Some(vc) => vc,
+    let state = match verified {
+        Some(state) => state,
         None if !verifier_errors.is_empty() => {
             return Err(IdpError::VerificationUnavailable(
                 verifier_errors.join("; "),
@@ -245,7 +349,162 @@ async fn token_endpoint(
         }
         None => return Err(IdpError::InvalidClient),
     };
+    // One read, used whole: `state` is the row the secret was checked
+    // against, so the token's claims, audience, TTL and `cgen` and the hash
+    // cached below are all the ones Argon2 vouched for. A second read here
+    // could see a rotation that landed after the check and tie the OLD secret
+    // to the NEW hash in the cache, serving it unlimited for a TTL.
+    st.verified_cache
+        .put(client_id, client_secret, state.secret_hash.clone());
+    mint(st, &state).await
+}
 
+/// RFC 8693 token exchange: an unexpired token this IdP issued buys a fresh
+/// one for the same client and audience. Iceberg's REST client refreshes its
+/// catalog token this way; before this grant existed it got a 422 and retried
+/// in a storm (I4).
+///
+/// An exchange is exactly as strong as `client_credentials` (decision D1): it
+/// succeeds only while the client still exists, may still mint, and stores
+/// the very secret hash the subject token was minted under (`cgen`). There is
+/// no cap on the chain's age — a chain ends when the client is revoked or its
+/// secret rotated, both of which `client_credentials` honours too.
+///
+/// The new token comes from ONE `current` read of the client, never from the
+/// subject token's claims, so a change to the client's roles or TTL reaches
+/// the next refresh. The subject token itself is never logged.
+async fn token_exchange(
+    st: &IdpState,
+    headers: &HeaderMap,
+    f: &TokenForm,
+) -> Result<Json<TokenResp>, IdpError> {
+    if f.subject_token_type.as_deref() != Some(ACCESS_TOKEN_TYPE) {
+        return Err(IdpError::InvalidRequest(
+            "subject_token_type must be urn:ietf:params:oauth:token-type:access_token",
+        ));
+    }
+    // The form field is the grant. A Bearer header is what the client
+    // authenticates its session with, not what it asks to exchange; when both
+    // are sent they must name the same token.
+    let Some(subject_token) = f.subject_token.as_deref() else {
+        return Err(IdpError::InvalidRequest("subject_token is required"));
+    };
+    if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) {
+        let bearer = auth
+            .to_str()
+            .ok()
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(str::trim);
+        if bearer != Some(subject_token) {
+            return Err(IdpError::InvalidRequest(
+                "the Authorization header does not carry the subject_token",
+            ));
+        }
+    }
+
+    // Metering (F3). Every refusal is counted; only an exchange PROVEN against
+    // the client's current state — signature, `iss`/`exp`/`sub`, audience and
+    // `cgen` all matching — mints without touching the limiter, as a proven
+    // repeat of a good secret does on `client_credentials` (D1). Counting a
+    // proven exchange would spend the `ip:<client_id>` bucket a refresh burst
+    // shares with `client_credentials` and lock the client out of both.
+    //
+    // Until a token verifies there is no client to key on, so a token that
+    // fails verification counts against the IP's shared `exchange` bucket: a
+    // junk flood is limited without touching any real client's bucket. A
+    // token that verifies but names no client (`sub`, `aud` or `cgen`
+    // missing — every token minted before `cgen` existed) is refused
+    // UNCOUNTED: only egret's own key could have signed it, so counting it
+    // bounds no guessing and only adds 429 churn to the rollout. A refusal
+    // after the client is named counts against `ip:<sub>`.
+    let ip = client_ip(headers);
+    let refuse_unverified = || {
+        if st.rate_limiter.check(&format!("{ip}:exchange")) {
+            IdpError::InvalidGrant
+        } else {
+            IdpError::RateLimited
+        }
+    };
+    let jwks = st.keys.all_public_jwks().await?;
+    let Ok(claims) = token::verify_issued(subject_token, &jwks, st.issuer.trim_end_matches('/'))
+    else {
+        return Err(refuse_unverified());
+    };
+    let (Some(sub), Some(aud), Some(cgen)) = (
+        claims["sub"].as_str(),
+        claims["aud"].as_str(),
+        claims["cgen"].as_str(),
+    ) else {
+        return Err(IdpError::InvalidGrant);
+    };
+    let refuse_for_sub = || {
+        if st.rate_limiter.check(&format!("{ip}:{sub}")) {
+            IdpError::InvalidGrant
+        } else {
+            IdpError::RateLimited
+        }
+    };
+
+    // The client must still be one that may mint, for the SAME audience: a
+    // token never changes audience across an exchange. Same non-short-circuit
+    // rule as `client_credentials`: one registry's outage must not refuse a
+    // client another registry owns, and an outage is not "no such client".
+    let mut found = None;
+    let mut verifier_errors = Vec::new();
+    for v in &st.verifiers {
+        match v.current(sub).await {
+            Ok(Some(state)) if state.verified.audience == aud => {
+                found = Some(state);
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!(client_id = %sub, error = %e, "client state read failed on token exchange");
+                verifier_errors.push(e.to_string());
+            }
+        }
+    }
+    let state = match found {
+        Some(state) => state,
+        // An outage proves nothing either way and is not the caller's
+        // attempt: not counted, as on `client_credentials`.
+        None if !verifier_errors.is_empty() => {
+            return Err(IdpError::VerificationUnavailable(
+                verifier_errors.join("; "),
+            ));
+        }
+        None => return Err(refuse_for_sub()),
+    };
+    // The subject token was minted under the secret the client stores now —
+    // a rotation since ends the chain, as it ends `client_credentials`.
+    if cgen != credential_generation(&state.secret_hash) {
+        return Err(refuse_for_sub());
+    }
+    // Proven: every check above matched the client's current state.
+    mint(st, &state).await
+}
+
+/// The client's current state, if this secret is a proven repeat: it verified
+/// before against the hash some registry still stores for this client. Any
+/// other outcome — no entry, a changed hash, a client gone, a registry error —
+/// is `None`, and the request takes the full path (limiter + verify).
+async fn cached_state(st: &IdpState, client_id: &str, secret: &str) -> Option<ClientState> {
+    let verified_hash = st.verified_cache.get(client_id, secret)?;
+    for v in &st.verifiers {
+        match v.current(client_id).await {
+            Ok(Some(state)) if state.secret_hash == verified_hash => return Some(state),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(client_id = %client_id, error = %e, "client state read failed on a cache hit; verifying in full");
+            }
+        }
+    }
+    None
+}
+
+/// Sign a token for `state` — every claim from this one read.
+async fn mint(st: &IdpState, state: &ClientState) -> Result<Json<TokenResp>, IdpError> {
+    let vc = &state.verified;
     let km = st.keys.active().await?;
     let exp = chrono::Utc::now().timestamp() as u64 + vc.ttl_secs;
     let mut claims = serde_json::Map::new();
@@ -256,6 +515,10 @@ async fn token_endpoint(
     claims.insert("sub".into(), vc.client_id.clone().into());
     claims.insert("aud".into(), vc.audience.clone().into());
     claims.insert("exp".into(), exp.into());
+    claims.insert(
+        "cgen".into(),
+        credential_generation(&state.secret_hash).into(),
+    );
 
     let jwt = sign_claims(&km, &serde_json::Value::Object(claims))?;
     Ok(Json(TokenResp {
@@ -268,9 +531,19 @@ async fn token_endpoint(
 impl IntoResponse for IdpError {
     fn into_response(self) -> Response {
         use axum::http::StatusCode;
+        if let IdpError::InvalidRequest(why) = self {
+            // RFC 6749 §5.2 `error_description`: a fixed string naming the
+            // missing or malformed field, never request input.
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid_request", "error_description": why })),
+            )
+                .into_response();
+        }
         let (status, err) = match self {
             IdpError::InvalidClient => (StatusCode::UNAUTHORIZED, "invalid_client"),
             IdpError::UnsupportedGrant => (StatusCode::BAD_REQUEST, "unsupported_grant_type"),
+            IdpError::InvalidGrant => (StatusCode::BAD_REQUEST, "invalid_grant"),
             // `slow_down` is the registered OAuth error code for "you are asking
             // too often" (RFC 8628 §3.5); RFC 6749 defines none of its own. The
             // body shape is the same `{ "error": ... }` every other rejection
@@ -294,26 +567,48 @@ impl PgSigningKeyStore {
     }
 }
 
+/// Serialises first-key creation across egret replicas and concurrent tasks:
+/// without it two callers that both see "no active key" each insert one.
+const SIGNING_KEY_CREATE_LOCK: i64 = 0x4547_5245_5453_4b31; // "EGRETSK1"
+
+/// The newest non-retired key, read on `conn`.
+async fn newest_active(conn: &mut sqlx::PgConnection) -> Result<Option<KeyMaterial>, IdpError> {
+    // jsonb is read as ::text to avoid needing sqlx's `json` feature.
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT kid, private_pem, public_jwk::text FROM catalog.oidc_signing_keys \
+         WHERE retired_at IS NULL ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_optional(conn)
+    .await?;
+    row.map(|(kid, private_pem, jwk_text)| {
+        let public_jwk =
+            serde_json::from_str(&jwk_text).map_err(|e| IdpError::Crypto(e.to_string()))?;
+        Ok(KeyMaterial {
+            kid,
+            private_pem,
+            public_jwk,
+        })
+    })
+    .transpose()
+}
+
 #[async_trait::async_trait]
 impl SigningKeyStore for PgSigningKeyStore {
     async fn active(&self) -> Result<KeyMaterial, IdpError> {
-        // jsonb is read as ::text to avoid needing sqlx's `json` feature.
-        let row: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT kid, private_pem, public_jwk::text FROM catalog.oidc_signing_keys \
-             WHERE retired_at IS NULL ORDER BY created_at DESC LIMIT 1",
-        )
-        .fetch_optional(&self.db.pool)
-        .await?;
-        if let Some((kid, private_pem, jwk_text)) = row {
-            let public_jwk =
-                serde_json::from_str(&jwk_text).map_err(|e| IdpError::Crypto(e.to_string()))?;
-            return Ok(KeyMaterial {
-                kid,
-                private_pem,
-                public_jwk,
-            });
+        let mut conn = self.db.pool.acquire().await?;
+        if let Some(km) = newest_active(&mut conn).await? {
+            return Ok(km);
         }
-        // No active key — mint one and persist it.
+        // No active key — create one under an advisory lock, re-checking inside
+        // it so the loser of a race adopts the winner's key.
+        let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SIGNING_KEY_CREATE_LOCK)
+            .execute(&mut *tx)
+            .await?;
+        if let Some(km) = newest_active(&mut tx).await? {
+            return Ok(km);
+        }
         let kid = uuid::Uuid::new_v4().to_string();
         let km = generate_rsa_key(&kid)?;
         let jwk_text =
@@ -325,12 +620,17 @@ impl SigningKeyStore for PgSigningKeyStore {
         .bind(&km.kid)
         .bind(&km.private_pem)
         .bind(&jwk_text)
-        .execute(&self.db.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(km)
     }
 
     async fn all_public_jwks(&self) -> Result<Vec<serde_json::Value>, IdpError> {
+        // Never publish an empty set: an engine that reads it first would cache
+        // it and reject every delegated query until its TTL. `active()` creates
+        // and persists the key when none exists, so reuse that path.
+        self.active().await?;
         let rows: Vec<String> = sqlx::query_scalar(
             "SELECT public_jwk::text FROM catalog.oidc_signing_keys \
              WHERE retired_at IS NULL ORDER BY created_at DESC",
@@ -410,10 +710,18 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ClientVerifier for AlwaysErrorsVerifier {
-        async fn verify(&self, _: &str, _: &str) -> Result<Option<VerifiedClient>, IdpError> {
+        async fn verify(&self, _: &str, _: &str) -> Result<Option<ClientState>, IdpError> {
+            Err(IdpError::Db("simulated outage".into()))
+        }
+        async fn current(&self, _: &str) -> Result<Option<ClientState>, IdpError> {
             Err(IdpError::Db("simulated outage".into()))
         }
     }
+
+    /// The stored-hash stand-in every `FakeVerifier` client reports.
+    const FAKE_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$ZmFrZQ$ZmFrZS1oYXNo";
+    /// The stored-hash stand-in `CatalogLikeVerifier` reports.
+    const CATALOG_LIKE_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$Y2F0$Y2F0LWhhc2g";
 
     #[async_trait::async_trait]
     impl ClientVerifier for FakeVerifier {
@@ -421,18 +729,74 @@ mod tests {
             &self,
             client_id: &str,
             client_secret: &str,
-        ) -> Result<Option<VerifiedClient>, IdpError> {
-            if client_id == self.client_id && client_secret == self.client_secret {
-                Ok(Some(VerifiedClient {
-                    client_id: client_id.to_string(),
-                    audience: self.audience.clone(),
-                    extra_claims: self.extra_claims.clone(),
-                    ttl_secs: self.ttl_secs,
-                }))
+        ) -> Result<Option<ClientState>, IdpError> {
+            if client_secret == self.client_secret {
+                self.current(client_id).await
             } else {
                 Ok(None)
             }
         }
+        async fn current(&self, client_id: &str) -> Result<Option<ClientState>, IdpError> {
+            if client_id != self.client_id {
+                return Ok(None);
+            }
+            Ok(Some(ClientState {
+                verified: VerifiedClient {
+                    client_id: client_id.to_string(),
+                    audience: self.audience.clone(),
+                    extra_claims: self.extra_claims.clone(),
+                    ttl_secs: self.ttl_secs,
+                },
+                secret_hash: FAKE_HASH.into(),
+            }))
+        }
+    }
+
+    #[test]
+    fn database_url_is_exported_rather_than_read_from_dotenv() {
+        egret_test_db::assert_database_url_is_exported();
+    }
+
+    /// J-F1: a fresh deployment has no key row until the first mint, and an
+    /// engine that read the JWKS first cached an empty set.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn jwks_on_a_fresh_store_is_never_empty(pool: sqlx::PgPool) {
+        let store = PgSigningKeyStore::new(egret_metastore::Db { pool });
+        let keys = store.all_public_jwks().await.unwrap();
+        assert_eq!(keys.len(), 1, "a fresh store must publish one key");
+        let active = store.active().await.unwrap();
+        assert_eq!(keys[0]["kid"], active.kid.as_str(), "no second key");
+        assert_eq!(store.all_public_jwks().await.unwrap().len(), 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn concurrent_first_calls_end_with_one_active_key(pool: sqlx::PgPool) {
+        let store = PgSigningKeyStore::new(egret_metastore::Db { pool: pool.clone() });
+        let (a, b, c, d) = tokio::join!(
+            store.active(),
+            store.all_public_jwks(),
+            store.active(),
+            store.all_public_jwks()
+        );
+        let (a, c) = (a.unwrap(), c.unwrap());
+        assert_eq!(a.kid, c.kid);
+        assert_eq!(b.unwrap().len(), 1);
+        assert_eq!(d.unwrap().len(), 1);
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM catalog.oidc_signing_keys WHERE retired_at IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn jwks_endpoint_on_a_fresh_store_answers_one_key(pool: sqlx::PgPool) {
+        let mut st = state();
+        st.keys = Arc::new(PgSigningKeyStore::new(egret_metastore::Db { pool }));
+        let Json(body) = jwks(State(st)).await.unwrap();
+        assert_eq!(body["keys"].as_array().unwrap().len(), 1);
     }
 
     fn state() -> IdpState {
@@ -442,6 +806,7 @@ mod tests {
             issuer: "http://localhost:8080".into(),
             verifiers: vec![Arc::new(FakeVerifier::new())],
             rate_limiter: permissive_limiter(),
+            verified_cache: VerifiedCache::default(),
         }
     }
 
@@ -464,9 +829,19 @@ mod tests {
             &self,
             client_id: &str,
             client_secret: &str,
-        ) -> Result<Option<VerifiedClient>, IdpError> {
-            if client_id == "cat1" && client_secret == "s" {
-                Ok(Some(VerifiedClient {
+        ) -> Result<Option<ClientState>, IdpError> {
+            if client_secret == "s" {
+                self.current(client_id).await
+            } else {
+                Ok(None)
+            }
+        }
+        async fn current(&self, client_id: &str) -> Result<Option<ClientState>, IdpError> {
+            if client_id != "cat1" {
+                return Ok(None);
+            }
+            Ok(Some(ClientState {
+                verified: VerifiedClient {
                     client_id: client_id.to_string(),
                     audience: "catalog".into(),
                     extra_claims: serde_json::json!({ "warehouse": "wh1", "roles": ["role1"] })
@@ -474,10 +849,9 @@ mod tests {
                         .cloned()
                         .unwrap(),
                     ttl_secs: 3600,
-                }))
-            } else {
-                Ok(None)
-            }
+                },
+                secret_hash: CATALOG_LIKE_HASH.into(),
+            }))
         }
     }
 
@@ -489,6 +863,7 @@ mod tests {
             issuer: "http://localhost:8080".into(),
             verifiers,
             rate_limiter: permissive_limiter(),
+            verified_cache: VerifiedCache::default(),
         }
     }
 
@@ -512,23 +887,35 @@ mod tests {
     /// Parse an `application/x-www-form-urlencoded` token request body the way
     /// axum's `Form` extractor would (fixtures use no percent-escapes).
     fn parse_token_form(body: &str) -> TokenForm {
-        let mut grant_type = String::new();
-        let mut client_id = String::new();
-        let mut client_secret = String::new();
+        let mut f = TokenForm {
+            grant_type: None,
+            client_id: None,
+            client_secret: None,
+            subject_token: None,
+            subject_token_type: None,
+            scope: None,
+        };
         for pair in body.split('&') {
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            let v = v.to_string();
             match k {
-                "grant_type" => grant_type = v.to_string(),
-                "client_id" => client_id = v.to_string(),
-                "client_secret" => client_secret = v.to_string(),
+                "grant_type" => f.grant_type = Some(v),
+                "client_id" => f.client_id = Some(v),
+                "client_secret" => f.client_secret = Some(v),
+                "subject_token" => f.subject_token = Some(v),
+                "subject_token_type" => f.subject_token_type = Some(v),
+                "scope" => f.scope = Some(v),
                 other => panic!("unexpected form field {other}"),
             }
         }
-        TokenForm {
-            grant_type,
-            client_id,
-            client_secret,
-        }
+        f
+    }
+
+    /// A `client_credentials` form.
+    fn cc_form(client_id: &str, client_secret: &str) -> TokenForm {
+        parse_token_form(&format!(
+            "grant_type=client_credentials&client_id={client_id}&client_secret={client_secret}"
+        ))
     }
 
     /// Drive `POST /oauth/token` with a form body; panics if the IdP rejects it.
@@ -728,11 +1115,7 @@ mod tests {
         let resp = token_endpoint(
             State(st.clone()),
             HeaderMap::new(),
-            Form(TokenForm {
-                grant_type: "client_credentials".into(),
-                client_id: "cid".into(),
-                client_secret: "sec".into(),
-            }),
+            Form(cc_form("cid", "sec")),
         )
         .await
         .unwrap();
@@ -751,8 +1134,16 @@ mod tests {
     /// the cost the limiter exists to bound — this counter stands in for it, so
     /// a test can assert the limiter answered BEFORE that cost was paid rather
     /// than merely that it answered.
+    ///
+    /// `stored` is the client's stored secret hash as the registry sees it now;
+    /// `None` means the client is gone (revoked, disabled …). A test flips it to
+    /// simulate a rotation or a revoke between requests.
     struct CountingVerifier {
         calls: Arc<AtomicUsize>,
+        stored: Arc<std::sync::Mutex<Option<String>>>,
+        /// When set, `current` errors (a registry outage) while `verify` keeps
+        /// working off its own read.
+        current_fails: Arc<std::sync::atomic::AtomicBool>,
     }
 
     #[async_trait::async_trait]
@@ -761,36 +1152,93 @@ mod tests {
             &self,
             client_id: &str,
             client_secret: &str,
-        ) -> Result<Option<VerifiedClient>, IdpError> {
+        ) -> Result<Option<ClientState>, IdpError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            if client_id == "cid" && client_secret == "sec" {
-                Ok(Some(VerifiedClient {
-                    client_id: client_id.to_string(),
-                    audience: "data-api".into(),
-                    extra_claims: serde_json::Map::new(),
-                    ttl_secs: 600,
-                }))
+            if client_secret == "sec" {
+                Ok(self.read(client_id))
             } else {
                 Ok(None)
             }
+        }
+        /// Not counted: `calls` stands in for the Argon2 cost, which `current`
+        /// never pays.
+        async fn current(&self, client_id: &str) -> Result<Option<ClientState>, IdpError> {
+            if self.current_fails.load(Ordering::SeqCst) {
+                return Err(IdpError::Db("simulated outage".into()));
+            }
+            Ok(self.read(client_id))
+        }
+    }
+
+    impl CountingVerifier {
+        fn read(&self, client_id: &str) -> Option<ClientState> {
+            let stored = self.stored.lock().unwrap().clone();
+            stored
+                .filter(|_| client_id == "cid")
+                .map(|hash| ClientState {
+                    verified: VerifiedClient {
+                        client_id: client_id.to_string(),
+                        audience: "data-api".into(),
+                        extra_claims: serde_json::Map::new(),
+                        ttl_secs: 600,
+                    },
+                    secret_hash: hash,
+                })
+        }
+    }
+
+    /// The knobs a `CountingVerifier` test turns: how many verifies ran, and
+    /// what the registry currently stores for `cid`.
+    struct Counting {
+        calls: Arc<AtomicUsize>,
+        stored: Arc<std::sync::Mutex<Option<String>>>,
+        current_fails: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Counting {
+        fn verifies(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+        fn set_stored(&self, hash: Option<&str>) {
+            *self.stored.lock().unwrap() = hash.map(str::to_string);
+        }
+        fn fail_current(&self) {
+            self.current_fails.store(true, Ordering::SeqCst);
         }
     }
 
     /// An `IdpState` whose token endpoint allows `max` requests per key, over a
     /// window long enough that no test can outrun it — so these tests never
     /// sleep and never race the clock.
-    fn rate_limited_state(max: u32) -> (IdpState, Arc<AtomicUsize>) {
+    fn counting_state(max: u32) -> (IdpState, Counting) {
         let calls = Arc::new(AtomicUsize::new(0));
+        let stored = Arc::new(std::sync::Mutex::new(Some(FAKE_HASH.to_string())));
+        let current_fails = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let km = generate_rsa_key("kid-t").unwrap();
         let st = IdpState {
             keys: Arc::new(FakeKeys(km)),
             issuer: "http://localhost:8080".into(),
             verifiers: vec![Arc::new(CountingVerifier {
                 calls: calls.clone(),
+                stored: stored.clone(),
+                current_fails: current_fails.clone(),
             })],
             rate_limiter: RateLimiter::new(max, 3_600, 3_600),
+            verified_cache: VerifiedCache::default(),
         };
-        (st, calls)
+        (
+            st,
+            Counting {
+                calls,
+                stored,
+                current_fails,
+            },
+        )
+    }
+
+    fn rate_limited_state(max: u32) -> (IdpState, Arc<AtomicUsize>) {
+        let (st, counting) = counting_state(max);
+        (st, counting.calls)
     }
 
     struct RawResp {
@@ -804,11 +1252,7 @@ mod tests {
     async fn post_token_from(st: &IdpState, ip: &str, client_id: &str, secret: &str) -> RawResp {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", ip.parse().unwrap());
-        let form = TokenForm {
-            grant_type: "client_credentials".into(),
-            client_id: client_id.into(),
-            client_secret: secret.into(),
-        };
+        let form = cc_form(client_id, secret);
         let resp = match token_endpoint(State(st.clone()), headers, Form(form)).await {
             Ok(ok) => ok.into_response(),
             Err(e) => e.into_response(),
@@ -920,20 +1364,859 @@ mod tests {
         );
     }
 
+    #[test]
+    fn credential_generation_is_16_lowercase_hex_stable_and_input_sensitive() {
+        let g = credential_generation("abc");
+        assert_eq!(g.len(), 16);
+        assert!(
+            g.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "not lowercase hex: {g}"
+        );
+        assert_eq!(g, credential_generation("abc"), "must be stable");
+        assert_ne!(g, credential_generation("abd"));
+        // First 16 hex chars of SHA-256("abc") — pins the algorithm, not just
+        // the shape, so a later change of digest cannot pass silently.
+        assert_eq!(g, "ba7816bf8f01cfea");
+    }
+
+    /// Every token carries `cgen`, the digest of the hash the client's state
+    /// had when it was minted — read through `current` on the verifier that
+    /// matched, not through any other.
+    #[tokio::test]
+    async fn a_minted_token_carries_the_matching_verifiers_cgen() {
+        let st = test_idp_state_with(vec![
+            Arc::new(CatalogLikeVerifier),
+            Arc::new(FakeVerifier::with_extra_claims(serde_json::json!({}))),
+        ])
+        .await;
+
+        let cat = post_token(
+            &st,
+            "grant_type=client_credentials&client_id=cat1&client_secret=s",
+        )
+        .await;
+        assert_eq!(
+            decode_claims_without_verifying(&cat.access_token)["cgen"],
+            credential_generation(CATALOG_LIKE_HASH)
+        );
+
+        let api = post_token(
+            &st,
+            "grant_type=client_credentials&client_id=api1&client_secret=s",
+        )
+        .await;
+        assert_eq!(
+            decode_claims_without_verifying(&api.access_token)["cgen"],
+            credential_generation(FAKE_HASH)
+        );
+    }
+
+    #[tokio::test]
+    async fn reject_all_has_no_current_state() {
+        assert!(RejectAllVerifier
+            .current("anything")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
     #[tokio::test]
     async fn token_endpoint_rejects_bad_secret() {
         let st = state();
-        let err = token_endpoint(
-            State(st),
-            HeaderMap::new(),
-            Form(TokenForm {
-                grant_type: "client_credentials".into(),
-                client_id: "cid".into(),
-                client_secret: "WRONG".into(),
-            }),
-        )
-        .await
-        .unwrap_err();
+        let err = token_endpoint(State(st), HeaderMap::new(), Form(cc_form("cid", "WRONG")))
+            .await
+            .unwrap_err();
         assert!(matches!(err, IdpError::InvalidClient));
+    }
+
+    // ---- I3: a proven repeat skips Argon2 and the limiter -------------------
+
+    /// Trino mints a token per query session. With the limiter counting every
+    /// request, a busy engine hit 429 at 60/min. A repeat of a secret that
+    /// already verified, against a client whose stored hash is unchanged, is
+    /// not the Argon2 cost the limiter bounds — it must pass both.
+    #[tokio::test]
+    async fn a_repeat_of_a_good_secret_skips_verify_and_the_limiter() {
+        let (st, counting) = counting_state(2);
+
+        for i in 0..10 {
+            let r = post_token_from(&st, "203.0.113.7", "cid", "sec").await;
+            assert_eq!(r.status, 200, "request {i} was refused: {}", r.body);
+            assert_eq!(
+                decode_claims_without_verifying(r.body["access_token"].as_str().unwrap())["cgen"],
+                credential_generation(FAKE_HASH),
+                "a cache-hit token must carry the current state's cgen"
+            );
+        }
+        assert_eq!(counting.verifies(), 1, "only the first request may verify");
+    }
+
+    /// The cache only ever answers for a secret that verified. Anything else
+    /// takes the old path, limiter included.
+    #[tokio::test]
+    async fn a_wrong_secret_is_still_limited() {
+        let (st, counting) = counting_state(2);
+        // A good secret in the cache must not open the door for a wrong one.
+        assert_eq!(
+            post_token_from(&st, "198.51.100.9", "cid", "sec")
+                .await
+                .status,
+            200
+        );
+
+        let statuses = [
+            post_token_from(&st, "203.0.113.7", "cid", "WRONG")
+                .await
+                .status,
+            post_token_from(&st, "203.0.113.7", "cid", "WRONG")
+                .await
+                .status,
+            post_token_from(&st, "203.0.113.7", "cid", "WRONG")
+                .await
+                .status,
+        ];
+
+        assert_eq!(statuses, [401, 401, 429]);
+        assert_eq!(
+            counting.verifies(),
+            3,
+            "1 good + 2 wrong; the 429 never verified"
+        );
+    }
+
+    /// A rotation writes a new stored hash. The cached entry names the old one,
+    /// so it must stop answering and the request must verify again.
+    #[tokio::test]
+    async fn a_rotated_secret_misses_the_cache() {
+        let (st, counting) = counting_state(100);
+        assert_eq!(
+            post_token_from(&st, "203.0.113.7", "cid", "sec")
+                .await
+                .status,
+            200
+        );
+        assert_eq!(counting.verifies(), 1);
+
+        counting.set_stored(Some(CATALOG_LIKE_HASH));
+        let r = post_token_from(&st, "203.0.113.7", "cid", "sec").await;
+
+        assert_eq!(
+            counting.verifies(),
+            2,
+            "a rotated hash must not be served from cache"
+        );
+        assert_eq!(r.status, 200);
+        assert_eq!(
+            decode_claims_without_verifying(r.body["access_token"].as_str().unwrap())["cgen"],
+            credential_generation(CATALOG_LIKE_HASH)
+        );
+    }
+
+    /// A revoked client is refused on its next request, cached secret or not —
+    /// the cache never outlives the registry's say-so.
+    #[tokio::test]
+    async fn a_client_gone_is_refused_at_once() {
+        let (st, counting) = counting_state(100);
+        assert_eq!(
+            post_token_from(&st, "203.0.113.7", "cid", "sec")
+                .await
+                .status,
+            200
+        );
+
+        counting.set_stored(None);
+        let r = post_token_from(&st, "203.0.113.7", "cid", "sec").await;
+
+        assert_eq!(r.status, 401);
+        assert_eq!(r.body["error"], "invalid_client");
+        assert_eq!(
+            counting.verifies(),
+            2,
+            "the miss falls through to the normal path, which verifies once"
+        );
+    }
+
+    /// `verify` and `current` disagree (a role and the hash changed right
+    /// after the Argon2 check). A freshly verified token must be built from
+    /// ONE read — the state `verify` checked the secret against, which also
+    /// supplies `cgen` — never a mix with a later read.
+    struct ShapeChangesAfterVerify;
+
+    fn shape(aud: &str, role: &str, ttl_secs: u64, hash: &str) -> ClientState {
+        ClientState {
+            verified: VerifiedClient {
+                client_id: "x".into(),
+                audience: aud.into(),
+                extra_claims: serde_json::json!({ "roles": [role] })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+                ttl_secs,
+            },
+            secret_hash: hash.into(),
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ClientVerifier for ShapeChangesAfterVerify {
+        async fn verify(&self, _: &str, _: &str) -> Result<Option<ClientState>, IdpError> {
+            Ok(Some(shape("checked-aud", "checked", 600, FAKE_HASH)))
+        }
+        async fn current(&self, _: &str) -> Result<Option<ClientState>, IdpError> {
+            Ok(Some(shape("later-aud", "later", 3600, CATALOG_LIKE_HASH)))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_token_is_minted_from_one_state_read() {
+        let st = test_idp_state_with(vec![Arc::new(ShapeChangesAfterVerify)]).await;
+        let resp = post_token(
+            &st,
+            "grant_type=client_credentials&client_id=x&client_secret=y",
+        )
+        .await;
+        let c = decode_claims_without_verifying(&resp.access_token);
+        assert_eq!(c["aud"], "checked-aud");
+        assert_eq!(c["roles"], serde_json::json!(["checked"]));
+        assert_eq!(resp.expires_in, 600);
+        assert_eq!(c["cgen"], credential_generation(FAKE_HASH));
+    }
+
+    /// A rotation lands between the Argon2 check and any later read: `verify`
+    /// checked the OLD secret against H1, while `current` already sees H2.
+    /// The cache must hold H1 — the hash Argon2 actually checked — or the old
+    /// secret would be tied to the new hash and served unlimited for a TTL.
+    struct RotatesBetweenReads {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ClientVerifier for RotatesBetweenReads {
+        async fn verify(
+            &self,
+            client_id: &str,
+            client_secret: &str,
+        ) -> Result<Option<ClientState>, IdpError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            // Checked against FAKE_HASH (H1), the hash before the rotation.
+            Ok((client_secret == "old").then(|| ClientState {
+                verified: VerifiedClient {
+                    client_id: client_id.to_string(),
+                    audience: "data-api".into(),
+                    extra_claims: serde_json::Map::new(),
+                    ttl_secs: 600,
+                },
+                secret_hash: FAKE_HASH.into(),
+            }))
+        }
+        async fn current(&self, client_id: &str) -> Result<Option<ClientState>, IdpError> {
+            // The rotation has landed: the registry now stores H2.
+            Ok(Some(ClientState {
+                verified: VerifiedClient {
+                    client_id: client_id.to_string(),
+                    audience: "data-api".into(),
+                    extra_claims: serde_json::Map::new(),
+                    ttl_secs: 600,
+                },
+                secret_hash: CATALOG_LIKE_HASH.into(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_cache_holds_the_hash_argon2_checked_not_a_later_read() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let st = test_idp_state_with(vec![Arc::new(RotatesBetweenReads {
+            calls: calls.clone(),
+        })])
+        .await;
+
+        let _ = post_token_from(&st, "203.0.113.7", "cid", "old").await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let _ = post_token_from(&st, "203.0.113.7", "cid", "old").await;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the old secret must not be served from cache against the rotated hash"
+        );
+    }
+
+    /// A registry error on the hit path is not a refusal and not a pass: the
+    /// request takes the full path and verifies.
+    #[tokio::test]
+    async fn a_registry_error_on_a_hit_falls_through_to_verify() {
+        let (st, counting) = counting_state(100);
+        assert_eq!(
+            post_token_from(&st, "203.0.113.7", "cid", "sec")
+                .await
+                .status,
+            200
+        );
+
+        counting.fail_current();
+        let r = post_token_from(&st, "203.0.113.7", "cid", "sec").await;
+
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(counting.verifies(), 2);
+    }
+
+    // ---- I4: RFC 8693 token exchange ---------------------------------------
+
+    /// One client, `m1`/`sec`, whose registry row a test can rewrite between
+    /// requests: rotate its hash, delete it, change its claims or audience.
+    struct MutableVerifier {
+        row: Arc<std::sync::Mutex<Option<ClientState>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ClientVerifier for MutableVerifier {
+        async fn verify(
+            &self,
+            client_id: &str,
+            client_secret: &str,
+        ) -> Result<Option<ClientState>, IdpError> {
+            if client_secret == "sec" {
+                self.current(client_id).await
+            } else {
+                Ok(None)
+            }
+        }
+        async fn current(&self, client_id: &str) -> Result<Option<ClientState>, IdpError> {
+            Ok(self
+                .row
+                .lock()
+                .unwrap()
+                .clone()
+                .filter(|s| s.verified.client_id == client_id))
+        }
+    }
+
+    type Row = Arc<std::sync::Mutex<Option<ClientState>>>;
+
+    fn m1_row(roles: serde_json::Value, hash: &str) -> ClientState {
+        ClientState {
+            verified: VerifiedClient {
+                client_id: "m1".into(),
+                audience: "catalog".into(),
+                extra_claims: serde_json::json!({ "warehouse": "wh1", "roles": roles })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+                ttl_secs: 3600,
+            },
+            secret_hash: hash.into(),
+        }
+    }
+
+    fn exchange_state(max: u32) -> (IdpState, Row) {
+        let row: Row = Arc::new(std::sync::Mutex::new(Some(m1_row(
+            serde_json::json!(["r1"]),
+            FAKE_HASH,
+        ))));
+        let km = generate_rsa_key("kid-t").unwrap();
+        let st = IdpState {
+            keys: Arc::new(FakeKeys(km)),
+            issuer: "http://localhost:8080/".into(),
+            verifiers: vec![Arc::new(MutableVerifier { row: row.clone() })],
+            rate_limiter: RateLimiter::new(max, 3_600, 3_600),
+            verified_cache: VerifiedCache::default(),
+        };
+        (st, row)
+    }
+
+    fn exchange_form(subject_token: &str) -> TokenForm {
+        parse_token_form(&format!(
+            "grant_type={TOKEN_EXCHANGE_GRANT}&subject_token={subject_token}\
+             &subject_token_type={ACCESS_TOKEN_TYPE}&scope=catalog"
+        ))
+    }
+
+    /// Drive the endpoint with explicit headers and form, rendering either
+    /// outcome through `IntoResponse`.
+    async fn post_form(st: &IdpState, headers: HeaderMap, form: TokenForm) -> RawResp {
+        let resp = match token_endpoint(State(st.clone()), headers, Form(form)).await {
+            Ok(ok) => ok.into_response(),
+            Err(e) => e.into_response(),
+        };
+        let status = resp.status().as_u16();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        RawResp {
+            status,
+            body: serde_json::from_slice(&bytes).unwrap(),
+        }
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        h
+    }
+
+    fn now_secs() -> i64 {
+        chrono::Utc::now().timestamp()
+    }
+
+    /// A real subject token, minted by `client_credentials` through the endpoint.
+    async fn mint_m1(st: &IdpState) -> String {
+        let r = post_form(st, HeaderMap::new(), cc_form("m1", "sec")).await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        r.body["access_token"].as_str().unwrap().to_string()
+    }
+
+    /// Sign `claims` with the IdP's own active key.
+    async fn sign_as_idp(st: &IdpState, claims: serde_json::Value) -> String {
+        sign_claims(&st.keys.active().await.unwrap(), &claims).unwrap()
+    }
+
+    fn m1_claims(aud: &str, iss: &str, exp: i64) -> serde_json::Value {
+        serde_json::json!({
+            "warehouse": "wh1",
+            "roles": ["r1"],
+            "iss": iss,
+            "sub": "m1",
+            "aud": aud,
+            "exp": exp,
+            "cgen": credential_generation(FAKE_HASH),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_live_token_exchanges_for_a_fresh_one() {
+        let (st, row) = exchange_state(100);
+        let subject = mint_m1(&st).await;
+        let subject_claims = decode_claims_without_verifying(&subject);
+        // `exp` has one-second resolution; wait one out so "later" is decidable.
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        // The registry's view changes after the subject token was minted.
+        *row.lock().unwrap() = Some(m1_row(serde_json::json!(["r2"]), FAKE_HASH));
+
+        // Iceberg's refresh sends the same token in the header and the form.
+        let r = post_form(&st, bearer(&subject), exchange_form(&subject)).await;
+
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["token_type"], "Bearer");
+        assert_eq!(r.body["expires_in"], 3600);
+        let fresh = r.body["access_token"].as_str().unwrap();
+        let jwk = st.keys.all_public_jwks().await.unwrap()[0].clone();
+        let c = verify_with_jwk(fresh, &jwk).unwrap();
+        assert_eq!(c["sub"], "m1");
+        assert_eq!(c["aud"], "catalog");
+        assert_eq!(c["iss"], "http://localhost:8080");
+        assert_eq!(
+            c["roles"],
+            serde_json::json!(["r2"]),
+            "claims come from the client's current state, not the subject token"
+        );
+        assert_eq!(c["cgen"], credential_generation(FAKE_HASH));
+        assert!(
+            c["exp"].as_i64().unwrap() > subject_claims["exp"].as_i64().unwrap(),
+            "fresh exp {} must be later than the subject's {}",
+            c["exp"],
+            subject_claims["exp"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_bearer_header_alone_is_not_enough() {
+        let (st, _row) = exchange_state(100);
+        let subject = mint_m1(&st).await;
+
+        let mut no_field = exchange_form(&subject);
+        no_field.subject_token = None;
+        let r = post_form(&st, bearer(&subject), no_field).await;
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_request");
+
+        // A header naming a different token than the form field is refused too.
+        let other = sign_as_idp(
+            &st,
+            m1_claims("catalog", "http://localhost:8080", now_secs() + 600),
+        )
+        .await;
+        let r = post_form(&st, bearer(&other), exchange_form(&subject)).await;
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn an_expired_subject_token_is_invalid_grant() {
+        let (st, _row) = exchange_state(100);
+        let expired = sign_as_idp(
+            &st,
+            m1_claims("catalog", "http://localhost:8080", now_secs() - 3_600),
+        )
+        .await;
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&expired)).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn a_foreign_signature_is_invalid_grant() {
+        let (st, _row) = exchange_state(100);
+        // Same `kid` as the IdP's key, different key: only the signature differs.
+        let foreign = generate_rsa_key("kid-t").unwrap();
+        let tok = sign_claims(
+            &foreign,
+            &m1_claims("catalog", "http://localhost:8080", now_secs() + 600),
+        )
+        .unwrap();
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&tok)).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn a_wrong_issuer_is_invalid_grant() {
+        let (st, _row) = exchange_state(100);
+        let tok = sign_as_idp(
+            &st,
+            m1_claims("catalog", "https://evil.example", now_secs() + 600),
+        )
+        .await;
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&tok)).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn a_rotated_secret_ends_the_chain() {
+        let (st, row) = exchange_state(100);
+        let subject = mint_m1(&st).await;
+        *row.lock().unwrap() = Some(m1_row(serde_json::json!(["r1"]), CATALOG_LIKE_HASH));
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&subject)).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn a_deleted_client_ends_the_chain() {
+        let (st, row) = exchange_state(100);
+        let subject = mint_m1(&st).await;
+        *row.lock().unwrap() = None;
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&subject)).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn the_audience_cannot_change() {
+        let (st, row) = exchange_state(100);
+        let mut data_api = m1_row(serde_json::json!(["r1"]), FAKE_HASH);
+        data_api.verified.audience = "data-api".into();
+        *row.lock().unwrap() = Some(data_api);
+        let exp = now_secs() + 600;
+
+        let as_catalog = sign_as_idp(&st, m1_claims("catalog", "http://localhost:8080", exp)).await;
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&as_catalog)).await;
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+
+        // Control: the same token for the audience the client has is good.
+        let as_data_api =
+            sign_as_idp(&st, m1_claims("data-api", "http://localhost:8080", exp)).await;
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&as_data_api)).await;
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+
+    #[tokio::test]
+    async fn a_wrong_subject_token_type_is_invalid_request() {
+        let (st, _row) = exchange_state(100);
+        let subject = mint_m1(&st).await;
+
+        let mut wrong = exchange_form(&subject);
+        wrong.subject_token_type = Some("urn:ietf:params:oauth:token-type:id_token".into());
+        let r = post_form(&st, HeaderMap::new(), wrong).await;
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_request");
+
+        let mut missing = exchange_form(&subject);
+        missing.subject_token_type = None;
+        let r = post_form(&st, HeaderMap::new(), missing).await;
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_request");
+    }
+
+    /// Junk subject tokens share one `ip:exchange` bucket, so a flood of them
+    /// is limited — and a real exchange, which is not counted at all, is not
+    /// caught in it.
+    #[tokio::test]
+    async fn junk_subject_tokens_are_limited_per_ip() {
+        let (st, _row) = exchange_state(2);
+        let subject = mint_m1(&st).await;
+
+        let statuses = [
+            post_form(&st, HeaderMap::new(), exchange_form("junk1"))
+                .await
+                .status,
+            post_form(&st, HeaderMap::new(), exchange_form("junk2"))
+                .await
+                .status,
+            post_form(&st, HeaderMap::new(), exchange_form("junk3"))
+                .await
+                .status,
+        ];
+        assert_eq!(statuses, [400, 400, 429]);
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&subject)).await;
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+
+    // ---- F2: subject tokens that verify but cannot be traced to a client ----
+
+    /// `m1_claims` with `drop` removed — a token minted before this branch
+    /// carries no `cgen`, which is the rollout path every catalog token takes.
+    fn m1_claims_without(drop: &str) -> serde_json::Value {
+        let mut c = m1_claims("catalog", "http://localhost:8080", now_secs() + 600);
+        c.as_object_mut().unwrap().remove(drop);
+        c
+    }
+
+    #[tokio::test]
+    async fn a_pre_cgen_subject_token_is_invalid_grant() {
+        let (st, _row) = exchange_state(100);
+        let tok = sign_as_idp(&st, m1_claims_without("cgen")).await;
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&tok)).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn a_subject_token_without_sub_is_invalid_grant() {
+        let (st, _row) = exchange_state(100);
+        let tok = sign_as_idp(&st, m1_claims_without("sub")).await;
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&tok)).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+    }
+
+    /// HS256 (an algorithm swap), no `kid`, and a `kid` the JWKS does not hold
+    /// are each refused before any claim is read.
+    #[tokio::test]
+    async fn a_token_with_the_wrong_header_is_invalid_grant() {
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+        let (st, _row) = exchange_state(100);
+        let claims = m1_claims("catalog", "http://localhost:8080", now_secs() + 600);
+
+        let mut hs = Header::new(Algorithm::HS256);
+        hs.kid = Some("kid-t".into());
+        let hs256 = encode(&hs, &claims, &EncodingKey::from_secret(b"guess")).unwrap();
+
+        let km = st.keys.active().await.unwrap();
+        let rsa = EncodingKey::from_rsa_pem(km.private_pem.as_bytes()).unwrap();
+        let no_kid = encode(&Header::new(Algorithm::RS256), &claims, &rsa).unwrap();
+        let mut unknown = Header::new(Algorithm::RS256);
+        unknown.kid = Some("kid-nobody".into());
+        let unknown_kid = encode(&unknown, &claims, &rsa).unwrap();
+
+        for (name, tok) in [
+            ("hs256", hs256),
+            ("no kid", no_kid),
+            ("unknown kid", unknown_kid),
+        ] {
+            let r = post_form(&st, HeaderMap::new(), exchange_form(&tok)).await;
+            assert_eq!(r.status, 400, "{name}: {}", r.body);
+            assert_eq!(r.body["error"], "invalid_grant", "{name}");
+        }
+    }
+
+    /// A token egret signed that names no client (pre-`cgen`) is refused
+    /// uncounted: only egret's key could have signed it, so it bounds no
+    /// guessing. It never reaches 429, and the client's own `ip:<sub>`
+    /// bucket, which `client_credentials` shares, is untouched.
+    #[tokio::test]
+    async fn a_pre_cgen_token_is_refused_uncounted() {
+        let (st, _row) = exchange_state(2);
+        let pre_cgen = sign_as_idp(&st, m1_claims_without("cgen")).await;
+
+        let statuses = [
+            post_form(&st, HeaderMap::new(), exchange_form(&pre_cgen))
+                .await
+                .status,
+            post_form(&st, HeaderMap::new(), exchange_form(&pre_cgen))
+                .await
+                .status,
+            post_form(&st, HeaderMap::new(), exchange_form(&pre_cgen))
+                .await
+                .status,
+        ];
+        assert_eq!(statuses, [400, 400, 400]);
+        // The client's own bucket is untouched: two full verifies still run.
+        for _ in 0..2 {
+            let r = post_form(&st, HeaderMap::new(), cc_form("m1", "wrong")).await;
+            assert_eq!(r.status, 401, "{}", r.body);
+        }
+    }
+
+    // ---- F3: only a fully verified exchange goes unmetered ------------------
+
+    /// A refresh burst — every exchange proven against the client's current
+    /// state — mints every time, and leaves the bucket `client_credentials`
+    /// re-verifies count against unspent.
+    #[tokio::test]
+    async fn verified_exchanges_are_not_rate_counted() {
+        let (st, _row) = exchange_state(3);
+        let subject = mint_m1(&st).await; // 1 of 3 in `ip:m1`
+
+        for i in 0..10 {
+            let r = post_form(&st, bearer(&subject), exchange_form(&subject)).await;
+            assert_eq!(r.status, 200, "exchange {i}: {}", r.body);
+        }
+        for i in 0..2 {
+            let r = post_form(&st, HeaderMap::new(), cc_form("m1", "wrong")).await;
+            assert_eq!(r.status, 401, "re-verify {i}: {}", r.body);
+        }
+    }
+
+    /// The exchange's mirror of a cache hit: a matched `cgen` mints even while
+    /// failed secrets have tripped the client's bucket.
+    #[tokio::test]
+    async fn a_matched_exchange_mints_while_its_client_bucket_is_tripped() {
+        let (st, _row) = exchange_state(2);
+        let subject = mint_m1(&st).await; // 1 of 2
+        let r = post_form(&st, HeaderMap::new(), cc_form("m1", "wrong")).await;
+        assert_eq!(r.status, 401, "{}", r.body); // 2 of 2
+        let r = post_form(&st, HeaderMap::new(), cc_form("m1", "wrong")).await;
+        assert_eq!(r.status, 429, "{}", r.body); // tripped
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&subject)).await;
+
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+
+    /// Every way a verified token can still fail to match the client — secret
+    /// rotated, client gone, audience changed — counts against `ip:<sub>`.
+    #[tokio::test]
+    async fn an_exchange_refused_after_verification_is_counted_per_sub() {
+        type Mutation = fn(&Row);
+        let mutations: [(&str, Mutation); 3] = [
+            ("rotated", |row| {
+                *row.lock().unwrap() = Some(m1_row(serde_json::json!(["r1"]), CATALOG_LIKE_HASH));
+            }),
+            ("deleted", |row| *row.lock().unwrap() = None),
+            ("audience", |row| {
+                let mut s = m1_row(serde_json::json!(["r1"]), FAKE_HASH);
+                s.verified.audience = "data-api".into();
+                *row.lock().unwrap() = Some(s);
+            }),
+        ];
+        for (name, mutate) in mutations {
+            let (st, row) = exchange_state(3);
+            let subject = mint_m1(&st).await; // 1 of 3 in `ip:m1`
+            mutate(&row);
+
+            let mut statuses = Vec::new();
+            for _ in 0..3 {
+                let r = post_form(&st, HeaderMap::new(), exchange_form(&subject)).await;
+                statuses.push(r.status);
+            }
+
+            assert_eq!(statuses, [400, 400, 429], "{name}");
+        }
+    }
+
+    /// F1: through axum's real `Form` extractor, a body with no `grant_type`
+    /// is an OAuth refusal, not the extractor's 422.
+    #[tokio::test]
+    async fn a_missing_grant_type_is_invalid_request_not_422() {
+        use axum::extract::FromRequest as _;
+        let (st, counting) = counting_state(100);
+        let body = "client_id=cid&client_secret=sec";
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/oauth/token")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let form = match Form::<TokenForm>::from_request(req, &()).await {
+            Ok(f) => f,
+            Err(rej) => panic!(
+                "the extractor refused `{body}` with {}",
+                rej.into_response().status()
+            ),
+        };
+
+        let r = post_form(&st, HeaderMap::new(), form.0).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_request");
+        assert_eq!(r.body["error_description"], "grant_type is required");
+        assert_eq!(counting.verifies(), 0);
+    }
+
+    #[tokio::test]
+    async fn discovery_lists_both_grants() {
+        let (st, _row) = exchange_state(100);
+        let doc = discovery(State(st)).await.0;
+        assert_eq!(
+            doc["grant_types_supported"],
+            serde_json::json!(["client_credentials", TOKEN_EXCHANGE_GRANT])
+        );
+    }
+
+    /// Through axum's real `Form` extractor: a missing field used to be a 422
+    /// from the extractor (I4), which no OAuth client reads as a refusal.
+    #[tokio::test]
+    async fn client_credentials_without_client_id_is_invalid_request_not_422() {
+        use axum::extract::FromRequest as _;
+        let (st, counting) = counting_state(100);
+        for body in [
+            "grant_type=client_credentials&client_secret=sec",
+            "grant_type=client_credentials&client_id=cid",
+        ] {
+            let req = axum::http::Request::builder()
+                .method("POST")
+                .uri("/oauth/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let form = match Form::<TokenForm>::from_request(req, &()).await {
+                Ok(f) => f,
+                Err(rej) => panic!(
+                    "the extractor refused `{body}` with {}",
+                    rej.into_response().status()
+                ),
+            };
+
+            let r = post_form(&st, HeaderMap::new(), form.0).await;
+
+            assert_eq!(r.status, 400, "{body}: {}", r.body);
+            assert_eq!(r.body["error"], "invalid_request", "{body}");
+        }
+        assert_eq!(counting.verifies(), 0);
+    }
+
+    #[tokio::test]
+    async fn any_other_grant_is_unsupported() {
+        let (st, _row) = exchange_state(100);
+        let r = post_form(
+            &st,
+            HeaderMap::new(),
+            parse_token_form("grant_type=password&client_id=m1&client_secret=sec"),
+        )
+        .await;
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "unsupported_grant_type");
     }
 }

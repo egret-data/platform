@@ -124,7 +124,16 @@ pub trait ProfileRecompiler: Send + Sync {
 }
 
 /// Whether a write to `body` under `service_id` changes what a StarRocks
-/// clearance mask folds: a data mask (`policyType` 1) on a StarRocks profile.
+/// clearance mask folds: a data mask (`policyType` 1) on a `generated`
+/// StarRocks profile (final re-review N-2).
+///
+/// `origin = 'generated'` alone is the test: every compile that writes a
+/// clearance policy stamps the profile `generated` in the same transaction
+/// (`egret-perm-compile` `trigger.rs`, sticky), so a profile holding a compiled
+/// clearance mask is always `generated`. A profile that is not has no clearance
+/// mask for the write to leave stale, so refolding would only let an unrelated refusal of the recompile (an
+/// expansion ceiling, a stored overlap) block a steward from disabling or
+/// deleting a hand-written mask: the way out of that state.
 async fn changes_the_clearance_fold(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
@@ -133,13 +142,16 @@ async fn changes_the_clearance_fold(
     if body.get("policyType").and_then(Value::as_i64) != Some(1) {
         return Ok(false);
     }
-    let service_type: Option<String> =
-        sqlx::query_scalar("SELECT type FROM policy.authz_services WHERE id = $1")
-            .bind(service_id)
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(crate::PolicyStoreError::from)?;
-    Ok(service_type.as_deref() == Some(crate::STARROCKS_DEF_NAME))
+    let folds: Option<bool> = sqlx::query_scalar(
+        "SELECT type = $2 AND origin = 'generated' \
+           FROM policy.authz_services WHERE id = $1",
+    )
+    .bind(service_id)
+    .bind(crate::STARROCKS_DEF_NAME)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(crate::PolicyStoreError::from)?;
+    Ok(folds.unwrap_or(false))
 }
 
 /// The stored `(service_id, policy_jsonb)` of policy `id`, if it exists.
@@ -806,7 +818,7 @@ pub struct CreatedProfile {
     request_body = CreateProfileBody,
     responses(
         (status = 200, description = "Profile created", body = CreatedProfile),
-        (status = 400, description = "Invalid type, missing name, a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert), or a `tagService` whose value is not a non-empty string (it names no policy profile, and the plugin download would carry no `tagPolicies` block)", body = ErrorBody),
+        (status = 400, description = "Invalid type (must be `trino`, `starrocks` or `tag`), missing name, a `tagService` that names a profile that is missing or not of type `tag`, a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert), or a `tagService` whose value is not a non-empty string (it names no policy profile, and the plugin download would carry no `tagPolicies` block)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:create permission", body = ErrorBody),
         (status = 409, description = "A profile with this name already exists", body = ErrorBody),
@@ -824,9 +836,9 @@ async fn create_profile(
             "profile name is required".into(),
         ));
     }
-    if b.r#type != "trino" && b.r#type != "starrocks" {
+    if !matches!(b.r#type.as_str(), "trino" | "starrocks" | "tag") {
         return Err(PolicyHttpError::BadRequest(
-            "type must be \"trino\" or \"starrocks\"".into(),
+            "type must be \"trino\", \"starrocks\" or \"tag\"".into(),
         ));
     }
     let cfg = if b.config.is_null() {

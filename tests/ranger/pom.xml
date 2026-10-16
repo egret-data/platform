@@ -19,6 +19,8 @@
                anchor tests it must stay separate from. -->
           <includes>
             <include>EgretRangerEnforcementTest.java</include>
+            <!-- DG Task 7: is an expanded {USER} resource value matched as a literal or a pattern? -->
+            <include>EgretUserTokenWildcardTest.java</include>
             <include>EgretCaseRunner.java</include>
             <!-- SP4d-2b Task 2: measures the trie/matcher agreement table from
                  the real jar, so the Rust side's hard-coded copy of it has an

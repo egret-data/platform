@@ -1993,7 +1993,9 @@ describe("ExplainAccess — the StarRocks mask and the materialized-view rule", 
     expect(skipped).toHaveTextContent(/its mask is MASK_NULL/i);
     expect(skipped).toHaveTextContent(/whoever denies it/i);
     expect(skipped).toHaveTextContent(/unless the reader may select another column it reads/i);
-    expect(skipped).toHaveTextContent(/first unmasked column/i);
+    expect(skipped).toHaveTextContent(/first unmasked column \(measured: id, on a partly classified/i);
+    expect(skipped).toHaveTextContent(/when no column is unmasked, on an Iceberg table/i);
+    expect(skipped).toHaveTextContent(/hidden _file \/ _pos columns/i);
     expect(skipped).toHaveTextContent("___count___");
     expect(skipped).not.toHaveTextContent(/a reader who holds the grant/i);
     // No verdict badge at all: nothing says "denied" for this read.

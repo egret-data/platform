@@ -1324,6 +1324,10 @@ async fn trino_profile_with_tag_service(
 ) -> (egret_policy::ServiceRow, i64) {
     let profile_name = unique(prefix);
     let tag_name = format!("{profile_name}_tag");
+    let tag_service = policy
+        .create_service(&tag_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("create tag service");
     let profile = policy
         .create_service(
             &profile_name,
@@ -1332,10 +1336,6 @@ async fn trino_profile_with_tag_service(
         )
         .await
         .expect("create trino profile");
-    let tag_service = policy
-        .create_service(&tag_name, "tag", &serde_json::json!({}))
-        .await
-        .expect("create tag service");
     (profile, tag_service.id)
 }
 

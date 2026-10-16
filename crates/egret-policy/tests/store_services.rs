@@ -468,3 +468,63 @@ async fn both_entry_points_onto_the_tag_service_join_agree() {
     s.delete_service(svc.id).await.expect("cleanup");
     s.delete_service(tag_svc.id).await.expect("cleanup");
 }
+
+/// Task 5 (D) — a new profile's `tagService` must name a `tag` profile.
+///
+/// Migration 0191 made the policy download and the tag-bump cascade treat any
+/// profile that is NAMED as a `tagService` as a tag service, whatever its type.
+/// That tolerance exists for rows already stored; `create_service` must stop
+/// minting new ones. Three shapes: missing, wrong type, right type.
+#[tokio::test]
+async fn create_service_refuses_a_tag_service_that_is_not_a_tag_profile() {
+    let Some(s) = store().await else {
+        eprintln!("skip");
+        return;
+    };
+    seed_trino(&s).await.unwrap();
+    seed_tag(&s).await.unwrap();
+
+    let trino_as_tag = s
+        .create_service(&uniq("not_a_tag"), "trino", &json!({}))
+        .await
+        .unwrap();
+    let missing = uniq("no_such_profile");
+
+    for (label, target) in [
+        ("a trino profile", trino_as_tag.name.clone()),
+        ("a missing profile", missing.clone()),
+    ] {
+        let name = uniq("linker");
+        let err = s
+            .create_service(&name, "trino", &json!({ "tagService": target }))
+            .await
+            .expect_err(label);
+        match err {
+            egret_policy::PolicyStoreError::BadRequest(m) => assert!(
+                m.contains("`tag` profile") && m.contains(&target),
+                "{label}: message must say the tag service must be a `tag` profile and name it: {m}"
+            ),
+            other => panic!("{label}: expected BadRequest, got {other:?}"),
+        }
+        assert!(
+            s.get_service_opt(&name).await.unwrap().is_none(),
+            "{label}: a refusal must not insert"
+        );
+    }
+
+    let tag = s
+        .create_service(&uniq("real_tag"), "tag", &json!({}))
+        .await
+        .unwrap();
+    let ok = s
+        .create_service(
+            &uniq("linker_ok"),
+            "trino",
+            &json!({ "tagService": tag.name }),
+        )
+        .await
+        .expect("a tag-typed target is accepted");
+    s.delete_service(ok.id).await.unwrap();
+    s.delete_service(tag.id).await.unwrap();
+    s.delete_service(trino_as_tag.id).await.unwrap();
+}

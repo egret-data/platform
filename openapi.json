@@ -8409,7 +8409,7 @@
             }
           },
           "400": {
-            "description": "Invalid type, missing name, a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert), or a `tagService` whose value is not a non-empty string (it names no policy profile, and the plugin download would carry no `tagPolicies` block)",
+            "description": "Invalid type (must be `trino`, `starrocks` or `tag`), missing name, a `tagService` that names a profile that is missing or not of type `tag`, a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert), or a `tagService` whose value is not a non-empty string (it names no policy profile, and the plugin download would carry no `tagPolicies` block)",
             "content": {
               "application/json": {
                 "schema": {
@@ -34410,7 +34410,7 @@
         },
         "responses": {
           "200": {
-            "description": "A signed access token (client_credentials grant)",
+            "description": "A signed access token (client_credentials, or an RFC 8693 exchange of an unexpired token this IdP issued for a fresh one with the same client and audience)",
             "content": {
               "application/json": {
                 "schema": {
@@ -34420,7 +34420,7 @@
             }
           },
           "400": {
-            "description": "Unsupported grant_type (OAuth `{ \"error\": ... }` body)",
+            "description": "OAuth `{ \"error\": ... }` body: `invalid_request` (a field the grant requires is missing or malformed; carries `error_description`), `invalid_grant` (the subject_token is invalid, expired, foreign, for another audience, or its client was deleted or its secret rotated), or `unsupported_grant_type`",
             "content": {
               "application/json": {
                 "schema": {
@@ -34440,7 +34440,7 @@
             }
           },
           "429": {
-            "description": "Too many token requests from this ip+client_id (OAuth `{ \"error\": ... }` body)",
+            "description": "Too many failed token requests (OAuth `{ \"error\": ... }` body). client_credentials counts every request that runs a secret check, per ip+client_id; a token exchange counts a subject token that fails verification per ip, and one that names its client but no longer matches it (deleted, other audience, secret rotated) per ip+sub. A proven repeat of a good secret, and an exchange that matches its client's current state, are never counted",
             "content": {
               "application/json": {
                 "schema": {
@@ -40667,7 +40667,7 @@
           },
           "masked_read_skips_access": {
             "type": "boolean",
-            "description": "`true` when StarRocks consults no access policy for the target column:\na `read` of a column whose deciding mask is `MASK_NULL`, from whichever\npolicy (final review V-1, live §3.4 cases 2a/2b/2c). The read returns\n`NULL` for the column whoever denies it, so\n[`ExplainProfile::accesses`] carries no `select` verdict and\n[`ExplainProfile::mask`] is the answer.\n\nWhat this cannot say is the query-level consequence: the query as a\nwhole is still refused unless the reader may select another column it\nreads, and when it selects only such columns StarRocks checks the\ntable's first unmasked column (or `___count___` for `count(*)`).\nExplain does not know the query's other columns.\n\nAny other mask type keeps the `select` verdict (`MASK_HASH` was measured\nchecked; the rest are unmeasured), and so does no mask. When the mask\nverdict is undecidable the access verdict is kept and is provisional: if\nStarRocks applies a `MASK_NULL` there, it does not check that access.\nNever set on Trino, which checks access on a masked column.\n\n(Explain no longer answers `create materialized view`, Task 12 M-4: the\nA3 deny is engine-wide, so no single database's verdict says more than\nthe rule, and the database it asked about held nothing.)"
+            "description": "`true` when StarRocks consults no access policy for the target column:\na `read` of a column whose deciding mask is `MASK_NULL`, from whichever\npolicy (final review V-1, live §3.4 cases 2a/2b/2c; a hand-written\n`MASK_NULL` with a hand-written deny measured too, §4.4 case 3a). The read returns\n`NULL` for the column whoever denies it, so\n[`ExplainProfile::accesses`] carries no `select` verdict and\n[`ExplainProfile::mask`] is the answer.\n\nWhat this cannot say is the query-level consequence: the query as a\nwhole is still refused unless the reader may select another column it\nreads, and when it selects only such columns StarRocks checks the\ntable's first unmasked column (measured: `id` on a partly classified\nIceberg table, live result §3.4 case 2a) or `___count___` for\n`count(*)` (§3.4 case 2a). When no column is unmasked, on an Iceberg\ntable it checks the hidden `_file` / `_pos` columns, so a no-grant\nreader of a fully classified Iceberg table is refused (§4.4 case 3b).\nExplain does not know the query's other columns.\n\nAny other mask type keeps the `select` verdict (`MASK_HASH` was measured\nchecked; the rest are unmeasured), and so does no mask. When the mask\nverdict is undecidable the access verdict is kept and is provisional: if\nStarRocks applies a `MASK_NULL` there, it does not check that access.\nNever set on Trino, which checks access on a masked column.\n\n(Explain no longer answers `create materialized view`, Task 12 M-4: the\nA3 deny is engine-wide, so no single database's verdict says more than\nthe rule, and the database it asked about held nothing.)"
           }
         }
       },
@@ -47779,20 +47779,49 @@
       },
       "TokenForm": {
         "type": "object",
-        "required": [
-          "grant_type",
-          "client_id",
-          "client_secret"
-        ],
+        "description": "`POST /oauth/token` form. Which fields are required depends on\n`grant_type`, so every field — `grant_type` included — is optional here and\nchecked by the handler: a missing field is a 400 `invalid_request`, never\nthe extractor's 422, which no OAuth client reads as a refusal (I4).",
         "properties": {
           "grant_type": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required: `client_credentials` or\n`urn:ietf:params:oauth:grant-type:token-exchange`."
           },
           "client_id": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for `client_credentials`."
           },
           "client_secret": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for `client_credentials`."
+          },
+          "subject_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for token exchange: an unexpired access token this IdP issued.\nA Bearer `Authorization` header alone does not stand in for it."
+          },
+          "subject_token_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for token exchange: `urn:ietf:params:oauth:token-type:access_token`."
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Accepted and ignored."
           }
         }
       },
@@ -51403,7 +51432,7 @@
     },
     {
       "name": "idp",
-      "description": "egret mini machine-IdP: OIDC discovery, JWKS, and client_credentials token minting"
+      "description": "egret mini machine-IdP: OIDC discovery, JWKS, and token minting (client_credentials + RFC 8693 token exchange)"
     },
     {
       "name": "data-api",

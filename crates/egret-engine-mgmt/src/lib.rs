@@ -23,6 +23,7 @@ pub use delegation_default::{
     has_platform_jwks, resolve_delegation, starrocks_image_is_pre_3_5, ResolvedDelegation,
 };
 pub use engines::router as engine_mgmt_router;
+pub use engines::seed_user_baselines_for_existing_engines;
 pub use engines::workspace_engines_router;
 pub use error::EngineMgmtError;
 pub use http_error::EngineHttpError;

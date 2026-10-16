@@ -1620,3 +1620,39 @@ async fn a_materialized_view_over_a_matched_one_is_listed_at_any_depth() {
         "body={j}"
     );
 }
+
+/// Final re-review N-3: `default_catalog.<db>.<name>` is the base-map spelling
+/// StarRocks 4.1.6 was measured to write (Task 6), but a base map naming the
+/// matched view as `<db>.<name>` is accepted too, so a spelling difference
+/// cannot make a dependent view silently absent.
+#[tokio::test]
+async fn a_base_map_naming_the_matched_view_without_the_catalog_is_listed() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: no test database");
+        return;
+    };
+    let s = seed(&f).await;
+    let lister = Arc::new(FakeLister::default());
+    let classified = format!("{}.sales.orders", s.catalog);
+    lister.answer(
+        &s.engine_name,
+        Ok(vec![
+            mv("db1", "mv_base", &[&classified]),
+            mv("db2", "mv_short", &["DB1.mv_base"]),
+            mv("db3", "mv_long", &["default_catalog.db1.mv_base"]),
+            mv("db4", "mv_plain", &["db1.mv_other"]),
+        ]),
+    );
+
+    let j = exposure(&f, lister, s.tag_id).await;
+
+    assert_eq!(
+        listed(&j),
+        vec![
+            row(&s.engine_name, "db1", "mv_base", "baseTable"),
+            row(&s.engine_name, "db2", "mv_short", "baseTable"),
+            row(&s.engine_name, "db3", "mv_long", "baseTable"),
+        ],
+        "body={j}"
+    );
+}

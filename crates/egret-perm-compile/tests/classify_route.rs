@@ -851,14 +851,16 @@ async fn a_trino_typed_profile_named_as_a_tag_service_is_classified_as_a_tag_ser
         .create_service(&unique("cls_ttag"), "trino", &json!({}))
         .await
         .expect("create trino-typed tag service");
-    store
-        .create_service(
-            &unique("cls_tlink"),
-            "trino",
-            &json!({ "tagService": tt.name }),
-        )
-        .await
-        .expect("create linker");
+    // A pre-existing shape (spec D4): `create_service` now refuses a `tagService`
+    // naming a non-`tag` profile, but rows like this one are not migrated.
+    sqlx::query(
+        "INSERT INTO policy.authz_services (name, type, config_jsonb) VALUES ($1,'trino',$2)",
+    )
+    .bind(unique("cls_tlink"))
+    .bind(json!({ "tagService": tt.name }))
+    .execute(&f.db.pool)
+    .await
+    .expect("insert a linker naming a trino-typed tag service");
 
     let mask = insert(
         &f,

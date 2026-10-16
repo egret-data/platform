@@ -66,6 +66,10 @@ async fn seed(db: &Db) -> Fixture {
 
     let profile_name = unique("trino_clr");
     let tag_service_name = format!("{profile_name}_tag");
+    let tag_service = policy
+        .create_service(&tag_service_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("create tag service");
     let profile = policy
         .create_service(
             &profile_name,
@@ -74,10 +78,6 @@ async fn seed(db: &Db) -> Fixture {
         )
         .await
         .expect("create trino profile");
-    let tag_service = policy
-        .create_service(&tag_service_name, "tag", &serde_json::json!({}))
-        .await
-        .expect("create tag service");
 
     Fixture {
         perm,

@@ -34,6 +34,10 @@ async fn compiled_policies_are_stamped_compiler() {
 
     let profile_name = unique("trino_stamp");
     let tag_service_name = format!("{profile_name}_tag");
+    let tag_service = policy
+        .create_service(&tag_service_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("create tag service");
     let profile = policy
         .create_service(
             &profile_name,
@@ -42,10 +46,6 @@ async fn compiled_policies_are_stamped_compiler() {
         )
         .await
         .expect("create profile");
-    let tag_service = policy
-        .create_service(&tag_service_name, "tag", &serde_json::json!({}))
-        .await
-        .expect("create tag service");
 
     let tag_key = unique("stamp-pii");
     sqlx::query("INSERT INTO tags (key, name) VALUES ($1, 'Stamp PII')")

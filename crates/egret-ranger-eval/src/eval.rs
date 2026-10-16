@@ -2019,8 +2019,80 @@ fn candidate_views<'a>(
         .enumerate()
         .filter(|(_, p)| p.is_enabled)
         .filter(|(_, p)| p.policy_type == policy_type_code)
-        .map(|(i, policy)| PolicyView::from_matches(policy, &ctx.resource_matches(i, request)))
+        .map(|(i, policy)| {
+            let matches = ctx.resource_matches(i, request);
+            let mut view = PolicyView::from_matches(policy, &matches);
+            view.tokens_cannot_match =
+                resource_tokens_cannot_match(policy, &matches, &request.resource, ctx.service_def);
+            view
+        })
         .collect()
+}
+
+/// Whether this policy's resource-value expressions provably cannot make it
+/// match `request`, whatever they expand to — the one case in which
+/// [`Unmodelled::ResourceValueExpressionMarker`] cannot decide anything and so
+/// must not refuse the decision (DG Task 7).
+///
+/// An expression changes only what a matcher compares a REQUEST value against.
+/// All three must hold:
+///
+/// 1. no marked level is a level the request carries, so neither the matcher
+///    nor [`trie_excludes`] (which reads only the request's levels) ever reads
+///    a marked value;
+/// 2. the policy is `NONE` as stored;
+/// 3. the policy is still `NONE` with every marked level widened to `*`, which
+///    matches whatever the expression expands to. This is what keeps a policy
+///    on `{catalog: hive, schema: {USER}}` refusing a catalog-level request: it
+///    is a DESCENDANT match (a trie candidate) for any expansion.
+///
+/// A marked level with `isExcludes` is not widened (`*` excluded is the empty
+/// set, not a superset), so it keeps refusing. Anything this cannot prove is
+/// `false`, which keeps the old, refusing behaviour.
+fn resource_tokens_cannot_match(
+    policy: &RangerPolicy,
+    matches: &[ResourceMatch],
+    request: &RequestResource,
+    service_def: &ServiceDef,
+) -> bool {
+    let marked: Vec<(Option<usize>, &str)> = policy
+        .unmodelled
+        .iter()
+        .filter_map(|c| match c {
+            Unmodelled::ResourceValueExpressionMarker {
+                additional_index,
+                resource_type,
+                ..
+            } => Some((*additional_index, resource_type.as_str())),
+            _ => None,
+        })
+        .collect();
+    if marked.is_empty() || matches.iter().any(|m| m.match_type != MatchType::None) {
+        return false;
+    }
+    let mut widened = policy.clone();
+    for (index, resource_type) in marked {
+        if request.get(resource_type).is_some() {
+            return false;
+        }
+        let map = match index {
+            None => &mut widened.resources,
+            Some(i) => match widened.additional_resources.get_mut(i) {
+                Some(map) => map,
+                None => return false,
+            },
+        };
+        let Some(level) = map.get_mut(resource_type) else {
+            return false;
+        };
+        if level.is_excludes {
+            return false;
+        }
+        level.values = vec!["*".to_string()];
+    }
+    match_policy_resources(&widened, request, service_def)
+        .iter()
+        .all(|m| m.match_type == MatchType::None)
 }
 
 fn evaluate_in(ctx: &Ctx<'_, '_>, request: &AccessRequest, engine: &EngineConfig) -> Decision {
@@ -3340,6 +3412,10 @@ struct PolicyView<'a> {
     /// `SELF` scope, so this never makes `decide` return anything. It exists for
     /// [`PolicyView::provably_a_candidate`] alone.
     any_match: bool,
+    /// [`resource_tokens_cannot_match`]: this policy's resource-value
+    /// expressions cannot make it match this request, so their marker is not
+    /// reported. `false` unless the resource path proved it.
+    tokens_cannot_match: bool,
 }
 
 impl<'a> PolicyView<'a> {
@@ -3368,6 +3444,7 @@ impl<'a> PolicyView<'a> {
             has_allow: !policy.policy_items.is_empty(),
             matched,
             any_match: matches.iter().any(|m| m.match_type != MatchType::None),
+            tokens_cannot_match: false,
         }
     }
 
@@ -3423,6 +3500,8 @@ impl<'a> PolicyView<'a> {
             // ([`UndecidableCause::TagResourceNotReproducible`]); nothing on
             // that path reads this.
             any_match: true,
+            // The tag path keeps reporting every marker.
+            tokens_cannot_match: false,
         }
     }
 
@@ -3449,10 +3528,13 @@ impl<'a> PolicyView<'a> {
                 // A construct that decides whether the policy MATCHES has
                 // to be reported whether or not `matched` came out true —
                 // `matched` is exactly what it makes unreliable.
-                let always = matches!(
-                    construct,
-                    Unmodelled::ResourceValueExpressionMarker { .. } | Unmodelled::ZoneName(_)
-                );
+                // ...unless the resource path proved no expansion can make
+                // this policy match ([`resource_tokens_cannot_match`]).
+                let always = match construct {
+                    Unmodelled::ResourceValueExpressionMarker { .. } => !self.tokens_cannot_match,
+                    Unmodelled::ZoneName(_) => true,
+                    _ => false,
+                };
                 if always || (self.matched && construct_affects(kind, construct)) {
                     push(construct);
                 }

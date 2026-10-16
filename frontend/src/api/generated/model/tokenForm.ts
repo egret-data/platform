@@ -6,8 +6,43 @@
  * OpenAPI spec version: 0.1.0
  */
 
+/**
+ * `POST /oauth/token` form. Which fields are required depends on
+ * `grant_type`, so every field — `grant_type` included — is optional here and
+ * checked by the handler: a missing field is a 400 `invalid_request`, never
+ * the extractor's 422, which no OAuth client reads as a refusal (I4).
+ */
 export interface TokenForm {
-  grant_type: string;
-  client_id: string;
-  client_secret: string;
+  /**
+     * Required: `client_credentials` or
+     * `urn:ietf:params:oauth:grant-type:token-exchange`.
+     * @nullable
+     */
+  grant_type?: string | null;
+  /**
+     * Required for `client_credentials`.
+     * @nullable
+     */
+  client_id?: string | null;
+  /**
+     * Required for `client_credentials`.
+     * @nullable
+     */
+  client_secret?: string | null;
+  /**
+     * Required for token exchange: an unexpired access token this IdP issued.
+     * A Bearer `Authorization` header alone does not stand in for it.
+     * @nullable
+     */
+  subject_token?: string | null;
+  /**
+     * Required for token exchange: `urn:ietf:params:oauth:token-type:access_token`.
+     * @nullable
+     */
+  subject_token_type?: string | null;
+  /**
+     * Accepted and ignored.
+     * @nullable
+     */
+  scope?: string | null;
 }

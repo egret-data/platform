@@ -66,6 +66,12 @@ pub struct CatalogClient {
     pub catalog_role_id: Uuid,
     pub client_id: String,
     pub created_at: DateTime<Utc>,
+    /// Last full secret verification. The IdP serves repeats from a
+    /// verification cache, so this advances at most about once per 10 minutes
+    /// per (client, secret) — not on every token request. An RFC 8693 token
+    /// exchange never verifies a secret, so a client that only refreshes by
+    /// exchange (Iceberg's catalog client, after its first token) does not
+    /// advance it: it can read hours old for a client in constant use.
     pub last_used_at: Option<DateTime<Utc>>,
 }
 
@@ -540,14 +546,15 @@ impl CatalogStore {
         Ok(())
     }
 
-    /// Verify a client's secret; on success return its warehouse name + role name
-    /// (for the JWT claims), and touch `last_used_at`.
-    pub async fn verify_client(
+    /// The row a Catalog Client mints from: `(id, client_secret_hash,
+    /// warehouse name, role name)`. Read by both [`Self::verify_client`] and the
+    /// `ClientVerifier::current` impl, so the secret path and the secret-free
+    /// path cannot disagree about which clients exist.
+    async fn client_row(
         &self,
         client_id: &str,
-        client_secret: &str,
-    ) -> Result<Option<(String, String)>, CatalogError> {
-        let row: Option<(Uuid, String, String, String)> = sqlx::query_as(
+    ) -> Result<Option<(Uuid, String, String, String)>, CatalogError> {
+        Ok(sqlx::query_as(
             "SELECT c.id, c.client_secret_hash, w.name, r.name \
              FROM catalog.catalog_clients c \
              JOIN catalog.warehouses w ON w.id = c.warehouse_id \
@@ -556,8 +563,36 @@ impl CatalogStore {
         )
         .bind(client_id)
         .fetch_optional(self.pool())
-        .await?;
-        let Some((id, hash, warehouse, role)) = row else {
+        .await?)
+    }
+
+    /// Verify a client's secret; on success return its warehouse name + role name
+    /// (for the JWT claims), and touch `last_used_at`.
+    pub async fn verify_client(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Result<Option<(String, String)>, CatalogError> {
+        Ok(self
+            .verified_row(client_id, client_secret)
+            .await?
+            .map(|(_, warehouse, role)| (warehouse, role)))
+    }
+
+    /// The client's row — `(secret hash, warehouse name, role name)` — if the
+    /// secret verifies against the hash in THAT row; touches `last_used_at`.
+    ///
+    /// Only a full verify touches `last_used_at`. The IdP serves a proven
+    /// repeat of a secret from its verification cache without calling this, so
+    /// the column advances at most about once per cache TTL (600 s) per
+    /// (client, secret). A token exchange never calls this, so it does not
+    /// advance the column at all.
+    async fn verified_row(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Result<Option<(String, String, String)>, CatalogError> {
+        let Some((id, hash, warehouse, role)) = self.client_row(client_id).await? else {
             return Ok(None);
         };
         let parsed = PasswordHash::new(&hash)
@@ -573,7 +608,7 @@ impl CatalogStore {
                 .bind(id)
                 .execute(self.pool())
                 .await;
-        Ok(Some((warehouse, role)))
+        Ok(Some((hash, warehouse, role)))
     }
 }
 
@@ -584,19 +619,37 @@ impl egret_machine_idp::ClientVerifier for CatalogStore {
         &self,
         client_id: &str,
         client_secret: &str,
-    ) -> Result<Option<egret_machine_idp::VerifiedClient>, egret_machine_idp::IdpError> {
-        match self
-            .verify_client(client_id, client_secret)
+    ) -> Result<Option<egret_machine_idp::ClientState>, egret_machine_idp::IdpError> {
+        let row = self
+            .verified_row(client_id, client_secret)
             .await
-            .map_err(|e| egret_machine_idp::IdpError::Db(e.to_string()))?
-        {
-            Some((warehouse, catalog_role)) => Ok(Some(catalog_verified_client(
-                client_id,
-                warehouse,
-                catalog_role,
-            ))),
-            None => Ok(None),
-        }
+            .map_err(|e| egret_machine_idp::IdpError::Db(e.to_string()))?;
+        // The row the Argon2 check used, whole: its hash is the one that
+        // verified, which is what the IdP caches.
+        Ok(row.map(
+            |(secret_hash, warehouse, role)| egret_machine_idp::ClientState {
+                verified: catalog_verified_client(client_id, warehouse, role),
+                secret_hash,
+            },
+        ))
+    }
+
+    /// A Catalog Client has no refusal beyond existing: revoking one DELETEs
+    /// its row. So the row read alone is the whole answer.
+    async fn current(
+        &self,
+        client_id: &str,
+    ) -> Result<Option<egret_machine_idp::ClientState>, egret_machine_idp::IdpError> {
+        let row = self
+            .client_row(client_id)
+            .await
+            .map_err(|e| egret_machine_idp::IdpError::Db(e.to_string()))?;
+        Ok(row.map(
+            |(_, secret_hash, warehouse, role)| egret_machine_idp::ClientState {
+                verified: catalog_verified_client(client_id, warehouse, role),
+                secret_hash,
+            },
+        ))
     }
 }
 

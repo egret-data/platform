@@ -15,10 +15,11 @@
 //!    names like `"egret-admin - catalog, schema, table, column"` and
 //!    `"all - catalog, schema, table, column"`, thirteen hierarchies per
 //!    generated Trino profile, granting `*` on everything.
-//! 2. **Delegator plumbing** — `egret_engine_mgmt::delegator_policy` has two
-//!    stable names, `egret-delegator-impersonate` and `egret-query-timeout`.
-//!    Neither is a data grant, so neither will ever decide a `select`, but
-//!    this function must not choke on them.
+//! 2. **Delegator plumbing** — `egret_engine_mgmt::delegator_policy` has four
+//!    stable names, `egret-delegator-impersonate` and the per-user baseline
+//!    `egret-user-impersonate-self`, `egret-user-execute-query` and
+//!    `egret-query-timeout`. None is a data grant, so none will ever decide a
+//!    `select`, but this function must not choke on them.
 //! 3. **Operator-written raw JSON** — arbitrary names, constrained to
 //!    `manual` profiles but reachable by `explain`.
 //! 4. **Ranger's super-user short-circuit** — the evaluator can report

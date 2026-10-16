@@ -2244,6 +2244,25 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             as std::sync::Arc<dyn egret_catalog_registry::CatalogAssignmentCompiler>),
     });
 
+    // DG Task 7: bring every existing delegating Trino engine's Ranger profile
+    // up to the per-user baseline Trino 483 checks on every session. An apply
+    // seeds it too; this pass is what reaches engines deployed before the
+    // baseline existed, with no reapply (each plugin picks the rows up on its
+    // next policy poll). Best-effort: a failing profile is logged, not fatal.
+    //
+    // Not gated on `config.ranger.enabled` (final review F6): the apply path
+    // seeds any engine bound to a profile whatever that flag says, and an
+    // engine bound while it was on keeps its profile after it is turned off.
+    // `seed_engine_user_baseline` skips every engine bound to no profile.
+    {
+        let st = engine_mgmt
+            .as_ref()
+            .expect("engine-mgmt state is built just above");
+        let (seeded, failed) =
+            egret_engine_mgmt::seed_user_baselines_for_existing_engines(st).await;
+        tracing::info!(seeded, failed, "per-user Ranger baseline pass");
+    }
+
     // Control plane: global platform-admin Storage + Secrets + Access console.
     // Keeps `storage` (CatalogStore) + `browser` for the Storage router's
     // credential-rotation push-down onto provisioned warehouses; the warehouse

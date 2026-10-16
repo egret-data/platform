@@ -926,3 +926,573 @@ the 90 s deadline.
   throwaway DB, and `egret-sign.pem` is that DB's signing key.
 - **Untouched:** DB `egret`, every `egret-dev-*` container (including the running `egret-dev-valkey-1` and
   `egret-dev-rustfs-1`), `egret-w7e-postgres`, ports 5173, 5000 and 8080. No product code changed.
+
+## 4. DG backend package: measurements (Task 6)
+
+> **Measured:** 2026-10-16 (UTC), branch `feat/dg-backend-cleanup` at `329e460f` (holds Tasks 2–5: the RFC 8693
+> token exchange, the verification cache that lets a proven repeat skip Argon2 and the token limit, and "a
+> `tagService` must name a `tag` profile"). Brief: DG backend cleanup, Task 6. No product code changes.
+
+### 4.0 Predictions (committed before anything was observed)
+
+Written from the code at `329e460f`, §2–§3 and the Task 12 "I2 investigation", before any engine of this run was
+started. Nothing here is edited after observing; a wrong prediction is a finding.
+
+**Setup the predictions are about.** The §3.2 stack rebuilt: image `egret-backend:vg-dg6` built from `329e460f`,
+DB `egret_dgpkg_live` (created for this run, dropped at the end), `vg-*` containers on `vg-net`, Trino 483 in the
+provisioner's JWT rendering (DEV-1/DEV-2 rows as §2.2), StarRocks 4.1.6 allin1. Profiles `vgtr-tag` (type `tag`,
+created first), `vgtr` (trino, `tagService = vgtr-tag`), `vgsr` (starrocks). Registry catalog `ice`, namespace `s`.
+`EGRET_RATE_LIMIT__TOKEN_MAX_ATTEMPTS` stays at its default (60 per minute).
+
+**1. JWT baseline (brief step 2).** `vcplain` (not a platform admin) holds one perm grant, `select` on table
+`ice.s.pub`. The `vgtr` profile holds only what the compiler writes (no hand-written policy at all; DEV-1 also
+skips the creation-time `seed_admin_all_access`, which covers platform admins only). `vcplain` runs
+`SELECT * FROM ice.s.pub` through `POST /api/ws/default/queries`. egret sends `Authorization: Bearer <vcplain's
+engine JWT>`, `X-Trino-User: vcplain` and `X-Trino-Session: query_max_run_time=…`.
+
+| step | hand-written policies present (`{USER}` = the user macro) | predicted result |
+|---|---|---|
+| J0 | none | `Access Denied: Cannot execute query` (Trino checks `queryid` `execute` in `checkCanExecuteQuery` before it applies the session's system properties) |
+| J1 | `systemproperty = query_max_run_time`, `alter`, `{USER}` | still `Access Denied: Cannot execute query` |
+| J2 | J1 + `queryid = *`, `execute`, `{USER}` | **rows** (the query succeeds) |
+| J3 | `trinouser` self-impersonate | **not needed**: Trino 483 checks impersonation only when `X-Trino-User` differs from the authenticated principal, and both are `vcplain` |
+| J-min | J2 minus the `query_max_run_time` allow (only `queryid`) | `Access Denied: Cannot set system session property query_max_run_time` |
+
+Predicted minimal set: **two** allows for `{USER}`: `queryid` `*` `execute`, and `systemproperty`
+`query_max_run_time` `alter`. No `trinouser` policy. The grant alone (no baseline) never reaches the table check.
+
+I3 at the default limit: no `429` / `slow_down` from `/oauth/token` in Trino's log or egret's for the whole run
+(Task 3: a proven repeat skips the limiter). DEV-5 (raised limit) is not used.
+
+**2. StarRocks (brief step 3).**
+
+| id | setup | query (as the reader) | predicted engine result | predicted explain (`POST /perm/explain`, read, column) | verdict |
+|---|---|---|---|---|---|
+| 3a | table `ice.s.hm(id, c)`, unclassified. Hand-written `{public}` `MASK_NULL` on `hm.c`; hand-written `select` deny on `hm.c` for `vcplain`; `vcplain` holds the perm grant `select` on `ice.s.hm` | `select id, c` | `id` real, `c` `NULL` ×3, **no error**: the skip follows the mask type, whichever policy wrote the mask (§3.4 2b) | `hm.c`: mask `MASK_NULL` decided by the hand-written mask, `masked_read_skips_access`, no `select` verdict | same |
+| 3a | as above | `select c` | `NULL` ×3, no error (the check falls on `id`, which the grant allows) | as above | same |
+| 3a | as above | `select id` | rows | `select` allowed | same |
+| 3b | table `ice.s.full(a, b)`, **every** column classified `vgsecret`; reader `vcnobody`, no grant | `select count(*)` | `ERROR 5204 … COLUMN ___count___` (as §3.4 2a) | — | — |
+| 3b | as above | `select *` | **refused**, `ERROR 5204 … COLUMN a`: with no unmasked column, StarRocks checks the table's first column, masked or not. The row count is **not** learned | `select` denied on `a` and `b`... but explain's V-1 rule answers `MASK_NULL` + skip with no `select` verdict | **differs** (fail-closed: explain says not access-checked, the engine refuses) |
+| 3c | `vgdb.mv1` over `ice.s.pii`, `vgdb.mv2` over `vgdb.mv1`, both refreshed | root: `MATERIALIZED_VIEWS_SQL` (`TABLE_SCHEMA, TABLE_NAME, BASE_TABLE_REFRESH_VERSION_TIMES, MATERIALIZED_VIEW_DEFINITION`) | `mv1`'s map key `ice.s.pii`; **`mv2`'s map key `default_catalog.vgdb.mv1`** (what `reads_a_matched_view` accepts) | — | N-3 closed if so |
+
+If 3b's `select *` returns `NULL` rows instead, the reader learns the row count (the guide's stated risk), and
+explain then agrees with the engine.
+
+### 4.1 Result (read this first)
+
+**PARTIAL.** The three StarRocks cells ran. The JWT baseline (brief step 2) is **BLOCKED** by a new finding, J-F1:
+on a fresh egret, Trino loaded an empty JWKS and refused every delegated query with `401 Unknown signing key ID`.
+The run was then cut short (the controller asked for the report), before Trino re-read the key file, so no
+J0–J3 cell was observed. All predictions in 4.0 for step 2 stay unverified.
+
+### 4.2 Stack and deviations
+
+Image `egret-backend:vg-dg6` built from `329e460f`. Containers `vg-egret` (egret, no logging proxy: DEV-4 not
+used), `vg-rustfs` (`rustfs/rustfs:1.0.1`), `vg-trino-coord` (Trino 483, digest `db58cc93…`, host name
+`vgtr-coordinator-6d5f7c9b8-ab1cd`, aliases `vgtr-trino` and `vgtr-trino.egret-engines.svc`), `vg-sr` (allin1
+4.1.6-6862092), all on `vg-net`. DB `egret_dgpkg_live`, `egret migrate` + `egret init`. Log line
+`kubernetes unavailable; engine provisioning disabled`.
+
+- **DEV-1 (SQL):** engine row `vgtr` inserted (`provisioned`, `running`, JWT spec, `workerReplicas: 0`, the leaf
+  coordinator cert), bound to profile `vgtr`. The Trino files were hand-rendered from `config_properties` (JWT,
+  TLS 8443, `jwt.key-file=http://vg-egret:8096/.well-known/jwks.json`, audience `engine`), the Ranger files from
+  the golden rendering (poll 30000 ms), and `ice.properties` from `render_trino` (OAuth2, vended credentials).
+  `PUT /engines/{id}/workspaces` then materialized `vgtr-trino.egret-engines.svc:8443` with the pinned cert.
+- **DEV-2 (SQL):** the `vgtr`→`ice` attachment inserted as `applied`.
+- **StarRocks** is an **external** engine (`POST /engines/external`, 2.9.0, profile `vgsr`, catalog `ice`
+  declared), not a DEV-1 row. Its external catalog `ice` was created by hand as root with egret's rendering
+  (DEV-13); Ranger files from `GET /engines/{id}/ranger-plugin-config`, poll 5000 ms (DEV-7).
+- **DEV-3 (SQL):** `origin = 'manual'` set on `vgsr` before each hand-written write; every mask write or toggle
+  recompiled it back to `generated` in the same request (I-3's refold, as designed).
+- **DEV-12 (setup):** the catalog's workspace assignment was removed (`PUT /catalogs/{id}/workspaces []`), because
+  it creates a `workspace_members` read grant on all of `ice` and the brief needs one-table grants and a reader
+  with no grant.
+- **DEV-13 (setup):** one engine catalog client served both engines.
+- `EGRET_RANGER__AUTH_TOKEN` had to be unset: with it set, the plugin-config endpoint warns that a stock plugin
+  gets 401.
+- `EGRET_RATE_LIMIT__TOKEN_MAX_ATTEMPTS` default; no `429`/`slow_down` in Trino's or the FE's log.
+
+### 4.3 JWT baseline (brief step 2): BLOCKED
+
+`vcplain` (grant: `select` on `ice.s.pub` only; the profile held only the two compiled grants) ran
+`SELECT * FROM ice.s.pub` through `POST /api/ws/default/queries`: query `failed`, `"error": "forbidden"`. Trino's
+`http-request.log`: `POST /v1/statement … 401`. Replaying with a JWT minted from egret's key (DEV-6) gave
+`401 Unknown signing key ID`. The JWKS egret served at that time held the one key
+(`137ee79d…`, created 02:23:47 by the Iceberg catalog's first token mint); Trino started at 02:23:35. A probe every
+30 s stayed 401 from 02:27:30 to 02:29:31, when the run was stopped.
+
+### 4.4 StarRocks (brief step 3)
+
+| id | query | engine | explain | verdict |
+|---|---|---|---|---|
+| 3a `vcplain`, hand-written `{public}` `MASK_NULL` + hand-written deny on `hm.c`, grant on `hm` | `select id, c` | `1 NULL / 2 NULL / 3 NULL`, no error | `hm.c`: `accesses: []`, mask `MASK_NULL` by `hw-mask-public-hm-c`, `masked_read_skips_access: true` | same (as predicted) |
+| 3a | `select c` / `select id` / `count(*)` | `NULL` ×3 / `1 2 3` / `3` | `hm.id`: allowed by the grant, `no_mask` | same |
+| 3a control: mask disabled | `select id, c` | `ERROR 5204 … SELECT privilege(s) on COLUMN c` (the deny is live) | — | — |
+| 3b `vcnobody`, no grant, `full(a, b)` both classified | `select count(*)` | `ERROR 5204 … COLUMN ___count___` | — | as predicted |
+| 3b | `select *` | **`ERROR 5204 … COLUMN _file`** | `full.a`, `full.b`: `MASK_NULL` (clearance), skip, no `select`; table-level: denied, `no_policy_matched` | refused as predicted, **another column** (Iceberg hidden column, not `a`); the per-column explain cell differs (fail-closed) |
+| 3b | `select a`, `select b`, `select 1`, `count(a)` | `ERROR 5204 … COLUMN _pos` | as above | refused |
+| 3b | `count(*) … where a is null` | `ERROR 5204 … COLUMN ___count___` | — | refused |
+| 3c | root, `MATERIALIZED_VIEWS_SQL` | `mv1` `{"ice.s.pii":…}`; `mv2` over `vgdb.mv1`: `{"default_catalog.vgdb.mv1":…}`; `mv4` over `default_catalog.vgdb.mv1`: same key; `mv3` over internal `vgdb.t`: `{"default_catalog.vgdb.t":…}` | — | as predicted; N-3 closed |
+
+So a no-grant reader of a fully classified **Iceberg** table does not learn the row count: StarRocks checks the
+hidden `_file` / `_pos` columns (or `___count___`), which no mask covers.
+
+### 4.5 Findings
+
+- **J-F1 (Important).** egret creates its signing key lazily (on the first mint), and `/.well-known/jwks.json`
+  serves only stored keys. An engine whose JWT authenticator reads the JWKS before the first mint caches an empty
+  set and answers every delegated query `401 Unknown signing key ID`, which egret reports as `forbidden`, for at
+  least 2 minutes here (recovery time not measured). Fix: create the key at startup (or before the JWKS answers).
+- **J-F2 (Minor).** egret flattens every engine 401/403 to `"error": "forbidden"`; the engine's reason (here a
+  key-ID failure, not an access decision) is not visible to the user or in egret's log.
+- **J-F3 (Minor).** `POST /perm/grants` with `{kind: user, ref: <user id>}` is accepted and compiles a Ranger user
+  named by the UUID, which matches nobody. The ref must be the username; a UUID should be refused or resolved.
+- **S-F1 (Minor, docs).** The guide's "Not measured: a table on which every column is `MASK_NULL`" and "checks the
+  table's first unmasked column" should now say: on Iceberg tables the check falls on the hidden `_file`/`_pos`
+  columns (or `___count___`), so a no-grant reader is refused and learns no row count. Explain's per-column cell
+  says "not access-checked" where the engine refuses (fail-closed).
+- **S-F2 (observation).** Root, with the `{public}` clearance mask, reads `full.a`/`full.b` as `NULL`, and its
+  `select *` also returned `_file` and `_pos`.
+
+### 4.6 Left behind
+
+- **Removed:** containers `vg-egret`, `vg-trino-coord`, `vg-sr`, `vg-rustfs`; network `vg-net`; image
+  `egret-backend:vg-dg6`; DB `egret_dgpkg_live` (dropped). The probe loop was killed by its PID.
+- **Kept:** the scratchpad `t6/` (logs, evidence). It holds secrets of the dropped throwaway DB and stack:
+  `egret.env`, `admin_pw.txt`, `user_pw.txt`, `client.json`, `trino_cred.txt`, `s3secret.txt`, `egret-sign.pem`,
+  the cookie jars and `api.log`.
+- **Untouched:** DB `egret`, every `egret-dev-*` container, `egret-w7f-postgres`, ports 5173, 5000, 8080. No
+  product code changed.
+
+### 4.7 Task 6b: the JWT baseline re-run, predictions (committed before anything was observed)
+
+> **Measured:** 2026-10-16 (UTC), branch `feat/dg-backend-cleanup` at `3aa3c8fa` (adds Task 6a: the JWKS is
+> never empty, and an engine 401 answers `502 "engine authentication failed"` instead of `"forbidden"`). Brief:
+> DG backend cleanup, Task 6b (Task 6 step 2 again). No product code changes.
+
+**Setup the predictions are about.** Image `egret-backend:vg-dg6b` built from `3aa3c8fa`; throwaway DB
+`egret_dgpkg_live` (created for this run, dropped at the end); `vg-*` containers on `vg-net`; Trino 483 (digest
+`db58cc93…`) in the provisioner's JWT rendering (TLS 8443, `allow-insecure-over-http=false`,
+`jwt.key-file=http://vg-egret:8096/.well-known/jwks.json`, `principal-field=preferred_username`,
+`required-audience=engine`), the Ranger plugin bound to profile `vgtr`. Engine row and catalog attachment as
+DEV-1 / DEV-2. Trino is started only **after** egret answers `/.well-known/jwks.json` with a key, and one JWT
+login is checked before J0. `EGRET_RATE_LIMIT__TOKEN_MAX_ATTEMPTS` stays at its default. StarRocks is not part of
+this run.
+
+The data is a registry catalog of type `tpch` named `tpch` (Trino's `tpch` connector), not Iceberg: the baseline
+checks (`queryid`, `systemproperty`, `trinouser`) do not depend on the connector, and this removes the catalog
+OAuth2 path (I3/I4) from the measurement. This is a labelled deviation (DEV-14 below).
+
+`vcplain` (not a platform admin, member of workspace `default`) holds one perm grant: `allow` `read` on table
+`tpch.tiny.nation`, principal `{kind: user, ref: "vcplain"}`. The catalog is **not** assigned to the workspace
+(no `workspace_members` grant, DEV-12). The profile holds no hand-written policy at J0. `vcplain` runs
+`SELECT * FROM tpch.tiny.nation` through `POST /api/ws/default/queries`; egret sends `Authorization: Bearer
+<vcplain's engine JWT>`, `X-Trino-User: vcplain`, `X-Trino-Session: query_max_run_time=…`.
+
+| step | hand-written policies present (`{USER}` = the user macro) | predicted result |
+|---|---|---|
+| login check | none (a query as any user) | **not** `502 engine authentication failed`: Trino authenticates the JWT, so any error is an access denial |
+| J0 | none | query `failed`, `Access Denied: Cannot execute query` (`checkCanExecuteQuery` runs right after the session is built, before the session's system properties are checked) |
+| J1 | `systemproperty = query_max_run_time`, `alter`, `{USER}` | still `Access Denied: Cannot execute query` |
+| J2 | J1 + `queryid = *`, `execute`, `{USER}` | **rows** (25 nations) |
+| J3 | `trinouser` self-impersonate | **not needed**: Trino checks impersonation only when `X-Trino-User` differs from the authenticated principal (both `vcplain`) |
+| J-min a | J2 minus the `query_max_run_time` allow (only `queryid`) | `Access Denied: Cannot set system session property query_max_run_time` |
+| J-min b | J2 minus the `queryid` allow (only `query_max_run_time`) | as J1 |
+| J-min c | J2, grant deleted | `Access Denied: Cannot select from columns [...] in table or view tpch.tiny.nation` (the baseline is not what lets the read through) |
+
+Predicted minimal set: **two** allows for `{USER}`: `queryid` `*` `execute`, and `systemproperty`
+`query_max_run_time` `alter`. No `trinouser` policy. With neither, the grant never reaches the table check.
+
+Not predicted with confidence: whether Trino's catalog visibility check (`use` on catalog `tpch`) passes on the
+compiled table grant alone. If it does not, J2 fails with a catalog error, and that is a third member of the set.
+
+No `429` / `slow_down` is expected (no catalog OAuth2 traffic at all in this run).
+
+### 4.8 Task 6b: result (read this first)
+
+**DONE.** The minimal per-user baseline a non-admin user needs to run a query through `POST
+/api/ws/default/queries` on a JWT-delegation Trino 483 engine is **three** allows, not two. All three are needed,
+and they are checked in this order:
+
+| # | resource (Trino service-def) | access | users | what fails without it |
+|---|---|---|---|---|
+| 1 | `trinouser` = `{USER}` | `impersonate` | `{USER}` | `Access Denied: Principal vcplain cannot become user vcplain` |
+| 2 | `queryid` = `*` | `execute` | `{USER}` | `Access Denied: Cannot execute query` |
+| 3 | `systemproperty` = `query_max_run_time` | `alter` | `{USER}` | `Access Denied: Cannot set system session property query_max_run_time` |
+
+Plus the user's own grant, which the compiler writes (`perm-grant-<id>`, `select` on `tpch.tiny.nation.*`). Without
+it the query stops at `Access Denied: Cannot access catalog tpch`. The table grant alone is enough for Trino's
+catalog check; no separate `use` policy is needed.
+
+The prediction (two allows, no `trinouser`) was wrong on #1. Trino's Ranger plugin implements
+`checkCanSetUser(principal, user)` as an `impersonate` check on `trinouser = <user>`. Trino calls it whenever a
+session is built, so it runs even when the principal and `X-Trino-User` are the same name (`javap` of
+`io.trino_trino-ranger-483.jar`: `checkCanSetUser` → `hasPermission(forUser(user), principal, IMPERSONATE,
+"SetUser")` → `denySetUser`). `checkCanImpersonateUser`, the check that runs only when the names differ, is a
+separate method.
+
+### 4.9 Task 6b: stack and deviations
+
+Image `egret-backend:vg-dg6b` built from `3aa3c8fa` (`deploy/docker/backend.Dockerfile`). Containers: `vg-egret`
+(serve, `:8096`, no logging proxy), `vg-rustfs` (`rustfs/rustfs:1.0.1`, bucket `warehouse`; egret's apps API
+will not start without `[storage]`), and `vg-trino-coord` (`trinodb/trino` image `db58cc93e593`, `/v1/info` →
+`"version":"483"`, host name `vgtr-coordinator-6d5f7c9b8-ab1cd`, aliases `vgtr-trino` and
+`vgtr-trino.egret-engines.svc`), all on `vg-net`. DB `egret_dgpkg_live`: `egret migrate`, `egret init`, then
+`serve`. Log line: `kubernetes unavailable; engine provisioning disabled`. Users: the bootstrap admin, and
+`vcplain` (local login, `ws_editor` in `default`, no platform role).
+
+- **DEV-1 (SQL):** engine row `vgtr` (`provisioned`, `running`, namespace `egret-engines`, spec
+  `trinoConfig = {delegationMode: jwt, auth: {jwt: {}}}`, `workerReplicas: 0`, a self-made leaf coordinator cert),
+  bound to profile `vgtr` (id 1). `PUT /engines/{id}/workspaces` then materialized
+  `vgtr-trino.egret-engines.svc:8443` (`http_scheme: https`, pinned cert). The Trino files were hand-rendered from
+  `config_properties` (the JWT and TLS lines in §4.7) and `ranger_plugin_files` (service `vgtr`,
+  `http://vg-egret:8096`).
+- **DEV-2 (SQL):** attachment `vgtr` → registry catalog `tpch` inserted as `applied`.
+- **DEV-3 (SQL):** `UPDATE policy.authz_services SET origin = 'manual'` before every hand-written policy write or
+  toggle, because the API refuses them on a compiled profile. That refusal was measured first (finding B-F2).
+- **DEV-7' (config):** Ranger poll 5000 ms instead of 30000 ms. Before each query the plugin's `Switched policy
+  engine to [n]` log line was awaited, with `n` equal to the profile's `policy_version`.
+- **DEV-12:** the catalog was never assigned to the workspace (no `workspace_members` grant).
+- **DEV-14 (setup):** a `tpch` registry catalog (`POST /catalogs {kind: tpch}`, Trino `connector.name=tpch`)
+  instead of Iceberg; `catalog.enabled = false`. Every check in the table above is about the session, not the
+  connector, and the catalog-OAuth2 path (I3/I4) is out of the measurement.
+- **Harness:** two policy downloads under `pluginId=probe-t6b` (to read the served set).
+- `EGRET_RATE_LIMIT__TOKEN_MAX_ATTEMPTS` default; `EGRET_RANGER__AUTH_TOKEN` unset.
+
+**J-F1 fix, observed.** `catalog.oidc_signing_keys` held 0 rows after `init`. The first `GET
+/.well-known/jwks.json` (02:55:03) answered one key, `08eeb31d…`, created by that request. Trino was started
+after that, at 02:56:57. All 11 `POST /v1/statement` of the run answered `200` in Trino's `http-request.log`, with
+no `401`, no `502 engine authentication failed`, and no `429` / `slow_down` anywhere.
+
+### 4.10 Task 6b: every step
+
+`vcplain` ran `SELECT * FROM tpch.tiny.nation` through `POST /api/ws/default/queries` (`202 queued`, then `GET
+…/queries/{id}`). The error column is egret's `error` field, verbatim. Hand-written policies (`{USER}` = the user
+macro): `hw-qmrt` = #3, `hw-queryid` = #2, `hw-self-impersonate` = #1 of §4.8.
+
+| step | time (UTC) | served set (besides the compiled grant) | result | prediction | verdict |
+|---|---|---|---|---|---|
+| login check (admin, `SELECT 1`) | 02:57:35 | none | `failed`, `engine: Access Denied: Principal admin cannot become user admin` (Trino POST 200: the JWT was accepted) | not a 502 | match (login works) |
+| J0 | 02:57:54 | none | `failed`, `engine: Access Denied: Principal vcplain cannot become user vcplain` | `Cannot execute query` | **mismatch** |
+| J1 | 02:59:12 | `hw-qmrt` | same as J0 | `Cannot execute query` | **mismatch** |
+| J2 | 02:59:22 | + `hw-queryid` | same as J0 | rows | **mismatch** |
+| J3 | 02:59:32 | + `hw-self-impersonate` | `finished`, 4 columns, 25 nations (`count(*)` = 25 at 03:00:22) | not needed | **mismatch: needed** |
+| J-min a | 02:59:51 | J3 minus `hw-qmrt` | `engine: Access Denied: Cannot set system session property query_max_run_time` | same | match |
+| J-min b | 02:59:57 | J3 minus `hw-queryid` | `engine: Access Denied: Cannot execute query` | same | match |
+| J-min c | 03:00:02 | J3 minus `hw-self-impersonate` | `engine: Access Denied: Principal vcplain cannot become user vcplain` | (not predicted) | — |
+| J-min d | 03:00:26 | J3, grant deleted (`DELETE /perm/grants/{id}`, 1 policy reaped) | `engine: Access Denied: Cannot access catalog tpch` | `Cannot select from columns …` | **mismatch** (the catalog check comes first) |
+| extra | 03:00:41 | J3's three, no grant | admin `SELECT 1` → `finished`, `1` | — | — |
+
+The order of the checks is: set user (`trinouser`), execute (`queryid`), system session property
+(`systemproperty`), catalog, table. One allow is missing at each of J0–J2, so each of those steps stops at the
+first check. The hand-written policies survived the recompile that the grant delete triggered.
+
+### 4.11 Task 6b: findings
+
+- **B-F1 (Important).** On a JWT-delegation Trino engine whose profile holds only what egret writes, **every**
+  delegated query fails with `Principal <u> cannot become user <u>`, a platform admin's included (DEV-1 skips
+  `seed_admin_all_access`; the login check shows the admin refused the same way). egret writes no `trinouser`,
+  `queryid` or `systemproperty` policy for a grant, and Trino 483's Ranger plugin checks all three on every
+  query. `crates/egret-provisioner/src/trino.rs` says that principal == user "is a self-impersonation Ranger allows
+  by default". That is false on 483: `checkCanSetUser` asks Ranger. The three allows of §4.8 (all `{USER}`) are
+  the minimal fix.
+- **B-F2 (Important).** An operator cannot add those allows through the API once the profile holds any grant:
+  `POST /policies` → `409 conflict: profile 1 is compiled by the SP4a permission model — edit its grants and
+  rules instead of writing a policy directly`. So the baseline must come from egret itself (the compiler or the
+  profile's creation), not from a hand-written policy.
+- **B-O1 (observation).** After the grant delete reaped the profile's last compiled policy, `origin` stayed
+  `manual` (DEV-3's value). Earlier runs saw compiler writes stamp `generated` again. Not investigated.
+- **B-O2 (observation).** Trino's `http-request.log` logs the user of every `/v1/statement` request as `null`, so
+  it cannot show who a 401 or 200 was for.
+
+### 4.12 Task 6b: left behind
+
+- **Removed:** containers `vg-egret`, `vg-trino-coord`, `vg-rustfs`; network `vg-net`; image
+  `egret-backend:vg-dg6b`; DB `egret_dgpkg_live` (dropped). Nothing left running.
+- **Kept:** scratchpad `t6b/` (step outputs, served policy sets, Trino request log, the public cert, Trino files),
+  with no secrets in it: the env file, passwords, cookie jars, TLS key and keystore were deleted.
+- **Untouched:** DB `egret`, every `egret-dev-*` container, `egret-w7f-postgres`, ports 5173, 5000, 8080. No
+  product code changed. (`w7f-rustfs`, running at the start, was gone by the end; this run never addressed it.)
+
+### 4.13 Verification (Task 10): predictions (committed before anything was observed)
+
+> **Measured:** 2026-10-16 (UTC), branch `feat/dg-backend-cleanup` at `128b5670` (Tasks 2–9: the verification cache
+> (I3), the RFC 8693 exchange (I4), the signing key at startup and `502 engine authentication failed` (6a), the
+> seeded per-user baseline on every delegating Trino engine (Task 7), overflow records that wait up to 10 s for a
+> permit (Task 8)). Brief: DG backend cleanup, Task 10, with the coordinator's additions 4a–4c. No product code
+> changes. This section is numbered 4.13, not 4.5, because 4.5 already exists (DEV-15).
+
+Written from the code at `128b5670` and §2–§4.12, before any container of this run was started. Nothing here is
+edited after observing; a wrong prediction is a finding.
+
+**Setup the predictions are about.** Image `egret-backend:vg-dg10` built from `128b5670`
+(`deploy/docker/backend.Dockerfile`). DB `egret_dgpkg_live` (created for this run, dropped at the end). On
+`vg-net`: `vg-egret-core` (egret `serve`) behind the logging proxy `vg-egret` (DEV-4; it also logs every
+`/oauth/token` request with its `grant_type` and status, and any response `>= 400`), `vg-rustfs`
+(`rustfs/rustfs:1.0.1`), `vg-trino-coord` (Trino 483, digest `db58cc93…`, the provisioner's JWT rendering of §4.9,
+the Ranger plugin bound to `vgtr`, poll **30000 ms as rendered**, catalog `ice` in the `render_trino` Egret shape:
+OAuth2 `client_credentials` with an engine catalog client, vended credentials). Profiles `vgtr-tag` (tag), `vgtr`
+(trino, `tagService = vgtr-tag`). Engine row `vgtr` (DEV-1: JWT spec, `workerReplicas: 0`) and its `ice`
+attachment (DEV-2). Tag `vgsecret` on `ice.s.pii.ssn`, clearance role `vg_clear` = {`vcownerc`}. `vcplain` (not
+cleared) holds one perm grant, `read` on `ice.s.pub`. `vcownerc` holds a hand-written all-access allow on `ice`
+(DEV-3), because no perm action expresses `create`. `EGRET_RATE_LIMIT__TOKEN_MAX_ATTEMPTS` at its default
+(DEV-5 not applied). No StarRocks container (DEV-16).
+
+**Step 4 first (it is what makes the rest queryable).** No apply runs without Kubernetes, so a DEV-1 engine row is
+seeded only by the startup pass (DEV-17).
+
+| id | action | predicted |
+|---|---|---|
+| 4-0 | DEV-1 row inserted, egret not yet restarted; `vcplain` `SELECT * FROM ice.s.pub` via `POST /api/ws/default/queries` | profile `vgtr` holds none of the three names; query `failed`, `engine: Access Denied: Principal vcplain cannot become user vcplain` (§4.8) |
+| 4-1 | restart `vg-egret-core` | log `per-user Ranger baseline pass seeded=1 failed=0`; `policy.authz_policies` on `vgtr` holds `egret-user-impersonate-self` (`trinouser={USER}`, `impersonate`, users `{USER}`), `egret-user-execute-query` (`queryid=*`, `execute`), `egret-query-timeout` (`systemproperty=query_max_run_time`, `alter`), all `managed_by = 'infra'`; `policy_version` bumped |
+| 4-2 | after the plugin's next `Switched policy engine` to that version, the same query | `finished`, 3 rows; no hand-written baseline exists (`select count(*)` of non-infra, non-`perm-*` policies naming `trinouser`/`queryid`/`systemproperty` = 0) |
+
+**Step 2 — I3: 12 concurrent `CREATE VIEW ice.s.b<i> AS SELECT id, ssn FROM ice.s.pii`** sent straight to Trino as
+`vcownerc` (DEV-6 JWT), on the classified profile, at the default token limit.
+
+- Every `/oauth/token` in the proxy log answers `200`; **zero `429` / `slow_down`** for the whole run. The
+  catalog client's repeats are proven by the cache, so they skip Argon2 and the limiter.
+- Exactly 8 holds are taken. Those 8 succeed after 30–60 s (one to two 30 s polls, §3.5).
+- The other 4 are refused at once (client time < 3 s) with `Commit failed: egret refused the view: egret is
+  holding 8 classified view changes already, its maximum; retry in a minute`; egret logs 4 `view hold refused a
+  view commit`.
+- No `Failed to load …` errors (the §2 I3 symptom).
+- Risk named in advance: 8 lineage `EXPLAIN`s at once on a one-node Trino could pass the 5 s `EXPLAIN_BUDGET`. That
+  would show as a `lineage could not be computed` refusal, and it would be a finding, not a pass.
+
+**Step 3 — I4.** The catalog token TTL is fixed at 3600 s (`crates/egret-catalog-engine/src/store/embedded.rs`), so
+this run waits for Trino's real refresh (DEV-18). Trino 483 bundles Iceberg 1.11.0, whose `AuthSession` refreshes
+at `expires_in − min(expires_in/10, 300 s)`, i.e. about 3300 s after a token is issued. It uses
+`grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token` = the current token, with the same
+token in `Authorization: Bearer`.
+
+- About 3300 s (±60 s) after each catalog session's first `client_credentials` token, the proxy logs one
+  `token-exchange` request per session, answered **`200`**.
+- No `422`, no `400`, no `401`, no `429`.
+- No retry storm: no second `token-exchange` from the same session within the next 5 minutes. Iceberg retries only
+  a failed refresh.
+- `ice` keeps answering afterwards (`SELECT count(*) FROM ice.s.pub` as `vcplain` → 3).
+
+**4a — another user, live.** A JWT for `vcplain` with `X-Trino-User: vcownerc` (DEV-6), straight to Trino:
+**denied**, `Access Denied: Principal vcplain cannot become user vcownerc`. Trino's `checkCanSetUser(principal,
+user)` asks Ranger for `impersonate` on `trinouser = vcownerc` for user `vcplain`, and the seeded value `{USER}`
+expands to `vcplain`. If Trino reaches `checkCanImpersonateUser` first, the text is `User vcplain cannot
+impersonate user vcownerc`; either text is a denial. Control: the same JWT with `X-Trino-User: vcplain` succeeds,
+and so does the reverse pair (`vcownerc` → `vcownerc`).
+
+**4b — the startup pass on an existing engine.**
+- `DELETE` of the three seeded rows of `vgtr` (throwaway DB, by SQL), then restart `vg-egret-core`, with no apply.
+- The three rows are back with new ids, the log again says `seeded=1 failed=0`, and `policy_version` is bumped.
+- Once the plugin reports the new version, `vcplain`'s query is `finished`, 3 rows.
+
+**4c — external engines.** Two external engines are registered through `POST /api/control-plane/engines/external`,
+with no cluster behind them (DEV-16):
+- `vgext` (`trino`, profile `vgext` with `tagService = vgext-tag`);
+- `vgsrx` (`starrocks`, profile `vgsrx`).
+
+They exist before 4b's restart, so the startup pass sees them.
+- The pass still reports `seeded=1`.
+- Neither profile gets any of the three names (count 0 on `vgext` and on `vgsrx`), before and after the restart.
+
+### 4.14 Verification (Task 10): result (read this first)
+
+**DONE_WITH_CONCERNS.** Steps 2, 4, 4a, 4b and 4c went as predicted. Step 3 (I4) works: Trino's refreshes are
+`token-exchange` requests answered `200`, with no `422`. But one prediction was wrong: a refresh burst hit the token
+limiter (finding T10-F1).
+
+| step | result | verdict |
+|---|---|---|
+| 4 (baseline) | The fresh DEV-1 engine had none of the three rows. `vcplain` got `Principal vcplain cannot become user vcplain`. One restart later: `seeded=1 failed=0`, the three `infra` rows exist, and `vcplain` read 3 rows with no hand-written baseline | match |
+| 2 (I3) | 12 concurrent classified `CREATE VIEW`. 8 succeeded in 50.1–50.6 s. 4 were refused at once (1.55–1.70 s) with the cap message. 88 `/oauth/token` requests, all `200`; 0 `429` | match (wording nit below) |
+| 3 (I4) | 144 `token-exchange` refreshes. The first came 3299.6 s after the first token; every one was `Bearer` = `subject_token`; 0 `422`/`400`/`401`. **11 got `429 slow_down`** (09:41:11–09:42:00), when the 96 sessions that the step-2 burst had opened refreshed in the same minute. Iceberg backed off and retried, and all 96 had refreshed by 09:43:13 | **partial mismatch → T10-F1** |
+| 4a (A→B) | JWT `vcplain` + `X-Trino-User: vcownerc` → `Access Denied: Principal vcplain cannot become user vcownerc`; A→A succeeds | match |
+| 4b (startup pass) | Three rows deleted by SQL. After a restart with no apply, they are back (ids 8–10), `seeded=1 failed=0`, and `policy_version` went 9 → 12. Plugin at 12, `vcplain` → 3 rows | match |
+| 4c (external) | Registered external `vgext` (trino) and `vgsrx` (starrocks). Neither profile has any of the three rows, before or after the 4b restart (`seeded=1`) | match |
+
+### 4.15 Verification (Task 10): stack and deviations
+
+Image `egret-backend:vg-dg10` was built from `128b5670`, with a clean worktree, cold (the build cache had been
+pruned). It took 29 min; free disk was 36.9 GiB at its lowest, and the floor was 30. Containers on `vg-net`:
+- `vg-egret-core` (`serve`) behind the logging proxy `vg-egret` (`python:3.13-slim`);
+- `vg-rustfs` (`rustfs/rustfs:1.0.1`);
+- `vg-trino-coord` (`trinodb/trino@sha256:db58cc93…`, Trino 483, Iceberg 1.11.0, `ranger-plugins-common` 2.8.0).
+  Host name `vgtr-coordinator-6d5f7c9b8-ab1cd`, aliases `vgtr-trino` and `vgtr-trino.egret-engines.svc`. The
+  JWT/TLS rendering is §4.9's, the Ranger poll is 30000 ms (as rendered), and catalog `ice` uses `render_trino`'s
+  Egret shape (OAuth2 `client_credentials`, vended credentials).
+
+DB `egret_dgpkg_live`: `migrate`, `init`, then `serve`. Log `kubernetes unavailable; engine provisioning disabled`.
+The first start printed `per-user Ranger baseline pass seeded=0 failed=0`, because no engine existed yet.
+`EGRET_RATE_LIMIT__TOKEN_MAX_ATTEMPTS` was at its default and `EGRET_RANGER__AUTH_TOKEN` was unset. Users:
+- `vcadmin` (the bootstrap admin, not used on the engine);
+- `vcplain` (`ws_editor`, one perm grant: `read` on `ice.s.pub`);
+- `vcownerc` (`ws_editor`, platform role `vg_clear`, the clearance of tag `vgsecret` on `ice.s.pii.ssn`).
+
+- **DEV-1 (SQL):** engine row `vgtr` (`provisioned`, `running`, JWT spec, `workerReplicas: 0`, a self-made leaf
+  cert), bound to profile `vgtr` (id 2, `tagService = vgtr-tag`). Then `PUT /engines/{id}/workspaces` materialized
+  `vgtr-trino.egret-engines.svc:8443` with the pinned cert.
+- **DEV-2 (SQL):** the `vgtr` → `ice` attachment was inserted as `applied`.
+- **DEV-3 (SQL + API):** `origin = 'manual'` was set once, so the hand-written `hw-owner-all` could be written. It
+  grants `vcownerc` `select`/`insert`/`delete`/`update`/`create`/`drop`/`alter`/`show`/`use` on `ice.*.*.*`. No
+  perm action expresses `create`, and the views and tables needed an owner. It is not a baseline.
+- **DEV-4:** the logging proxy. Compared with §2.2, it also logs every `/oauth/token` request with its
+  `grant_type`, whether `Authorization: Bearer` equals the `subject_token`, its status and its error body. It also
+  logs every response `>= 400`, and every `/service` poll with its `pluginId` and `lastKnownVersion`.
+- **DEV-6:** the direct Trino requests were signed with egret's own key and `engine_claims`'s claims: the table
+  setup, step 2's burst, and 4a's A→B requests (egret's query API always sends `X-Trino-User` = the JWT's user).
+  `vcplain`'s step-4 and 4b queries went through `POST /api/ws/default/queries` (egret's own minter).
+- **DEV-8:** a self-made leaf cert (`CA:FALSE`, SAN `vgtr-trino.egret-engines.svc`, `vgtr-trino`, `localhost`).
+- **DEV-9:** the engine's catalog role got `catalog` `write` before the client was minted.
+- **DEV-12:** the catalog's workspace assignment was removed (`PUT /catalogs/{id}/workspaces []`), so `vcplain`'s
+  only access is its grant.
+- **DEV-15 (doc):** this section is numbered 4.13–4.18, not "4.5", because 4.5 already exists.
+- **DEV-16 (scope):** no StarRocks container ran; nothing in steps 2–4c needs one. 4c's two external engines were
+  registered against `vgext.invalid:8443` and `vgsrx.invalid:9030`, with no cluster behind them.
+- **DEV-17 (path):** every apply needs Kubernetes (`kubernetes not configured`), so the fresh engine's baseline came
+  from the startup pass, by a restart after the DEV-1 insert. The "on every apply" half of Task 7 was not exercised
+  live.
+- **DEV-18 (time):** the catalog TTL is fixed at 3600 s (`embedded.rs`), so step 3 waited for Trino's real refresh.
+  Trino started at 08:40:44, the first catalog token was at 08:42:37.389, and the first refresh at 09:37:36.963.
+- **DEV-19 (topology):** one coordinator, no worker. Holds wait on one plugin id.
+- **DEV-20 (setup):** `vcownerc` had no `users.username` until its first query through egret. So the clearance
+  policy compiled with an empty deny-exception user list, and `vcownerc` was refused `pii` (finding T10-O1). The
+  fix was a `SELECT 1` through `POST /api/ws/default/queries` (which minted `vcownerc`), then a re-`PUT` of the tag's
+  access policy, which recompiled it with `users: ["vcownerc"]`.
+
+### 4.16 Verification (Task 10): every step
+
+**Step 4.** Times are UTC.
+
+- **4-0 (08:42:04).** Seeded rows: 0. `vcplain` `SELECT * FROM ice.s.pub` → `failed`, `engine: Access Denied:
+  Principal vcplain cannot become user vcplain`.
+- **4-1 (restart at 08:42:13).** The log said `2026-10-16T08:42:14.303688Z INFO egret: per-user Ranger baseline pass
+  seeded=1 failed=0`. Rows on profile 2:
+  - id 3 `egret-user-impersonate-self`: `infra`, `{"trinouser": ["{USER}"]}`, users `["{USER}"]`, `impersonate`;
+  - id 4 `egret-user-execute-query`: `infra`, `{"queryid": ["*"]}`, `execute`;
+  - id 5 `egret-query-timeout`: `infra`, `{"systemproperty": ["query_max_run_time"]}`, `alter`.
+
+  `policy_version` went 4 → 7.
+- **4-2 (08:42:55, plugin at 7).** `finished`, 3 rows `[[1,'a'],[2,'b'],[3,'c']]`. Non-infra, non-`perm-*` policies
+  on `trinouser`/`queryid`/`systemproperty`: 0.
+
+**Step 2** (08:46:08; plugin at policy 9, tags 2). A warm-up `CREATE VIEW ice.s.warm` ran first and took 54.45 s
+(proxy: `POST …/views -> 200 53.799s`).
+
+| views | client time | proxy | Trino error |
+|---|---|---|---|
+| `b1`, `b6`, `b7`, `b8` | 1.55–1.70 s | `POST …/views -> 409` in 0.07–0.18 s | `egret refused the view: egret is holding 8 classified view changes already, its maximum; retry in a minute` |
+| `b0`, `b2`, `b3`, `b4`, `b5`, `b9`, `b10`, `b11` | 50.14–50.55 s | `POST …/views -> 200` in 48.9–49.3 s | — |
+
+- egret logged four `WARN egret_catalog_engine::view_hold: view hold refused a view commit egret refused the view:
+  egret is holding 8 classified view changes already, its maximum; retry in a minute`.
+- `view_lineage_state`: 9 `computed` (`warm` and the 8).
+- Burst window: 88 `/oauth/token` requests, all `grant_type=client_credentials`, all `200`. No `429` / `slow_down`
+  anywhere before 09:41.
+- Trino 483 asks for a new `client_credentials` token for nearly every table or view load (about 7 per `CREATE
+  VIEW`): those are the sessions step 3 later refreshes.
+- Nit: Trino shows the refusal without the `Commit failed:` prefix that 4.13 quoted. The reason text is exact.
+
+**Step 3.**
+
+| window (UTC) | `token-exchange` | status |
+|---|---|---|
+| 09:37:36.963–09:39:06 | sessions opened 08:42:37–08:44:06 | all `200` |
+| 09:41:07–09:41:11 | 60 (sessions opened by the 08:46:08 burst) | `200` |
+| 09:41:11–09:42:00 | 11 | **`429` `{"error":"slow_down"}`** |
+| 09:42:17–09:43:13 | the rest of the burst's sessions, including the retries | `200` |
+
+- Totals: 331 `/oauth/token`, made of 187 `client_credentials` (all `200`) and 144 `token-exchange` (133 `200`,
+  11 `429`).
+- No `422`, `400` or `401`. Every exchange had `Authorization: Bearer` equal to `subject_token` (144/144), and no
+  `client_id`.
+- 106 exchanges fall 3297.0–3302.4 s after a `client_credentials` token, which matches Iceberg's refresh at
+  `expires_in − 300 s`.
+- The 96 tokens issued 08:46:00–08:48:20 match 96 successful exchanges 09:41:00–09:43:20: every session refreshed in
+  the end.
+- Trino logged `WARN auth-session-refresh-0 org.apache.iceberg.util.Tasks Retrying task after failure:
+  sleepTimeMs=101 Unable to process (code: 429, type: slow_down): null`.
+- Afterwards: `vcplain` `SELECT count(*) FROM ice.s.pub` → 3 (09:46:48), and `vcownerc` `select count(*) from
+  ice.s.b0` → 3.
+
+**4a** (08:47:19–08:47:30, direct to Trino, DEV-6).
+
+| JWT `preferred_username` | `X-Trino-User` | result |
+|---|---|---|
+| `vcplain` | `vcownerc` | `Access Denied: Principal vcplain cannot become user vcownerc` |
+| `vcplain` | `vcownerc` (`SELECT * FROM ice.s.pub`) | same |
+| `vcownerc` | `vcplain` | `Access Denied: Principal vcownerc cannot become user vcplain` |
+| `vcplain` | `egret-lineage` | `Access Denied: Principal vcplain cannot become user egret-lineage` |
+| `vcplain` | `vcplain` | `SELECT count(*) FROM ice.s.pub` → 3 |
+| `vcownerc` | `vcownerc` | `current_user` → `vcownerc` |
+| `vcplain` | `VCPLAIN` | allowed (`current_user` = `VCPLAIN`). Then `SELECT count(*) FROM ice.s.pub` → `Access Denied: Cannot access catalog ice` |
+| `VCOWNERC` | `vcownerc` | allowed |
+
+The last two rows are the `ignoreCase` behaviour Task 7 measured on `ranger-plugins-common` (`alice → ALICE`), now
+seen on the real plugin. The case-variant user holds none of `vcplain`'s grants, so it fails closed. egret mints only
+lowercase `[a-z0-9_-]` usernames, and `users.username` is `citext UNIQUE`, so egret cannot produce an upper-case
+JWT.
+
+**4b.**
+- Before: ids 3/4/5 `infra`, `policy_version` 9.
+- `DELETE … RETURNING` at 08:47:55 removed those 3 rows; the count was then 0.
+- Restart at 08:47:56. Log: `2026-10-16T08:47:57.086665Z INFO egret: per-user Ranger baseline pass seeded=1
+  failed=0`.
+- After: ids 8/9/10 with the same three bodies, all `infra`; `policy_version` 12.
+- The plugin had been answered `304` (lkv 9) at 08:46:58 and 08:47:28, and got `200` (lkv 9) at 08:47:58.
+- Its cache file holds the three names at `"policyVersion":12`. At 08:48:13 `vcplain` → `finished`, 3 rows.
+
+**4c.** `POST /engines/external` → 201 for:
+- `vgext`: `trino`, `origin external`, spec `{}`, profile 4 `vgext` with `tagService vgext-tag`;
+- `vgsrx`: `starrocks`, profile 5.
+
+Count of the three names by profile, right after registration and again after the 4b restart: `vgext 0`,
+`vgext-tag 0`, `vgsrx 0`, `vgtr 3`, `vgtr-tag 0`. The restart's pass reported `seeded=1`, which is `vgtr` only.
+
+### 4.17 Verification (Task 10): findings
+
+- **T10-F1 (Minor; self-healing, but it contradicts the "no `429`" prediction).** An RFC 8693 exchange always
+  counts against the `ip:<client_id>` token limit (`crates/egret-machine-idp/src/lib.rs`, `token_exchange`: the
+  `check(&format!("{ip}:{sub}"))` runs before any proof). It has no counterpart of the `client_credentials`
+  proven-repeat exemption (I3).
+  - Trino 483 opens a contextual Iceberg session, with its own `client_credentials` token, for nearly every table or
+    view load. Each session refreshes 3300 s later.
+  - So a burst of N loads within one minute becomes N exchanges in one minute, 55 minutes later. Here N = 96
+    against the limit of 60: 11 `429 slow_down`.
+  - Iceberg retried with backoff (100 ms → 60 s, `tokenRefreshNumRetries`), and every session refreshed once the
+    window turned over. No query failed.
+  - A larger burst (more than about 5 minutes of retries against the limit) would leave sessions to expire. They
+    then fall back to `client_credentials` (`refreshExpiredToken`, cache-exempt). So the expected worst case is
+    still noise, not failure. That fallback was not observed.
+  - Possible fix: exempt a verified exchange whose `cgen` matches (the client's secret is already proven by the
+    token), or key the exchange limit separately.
+- **T10-O1 (observation; fail-closed).** A cleared user who has never run a query through egret has no
+  `users.username`, so the clearance deny compiles with that user missing from its exceptions (`denyExceptions`
+  users `[]`). Minting the username later does not recompile. Here `vcownerc` was refused `pii` until a
+  classification write recompiled (DEV-20). Every delegated query goes through egret's minter first, so in practice
+  this costs one refused query plus a wait for the next recompile. It is still a gap between "has the role" and "is
+  exempt".
+- **T10-O2 (observation).** The Trino plugin logs `Error getting Roles; service not found … response=404` at startup:
+  egret does not serve `/service/roles/download`. This is harmless (no roles are used); it is noted for completeness.
+
+No other finding. I3's cache, I4's exchange (no `422`), 6a's key at startup (all statement POSTs authenticated, no
+`502`), Task 7's seed (apply path not exercised, DEV-17) and its startup pass, the impersonation boundary on the real
+plugin, and the external skip all behave as designed.
+
+### 4.18 Verification (Task 10): left behind
+
+- **Removed:**
+  - containers `vg-trino-coord`, `vg-egret`, `vg-egret-core`, `vg-rustfs`;
+  - network `vg-net`;
+  - image `egret-backend:vg-dg10`;
+  - DB `egret_dgpkg_live` (dropped).
+
+  `docker ps -a | grep ^vg-`, `docker network ls | grep vg-` and `docker images | grep vg-` are all empty.
+- **Kept:**
+  - BuildKit cache, about 8.1 GB, all reclaimable; it includes the cargo cache mounts this build filled;
+  - the base image `rust:bookworm`, pulled by this build;
+  - the scratchpad `t10/`: logs, step outputs, the proxy log, and the public cert.
+
+  Secrets were deleted from the scratchpad: the env file, passwords, S3 key, catalog client secret, TLS key and
+  keystore, signing key, cookie jars, and the API log that held the client-creation response.
+- **Freed for the build:** this worktree's `target/debug/incremental` (7 GiB).
+- **Untouched:** DB `egret`, every `egret-dev-*` container, `egret-w7f-postgres`, ports 5173, 5000 and 8080. No
+  product code changed. Free disk at the end: 35 GiB.

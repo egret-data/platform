@@ -51,6 +51,30 @@ fn unique(prefix: &str) -> String {
 
 static LAKEKEEPER: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
+/// Final review F5: the timed tests run alone. The view-tag advisory lock is
+/// global to the test database, so a test that holds it (or keeps the one
+/// best-effort permit busy) for seconds stalls every hold running beside it,
+/// and any parallel load slows the commits a timed test measures. A test
+/// whose assertions bound a duration (a 3 s shared deadline, "returned within
+/// 1.2 s") then fails on a stall that is not its own.
+///
+/// So every test that holds that lock or bounds a duration takes [`serial`]
+/// (exclusive); every other test takes [`shared`], and those still run in
+/// parallel with each other. `tokio::sync::RwLock` because each
+/// `#[tokio::test]` has its own runtime and a panicking holder must not
+/// poison the next. Timings are unchanged; only who runs beside whom is.
+static SERIAL: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
+/// Run alone: holds the view-tag lock, or asserts a duration.
+async fn serial() -> tokio::sync::RwLockWriteGuard<'static, ()> {
+    SERIAL.write().await
+}
+
+/// Run beside other untimed tests, never beside a [`serial`] one.
+async fn shared() -> tokio::sync::RwLockReadGuard<'static, ()> {
+    SERIAL.read().await
+}
+
 /// lakekeeper's schema and default project, once per test process.
 async fn lakekeeper_ready(dsn: &str) {
     LAKEKEEPER
@@ -114,15 +138,25 @@ type Seen = Arc<Mutex<Vec<(Instant, String)>>>;
 /// first read and before its after-commit record (Task 9 fix round 2, N6).
 type OnReach = Arc<Mutex<Option<(Uuid, Uuid, String, String)>>>;
 
-/// Records when a request reaches lakekeeper (inside the hold), and runs the
-/// pending [`OnReach`] classification, if any.
+/// A request to stall right after lakekeeper answers it 2xx: `(what,
+/// signal)`, `what` as [`Seen`] records it. The observer signals and then
+/// sleeps [`STALL`] before the answer goes back to the hold, so a test can
+/// drop the request between lakekeeper's commit and the hold's record.
+type AfterCommit = Arc<Mutex<Option<(String, Arc<tokio::sync::Notify>)>>>;
+
+/// How long an [`AfterCommit`] request stalls.
+const STALL: Duration = Duration::from_millis(500);
+
+/// Records when a request reaches lakekeeper (inside the hold), runs the
+/// pending [`OnReach`] classification, if any, and stalls a matching
+/// [`AfterCommit`] request once lakekeeper has answered it.
 async fn observe(
-    State((seen, on_reach, db)): State<(Seen, OnReach, Db)>,
+    State((seen, on_reach, after_commit, db)): State<(Seen, OnReach, AfterCommit, Db)>,
     req: Request,
     next: Next,
 ) -> Response {
     let what = format!("{} {}", req.method(), req.uri().path());
-    seen.lock().unwrap().push((Instant::now(), what));
+    seen.lock().unwrap().push((Instant::now(), what.clone()));
     let pending = on_reach.lock().unwrap().take();
     if let Some((tag, warehouse, table, column)) = pending {
         sqlx::query(
@@ -138,7 +172,21 @@ async fn observe(
         .await
         .expect("classify on reach");
     }
-    next.run(req).await
+    let response = next.run(req).await;
+    if response.status().is_success() {
+        let armed = {
+            let mut slot = after_commit.lock().unwrap();
+            match slot.as_ref() {
+                Some((w, _)) if *w == what => slot.take().map(|(_, signal)| signal),
+                _ => None,
+            }
+        };
+        if let Some(signal) = armed {
+            signal.notify_one();
+            tokio::time::sleep(STALL).await;
+        }
+    }
+    response
 }
 
 struct Env {
@@ -158,6 +206,7 @@ struct Env {
     runner: Arc<FakeRunner>,
     seen: Seen,
     on_reach: OnReach,
+    after_commit: AfterCommit,
     /// The clearance-bearing tag on `s.pii.ssn` (when classified).
     clearance: Option<Uuid>,
 }
@@ -251,15 +300,15 @@ async fn env_with(o: Opts) -> Option<Env> {
     egret_policy::seed_tag(&policy).await.expect("seed tag");
     let profile_name = unique("trino_vh");
     let tag_service = format!("{profile_name}_tag");
-    let profile = policy
-        .create_service(&profile_name, "trino", &json!({"tagService": tag_service}))
-        .await
-        .expect("profile");
     let tag_service_id = policy
         .create_service(&tag_service, "tag", &json!({}))
         .await
         .expect("tag service")
         .id;
+    let profile = policy
+        .create_service(&profile_name, "trino", &json!({"tagService": tag_service}))
+        .await
+        .expect("profile");
 
     let ws: Uuid =
         sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,'VH') RETURNING id")
@@ -329,9 +378,15 @@ async fn env_with(o: Opts) -> Option<Env> {
     });
     let seen: Seen = Arc::default();
     let on_reach: OnReach = Arc::default();
+    let after_commit: AfterCommit = Arc::default();
     let raw = front_catalog_router(catalog_engine_router(state.clone()), None, None);
     let inner = catalog_engine_router(state).layer(axum::middleware::from_fn_with_state(
-        (seen.clone(), on_reach.clone(), db.clone()),
+        (
+            seen.clone(),
+            on_reach.clone(),
+            after_commit.clone(),
+            db.clone(),
+        ),
         observe,
     ));
     let hold = ViewHold::new(db.clone(), runner.clone())
@@ -354,6 +409,7 @@ async fn env_with(o: Opts) -> Option<Env> {
         runner,
         seen,
         on_reach,
+        after_commit,
         clearance,
     };
     let (status, body) = env
@@ -481,6 +537,30 @@ impl Env {
             .filter(|(_, w)| *w == what)
             .map(|(t, _)| *t)
             .collect()
+    }
+
+    /// Drive `request` until lakekeeper has answered `what` 2xx, then drop
+    /// it, as hyper drops the handler future of a client that disconnects.
+    /// `what` is `"<METHOD> /<path after the prefix>"`.
+    async fn cancel_after_commit<F>(&self, what: &str, request: F)
+    where
+        F: std::future::Future<Output = (StatusCode, Value)>,
+    {
+        let (method, path) = what.split_once(' ').unwrap();
+        let signal = Arc::new(tokio::sync::Notify::new());
+        *self.after_commit.lock().unwrap() =
+            Some((format!("{method} /{}{path}", self.prefix), signal.clone()));
+        // Boxed, so `drop` drops the handler future itself.
+        let mut request = Box::pin(request);
+        tokio::select! {
+            r = &mut request => panic!("{what} answered before lakekeeper committed: {r:?}"),
+            _ = signal.notified() => {}
+        }
+        drop(request);
+        assert!(
+            self.after_commit.lock().unwrap().is_none(),
+            "{what} was stalled"
+        );
     }
 
     fn expected_pii_tags(&self, columns: &[&str]) -> BTreeSet<(Uuid, String)> {
@@ -648,6 +728,7 @@ fn computed(tables: &[&str], catalog: &str) -> RecordedLineage {
 /// reports the new tag version.
 #[tokio::test]
 async fn a_classified_view_commits_only_after_the_plugin_holds_its_tags() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -685,6 +766,7 @@ async fn a_classified_view_commits_only_after_the_plugin_holds_its_tags() {
 /// a margin, and nothing remains.
 #[tokio::test]
 async fn a_view_no_plugin_confirms_is_refused_and_nothing_remains() {
+    let _serial = serial().await;
     let limit = Duration::from_secs(2);
     let Some(env) = env(limit, true).await else {
         return;
@@ -724,6 +806,7 @@ async fn a_view_no_plugin_confirms_is_refused_and_nothing_remains() {
 /// lineage is recorded.
 #[tokio::test]
 async fn a_view_over_unclassified_tables_commits_with_no_wait() {
+    let _serial = serial().await;
     // No plugin polls: a hold would time out at the limit.
     let Some(env) = env(LIMIT, true).await else {
         return;
@@ -755,6 +838,7 @@ async fn a_view_over_unclassified_tables_commits_with_no_wait() {
 /// Nothing is written either way.
 #[tokio::test]
 async fn a_lineage_that_cannot_be_computed_refuses_and_writes_nothing() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -782,6 +866,7 @@ async fn a_lineage_that_cannot_be_computed_refuses_and_writes_nothing() {
 /// through the same hold.
 #[tokio::test]
 async fn create_or_replace_goes_through_the_same_hold() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -817,6 +902,7 @@ async fn create_or_replace_goes_through_the_same_hold() {
 /// Test 6: a commit with no new view version passes untouched.
 #[tokio::test]
 async fn a_commit_with_no_new_view_version_passes_untouched() {
+    let _serial = serial().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -847,6 +933,7 @@ async fn a_commit_with_no_new_view_version_passes_untouched() {
 /// that hold remains, and what was there before it does.
 #[tokio::test]
 async fn a_commit_lakekeeper_refuses_after_the_hold_leaves_nothing_behind() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -890,6 +977,7 @@ async fn a_commit_lakekeeper_refuses_after_the_hold_leaves_nothing_behind() {
 /// Test 8: a rename moves the lineage and the tag assignments.
 #[tokio::test]
 async fn a_rename_moves_the_lineage_and_the_tags() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -930,6 +1018,7 @@ async fn a_rename_moves_the_lineage_and_the_tags() {
 /// EXPLAIN, and the lineage stays missing for the B3 sweep.
 #[tokio::test]
 async fn a_profile_with_no_classified_column_commits_without_explain() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, false).await else {
         return;
     };
@@ -961,6 +1050,7 @@ async fn a_profile_with_no_classified_column_commits_without_explain() {
 /// recorded `failed`, so the sweep a later classification triggers finds it.
 #[tokio::test]
 async fn a_profile_with_no_classified_column_never_refuses_and_records_a_failed_lineage() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, false).await else {
         return;
     };
@@ -1010,6 +1100,7 @@ async fn lock_waiters(db: &Db) -> i64 {
 /// compensates: it removes its own derived rows, never the admin's.
 #[tokio::test]
 async fn compensation_never_removes_a_tag_an_admin_assigned_during_the_wait() {
+    let _shared = shared().await;
     let Some(env) = env(Duration::from_secs(3), true).await else {
         return;
     };
@@ -1061,6 +1152,7 @@ async fn compensation_never_removes_a_tag_an_admin_assigned_during_the_wait() {
 /// refused, compensation restores the previous lineage AND its derived tags.
 #[tokio::test]
 async fn compensation_rederives_the_tags_the_previous_lineage_carries() {
+    let _shared = shared().await;
     let Some(env) = env(Duration::from_secs(3), true).await else {
         return;
     };
@@ -1113,6 +1205,7 @@ async fn compensation_rederives_the_tags_the_previous_lineage_carries() {
 /// test holds, the base write runs, then the stall is released.
 #[tokio::test]
 async fn a_base_classification_racing_a_held_commit_reaches_the_view() {
+    let _serial = serial().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1195,6 +1288,7 @@ async fn a_base_classification_racing_a_held_commit_reaches_the_view() {
 /// `-1` with no version added before it cannot be resolved and is refused.
 #[tokio::test]
 async fn a_commit_switching_to_a_stored_version_is_held_on_that_version() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1262,6 +1356,7 @@ async fn a_commit_switching_to_a_stored_version_is_held_on_that_version() {
 /// is refused; the hold never judges the wrong added version.
 #[tokio::test]
 async fn a_commit_whose_current_cannot_be_loaded_is_refused() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1292,6 +1387,7 @@ async fn a_commit_whose_current_cannot_be_loaded_is_refused() {
 /// it. In `[add A, set -1, add B]` A is current, so A is what is judged.
 #[tokio::test]
 async fn set_current_minus_one_binds_to_the_version_added_before_it() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1327,6 +1423,7 @@ async fn set_current_minus_one_binds_to_the_version_added_before_it() {
 /// last one in the request: the tags go on the columns the view really has.
 #[tokio::test]
 async fn schema_minus_one_is_the_schema_added_before_the_version() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1367,6 +1464,7 @@ async fn nested_namespace(env: &Env) {
 /// profile, and passes on a profile with no classified column.
 #[tokio::test]
 async fn a_multi_level_namespace_is_refused_only_on_a_classified_profile() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1405,6 +1503,7 @@ async fn a_multi_level_namespace_is_refused_only_on_a_classified_profile() {
 /// held) into a single-level one is refused on a classified profile.
 #[tokio::test]
 async fn a_rename_out_of_a_multi_level_namespace_is_refused() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1434,6 +1533,7 @@ async fn a_rename_out_of_a_multi_level_namespace_is_refused() {
 /// I3: the EXPLAIN is bounded (5 s), whatever the engine does.
 #[tokio::test]
 async fn a_slow_explain_is_refused_at_its_bound() {
+    let _serial = serial().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1453,6 +1553,7 @@ async fn a_slow_explain_is_refused_at_its_bound() {
 /// I3: one deadline from arrival covers the EXPLAIN and the wait together.
 #[tokio::test]
 async fn the_explain_and_the_wait_share_one_deadline() {
+    let _serial = serial().await;
     let limit = Duration::from_secs(3);
     let Some(env) = env(limit, true).await else {
         return;
@@ -1474,6 +1575,7 @@ async fn the_explain_and_the_wait_share_one_deadline() {
 /// on a profile with no classified column takes no lock at all.
 #[tokio::test]
 async fn a_busy_view_lock_refuses_at_once_and_an_unclassified_view_takes_none() {
+    let _serial = serial().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1523,6 +1625,7 @@ async fn a_busy_view_lock_refuses_at_once_and_an_unclassified_view_takes_none() 
 /// I4: when the concurrent holds are at their cap, the next is refused fast.
 #[tokio::test]
 async fn a_full_hold_semaphore_refuses_fast() {
+    let _serial = serial().await;
     let Some(env) = env_with(Opts {
         limit: Duration::from_secs(5),
         max_holds: 1,
@@ -1559,6 +1662,7 @@ async fn a_full_hold_semaphore_refuses_fast() {
 /// confirm: refused at once, and nothing remains.
 #[tokio::test]
 async fn no_bound_trino_engine_refuses_at_once() {
+    let _serial = serial().await;
     let Some(env) = env_with(Opts {
         engine_type: "starrocks",
         ..Opts::default()
@@ -1593,6 +1697,7 @@ async fn no_bound_trino_engine_refuses_at_once() {
 /// one view column, the hold refuses and nothing remains.
 #[tokio::test]
 async fn tags_that_would_overlap_two_masks_on_a_view_column_are_refused() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1647,6 +1752,7 @@ async fn tags_that_would_overlap_two_masks_on_a_view_column_are_refused() {
 /// the recorded lineage stays that of the version that is still current.
 #[tokio::test]
 async fn adding_a_version_without_making_it_current_keeps_the_lineage() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1684,6 +1790,7 @@ async fn adding_a_version_without_making_it_current_keeps_the_lineage() {
 /// its own.
 #[tokio::test]
 async fn a_refused_rename_leaves_nothing_on_the_destination() {
+    let _shared = shared().await;
     let Some(env) = env(Duration::from_secs(2), true).await else {
         return;
     };
@@ -1739,6 +1846,7 @@ async fn a_refused_rename_leaves_nothing_on_the_destination() {
 /// other writer records, and the sweep repairs a lineage that may be stale.
 #[tokio::test]
 async fn a_best_effort_record_under_a_busy_view_lock_leaves_the_lineage_to_the_sweep() {
+    let _serial = serial().await;
     let Some(env) = env(LIMIT, false).await else {
         return;
     };
@@ -1789,9 +1897,11 @@ async fn a_best_effort_record_under_a_busy_view_lock_leaves_the_lineage_to_the_s
 /// Final review I-1: a burst of best-effort commits beyond the cap. The
 /// commit that holds the permit runs its EXPLAIN; every other commit passes
 /// through at once, with no EXPLAIN and no lock connection of its own, and its
-/// lineage is recorded `failed` (its view's lock is free) for the sweep.
+/// lineage is recorded `failed` (its view's lock is free) for the sweep, once
+/// its record task gets a permit (re-review N-6).
 #[tokio::test]
 async fn a_best_effort_burst_beyond_the_cap_explains_once_and_never_waits() {
+    let _serial = serial().await;
     let Some(env) = env_with(Opts {
         classified: false,
         max_holds: 1,
@@ -1853,6 +1963,7 @@ async fn a_best_effort_burst_beyond_the_cap_explains_once_and_never_waits() {
 /// step 3 wrote are removed.
 #[tokio::test]
 async fn a_request_cancelled_during_the_wait_still_compensates() {
+    let _serial = serial().await;
     let limit = Duration::from_secs(3);
     let Some(env) = env(limit, true).await else {
         return;
@@ -1891,6 +2002,7 @@ async fn a_request_cancelled_during_the_wait_still_compensates() {
 /// hold refuses cleanly, in time, and writes nothing.
 #[tokio::test]
 async fn a_hold_that_cannot_take_the_view_tag_lock_in_time_refuses_cleanly() {
+    let _serial = serial().await;
     let limit = Duration::from_secs(3);
     let Some(env) = env(limit, true).await else {
         return;
@@ -1929,6 +2041,7 @@ async fn a_hold_that_cannot_take_the_view_tag_lock_in_time_refuses_cleanly() {
 /// carries the tag on every column.
 #[tokio::test]
 async fn a_classification_during_a_step_two_commit_reaches_the_view() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1953,4 +2066,288 @@ async fn a_classification_during_a_step_two_commit_reaches_the_view() {
         env.expected_pii_tags(&["id", "ssn"])
     );
     assert_eq!(env.derived_flags("v1").await, vec![true, true]);
+}
+
+/// Re-review N-1: on a profile with no classified column, a client that
+/// disconnects after lakekeeper commits the view but before the hold records
+/// its lineage does not skip the record. The best-effort path's work after
+/// its permit runs in a task the request's cancellation cannot drop.
+#[tokio::test]
+async fn a_best_effort_commit_cancelled_after_lakekeeper_commits_still_records() {
+    let _shared = shared().await;
+    let Some(env) = env(LIMIT, false).await else {
+        return;
+    };
+
+    env.cancel_after_commit(
+        "POST /namespaces/s/views",
+        env.create("v1", "SELECT id, ssn FROM pii"),
+    )
+    .await;
+
+    assert!(env.view("v1").await.is_some(), "lakekeeper committed");
+    let e = &env;
+    eventually("the cancelled best-effort commit recorded", || async move {
+        e.lineage("v1").await == computed(&["pii"], &e.catalog)
+    })
+    .await;
+    assert_eq!(
+        env.columns("v1").await,
+        Some(vec!["id".into(), "ssn".into()])
+    );
+    assert_eq!(env.runner.calls.load(Ordering::SeqCst), 1);
+}
+
+/// Re-review test gap: a classified rename whose client disconnects after
+/// lakekeeper commits still drops what the source held.
+#[tokio::test]
+async fn a_rename_cancelled_after_lakekeeper_commits_still_moves_everything() {
+    let _shared = shared().await;
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let plugin = env.start_plugin();
+    plugin.polled().await;
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let tags = env.assignments("v1").await;
+    assert!(!tags.is_empty());
+
+    env.cancel_after_commit(
+        "POST /views/rename",
+        env.call(
+            "POST",
+            "views/rename",
+            Some(json!({"source": {"namespace": ["s"], "name": "v1"},
+                        "destination": {"namespace": ["s"], "name": "v2"}})),
+        ),
+    )
+    .await;
+
+    let e = &env;
+    eventually(
+        "the cancelled rename dropped the source's rows",
+        || async move {
+            e.assignments("v1").await.is_empty()
+                && e.lineage("v1").await == RecordedLineage::Missing
+        },
+    )
+    .await;
+    assert!(env.view("v1").await.is_none());
+    assert!(env.view("v2").await.is_some());
+    assert_eq!(env.assignments("v2").await, tags);
+    assert_eq!(env.lineage("v2").await, computed(&["pii"], &env.catalog));
+}
+
+/// Re-review test gap: a classified drop whose client disconnects after
+/// lakekeeper commits still forgets the view's lineage and derived tags.
+#[tokio::test]
+async fn a_drop_cancelled_after_lakekeeper_commits_still_forgets_the_view() {
+    let _shared = shared().await;
+    let Some(env) = env(LIMIT, true).await else {
+        return;
+    };
+    let plugin = env.start_plugin();
+    plugin.polled().await;
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!env.assignments("v1").await.is_empty());
+
+    env.cancel_after_commit(
+        "DELETE /namespaces/s/views/v1",
+        env.call("DELETE", "namespaces/s/views/v1", None),
+    )
+    .await;
+
+    let e = &env;
+    eventually("the cancelled drop forgot the view", || async move {
+        e.assignments("v1").await.is_empty() && e.lineage("v1").await == RecordedLineage::Missing
+    })
+    .await;
+    assert!(env.view("v1").await.is_none());
+}
+
+/// How many backends hold the transaction-level advisory lock
+/// `record_failed_if_free` takes on one of `keys`: the overflow record tasks
+/// that hold a pooled connection right now.
+async fn record_holders(conn: &mut sqlx::PgConnection, keys: &[String]) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(DISTINCT l.pid) FROM pg_locks l \
+           JOIN (SELECT hashtextextended(k, 0) AS h FROM unnest($1::text[]) k) x \
+             ON l.locktype = 'advisory' AND l.granted AND l.objsubid = 1 \
+            AND l.classid = ((x.h >> 32) & 4294967295)::oid \
+            AND l.objid = (x.h & 4294967295)::oid \
+          WHERE l.database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+    )
+    .bind(keys)
+    .fetch_one(conn)
+    .await
+    .unwrap()
+}
+
+/// Re-review N-6 (fix round 1): the overflow records are bounded by the
+/// best-effort cap, and wait for a permit rather than skip. With the cap at 1
+/// and the view-tag lock held here, ten commits past the cap each return at
+/// once. When the permit frees, exactly `cap` record tasks hold a pooled
+/// connection (each waiting on the view-tag lock); the others wait for a
+/// permit holding none. Once the lock frees, every view is recorded `failed`.
+#[tokio::test]
+async fn overflow_records_never_hold_more_connections_than_the_cap() {
+    let _serial = serial().await;
+    const CAP: usize = 1;
+    let Some(env) = env_with(Opts {
+        classified: false,
+        max_holds: CAP,
+        ..Opts::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces/s/views",
+            Some(create_body("dup", "SELECT id FROM orders")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The blocker and the sampler stay out of the hold's own pool.
+    let dsn = egret_test_db::url().await.expect("database");
+    let side = Db::connect(&dsn, 2).await.expect("connect");
+    let mut sampler = side.pool.acquire().await.unwrap();
+    let mut blocker = side.pool.begin().await.unwrap();
+    egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut blocker)
+        .await
+        .expect("take the view-tag lock");
+    let names: Vec<String> = (0..10).map(|i| format!("o{i}")).collect();
+    let keys: Vec<String> = names
+        .iter()
+        .map(|n| view_lock_key(&env.prefix, "s", n))
+        .collect();
+
+    // The one permit is taken for ~1.5 s, then freed while the view-tag
+    // lock is still held here.
+    let rest = async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut set = tokio::task::JoinSet::new();
+        for name in &names {
+            let (app, prefix) = (env.app.clone(), env.prefix.clone());
+            let body = create_body(name, "SELECT id FROM orders");
+            set.spawn(async move {
+                let started = Instant::now();
+                let got = Env::send(&app, &prefix, "POST", "namespaces/s/views", Some(body)).await;
+                (got, started.elapsed())
+            });
+        }
+        let answers: Vec<_> = set.join_all().await;
+        // Sample until the freed permit has been taken, then 500 ms more, so
+        // the view-tag lock (global; other tests want it) is held briefly.
+        let mut most = 0;
+        let mut until = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < until {
+            let now = record_holders(&mut sampler, &keys).await;
+            if now > 0 && most == 0 {
+                until = until.min(Instant::now() + Duration::from_millis(500));
+            }
+            most = most.max(now);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        blocker.rollback().await.unwrap();
+        (answers, most)
+    };
+    let ((), (answers, most)) = tokio::join!(hold_the_permit_briefly(&env, "dup"), rest);
+
+    assert_eq!(answers.len(), names.len());
+    for ((status, body), took) in &answers {
+        assert_eq!(*status, StatusCode::OK, "{body}");
+        assert!(
+            *took < Duration::from_millis(1200),
+            "a commit past the cap waited {took:?}"
+        );
+    }
+    assert_eq!(
+        most, CAP as i64,
+        "overflow record tasks holding a connection at once (cap {CAP})"
+    );
+    assert_eq!(
+        env.runner.calls.load(Ordering::SeqCst),
+        1,
+        "only the permit holder ran an EXPLAIN"
+    );
+    // No record was skipped: each waited for the permit.
+    let e = &env;
+    for name in &names {
+        eventually("an overflow record landed failed", || async move {
+            matches!(e.lineage(name).await, RecordedLineage::Failed { .. })
+        })
+        .await;
+    }
+}
+
+/// Take the one best-effort permit (cap 1) for about 1.5 s, then free it: a
+/// create of `name`, which already exists, whose EXPLAIN is slow. lakekeeper
+/// refuses it, so it records nothing and takes no view-tag lock.
+async fn hold_the_permit_briefly(env: &Env, name: &str) {
+    let (status, body) = env
+        .create(name, "SELECT id, ssn FROM pii WHERE SLOW1")
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "the duplicate create: {body}");
+}
+
+/// Task 8 fix round 1 (c): a replace past the cap must not leave the view's
+/// previous `computed` lineage in place. It is recorded `failed`, which the
+/// classification sweep (`sweep_unjudged`) picks up; a stale `computed` one
+/// it skips, so a classification of a table only the new definition reads
+/// would reach the view only at the scheduled sweep.
+#[tokio::test]
+async fn an_over_cap_replace_replaces_the_stale_lineage_with_failed() {
+    let _serial = serial().await;
+    let Some(env) = env_with(Opts {
+        classified: false,
+        max_holds: 1,
+        ..Opts::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(env.lineage("v1").await, computed(&["pii"], &env.catalog));
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces/s/views",
+            Some(create_body("dup", "SELECT id FROM orders")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let view = env.view("v1").await.unwrap();
+
+    let ((), (status, body)) = tokio::join!(hold_the_permit_briefly(&env, "dup"), async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        env.call(
+            "POST",
+            "namespaces/s/views/v1",
+            Some(replace_body(&view, "SELECT id, name FROM orders")),
+        )
+        .await
+    });
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        current_sql(&env.view("v1").await.unwrap()),
+        "SELECT id, name FROM orders"
+    );
+    assert_eq!(
+        env.runner.calls.load(Ordering::SeqCst),
+        2,
+        "the replace past the cap ran no EXPLAIN"
+    );
+    let e = &env;
+    eventually("the over-cap replace recorded failed", || async move {
+        matches!(e.lineage("v1").await, RecordedLineage::Failed { .. })
+    })
+    .await;
 }

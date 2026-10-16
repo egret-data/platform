@@ -1065,6 +1065,120 @@ fn a_resource_expression_forces_undecidable_even_when_it_seems_not_to_match() {
     );
 }
 
+/// DG Task 7: egret seeds `trinouser = {USER}` (impersonate, users
+/// `{USER}`) on every delegating Trino profile, the first resource-value
+/// token egret itself writes. The rule above refused EVERY access decision on
+/// such a profile, because a marker was reported "whether or not the policy
+/// matched", so explain and every other evaluator caller would have gone
+/// undecidable on a `select` the policy can never reach.
+///
+/// The token can only change what a matcher compares a REQUEST value against.
+/// When no marked level is a level the request carries, and the policy is
+/// `NONE` both as stored and with every marked value widened to `*` (which
+/// matches whatever the token expands to), no expansion can make it match,
+/// and the marker cannot decide anything.
+#[test]
+fn a_resource_expression_on_a_level_the_request_lacks_cannot_poison_it() {
+    for token in ["{USER}", "${{USER}}"] {
+        let set = policies(json!([
+            {
+                "id": 1, "name": "allow", "service": "trino", "policyType": 0,
+                "resources": full_resources(),
+                "policyItems": [item(&["alice"], &["select"])],
+            },
+            {
+                "id": 2, "name": "self-impersonate", "service": "trino", "policyType": 0,
+                "resources": { "trinouser": {"values": [token]} },
+                "policyItems": [item(&["{USER}"], &["impersonate"])],
+            },
+        ]));
+        assert_allowed(&evaluate(
+            &set,
+            &full_request("alice", "select"),
+            &trino_def(),
+            &no_superusers(),
+        ));
+    }
+}
+
+/// The other half: where the token's level IS in the request, the marker
+/// still refuses, whoever asks for whom. So egret-ranger-eval does not claim
+/// the self-impersonation seed allows or denies anything; it declines.
+#[test]
+fn a_resource_expression_on_a_level_the_request_carries_still_refuses() {
+    let set = policies(json!([{
+        "id": 2, "name": "self-impersonate", "service": "trino", "policyType": 0,
+        "resources": { "trinouser": {"values": ["{USER}"]} },
+        "policyItems": [item(&["{USER}"], &["impersonate"])],
+    }]));
+    for target in ["alice", "bob"] {
+        let d = evaluate(
+            &set,
+            &AccessRequest {
+                user: "alice".into(),
+                groups: BTreeSet::new(),
+                roles: BTreeSet::new(),
+                access_type: "impersonate".into(),
+                resource: RequestResource::new().with("trinouser", target),
+                owner: None,
+                resolved_tags: None,
+            },
+            &trino_def(),
+            &no_superusers(),
+        );
+        assert!(
+            causes(&d).iter().any(|c| matches!(
+                c,
+                UndecidableCause::PolicyConstruct {
+                    construct: Unmodelled::ResourceValueExpressionMarker { resource_type, .. },
+                    ..
+                } if resource_type == "trinouser"
+            )),
+            "alice as {target}: {d:?}"
+        );
+    }
+}
+
+/// And "the request lacks the level" alone is NOT enough: a policy on
+/// `{catalog: hive, schema: {USER}}` against a catalog-level request is a
+/// DESCENDANT match whatever the token expands to, and a descendant is a trie
+/// candidate. The widened-to-`*` test is what keeps this one refusing.
+#[test]
+fn a_resource_expression_below_the_requested_level_still_refuses() {
+    let set = policies(json!([{
+        "id": 1, "name": "per-user-schema", "service": "trino", "policyType": 0,
+        "resources": {
+            "catalog": {"values": ["hive"]},
+            "schema":  {"values": ["{USER}"]},
+        },
+        "denyPolicyItems": [item(&["alice"], &["use"])],
+    }]));
+    let d = evaluate(
+        &set,
+        &AccessRequest {
+            user: "alice".into(),
+            groups: BTreeSet::new(),
+            roles: BTreeSet::new(),
+            access_type: "use".into(),
+            resource: RequestResource::new().with("catalog", "hive"),
+            owner: None,
+            resolved_tags: None,
+        },
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        causes(&d).iter().any(|c| matches!(
+            c,
+            UndecidableCause::PolicyConstruct {
+                construct: Unmodelled::ResourceValueExpressionMarker { resource_type, .. },
+                ..
+            } if resource_type == "schema"
+        )),
+        "{d:?}"
+    );
+}
+
 /// A DISABLED policy is dropped by `RangerPolicyRepository.skipBuildingPolicyEvaluator`
 /// before an evaluator is ever built, so neither its items nor its
 /// unmodelled constructs can reach a decision.

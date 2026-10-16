@@ -886,6 +886,56 @@ async fn create_profile_makes_a_starrocks_service() {
     f.store.delete_service(svc.id).await.expect("cleanup");
 }
 
+/// Task 5 (D) — the route accepts `type: "tag"` (a tag service is a `tag`
+/// profile) and names all three allowed types when it refuses another.
+#[tokio::test]
+async fn create_profile_accepts_tag_and_refuses_other_types_naming_all_three() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "create_profile_tag", true).await;
+    egret_policy::seed_tag(&f.store)
+        .await
+        .expect("seed tag def");
+
+    let name = format!("tg_{}", uuid::Uuid::new_v4().simple());
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies/services",
+                &token,
+                Some(serde_json::json!({ "name": name, "type": "tag" })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create tag profile; body={body}");
+    let svc = f.store.get_service(&name).await.expect("created");
+    assert_eq!(svc.r#type, "tag");
+    f.store.delete_service(svc.id).await.expect("cleanup");
+
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies/services",
+                &token,
+                Some(serde_json::json!({ "name": "hv1", "type": "hive" })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    let msg = body.to_string();
+    for t in ["trino", "starrocks", "tag"] {
+        assert!(msg.contains(t), "the refusal must name {t:?}: {msg}");
+    }
+}
+
 /// SP4d debt Task 2 — **the reachable surface.** `POST /policies/services`
 /// stores `config` verbatim, so it is the one route that can hand a StarRocks
 /// profile a `tagService`. That profile would download tag attachments naming the

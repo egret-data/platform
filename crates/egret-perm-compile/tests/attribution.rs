@@ -172,6 +172,12 @@ fn delegator_query_timeout_policy_is_not_attributed() {
 }
 
 #[test]
+fn per_user_baseline_policies_are_not_attributed() {
+    assert_eq!(attribute_policy_name("egret-user-impersonate-self"), None);
+    assert_eq!(attribute_policy_name("egret-user-execute-query"), None);
+}
+
+#[test]
 fn operator_written_raw_policy_is_not_attributed() {
     // Arbitrary name an operator typed directly into a `manual` profile.
     assert_eq!(attribute_policy_name("nightly-audit-row-filter"), None);

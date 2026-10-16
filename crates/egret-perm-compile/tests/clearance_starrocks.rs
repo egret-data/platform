@@ -1334,3 +1334,169 @@ async fn every_editor_write_of_a_hand_written_mask_refolds_the_clearance_mask() 
     assert!(status.is_success(), "{status} {body}");
     assert_eq!(fold().await, folded("MASK_NONE"), "delete refolds");
 }
+
+/// Final re-review N-2: the refold is scoped to a profile whose compile folds a
+/// clearance mask. On a profile with NO compiled clearance mask whose recompile
+/// is refused for an unrelated reason (here: a clearance over the expansion
+/// ceiling, seeded as the ceiling test above does), a steward must still be
+/// able to enable, disable and delete a hand-written mask, the way out of such
+/// a state. The write has nothing to refold, so the refused recompile must not
+/// refuse it.
+#[tokio::test]
+async fn a_profile_with_no_compiled_clearance_mask_does_not_refold_on_a_mask_write() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, _key) = new_tag(&db).await;
+    bulk_tag_columns(
+        &db,
+        tag_id,
+        f.warehouse_id,
+        "wide",
+        DEFAULT_EXPANSION_CEILING as i64 + 1,
+    )
+    .await;
+    let role_name = unique("sr-clearance-refused");
+    let role_id = new_role(&db, &role_name).await;
+    let holder = new_user(
+        &db,
+        &format!("{}@egret.local", unique("refused")),
+        &unique("refusedholder"),
+    )
+    .await;
+    grant_role(&db, holder, role_id).await;
+    gate(&db, tag_id, &[&role_name]).await;
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect_err("the seeded recompile must be refused");
+    assert!(
+        clearance_masks(&db, f.service_id, tag_id).await.is_empty(),
+        "the profile must hold no compiled clearance mask"
+    );
+
+    let name = unique("hand-mask-refused");
+    let lvl =
+        |v: &str| serde_json::json!({"values": [v], "isExcludes": false, "isRecursive": false});
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+         VALUES ($1, $2, $3, false, 'operator') RETURNING id",
+    )
+    .bind(f.service_id)
+    .bind(&name)
+    .bind(serde_json::json!({
+        "name": name, "service": "x", "serviceType": "starrocks",
+        "policyType": 1, "isEnabled": false,
+        "resources": {"catalog": lvl(&f.catalog_name), "database": lvl("sales"),
+                      "table": lvl("orders"), "column": lvl("ssn")},
+        "dataMaskPolicyItems": [{
+            "users": [], "groups": ["public"], "roles": [],
+            "accesses": [{"type": "select", "isAllowed": true}],
+            "dataMaskInfo": {"dataMaskType": "MASK"}
+        }],
+        "policyItems": [], "denyPolicyItems": []
+    }))
+    .fetch_one(&db.pool)
+    .await
+    .expect("hand-written mask");
+
+    let (app, token) = editor(&db, &f.policy).await;
+    let uri = format!("/policies/{id}/enabled");
+    for on in [true, false] {
+        let (status, body) = call(
+            &app,
+            &token,
+            "PUT",
+            &uri,
+            Some(serde_json::json!({ "enabled": on })),
+        )
+        .await;
+        assert!(
+            status.is_success(),
+            "enabled={on} must not be refused by a recompile with nothing to refold: {status} {body}"
+        );
+    }
+    let (status, body) = call(&app, &token, "DELETE", &format!("/policies/{id}"), None).await;
+    assert!(status.is_success(), "delete: {status} {body}");
+}
+
+/// Final re-review N-2 (other side): `origin = 'generated'` alone scopes the
+/// refold. Same seed as the test above, stamped `generated` with no clearance
+/// mask row: the mask write refolds, so the refused recompile refuses it.
+#[tokio::test]
+async fn a_generated_profile_without_a_compiled_clearance_mask_still_refolds_on_a_mask_write() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let (tag_id, _key) = new_tag(&db).await;
+    bulk_tag_columns(
+        &db,
+        tag_id,
+        f.warehouse_id,
+        "wide",
+        DEFAULT_EXPANSION_CEILING as i64 + 1,
+    )
+    .await;
+    let role_name = unique("sr-clearance-refused");
+    let role_id = new_role(&db, &role_name).await;
+    let holder = new_user(
+        &db,
+        &format!("{}@egret.local", unique("refused")),
+        &unique("refusedholder"),
+    )
+    .await;
+    grant_role(&db, holder, role_id).await;
+    gate(&db, tag_id, &[&role_name]).await;
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect_err("the seeded recompile must be refused");
+    assert!(
+        clearance_masks(&db, f.service_id, tag_id).await.is_empty(),
+        "the profile must hold no compiled clearance mask"
+    );
+
+    // The compiler stamped the profile `generated` on an earlier compile whose
+    // clearance mask is now skipped, so no clearance mask row exists.
+    sqlx::query("UPDATE policy.authz_services SET origin = 'generated' WHERE id = $1")
+        .bind(f.service_id)
+        .execute(&db.pool)
+        .await
+        .expect("stamp generated");
+    let name = unique("hand-mask-generated");
+    let lvl =
+        |v: &str| serde_json::json!({"values": [v], "isExcludes": false, "isRecursive": false});
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+         VALUES ($1, $2, $3, false, 'operator') RETURNING id",
+    )
+    .bind(f.service_id)
+    .bind(&name)
+    .bind(serde_json::json!({
+        "name": name, "service": "x", "serviceType": "starrocks",
+        "policyType": 1, "isEnabled": false,
+        "resources": {"catalog": lvl(&f.catalog_name), "database": lvl("sales"),
+                      "table": lvl("orders"), "column": lvl("ssn")},
+        "dataMaskPolicyItems": [{
+            "users": [], "groups": ["public"], "roles": [],
+            "accesses": [{"type": "select", "isAllowed": true}],
+            "dataMaskInfo": {"dataMaskType": "MASK"}
+        }],
+        "policyItems": [], "denyPolicyItems": []
+    }))
+    .fetch_one(&db.pool)
+    .await
+    .expect("hand-written mask");
+
+    let (app, token) = editor(&db, &f.policy).await;
+    let uri = format!("/policies/{id}/enabled");
+    let (status, body) = call(
+        &app,
+        &token,
+        "PUT",
+        &uri,
+        Some(serde_json::json!({ "enabled": true })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::CONFLICT,
+        "a generated profile refolds on a mask write, so the refused recompile refuses it: {body}"
+    );
+}

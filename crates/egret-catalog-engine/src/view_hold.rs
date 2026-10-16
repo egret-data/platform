@@ -86,10 +86,15 @@
 //! review I-1). Past it, or with the view's lock busy, the commit passes at
 //! once with no EXPLAIN and no lock connection, and one bounded pooled
 //! transaction records the lineage `failed` if the view's lock is free.
+//! Overflow records share the cap with the EXPLAIN path: each waits (holding
+//! no connection) for a permit, up to `OVERFLOW_PERMIT_WAIT`, and may then
+//! hold it for up to `RECORD_LOCK_WAIT` (re-review N-6, fix round 1).
 //!
 //! Once a hold has its lock, the rest of the request runs in a task of its
 //! own (final review I-2): a client that disconnects mid-wait drops only the
 //! handler future, so the wait, the commit and any compensation still run.
+//! The best-effort path does the same once it has its permit and its lock
+//! (re-review N-1), so its record survives a disconnect after the commit.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -106,6 +111,7 @@ use serde_json::Value;
 use sqlx::Connection as _;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 /// The reason a view is refused when egret cannot judge what it reads.
@@ -1339,7 +1345,14 @@ impl ViewHold {
     /// it is taken only under a permit of its own cap (final review I-1).
     /// With no permit free, or the lock busy, it skips the EXPLAIN, lets the
     /// commit through at once, and records `failed` without waiting
-    /// ([`record_failed_if_free`]).
+    /// ([`record_failed_if_free`]), under a permit of the same cap that a task
+    /// waits for, holding no connection, up to [`OVERFLOW_PERMIT_WAIT`]; only
+    /// past that is the record skipped and the view left to the sweep
+    /// (re-review N-6, fix round 1).
+    ///
+    /// Once it has its permit and its lock, the rest runs in a task of its
+    /// own (re-review N-1), as a held request's does: a client that
+    /// disconnects after lakekeeper commits does not skip the record.
     #[allow(clippy::too_many_arguments)]
     async fn best_effort(
         &self,
@@ -1367,13 +1380,37 @@ impl ViewHold {
             },
             Err(_) => None,
         };
-        let Some((_permit, lock)) = lock else {
+        let Some((permit, lock)) = lock else {
             let response = next.run(req).await;
             if response.status().is_success() {
-                // Bounded (pooled connection, `RECORD_LOCK_WAIT`), so no
-                // task outlives a few seconds.
+                // N-6: at most the cap of these hold a pooled connection at
+                // once. The task waits for a permit (holding no connection),
+                // up to `OVERFLOW_PERMIT_WAIT`; the record itself is bounded
+                // by `RECORD_LOCK_WAIT`, so no task outlives a few seconds.
+                // Fix round 1: waiting, not skipping, so a replace's stale
+                // `computed` lineage becomes `failed`, which the
+                // classification sweep picks up.
                 let db = self.db.clone();
-                tokio::spawn(async move {
+                let permits = self.best_effort.clone();
+                let record = async move {
+                    let permit =
+                        match tokio::time::timeout(OVERFLOW_PERMIT_WAIT, permits.acquire_owned())
+                            .await
+                        {
+                            Ok(Ok(permit)) => permit,
+                            // `warn!`: this is the residual fail-open path —
+                            // a stale `computed` lineage stays until the
+                            // sweep, up to its interval (final review F7).
+                            Ok(Err(_)) | Err(_) => {
+                                tracing::warn!(
+                                    ?view,
+                                    "view hold: no best-effort permit for the failed record in \
+                                 time; its lineage is left to the sweep"
+                                );
+                                return;
+                            }
+                        };
+                    let _permit = permit;
                     match record_failed_if_free(db, key, view.clone()).await {
                         Ok(true) => {}
                         Ok(false) => tracing::info!(
@@ -1386,10 +1423,51 @@ impl ViewHold {
                             "view hold: the failed lineage was not recorded; the sweep repairs it"
                         ),
                     }
-                });
+                };
+                tokio::spawn(record.in_current_span());
             }
             return response;
         };
+        // N-1: the permit and the lock connection move into the task.
+        let this = self.clone();
+        let loader = loader.clone();
+        let ns = ns.to_string();
+        let warehouse_id = r.warehouse_id;
+        uncancellable(async move {
+            let _permit = permit;
+            this.best_effort_held(
+                &loader,
+                deadline,
+                &catalog,
+                &ns,
+                &view,
+                warehouse_id,
+                change,
+                req,
+                next,
+                lock,
+            )
+            .await
+        })
+        .await
+    }
+
+    /// [`Self::best_effort`] under its permit and the view's lock: the
+    /// EXPLAIN, the commit and the record.
+    #[allow(clippy::too_many_arguments)]
+    async fn best_effort_held(
+        &self,
+        loader: &axum::Router,
+        deadline: Instant,
+        catalog: &str,
+        ns: &str,
+        view: &ViewRef,
+        warehouse_id: Uuid,
+        change: Change,
+        req: Request,
+        next: Next,
+        lock: sqlx::PgConnection,
+    ) -> Response {
         let outcome: Option<(RecordedLineage, Option<Vec<String>>)> = match change {
             Change::Untouched => None,
             Change::Judge(Err(detail)) => Some((RecordedLineage::Failed { detail }, None)),
@@ -1401,7 +1479,7 @@ impl ViewHold {
                     .await
                 {
                     Err(detail) => Some((RecordedLineage::Failed { detail }, None)),
-                    Ok(def) => match self.explain(&def, &catalog, ns, deadline).await {
+                    Ok(def) => match self.explain(&def, catalog, ns, deadline).await {
                         Ok(tables) => Some((RecordedLineage::Computed(tables), Some(def.columns))),
                         Err(detail) => {
                             Some((RecordedLineage::Failed { detail }, Some(def.columns)))
@@ -1413,7 +1491,7 @@ impl ViewHold {
         let response = next.run(req).await;
         if response.status().is_success() {
             if let Some((lineage, columns)) = outcome {
-                self.record_after_commit(r.warehouse_id, &view, &lineage, columns.as_deref())
+                self.record_after_commit(warehouse_id, view, &lineage, columns.as_deref())
                     .await;
             }
         }
@@ -1924,6 +2002,14 @@ async fn try_view_lock(db: &Db, key: &str) -> Result<Option<sqlx::PgConnection>,
 /// How long [`record_failed_if_free`] waits for the view-tag lock.
 const RECORD_LOCK_WAIT: Duration = EXPLAIN_BUDGET;
 
+/// How long an overflow record waits for a best-effort permit before it
+/// leaves the view to the sweep (Task 8 fix round 1). One permit holder holds
+/// it for at most an EXPLAIN ([`EXPLAIN_BUDGET`]) or one record's lock wait
+/// ([`RECORD_LOCK_WAIT`]), plus short transactions; the sum covers the longer
+/// of the two with margin, so a record queued behind one slow holder still
+/// lands. Waiting holds no connection.
+const OVERFLOW_PERMIT_WAIT: Duration = EXPLAIN_BUDGET.saturating_add(RECORD_LOCK_WAIT);
+
 /// A best-effort commit that skipped its EXPLAIN (no permit, or the view's
 /// lock busy) records the view's lineage `failed`, so the sweep a later
 /// classification triggers recomputes it. Its own EXPLAIN was skipped, so a
@@ -1960,16 +2046,18 @@ async fn record_failed_if_free(db: Db, key: String, view: ViewRef) -> Result<boo
     Ok(true)
 }
 
-/// Final review I-2: run a held request's work after its lock in a task of
-/// its own. When the client disconnects, hyper drops the handler future, but
-/// dropping a `JoinHandle` does not cancel its task, so the wait, the commit
-/// and any compensation still run, under the lock and the permit the task
-/// owns.
+/// Final review I-2 (and re-review N-1 for the best-effort path): run a
+/// request's work after its lock in a task of its own. When the client
+/// disconnects, hyper drops the handler future, but dropping a `JoinHandle`
+/// does not cancel its task, so the wait, the commit, any compensation and
+/// the record still run, under the lock and the permit the task owns. The
+/// task runs in the request's tracing span (re-review N-5).
 async fn uncancellable<F>(work: F) -> Response
 where
     F: std::future::Future<Output = Response> + Send + 'static,
 {
-    match tokio::spawn(work).await {
+    // N-5: the task keeps the request's tracing span.
+    match tokio::spawn(work.in_current_span()).await {
         Ok(response) => response,
         Err(e) => Refusal::internal("hold task", e).into_response(),
     }

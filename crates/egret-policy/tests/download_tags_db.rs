@@ -280,14 +280,14 @@ async fn download_tags_via_tag_service_resolves_owning_trino_profile() {
     let tag_svc = format!("{trino}_tag");
     // Trino profile carries `tagService` pointing at its tag service; engine binds
     // to the TRINO profile (not the tag service).
-    let trino_row = store
-        .create_service(&trino, "trino", &json!({ "tagService": tag_svc }))
-        .await
-        .expect("create trino service");
     store
         .create_service(&tag_svc, "tag", &json!({}))
         .await
         .expect("create tag service");
+    let trino_row = store
+        .create_service(&trino, "trino", &json!({ "tagService": tag_svc }))
+        .await
+        .expect("create trino service");
     let (wh_id, catalog_name) = seed_bound_warehouse(&pool, trino_row.id).await;
     let (tag_id,): (Uuid,) =
         sqlx::query_as("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")

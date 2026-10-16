@@ -22,8 +22,8 @@ use egret_bin::identity::EgretIdentity;
 use egret_config::Config;
 use egret_core::ratelimit::RateLimiter;
 use egret_machine_idp::{
-    generate_rsa_key, idp_router, ClientVerifier, IdpError, IdpState, KeyMaterial, SigningKeyStore,
-    VerifiedClient,
+    generate_rsa_key, idp_router, ClientState, ClientVerifier, IdpError, IdpState, KeyMaterial,
+    SigningKeyStore, VerifiedClient,
 };
 use std::sync::Arc;
 use tower::ServiceExt as _;
@@ -54,17 +54,23 @@ struct OneClient;
 
 #[async_trait::async_trait]
 impl ClientVerifier for OneClient {
-    async fn verify(&self, id: &str, secret: &str) -> Result<Option<VerifiedClient>, IdpError> {
-        if id == "cid" && secret == "sec" {
-            Ok(Some(VerifiedClient {
+    async fn verify(&self, id: &str, secret: &str) -> Result<Option<ClientState>, IdpError> {
+        if secret == "sec" {
+            self.current(id).await
+        } else {
+            Ok(None)
+        }
+    }
+    async fn current(&self, id: &str) -> Result<Option<ClientState>, IdpError> {
+        Ok((id == "cid").then(|| ClientState {
+            verified: VerifiedClient {
                 client_id: id.to_string(),
                 audience: "catalog".into(),
                 extra_claims: serde_json::Map::new(),
                 ttl_secs: 3600,
-            }))
-        } else {
-            Ok(None)
-        }
+            },
+            secret_hash: "$argon2id$v=19$m=19456,t=2,p=1$b25l$b25lLWNsaWVudA".into(),
+        }))
     }
 }
 

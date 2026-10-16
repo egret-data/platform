@@ -94,6 +94,10 @@ async fn a_trino_tag_rule_lands_in_the_tag_service_and_is_reaped_from_it_on_dele
 
     let profile_name = unique("trino_tagroute");
     let tag_service_name = format!("{profile_name}_tag");
+    let tag_service = policy
+        .create_service(&tag_service_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("create tag service");
     let profile = policy
         .create_service(
             &profile_name,
@@ -102,10 +106,6 @@ async fn a_trino_tag_rule_lands_in_the_tag_service_and_is_reaped_from_it_on_dele
         )
         .await
         .expect("create trino profile");
-    let tag_service = policy
-        .create_service(&tag_service_name, "tag", &serde_json::json!({}))
-        .await
-        .expect("create tag service");
     // A SECOND resource profile linking the same tag service. Its download
     // embeds the same `tagPolicies` block, so the recompile of `profile` below
     // changes what its engine must enforce too — and nothing recompiles it.
