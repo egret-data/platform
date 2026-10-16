@@ -977,3 +977,89 @@ I3 at the default limit: no `429` / `slow_down` from `/oauth/token` in Trino's l
 
 If 3b's `select *` returns `NULL` rows instead, the reader learns the row count (the guide's stated risk), and
 explain then agrees with the engine.
+
+### 4.1 Result (read this first)
+
+**PARTIAL.** The three StarRocks cells ran. The JWT baseline (brief step 2) is **BLOCKED** by a new finding, J-F1:
+on a fresh egret, Trino loaded an empty JWKS and refused every delegated query with `401 Unknown signing key ID`.
+The run was then cut short (the controller asked for the report), before Trino re-read the key file, so no
+J0–J3 cell was observed. All predictions in 4.0 for step 2 stay unverified.
+
+### 4.2 Stack and deviations
+
+Image `egret-backend:vg-dg6` built from `329e460f`. Containers `vg-egret` (egret, no logging proxy: DEV-4 not
+used), `vg-rustfs` (`rustfs/rustfs:1.0.1`), `vg-trino-coord` (Trino 483, digest `db58cc93…`, host name
+`vgtr-coordinator-6d5f7c9b8-ab1cd`, aliases `vgtr-trino` and `vgtr-trino.egret-engines.svc`), `vg-sr` (allin1
+4.1.6-6862092), all on `vg-net`. DB `egret_dgpkg_live`, `egret migrate` + `egret init`. Log line
+`kubernetes unavailable; engine provisioning disabled`.
+
+- **DEV-1 (SQL):** engine row `vgtr` inserted (`provisioned`, `running`, JWT spec, `workerReplicas: 0`, the leaf
+  coordinator cert), bound to profile `vgtr`. The Trino files were hand-rendered from `config_properties` (JWT,
+  TLS 8443, `jwt.key-file=http://vg-egret:8096/.well-known/jwks.json`, audience `engine`), the Ranger files from
+  the golden rendering (poll 30000 ms), and `ice.properties` from `render_trino` (OAuth2, vended credentials).
+  `PUT /engines/{id}/workspaces` then materialized `vgtr-trino.egret-engines.svc:8443` with the pinned cert.
+- **DEV-2 (SQL):** the `vgtr`→`ice` attachment inserted as `applied`.
+- **StarRocks** is an **external** engine (`POST /engines/external`, 2.9.0, profile `vgsr`, catalog `ice`
+  declared), not a DEV-1 row. Its external catalog `ice` was created by hand as root with egret's rendering
+  (DEV-13); Ranger files from `GET /engines/{id}/ranger-plugin-config`, poll 5000 ms (DEV-7).
+- **DEV-3 (SQL):** `origin = 'manual'` set on `vgsr` before each hand-written write; every mask write or toggle
+  recompiled it back to `generated` in the same request (I-3's refold, as designed).
+- **DEV-12 (setup):** the catalog's workspace assignment was removed (`PUT /catalogs/{id}/workspaces []`), because
+  it creates a `workspace_members` read grant on all of `ice` and the brief needs one-table grants and a reader
+  with no grant.
+- **DEV-13 (setup):** one engine catalog client served both engines.
+- `EGRET_RANGER__AUTH_TOKEN` had to be unset: with it set, the plugin-config endpoint warns that a stock plugin
+  gets 401.
+- `EGRET_RATE_LIMIT__TOKEN_MAX_ATTEMPTS` default; no `429`/`slow_down` in Trino's or the FE's log.
+
+### 4.3 JWT baseline (brief step 2): BLOCKED
+
+`vcplain` (grant: `select` on `ice.s.pub` only; the profile held only the two compiled grants) ran
+`SELECT * FROM ice.s.pub` through `POST /api/ws/default/queries`: query `failed`, `"error": "forbidden"`. Trino's
+`http-request.log`: `POST /v1/statement … 401`. Replaying with a JWT minted from egret's key (DEV-6) gave
+`401 Unknown signing key ID`. The JWKS egret served at that time held the one key
+(`137ee79d…`, created 02:23:47 by the Iceberg catalog's first token mint); Trino started at 02:23:35. A probe every
+30 s stayed 401 from 02:27:30 to 02:29:31, when the run was stopped.
+
+### 4.4 StarRocks (brief step 3)
+
+| id | query | engine | explain | verdict |
+|---|---|---|---|---|
+| 3a `vcplain`, hand-written `{public}` `MASK_NULL` + hand-written deny on `hm.c`, grant on `hm` | `select id, c` | `1 NULL / 2 NULL / 3 NULL`, no error | `hm.c`: `accesses: []`, mask `MASK_NULL` by `hw-mask-public-hm-c`, `masked_read_skips_access: true` | same (as predicted) |
+| 3a | `select c` / `select id` / `count(*)` | `NULL` ×3 / `1 2 3` / `3` | `hm.id`: allowed by the grant, `no_mask` | same |
+| 3a control: mask disabled | `select id, c` | `ERROR 5204 … SELECT privilege(s) on COLUMN c` (the deny is live) | — | — |
+| 3b `vcnobody`, no grant, `full(a, b)` both classified | `select count(*)` | `ERROR 5204 … COLUMN ___count___` | — | as predicted |
+| 3b | `select *` | **`ERROR 5204 … COLUMN _file`** | `full.a`, `full.b`: `MASK_NULL` (clearance), skip, no `select`; table-level: denied, `no_policy_matched` | refused as predicted, **another column** (Iceberg hidden column, not `a`); the per-column explain cell differs (fail-closed) |
+| 3b | `select a`, `select b`, `select 1`, `count(a)` | `ERROR 5204 … COLUMN _pos` | as above | refused |
+| 3b | `count(*) … where a is null` | `ERROR 5204 … COLUMN ___count___` | — | refused |
+| 3c | root, `MATERIALIZED_VIEWS_SQL` | `mv1` `{"ice.s.pii":…}`; `mv2` over `vgdb.mv1`: `{"default_catalog.vgdb.mv1":…}`; `mv4` over `default_catalog.vgdb.mv1`: same key; `mv3` over internal `vgdb.t`: `{"default_catalog.vgdb.t":…}` | — | as predicted; N-3 closed |
+
+So a no-grant reader of a fully classified **Iceberg** table does not learn the row count: StarRocks checks the
+hidden `_file` / `_pos` columns (or `___count___`), which no mask covers.
+
+### 4.5 Findings
+
+- **J-F1 (Important).** egret creates its signing key lazily (on the first mint), and `/.well-known/jwks.json`
+  serves only stored keys. An engine whose JWT authenticator reads the JWKS before the first mint caches an empty
+  set and answers every delegated query `401 Unknown signing key ID`, which egret reports as `forbidden`, for at
+  least 2 minutes here (recovery time not measured). Fix: create the key at startup (or before the JWKS answers).
+- **J-F2 (Minor).** egret flattens every engine 401/403 to `"error": "forbidden"`; the engine's reason (here a
+  key-ID failure, not an access decision) is not visible to the user or in egret's log.
+- **J-F3 (Minor).** `POST /perm/grants` with `{kind: user, ref: <user id>}` is accepted and compiles a Ranger user
+  named by the UUID, which matches nobody. The ref must be the username; a UUID should be refused or resolved.
+- **S-F1 (Minor, docs).** The guide's "Not measured: a table on which every column is `MASK_NULL`" and "checks the
+  table's first unmasked column" should now say: on Iceberg tables the check falls on the hidden `_file`/`_pos`
+  columns (or `___count___`), so a no-grant reader is refused and learns no row count. Explain's per-column cell
+  says "not access-checked" where the engine refuses (fail-closed).
+- **S-F2 (observation).** Root, with the `{public}` clearance mask, reads `full.a`/`full.b` as `NULL`, and its
+  `select *` also returned `_file` and `_pos`.
+
+### 4.6 Left behind
+
+- **Removed:** containers `vg-egret`, `vg-trino-coord`, `vg-sr`, `vg-rustfs`; network `vg-net`; image
+  `egret-backend:vg-dg6`; DB `egret_dgpkg_live` (dropped). The probe loop was killed by its PID.
+- **Kept:** the scratchpad `t6/` (logs, evidence). It holds secrets of the dropped throwaway DB and stack:
+  `egret.env`, `admin_pw.txt`, `user_pw.txt`, `client.json`, `trino_cred.txt`, `s3secret.txt`, `egret-sign.pem`,
+  the cookie jars and `api.log`.
+- **Untouched:** DB `egret`, every `egret-dev-*` container, `egret-w7f-postgres`, ports 5173, 5000, 8080. No
+  product code changed.
