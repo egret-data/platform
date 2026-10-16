@@ -339,6 +339,41 @@ Report: `task-6-report.md` with the minimal JWT set (exact resources/accesses/us
 
 ---
 
+### Task 6a: the JWKS is never empty (J-F1) and engine auth failures say why (J-F2)
+
+Found by Task 6 (live-result §4): egret creates its signing key only at the first token mint, and
+`/.well-known/jwks.json` serves only stored keys. An engine that reads the JWKS first caches an empty set and rejects
+every delegated query with 401 for minutes. Separately, every engine 401/403 becomes `"forbidden"` with no logged
+reason, so a login failure looks like an access denial.
+
+**Files:**
+- Modify: `crates/egret-machine-idp/src/lib.rs` (`PgSigningKeyStore::all_public_jwks` ~`:581`, and the JWKS handler)
+- Modify: `crates/egret-query/src/execution/error.rs` (`EngineError::Forbidden` mapping ~`:12`, `:46`) and the
+  connector code that maps engine 401/403 (`grep -rn "Forbidden" crates/egret-query/src/execution`)
+- Test: machine-idp unit (fake store) + a DB test on `egret_test`; egret-query unit
+
+- [ ] **Step 1: failing tests:**
+  - DB: on a store with no key rows, `all_public_jwks()` returns exactly one key, and `active()` afterwards returns
+    that same `kid` (no second key). Concurrent first calls (two tasks) still end with one active key.
+  - HTTP: `GET /.well-known/jwks.json` on a fresh store answers one key.
+  - egret-query: an engine 401 is distinguishable from a 403 in the error the API returns (e.g. `"engine
+    authentication failed"` vs `"forbidden"`), and the 401 path logs the engine's reason at `warn` without any token.
+- [ ] **Step 2: run** → fail.
+- [ ] **Step 3: implement:** `all_public_jwks` calls `active()` first when no non-retired key exists (reuse
+  `active()`'s creation path; do not duplicate it). Map engine 401 to its own variant/message; keep 403 as
+  `forbidden`. Never log a token.
+- [ ] **Step 4: run** `cargo test -p egret-machine-idp -p egret-query` (+ `-p egret-server --lib` if the OpenAPI
+  changes) + clippy.
+- [ ] **Step 5: commit** `fix(machine-idp): never serve an empty JWKS; tell engine login failures apart`.
+
+### Task 6b: re-run the JWT baseline measurement
+
+Task 6's step 2, on an image that contains Task 6a. Same stack recipe, same constraints, predictions first
+(`### 4.x` in the live-result doc). Run J0–J3 and the minimality check; record the exact minimal set. Report
+`task-6b-report.md`. Commit `docs(dg): the JWT per-user baseline, measured`.
+
+---
+
 ### Task 7: seed the JWT per-user baseline
 
 **Files:**
