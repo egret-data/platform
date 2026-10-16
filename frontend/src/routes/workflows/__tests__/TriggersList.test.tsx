@@ -273,14 +273,13 @@ const TOO_LARGE: Reply = {
 };
 
 describe("TriggersList: the page", () => {
-  it("is a list page with the flow tab's columns plus Namespace and Flow, linked", async () => {
+  it("is a list page with the flow tab's columns plus one Flow column, namespace and flow linked", async () => {
     renderPage();
     expect(screen.getByRole("heading", { level: 1, name: "Triggers" })).toBeInTheDocument();
     await table();
     expect(screen.getAllByRole("columnheader").map((h) => h.textContent?.trim())).toEqual([
       "",
       "ID",
-      "Namespace",
       "Flow",
       "Type",
       "Next run",
@@ -303,7 +302,7 @@ describe("TriggersList: the page", () => {
     // A list row carries no webhook (§3.5), and the page never shows a key.
     expect(document.body.textContent).not.toContain("s3cr3t-key");
     // Type: the short name only, with no long name on hover.
-    const typeCell = within(second).getAllByRole("cell")[4];
+    const typeCell = within(second).getAllByRole("cell")[3];
     expect(typeCell.textContent).toBe("Schedule: Schedule");
     expect(typeCell.querySelector("[title]")).toBeNull();
   });

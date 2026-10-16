@@ -128,12 +128,7 @@ export function TriggersTable({
             />
           </TableHead>
           <TableHead>ID</TableHead>
-          {variant === "global" ? (
-            <>
-              <TableHead>Namespace</TableHead>
-              <TableHead>Flow</TableHead>
-            </>
-          ) : null}
+          {variant === "global" ? <TableHead>Flow</TableHead> : null}
           <TableHead>Type</TableHead>
           <TableHead>Next run</TableHead>
           <TableHead>
@@ -204,21 +199,18 @@ export function TriggersTable({
                   ) : null}
                 </TableCell>
                 {variant === "global" ? (
-                  <>
-                    <TableCell>
-                      <Link
-                        className="text-muted-foreground hover:underline"
-                        to={`${base}/namespaces/${encodeURIComponent(row.namespace ?? "")}/overview`}
-                      >
-                        {row.namespace}
-                      </Link>
-                    </TableCell>
-                    <TableCell>
-                      <Link className="hover:underline" to={`${base}/flows/${encodeURIComponent(row.flow_uuid)}/triggers`}>
-                        {row.flow_id}
-                      </Link>
-                    </TableCell>
-                  </>
+                  <TableCell className="whitespace-nowrap">
+                    <Link
+                      className="text-muted-foreground hover:underline"
+                      to={`${base}/namespaces/${encodeURIComponent(row.namespace ?? "")}/overview`}
+                    >
+                      {row.namespace}
+                    </Link>
+                    <span className="text-muted-foreground">.</span>
+                    <Link className="hover:underline" to={`${base}/flows/${encodeURIComponent(row.flow_uuid)}/triggers`}>
+                      {row.flow_id}
+                    </Link>
+                  </TableCell>
                 ) : null}
                 <TableCell>
                   <span className="inline-flex items-center gap-1.5" title={variant === "flow" ? row.type : undefined}>
@@ -297,7 +289,7 @@ export function TriggersTable({
               {row.backfill ? (
                 <BackfillStrip
                   row={row}
-                  colSpan={variant === "global" ? 12 : 10}
+                  colSpan={variant === "global" ? 11 : 10}
                   name={name}
                   manage={manage}
                   busy={backfillActions.isBusy(row)}
