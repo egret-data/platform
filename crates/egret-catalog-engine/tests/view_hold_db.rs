@@ -251,15 +251,15 @@ async fn env_with(o: Opts) -> Option<Env> {
     egret_policy::seed_tag(&policy).await.expect("seed tag");
     let profile_name = unique("trino_vh");
     let tag_service = format!("{profile_name}_tag");
-    let profile = policy
-        .create_service(&profile_name, "trino", &json!({"tagService": tag_service}))
-        .await
-        .expect("profile");
     let tag_service_id = policy
         .create_service(&tag_service, "tag", &json!({}))
         .await
         .expect("tag service")
         .id;
+    let profile = policy
+        .create_service(&profile_name, "trino", &json!({"tagService": tag_service}))
+        .await
+        .expect("profile");
 
     let ws: Uuid =
         sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,'VH') RETURNING id")

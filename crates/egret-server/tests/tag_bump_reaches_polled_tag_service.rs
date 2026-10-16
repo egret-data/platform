@@ -149,14 +149,14 @@ async fn tag_change_bumps_the_polled_tag_service_not_just_the_trino_profile() {
     // format!("{name}_tag") }`), and the SAME field
     // `tag_assignments_for_service`'s `LEFT JOIN ... tp.config_jsonb->>
     // 'tagService' = s.name` reads on the serving side.
-    let trino_row = store
-        .create_service(&trino_name, "trino", &json!({ "tagService": tag_svc_name }))
-        .await
-        .expect("create trino profile");
     let tag_row = store
         .create_service(&tag_svc_name, "tag", &json!({}))
         .await
         .expect("create tag service");
+    let trino_row = store
+        .create_service(&trino_name, "trino", &json!({ "tagService": tag_svc_name }))
+        .await
+        .expect("create trino profile");
     assert_eq!(trino_row.tag_version, 1);
     assert_eq!(
         tag_row.tag_version, 1,

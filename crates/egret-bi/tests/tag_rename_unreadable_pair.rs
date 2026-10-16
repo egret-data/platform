@@ -197,6 +197,10 @@ async fn setup() -> Option<Fixture> {
 
     let trino_name = unique("t15trino");
     let tag_service_name = format!("{trino_name}_tag");
+    let tag_svc = store
+        .create_service(&tag_service_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("tag service");
     store
         .create_service(
             &trino_name,
@@ -205,10 +209,6 @@ async fn setup() -> Option<Fixture> {
         )
         .await
         .expect("trino profile");
-    let tag_svc = store
-        .create_service(&tag_service_name, "tag", &serde_json::json!({}))
-        .await
-        .expect("tag service");
 
     let ws_id: Uuid =
         sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$2) RETURNING id")
