@@ -65,11 +65,14 @@ pub fn delegator_impersonate_policy(service: &str) -> Value {
 /// `trinouser=<user>` for every session, principal == user included; without
 /// this a query fails `Principal u cannot become user u`.
 ///
-/// Self only: Ranger expands `{USER}` in the resource value to the requesting
-/// user and matches the result as a literal, not a pattern — measured on the
-/// real 2.5.0 and 2.8.0 engines by `tests/ranger`'s
-/// `EgretUserTokenWildcardTest` (a user named `*` or `a*` cannot become
-/// anyone else). The match is case-insensitive (`trinouser` is `ignoreCase`);
+/// Self only, as measured — not as a claim about Ranger's matcher. On the
+/// real 2.5.0 and 2.8.0 engines `tests/ranger`'s `EgretUserTokenWildcardTest`
+/// finds that a requester whose name is a wildcard (`*`, `a*`) is denied
+/// becoming anyone else; those rows do not establish HOW `{USER}` is matched.
+/// On Trino 483 (live verification §4.16, step 4a,
+/// `docs/en/plans/2026-10-13-view-governance-live-result.md`) A→B is denied
+/// (`Principal vcplain cannot become user vcownerc`) and A→A succeeds. The
+/// match is case-insensitive (`trinouser` is `ignoreCase`);
 /// `users.username` is `citext UNIQUE`, so no two egret users differ only by
 /// case.
 pub fn self_impersonate_policy(service: &str) -> Value {
@@ -241,7 +244,8 @@ mod tests {
     ///    `EgretUserTokenWildcardTest` runs this exact body through
     ///    `RangerPolicyEngineImpl` 2.5.0 and 2.8.0. `alice → alice` is allowed;
     ///    `alice → bob`, `* → bob`, `a* → alice2`, `?lice → alice` are not.
-    ///    The expanded value is matched as a LITERAL, never as a pattern.
+    ///    Those rows establish the outcome — wildcard-named requesters are
+    ///    denied — not the mechanism that produces it.
     /// 2. **egret-ranger-eval on the stored body** declines: it reads a resource
     ///    value as a literal and refuses one carrying a token
     ///    (`ResourceValueExpressionMarker`), so for a `trinouser` request it
@@ -251,7 +255,7 @@ mod tests {
     ///    (1) for usernames without wildcard characters only. For `*` it would
     ///    WRONGLY allow everything, because the expanded literal becomes a
     ///    policy value and the evaluator matches policy values as patterns —
-    ///    which is exactly what (1) shows Ranger does not do. So the model is
+    ///    and (1) shows Ranger denies that case. So the model is
     ///    run on plain names only; egret's usernames are `[a-z0-9_-]`
     ///    (`egret_auth::users::slugify_localpart`), so those are the names that
     ///    exist.

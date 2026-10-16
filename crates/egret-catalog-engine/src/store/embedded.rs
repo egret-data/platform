@@ -68,7 +68,10 @@ pub struct CatalogClient {
     pub created_at: DateTime<Utc>,
     /// Last full secret verification. The IdP serves repeats from a
     /// verification cache, so this advances at most about once per 10 minutes
-    /// per (client, secret) — not on every token request.
+    /// per (client, secret) — not on every token request. An RFC 8693 token
+    /// exchange never verifies a secret, so a client that only refreshes by
+    /// exchange (Iceberg's catalog client, after its first token) does not
+    /// advance it: it can read hours old for a client in constant use.
     pub last_used_at: Option<DateTime<Utc>>,
 }
 
@@ -582,7 +585,8 @@ impl CatalogStore {
     /// Only a full verify touches `last_used_at`. The IdP serves a proven
     /// repeat of a secret from its verification cache without calling this, so
     /// the column advances at most about once per cache TTL (600 s) per
-    /// (client, secret).
+    /// (client, secret). A token exchange never calls this, so it does not
+    /// advance the column at all.
     async fn verified_row(
         &self,
         client_id: &str,

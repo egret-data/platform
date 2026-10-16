@@ -281,8 +281,11 @@ pub struct DataApiClientDto {
     pub expires_at: Option<DateTime<Utc>>,
     // Last full secret verification. The IdP serves repeats from a
     // verification cache, so this advances at most about once per 10 minutes
-    // per (client, secret) — not on every token request. (A `//` comment on
-    // purpose: a doc comment would change the checked-in openapi.json.)
+    // per (client, secret) — not on every token request. An RFC 8693 token
+    // exchange verifies no secret and does not advance it, so a client that
+    // only refreshes by exchange can read hours old while in use. (A `//`
+    // comment on purpose: a doc comment would change the checked-in
+    // openapi.json.)
     pub last_used_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,

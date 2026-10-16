@@ -1398,8 +1398,11 @@ impl ViewHold {
                             .await
                         {
                             Ok(Ok(permit)) => permit,
+                            // `warn!`: this is the residual fail-open path —
+                            // a stale `computed` lineage stays until the
+                            // sweep, up to its interval (final review F7).
                             Ok(Err(_)) | Err(_) => {
-                                tracing::debug!(
+                                tracing::warn!(
                                     ?view,
                                     "view hold: no best-effort permit for the failed record in \
                                  time; its lineage is left to the sweep"
