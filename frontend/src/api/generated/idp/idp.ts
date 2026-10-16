@@ -317,7 +317,9 @@ export const getIdpTokenEndpointUrl = () => {
 
 export const idpTokenEndpoint = async (tokenForm: TokenForm, options?: Parameters<typeof customInstance>[1]): Promise<idpTokenEndpointResponse> => {
     const formUrlEncoded = new URLSearchParams();
-formUrlEncoded.append(`grant_type`, tokenForm.grant_type);
+if(tokenForm.grant_type !== undefined && tokenForm.grant_type !== null) {
+ formUrlEncoded.append(`grant_type`, tokenForm.grant_type);
+ }
 if(tokenForm.client_id !== undefined && tokenForm.client_id !== null) {
  formUrlEncoded.append(`client_id`, tokenForm.client_id);
  }

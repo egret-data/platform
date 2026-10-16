@@ -29,6 +29,14 @@ pub struct RateLimitConfig {
     /// from the IdP's verification cache without Argon2 and without touching
     /// this limit (I3 — Trino mints a token per query session). Wrong secrets,
     /// first-time secrets and anything after a rotation or revoke still count.
+    ///
+    /// The RFC 8693 token exchange uses the same numbers. A subject token that
+    /// fails verification, or names no client, counts against the IP's shared
+    /// `ip:exchange` bucket; one that verifies but no longer matches its client
+    /// (deleted, another audience, secret rotated) counts against `ip:<sub>`.
+    /// An exchange proven against the client's current state is never counted
+    /// (I4) — Iceberg refreshes in bursts, and counting them would lock the
+    /// client out of `client_credentials` too.
     pub token_max_attempts: u32,
     pub token_window_secs: u64,
     pub token_lockout_secs: u64,

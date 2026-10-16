@@ -8,13 +8,17 @@
 
 /**
  * `POST /oauth/token` form. Which fields are required depends on
- * `grant_type`, so every field but `grant_type` is optional here and checked
- * by the handler — a missing field is a 400 `invalid_request`, never the
- * extractor's 422, which no OAuth client reads as a refusal (I4).
+ * `grant_type`, so every field — `grant_type` included — is optional here and
+ * checked by the handler: a missing field is a 400 `invalid_request`, never
+ * the extractor's 422, which no OAuth client reads as a refusal (I4).
  */
 export interface TokenForm {
-  /** `client_credentials` or `urn:ietf:params:oauth:grant-type:token-exchange`. */
-  grant_type: string;
+  /**
+     * Required: `client_credentials` or
+     * `urn:ietf:params:oauth:grant-type:token-exchange`.
+     * @nullable
+     */
+  grant_type?: string | null;
   /**
      * Required for `client_credentials`.
      * @nullable

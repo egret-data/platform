@@ -117,7 +117,8 @@ pub struct IdpState {
     pub verifiers: Vec<Arc<dyn ClientVerifier>>,
     /// Guards `POST /oauth/token`, which is reachable from the internet and runs
     /// one Argon2 verify per request with a known `client_id`. Keyed on
-    /// `ip:client_id` — see [`token_endpoint`].
+    /// `ip:client_id`; a token exchange's refusals count against `ip:exchange`
+    /// or `ip:<sub>` — see [`client_credentials`] and [`token_exchange`].
     pub rate_limiter: RateLimiter,
     /// Secrets already proven good for a client whose stored hash has not
     /// changed since. A hit skips the limiter and the Argon2 verify — see
@@ -193,13 +194,14 @@ pub const TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-e
 pub const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
 
 /// `POST /oauth/token` form. Which fields are required depends on
-/// `grant_type`, so every field but `grant_type` is optional here and checked
-/// by the handler — a missing field is a 400 `invalid_request`, never the
-/// extractor's 422, which no OAuth client reads as a refusal (I4).
+/// `grant_type`, so every field — `grant_type` included — is optional here and
+/// checked by the handler: a missing field is a 400 `invalid_request`, never
+/// the extractor's 422, which no OAuth client reads as a refusal (I4).
 #[derive(Deserialize, utoipa::ToSchema)]
 struct TokenForm {
-    /// `client_credentials` or `urn:ietf:params:oauth:grant-type:token-exchange`.
-    grant_type: String,
+    /// Required: `client_credentials` or
+    /// `urn:ietf:params:oauth:grant-type:token-exchange`.
+    grant_type: Option<String>,
     /// Required for `client_credentials`.
     client_id: Option<String>,
     /// Required for `client_credentials`.
@@ -250,7 +252,7 @@ struct JwksDoc {
         (status = 200, description = "A signed access token (client_credentials, or an RFC 8693 exchange of an unexpired token this IdP issued for a fresh one with the same client and audience)", body = TokenResp),
         (status = 400, description = "OAuth `{ \"error\": ... }` body: `invalid_request` (a field the grant requires is missing or malformed; carries `error_description`), `invalid_grant` (the subject_token is invalid, expired, foreign, for another audience, or its client was deleted or its secret rotated), or `unsupported_grant_type`", body = ErrorBody),
         (status = 401, description = "Invalid client credentials (OAuth `{ \"error\": ... }` body)", body = ErrorBody),
-        (status = 429, description = "Too many token requests from this ip+client_id (or ip+sub for an exchange) (OAuth `{ \"error\": ... }` body)", body = ErrorBody),
+        (status = 429, description = "Too many failed token requests (OAuth `{ \"error\": ... }` body). client_credentials counts every request that runs a secret check, per ip+client_id; a token exchange counts a subject token that fails verification per ip, and one that verifies but no longer matches its client (deleted, other audience, secret rotated) per ip+sub. A proven repeat of a good secret, and an exchange that matches its client's current state, are never counted", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -259,7 +261,10 @@ async fn token_endpoint(
     headers: HeaderMap,
     Form(f): Form<TokenForm>,
 ) -> Result<Json<TokenResp>, IdpError> {
-    match f.grant_type.as_str() {
+    let Some(grant_type) = f.grant_type.as_deref() else {
+        return Err(IdpError::InvalidRequest("grant_type is required"));
+    };
+    match grant_type {
         "client_credentials" => {
             let (Some(client_id), Some(client_secret)) = (&f.client_id, &f.client_secret) else {
                 return Err(IdpError::InvalidRequest(
@@ -397,31 +402,45 @@ async fn token_exchange(
         }
     }
 
-    // Until a token verifies there is no client to key on, so every failure
-    // shares the IP's `exchange` bucket — a junk flood is limited without
-    // touching any real client's bucket. A verified token counts against
-    // `ip:<sub>` instead.
+    // Metering (F3). Every refusal is counted; only an exchange PROVEN against
+    // the client's current state — signature, `iss`/`exp`/`sub`, audience and
+    // `cgen` all matching — mints without touching the limiter, as a proven
+    // repeat of a good secret does on `client_credentials` (D1). Counting a
+    // proven exchange would spend the `ip:<client_id>` bucket a refresh burst
+    // shares with `client_credentials` and lock the client out of both.
+    //
+    // Until a token verifies AND names its client (`sub`, `aud`, `cgen`)
+    // there is no client to key on, so those refusals share the IP's
+    // `exchange` bucket: a junk flood — or a pre-`cgen` token from before
+    // this grant existed — is limited without touching any real client's
+    // bucket. A refusal after that point counts against `ip:<sub>`.
     let ip = client_ip(headers);
-    let jwks = st.keys.all_public_jwks().await?;
-    let claims = match token::verify_issued(subject_token, &jwks, st.issuer.trim_end_matches('/')) {
-        Ok(claims) => claims,
-        Err(e) => {
-            if !st.rate_limiter.check(&format!("{ip}:exchange")) {
-                return Err(IdpError::RateLimited);
-            }
-            return Err(e);
+    let refuse_unattributed = || {
+        if st.rate_limiter.check(&format!("{ip}:exchange")) {
+            IdpError::InvalidGrant
+        } else {
+            IdpError::RateLimited
         }
+    };
+    let jwks = st.keys.all_public_jwks().await?;
+    let Ok(claims) = token::verify_issued(subject_token, &jwks, st.issuer.trim_end_matches('/'))
+    else {
+        return Err(refuse_unattributed());
     };
     let (Some(sub), Some(aud), Some(cgen)) = (
         claims["sub"].as_str(),
         claims["aud"].as_str(),
         claims["cgen"].as_str(),
     ) else {
-        return Err(IdpError::InvalidGrant);
+        return Err(refuse_unattributed());
     };
-    if !st.rate_limiter.check(&format!("{ip}:{sub}")) {
-        return Err(IdpError::RateLimited);
-    }
+    let refuse_for_sub = || {
+        if st.rate_limiter.check(&format!("{ip}:{sub}")) {
+            IdpError::InvalidGrant
+        } else {
+            IdpError::RateLimited
+        }
+    };
 
     // The client must still be one that may mint, for the SAME audience: a
     // token never changes audience across an exchange. Same non-short-circuit
@@ -444,18 +463,21 @@ async fn token_exchange(
     }
     let state = match found {
         Some(state) => state,
+        // An outage proves nothing either way and is not the caller's
+        // attempt: not counted, as on `client_credentials`.
         None if !verifier_errors.is_empty() => {
             return Err(IdpError::VerificationUnavailable(
                 verifier_errors.join("; "),
             ));
         }
-        None => return Err(IdpError::InvalidGrant),
+        None => return Err(refuse_for_sub()),
     };
     // The subject token was minted under the secret the client stores now —
     // a rotation since ends the chain, as it ends `client_credentials`.
     if cgen != credential_generation(&state.secret_hash) {
-        return Err(IdpError::InvalidGrant);
+        return Err(refuse_for_sub());
     }
+    // Proven: every check above matched the client's current state.
     mint(st, &state).await
 }
 
@@ -863,7 +885,7 @@ mod tests {
     /// axum's `Form` extractor would (fixtures use no percent-escapes).
     fn parse_token_form(body: &str) -> TokenForm {
         let mut f = TokenForm {
-            grant_type: String::new(),
+            grant_type: None,
             client_id: None,
             client_secret: None,
             subject_token: None,
@@ -874,7 +896,7 @@ mod tests {
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
             let v = v.to_string();
             match k {
-                "grant_type" => f.grant_type = v,
+                "grant_type" => f.grant_type = Some(v),
                 "client_id" => f.client_id = Some(v),
                 "client_secret" => f.client_secret = Some(v),
                 "subject_token" => f.subject_token = Some(v),
@@ -1930,7 +1952,8 @@ mod tests {
     }
 
     /// Junk subject tokens share one `ip:exchange` bucket, so a flood of them
-    /// is limited — and a real exchange, keyed on its `sub`, is not caught in it.
+    /// is limited — and a real exchange, which is not counted at all, is not
+    /// caught in it.
     #[tokio::test]
     async fn junk_subject_tokens_are_limited_per_ip() {
         let (st, _row) = exchange_state(2);
@@ -1951,6 +1974,191 @@ mod tests {
 
         let r = post_form(&st, HeaderMap::new(), exchange_form(&subject)).await;
         assert_eq!(r.status, 200, "{}", r.body);
+    }
+
+    // ---- F2: subject tokens that verify but cannot be traced to a client ----
+
+    /// `m1_claims` with `drop` removed — a token minted before this branch
+    /// carries no `cgen`, which is the rollout path every catalog token takes.
+    fn m1_claims_without(drop: &str) -> serde_json::Value {
+        let mut c = m1_claims("catalog", "http://localhost:8080", now_secs() + 600);
+        c.as_object_mut().unwrap().remove(drop);
+        c
+    }
+
+    #[tokio::test]
+    async fn a_pre_cgen_subject_token_is_invalid_grant() {
+        let (st, _row) = exchange_state(100);
+        let tok = sign_as_idp(&st, m1_claims_without("cgen")).await;
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&tok)).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn a_subject_token_without_sub_is_invalid_grant() {
+        let (st, _row) = exchange_state(100);
+        let tok = sign_as_idp(&st, m1_claims_without("sub")).await;
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&tok)).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_grant");
+    }
+
+    /// HS256 (an algorithm swap), no `kid`, and a `kid` the JWKS does not hold
+    /// are each refused before any claim is read.
+    #[tokio::test]
+    async fn a_token_with_the_wrong_header_is_invalid_grant() {
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+        let (st, _row) = exchange_state(100);
+        let claims = m1_claims("catalog", "http://localhost:8080", now_secs() + 600);
+
+        let mut hs = Header::new(Algorithm::HS256);
+        hs.kid = Some("kid-t".into());
+        let hs256 = encode(&hs, &claims, &EncodingKey::from_secret(b"guess")).unwrap();
+
+        let km = st.keys.active().await.unwrap();
+        let rsa = EncodingKey::from_rsa_pem(km.private_pem.as_bytes()).unwrap();
+        let no_kid = encode(&Header::new(Algorithm::RS256), &claims, &rsa).unwrap();
+        let mut unknown = Header::new(Algorithm::RS256);
+        unknown.kid = Some("kid-nobody".into());
+        let unknown_kid = encode(&unknown, &claims, &rsa).unwrap();
+
+        for (name, tok) in [
+            ("hs256", hs256),
+            ("no kid", no_kid),
+            ("unknown kid", unknown_kid),
+        ] {
+            let r = post_form(&st, HeaderMap::new(), exchange_form(&tok)).await;
+            assert_eq!(r.status, 400, "{name}: {}", r.body);
+            assert_eq!(r.body["error"], "invalid_grant", "{name}");
+        }
+    }
+
+    /// A signed token that names no client to key on is metered with junk, in
+    /// the IP's `exchange` bucket — never in the client's own `ip:<sub>`
+    /// bucket, which `client_credentials` shares.
+    #[tokio::test]
+    async fn a_pre_cgen_token_is_counted_with_junk_not_against_its_client() {
+        let (st, _row) = exchange_state(2);
+        let pre_cgen = sign_as_idp(&st, m1_claims_without("cgen")).await;
+
+        let statuses = [
+            post_form(&st, HeaderMap::new(), exchange_form(&pre_cgen))
+                .await
+                .status,
+            post_form(&st, HeaderMap::new(), exchange_form(&pre_cgen))
+                .await
+                .status,
+            post_form(&st, HeaderMap::new(), exchange_form(&pre_cgen))
+                .await
+                .status,
+        ];
+        assert_eq!(statuses, [400, 400, 429]);
+        // The client's own bucket is untouched: two full verifies still run.
+        for _ in 0..2 {
+            let r = post_form(&st, HeaderMap::new(), cc_form("m1", "wrong")).await;
+            assert_eq!(r.status, 401, "{}", r.body);
+        }
+    }
+
+    // ---- F3: only a fully verified exchange goes unmetered ------------------
+
+    /// A refresh burst — every exchange proven against the client's current
+    /// state — mints every time, and leaves the bucket `client_credentials`
+    /// re-verifies count against unspent.
+    #[tokio::test]
+    async fn verified_exchanges_are_not_rate_counted() {
+        let (st, _row) = exchange_state(3);
+        let subject = mint_m1(&st).await; // 1 of 3 in `ip:m1`
+
+        for i in 0..10 {
+            let r = post_form(&st, bearer(&subject), exchange_form(&subject)).await;
+            assert_eq!(r.status, 200, "exchange {i}: {}", r.body);
+        }
+        for i in 0..2 {
+            let r = post_form(&st, HeaderMap::new(), cc_form("m1", "wrong")).await;
+            assert_eq!(r.status, 401, "re-verify {i}: {}", r.body);
+        }
+    }
+
+    /// The exchange's mirror of a cache hit: a matched `cgen` mints even while
+    /// failed secrets have tripped the client's bucket.
+    #[tokio::test]
+    async fn a_matched_exchange_mints_while_its_client_bucket_is_tripped() {
+        let (st, _row) = exchange_state(2);
+        let subject = mint_m1(&st).await; // 1 of 2
+        let r = post_form(&st, HeaderMap::new(), cc_form("m1", "wrong")).await;
+        assert_eq!(r.status, 401, "{}", r.body); // 2 of 2
+        let r = post_form(&st, HeaderMap::new(), cc_form("m1", "wrong")).await;
+        assert_eq!(r.status, 429, "{}", r.body); // tripped
+
+        let r = post_form(&st, HeaderMap::new(), exchange_form(&subject)).await;
+
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+
+    /// Every way a verified token can still fail to match the client — secret
+    /// rotated, client gone, audience changed — counts against `ip:<sub>`.
+    #[tokio::test]
+    async fn an_exchange_refused_after_verification_is_counted_per_sub() {
+        type Mutation = fn(&Row);
+        let mutations: [(&str, Mutation); 3] = [
+            ("rotated", |row| {
+                *row.lock().unwrap() = Some(m1_row(serde_json::json!(["r1"]), CATALOG_LIKE_HASH));
+            }),
+            ("deleted", |row| *row.lock().unwrap() = None),
+            ("audience", |row| {
+                let mut s = m1_row(serde_json::json!(["r1"]), FAKE_HASH);
+                s.verified.audience = "data-api".into();
+                *row.lock().unwrap() = Some(s);
+            }),
+        ];
+        for (name, mutate) in mutations {
+            let (st, row) = exchange_state(3);
+            let subject = mint_m1(&st).await; // 1 of 3 in `ip:m1`
+            mutate(&row);
+
+            let mut statuses = Vec::new();
+            for _ in 0..3 {
+                let r = post_form(&st, HeaderMap::new(), exchange_form(&subject)).await;
+                statuses.push(r.status);
+            }
+
+            assert_eq!(statuses, [400, 400, 429], "{name}");
+        }
+    }
+
+    /// F1: through axum's real `Form` extractor, a body with no `grant_type`
+    /// is an OAuth refusal, not the extractor's 422.
+    #[tokio::test]
+    async fn a_missing_grant_type_is_invalid_request_not_422() {
+        use axum::extract::FromRequest as _;
+        let (st, counting) = counting_state(100);
+        let body = "client_id=cid&client_secret=sec";
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/oauth/token")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let form = match Form::<TokenForm>::from_request(req, &()).await {
+            Ok(f) => f,
+            Err(rej) => panic!(
+                "the extractor refused `{body}` with {}",
+                rej.into_response().status()
+            ),
+        };
+
+        let r = post_form(&st, HeaderMap::new(), form.0).await;
+
+        assert_eq!(r.status, 400, "{}", r.body);
+        assert_eq!(r.body["error"], "invalid_request");
+        assert_eq!(r.body["error_description"], "grant_type is required");
+        assert_eq!(counting.verifies(), 0);
     }
 
     #[tokio::test]

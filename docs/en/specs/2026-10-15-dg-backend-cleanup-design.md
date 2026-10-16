@@ -52,8 +52,12 @@ storm, which feeds I3.
   `ClientVerifier::current(client_id) -> Result<Option<ClientState>, IdpError>`, where
   `ClientState { verified: VerifiedClient, secret_hash: String }` and `None` means "may not mint" for any reason.
   Section B uses the same method.
-- Rate limiting: the exchange is keyed `ip:sub` on the same limiter. It costs no Argon2, so it is counted only to
-  stop floods.
+- Rate limiting (amended by the final review, F3): only refusals are counted, on the same limiter. A subject token
+  that fails verification or names no client (`sub`/`aud`/`cgen` missing) counts against the IP's `ip:exchange`
+  bucket; one that verifies but does not match its client (gone, other audience, `cgen` mismatch) counts against
+  `ip:sub`. An exchange proven against the client's current state is not counted, as a proven repeat of a good secret
+  is not counted on `client_credentials` — counting it spent the `ip:client_id` bucket a refresh burst shares with
+  `client_credentials` and locked the client out of both for the lockout window. A registry outage is not counted.
 - Failures answer OAuth errors (`invalid_grant` 400 for a bad/expired/revoked subject token,
   `unsupported_grant_type` 400 otherwise), never 422.
 - Discovery's `grant_types_supported` lists both grants. OpenAPI documents the new form.

@@ -34440,7 +34440,7 @@
             }
           },
           "429": {
-            "description": "Too many token requests from this ip+client_id (or ip+sub for an exchange) (OAuth `{ \"error\": ... }` body)",
+            "description": "Too many failed token requests (OAuth `{ \"error\": ... }` body). client_credentials counts every request that runs a secret check, per ip+client_id; a token exchange counts a subject token that fails verification per ip, and one that verifies but no longer matches its client (deleted, other audience, secret rotated) per ip+sub. A proven repeat of a good secret, and an exchange that matches its client's current state, are never counted",
             "content": {
               "application/json": {
                 "schema": {
@@ -47779,14 +47779,14 @@
       },
       "TokenForm": {
         "type": "object",
-        "description": "`POST /oauth/token` form. Which fields are required depends on\n`grant_type`, so every field but `grant_type` is optional here and checked\nby the handler — a missing field is a 400 `invalid_request`, never the\nextractor's 422, which no OAuth client reads as a refusal (I4).",
-        "required": [
-          "grant_type"
-        ],
+        "description": "`POST /oauth/token` form. Which fields are required depends on\n`grant_type`, so every field — `grant_type` included — is optional here and\nchecked by the handler: a missing field is a 400 `invalid_request`, never\nthe extractor's 422, which no OAuth client reads as a refusal (I4).",
         "properties": {
           "grant_type": {
-            "type": "string",
-            "description": "`client_credentials` or `urn:ietf:params:oauth:grant-type:token-exchange`."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required: `client_credentials` or\n`urn:ietf:params:oauth:grant-type:token-exchange`."
           },
           "client_id": {
             "type": [
