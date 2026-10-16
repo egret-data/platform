@@ -659,7 +659,7 @@
       "errors": "ignored",
       "finally": "ignored",
       "id": "honoured",
-      "inputFiles": "refused",
+      "inputFiles": "honoured",
       "logLevel": "ignored",
       "logToFile": "ignored",
       "namespaceFiles": "honoured",

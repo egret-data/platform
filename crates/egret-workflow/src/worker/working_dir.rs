@@ -13,15 +13,19 @@
 
 use std::collections::BTreeMap;
 
+use serde_json::Value;
 use sqlx::PgPool;
 
 use super::claim::Claimed;
-use super::commands::{StoredInput, WORKING_DIR};
-use super::handlers::script::WORKING_DIR_VAR;
+use super::commands::{relative_problem, StoredInput, WORKING_DIR};
+use super::handlers::script::{STORAGE_SCHEME, WORKING_DIR_VAR};
 use super::WorkingDirCarry;
 use crate::models::{Flow, Task, TaskKind, WorkingDirectory};
+use crate::runners::files::is_namespace_file_uri;
 use crate::runners::{render_str, RenderContext};
-use crate::storage::nsfiles::stage::{check_task_bytes, stage, NamespaceFilesSpec};
+use crate::storage::nsfiles::stage::{
+    check_task_bytes, merge, resolve_ns_file, stage, NamespaceFilesSpec,
+};
 use crate::storage::transfer::{write_tar, TarSource};
 use crate::storage::FileStore;
 
@@ -151,6 +155,9 @@ async fn prepare(
             c.task_id
         ));
     };
+    // The flow's own namespace: the default of `namespaceFiles`, and the one an
+    // `inputFiles` namespace-file URI is read as (W9b spec §7).
+    let own = render.files().and_then(|f| f.0.flow_namespace());
     let mut files: BTreeMap<String, StoredInput> = BTreeMap::new();
     if let Some(v) = &block.namespace_files {
         let spec = NamespaceFilesSpec::parse(v).map_err(|(path, message)| {
@@ -162,16 +169,13 @@ async fn prepare(
         })?;
         let rendered = spec.render(|what, s| render_with(render, what, s))?;
         if rendered.enabled {
-            let own = render
-                .files()
-                .and_then(|f| f.0.flow_namespace())
-                .ok_or_else(|| {
-                    format!(
-                        "namespace files cannot be staged for {}: this run is not a task run \
-                         of a flow's execution, whose namespace they are read as",
-                        c.task_id
-                    )
-                })?;
+            let own = own.ok_or_else(|| {
+                format!(
+                    "namespace files cannot be staged for {}: this run is not a task run of \
+                     a flow's execution, whose namespace they are read as",
+                    c.task_id
+                )
+            })?;
             files = match stage(pool, store, c.workspace_id, own, &rendered).await {
                 Ok(Ok(staged)) => {
                     for line in &staged.warnings {
@@ -189,29 +193,131 @@ async fn prepare(
             };
         }
     }
-    check_task_bytes(&files, store.caps.max_task_bytes)?;
+    // `inputFiles` load after `namespaceFiles` and overwrite a namespace file
+    // of their name, whatever `ifExists` says (spec §2.2, the W9b ruling).
+    let (contents, input_stored) =
+        input_files(pool, store, c, render, own, block.input_files.as_ref()).await?;
+    let merged = merge(files, &contents, input_stored);
+    check_task_bytes(&merged, store.caps.max_task_bytes)?;
     let uri = store.working_dir_uri(c.workspace_id, c.execution_id, c.id, PREPARE_OBJECT);
-    write_archive(store, &uri, &files).await.map_err(|e| {
-        format!(
-            "the WorkingDirectory {} could not write its snapshot: {e}",
-            c.task_id
-        )
-    })?;
+    write_archive(store, &uri, &contents, &merged)
+        .await
+        .map_err(|e| {
+            format!(
+                "the WorkingDirectory {} could not write its snapshot: {e}",
+                c.task_id
+            )
+        })?;
     Ok(uri)
 }
 
-/// Write `files` as one ustar archive at `uri`, streamed: [`write_tar`] writes
-/// into a pipe that the store reads, so no archive is held whole (spec §4.4).
-/// A failed write removes the object, so a half archive is never a pointer.
+/// The block's `inputFiles`, rendered and split as a script task's are (spec
+/// §2.2, W9b Task 5): inline contents; a `kestra://` value, a file already in
+/// internal storage, looked up through the run's render scope; and a
+/// namespace-file URI, resolved by [`resolve_ns_file`]. A name with a problem,
+/// or a value that cannot be read, is the block's failure.
+async fn input_files(
+    pool: &PgPool,
+    store: &FileStore,
+    c: &Claimed,
+    render: &RenderContext,
+    own: Option<&str>,
+    declared: Option<&Value>,
+) -> Result<(BTreeMap<String, String>, BTreeMap<String, StoredInput>), String> {
+    let mut contents = BTreeMap::new();
+    let mut stored = BTreeMap::new();
+    let Some(declared) = declared else {
+        return Ok((contents, stored));
+    };
+    let Value::Object(map) = declared else {
+        return Err(format!(
+            "the WorkingDirectory {} declares inputFiles, which is not a map of name to value",
+            c.task_id
+        ));
+    };
+    for (name, value) in map {
+        if let Some(problem) = relative_problem(name) {
+            return Err(format!("inputFiles: {problem}"));
+        }
+        let Value::String(raw) = value else {
+            return Err(format!(
+                "inputFiles {name:?}: its value is not a string, which is what it must be"
+            ));
+        };
+        let value = render_with(render, &format!("inputFiles {name:?}"), raw)?;
+        if is_namespace_file_uri(&value) {
+            let own = own.ok_or_else(|| {
+                format!(
+                    "inputFiles {name:?}: {value} is read as a namespace file, and this run is \
+                     not a task run of a flow's execution"
+                )
+            })?;
+            let mut conn = pool.acquire().await.map_err(|e| {
+                format!(
+                    "the namespace files of {} could not be read: {e}",
+                    c.task_id
+                )
+            })?;
+            match resolve_ns_file(&mut conn, store, c.workspace_id, own, &value).await {
+                Ok(Ok(found)) => {
+                    stored.insert(name.clone(), found.input);
+                }
+                Ok(Err(why)) => return Err(format!("inputFiles {name:?}: {why}")),
+                Err(e) => {
+                    return Err(format!(
+                        "the namespace files of {} could not be read: {e}",
+                        c.task_id
+                    ))
+                }
+            }
+        } else if value.starts_with(STORAGE_SCHEME) {
+            let fail = |why: String| format!("inputFiles {name:?}: {why}");
+            let scope = render.files().ok_or_else(|| {
+                fail(format!(
+                    "{value} cannot be read: this render has no file scope"
+                ))
+            })?;
+            let meta = scope
+                .0
+                .lookup(&value)
+                .map_err(|u| fail(u.message().to_string()))?;
+            let object_uri = store
+                .object_uri(c.workspace_id, &value)
+                .map_err(|e| fail(e.to_string()))?;
+            stored.insert(
+                name.clone(),
+                StoredInput {
+                    uri: value.clone(),
+                    object_uri,
+                    size: meta.size,
+                },
+            );
+        } else {
+            contents.insert(name.clone(), value);
+        }
+    }
+    Ok((contents, stored))
+}
+
+/// Write one ustar archive at `uri`, streamed: [`write_tar`] writes into a
+/// pipe that the store reads, so no archive is held whole (spec §4.4). The
+/// entries are `contents` (inline) and `stored` (files in storage). The two
+/// never share a name: [`merge`] removed the namespace file a name of
+/// `contents` would shadow. A failed write removes the object, so a half
+/// archive is never a pointer.
 async fn write_archive(
     store: &FileStore,
     uri: &str,
-    files: &BTreeMap<String, StoredInput>,
+    contents: &BTreeMap<String, String>,
+    stored: &BTreeMap<String, StoredInput>,
 ) -> Result<(), String> {
-    let sources: BTreeMap<String, TarSource<'_>> = files
+    let mut sources: BTreeMap<String, TarSource<'_>> = contents
         .iter()
-        .map(|(name, input)| (name.clone(), TarSource::Stored(input)))
+        .map(|(name, text)| (name.clone(), TarSource::Contents(text)))
         .collect();
+    for (name, input) in stored {
+        sources.insert(name.clone(), TarSource::Stored(input));
+    }
     let (mut writer, mut reader) = tokio::io::duplex(256 * 1024);
     let write = async {
         let res = write_tar(&mut writer, &sources, Some(store)).await;
@@ -311,6 +417,28 @@ mod tests {
         out
     }
 
+    /// Tick until this execution's block is `PREPARED`. The lib tests share one
+    /// database, so a tick may claim another test's run; the loop answers for
+    /// this block alone.
+    async fn tick_until_prepared(pool: &PgPool, reg: &Handlers, ex: uuid::Uuid) {
+        for _ in 0..60 {
+            tick_with(pool, 8, reg, WorkerTiming::default())
+                .await
+                .expect("a tick");
+            let phase: Option<String> = sqlx::query_scalar(
+                "SELECT working_dir FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'block'",
+            )
+            .bind(ex)
+            .fetch_one(pool)
+            .await
+            .expect("the block");
+            if phase.as_deref() == Some("PREPARED") {
+                return;
+            }
+        }
+        panic!("the block was not prepared in 60 ticks");
+    }
+
     /// Tick until the block is terminal.
     async fn settle(pool: &PgPool, reg: &Handlers, ex: uuid::Uuid) {
         for _ in 0..60 {
@@ -362,11 +490,9 @@ mod tests {
         let ex = start_execution(&pool, ws, None, &src, json!({}))
             .await
             .expect("start");
-        // One tick: the prepare claim. The finish claim discards the snapshot
-        // after the block ends, so the directory is read while it is PREPARED.
-        tick_with(&pool, 8, &reg, WorkerTiming::default())
-            .await
-            .expect("the prepare claim");
+        // The prepare claim. The finish claim discards the snapshot after the
+        // block ends, so the directory is read while it is PREPARED.
+        tick_until_prepared(&pool, &reg, ex).await;
         let uri = snapshot_of(&pool, ex)
             .await
             .expect("the prepare claim's pointer");
@@ -379,6 +505,70 @@ mod tests {
         assert!(
             !files.contains_key("other.txt"),
             "the exclusion is the block's include: {files:?}"
+        );
+        settle(&pool, &reg, ex).await;
+    }
+
+    /// Spec §2.2 (the W9b ruling, which holds here): `inputFiles` load after
+    /// `namespaceFiles`, so an input overwrites a namespace file of its name.
+    /// The contents are rendered with the flow's context, as a script's are.
+    #[tokio::test]
+    async fn input_files_are_in_the_directory_and_overwrite_a_namespace_file_of_the_same_name() {
+        install_served();
+        let pool = ns::pool().await.expect("the test database");
+        let fs = crate::storage::install_mem_for_tests();
+        let ws = ns::workspace(&pool).await;
+        ns::write(&pool, &fs, ws, "w11.inp", "/shared.txt", "from-namespace").await;
+        ns::write(&pool, &fs, ws, "w11.inp", "/data/ref.txt", "kept").await;
+        let src = block_flow(
+            "w11.inp",
+            "    namespaceFiles:\n      enabled: true\n    inputFiles:\n      shared.txt: from-input\n      in/rendered.txt: \"from-{{ flow.id }}\"\n",
+        );
+
+        let flow = crate::spec::parse(&src).expect("the flow parses");
+        let refused: Vec<_> = crate::spec::validate(&flow)
+            .errors
+            .into_iter()
+            .filter(|f| f.code == "working_directory_property_not_yet_run")
+            .collect();
+        assert!(
+            refused.is_empty(),
+            "inputFiles publishes once it runs: {refused:?}"
+        );
+
+        let reg = Handlers::with_core_tasks(Some(fs.clone()));
+        let ex = start_execution(&pool, ws, None, &src, json!({}))
+            .await
+            .expect("start");
+        tick_until_prepared(&pool, &reg, ex).await;
+        let uri = match snapshot_of(&pool, ex).await {
+            Some(uri) => uri,
+            None => {
+                let row: (String, Option<String>) = sqlx::query_as(
+                    "SELECT state, message FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'block'",
+                )
+                .bind(ex)
+                .fetch_one(&pool)
+                .await
+                .expect("the block");
+                panic!("the prepare claim wrote no pointer: block {row:?}");
+            }
+        };
+        let files = files_in(&fs, &uri).await;
+        assert_eq!(
+            files.get("shared.txt").map(String::as_str),
+            Some("from-input"),
+            "an input file overwrites the namespace file of its name: {files:?}"
+        );
+        assert_eq!(
+            files.get("data/ref.txt").map(String::as_str),
+            Some("kept"),
+            "the other namespace files stay: {files:?}"
+        );
+        assert_eq!(
+            files.get("in/rendered.txt").map(String::as_str),
+            Some("from-wd-props"),
+            "the contents render with the flow's context: {files:?}"
         );
         settle(&pool, &reg, ex).await;
     }

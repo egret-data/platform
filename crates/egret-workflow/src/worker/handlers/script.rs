@@ -591,7 +591,7 @@ struct Rendered {
 /// What makes an `inputFiles` value a file in internal storage rather than
 /// contents -- Kestra's own test (`value.startsWith("kestra://")`). A value
 /// with the scheme that does not parse is refused by the snapshot, naming it.
-const STORAGE_SCHEME: &str = "kestra://";
+pub(crate) const STORAGE_SCHEME: &str = "kestra://";
 
 /// The lines ahead of the commands, as the artifact writes them (module doc):
 /// `set -e` iff `fail_fast`, and a DEBUG bracket around `before` when there

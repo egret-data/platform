@@ -1731,11 +1731,10 @@ fn walk_task(
             }
             // The block runs (spec §4.2), but its properties run in steps: each
             // is refused by name until its claim runs it (spec §8, no silent
-            // drop). `namespaceFiles` runs in the prepare claim (spec §5.1), so
-            // it is no longer refused. Task 7 removes each remaining refusal
-            // when its property runs.
+            // drop). `namespaceFiles` and `inputFiles` run in the prepare claim
+            // (spec §5.1), so neither is refused. Task 7 removes each remaining
+            // refusal when its property runs.
             for (property, present) in [
-                ("inputFiles", w.input_files.is_some()),
                 ("outputFiles", w.output_files.is_some()),
                 ("cache", w.cache.is_some()),
             ] {
@@ -4688,8 +4687,8 @@ mod tests {
         vec![
             "id: c".into(),
             format!("type: {ty}"),
-            "inputFiles:".into(),
-            "  in.txt: hello".into(),
+            "outputFiles:".into(),
+            "  - out.txt".into(),
             "tasks:".into(),
             "  - id: inner".into(),
             "    type: core.log".into(),
@@ -4752,8 +4751,8 @@ mod tests {
                 "core.WorkingDirectory",
             ],
             body: working_directory_property_body,
-            suffix: ".inputFiles",
-            hints: &["'inputFiles'"],
+            suffix: ".outputFiles",
+            hints: &["'outputFiles'"],
         },
         Refused {
             code: "unsupported_loop_until_property",
