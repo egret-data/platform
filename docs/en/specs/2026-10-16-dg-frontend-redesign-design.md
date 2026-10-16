@@ -66,7 +66,7 @@ Classification; **#5** Lineage.
 - A search box filters what is loaded. A "go to path" box opens any `catalog.schema.object` directly.
 - A node that cannot be listed shows the API's reason (§2.3 `notListed`) and the "go to path" hint, never an empty
   branch.
-- Keyboard: the ARIA treegrid pattern of the SQL editor's namespaces list (#671).
+- Keyboard: the ARIA treegrid pattern of the workflows namespaces list (`frontend/src/routes/workflows/NamespacesList.tsx`, #671).
 
 **Object header.** Name, tags (direct and inherited, distinguished), kind, and the engines the catalog is attached
 to. Actions, each shown only with its permission: **Grant access**, **Add tag** (F9), **Who can read?**.
