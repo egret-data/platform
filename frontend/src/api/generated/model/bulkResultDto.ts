@@ -13,12 +13,14 @@ import type { TriggerEntryDto } from './triggerEntryDto';
 export interface BulkResultDto {
   flow_id: string;
   trigger_id: string;
-  /** Switched (and committed). */
+  /** Switched, or the backfill paused, resumed or deleted (and committed). */
   ok: boolean;
   /**
      * Why not: `not_found`, `source_does_not_parse`,
      * `trigger_disabled_in_source`, `trigger_not_supported`,
-     * `recover_missed_unknown`.
+     * `recover_missed_unknown` (the switch); `not_found`,
+     * `source_does_not_parse`, `backfill_not_supported`, `no_backfill` (the
+     * backfill routes).
      * @nullable
      */
   code?: string | null;

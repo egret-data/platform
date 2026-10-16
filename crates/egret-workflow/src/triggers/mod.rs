@@ -1,18 +1,22 @@
 //! Reading triggers (W7e spec §3.5, §3.6): a flow's, and the workspace's.
 //! Switching them on and off at runtime (§3.3, §3.7) is [`switch`], behind
-//! the two `PUT` routes in [`routes`].
+//! the two `PUT` routes in [`routes`]. A schedule's backfill (W7f §3.4,
+//! §3.5) is created, paused, resumed and deleted by [`backfill`], behind the
+//! five routes in [`backfill_routes`].
 //!
 //! # What is read, from where
 //!
 //! - **The declared triggers** come from the flow's saved draft, parsed with
 //!   `spec::parse` -- the source every execution runs. Only the source knows a
 //!   `Webhook` or a `Leaf` trigger: neither has a row anywhere.
-//! - **Their state** comes from four tables, one statement each, for the flow
+//! - **Their state** comes from five tables, one statement each, for the flow
 //!   ids in scope ([`state::read_state`]): the runtime switch
 //!   (`workflow.disabled_triggers`, with the switcher's display name), the
 //!   schedule rows (`workflow.triggers`), the listener rows
-//!   (`workflow.flow_listeners`) and the open `dependsOn` windows
-//!   (`workflow.flow_trigger_windows`), plus the database's `now()`.
+//!   (`workflow.flow_listeners`), the open `dependsOn` windows
+//!   (`workflow.flow_trigger_windows`) and the schedule backfills
+//!   (`workflow.trigger_backfills`, with the creator's and pauser's names;
+//!   W7f), plus the database's `now()`.
 //! - **The last execution** of each trigger is §3.6's statement
 //!   ([`state::LAST_EXECUTION_SQL`]), read for one flow's triggers or for one
 //!   page of the workspace list, never for the whole match.
@@ -31,6 +35,8 @@
 //! CPU at the bound must not pin a runtime worker that also runs the
 //! scheduler, the reaper and lease renewal.
 
+pub(crate) mod backfill;
+pub(crate) mod backfill_routes;
 pub(crate) mod entry;
 pub(crate) mod routes;
 pub(crate) mod state;

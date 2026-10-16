@@ -2,16 +2,21 @@ import { useEffect, useId, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { Copy, Eye, EyeOff, SquarePen } from "lucide-react";
-import type { DependsOnDto, ScheduleInfoDto, TriggerEntryDto, WebhookInfoDto } from "@/api/generated/model";
+import type { BackfillDto, DependsOnDto, ScheduleInfoDto, TriggerEntryDto, WebhookInfoDto } from "@/api/generated/model";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StateChip } from "@/components/workflows/StateChip";
 import {
+  backfillWindowText,
   kindLabel,
   missedLabel,
+  progressText,
+  recoverDescription,
   statusText,
+  ticksText,
   webhookNote,
   webhookPath,
   type FlowContext,
@@ -91,6 +96,63 @@ function ScheduleFacts({ schedule, runtimeDisabled }: { schedule: ScheduleInfoDt
     items.push(["Missed ticks", <span key="m" className="tabular-nums">{missedLabel(schedule.missed_ticks)}</span>]);
   }
   return <Facts items={items} />;
+}
+
+const sentence = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+/**
+ * A schedule's backfill (spec §4.2): the window in the trigger's zone and the
+ * viewer's, the tick it is at, who made it and paused it, what it adds to the
+ * executions, and where the regular schedule resumes once it ends.
+ */
+function BackfillFacts({ backfill: b, schedule }: { backfill: BackfillDto; schedule: ScheduleInfoDto }) {
+  const zoned = (iso: string) => inZone(iso, schedule.timezone) ?? "—";
+  const inputs = Object.entries(b.inputs);
+  return (
+    <>
+      <Facts
+        items={[
+          [
+            "Window",
+            <span key="w" className="grid">
+              <span>
+                {zoned(b.start)} → {zoned(b.end)} <span className="text-muted-foreground">(the trigger's timezone)</span>
+              </span>
+              <span>
+                {backfillWindowText(b)} <span className="text-muted-foreground">(your time)</span>
+              </span>
+            </span>,
+          ],
+          ["Current tick", <span key="t">{zoned(b.current_tick)}</span>],
+          ["Progress", <span key="p" className="tabular-nums">{`${progressText(b)} · ${ticksText(b)}`}</span>],
+          ["Created by", b.created_by_name ? `${b.created_by_name}, ${timeAgo(b.created_at)}` : timeAgo(b.created_at)],
+          [
+            "Paused",
+            b.paused ? `Yes${b.paused_by_name ? `, by ${b.paused_by_name}` : ""}${b.paused_at ? `, ${timeAgo(b.paused_at)}` : ""}` : "No",
+          ],
+          ["Inputs", inputs.length > 0 ? inputs.map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(", ") : "None"],
+          [
+            "Labels",
+            b.labels.length > 0 ? (
+              <span key="l" className="flex flex-wrap gap-1">
+                {b.labels.map((l) => (
+                  <Badge key={l.key} variant="outline" className="font-mono text-xs">
+                    {l.key}: {l.value}
+                  </Badge>
+                ))}
+              </span>
+            ) : (
+              "None"
+            ),
+          ],
+          [
+            "Regular runs",
+            `Resume from ${fullTimestamp(b.previous_next_evaluation_date)} when the backfill ends. ${sentence(recoverDescription(schedule.recover_missed_schedules))}.`,
+          ],
+        ]}
+      />
+    </>
+  );
 }
 
 function DependsOn({ dependsOn }: { dependsOn: DependsOnDto }) {
@@ -332,6 +394,11 @@ export function TriggerDetailsDrawer({
               {entry.schedule ? (
                 <Section title="Schedule">
                   <ScheduleFacts schedule={entry.schedule} runtimeDisabled={entry.runtime_disabled} />
+                </Section>
+              ) : null}
+              {entry.schedule && entry.backfill ? (
+                <Section title="Backfill">
+                  <BackfillFacts backfill={entry.backfill} schedule={entry.schedule} />
                 </Section>
               ) : null}
               {entry.flow ? (

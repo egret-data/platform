@@ -188,6 +188,8 @@ struct SourceRow {
     source: String,
     last_task_id: Option<String>,
     loop_index: Option<i32>,
+    /// The execution's own labels (migration 0192), beyond its flow's.
+    labels: Option<serde_json::Value>,
 }
 
 /// The source's half of `execution.trigger.variables`, with egret's values
@@ -782,7 +784,7 @@ async fn load_source(
 ) -> Result<(Source, RenderContext)> {
     let row: SourceRow = sqlx::query_as(
         "SELECT e.workspace_id, e.namespace, e.flow_key, e.execution_depth, e.created_at, e.updated_at, \
-                e.source, e.loop_index, \
+                e.source, e.loop_index, e.labels, \
                 (SELECT r.task_id FROM workflow.task_runs r \
                   WHERE r.execution_id = e.id ORDER BY r.run_ix DESC LIMIT 1) AS last_task_id \
            FROM workflow.executions e WHERE e.id = $1",
@@ -792,9 +794,14 @@ async fn load_source(
     .await
     .map_err(db_err)?;
     let ctx = execution_render_context(conn, ev.source_execution_id).await?;
-    let labels = crate::spec::parse(&row.source)
+    // The EXECUTION's labels: its flow's, then its own (W7f spec §3.3).
+    let flow_labels = crate::spec::parse(&row.source)
         .map(|f| f.labels)
         .unwrap_or_default();
+    let labels = crate::labels::execution_labels(
+        &flow_labels,
+        &crate::labels::own_labels(row.labels.as_ref()),
+    );
     let execution = SourceExecution {
         id: ev.source_execution_id,
         // The EXECUTION's workspace, from its row (final review M-a). The
@@ -1010,6 +1017,8 @@ async fn start_fire(
             replayed_from_execution_id: None,
             id: None,
             input_files: Vec::new(),
+            labels: None,
+            backfill_id: None,
         },
     )
     .await;
@@ -1076,11 +1085,10 @@ async fn listen_depends_on(
     // trigger's. `models::Dependency` fills an absent `when` with `"true"`, so
     // this renders it and passes `Rendered`; only an explicit `when: null` is
     // `NotDeclared` (which `dependency_matches` accepts for exactly that).
-    // Labels are the source FLOW's declared ones -- egret has no execution
-    // labels (spec §4.5), so this is the same stand-in `executionLabels` uses
-    // (the variables table below). It diverges from Kestra, which matches the
-    // source EXECUTION's labels, and fails closed: a label that exists only
-    // at run time never matches. Written down in spec §5.3 step 4.
+    // Labels are the source EXECUTION's: its flow's declared ones, then its
+    // own (a backfill's, a replay's copy; W7f spec §3.3), as Kestra matches.
+    // An execution without own labels still has none beyond its flow's, and a
+    // label that exists on neither never matches (fails closed).
     let dep_source = DepSource {
         namespace: &source.record.namespace,
         flow_id: &source.record.flow_id,
@@ -1318,7 +1326,7 @@ async fn window_step(
 /// | `startDate` | the source's `created_at` | measured: equals the source's `CREATED` history date (hop 2) |
 /// | `endDate` | the source's `updated_at`, **only** when the event's state is terminal | measured for SUCCESS: equals the terminal history date. For a non-terminal state (`PAUSED`) it is **omitted** -- derived from `State.getEndDate()` being empty until termination, not measured |
 /// | `lastTaskId` | the source's highest-`run_ix` task run; omitted when it has none | measured on one-task flows only |
-/// | `executionLabels` | the source FLOW's declared `labels:`, dotted keys nested, `system.correlationId` excluded | measured: `system.from` nests under `system`, and `correlationId` is absent. egret has no execution labels (spec §4.5), so the flow's own labels -- which Kestra copies onto every execution -- are the nearest value; with none declared it is `{}`, which is what hop 2 measured |
+/// | `executionLabels` | the source EXECUTION's labels (its flow's, then its own), dotted keys nested, `system.correlationId` excluded | measured: `system.from` nests under `system`, and `correlationId` is absent. The source EXECUTION's labels: its flow's declared ones (which Kestra copies onto every execution), then the execution's own (W7f); egret sets no `system.*` label, so with none of either it is `{}`, which is what hop 2 measured |
 /// | `flowRevision` | **omitted** | egret records no revision on an execution. `flow_versions` exists, but nothing says which version an execution ran, and a guessed number would be an invented value |
 ///
 /// Dates carry six fractional digits and `Z`, the measured shape. A date whose

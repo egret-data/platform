@@ -5,6 +5,8 @@ import type {
   FlowDto,
   FlowTriggersDto,
   FlowVersionDto,
+  CreateBackfillRequest,
+  SetBackfillPausedRequest,
   SetTriggerDisabledRequest,
   SetTriggersDisabledRequest,
   TriggerEntryDto,
@@ -76,6 +78,8 @@ export class FakeWorkflowServer {
   triggersReply: Reply | null = null;
   /** Answers the next `PUT …/triggers/{trigger_id}/disabled` with this instead of switching. */
   triggerPutReply: Reply | null = null;
+  /** Answers the next `POST …/triggers/{trigger_id}/backfill` with this instead of creating. */
+  backfillCreateReply: Reply | null = null;
   /** Answers the next `PUT …/workflows/triggers/disabled` with this instead of switching. */
   bulkReply: Reply | null = null;
   /** Bulk entries refused by trigger id, with the server's code and sentence. */
@@ -142,6 +146,55 @@ export class FakeWorkflowServer {
     };
     this.triggers = { ...this.triggers, triggers: this.triggers.triggers.map((t, i) => (i === at ? next : t)) };
     return next;
+  }
+
+  /**
+   * The per-trigger backfill routes (W7f §3.5): pause or resume, and delete. Only the backfill
+   * entry changes; the answer is the trigger's entry, as the server returns it.
+   */
+  private backfillRoute(triggerId: string, method: string, body: unknown): Reply {
+    const at = this.triggers.triggers.findIndex((t) => t.trigger_id === triggerId);
+    if (at < 0) return { status: 404, body: { error: "not found: trigger", code: "not_found" } };
+    const old = this.triggers.triggers[at];
+    if (method === "POST") {
+      if (this.backfillCreateReply) {
+        const reply = this.backfillCreateReply;
+        this.backfillCreateReply = null;
+        return reply;
+      }
+      if (old.backfill) return { status: 409, body: { error: "This trigger already has a backfill; pause or delete it first", code: "backfill_exists" } };
+      const req = body as CreateBackfillRequest;
+      const end = req.end ?? req.start;
+      const created: TriggerEntryDto = {
+        ...old,
+        backfill: {
+          id: "00000000-0000-4000-8000-0000000000c1",
+          start: req.start,
+          end,
+          current_tick: req.start,
+          paused: false,
+          paused_by_name: null,
+          paused_at: null,
+          inputs: req.inputs ?? {},
+          labels: req.labels ?? [],
+          created_by_name: "Ana Lima",
+          created_at: req.start,
+          previous_next_evaluation_date: req.start,
+          total_ticks: 1,
+          ticks_done: 0,
+          progress: 0,
+        },
+      };
+      this.triggers = { ...this.triggers, triggers: this.triggers.triggers.map((t, i) => (i === at ? created : t)) };
+      return { status: 201, body: created };
+    }
+    if (!old.backfill) return { status: 404, body: { error: "This trigger has no backfill", code: "no_backfill" } };
+    const next: TriggerEntryDto =
+      method === "DELETE"
+        ? { ...old, backfill: null }
+        : { ...old, backfill: { ...old.backfill, paused: (body as SetBackfillPausedRequest).paused } };
+    this.triggers = { ...this.triggers, triggers: this.triggers.triggers.map((t, i) => (i === at ? next : t)) };
+    return { status: 200, body: next };
   }
 
   private switchBulk(req: SetTriggersDisabledRequest): Reply {
@@ -221,6 +274,8 @@ export class FakeWorkflowServer {
       const switched = this.switchOne(decodeURIComponent(switchPath[1]), body as SetTriggerDisabledRequest);
       return switched ? { status: 200, body: switched } : { status: 404, body: { error: "not found: trigger" } };
     }
+    const backfillPath = new RegExp(`^${flowPath}/triggers/([^/]+)/backfill(/paused)?$`).exec(path);
+    if (backfillPath) return this.backfillRoute(decodeURIComponent(backfillPath[1]), method, body);
     if (method === "GET" && path === flowPath) {
       if (this.getFlowFailures > 0) {
         this.getFlowFailures--;

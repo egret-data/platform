@@ -32,6 +32,12 @@ kind?: string | null;
  */
 state?: string | null;
 /**
+ * `running` (a backfill that is not paused), `paused` or `any`. Anything
+ * else is a 400. Empty (`backfill=`) is no filter.
+ * @nullable
+ */
+backfill?: string | null;
+/**
  * A case-insensitive substring of the trigger id, the flow id or the
  * namespace.
  * @nullable

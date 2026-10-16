@@ -1680,6 +1680,8 @@ async fn the_caller_owned_wrappers_answer_err_for_a_render_that_needs_a_read() {
             replayed_from_execution_id: None,
             id: None,
             input_files: Vec::new(),
+            labels: None,
+            backfill_id: None,
         },
     )
     .await;

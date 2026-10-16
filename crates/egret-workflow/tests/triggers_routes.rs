@@ -269,7 +269,8 @@ async fn each_kind_reads_every_field_in_declaration_order() {
                 "next_evaluation_date": null, "evaluated_at": null, "last_error": null,
                 "off_queue": false, "missed_ticks": null, "recover_missed_schedules": null
             },
-            "flow": null, "webhook": null, "last_execution": null
+            "flow": null, "webhook": null, "last_execution": null,
+            "backfill": null, "can_backfill": true, "backfill_refusal": null
         })
     );
     assert_eq!(
@@ -284,7 +285,8 @@ async fn each_kind_reads_every_field_in_declaration_order() {
                 "url_path": format!("/workflows/v1/{ws}/executions/webhook/company.a/all/k-all"),
                 "key_error": null, "unsupported": null
             },
-            "last_execution": null
+            "last_execution": null,
+            "backfill": null, "can_backfill": false, "backfill_refusal": "not_schedule"
         })
     );
     assert_eq!(
@@ -296,7 +298,8 @@ async fn each_kind_reads_every_field_in_declaration_order() {
             "effective_disabled": false, "can_toggle": true, "toggle_refusal": null,
             "duplicate_id": false, "schedule": null,
             "flow": { "states": ["SUCCESS"], "listening": true, "not_listening_reason": null, "depends_on": null },
-            "webhook": null, "last_execution": null
+            "webhook": null, "last_execution": null,
+            "backfill": null, "can_backfill": false, "backfill_refusal": "not_schedule"
         })
     );
     assert_eq!(
@@ -319,7 +322,8 @@ async fn each_kind_reads_every_field_in_declaration_order() {
                     "window": null
                 }
             },
-            "webhook": null, "last_execution": null
+            "webhook": null, "last_execution": null,
+            "backfill": null, "can_backfill": false, "backfill_refusal": "not_schedule"
         })
     );
     assert_eq!(
@@ -330,7 +334,8 @@ async fn each_kind_reads_every_field_in_declaration_order() {
             "disabled_by": null, "disabled_by_name": null, "disabled_at": null,
             "effective_disabled": false, "can_toggle": false, "toggle_refusal": "not_supported",
             "duplicate_id": false, "schedule": null, "flow": null, "webhook": null,
-            "last_execution": null
+            "last_execution": null,
+            "backfill": null, "can_backfill": false, "backfill_refusal": "not_schedule"
         })
     );
 }
@@ -1251,7 +1256,7 @@ async fn off_then_on_for_each_kind() {
             vec![(
                 "workflow_trigger:disable".to_string(),
                 Some(format!("{flow}/{trig}")),
-                json!({"recover_missed": false, "next_evaluation_date": null}),
+                json!({"recover_missed": false, "next_evaluation_date": null, "backfill_resume_from": null}),
             )]
         );
     }
@@ -1290,7 +1295,7 @@ async fn off_then_on_for_each_kind() {
             vec![(
                 "workflow_trigger:enable".to_string(),
                 Some(format!("{flow}/{trig}")),
-                json!({"recover_missed": false, "next_evaluation_date": null}),
+                json!({"recover_missed": false, "next_evaluation_date": null, "backfill_resume_from": null}),
             )]
         );
     }
@@ -1371,7 +1376,7 @@ async fn re_enabling_an_overdue_schedule_skips_or_recovers() {
             vec![(
                 "workflow_trigger:enable".to_string(),
                 Some(format!("{flow}/{id}")),
-                json!({"recover_missed": recover, "next_evaluation_date": next}),
+                json!({"recover_missed": recover, "next_evaluation_date": next, "backfill_resume_from": null}),
             )],
             "{id}"
         );
@@ -1384,7 +1389,7 @@ async fn re_enabling_an_overdue_schedule_skips_or_recovers() {
         assert_eq!(schedule_row(&db, flow, id).await, row, "{id}: dates kept");
         assert_eq!(
             common::audit_mutations(&app)[0].2,
-            json!({"recover_missed": true, "next_evaluation_date": null}),
+            json!({"recover_missed": true, "next_evaluation_date": null, "backfill_resume_from": null}),
             "{id}"
         );
     }
@@ -1487,6 +1492,189 @@ async fn a_future_date_and_an_off_queue_row_are_kept() {
             "recover {recover}: an off-queue row stays off"
         );
     }
+}
+
+/// The backfill row's dates: `(current_tick, previous_next_evaluation_date)`.
+async fn backfill_dates(
+    db: &Db,
+    flow: Uuid,
+    trig: &str,
+) -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+    sqlx::query_as(
+        "SELECT current_tick, previous_next_evaluation_date FROM workflow.trigger_backfills \
+          WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .fetch_one(&db.pool)
+    .await
+    .expect("a backfill row")
+}
+
+/// W7f §3.8 (D11): re-enabling a switched-off schedule during a backfill keeps
+/// `next_evaluation_date` (the backfill's `current_tick`) for every choice;
+/// the choice moves the regular schedule's resume position instead. The fire
+/// that follows is `tests/backfill_routes.rs`'s
+/// `a_re_enabled_backfill_fires_where_it_stopped` (a pass is global).
+#[tokio::test]
+async fn re_enabling_during_a_backfill_keeps_its_place() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = manager(&db).await;
+    let ids: [(&str, Option<&str>, bool); 6] = [
+        ("skip", None, false),
+        ("all", Some("ALL"), true),
+        ("absent", None, true),
+        ("last", Some("LAST"), true),
+        ("none", Some("NONE"), true),
+        ("some", Some("SOME"), true),
+    ];
+    let triggers: String = ids
+        .iter()
+        .map(|(id, r, _)| schedule_recovering(id, *r))
+        .collect();
+    let triggers = format!("{triggers}{}{}", schedule("ahead"), schedule("offq"));
+    let flow = common::seed_flow(&db, ws, user, &src("company.a", "bf", &triggers), "draft").await;
+    let app = flagged_app(&db).await;
+    let minute: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT date_trunc('minute', now())")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let (w0, w1) = (
+        minute - chrono::Duration::hours(3),
+        minute - chrono::Duration::hours(2),
+    );
+    for (id, _, _) in ids {
+        // The regular schedule three ticks overdue, then a window hours back.
+        common::make_due(&db, flow, id, 3).await;
+        common::stage_backfill(&db, flow, id, (w0, w1), w0, 61, json!({}), json!([])).await;
+        switch(&app, ws, user, flow, id, true, false).await;
+    }
+    // A regular schedule not yet due: an hour ahead.
+    sql(
+        &db,
+        "UPDATE workflow.triggers SET next_evaluation_date = date_trunc('minute', now()) + interval '1 hour' \
+          WHERE flow_id = $1 AND trigger_id = 'ahead'",
+        flow,
+    )
+    .await;
+    common::stage_backfill(&db, flow, "ahead", (w0, w1), w0, 61, json!({}), json!([])).await;
+    switch(&app, ws, user, flow, "ahead", true, false).await;
+    // Overdue, then taken off the queue during the backfill (as
+    // `take_off_queue` does: the backfill row stays).
+    common::make_due(&db, flow, "offq", 3).await;
+    common::stage_backfill(&db, flow, "offq", (w0, w1), w0, 61, json!({}), json!([])).await;
+    switch(&app, ws, user, flow, "offq", true, false).await;
+    sql(
+        &db,
+        "UPDATE workflow.triggers SET next_evaluation_date = NULL, last_error = 'gone' \
+          WHERE flow_id = $1 AND trigger_id = 'offq'",
+        flow,
+    )
+    .await;
+    common::audit_mutations(&app);
+
+    // Skip (`false`, or `NONE`): the date is kept; the resume position moves
+    // to the first tick after now.
+    for (id, recover) in [("skip", false), ("none", true)] {
+        let (_, prev) = backfill_dates(&db, flow, id).await;
+        assert!(prev <= minute, "{id}: the regular schedule is overdue");
+        let before = db_now(&db).await;
+        let e = switch(&app, ws, user, flow, id, false, recover).await;
+        let after = db_now(&db).await;
+        let (next, _, _) = schedule_row(&db, flow, id).await;
+        assert_eq!(next, Some(w0), "{id}: the backfill resumes at its tick");
+        let (tick, resume) = backfill_dates(&db, flow, id).await;
+        assert_eq!(tick, w0, "{id}");
+        assert!(
+            resume > before && resume <= after + chrono::Duration::seconds(60) && is_minute(resume),
+            "{id}: {resume} is not the first tick after a now() in [{before}, {after}]"
+        );
+        assert_eq!(ts(&e["schedule"]["next_evaluation_date"]), w0, "{id}: {e}");
+        assert_eq!(
+            ts(&e["backfill"]["previous_next_evaluation_date"]),
+            resume,
+            "{id}: the answer is what was committed"
+        );
+        assert_eq!(e["schedule"]["missed_ticks"], json!(null), "{id}: {e}");
+        assert_eq!(
+            common::audit_mutations(&app),
+            vec![(
+                "workflow_trigger:enable".to_string(),
+                Some(format!("{flow}/{id}")),
+                json!({"recover_missed": recover, "next_evaluation_date": null, "backfill_resume_from": resume}),
+            )],
+            "{id}"
+        );
+    }
+
+    // Recover (`ALL`, absent, `LAST`): both dates kept; the policy applies
+    // when the backfill ends.
+    for id in ["all", "absent", "last"] {
+        let row = schedule_row(&db, flow, id).await;
+        let dates = backfill_dates(&db, flow, id).await;
+        let e = switch(&app, ws, user, flow, id, false, true).await;
+        assert_eq!(schedule_row(&db, flow, id).await, row, "{id}");
+        assert_eq!(backfill_dates(&db, flow, id).await, dates, "{id}");
+        assert_eq!(ts(&e["schedule"]["next_evaluation_date"]), w0, "{id}: {e}");
+        assert_eq!(
+            common::audit_mutations(&app)[0].2,
+            json!({"recover_missed": true, "next_evaluation_date": null, "backfill_resume_from": null}),
+            "{id}"
+        );
+    }
+
+    // A skip whose resume position has not passed leaves it, as W7e's skip
+    // leaves a date not yet due.
+    let dates = backfill_dates(&db, flow, "ahead").await;
+    switch(&app, ws, user, flow, "ahead", false, false).await;
+    assert_eq!(backfill_dates(&db, flow, "ahead").await, dates);
+    assert_eq!(
+        common::audit_mutations(&app)[0].2,
+        json!({"recover_missed": false, "next_evaluation_date": null, "backfill_resume_from": null})
+    );
+
+    // Off the queue: the dialog is not offered, so a skip moves nothing --
+    // neither date -- and the entry counts no missed tick.
+    let row = schedule_row(&db, flow, "offq").await;
+    let dates = backfill_dates(&db, flow, "offq").await;
+    assert!(dates.1 <= minute, "offq: the resume position has passed");
+    let e = switch(&app, ws, user, flow, "offq", false, false).await;
+    assert_eq!(schedule_row(&db, flow, "offq").await, row);
+    assert_eq!(backfill_dates(&db, flow, "offq").await, dates);
+    assert_eq!(e["schedule"]["off_queue"], json!(true), "{e}");
+    assert_eq!(e["schedule"]["missed_ticks"], json!(null), "{e}");
+    assert_eq!(
+        common::audit_mutations(&app)[0].2,
+        json!({"recover_missed": false, "next_evaluation_date": null, "backfill_resume_from": null})
+    );
+
+    // An unknown value: 409, nothing written.
+    let row = schedule_row(&db, flow, "some").await;
+    let dates = backfill_dates(&db, flow, "some").await;
+    let (status, body) = answer(
+        switch_res(
+            &app,
+            ws,
+            user,
+            flow,
+            "some",
+            json!({"disabled": false, "recover_missed": true}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], json!("recover_missed_unknown"));
+    assert_eq!(schedule_row(&db, flow, "some").await, row);
+    assert_eq!(backfill_dates(&db, flow, "some").await, dates);
+    assert_eq!(common::switched_off(&db, flow).await, vec!["some"]);
+    assert!(common::audit_mutations(&app).is_empty());
+    assert_eq!(
+        executions_of(&db, flow).await,
+        0,
+        "the switch fires nothing"
+    );
 }
 
 /// A later save does not undo a skip; a new cron re-initialises it.
@@ -1900,7 +2088,7 @@ async fn bulk_switching_is_per_entry_and_bounded() {
         vec![(
             "workflow_trigger:enable".to_string(),
             Some(format!("{mix}/s")),
-            json!({"recover_missed": false, "next_evaluation_date": null}),
+            json!({"recover_missed": false, "next_evaluation_date": null, "backfill_resume_from": null}),
         )],
         "one event per switched trigger"
     );

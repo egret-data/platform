@@ -52,6 +52,7 @@ function execution(state: string, extra: Record<string, unknown> = {}) {
     inputs: {},
     seq: 1,
     execution_trigger: null,
+    effective_labels: [],
     attempt_number: 1,
     origin_offset_ms: 0,
     replayed_from_execution_id: null,

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  anyBackfillRunning,
+  backfillBulkMessage,
+  backfillRefusalText,
   bannersFor,
   enableBody,
   kindLabel,
@@ -9,10 +12,11 @@ import {
   shortType,
   statusText,
   switchEnablement,
+  ticksText,
   webhookNote,
   webhookPath,
 } from "@/components/workflows/triggers/triggersModel";
-import { flowEntry, flowTriggers, otherEntry, scheduleEntry, webhookEntry } from "./triggerFixtures";
+import { backfill, flowEntry, flowTriggers, otherEntry, scheduleEntry, webhookEntry } from "./triggerFixtures";
 
 const ON = { flowDisabled: false, flowDeleted: false };
 const NOW = Date.parse("2026-10-15T12:00:00Z");
@@ -170,5 +174,53 @@ describe("names", () => {
     expect(["schedule", "webhook", "flow", "other"].map((k) => kindLabel(k as never))).toEqual(["Schedule", "Webhook", "Flow", "Other"]);
     expect(shortType("io.kestra.plugin.core.trigger.Schedule")).toBe("Schedule");
     expect(shortType("Schedule")).toBe("Schedule");
+  });
+});
+
+describe("backfill copy and decisions (W7f §4.1)", () => {
+  const ctx = { flowDisabled: false, flowDeleted: false };
+
+  it("says Backfilling or Backfill paused with the progress, after the off-queue cause", () => {
+    expect(statusText(scheduleEntry({ backfill: backfill() }), ctx)).toBe("Backfilling (30%)");
+    expect(statusText(scheduleEntry({ backfill: backfill({ paused: true }) }), ctx)).toBe("Backfill paused (30%)");
+    // A switched-off trigger says why it is off, before the backfill.
+    expect(statusText(scheduleEntry({ backfill: backfill(), runtime_disabled: true }), ctx)).toMatch(/^Switched off/);
+    expect(statusText(scheduleEntry({ backfill: backfill() }, { off_queue: true, last_error: "bad cron" }), ctx)).toBe(
+      "Off the queue: bad cron",
+    );
+  });
+
+  it("names each refusal of the Backfill button in words, the schedule's error for off the queue", () => {
+    expect(backfillRefusalText("not_schedule")).toBe("Only schedules can be backfilled");
+    expect(backfillRefusalText("forbidden")).toBe("You need workflow:manage");
+    expect(backfillRefusalText("disabled")).toBe("Enable the trigger to backfill it");
+    expect(backfillRefusalText("off_queue", "bad cron")).toBe("Off the queue: bad cron");
+    expect(backfillRefusalText("flow_deleted")).toBe("The flow is in the trash");
+    expect(backfillRefusalText("running")).toBe("This trigger already has a backfill");
+  });
+
+  it("counts ticks and says running only for a backfill that is not paused", () => {
+    expect(ticksText(backfill())).toBe("3 of 10 ticks");
+    expect(anyBackfillRunning([scheduleEntry({ backfill: backfill({ paused: true }) })])).toBe(false);
+    expect(anyBackfillRunning([scheduleEntry(), scheduleEntry({ backfill: backfill() })])).toBe(true);
+  });
+
+  it("reads a no_backfill refusal as 'had no backfill' and keeps the other sentences", () => {
+    expect(backfillBulkMessage("no_backfill", "This trigger has no backfill")).toBe("had no backfill");
+    expect(backfillBulkMessage("not_found", "This trigger no longer exists in the flow; reload")).toBe(
+      "This trigger no longer exists in the flow; reload",
+    );
+  });
+});
+
+describe("needsEnableDialog with a backfill (W7f §4.1)", () => {
+  it("reads the regular position the backfill saved, not the window's tick", () => {
+    const now = Date.parse("2099-01-01T02:00:00Z");
+    // The trigger's date is a window tick in the past; the regular schedule resumes in the future.
+    const future = backfill({ previous_next_evaluation_date: "2099-01-01T05:00:00Z" });
+    expect(needsEnableDialog(scheduleEntry({ runtime_disabled: true, backfill: future }), now)).toBe(false);
+    // The saved position has passed: the question is asked.
+    const past = backfill({ previous_next_evaluation_date: "2099-01-01T01:00:00Z" });
+    expect(needsEnableDialog(scheduleEntry({ runtime_disabled: true, backfill: past }), now)).toBe(true);
   });
 });

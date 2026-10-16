@@ -76,7 +76,9 @@ pub struct ScheduleInfoDto {
     pub off_queue: bool,
     /// On the queue and overdue (`next_evaluation_date <= now`, which a
     /// switched-off schedule becomes, since it keeps its date): the ticks from
-    /// `next_evaluation_date` through now. `null` otherwise.
+    /// `next_evaluation_date` through now. During a backfill, the regular
+    /// ticks waiting instead: from `backfill.previous_next_evaluation_date`
+    /// through now. `null` otherwise.
     pub missed_ticks: Option<MissedTicksDto>,
     /// The YAML's `recoverMissedSchedules` as written (`ALL`, `NONE`, `LAST`);
     /// `null` when absent, which a re-enable treats as `ALL`.
@@ -153,6 +155,58 @@ pub struct LastExecutionDto {
     pub created_at: DateTime<Utc>,
 }
 
+/// A `Schedule` trigger's backfill in progress (W7f spec §3.9). Its inputs
+/// and labels are shown to `workflow:read`, as every execution's inputs are.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+pub struct BackfillDto {
+    /// This backfill's id, written on every execution it fires
+    /// (`backfill_id`).
+    pub id: Uuid,
+    /// The window's first instant (inclusive).
+    pub start: DateTime<Utc>,
+    /// The window's last instant (inclusive).
+    pub end: DateTime<Utc>,
+    /// The next window tick to fire.
+    pub current_tick: DateTime<Utc>,
+    /// Paused: no window tick fires until it is resumed.
+    pub paused: bool,
+    /// The pauser's display name.
+    pub paused_by_name: Option<String>,
+    pub paused_at: Option<DateTime<Utc>>,
+    /// Overlaid on the schedule's `inputs:` key by key.
+    #[schema(value_type = Object)]
+    pub inputs: serde_json::Value,
+    /// Added to every execution it fires, in this order.
+    pub labels: Vec<crate::routes::LabelDto>,
+    /// The creator's display name.
+    pub created_by_name: Option<String>,
+    pub created_at: DateTime<Utc>,
+    /// Where the regular schedule resumes when the backfill ends (its
+    /// `recoverMissedSchedules` applies from here).
+    pub previous_next_evaluation_date: DateTime<Utc>,
+    /// The window's ticks, counted at create.
+    pub total_ticks: i32,
+    /// The ticks fired (or skipped) so far.
+    pub ticks_done: i32,
+    /// 0-100: Kestra's `(current_tick − start) / (end − start)`, rounded, clamped; 100 for an empty span.
+    pub progress: u8,
+}
+
+/// Why the Backfill button is unusable, the first that applies: the flow is
+/// in the trash, the trigger is not a `Schedule`, the caller lacks
+/// `workflow:manage`, the trigger is effective-disabled, its schedule is off
+/// the queue, a backfill already exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CannotBackfill {
+    FlowDeleted,
+    NotSchedule,
+    Forbidden,
+    Disabled,
+    OffQueue,
+    Running,
+}
+
 /// One declared trigger and its state.
 #[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
 pub struct TriggerEntryDto {
@@ -188,6 +242,13 @@ pub struct TriggerEntryDto {
     /// `null` in the workspace list.
     pub webhook: Option<WebhookInfoDto>,
     pub last_execution: Option<LastExecutionDto>,
+    /// A `Schedule`'s backfill in progress; `null` for none and for every
+    /// other kind.
+    pub backfill: Option<BackfillDto>,
+    /// Whether the Backfill button is usable; the create route checks for itself.
+    pub can_backfill: bool,
+    /// Why `can_backfill` is false.
+    pub backfill_refusal: Option<CannotBackfill>,
 }
 
 /// A flow's triggers, in declaration order.
@@ -384,6 +445,9 @@ pub struct ListTriggersQuery {
     /// `enabled` or `disabled`, on `effective_disabled`. Anything else is a
     /// 400. Empty (`state=`) is no filter.
     pub state: Option<String>,
+    /// `running` (a backfill that is not paused), `paused` or `any`. Anything
+    /// else is a 400. Empty (`backfill=`) is no filter.
+    pub backfill: Option<String>,
     /// A case-insensitive substring of the trigger id, the flow id or the
     /// namespace.
     pub q: Option<String>,
@@ -406,8 +470,17 @@ pub(crate) struct RowFilter {
     pub kinds: Option<Vec<TriggerKindDto>>,
     /// `Some(true)`: only effective-disabled; `Some(false)`: only enabled.
     pub disabled: Option<bool>,
+    pub backfill: Option<BackfillFilter>,
     /// Lower-cased.
     pub q: Option<String>,
+}
+
+/// The list's `backfill` filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackfillFilter {
+    Running,
+    Paused,
+    Any,
 }
 
 impl RowFilter {
@@ -442,12 +515,28 @@ impl RowFilter {
                 )))
             }
         };
+        let backfill = match q.backfill.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some("running") => Some(BackfillFilter::Running),
+            Some("paused") => Some(BackfillFilter::Paused),
+            Some("any") => Some(BackfillFilter::Any),
+            Some(other) => {
+                return Err(Error::InvalidInput(format!(
+                    "unknown backfill '{other}': send running, paused or any"
+                )))
+            }
+        };
         let q =
             q.q.as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_lowercase);
-        Ok(Self { kinds, disabled, q })
+        Ok(Self {
+            kinds,
+            disabled,
+            backfill,
+            q,
+        })
     }
 
     fn keeps(&self, d: &DraftRow, e: &TriggerEntryDto) -> bool {
@@ -458,6 +547,17 @@ impl RowFilter {
         }
         if let Some(disabled) = self.disabled {
             if e.effective_disabled != disabled {
+                return false;
+            }
+        }
+        if let Some(want) = self.backfill {
+            let keep = match (want, &e.backfill) {
+                (_, None) => false,
+                (BackfillFilter::Any, Some(_)) => true,
+                (BackfillFilter::Running, Some(b)) => !b.paused,
+                (BackfillFilter::Paused, Some(b)) => b.paused,
+            };
+            if !keep {
                 return false;
             }
         }
@@ -516,7 +616,11 @@ pub(crate) fn build_rows(
             }
             if total >= start && total < end {
                 if let Some(s) = e.schedule.as_mut() {
-                    s.missed_ticks = entry::missed_ticks(t, s.next_evaluation_date, state.db_now);
+                    let from = entry::missed_from(
+                        s.next_evaluation_date,
+                        state.backfills.get(&(d.id, t.id.clone())),
+                    );
+                    s.missed_ticks = entry::missed_ticks(t, from, state.db_now);
                 }
                 rows.push(TriggerRowDto {
                     flow_uuid: d.id,
@@ -542,8 +646,8 @@ pub(crate) fn build_rows(
     tag = "workflow",
     params(WorkspacePath, ListTriggersQuery),
     responses(
-        (status = 200, description = "One page of the triggers of the workspace's flows not in the trash, by namespace, flow id and declaration order. Rows carry no `depends_on.conditions` and no `webhook` (read the per-flow route). `unparsable` counts the flows in scope whose source did not parse.", body = TriggerPageDto),
-        (status = 400, description = "`namespace_prefix` is not a valid namespace name, or `kind`/`state` holds an unknown value, or the query string does not decode", body = egret_core::http::ErrorBody),
+        (status = 200, description = "One page of the triggers of the workspace's flows not in the trash, by namespace, flow id and declaration order. Rows carry no `depends_on.conditions` and no `webhook` (read the per-flow route), and carry `backfill`, `can_backfill` and `backfill_refusal` as the per-flow route does. `unparsable` counts the flows in scope whose source did not parse.", body = TriggerPageDto),
+        (status = 400, description = "`namespace_prefix` is not a valid namespace name, or `kind`/`state`/`backfill` holds an unknown value, or the query string does not decode", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
         (status = 422, description = "More than 2000 flows match the namespace and flow filters (`code: triggers_too_large`); narrow by namespace", body = egret_core::http::ErrorBody),
@@ -652,7 +756,8 @@ pub struct SetTriggerDisabledRequest {
     /// skips the missed ticks (the next date becomes the first tick after
     /// now); `true` follows the trigger's `recoverMissedSchedules` (absent or
     /// `ALL`: every missed tick runs; `NONE`: skip; `LAST`: the latest one
-    /// runs). Ignored otherwise.
+    /// runs). Ignored otherwise. During a backfill the choice applies to the
+    /// regular schedule's resume position, not to the backfill's tick.
     #[serde(default)]
     pub recover_missed: bool,
 }
@@ -681,15 +786,17 @@ pub struct SetTriggersDisabledRequest {
 pub struct BulkResultDto {
     pub flow_id: Uuid,
     pub trigger_id: String,
-    /// Switched (and committed).
+    /// Switched, or the backfill paused, resumed or deleted (and committed).
     pub ok: bool,
     /// Why not: `not_found`, `source_does_not_parse`,
     /// `trigger_disabled_in_source`, `trigger_not_supported`,
-    /// `recover_missed_unknown`.
+    /// `recover_missed_unknown` (the switch); `not_found`,
+    /// `source_does_not_parse`, `backfill_not_supported`, `no_backfill` (the
+    /// backfill routes).
     pub code: Option<String>,
     /// The refusal's sentence.
     pub message: Option<String>,
-    /// The trigger's entry after the switch, when `ok`.
+    /// The trigger's entry after the change, when `ok`.
     pub trigger: Option<TriggerEntryDto>,
 }
 
@@ -711,11 +818,21 @@ pub const TOO_MANY_TRIGGERS: &str = "too_many_triggers";
 /// delete does): over the cap is a 413, anything else a 400, each with its
 /// code and `ErrorBody`.
 fn body_refusal(r: JsonRejection, shape: &str) -> TriggerRouteError {
+    body_refusal_saying(r, shape, "nothing was switched")
+}
+
+/// [`body_refusal`], saying what was not done (`nothing`) in the 413's
+/// sentence; the backfill routes' too.
+pub(crate) fn body_refusal_saying(
+    r: JsonRejection,
+    shape: &str,
+    nothing: &str,
+) -> TriggerRouteError {
     match r.status() {
         StatusCode::PAYLOAD_TOO_LARGE => TriggerRouteError::Coded {
             status: StatusCode::PAYLOAD_TOO_LARGE,
             code: TRIGGER_BODY_TOO_LARGE,
-            message: "the body is over this route's size cap; nothing was switched".to_string(),
+            message: format!("the body is over this route's size cap; {nothing}"),
         },
         _ => TriggerRouteError::Coded {
             status: StatusCode::BAD_REQUEST,
@@ -725,7 +842,7 @@ fn body_refusal(r: JsonRejection, shape: &str) -> TriggerRouteError {
     }
 }
 
-const TRIGGER_GONE: &str = "This trigger no longer exists in the flow; reload";
+pub(crate) const TRIGGER_GONE: &str = "This trigger no longer exists in the flow; reload";
 
 /// A refusal's status, code and sentence.
 fn refusal_parts(r: &SwitchRefusal) -> (StatusCode, &'static str, String) {
@@ -775,6 +892,39 @@ impl From<SwitchRefusal> for TriggerRouteError {
     }
 }
 
+/// The entry of `trigger_id` (its first declaration) of a flow a write just
+/// changed, read **in the write's transaction**, so the answer is what is
+/// committed. The caller holds `workflow:manage`; the flow is not in the
+/// trash (every write refuses a trashed flow).
+pub(crate) async fn entry_in(
+    conn: &mut sqlx::PgConnection,
+    ws_slug: &str,
+    flow: &crate::repo::FlowRow,
+    parsed: &crate::models::Flow,
+    trigger_id: &str,
+) -> egret_core::Result<TriggerEntryDto> {
+    let state = read_state(&mut *conn, &[flow.id]).await?;
+    let fctx = FlowCtx {
+        id: flow.id,
+        ws_slug,
+        namespace: &flow.namespace,
+        flow_id: &flow.flow_id,
+        state: &flow.state,
+        deleted: false,
+    };
+    let Some(at) = parsed.triggers.iter().position(|t| t.id == trigger_id) else {
+        return Err(egret_core::Error::Internal(anyhow::anyhow!(
+            "the written trigger {trigger_id} vanished from its parsed flow"
+        )));
+    };
+    let mut e = entry::entries_for_flow(&fctx, parsed, &state, true, Detail::Full).swap_remove(at);
+    let key: Key = (flow.id, trigger_id.to_string());
+    e.last_execution = last_executions(&mut *conn, std::slice::from_ref(&key))
+        .await?
+        .remove(&key);
+    Ok(e)
+}
+
 /// One switch in its own transaction: [`switch::set_disabled`], then the
 /// trigger's entry read **in that transaction** (so the answer is what was
 /// committed), the commit, and the audit event. The caller has passed
@@ -807,27 +957,7 @@ async fn switch_one(
             return Ok(Err(refusal));
         }
     };
-    let state = read_state(&mut tx, &[flow]).await?;
-    let fctx = FlowCtx {
-        id: sw.flow.id,
-        ws_slug,
-        namespace: &sw.flow.namespace,
-        flow_id: &sw.flow.flow_id,
-        state: &sw.flow.state,
-        deleted: false,
-    };
-    // The first declaration with this id: the one the switch resolved.
-    let Some(at) = sw.parsed.triggers.iter().position(|t| t.id == trigger_id) else {
-        return Err(egret_core::Error::Internal(anyhow::anyhow!(
-            "the switched trigger {trigger_id} vanished from its parsed flow"
-        )));
-    };
-    let mut e =
-        entry::entries_for_flow(&fctx, &sw.parsed, &state, true, Detail::Full).swap_remove(at);
-    let key: Key = (flow, trigger_id.to_string());
-    e.last_execution = last_executions(&mut tx, std::slice::from_ref(&key))
-        .await?
-        .remove(&key);
+    let e = entry_in(&mut tx, ws_slug, &sw.flow, &sw.parsed, trigger_id).await?;
     tx.commit().await.map_err(db_err)?;
     // Only a real change is audited: off when already off, or on when
     // already on, wrote nothing.
@@ -845,6 +975,7 @@ async fn switch_one(
             serde_json::json!({
                 "recover_missed": recover_missed,
                 "next_evaluation_date": sw.moved_to,
+                "backfill_resume_from": sw.resume_moved_to,
             }),
         ));
     }
@@ -862,7 +993,7 @@ async fn switch_one(
     ),
     request_body = SetTriggerDisabledRequest,
     responses(
-        (status = 200, description = "Switched (idempotent: off twice, or on with no switch, is a 200). The answer is the trigger's entry as `GET .../triggers` returns it. Off stops the trigger's schedule claim, Flow-trigger listener and webhook; a fire already claimed commits first, and no new schedule fire starts after the answer. A Flow-trigger pass or a webhook request that read the switch before it changed may still fire once more after the answer. A re-enabled `Schedule` (one that was switched off) whose next date has passed skips the missed ticks, or with `recover_missed: true` follows its `recoverMissedSchedules`; enabling a trigger that is already on changes nothing and is not audited.", body = TriggerEntryDto),
+        (status = 200, description = "Switched (idempotent: off twice, or on with no switch, is a 200). The answer is the trigger's entry as `GET .../triggers` returns it. Off stops the trigger's schedule claim, Flow-trigger listener and webhook; a fire already claimed commits first, and no new schedule fire starts after the answer. A Flow-trigger pass or a webhook request that read the switch before it changed may still fire once more after the answer. A re-enabled `Schedule` (one that was switched off) whose next date has passed skips the missed ticks, or with `recover_missed: true` follows its `recoverMissedSchedules`; enabling a trigger that is already on changes nothing and is not audited. During a backfill the stored date (the backfill's tick) is kept for every choice, so the backfill resumes where it stopped; the choice applies to the regular schedule's resume position (`backfill.previous_next_evaluation_date`) instead, which a skip moves to the first tick after now when it has passed.", body = TriggerEntryDto),
         (status = 400, description = "The flow's saved source does not parse (`code: source_does_not_parse`), or the body is not a switch request: bad JSON, a missing or mistyped field, or no JSON content type (`code: invalid_body`)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),

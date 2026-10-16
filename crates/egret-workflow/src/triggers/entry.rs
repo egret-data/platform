@@ -6,11 +6,12 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::routes::{
-    ConditionDto, DependsOnDto, FlowTriggerInfoDto, MissedTicksDto, ScheduleInfoDto, ToggleRefusal,
-    TriggerEntryDto, TriggerKindDto, WebhookInfoDto, WindowDto,
+    BackfillDto, CannotBackfill, ConditionDto, DependsOnDto, FlowTriggerInfoDto, MissedTicksDto,
+    ScheduleInfoDto, ToggleRefusal, TriggerEntryDto, TriggerKindDto, WebhookInfoDto, WindowDto,
 };
-use super::state::{Key, StateRows};
+use super::state::{BackfillStateRow, Key, StateRows};
 use crate::models::{Flow, State, Trigger, TriggerKind};
+use crate::routes::LabelDto;
 use crate::trigger::{
     condition_key, KeyContext, ScheduleTrigger, TimeWindow, WindowFreeFlowTrigger,
 };
@@ -98,9 +99,32 @@ fn entry(
     };
     let duplicate_id = parsed.triggers.iter().filter(|o| o.id == t.id).count() > 1;
 
+    // A backfill belongs to a schedule only (W7f §3.9).
+    let backfill_row = match &t.kind {
+        TriggerKind::Schedule(_) => state.backfills.get(&key),
+        _ => None,
+    };
+    let schedule_row = state.schedules.get(&key);
+    // First match wins (§3.9).
+    let backfill_refusal = if flow.deleted {
+        Some(CannotBackfill::FlowDeleted)
+    } else if kind != TriggerKindDto::Schedule {
+        Some(CannotBackfill::NotSchedule)
+    } else if !may_manage {
+        Some(CannotBackfill::Forbidden)
+    } else if effective_disabled {
+        Some(CannotBackfill::Disabled)
+    } else if schedule_row.and_then(|r| r.next_evaluation_date).is_none() {
+        Some(CannotBackfill::OffQueue)
+    } else if backfill_row.is_some() {
+        Some(CannotBackfill::Running)
+    } else {
+        None
+    };
+
     let schedule = match &t.kind {
         TriggerKind::Schedule(s) => {
-            let row = state.schedules.get(&key);
+            let row = schedule_row;
             let next = row.and_then(|r| r.next_evaluation_date);
             Some(ScheduleInfoDto {
                 cron: s.cron.clone(),
@@ -111,7 +135,7 @@ fn entry(
                 last_error: row.and_then(|r| r.last_error.clone()),
                 off_queue: next.is_none(),
                 missed_ticks: match detail {
-                    Detail::Full => missed_ticks(t, next, state.db_now),
+                    Detail::Full => missed_ticks(t, missed_from(next, backfill_row), state.db_now),
                     Detail::Row => None,
                 },
                 recover_missed_schedules: s.recover_missed_schedules.as_ref().map(|v| match v {
@@ -215,24 +239,89 @@ fn entry(
         flow: flow_info,
         webhook,
         last_execution: None,
+        backfill: backfill_row.map(backfill_dto),
+        can_backfill: backfill_refusal.is_none(),
+        backfill_refusal,
     }
 }
 
-/// The ticks of a schedule due and not fired: on the queue (`next` is set)
-/// and `next <= now`, the ticks from `next` through `now`, up to
-/// [`MISSED_TICKS_CAP`]. A switched-off schedule keeps its date, so it is
-/// overdue by the same rule. `None` off the queue, not yet due, or when the
-/// schedule does not resolve.
+/// Where a schedule's missed ticks are counted from (D12): during a backfill
+/// the stored date is a window tick, so the regular ticks waiting are counted
+/// from the backfill's `previous_next_evaluation_date`; otherwise from the
+/// stored date. Off the queue (`next` is `None`) nothing is missed, backfill
+/// or not: `take_off_queue` keeps a backfill row, and an off-queue schedule
+/// offers no recovery.
+pub(crate) fn missed_from(
+    next: Option<DateTime<Utc>>,
+    backfill: Option<&BackfillStateRow>,
+) -> Option<DateTime<Utc>> {
+    let next = next?;
+    Some(backfill.map_or(next, |b| b.previous_next_evaluation_date))
+}
+
+fn backfill_dto(b: &BackfillStateRow) -> BackfillDto {
+    BackfillDto {
+        id: b.id,
+        start: b.window_start,
+        end: b.window_end,
+        current_tick: b.current_tick,
+        paused: b.paused,
+        paused_by_name: b.paused_by_name.clone(),
+        paused_at: b.paused_at,
+        inputs: b.inputs.clone(),
+        // The column holds `[{key, value}]` (a CHECK pins the array); an
+        // entry of another shape is not a label and is not shown.
+        labels: b
+            .labels
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|l| serde_json::from_value::<LabelDto>(l.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        created_by_name: b.created_by_name.clone(),
+        created_at: b.created_at,
+        previous_next_evaluation_date: b.previous_next_evaluation_date,
+        total_ticks: b.total_ticks,
+        ticks_done: b.ticks_done,
+        progress: backfill_progress(b.window_start, b.window_end, b.current_tick),
+    }
+}
+
+/// A backfill's progress, 0-100: Kestra's time formula
+/// `(current − start) / (end − start)`, rounded and clamped; 100 for an
+/// empty span (`BackfillBanner.vue:75-82`).
+pub(crate) fn backfill_progress(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    current: DateTime<Utc>,
+) -> u8 {
+    let span = (end - start).num_milliseconds();
+    if span <= 0 {
+        return 100;
+    }
+    let done = (current - start).num_milliseconds();
+    let pct = (done as f64 / span as f64 * 100.0).round();
+    pct.clamp(0.0, 100.0) as u8
+}
+
+/// The ticks of a schedule due and not fired: `from` is set and
+/// `from <= now`, the ticks from `from` through `now`, up to
+/// [`MISSED_TICKS_CAP`]. The caller picks `from` with [`missed_from`]: the
+/// stored date (a switched-off schedule keeps it, so it is overdue by the
+/// same rule), or during a backfill the regular schedule's resume position.
+/// `None` off the queue, not yet due, or when the schedule does not resolve.
 pub(crate) fn missed_ticks(
     t: &Trigger,
-    next: Option<DateTime<Utc>>,
+    from: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> Option<MissedTicksDto> {
-    let next = next.filter(|n| *n <= now)?;
+    let from = from.filter(|n| *n <= now)?;
     let (count, more) =
         ScheduleTrigger::resolve(t)
             .ok()?
-            .ticks_through(next, now, MISSED_TICKS_CAP);
+            .ticks_through(from, now, MISSED_TICKS_CAP);
     Some(MissedTicksDto { count, more })
 }
 
@@ -306,7 +395,7 @@ fn state_name(s: &State) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::state::{ListenerRow, ScheduleRow, Switch, WindowRow};
+    use super::super::state::{BackfillStateRow, ListenerRow, ScheduleRow, Switch, WindowRow};
     use super::*;
     use chrono::{Duration, TimeZone};
 
@@ -647,6 +736,219 @@ mod tests {
         .webhook
         .unwrap();
         assert!(w.unsupported.unwrap().contains("wait"));
+    }
+
+    #[test]
+    fn backfill_progress_is_kestras_time_formula() {
+        let s = now();
+        let e = s + Duration::minutes(3);
+        assert_eq!(backfill_progress(s, s, s), 100, "an empty span");
+        assert_eq!(backfill_progress(s, e, s), 0, "at the start");
+        assert_eq!(
+            backfill_progress(s, s + Duration::minutes(4), s + Duration::minutes(2)),
+            50
+        );
+        assert_eq!(
+            backfill_progress(s, e, e + Duration::minutes(1)),
+            100,
+            "past the end"
+        );
+        assert_eq!(
+            backfill_progress(s, e, s + Duration::minutes(1)),
+            33,
+            "1/3 rounds down"
+        );
+        assert_eq!(
+            backfill_progress(s, e, s + Duration::minutes(2)),
+            67,
+            "2/3 rounds up"
+        );
+        assert_eq!(
+            backfill_progress(s, e, s - Duration::minutes(1)),
+            0,
+            "clamped"
+        );
+    }
+
+    fn backfill(prev: DateTime<Utc>) -> BackfillStateRow {
+        BackfillStateRow {
+            flow_id: Uuid::nil(),
+            trigger_id: "s".into(),
+            id: Uuid::from_u128(7),
+            window_start: now() - Duration::hours(3),
+            window_end: now() - Duration::hours(2),
+            current_tick: now() - Duration::hours(3),
+            paused: false,
+            paused_by_name: None,
+            paused_at: None,
+            inputs: serde_json::json!({"a": 1}),
+            labels: serde_json::json!([{"key": "k", "value": "v"}]),
+            created_by_name: Some("Cara".into()),
+            created_at: now(),
+            previous_next_evaluation_date: prev,
+            total_ticks: 61,
+            ticks_done: 0,
+        }
+    }
+
+    fn on_queue(next: DateTime<Utc>) -> StateRows {
+        let mut st = StateRows::empty(now());
+        st.schedules.insert(
+            (Uuid::nil(), "s".into()),
+            ScheduleRow {
+                flow_id: Uuid::nil(),
+                trigger_id: "s".into(),
+                next_evaluation_date: Some(next),
+                evaluated_at: None,
+                last_error: None,
+            },
+        );
+        st
+    }
+
+    #[test]
+    fn backfill_refusal_first_match_wins() {
+        let on = format!("  - id: s\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n");
+        let yaml_off = format!("{on}    disabled: true\n");
+        let hook = format!("  - id: s\n    type: {WEBHOOK}\n    key: k\n");
+        let mut st = on_queue(now() + Duration::minutes(1));
+        let r = |e: TriggerEntryDto| (e.can_backfill, e.backfill_refusal);
+        assert_eq!(r(one(&on, &st, true, false)), (true, None));
+        assert_eq!(
+            r(one(&on, &st, true, true)),
+            (false, Some(CannotBackfill::FlowDeleted))
+        );
+        assert_eq!(
+            r(one(&hook, &st, true, false)),
+            (false, Some(CannotBackfill::NotSchedule))
+        );
+        assert_eq!(
+            r(one(&on, &st, false, false)),
+            (false, Some(CannotBackfill::Forbidden))
+        );
+        assert_eq!(
+            r(one(&yaml_off, &st, true, false)),
+            (false, Some(CannotBackfill::Disabled))
+        );
+        st.backfills
+            .insert((Uuid::nil(), "s".into()), backfill(now()));
+        assert_eq!(
+            r(one(&on, &st, true, false)),
+            (false, Some(CannotBackfill::Running))
+        );
+        // Two causes: the first in the order wins.
+        assert_eq!(
+            r(one(&yaml_off, &st, true, false)),
+            (false, Some(CannotBackfill::Disabled))
+        );
+        assert_eq!(
+            r(one(&on, &st, false, false)),
+            (false, Some(CannotBackfill::Forbidden))
+        );
+        assert_eq!(
+            r(one(&on, &st, true, true)),
+            (false, Some(CannotBackfill::FlowDeleted))
+        );
+        // Off the queue.
+        let mut off = StateRows::empty(now());
+        assert_eq!(
+            r(one(&on, &off, true, false)),
+            (false, Some(CannotBackfill::OffQueue))
+        );
+        off.schedules.insert(
+            (Uuid::nil(), "s".into()),
+            ScheduleRow {
+                flow_id: Uuid::nil(),
+                trigger_id: "s".into(),
+                next_evaluation_date: None,
+                evaluated_at: None,
+                last_error: None,
+            },
+        );
+        assert_eq!(
+            r(one(&on, &off, true, false)),
+            (false, Some(CannotBackfill::OffQueue))
+        );
+        // Off the queue with a backfill (`take_off_queue` keeps the row):
+        // `off_queue` before `running`.
+        off.backfills
+            .insert((Uuid::nil(), "s".into()), backfill(now()));
+        assert_eq!(
+            r(one(&on, &off, true, false)),
+            (false, Some(CannotBackfill::OffQueue))
+        );
+        // `not_schedule` before `forbidden`; `flow_deleted` before `not_schedule`.
+        assert_eq!(
+            r(one(&hook, &st, false, false)),
+            (false, Some(CannotBackfill::NotSchedule))
+        );
+        assert_eq!(
+            r(one(&hook, &st, false, true)),
+            (false, Some(CannotBackfill::FlowDeleted))
+        );
+        // A webhook carries no backfill.
+        assert!(one(&hook, &st, true, false).backfill.is_none());
+    }
+
+    #[test]
+    fn a_backfill_maps_to_its_dto_and_moves_missed_ticks_to_the_regular_date() {
+        let on = format!("  - id: s\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n");
+        let minute = Utc.with_ymd_and_hms(2026, 10, 14, 12, 0, 0).unwrap();
+        // The stored date is the window's tick, hours back.
+        let mut st = on_queue(now() - Duration::hours(3));
+        st.backfills.insert(
+            (Uuid::nil(), "s".into()),
+            backfill(minute - Duration::minutes(2)),
+        );
+        let e = one(&on, &st, true, false);
+        assert_eq!(
+            e.schedule.unwrap().missed_ticks,
+            Some(MissedTicksDto {
+                count: 3,
+                more: false
+            }),
+            "11:58, 11:59, 12:00: the regular ticks waiting"
+        );
+        let b = e.backfill.unwrap();
+        assert_eq!(b.id, Uuid::from_u128(7));
+        assert_eq!(b.labels.len(), 1);
+        assert_eq!(
+            (b.labels[0].key.as_str(), b.labels[0].value.as_str()),
+            ("k", "v")
+        );
+        assert_eq!(b.progress, 0);
+        assert_eq!(b.created_by_name.as_deref(), Some("Cara"));
+
+        // A regular date ahead: nothing missed, though the window's is back.
+        st.backfills.insert(
+            (Uuid::nil(), "s".into()),
+            backfill(minute + Duration::minutes(1)),
+        );
+        assert_eq!(
+            one(&on, &st, true, false).schedule.unwrap().missed_ticks,
+            None
+        );
+
+        // Off the queue with a backfill whose resume position has passed:
+        // `off_queue`, so nothing is missed (the enable dialog is not offered).
+        let mut off = StateRows::empty(now());
+        off.schedules.insert(
+            (Uuid::nil(), "s".into()),
+            ScheduleRow {
+                flow_id: Uuid::nil(),
+                trigger_id: "s".into(),
+                next_evaluation_date: None,
+                evaluated_at: None,
+                last_error: Some("gone".into()),
+            },
+        );
+        off.backfills.insert(
+            (Uuid::nil(), "s".into()),
+            backfill(minute - Duration::minutes(2)),
+        );
+        let s = one(&on, &off, true, false).schedule.unwrap();
+        assert!(s.off_queue);
+        assert_eq!(s.missed_ticks, None);
     }
 
     #[test]

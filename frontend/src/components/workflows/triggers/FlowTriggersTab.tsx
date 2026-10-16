@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { lazy, Suspense, useId, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { Power, PowerOff, RotateCw, X } from "lucide-react";
 import { ApiError } from "@/api/client";
@@ -10,11 +10,14 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import type { Enablement } from "@/components/workflows/draftState";
 import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
 import { EnableTriggerDialog } from "@/components/workflows/triggers/EnableTriggerDialog";
+
+const BackfillDialog = lazy(() => import("@/components/workflows/triggers/BackfillDialog"));
 import { TriggerBanners } from "@/components/workflows/triggers/TriggerBanners";
 import { TriggerDetailsDrawer } from "@/components/workflows/triggers/TriggerDetailsDrawer";
 import { triggerBlock } from "@/components/workflows/triggers/triggerYaml";
 import { selectionKey, TriggersTable } from "@/components/workflows/triggers/TriggersTable";
-import { bannersFor, MANAGE_REASON, type TriggerRow } from "@/components/workflows/triggers/triggersModel";
+import { anyBackfillRunning, bannersFor, MANAGE_REASON, type TriggerRow } from "@/components/workflows/triggers/triggersModel";
+import { useBackfill } from "@/components/workflows/triggers/useBackfill";
 import { useTriggerSwitch } from "@/components/workflows/triggers/useTriggerSwitch";
 
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
@@ -25,6 +28,8 @@ const readError = (e: unknown) =>
 
 /** How often the tab reads the triggers again while it is shown (spec §4.1). */
 export const TRIGGERS_POLL_MS = 30_000;
+/** The faster refresh while a backfill is running, so its progress moves on the strip (spec §4.1). */
+export const BACKFILL_POLL_MS = 5_000;
 
 /**
  * The flow's Triggers tab (W7e spec §4.1): every declared trigger, its state
@@ -56,7 +61,8 @@ export default function FlowTriggersTab({
   const query = useWorkflowListFlowTriggers(ws, flowId, {
     query: {
       queryKey: workflowsKeys.flowTriggers(flowId),
-      refetchInterval: TRIGGERS_POLL_MS,
+      refetchInterval: (q) =>
+        anyBackfillRunning(q.state.data?.status === 200 ? q.state.data.data.triggers : []) ? BACKFILL_POLL_MS : TRIGGERS_POLL_MS,
       refetchIntervalInBackground: false,
     },
   });
@@ -64,6 +70,8 @@ export default function FlowTriggersTab({
   const [selection, setSelection] = useState<Set<string>>(() => new Set());
   // A bulk action that the server answered clears the selection; its refusals are listed by name.
   const sw = useTriggerSwitch(ws, { onBulkAnswered: () => setSelection(new Set()) });
+  const backfill = useBackfill(ws);
+  const [creating, setCreating] = useState<TriggerRow | null>(null);
   const [params, setParams] = useSearchParams();
   const reasonsId = useId();
   const openId = params.get("trigger");
@@ -185,7 +193,20 @@ export default function FlowTriggersTab({
         isBusy={sw.isBusy}
         contextOf={() => ctx}
         detailsHref={detailsHref}
+        backfillActions={{ isBusy: backfill.isBusy, pause: backfill.pause, remove: backfill.remove }}
+        onBackfill={(row) => setCreating(row)}
       />
+      {creating ? (
+        <Suspense fallback={null}>
+          <BackfillDialog
+            ws={ws}
+            flowUuid={flowId}
+            trigger={creating}
+            source={source}
+            onClose={() => setCreating(null)}
+          />
+        </Suspense>
+      ) : null}
       <TriggerDetailsDrawer
         key={openId ?? ""}
         open={openId !== null}

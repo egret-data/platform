@@ -1,4 +1,4 @@
-import type { FlowTriggersDto, ScheduleInfoDto, TriggerEntryDto } from "@/api/generated/model";
+import type { BackfillDto, FlowTriggersDto, ScheduleInfoDto, TriggerEntryDto } from "@/api/generated/model";
 
 /**
  * Trigger entries as `GET …/flows/{id}/triggers` answers them (W7e spec §3.5),
@@ -23,6 +23,9 @@ export function entry(over: Partial<TriggerEntryDto> = {}): TriggerEntryDto {
     flow: null,
     webhook: null,
     last_execution: null,
+    backfill: null,
+    can_backfill: true,
+    backfill_refusal: null,
     ...over,
   };
 }
@@ -72,6 +75,28 @@ export const otherEntry = (over: Partial<TriggerEntryDto> = {}) =>
     toggle_refusal: "not_supported",
     ...over,
   });
+
+/** A schedule's backfill as the server answers it: 3 of 10 ticks done, running unless `over` says paused. */
+export function backfill(over: Partial<BackfillDto> = {}): BackfillDto {
+  return {
+    id: "00000000-0000-4000-8000-0000000000b1",
+    start: "2099-01-01T00:00:00Z",
+    end: "2099-01-01T00:45:00Z",
+    current_tick: "2099-01-01T00:30:00Z",
+    paused: false,
+    paused_by_name: null,
+    paused_at: null,
+    inputs: {},
+    labels: [],
+    created_by_name: "Ada",
+    created_at: "2098-12-31T23:00:00Z",
+    previous_next_evaluation_date: "2099-01-01T01:00:00Z",
+    total_ticks: 10,
+    ticks_done: 3,
+    progress: 30,
+    ...over,
+  };
+}
 
 export function flowTriggers(over: Partial<FlowTriggersDto> = {}): FlowTriggersDto {
   return {

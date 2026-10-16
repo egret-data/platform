@@ -179,7 +179,7 @@ pub(super) async fn spawn_due(
 
     let row = sqlx::query(
         "SELECT flow_id, namespace, flow_key, inputs, parent_run_ix, \
-                attempt_number, origin_offset_ms, execution_depth \
+                attempt_number, origin_offset_ms, execution_depth, labels \
            FROM workflow.executions WHERE id = $1",
     )
     .bind(ctx.id)
@@ -243,9 +243,9 @@ pub(super) async fn spawn_due(
         "INSERT INTO workflow.executions \
                (workspace_id, flow_id, namespace, flow_key, source, state, history, \
                 parent_execution_id, attempt_number, origin_offset_ms, inputs, \
-                execution_depth, ",
+                execution_depth, labels, ",
         super::stamps::stamp_columns!(),
-        ") VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9,$10, ",
+        ") VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9,$10,$11, ",
         super::stamps::stamp_values!("'CREATED'", "'[\"CREATED\"]'"),
         ") RETURNING id",
     ))
@@ -272,6 +272,9 @@ pub(super) async fn spawn_due(
     // bumped), so `executionDepth` carries over. A replay is the same link in
     // a chain, not a new one.
     .bind(row.get::<i32, _>("execution_depth"))
+    // `Execution.childExecution` copies the labels like everything else; read
+    // from the row for `inputs`' reason (W7f spec §3.3).
+    .bind(row.get::<Option<Value>, _>("labels"))
     .fetch_one(&mut *sp)
     .await
     .map_err(db_err)?;

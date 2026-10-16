@@ -2593,6 +2593,10 @@ pub async fn start_execution_with_trigger(
                 // `start_execution_in` itself with the id it uploaded under.
                 id: None,
                 input_files: Vec::new(),
+                // The API, a webhook and the tests start with the flow's labels
+                // only; a backfill is the scheduler's.
+                labels: None,
+                backfill_id: None,
             },
         )
         .await
@@ -2650,6 +2654,11 @@ pub struct NewExecution<'a> {
     /// in the transaction that inserts the row. Empty for every start that
     /// uploads nothing.
     pub input_files: Vec<crate::storage::StoredFile>,
+    /// The labels this execution starts with beyond its flow's own `labels:`
+    /// (`[{key, value}]`, D3). `None` stores NULL.
+    pub labels: Option<serde_json::Value>,
+    /// The backfill that fired this tick (D2); `Some` only with `scheduled_date`.
+    pub backfill_id: Option<Uuid>,
 }
 
 /// [`start_execution_with_trigger`]'s body, taking the caller's own `conn`
@@ -2710,6 +2719,8 @@ async fn start_execution_in_on(
         replayed_from_execution_id,
         id,
         input_files,
+        labels,
+        backfill_id,
     } = new;
 
     let flow = crate::spec::parse(source)
@@ -2737,10 +2748,10 @@ async fn start_execution_in_on(
         "INSERT INTO workflow.executions \
            (id, workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
             execution_trigger, scheduled_date, trigger_execution_id, execution_depth, \
-            flow_trigger_event_id, replayed_from_execution_id, ",
+            flow_trigger_event_id, replayed_from_execution_id, labels, backfill_id, ",
         stamp_columns!(),
         ") VALUES (COALESCE($13, gen_random_uuid()), $1, $2, $3, $4, $5, 'CREATED', \
-                 '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, $11, $12, ",
+                 '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, $11, $12, $14, $15, ",
         // Both NULL for a row born `CREATED`; spelled through the helper so the
         // rule has no exception for the reader to remember (`stamps`).
         stamp_values!("'CREATED'", "'[\"CREATED\"]'"),
@@ -2759,6 +2770,8 @@ async fn start_execution_in_on(
     .bind(flow_trigger_event_id)
     .bind(replayed_from_execution_id)
     .bind(id)
+    .bind(labels)
+    .bind(backfill_id)
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;

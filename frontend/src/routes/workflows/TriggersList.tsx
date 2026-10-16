@@ -1,11 +1,21 @@
 import { lazy, Suspense, useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { keepPreviousData } from "@tanstack/react-query";
-import { ChevronDown, ChevronLeft, ChevronRight, Power, PowerOff, RotateCw, Search, X, Zap } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, Pause, Play, Power, PowerOff, RotateCw, Search, Trash2, X, Zap } from "lucide-react";
 import { ApiError } from "@/api/client";
 import type { TriggerKindDto, TriggerPageDto, WorkflowListTriggersParams } from "@/api/generated/model";
 import { useWorkflowListFlows, useWorkflowListNamespaces, useWorkflowListTriggers } from "@/api/generated/workflow/workflow";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -29,6 +39,7 @@ import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButt
 import { TriggerBanners } from "@/components/workflows/triggers/TriggerBanners";
 import { selectionKey, TriggersTable, type TableRowData } from "@/components/workflows/triggers/TriggersTable";
 import { bannersFor, kindLabel, MANAGE_REASON } from "@/components/workflows/triggers/triggersModel";
+import { useBackfill } from "@/components/workflows/triggers/useBackfill";
 import { useTriggerSwitch } from "@/components/workflows/triggers/useTriggerSwitch";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
@@ -38,6 +49,9 @@ import { workflowsKeys } from "@/routes/workflows/queryKeys";
  * itself never needs (`scripts/assert-workflows-lazy.mjs`, flagged `editor`).
  */
 const GlobalTriggerDrawer = lazy(() => import("@/components/workflows/triggers/GlobalTriggerDrawer"));
+const FlowBackfillDialog = lazy(() =>
+  import("@/components/workflows/triggers/BackfillDialog").then((m) => ({ default: m.FlowBackfillDialog })),
+);
 const EnableTriggerDialog = lazy(() =>
   import("@/components/workflows/triggers/EnableTriggerDialog").then((m) => ({ default: m.EnableTriggerDialog })),
 );
@@ -49,6 +63,12 @@ const KINDS: TriggerKindDto[] = ["schedule", "webhook", "flow", "other"];
 const STATES = [
   { value: "enabled", label: "Enabled" },
   { value: "disabled", label: "Disabled" },
+];
+
+const BACKFILLS = [
+  { value: "running", label: "Running" },
+  { value: "paused", label: "Paused" },
+  { value: "any", label: "Any" },
 ];
 
 /** How long the search box waits for the typing to stop before it asks (each ask parses every flow in scope). */
@@ -63,6 +83,7 @@ const SEARCH_DEBOUNCE_MS = 250;
  * | `flow` | a flow's uuid | every flow |
  * | `kind` | kinds, one comma list | every kind |
  * | `state` | `enabled` or `disabled` | both |
+ * | `backfill` | `running`, `paused` or `any` (a backfill of any state) | every trigger |
  * | `q` | a substring of the trigger id, flow id or namespace | none |
  * | `page` | 1-based page | 1 |
  * | `trigger` | `<flow uuid>/<trigger id>`: the open drawer | closed |
@@ -70,7 +91,15 @@ const SEARCH_DEBOUNCE_MS = 250;
  * A value the page does not know (a kind or state from an old link) is read
  * as absent rather than sent, since the server answers it 400.
  */
-type Filters = { namespace: string; flow: string; kinds: TriggerKindDto[]; state: string; q: string; page: number };
+type Filters = {
+  namespace: string;
+  flow: string;
+  kinds: TriggerKindDto[];
+  state: string;
+  backfill: string;
+  q: string;
+  page: number;
+};
 
 /** The note for one unreadable flow (FE-COPY-4); also this module's bundle marker (`scripts/assert-workflows-lazy.mjs`). */
 export const UNPARSABLE_ONE = "1 flow could not be read; its triggers are not listed";
@@ -80,12 +109,14 @@ function readFilters(p: URLSearchParams): Filters {
     .split(",")
     .filter((k, i, all): k is TriggerKindDto => (KINDS as string[]).includes(k) && all.indexOf(k) === i);
   const state = p.get("state") ?? "";
+  const backfill = p.get("backfill");
   const page = Number.parseInt(p.get("page") ?? "1", 10);
   return {
     namespace: p.get("namespace") ?? "",
     flow: p.get("flow") ?? "",
     kinds,
     state: STATES.some((s) => s.value === state) ? state : "",
+    backfill: BACKFILLS.some((b) => b.value === backfill) ? (backfill ?? "") : "",
     q: p.get("q") ?? "",
     page: Number.isFinite(page) && page >= 1 ? page : 1,
   };
@@ -98,6 +129,7 @@ function toParams(f: Filters): WorkflowListTriggersParams {
     flow_id: f.flow || undefined,
     kind: f.kinds.length > 0 ? f.kinds.join(",") : undefined,
     state: f.state || undefined,
+    backfill: f.backfill || undefined,
     q: f.q.trim() || undefined,
     limit: TRIGGERS_PAGE_SIZE,
     offset: (f.page - 1) * TRIGGERS_PAGE_SIZE,
@@ -112,14 +144,15 @@ function withFilters(prev: URLSearchParams, patch: Partial<Filters>): URLSearchP
   if (patch.flow !== undefined) set("flow", patch.flow);
   if (patch.kinds !== undefined) set("kind", patch.kinds.join(","));
   if (patch.state !== undefined) set("state", patch.state);
+  if (patch.backfill !== undefined) set("backfill", patch.backfill);
   if (patch.q !== undefined) set("q", patch.q);
   set("page", patch.page !== undefined && patch.page > 1 ? String(patch.page) : "");
   return next;
 }
 
-const isFiltering = (f: Filters) => !!(f.namespace || f.flow || f.kinds.length > 0 || f.state || f.q.trim());
+const isFiltering = (f: Filters) => !!(f.namespace || f.flow || f.kinds.length > 0 || f.state || f.backfill || f.q.trim());
 
-const CLEARED: Partial<Filters> = { namespace: "", flow: "", kinds: [], state: "", q: "" };
+const CLEARED: Partial<Filters> = { namespace: "", flow: "", kinds: [], state: "", backfill: "", q: "" };
 
 /** A failed read, in words (FE-COPY-2): the server's sentence, ending once, or what to do. */
 const readError = (e: unknown) =>
@@ -177,6 +210,9 @@ export default function TriggersList() {
   const [selection, setSelection] = useState<Set<string>>(() => new Set());
   // A bulk action the server answered clears the selection; its refusals are listed by name.
   const sw = useTriggerSwitch(ws, { onBulkAnswered: () => setSelection(new Set()) });
+  const bf = useBackfill(ws, { onBulkAnswered: () => setSelection(new Set()) });
+  const [creating, setCreating] = useState<TableRowData | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const reasonsId = useId();
   // The selection and the bulk refusals belong to the page and filters they were made on:
   // another page or filter drops both, and coming back does not bring them back.
@@ -186,6 +222,7 @@ export default function TriggersList() {
     setSeenScope(scope);
     setSelection(new Set());
     if (sw.refusals.length > 0) sw.clearRefusals();
+    if (bf.refusals.length > 0) bf.clearRefusals();
   }
 
   const namespaceRef = useRef<HTMLDivElement>(null);
@@ -253,7 +290,7 @@ export default function TriggersList() {
     // While the next page or filter loads, the rows on screen are the last answer's: nothing may
     // be selected or switched in bulk on them.
     const stale = query.isPlaceholderData;
-    const bulkBusy = sw.anyBusy || stale;
+    const bulkBusy = sw.anyBusy || bf.anyBusy || stale;
     const flowName = new Map(page.rows.map((r) => [r.flow_uuid, `${r.namespace}.${r.flow_id}`]));
     // D18: a flow whose state is disabled fires none of its triggers, though each stays switched on.
     const disabledFlows = new Set(page.rows.filter((r) => r.flow_disabled).map((r) => r.flow_uuid));
@@ -343,14 +380,70 @@ export default function TriggersList() {
                 {selected.length === 1 ? "1 trigger selected" : `${selected.length} triggers selected`}
               </span>
             ) : null}
+            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-pause-backfills`} variant="outline" busy={bulkBusy} onClick={() => bf.pauseMany(selected, true)}>
+              <Pause aria-hidden />
+              Pause backfills
+            </ReasonButton>
+            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-resume-backfills`} variant="outline" busy={bulkBusy} onClick={() => bf.pauseMany(selected, false)}>
+              <Play aria-hidden />
+              Resume backfills
+            </ReasonButton>
+            <ReasonButton enablement={bulk} reasonId={`${reasonsId}-delete-backfills`} variant="outline" busy={bulkBusy} onClick={() => setConfirmingDelete(true)}>
+              <Trash2 aria-hidden />
+              Delete backfills
+            </ReasonButton>
           </div>
           <DisabledReasons
             actions={[
               { id: `${reasonsId}-enable`, label: "Enable", enablement: bulk },
               { id: `${reasonsId}-disable`, label: "Disable", enablement: bulk },
+              { id: `${reasonsId}-pause-backfills`, label: "Pause backfills", enablement: bulk },
+              { id: `${reasonsId}-resume-backfills`, label: "Resume backfills", enablement: bulk },
+              { id: `${reasonsId}-delete-backfills`, label: "Delete backfills", enablement: bulk },
             ]}
           />
         </div>
+        <AlertDialog open={confirmingDelete} onOpenChange={setConfirmingDelete}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete {selected.length === 1 ? "this backfill" : `${selected.length} backfills`}?</AlertDialogTitle>
+              <AlertDialogDescription>
+                Their remaining ticks will not run. Executions already started stay.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => {
+                  setConfirmingDelete(false);
+                  bf.removeMany(selected);
+                }}
+              >
+                Delete backfills
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+        {bf.refusals.length > 0 ? (
+          <Alert variant="destructive" data-testid="bulk-backfill-refusals">
+            <AlertDescription className="grid gap-1">
+              <div className="flex items-start justify-between gap-2">
+                <p>{bf.refusals.length === 1 ? "1 backfill was not changed:" : `${bf.refusals.length} backfills were not changed:`}</p>
+                <Button type="button" size="iconSm" variant="ghost" aria-label="Dismiss" onClick={bf.clearRefusals}>
+                  <X aria-hidden />
+                </Button>
+              </div>
+              <ul className="list-disc pl-5" role="list">
+                {bf.refusals.map((r) => (
+                  <li key={`${r.flow_uuid}/${r.trigger_id}`}>
+                    <span className="font-mono">{flowName.get(r.flow_uuid) ?? r.flow_uuid}</span> ·{" "}
+                    <span className="font-mono">{r.trigger_id}</span>: {r.message}
+                  </li>
+                ))}
+              </ul>
+            </AlertDescription>
+          </Alert>
+        ) : null}
         {sw.refusals.length > 0 ? (
           <Alert variant="destructive" data-testid="bulk-refusals">
             <AlertDescription className="grid gap-1">
@@ -385,6 +478,8 @@ export default function TriggersList() {
             contextOf={(row) => ({ flowDisabled: disabledFlows.has(row.flow_uuid), flowDeleted: false })}
             detailsHref={detailsHref}
             selectionBusy={stale}
+            backfillActions={{ isBusy: bf.isBusy, pause: bf.pause, remove: bf.remove }}
+            onBackfill={(row) => setCreating(row)}
           />
         </div>
         <Pager page={page} current={filters.page} onPage={(n) => pickFilters({ page: n })} />
@@ -409,6 +504,11 @@ export default function TriggersList() {
             flowName={listedFlowName(page, open.flowUuid)}
             onClose={closeDrawer}
           />
+        </Suspense>
+      ) : null}
+      {creating ? (
+        <Suspense fallback={null}>
+          <FlowBackfillDialog ws={ws} flowUuid={creating.flow_uuid} trigger={creating} onClose={() => setCreating(null)} />
         </Suspense>
       ) : null}
       {sw.question ? (
@@ -498,6 +598,12 @@ function FilterBar({
         options={flowOptions}
       />
       <KindPicker kinds={filters.kinds} onChange={(kinds) => setFilters({ kinds })} />
+      <FacetSelect
+        label="Backfill"
+        value={filters.backfill || FACET_ALL}
+        onChange={(v) => setFilters({ backfill: v === FACET_ALL ? "" : v })}
+        options={BACKFILLS}
+      />
       <FacetSelect
         label="State"
         value={filters.state || FACET_ALL}

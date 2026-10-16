@@ -257,6 +257,16 @@ const MARKERS = [
   ["src/components/workflows/triggers/triggersModel.ts", "On, but the flow is disabled, so it does not fire"],
   ["src/components/workflows/triggers/TriggerBanners.tsx", "trigger-banners"],
   ["src/components/workflows/triggers/useTriggerSwitch.ts", "The triggers were not switched "],
+  // The backfill column's strip and its actions (W7f Task 8): shared by the flow's tab and the
+  // global page, so guarded against the entry only, as the switch above. The strip's "frozen"
+  // sentence; the hook's bulk failure sentence. Each proven by a scratch static import (W7f task-8-report.md).
+  ["src/components/workflows/triggers/BackfillStrip.tsx", "Frozen while the trigger is off"],
+  ["src/components/workflows/triggers/useBackfill.ts", "The backfills were not changed: "],
+  // The create form (W7f Task 9), flagged `backfill`: it stays out of every flow page's chunk and
+  // out of the flow list's, and reaches the trigger views through lazy() only (P6).
+  ["src/components/workflows/triggers/BackfillDialog.tsx", "A FILE input cannot be backfilled", "backfill"],
+  ["src/components/workflows/triggers/LabelsEditor.tsx", "Keys starting with system. are reserved", "backfill"],
+  ["src/components/workflows/triggers/backfillForm.ts", "Fill both the key and the value", "backfill"],
   // The workspace's Triggers page (W7e Task 7), in the area's chunk like the namespaces list
   // (`WorkflowsRoutes.tsx` imports it): `UNPARSABLE_ONE`. Its drawer, which reads the flow and
   // cuts the trigger's YAML (`triggerYaml.ts`), is reached through `lazy()` only and flagged
@@ -358,13 +368,13 @@ for (const [module, marker, flag] of MARKERS) {
       failed = true;
     }
   }
-  if (flag === "files") {
+  if (flag === "files" || flag === "backfill") {
     for (const [i, host] of flowPageChunks.entries()) {
       const loaded = carriers.filter((f) => flowPageLoads[i].includes(f));
       if (loaded.length > 0) {
         console.error(
           `✗ ${marker} (${module}) loads with a flow page (${host}, in ${loaded.join(", ")}).\n` +
-            `  The editor's Files and file tabs load their bodies through lazy(), never a static import.`,
+            `  The editor's Files and file tabs, and the backfill form, load their bodies through lazy(), never a static import.`,
         );
         failed = true;
       }
@@ -422,5 +432,6 @@ console.log(
     `✓ The namespace tabs' slots stay out of the namespace detail's chunk (${namespaceHosts[0]}); ` +
     `${MARKERS.filter((m) => m[2] === "namespace-tab" || m[2] === "files").length} slot markers checked.\n` +
     `✓ The editor's files stay out of the flow pages' chunks (${flowPageChunks.join(", ")}); ` +
-    `${MARKERS.filter((m) => m[2] === "files").length} files markers checked.`,
+    `${MARKERS.filter((m) => m[2] === "files").length} files markers checked.\n` +
+    `✓ The backfill form stays out of the flow pages' chunks; ${MARKERS.filter((m) => m[2] === "backfill").length} backfill markers checked.`,
 );

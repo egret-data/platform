@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ExecutionListItemDto } from './executionListItemDto';
+import type { LabelDto } from './labelDto';
 import type { TaskRunDto } from './taskRunDto';
 
 /**
@@ -27,4 +28,9 @@ export type ExecutionDto = ExecutionListItemDto & {
      * when this is false; the routes still check for themselves.
      */
   can_manage: boolean;
+  /**
+     * What the run sees as `labels`: the flow's, then `labels`, the later key
+     * winning. Empty when the frozen source does not parse.
+     */
+  effective_labels: LabelDto[];
 };

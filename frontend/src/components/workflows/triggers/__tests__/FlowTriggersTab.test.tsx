@@ -6,7 +6,7 @@ const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.
 vi.mock("sonner", () => ({ toast }));
 
 import { FakeWorkflowServer, FLOW_ID, WS } from "@/routes/workflows/__tests__/fakeWorkflowServer";
-import { flowEntry, flowTriggers, otherEntry, scheduleEntry, webhookEntry } from "./triggerFixtures";
+import { backfill, flowEntry, flowTriggers, otherEntry, scheduleEntry, webhookEntry } from "./triggerFixtures";
 import { renderTriggersTab } from "./renderTriggersTab";
 import { workflowsKeys } from "@/routes/workflows/queryKeys";
 import { TRIGGERS_POLL_MS } from "@/components/workflows/triggers/FlowTriggersTab";
@@ -58,6 +58,7 @@ describe("FlowTriggersTab: the table", () => {
       "Last execution",
       "Status",
       "Enabled",
+      "Backfill",
       "Details",
     ]);
     expect(statusOf("daily")).toBe("Active");
@@ -353,7 +354,10 @@ describe("FlowTriggersTab: refresh and failures", () => {
     await theSwitch("daily");
     const query = client.getQueryCache().find({ queryKey: workflowsKeys.flowTriggers(FLOW_ID) })!;
     expect(TRIGGERS_POLL_MS).toBe(30_000);
-    expect(query.options).toMatchObject({ refetchInterval: 30_000, refetchIntervalInBackground: false });
+    expect(query.options).toMatchObject({ refetchIntervalInBackground: false });
+    // The interval is a function of the answer: 30 s with no backfill running (asserted in the next test).
+    const interval = (query.options as { refetchInterval: (q: unknown) => number | false }).refetchInterval;
+    expect(interval({ state: { data: undefined } })).toBe(30_000);
   });
 
   it("keeps the dialog open with the choice on a coded refusal (recover_missed_unknown)", async () => {
@@ -424,5 +428,38 @@ describe("FlowTriggersTab: refresh and failures", () => {
     await waitFor(async () => expect(await theSwitch("daily")).not.toBeChecked());
     expect(server.callsTo("PUT", BULK)).toHaveLength(1);
     expect(disable).toHaveFocus();
+  });
+});
+
+describe("FlowTriggersTab: backfills (W7f §4.1)", () => {
+  it("polls every 5 s while a backfill runs, and 30 s once it is paused", async () => {
+    server.triggers = flowTriggers({ triggers: [scheduleEntry({ backfill: backfill() })] });
+    const { client } = renderTriggersTab(server);
+    await screen.findByTestId("backfill-strip");
+    const query = client.getQueryCache().find({ queryKey: workflowsKeys.flowTriggers(FLOW_ID) })!;
+    const interval = (query.options as { refetchInterval: (q: unknown) => number | false }).refetchInterval;
+    const answer = (triggers: unknown[]) => ({ state: { data: { status: 200, data: { triggers } } } });
+    expect(interval(answer([scheduleEntry({ backfill: backfill() })]))).toBe(5_000);
+    expect(interval(answer([scheduleEntry({ backfill: backfill({ paused: true }) })]))).toBe(TRIGGERS_POLL_MS);
+  });
+
+  it("Pause sends the paused flag and the strip says Paused once the server answers", async () => {
+    server.triggers = flowTriggers({ triggers: [scheduleEntry({ backfill: backfill() })] });
+    renderTriggersTab(server);
+    const strip = await screen.findByTestId("backfill-strip");
+    await userEvent.click(within(strip).getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(within(screen.getByTestId("backfill-strip")).getByText("Paused")).toBeInTheDocument());
+    const puts = server.callsTo("PUT", `/api/ws/${WS}/workflows/flows/${FLOW_ID}/triggers/daily/backfill/paused`);
+    expect(puts.map((c) => c.body)).toEqual([{ paused: true }]);
+  });
+
+  it("Delete asks first; Confirm sends the delete and the strip goes", async () => {
+    server.triggers = flowTriggers({ triggers: [scheduleEntry({ backfill: backfill() })] });
+    renderTriggersTab(server);
+    const strip = await screen.findByTestId("backfill-strip");
+    await userEvent.click(within(strip).getByRole("button", { name: "Delete" }));
+    await userEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Delete backfill" }));
+    await waitFor(() => expect(screen.queryByTestId("backfill-strip")).toBeNull());
+    expect(server.callsTo("DELETE", `/api/ws/${WS}/workflows/flows/${FLOW_ID}/triggers/daily/backfill`)).toHaveLength(1);
   });
 });

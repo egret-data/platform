@@ -75,12 +75,16 @@
 //!
 //! [`start_execution_in`](crate::worker::start_execution_in) runs in a
 //! savepoint inside the claim's transaction. Its `workflow.executions` insert
-//! carries `scheduled_date`, and `workflow_executions_one_per_schedule_tick`
-//! (migration 0156, `(flow_id, execution_trigger->>'id', scheduled_date)`)
-//! makes a second execution for one tick **unrepresentable** rather than
-//! merely avoided. A violation of that index rolls back the savepoint and is a
-//! consumed tick (`PassReport::skipped`), not an error. Under statement 1 it
-//! never fires; it is there for the day statement 1 is wrong.
+//! carries `scheduled_date`, and two unique indexes make a second execution
+//! for one tick **unrepresentable** rather than merely avoided:
+//! `workflow_executions_one_per_schedule_tick` (migration 0156, rebuilt by
+//! 0192: `(flow_id, execution_trigger->>'id', scheduled_date)` over regular
+//! fires, `backfill_id IS NULL`) and `workflow_executions_one_per_backfill_tick`
+//! (0192: `(backfill_id, scheduled_date)` over a backfill's fires, W7f D2; a
+//! backfill re-runs dates that already ran, so it is outside the first). A
+//! violation of either rolls back the savepoint and is a consumed tick
+//! (`PassReport::skipped`), not an error. Under statement 1 neither fires;
+//! they are there for the day statement 1 is wrong.
 //!
 //! Proved real by `tests/scheduler_fire.rs`'s
 //! `the_unique_index_refuses_a_second_fire` (the constraint name, with a
@@ -132,6 +136,24 @@
 //! `workflow.disabled_triggers` (the runtime switch, W7e) and deletes its
 //! undeclared rows, in the same transaction.
 //!
+//! **W7f (spec §3.7, §3.11): before the upsert, `sync` reads the flow's
+//! trigger rows and then its backfill rows `FOR UPDATE`, each `ORDER BY
+//! trigger_id`.** The decision the upsert's `CASE` encodes (keep the dates,
+//! or re-initialise) is taken in Rust from that locked read, so a
+//! re-initialised schedule with a backfill can be re-derived from it. The
+//! trigger-row read takes the locks the upsert already took, earlier and in
+//! `trigger_id` order instead of declaration order; it waits on a claimed
+//! row exactly as the upsert did, and the backfill rows come after it, so the
+//! lock order stays flow, trigger rows, backfill rows. The rename deadlock
+//! below is unchanged by it: the save's `FOR UPDATE` on the flow against a
+//! pass's `KEY SHARE`, now met at this read rather than at the upsert.
+//! `tests/runtime.rs`'s
+//! `a_save_that_re_derives_a_backfill_waits_for_a_pause_on_the_flow_row`
+//! proves that a save re-deriving a backfill and a pause of it (SQL standing
+//! in for the route, in its lock order) serialise on the flow row and do not
+//! lose each other's writes: the end state has both `paused = true` and the
+//! re-derived dates.
+//!
 //! **`resync` is serialised on the flow row, without waiting.** Every other
 //! caller holds the flow row while `sync` runs (a save `FOR NO KEY UPDATE` or
 //! `FOR UPDATE`, `reconcile` `FOR SHARE`), and so does the W7e switch route
@@ -166,13 +188,23 @@
 //! A save that does not rename takes `FOR NO KEY UPDATE`, which `KEY SHARE`
 //! does not conflict with. Unproved: no test stages it.
 
+/// W7f: the backfill row and its reads, shared with `sync` and the trigger
+/// routes.
+pub(crate) mod backfill;
 mod fire;
 /// Shared with `flow_trigger` (W13a Task 4): the off switches' SQL and the
 /// classification of a failed start.
 pub(crate) mod start;
 mod sync;
 
+/// Test-only (`test-util`; W7f D22): park a pass between its claim and its
+/// read of the backfill row. See `fire::hold`.
+#[cfg(any(test, feature = "test-util"))]
+pub use fire::hold as test_hold;
 pub use fire::{fire_due, PassReport};
+// The backfill routes (`triggers::backfill`) check a backfill's inputs as a
+// fire merges them, and end a deleted backfill as a refused fire does (D26).
+pub(crate) use fire::{backfill_ended, overlay_inputs, refuse_templated};
 // The switch route (`triggers::switch`) writes the same effective value `sync`
 // does; the read routes report it.
 pub(crate) use sync::{effective_disabled, never_fires};

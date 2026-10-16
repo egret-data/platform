@@ -48,6 +48,8 @@ pub mod flow_trigger;
 /// W7c: the read-only topology graph of a flow (`flow_graph`), pure like
 /// `executor`. `pub` because the routes (Task 2) and the corpus sweep use it.
 pub mod graph;
+/// W7f: execution-label merge and the backfill's label checks. Crate-private.
+pub(crate) mod labels;
 /// W11: `workflow.task_logs` -- the log vocabulary and `LogRepo`. `pub`
 /// because `tests/task_logs.rs` drives the repository directly.
 pub mod logs;
@@ -98,7 +100,8 @@ pub mod spec;
 pub mod storage;
 // W6 Tasks 5 and 6: the schedule trigger, its backfill, and the flow
 // trigger's window-free arm. `pub` because the loop that drives the clock
-// lives in `scheduler`, not here, and backfill has no route yet (W7f) -- and
+// lives in `scheduler`, not here, and backfill's routes are
+// `triggers::backfill_routes` (W7f) -- and
 // because NOTHING in `oracle-exec/` can reach it, so its own tests are the
 // whole instrument (see the module doc).
 pub mod trigger;

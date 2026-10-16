@@ -68,8 +68,12 @@ macro_rules! flow_is_on {
 pub(crate) use flow_is_on;
 
 /// The index that makes a second execution for one schedule tick impossible
-/// (migration 0156).
+/// (migration 0156; since 0192 it covers regular fires only, `backfill_id IS
+/// NULL`).
 pub(crate) const ONE_PER_TICK: &str = "workflow_executions_one_per_schedule_tick";
+
+/// One execution per (backfill, tick) (migration 0192).
+pub(crate) const ONE_PER_BACKFILL_TICK: &str = "workflow_executions_one_per_backfill_tick";
 
 /// The index that makes a second execution for one (outbox event, listener)
 /// impossible (migration 0157).
@@ -84,7 +88,7 @@ pub(crate) enum Started {
     /// input is refused. Fixed only by a save (or, for a type not served, a
     /// deployment that serves it), so retrying cannot help.
     Refused(String),
-    /// A unique violation on [`ONE_PER_TICK`] or
+    /// A unique violation on [`ONE_PER_TICK`], [`ONE_PER_BACKFILL_TICK`] or
     /// [`ONE_PER_FLOW_TRIGGER_EVENT`]: this fire already has its execution.
     AlreadyFired(String),
     /// Anything else. Possibly transient (a timeout, a deadlock, a
@@ -106,6 +110,9 @@ pub(crate) fn classify(err: &Error) -> Started {
             Some(ONE_PER_TICK) => {
                 Started::AlreadyFired(format!("this tick already has an execution: {err}"))
             }
+            Some(ONE_PER_BACKFILL_TICK) => Started::AlreadyFired(format!(
+                "this backfill tick already has an execution: {err}"
+            )),
             Some(ONE_PER_FLOW_TRIGGER_EVENT) => Started::AlreadyFired(format!(
                 "this listener already fired on this flow-trigger event: {err}"
             )),

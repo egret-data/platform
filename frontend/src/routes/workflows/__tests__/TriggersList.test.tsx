@@ -288,6 +288,7 @@ describe("TriggersList: the page", () => {
       "Last execution",
       "Status",
       "Enabled",
+      "Backfill",
       "Details",
     ]);
     const second = bodyRows()[2];

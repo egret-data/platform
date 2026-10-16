@@ -6,6 +6,7 @@ import type { ExecutionDto, ExecutionListItemDto, TaskRunDto } from "@/api/gener
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -44,6 +45,9 @@ export default function ExecutionOverview({ ws, execution, now }: { ws: string; 
       <Section title="Trigger">
         <TriggerSection execution={execution} />
       </Section>
+      <Section title="Labels">
+        <LabelChips labels={execution.effective_labels} />
+      </Section>
       <Section title="Child executions">
         <ChildExecutions ws={ws} execution={execution} />
       </Section>
@@ -51,6 +55,22 @@ export default function ExecutionOverview({ ws, execution, now }: { ws: string; 
         <TaskRuns ws={ws} execution={execution} now={now} />
       </Section>
     </div>
+  );
+}
+
+/** The labels an execution runs with, as `key: value` chips (W7f spec §4.4); "None" for none. */
+function LabelChips({ labels }: { labels: { key: string; value: string }[] }) {
+  if (labels.length === 0) return <p className="text-sm text-muted-foreground">None</p>;
+  return (
+    <ul className="flex flex-wrap gap-1.5" aria-label="Labels">
+      {labels.map((l) => (
+        <li key={l.key}>
+          <Badge variant="outline" className="font-mono text-xs">
+            {l.key}: {l.value}
+          </Badge>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -150,9 +170,12 @@ function TriggerSection({ execution }: { execution: ExecutionDto }) {
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
         <TriggerLabel row={execution} />
         {triggerId ? (
-          <span>
-            <span className="text-muted-foreground">Trigger </span>
-            <span className="font-mono text-xs">{triggerId}</span>
+          <span className="inline-flex items-center gap-2">
+            <span>
+              <span className="text-muted-foreground">Trigger </span>
+              <span className="font-mono text-xs">{triggerId}</span>
+            </span>
+            {execution.backfill_id ? <Badge variant="outline">Backfill</Badge> : null}
           </span>
         ) : null}
       </div>

@@ -1094,3 +1094,118 @@ pub async fn switched_off(db: &Db, flow: Uuid) -> Vec<String> {
     .await
     .expect("read the switch rows")
 }
+
+/// Start `source` carrying `labels` of its own (a jsonb list of `{key, value}`)
+/// and finish it SUCCESS through the real worker.
+pub async fn run_with_labels(
+    db: &Db,
+    ws: Uuid,
+    flow: Uuid,
+    source: &str,
+    labels: Option<serde_json::Value>,
+) -> Uuid {
+    let mut tx = db.pool.begin().await.expect("begin");
+    let id = egret_workflow::worker::start_execution_in(
+        &mut tx,
+        egret_workflow::worker::NewExecution {
+            workspace_id: ws,
+            flow_id: Some(flow),
+            source,
+            inputs: serde_json::json!({}),
+            trigger: None,
+            scheduled_date: None,
+            trigger_execution_id: None,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
+            born_failed: false,
+            replayed_from_execution_id: None,
+            id: None,
+            input_files: Vec::new(),
+            labels,
+            backfill_id: None,
+        },
+    )
+    .await
+    .expect("start with labels");
+    tx.commit().await.expect("commit");
+    drive_to(db, id, "SUCCESS").await;
+    id
+}
+
+// ---------------------------------------------------------------------------
+// W7f: staging a backfill until the create route (Task 7) exists
+// ---------------------------------------------------------------------------
+
+/// Insert a backfill for `trig` exactly as the create route will: the row,
+/// the trigger's `next_evaluation_date` moved to `first_tick`, its old value
+/// kept as `previous_next_evaluation_date`. One transaction, the trigger row
+/// locked first (the route's order: trigger row, then backfill row). Returns
+/// the backfill id.
+#[allow(clippy::too_many_arguments)]
+pub async fn stage_backfill(
+    db: &Db,
+    flow: Uuid,
+    trig: &str,
+    window: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
+    first_tick: chrono::DateTime<chrono::Utc>,
+    total_ticks: i32,
+    inputs: serde_json::Value,
+    labels: serde_json::Value,
+) -> Uuid {
+    let mut tx = db.pool.begin().await.expect("begin");
+    let prev: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT next_evaluation_date FROM workflow.triggers \
+          WHERE flow_id = $1 AND trigger_id = $2 FOR UPDATE",
+    )
+    .bind(flow)
+    .bind(trig)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("the trigger row to stage a backfill on");
+    let prev = prev.expect("a trigger on the queue (the route refuses `off_queue`)");
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO workflow.trigger_backfills \
+           (flow_id, trigger_id, workspace_id, window_start, window_end, current_tick, \
+            inputs, labels, previous_next_evaluation_date, total_ticks) \
+         SELECT f.id, $2, f.workspace_id, $3, $4, $5, $6, $7, $8, $9 \
+           FROM workflow.flows f WHERE f.id = $1 \
+         RETURNING id",
+    )
+    .bind(flow)
+    .bind(trig)
+    .bind(window.0)
+    .bind(window.1)
+    .bind(first_tick)
+    .bind(inputs)
+    .bind(labels)
+    .bind(prev)
+    .bind(total_ticks)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("insert the backfill");
+    sqlx::query(
+        "UPDATE workflow.triggers SET next_evaluation_date = $3, updated_at = now() \
+          WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .bind(first_tick)
+    .execute(&mut *tx)
+    .await
+    .expect("move the trigger to the first tick");
+    tx.commit().await.expect("commit the staged backfill");
+    id
+}
+
+/// The backfill row of `(flow, trig)`, whole (`row_to_json`), or `None`.
+pub async fn backfill_row(db: &Db, flow: Uuid, trig: &str) -> Option<serde_json::Value> {
+    sqlx::query_scalar(
+        "SELECT row_to_json(b) FROM workflow.trigger_backfills b \
+          WHERE b.flow_id = $1 AND b.trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .fetch_optional(&db.pool)
+    .await
+    .expect("read the backfill row")
+}

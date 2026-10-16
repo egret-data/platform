@@ -343,6 +343,8 @@ async fn a_log_task_reads_its_trigger_executions_file() {
             replayed_from_execution_id: None,
             id: None,
             input_files: Vec::new(),
+            labels: None,
+            backfill_id: None,
         },
     )
     .await

@@ -27,7 +27,9 @@ import type {
 import type {
   Ack,
   BulkResultsDto,
+  CreateBackfillRequest,
   CreateFlowRequest,
+  DeleteBackfillsRequest,
   ErrorBody,
   ExecutionDto,
   ExecutionGraph,
@@ -51,6 +53,8 @@ import type {
   NsFileStatsDto,
   NsFileUploadForm,
   PublishFlowRequest,
+  SetBackfillPausedRequest,
+  SetBackfillsPausedRequest,
   SetTriggerDisabledRequest,
   SetTriggersDisabledRequest,
   StartExecutionMultipart,
@@ -2855,7 +2859,355 @@ export function useWorkflowListFlowTriggers<TData = Awaited<ReturnType<typeof wo
 
 
 
-export type workflowSetTriggerDisabledResponse200 = {
+export type workflowCreateTriggerBackfillResponse201 = {
+  data: TriggerEntryDto
+  status: 201
+}
+
+export type workflowCreateTriggerBackfillResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowCreateTriggerBackfillResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowCreateTriggerBackfillResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowCreateTriggerBackfillResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowCreateTriggerBackfillResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowCreateTriggerBackfillResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowCreateTriggerBackfillResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowCreateTriggerBackfillResponseSuccess = (workflowCreateTriggerBackfillResponse201) & {
+  headers: Headers;
+};
+export type workflowCreateTriggerBackfillResponseError = (workflowCreateTriggerBackfillResponse400 | workflowCreateTriggerBackfillResponse401 | workflowCreateTriggerBackfillResponse403 | workflowCreateTriggerBackfillResponse404 | workflowCreateTriggerBackfillResponse409 | workflowCreateTriggerBackfillResponse413 | workflowCreateTriggerBackfillResponse500) & {
+  headers: Headers;
+};
+
+export type workflowCreateTriggerBackfillResponse = (workflowCreateTriggerBackfillResponseSuccess | workflowCreateTriggerBackfillResponseError)
+
+export const getWorkflowCreateTriggerBackfillUrl = (workspace: string,
+    id: string,
+    triggerId: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/flows/${encodeURIComponent(id)}/triggers/${encodeURIComponent(triggerId)}/backfill`
+}
+
+export const workflowCreateTriggerBackfill = async (workspace: string,
+    id: string,
+    triggerId: string,
+    createBackfillRequest: CreateBackfillRequest, options?: Parameters<typeof customInstance>[1]): Promise<workflowCreateTriggerBackfillResponse> => {
+
+  return customInstance<workflowCreateTriggerBackfillResponse>(getWorkflowCreateTriggerBackfillUrl(workspace,id,triggerId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(createBackfillRequest)
+  }
+);}
+
+
+
+
+
+export const getWorkflowCreateTriggerBackfillMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowCreateTriggerBackfill>>, TError,{workspace: string;id: string;triggerId: string;data: CreateBackfillRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowCreateTriggerBackfill>>, TError,{workspace: string;id: string;triggerId: string;data: CreateBackfillRequest}, TContext> => {
+
+const mutationKey = ['workflowCreateTriggerBackfill'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowCreateTriggerBackfill>>, {workspace: string;id: string;triggerId: string;data: CreateBackfillRequest}> = (props) => {
+          const {workspace,id,triggerId,data} = props ?? {};
+
+          return  workflowCreateTriggerBackfill(workspace,id,triggerId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowCreateTriggerBackfillMutationResult = NonNullable<Awaited<ReturnType<typeof workflowCreateTriggerBackfill>>>
+    export type WorkflowCreateTriggerBackfillMutationBody = CreateBackfillRequest
+    export type WorkflowCreateTriggerBackfillMutationError = ErrorBody
+
+    export const useWorkflowCreateTriggerBackfill = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowCreateTriggerBackfill>>, TError,{workspace: string;id: string;triggerId: string;data: CreateBackfillRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowCreateTriggerBackfill>>,
+        TError,
+        {workspace: string;id: string;triggerId: string;data: CreateBackfillRequest},
+        TContext
+      > => {
+      return useMutation(getWorkflowCreateTriggerBackfillMutationOptions(options), queryClient);
+    }
+    export type workflowDeleteTriggerBackfillResponse200 = {
+  data: TriggerEntryDto
+  status: 200
+}
+
+export type workflowDeleteTriggerBackfillResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowDeleteTriggerBackfillResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowDeleteTriggerBackfillResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowDeleteTriggerBackfillResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowDeleteTriggerBackfillResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowDeleteTriggerBackfillResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowDeleteTriggerBackfillResponseSuccess = (workflowDeleteTriggerBackfillResponse200) & {
+  headers: Headers;
+};
+export type workflowDeleteTriggerBackfillResponseError = (workflowDeleteTriggerBackfillResponse400 | workflowDeleteTriggerBackfillResponse401 | workflowDeleteTriggerBackfillResponse403 | workflowDeleteTriggerBackfillResponse404 | workflowDeleteTriggerBackfillResponse409 | workflowDeleteTriggerBackfillResponse500) & {
+  headers: Headers;
+};
+
+export type workflowDeleteTriggerBackfillResponse = (workflowDeleteTriggerBackfillResponseSuccess | workflowDeleteTriggerBackfillResponseError)
+
+export const getWorkflowDeleteTriggerBackfillUrl = (workspace: string,
+    id: string,
+    triggerId: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/flows/${encodeURIComponent(id)}/triggers/${encodeURIComponent(triggerId)}/backfill`
+}
+
+export const workflowDeleteTriggerBackfill = async (workspace: string,
+    id: string,
+    triggerId: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowDeleteTriggerBackfillResponse> => {
+
+  return customInstance<workflowDeleteTriggerBackfillResponse>(getWorkflowDeleteTriggerBackfillUrl(workspace,id,triggerId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowDeleteTriggerBackfillMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteTriggerBackfill>>, TError,{workspace: string;id: string;triggerId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteTriggerBackfill>>, TError,{workspace: string;id: string;triggerId: string}, TContext> => {
+
+const mutationKey = ['workflowDeleteTriggerBackfill'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowDeleteTriggerBackfill>>, {workspace: string;id: string;triggerId: string}> = (props) => {
+          const {workspace,id,triggerId} = props ?? {};
+
+          return  workflowDeleteTriggerBackfill(workspace,id,triggerId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowDeleteTriggerBackfillMutationResult = NonNullable<Awaited<ReturnType<typeof workflowDeleteTriggerBackfill>>>
+
+    export type WorkflowDeleteTriggerBackfillMutationError = ErrorBody
+
+    export const useWorkflowDeleteTriggerBackfill = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteTriggerBackfill>>, TError,{workspace: string;id: string;triggerId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowDeleteTriggerBackfill>>,
+        TError,
+        {workspace: string;id: string;triggerId: string},
+        TContext
+      > => {
+      return useMutation(getWorkflowDeleteTriggerBackfillMutationOptions(options), queryClient);
+    }
+    export type workflowSetTriggerBackfillPausedResponse200 = {
+  data: TriggerEntryDto
+  status: 200
+}
+
+export type workflowSetTriggerBackfillPausedResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowSetTriggerBackfillPausedResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowSetTriggerBackfillPausedResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowSetTriggerBackfillPausedResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowSetTriggerBackfillPausedResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowSetTriggerBackfillPausedResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowSetTriggerBackfillPausedResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowSetTriggerBackfillPausedResponseSuccess = (workflowSetTriggerBackfillPausedResponse200) & {
+  headers: Headers;
+};
+export type workflowSetTriggerBackfillPausedResponseError = (workflowSetTriggerBackfillPausedResponse400 | workflowSetTriggerBackfillPausedResponse401 | workflowSetTriggerBackfillPausedResponse403 | workflowSetTriggerBackfillPausedResponse404 | workflowSetTriggerBackfillPausedResponse409 | workflowSetTriggerBackfillPausedResponse413 | workflowSetTriggerBackfillPausedResponse500) & {
+  headers: Headers;
+};
+
+export type workflowSetTriggerBackfillPausedResponse = (workflowSetTriggerBackfillPausedResponseSuccess | workflowSetTriggerBackfillPausedResponseError)
+
+export const getWorkflowSetTriggerBackfillPausedUrl = (workspace: string,
+    id: string,
+    triggerId: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/flows/${encodeURIComponent(id)}/triggers/${encodeURIComponent(triggerId)}/backfill/paused`
+}
+
+export const workflowSetTriggerBackfillPaused = async (workspace: string,
+    id: string,
+    triggerId: string,
+    setBackfillPausedRequest: SetBackfillPausedRequest, options?: Parameters<typeof customInstance>[1]): Promise<workflowSetTriggerBackfillPausedResponse> => {
+
+  return customInstance<workflowSetTriggerBackfillPausedResponse>(getWorkflowSetTriggerBackfillPausedUrl(workspace,id,triggerId),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setBackfillPausedRequest)
+  }
+);}
+
+
+
+
+
+export const getWorkflowSetTriggerBackfillPausedMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowSetTriggerBackfillPaused>>, TError,{workspace: string;id: string;triggerId: string;data: SetBackfillPausedRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowSetTriggerBackfillPaused>>, TError,{workspace: string;id: string;triggerId: string;data: SetBackfillPausedRequest}, TContext> => {
+
+const mutationKey = ['workflowSetTriggerBackfillPaused'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowSetTriggerBackfillPaused>>, {workspace: string;id: string;triggerId: string;data: SetBackfillPausedRequest}> = (props) => {
+          const {workspace,id,triggerId,data} = props ?? {};
+
+          return  workflowSetTriggerBackfillPaused(workspace,id,triggerId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowSetTriggerBackfillPausedMutationResult = NonNullable<Awaited<ReturnType<typeof workflowSetTriggerBackfillPaused>>>
+    export type WorkflowSetTriggerBackfillPausedMutationBody = SetBackfillPausedRequest
+    export type WorkflowSetTriggerBackfillPausedMutationError = ErrorBody
+
+    export const useWorkflowSetTriggerBackfillPaused = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowSetTriggerBackfillPaused>>, TError,{workspace: string;id: string;triggerId: string;data: SetBackfillPausedRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowSetTriggerBackfillPaused>>,
+        TError,
+        {workspace: string;id: string;triggerId: string;data: SetBackfillPausedRequest},
+        TContext
+      > => {
+      return useMutation(getWorkflowSetTriggerBackfillPausedMutationOptions(options), queryClient);
+    }
+    export type workflowSetTriggerDisabledResponse200 = {
   data: TriggerEntryDto
   status: 200
 }
@@ -6406,7 +6758,215 @@ export function useWorkflowListTriggers<TData = Awaited<ReturnType<typeof workfl
 
 
 
-export type workflowSetTriggersDisabledResponse200 = {
+export type workflowDeleteTriggersBackfillResponse200 = {
+  data: BulkResultsDto
+  status: 200
+}
+
+export type workflowDeleteTriggersBackfillResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowDeleteTriggersBackfillResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowDeleteTriggersBackfillResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowDeleteTriggersBackfillResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowDeleteTriggersBackfillResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowDeleteTriggersBackfillResponseSuccess = (workflowDeleteTriggersBackfillResponse200) & {
+  headers: Headers;
+};
+export type workflowDeleteTriggersBackfillResponseError = (workflowDeleteTriggersBackfillResponse400 | workflowDeleteTriggersBackfillResponse401 | workflowDeleteTriggersBackfillResponse403 | workflowDeleteTriggersBackfillResponse413 | workflowDeleteTriggersBackfillResponse500) & {
+  headers: Headers;
+};
+
+export type workflowDeleteTriggersBackfillResponse = (workflowDeleteTriggersBackfillResponseSuccess | workflowDeleteTriggersBackfillResponseError)
+
+export const getWorkflowDeleteTriggersBackfillUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/triggers/backfill/delete`
+}
+
+export const workflowDeleteTriggersBackfill = async (workspace: string,
+    deleteBackfillsRequest: DeleteBackfillsRequest, options?: Parameters<typeof customInstance>[1]): Promise<workflowDeleteTriggersBackfillResponse> => {
+
+  return customInstance<workflowDeleteTriggersBackfillResponse>(getWorkflowDeleteTriggersBackfillUrl(workspace),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(deleteBackfillsRequest)
+  }
+);}
+
+
+
+
+
+export const getWorkflowDeleteTriggersBackfillMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteTriggersBackfill>>, TError,{workspace: string;data: DeleteBackfillsRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteTriggersBackfill>>, TError,{workspace: string;data: DeleteBackfillsRequest}, TContext> => {
+
+const mutationKey = ['workflowDeleteTriggersBackfill'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowDeleteTriggersBackfill>>, {workspace: string;data: DeleteBackfillsRequest}> = (props) => {
+          const {workspace,data} = props ?? {};
+
+          return  workflowDeleteTriggersBackfill(workspace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowDeleteTriggersBackfillMutationResult = NonNullable<Awaited<ReturnType<typeof workflowDeleteTriggersBackfill>>>
+    export type WorkflowDeleteTriggersBackfillMutationBody = DeleteBackfillsRequest
+    export type WorkflowDeleteTriggersBackfillMutationError = ErrorBody
+
+    export const useWorkflowDeleteTriggersBackfill = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteTriggersBackfill>>, TError,{workspace: string;data: DeleteBackfillsRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowDeleteTriggersBackfill>>,
+        TError,
+        {workspace: string;data: DeleteBackfillsRequest},
+        TContext
+      > => {
+      return useMutation(getWorkflowDeleteTriggersBackfillMutationOptions(options), queryClient);
+    }
+    export type workflowSetTriggersBackfillPausedResponse200 = {
+  data: BulkResultsDto
+  status: 200
+}
+
+export type workflowSetTriggersBackfillPausedResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowSetTriggersBackfillPausedResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowSetTriggersBackfillPausedResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowSetTriggersBackfillPausedResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowSetTriggersBackfillPausedResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowSetTriggersBackfillPausedResponseSuccess = (workflowSetTriggersBackfillPausedResponse200) & {
+  headers: Headers;
+};
+export type workflowSetTriggersBackfillPausedResponseError = (workflowSetTriggersBackfillPausedResponse400 | workflowSetTriggersBackfillPausedResponse401 | workflowSetTriggersBackfillPausedResponse403 | workflowSetTriggersBackfillPausedResponse413 | workflowSetTriggersBackfillPausedResponse500) & {
+  headers: Headers;
+};
+
+export type workflowSetTriggersBackfillPausedResponse = (workflowSetTriggersBackfillPausedResponseSuccess | workflowSetTriggersBackfillPausedResponseError)
+
+export const getWorkflowSetTriggersBackfillPausedUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/triggers/backfill/paused`
+}
+
+export const workflowSetTriggersBackfillPaused = async (workspace: string,
+    setBackfillsPausedRequest: SetBackfillsPausedRequest, options?: Parameters<typeof customInstance>[1]): Promise<workflowSetTriggersBackfillPausedResponse> => {
+
+  return customInstance<workflowSetTriggersBackfillPausedResponse>(getWorkflowSetTriggersBackfillPausedUrl(workspace),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setBackfillsPausedRequest)
+  }
+);}
+
+
+
+
+
+export const getWorkflowSetTriggersBackfillPausedMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowSetTriggersBackfillPaused>>, TError,{workspace: string;data: SetBackfillsPausedRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowSetTriggersBackfillPaused>>, TError,{workspace: string;data: SetBackfillsPausedRequest}, TContext> => {
+
+const mutationKey = ['workflowSetTriggersBackfillPaused'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowSetTriggersBackfillPaused>>, {workspace: string;data: SetBackfillsPausedRequest}> = (props) => {
+          const {workspace,data} = props ?? {};
+
+          return  workflowSetTriggersBackfillPaused(workspace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowSetTriggersBackfillPausedMutationResult = NonNullable<Awaited<ReturnType<typeof workflowSetTriggersBackfillPaused>>>
+    export type WorkflowSetTriggersBackfillPausedMutationBody = SetBackfillsPausedRequest
+    export type WorkflowSetTriggersBackfillPausedMutationError = ErrorBody
+
+    export const useWorkflowSetTriggersBackfillPaused = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowSetTriggersBackfillPaused>>, TError,{workspace: string;data: SetBackfillsPausedRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowSetTriggersBackfillPaused>>,
+        TError,
+        {workspace: string;data: SetBackfillsPausedRequest},
+        TContext
+      > => {
+      return useMutation(getWorkflowSetTriggersBackfillPausedMutationOptions(options), queryClient);
+    }
+    export type workflowSetTriggersDisabledResponse200 = {
   data: BulkResultsDto
   status: 200
 }

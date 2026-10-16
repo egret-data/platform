@@ -812,12 +812,18 @@ async fn every_repository_column_reaches_the_wire() {
     // is what would show a crossed wire.
     let replayed_from =
         insert_execution(&db, ws, None, "a.keys-source", "src", "SUCCESS", at(1)).await;
+    let backfill = Uuid::new_v4();
     sqlx::query(
         "UPDATE workflow.executions SET started_at = '2026-01-01T00:00:05Z', \
-                replayed_from_execution_id = $2 WHERE id = $1",
+                replayed_from_execution_id = $2, \
+                scheduled_date = '2026-01-01T00:00:00Z', backfill_id = $3, labels = $4, \
+                execution_trigger = '{\"id\":\"daily\",\"type\":\"io.kestra.plugin.core.trigger.Schedule\",\"variables\":{}}' \
+          WHERE id = $1",
     )
     .bind(id)
     .bind(replayed_from)
+    .bind(backfill)
+    .bind(serde_json::json!([{"key": "reason", "value": "backfill"}]))
     .execute(&db.pool)
     .await
     .expect("seed the W7b columns");
@@ -860,8 +866,13 @@ async fn every_repository_column_reaches_the_wire() {
         "ended_at",
         "created_at",
         "updated_at",
+        // W7f: the execution's own labels and the backfill that fired it.
+        "labels",
+        "backfill_id",
         "source",
         "runs",
+        // W7f: what the run sees as `labels` (detail only).
+        "effective_labels",
         // Not a repository column: the PDP's `workflow:manage` answer (W7b Task 3).
         "can_manage",
     ];
@@ -982,6 +993,18 @@ async fn every_repository_column_reaches_the_wire() {
         "{detail}"
     );
 
+    assert_eq!(
+        detail["labels"],
+        serde_json::json!([{"key": "reason", "value": "backfill"}]),
+        "{detail}"
+    );
+    assert_eq!(detail["backfill_id"], backfill.to_string(), "{detail}");
+    assert_eq!(
+        detail["effective_labels"],
+        serde_json::json!([{"key": "reason", "value": "backfill"}]),
+        "{detail}"
+    );
+
     // `can_manage` is the caller's, on the detail only: a list row answers no PDP question.
     assert_eq!(detail["can_manage"], false, "a reader: {detail}");
 
@@ -997,7 +1020,7 @@ async fn every_repository_column_reaches_the_wire() {
     let want_list: std::collections::BTreeSet<&str> = want_execution
         .iter()
         .copied()
-        .filter(|k| !matches!(*k, "source" | "runs" | "can_manage"))
+        .filter(|k| !matches!(*k, "source" | "runs" | "can_manage" | "effective_labels"))
         .collect();
     assert_eq!(got_list, want_list, "the list DTO's key set: {page}");
     // The flattened parent's fields carry the same values through the list
@@ -2052,6 +2075,136 @@ async fn a_replay_runs_the_frozen_source_and_inputs_and_not_the_drafts() {
         audit[0].2,
         serde_json::json!({ "replayed_from": done, "replacement": replacement })
     );
+}
+
+/// **A replay keeps the replayed execution's own labels and never its
+/// `backfill_id`** (W7f spec §3.3): the labels are what the run saw, the
+/// backfill is a fact about how the ORIGINAL was fired.
+#[tokio::test]
+async fn a_replay_copies_the_labels_and_not_the_backfill() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+    let src = runnable_source("replay-labels");
+    let flow = common::seed_flow(&db, ws, user, &src, "draft").await;
+    let done =
+        insert_execution_with(&db, ws, Some(flow), "SUCCESS", &src, serde_json::json!({})).await;
+    sqlx::query(
+        "UPDATE workflow.executions SET scheduled_date = '2026-01-01T00:00:00Z', \
+                backfill_id = $2, labels = $3, \
+                execution_trigger = '{\"id\":\"daily\",\"type\":\"io.kestra.plugin.core.trigger.Schedule\",\"variables\":{}}' \
+          WHERE id = $1",
+    )
+    .bind(done)
+    .bind(Uuid::new_v4())
+    .bind(serde_json::json!([{"key": "reason", "value": "backfill"}]))
+    .execute(&db.pool)
+    .await
+    .expect("label the original");
+
+    let app = common::app(&db).await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{done}/replay"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 201);
+    let dto = common::json(res).await;
+    let replacement: Uuid = dto["id"].as_str().unwrap().parse().unwrap();
+    let (labels, backfill): (Option<Value>, Option<Uuid>) =
+        sqlx::query_as("SELECT labels, backfill_id FROM workflow.executions WHERE id = $1")
+            .bind(replacement)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        labels,
+        Some(serde_json::json!([{"key": "reason", "value": "backfill"}]))
+    );
+    assert_eq!(backfill, None);
+}
+
+/// **The list carries an execution's OWN labels (`null` for none) and its
+/// `backfill_id`; the detail carries `effective_labels`**, the flow's merged
+/// with the execution's, the later value winning in the first key's position
+/// (W7f spec §3.3, P1). A source that does not parse contributes no flow
+/// labels (control).
+#[tokio::test]
+async fn the_list_carries_own_labels_and_the_detail_the_effective_ones() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let src = "id: eff\nnamespace: a.eff\nlabels:\n  team: data\n  env: prod\ntasks:\n  \
+               - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+    let labelled =
+        insert_execution_with(&db, ws, None, "SUCCESS", src, serde_json::json!({})).await;
+    let plain = insert_execution_with(&db, ws, None, "SUCCESS", src, serde_json::json!({})).await;
+    let broken = insert_execution_with(
+        &db,
+        ws,
+        None,
+        "SUCCESS",
+        "{{ not yaml",
+        serde_json::json!({}),
+    )
+    .await;
+    sqlx::query("UPDATE workflow.executions SET labels = $2 WHERE id = $1")
+        .bind(labelled)
+        .bind(serde_json::json!([
+            {"key": "team", "value": "ops"},
+            {"key": "reason", "value": "x"}
+        ]))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let app = common::app(&db).await;
+    let get = |id: Uuid| {
+        let app = &app;
+        async move {
+            common::json(
+                common::get(
+                    app,
+                    &format!("/api/ws/{ws}/workflows/executions/{id}"),
+                    user,
+                )
+                .await,
+            )
+            .await
+        }
+    };
+    let d = get(labelled).await;
+    assert_eq!(
+        d["effective_labels"],
+        serde_json::json!([
+            {"key": "team", "value": "ops"},
+            {"key": "env", "value": "prod"},
+            {"key": "reason", "value": "x"}
+        ]),
+        "{d}"
+    );
+    assert_eq!(
+        d["labels"],
+        serde_json::json!([
+            {"key": "team", "value": "ops"},
+            {"key": "reason", "value": "x"}
+        ]),
+        "own only: {d}"
+    );
+    let d = get(plain).await;
+    assert_eq!(d["labels"], Value::Null, "{d}");
+    assert_eq!(
+        d["effective_labels"],
+        serde_json::json!([
+            {"key": "team", "value": "data"},
+            {"key": "env", "value": "prod"}
+        ]),
+        "{d}"
+    );
+    let d = get(broken).await;
+    assert_eq!(d["effective_labels"], serde_json::json!([]), "{d}");
+    assert_eq!(d["backfill_id"], Value::Null, "{d}");
 }
 
 /// **A replay of an execution that has not finished is a 409.**

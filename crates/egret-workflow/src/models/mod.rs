@@ -12,6 +12,8 @@ mod wire;
 pub use execution::{
     Execution, ExecutionKind, StateHistory, StateTransition, TaskRun, TaskRunAttempt,
 };
+// The backfill create route's `labels` (W7f D24).
+pub(crate) use flow::deserialize_labels;
 pub use flow::{
     Check, CheckBehavior, CheckStyle, Concurrency, ConcurrencyBehavior, Flow, FlowOutput, Label,
     Quota, QuotaBehavior, Sla, SlaBehavior, SlaCommon,

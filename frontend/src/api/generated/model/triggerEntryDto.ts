@@ -5,6 +5,8 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { BackfillDto } from './backfillDto';
+import type { CannotBackfill } from './cannotBackfill';
 import type { FlowTriggerInfoDto } from './flowTriggerInfoDto';
 import type { LastExecutionDto } from './lastExecutionDto';
 import type { ScheduleInfoDto } from './scheduleInfoDto';
@@ -56,4 +58,8 @@ export interface TriggerEntryDto {
   flow?: null | FlowTriggerInfoDto;
   webhook?: null | WebhookInfoDto;
   last_execution?: null | LastExecutionDto;
+  backfill?: null | BackfillDto;
+  /** Whether the Backfill button is usable; the create route checks for itself. */
+  can_backfill: boolean;
+  backfill_refusal?: null | CannotBackfill;
 }

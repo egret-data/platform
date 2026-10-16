@@ -551,6 +551,313 @@ async fn the_unique_index_refuses_a_second_fire() {
     assert_eq!(executions_of(&fx.db, flow).await, 2);
 }
 
+/// W7f (migration 0192): a copy of `flow`'s first execution, with
+/// `backfill_id` and `labels` as given. `scheduled` keeps the copied row a
+/// schedule fire; `false` makes it an API-shaped row (no trigger record, no
+/// `scheduled_date`), which 0156's iff CHECK requires together.
+async fn copy_as(
+    db: &Db,
+    flow: Uuid,
+    scheduled: bool,
+    backfill_id: Option<Uuid>,
+    labels: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO workflow.executions \
+           (workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
+            execution_trigger, scheduled_date, backfill_id, labels) \
+         SELECT workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
+                CASE WHEN $2 THEN execution_trigger END, \
+                CASE WHEN $2 THEN scheduled_date END, $3, $4::jsonb \
+           FROM workflow.executions WHERE flow_id = $1 \
+          ORDER BY created_at LIMIT 1",
+    )
+    .bind(flow)
+    .bind(scheduled)
+    .bind(backfill_id)
+    .bind(labels)
+    .execute(&db.pool)
+    .await
+    .map(|_| ())
+}
+
+fn refused_by(err: sqlx::Error, code: &str) -> Option<String> {
+    let d = err.as_database_error().expect("a database error");
+    assert_eq!(d.code().as_deref(), Some(code), "{d}");
+    d.constraint().map(str::to_owned)
+}
+
+/// A fired tick of `flow`: one pass over a due trigger.
+async fn fired(fx: &Fx, name: &str) -> Uuid {
+    let flow = fx.flow(&flow_yaml(name, "", "")).await;
+    common::make_due(&fx.db, flow, "s", 1).await;
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            fired: 1,
+            ..Default::default()
+        }
+    );
+    flow
+}
+
+/// D2: the per-tick index of 0156, rebuilt by 0192, covers regular fires only.
+/// A backfill execution for a tick that already ran is accepted; a second
+/// REGULAR execution for it is still refused.
+#[tokio::test]
+async fn the_regular_index_ignores_backfill_executions() {
+    let Some(fx) = fx().await else { return };
+    let flow = fired(&fx, "bf-regular").await;
+
+    copy_as(&fx.db, flow, true, Some(Uuid::new_v4()), None)
+        .await
+        .expect("a backfill execution for a tick that already ran");
+    let err = copy_as(&fx.db, flow, true, None, None)
+        .await
+        .expect_err("a second regular execution for the tick");
+    assert_eq!(
+        refused_by(err, "23505").as_deref(),
+        Some("workflow_executions_one_per_schedule_tick")
+    );
+    assert_eq!(executions_of(&fx.db, flow).await, 2);
+}
+
+/// D2: one execution per (backfill, tick).
+#[tokio::test]
+async fn one_execution_per_backfill_tick() {
+    let Some(fx) = fx().await else { return };
+    let flow = fired(&fx, "bf-unique").await;
+    let backfill = Uuid::new_v4();
+
+    copy_as(&fx.db, flow, true, Some(backfill), None)
+        .await
+        .expect("the backfill's first execution for the tick");
+    let err = copy_as(&fx.db, flow, true, Some(backfill), None)
+        .await
+        .expect_err("a second execution of one backfill for one tick");
+    assert_eq!(
+        refused_by(err, "23505").as_deref(),
+        Some("workflow_executions_one_per_backfill_tick")
+    );
+    // Control: another backfill over the same tick is accepted, so the
+    // refusal above was the pair and nothing else about the copied row.
+    copy_as(&fx.db, flow, true, Some(Uuid::new_v4()), None)
+        .await
+        .expect("another backfill, same tick");
+    assert_eq!(executions_of(&fx.db, flow).await, 3);
+}
+
+/// 0192's CHECKs: a backfill execution is a schedule fire, and `labels` is a
+/// list or NULL.
+#[tokio::test]
+async fn backfill_id_needs_a_scheduled_date_and_labels_are_a_list() {
+    let Some(fx) = fx().await else { return };
+    let flow = fired(&fx, "bf-checks").await;
+
+    // Control first: an API-shaped row with neither column is accepted.
+    copy_as(&fx.db, flow, false, None, None)
+        .await
+        .expect("an API-shaped row");
+    let err = copy_as(&fx.db, flow, false, Some(Uuid::new_v4()), None)
+        .await
+        .expect_err("a backfill id on a row that is not a schedule fire");
+    assert_eq!(
+        refused_by(err, "23514").as_deref(),
+        Some("workflow_executions_backfill_is_a_schedule_fire")
+    );
+    let err = copy_as(&fx.db, flow, false, None, Some("{}"))
+        .await
+        .expect_err("labels as an object");
+    assert_eq!(
+        refused_by(err, "23514").as_deref(),
+        Some("workflow_executions_labels_are_a_list")
+    );
+    copy_as(&fx.db, flow, false, None, Some("[]"))
+        .await
+        .expect("an empty list");
+    copy_as(
+        &fx.db,
+        flow,
+        false,
+        None,
+        Some(r#"[{"key":"a","value":"b"}]"#),
+    )
+    .await
+    .expect("a list of labels");
+    assert_eq!(executions_of(&fx.db, flow).await, 4);
+}
+
+/// 0192: a backfill's next tick stays inside its window. The row is deleted
+/// once the next tick passes `window_end` (spec §3.6, §3.7).
+#[tokio::test]
+async fn a_backfill_tick_stays_inside_its_window() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.flow(&flow_yaml("bf-window", "", "")).await;
+    let row = |past_end: i32| {
+        sqlx::query(
+            "INSERT INTO workflow.trigger_backfills \
+               (flow_id, trigger_id, workspace_id, window_start, window_end, current_tick, \
+                previous_next_evaluation_date, total_ticks) \
+             VALUES ($1, 's', $2, '2026-10-01T00:00:00Z', '2026-10-01T01:00:00Z', \
+                     '2026-10-01T01:00:00Z'::timestamptz + make_interval(mins => $3), \
+                     now(), 61)",
+        )
+        .bind(flow)
+        .bind(fx.ws)
+        .bind(past_end)
+    };
+    let err = row(1)
+        .execute(&fx.db.pool)
+        .await
+        .expect_err("a tick after window_end");
+    assert_eq!(
+        refused_by(err, "23514").as_deref(),
+        Some("workflow_trigger_backfills_tick_within_window")
+    );
+    // Control: the last tick of the window itself is accepted.
+    row(0)
+        .execute(&fx.db.pool)
+        .await
+        .expect("current_tick = window_end");
+}
+
+/// The first execution of `flow`: its source and trigger record, to start
+/// more through `start_execution_in`.
+async fn first_execution(db: &Db, flow: Uuid) -> (String, serde_json::Value, DateTime<Utc>) {
+    sqlx::query_as(
+        "SELECT source, execution_trigger, scheduled_date FROM workflow.executions \
+          WHERE flow_id = $1 ORDER BY created_at LIMIT 1",
+    )
+    .bind(flow)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap()
+}
+
+async fn start_in(
+    fx: &Fx,
+    flow: Uuid,
+    source: &str,
+    trigger: &serde_json::Value,
+    scheduled_date: DateTime<Utc>,
+    labels: Option<serde_json::Value>,
+    backfill_id: Option<Uuid>,
+) -> egret_core::Result<Uuid> {
+    let mut tx = fx.db.pool.begin().await.unwrap();
+    let started = egret_workflow::worker::start_execution_in(
+        &mut tx,
+        egret_workflow::worker::NewExecution {
+            workspace_id: fx.ws,
+            flow_id: Some(flow),
+            source,
+            inputs: serde_json::json!({}),
+            trigger: Some(trigger.clone()),
+            scheduled_date: Some(scheduled_date),
+            trigger_execution_id: None,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
+            born_failed: false,
+            replayed_from_execution_id: None,
+            id: None,
+            input_files: Vec::new(),
+            labels,
+            backfill_id,
+        },
+    )
+    .await;
+    if started.is_ok() {
+        tx.commit().await.unwrap();
+    }
+    started
+}
+
+/// `NewExecution`'s two new fields reach the row; `None` stores NULL.
+#[tokio::test]
+async fn start_execution_in_writes_labels_and_backfill_id() {
+    let Some(fx) = fx().await else { return };
+    let flow = fired(&fx, "bf-insert").await;
+    let (source, trigger, tick) = first_execution(&fx.db, flow).await;
+    let backfill = Uuid::new_v4();
+    let labels = serde_json::json!([{"key": "a", "value": "b"}]);
+
+    let with = start_in(
+        &fx,
+        flow,
+        &source,
+        &trigger,
+        tick,
+        Some(labels.clone()),
+        Some(backfill),
+    )
+    .await
+    .expect("a backfill execution");
+    // One tick later, so the regular index is not what this exercises.
+    let without = start_in(
+        &fx,
+        flow,
+        &source,
+        &trigger,
+        tick + Duration::minutes(1),
+        None,
+        None,
+    )
+    .await
+    .expect("a regular execution");
+
+    let read = |id: Uuid| {
+        sqlx::query_as::<
+            _,
+            (
+                Option<serde_json::Value>,
+                Option<Uuid>,
+                Option<DateTime<Utc>>,
+            ),
+        >(
+            "SELECT labels, backfill_id, scheduled_date FROM workflow.executions WHERE id = $1"
+        )
+        .bind(id)
+        .fetch_one(&fx.db.pool)
+    };
+    assert_eq!(
+        read(with).await.unwrap(),
+        (Some(labels), Some(backfill), Some(tick))
+    );
+    assert_eq!(
+        read(without).await.unwrap(),
+        (None, None, Some(tick + Duration::minutes(1)))
+    );
+}
+
+/// What `scheduler::start::classify` reads: the second start of one
+/// (backfill, tick) fails with the backfill index's name on a `sqlx`
+/// database error, kept as the source of `Error::Internal`.
+#[tokio::test]
+async fn a_second_start_of_one_backfill_tick_names_the_backfill_index() {
+    let Some(fx) = fx().await else { return };
+    let flow = fired(&fx, "bf-classify").await;
+    let (source, trigger, tick) = first_execution(&fx.db, flow).await;
+    let backfill = Uuid::new_v4();
+
+    start_in(&fx, flow, &source, &trigger, tick, None, Some(backfill))
+        .await
+        .expect("the backfill's first execution for the tick");
+    let err = start_in(&fx, flow, &source, &trigger, tick, None, Some(backfill))
+        .await
+        .expect_err("a second one");
+    let egret_core::Error::Internal(source) = &err else {
+        panic!("not Internal: {err:?}");
+    };
+    let constraint = source
+        .downcast_ref::<sqlx::Error>()
+        .and_then(|e| e.as_database_error())
+        .and_then(|d| d.constraint());
+    assert_eq!(
+        constraint,
+        Some("workflow_executions_one_per_backfill_tick"),
+        "{err}"
+    );
+}
+
 #[tokio::test]
 async fn a_flow_that_does_not_plan_is_taken_off_the_queue_and_its_sibling_still_fires() {
     let Some(fx) = fx().await else { return };

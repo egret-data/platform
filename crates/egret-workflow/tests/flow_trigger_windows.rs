@@ -852,6 +852,40 @@ async fn a_dependency_when_renders_on_the_source() {
     assert_eq!(executions_of(&fx.db, on_listener).await, 0);
 }
 
+/// W7f spec §3.3: a dependency's `labels:` match the source EXECUTION's labels
+/// (the flow's, then its own). `p1` declares none; one execution carries
+/// `reason: backfill` and meets the dependency, a plain execution of the same
+/// flow does not (control).
+#[tokio::test]
+async fn a_dependency_matches_the_source_executions_own_labels() {
+    let Some(fx) = fx().await else { return };
+    let p1 = fx.source("p1").await;
+    let listener = fx
+        .flow(&listener_yaml(
+            "on_labelled",
+            "",
+            "    dependsOn:\n      - namespace: w13\n        flowId: p1\n        labels:\n          reason: backfill\n",
+        ))
+        .await;
+    common::run_with_labels(&fx.db, fx.ws, p1.id, &p1.yaml, None).await;
+    fx.pass().await;
+    assert_eq!(
+        executions_of(&fx.db, listener).await,
+        0,
+        "control: no own labels, no match"
+    );
+    common::run_with_labels(
+        &fx.db,
+        fx.ws,
+        p1.id,
+        &p1.yaml,
+        Some(serde_json::json!([{"key": "reason", "value": "backfill"}])),
+    )
+    .await;
+    fx.pass().await;
+    assert_eq!(executions_of(&fx.db, listener).await, 1);
+}
+
 /// D1: only an event that matches at least one dependency touches a window.
 /// An execution of an unrelated flow -- heard by the listener (same
 /// workspace, a listed state) -- opens none.

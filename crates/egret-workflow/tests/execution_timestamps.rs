@@ -466,6 +466,36 @@ async fn a_create_new_execution_retry_has_its_own_times(pool: sqlx::PgPool) {
     assert_invariants(&pool, true).await;
 }
 
+/// W7f spec §3.3: the replacement a `CREATE_NEW_EXECUTION` retry starts copies
+/// the original's own labels.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_create_new_execution_retry_copies_the_labels(pool: sqlx::PgPool) {
+    let (_db, ws, _) = seed(&pool).await;
+    let source =
+        "id: cne-l\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n\
+                  \x20   message: hi\n    retry:\n      behavior: CREATE_NEW_EXECUTION\n\
+                  \x20     type: constant\n      interval: PT1S\n      maxAttempts: 2\n";
+    let first = start(&pool, ws, source).await;
+    let own = serde_json::json!([{"key": "reason", "value": "backfill"}]);
+    sqlx::query("UPDATE workflow.executions SET labels = $2 WHERE id = $1")
+        .bind(first)
+        .bind(&own)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drain(&pool, &Fails).await;
+    pass_a_second(&pool).await;
+    drain(&pool, &Fails).await;
+    let copied: Option<Value> = sqlx::query_scalar(
+        "SELECT labels FROM workflow.executions WHERE parent_execution_id = $1 AND parent_run_ix IS NULL",
+    )
+    .bind(first)
+    .fetch_one(&pool)
+    .await
+    .expect("the replacement exists");
+    assert_eq!(copied, Some(own));
+}
+
 // ── 5. Pause and resume ─────────────────────────────────────────────────────
 
 /// The paused run keeps its start across the resume; the execution has no

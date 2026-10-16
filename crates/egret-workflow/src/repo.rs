@@ -963,7 +963,7 @@ macro_rules! execution_cols {
          execution_trigger, trigger_execution_id, trigger_run_ix, \
          parent_execution_id, parent_run_ix, loop_index, loop_value, \
          attempt_number, origin_offset_ms, replayed_from_execution_id, \
-         started_at, ended_at, created_at, updated_at"
+         started_at, ended_at, created_at, updated_at, labels, backfill_id"
     };
 }
 
@@ -1040,6 +1040,11 @@ pub struct ExecutionRow {
     pub ended_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The labels this execution was started with beyond its flow's own
+    /// (migration 0192): a backfill's, a replay's copy. `NULL` for none.
+    pub labels: Option<serde_json::Value>,
+    /// The backfill that fired this execution (migration 0192), `NULL` otherwise.
+    pub backfill_id: Option<Uuid>,
 }
 
 /// One `workflow.task_runs` row, whole.

@@ -1,4 +1,4 @@
-import { useId, type ComponentType } from "react";
+import { Fragment, useId, type ComponentType } from "react";
 import { Link } from "react-router-dom";
 import { Clock, Info, Loader2, Puzzle, Webhook, Workflow } from "lucide-react";
 import type { TriggerKindDto } from "@/api/generated/model";
@@ -9,6 +9,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { StateChip } from "@/components/workflows/StateChip";
+import { BackfillCell, BackfillStrip } from "@/components/workflows/triggers/BackfillStrip";
 import {
   FLOW_DISABLED_STATUS,
   kindLabel,
@@ -63,6 +64,8 @@ export function TriggersTable({
   contextOf,
   detailsHref,
   selectionBusy = false,
+  onBackfill,
+  backfillActions,
 }: {
   rows: TableRowData[];
   /** `global` adds the Namespace and Flow columns (links), and names each row by its flow too. */
@@ -84,6 +87,14 @@ export function TriggersTable({
    * `aria-disabled`, not `disabled`, so a focused box keeps the focus.
    */
   selectionBusy?: boolean;
+  /** Opens the create form for a schedule with no backfill; absent, the cell shows a dash for "none". */
+  onBackfill?: (row: TableRowData) => void;
+  /** Pause, resume and delete a row's backfill, and whether one of them is in flight. */
+  backfillActions: {
+    isBusy: (row: TableRowData) => boolean;
+    pause: (row: TableRowData, paused: boolean) => void;
+    remove: (row: TableRowData) => void;
+  };
 }) {
   const idBase = useId();
   const keys = rows.map(selectionKey);
@@ -145,6 +156,7 @@ export function TriggersTable({
           <TableHead>Last execution</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Enabled</TableHead>
+          <TableHead>Backfill</TableHead>
           <TableHead>
             <span className="sr-only">Details</span>
           </TableHead>
@@ -163,121 +175,137 @@ export function TriggersTable({
           const status = statusText(row, ctx);
           const name = rowName(row, variant);
           return (
-            <TableRow key={`${key}#${i}`} data-trigger={row.trigger_id}>
-              <TableCell>
-                <Checkbox
-                  aria-label={`Select ${name}`}
-                  aria-describedby={selectDescribedBy}
-                  disabled={!manage}
-                  aria-disabled={manage && selectionBusy ? true : undefined}
-                  checked={selection.has(key)}
-                  onCheckedChange={(c) => {
-                    if (selectionBusy) return;
-                    const next = new Set(selection);
-                    if (c === true) next.add(key);
-                    else next.delete(key);
-                    onSelectionChange(next);
-                  }}
-                />
-              </TableCell>
-              <TableCell>
-                <Link className="font-mono text-xs hover:underline" to={detailsHref(row)}>
-                  {row.trigger_id}
-                </Link>
-                {row.duplicate_id ? (
-                  <Badge variant="outline" className="ml-2">
-                    Duplicate id
-                  </Badge>
-                ) : null}
-              </TableCell>
-              {variant === "global" ? (
-                <>
-                  <TableCell>
-                    <Link
-                      className="text-muted-foreground hover:underline"
-                      to={`${base}/namespaces/${encodeURIComponent(row.namespace ?? "")}/overview`}
-                    >
-                      {row.namespace}
-                    </Link>
-                  </TableCell>
-                  <TableCell>
-                    <Link className="hover:underline" to={`${base}/flows/${encodeURIComponent(row.flow_uuid)}/triggers`}>
-                      {row.flow_id}
-                    </Link>
-                  </TableCell>
-                </>
-              ) : null}
-              <TableCell>
-                <span className="inline-flex items-center gap-1.5" title={variant === "flow" ? row.type : undefined}>
-                  <KindIcon aria-hidden className="h-4 w-4 text-muted-foreground" />
-                  <span className="sr-only">{kindLabel(row.kind)}: </span>
-                  {shortType(row.type)}
-                </span>
-              </TableCell>
-              <TableCell className="text-muted-foreground">
-                {row.schedule?.next_evaluation_date ? <RelativeTime iso={row.schedule.next_evaluation_date} /> : "—"}
-              </TableCell>
-              <TableCell className="text-muted-foreground">
-                {row.schedule?.evaluated_at ? <RelativeTime iso={row.schedule.evaluated_at} /> : "—"}
-              </TableCell>
-              <TableCell>
-                {row.last_execution ? (
-                  <span className="inline-flex flex-wrap items-center gap-1.5">
-                    <StateChip state={row.last_execution.state} kind="execution" />
-                    <Link
-                      className="font-mono text-xs hover:underline"
-                      to={`${base}/executions/${encodeURIComponent(row.last_execution.id)}/overview`}
-                      title={row.last_execution.id}
-                    >
-                      {row.last_execution.id.slice(0, 8)}
-                    </Link>
-                    <RelativeTime className="text-xs text-muted-foreground" iso={row.last_execution.created_at} />
-                  </span>
-                ) : (
-                  <span className="text-muted-foreground">—</span>
-                )}
-              </TableCell>
-              <TableCell data-testid="trigger-status">{status}</TableCell>
-              <TableCell>
-                <span className="inline-flex items-center gap-2">
-                  <Switch
-                    checked={on}
-                    disabled={!enablement.ok}
-                    // In flight: still focusable, so the keyboard focus stays on it (a `disabled`
-                    // button drops focus to the page); the click is ignored until the answer.
-                    aria-disabled={enablement.ok && busy ? true : undefined}
-                    aria-label={`Trigger ${name} enabled`}
-                    aria-describedby={!enablement.ok ? reasonId : busy ? busyId : undefined}
-                    title={enablement.ok ? (on && ctx.flowDisabled ? FLOW_DISABLED_STATUS : undefined) : enablement.reason}
+            <Fragment key={`${key}#${i}`}>
+              <TableRow data-trigger={row.trigger_id}>
+                <TableCell>
+                  <Checkbox
+                    aria-label={`Select ${name}`}
+                    aria-describedby={selectDescribedBy}
+                    disabled={!manage}
+                    aria-disabled={manage && selectionBusy ? true : undefined}
+                    checked={selection.has(key)}
                     onCheckedChange={(c) => {
-                      if (!busy) onToggle(row, c);
+                      if (selectionBusy) return;
+                      const next = new Set(selection);
+                      if (c === true) next.add(key);
+                      else next.delete(key);
+                      onSelectionChange(next);
                     }}
                   />
-                  {busy ? (
-                    <>
-                      <Loader2 aria-hidden className="h-4 w-4 animate-spin text-muted-foreground" />
-                      <span id={busyId} className="sr-only">
-                        Switching…
-                      </span>
-                    </>
+                </TableCell>
+                <TableCell>
+                  <Link className="font-mono text-xs hover:underline" to={detailsHref(row)}>
+                    {row.trigger_id}
+                  </Link>
+                  {row.duplicate_id ? (
+                    <Badge variant="outline" className="ml-2">
+                      Duplicate id
+                    </Badge>
                   ) : null}
-                  {enablement.ok ? null : (
-                    <span id={reasonId} className="text-xs text-muted-foreground">
-                      {enablement.reason}
+                </TableCell>
+                {variant === "global" ? (
+                  <>
+                    <TableCell>
+                      <Link
+                        className="text-muted-foreground hover:underline"
+                        to={`${base}/namespaces/${encodeURIComponent(row.namespace ?? "")}/overview`}
+                      >
+                        {row.namespace}
+                      </Link>
+                    </TableCell>
+                    <TableCell>
+                      <Link className="hover:underline" to={`${base}/flows/${encodeURIComponent(row.flow_uuid)}/triggers`}>
+                        {row.flow_id}
+                      </Link>
+                    </TableCell>
+                  </>
+                ) : null}
+                <TableCell>
+                  <span className="inline-flex items-center gap-1.5" title={variant === "flow" ? row.type : undefined}>
+                    <KindIcon aria-hidden className="h-4 w-4 text-muted-foreground" />
+                    <span className="sr-only">{kindLabel(row.kind)}: </span>
+                    {shortType(row.type)}
+                  </span>
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {row.schedule?.next_evaluation_date ? <RelativeTime iso={row.schedule.next_evaluation_date} /> : "—"}
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {row.schedule?.evaluated_at ? <RelativeTime iso={row.schedule.evaluated_at} /> : "—"}
+                </TableCell>
+                <TableCell>
+                  {row.last_execution ? (
+                    <span className="inline-flex flex-wrap items-center gap-1.5">
+                      <StateChip state={row.last_execution.state} kind="execution" />
+                      <Link
+                        className="font-mono text-xs hover:underline"
+                        to={`${base}/executions/${encodeURIComponent(row.last_execution.id)}/overview`}
+                        title={row.last_execution.id}
+                      >
+                        {row.last_execution.id.slice(0, 8)}
+                      </Link>
+                      <RelativeTime className="text-xs text-muted-foreground" iso={row.last_execution.created_at} />
                     </span>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
                   )}
-                </span>
-              </TableCell>
-              <TableCell>
-                <Link
-                  className="text-sm text-muted-foreground hover:underline"
-                  to={detailsHref(row)}
-                  aria-label={`Details of ${name}`}
-                >
-                  Details
-                </Link>
-              </TableCell>
-            </TableRow>
+                </TableCell>
+                <TableCell data-testid="trigger-status">{status}</TableCell>
+                <TableCell>
+                  <span className="inline-flex items-center gap-2">
+                    <Switch
+                      checked={on}
+                      disabled={!enablement.ok}
+                      // In flight: still focusable, so the keyboard focus stays on it (a `disabled`
+                      // button drops focus to the page); the click is ignored until the answer.
+                      aria-disabled={enablement.ok && busy ? true : undefined}
+                      aria-label={`Trigger ${name} enabled`}
+                      aria-describedby={!enablement.ok ? reasonId : busy ? busyId : undefined}
+                      title={enablement.ok ? (on && ctx.flowDisabled ? FLOW_DISABLED_STATUS : undefined) : enablement.reason}
+                      onCheckedChange={(c) => {
+                        if (!busy) onToggle(row, c);
+                      }}
+                    />
+                    {busy ? (
+                      <>
+                        <Loader2 aria-hidden className="h-4 w-4 animate-spin text-muted-foreground" />
+                        <span id={busyId} className="sr-only">
+                          Switching…
+                        </span>
+                      </>
+                    ) : null}
+                    {enablement.ok ? null : (
+                      <span id={reasonId} className="text-xs text-muted-foreground">
+                        {enablement.reason}
+                      </span>
+                    )}
+                  </span>
+                </TableCell>
+                <TableCell>
+                  <BackfillCell row={row} manage={manage} onBackfill={onBackfill} />
+                </TableCell>
+                <TableCell>
+                  <Link
+                    className="text-sm text-muted-foreground hover:underline"
+                    to={detailsHref(row)}
+                    aria-label={`Details of ${name}`}
+                  >
+                    Details
+                  </Link>
+                </TableCell>
+              </TableRow>
+              {row.backfill ? (
+                <BackfillStrip
+                  row={row}
+                  colSpan={variant === "global" ? 12 : 10}
+                  name={name}
+                  manage={manage}
+                  busy={backfillActions.isBusy(row)}
+                  onPause={(paused) => backfillActions.pause(row, paused)}
+                  onDelete={() => backfillActions.remove(row)}
+                />
+              ) : null}
+            </Fragment>
           );
         })}
       </TableBody>

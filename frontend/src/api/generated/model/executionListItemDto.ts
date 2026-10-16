@@ -7,6 +7,7 @@
  */
 import type { ExecutionListItemDtoExecutionTrigger } from './executionListItemDtoExecutionTrigger';
 import type { ExecutionListItemDtoInputs } from './executionListItemDtoInputs';
+import type { LabelDto } from './labelDto';
 
 /**
  * One execution as `GET /executions` lists it.
@@ -90,4 +91,15 @@ export interface ExecutionListItemDto {
   ended_at?: string | null;
   created_at: string;
   updated_at: string;
+  /**
+     * The labels this execution was started with beyond its flow's own
+     * `labels:` (a backfill's, a replay's copy); `null` for none. Not the flow's.
+     * @nullable
+     */
+  labels?: LabelDto[] | null;
+  /**
+     * The backfill that fired this execution (W7f), `null` otherwise.
+     * @nullable
+     */
+  backfill_id?: string | null;
 }
