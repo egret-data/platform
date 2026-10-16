@@ -85,9 +85,10 @@
 //! cap of its own, of the same size, taken before its lock connection (final
 //! review I-1). Past it, or with the view's lock busy, the commit passes at
 //! once with no EXPLAIN and no lock connection, and one bounded pooled
-//! transaction records the lineage `failed` if the view's lock is free. That
-//! record takes a permit of the same cap with no wait, and is skipped (left to
-//! the sweep) when none is free (re-review N-6).
+//! transaction records the lineage `failed` if the view's lock is free.
+//! Overflow records share the cap with the EXPLAIN path: each waits (holding
+//! no connection) for a permit, up to `OVERFLOW_PERMIT_WAIT`, and may then
+//! hold it for up to `RECORD_LOCK_WAIT` (re-review N-6, fix round 1).
 //!
 //! Once a hold has its lock, the rest of the request runs in a task of its
 //! own (final review I-2): a client that disconnects mid-wait drops only the
@@ -1344,9 +1345,10 @@ impl ViewHold {
     /// it is taken only under a permit of its own cap (final review I-1).
     /// With no permit free, or the lock busy, it skips the EXPLAIN, lets the
     /// commit through at once, and records `failed` without waiting
-    /// ([`record_failed_if_free`]), under a permit of the same cap taken with
-    /// no wait; with none free the record is skipped and the sweep covers the
-    /// view (re-review N-6).
+    /// ([`record_failed_if_free`]), under a permit of the same cap that a task
+    /// waits for, holding no connection, up to [`OVERFLOW_PERMIT_WAIT`]; only
+    /// past that is the record skipped and the view left to the sweep
+    /// (re-review N-6, fix round 1).
     ///
     /// Once it has its permit and its lock, the rest runs in a task of its
     /// own (re-review N-1), as a held request's does: a client that
@@ -1382,18 +1384,29 @@ impl ViewHold {
             let response = next.run(req).await;
             if response.status().is_success() {
                 // N-6: at most the cap of these hold a pooled connection at
-                // once. Each is bounded (`RECORD_LOCK_WAIT`), so no task
-                // outlives a few seconds.
-                let Ok(permit) = self.best_effort.clone().try_acquire_owned() else {
-                    tracing::debug!(
-                        ?view,
-                        "view hold: no best-effort permit for the failed record; \
-                         its lineage is left to the sweep"
-                    );
-                    return response;
-                };
+                // once. The task waits for a permit (holding no connection),
+                // up to `OVERFLOW_PERMIT_WAIT`; the record itself is bounded
+                // by `RECORD_LOCK_WAIT`, so no task outlives a few seconds.
+                // Fix round 1: waiting, not skipping, so a replace's stale
+                // `computed` lineage becomes `failed`, which the
+                // classification sweep picks up.
                 let db = self.db.clone();
+                let permits = self.best_effort.clone();
                 let record = async move {
+                    let permit =
+                        match tokio::time::timeout(OVERFLOW_PERMIT_WAIT, permits.acquire_owned())
+                            .await
+                        {
+                            Ok(Ok(permit)) => permit,
+                            Ok(Err(_)) | Err(_) => {
+                                tracing::debug!(
+                                    ?view,
+                                    "view hold: no best-effort permit for the failed record in \
+                                 time; its lineage is left to the sweep"
+                                );
+                                return;
+                            }
+                        };
                     let _permit = permit;
                     match record_failed_if_free(db, key, view.clone()).await {
                         Ok(true) => {}
@@ -1985,6 +1998,14 @@ async fn try_view_lock(db: &Db, key: &str) -> Result<Option<sqlx::PgConnection>,
 
 /// How long [`record_failed_if_free`] waits for the view-tag lock.
 const RECORD_LOCK_WAIT: Duration = EXPLAIN_BUDGET;
+
+/// How long an overflow record waits for a best-effort permit before it
+/// leaves the view to the sweep (Task 8 fix round 1). One permit holder holds
+/// it for at most an EXPLAIN ([`EXPLAIN_BUDGET`]) or one record's lock wait
+/// ([`RECORD_LOCK_WAIT`]), plus short transactions; the sum covers the longer
+/// of the two with margin, so a record queued behind one slow holder still
+/// lands. Waiting holds no connection.
+const OVERFLOW_PERMIT_WAIT: Duration = EXPLAIN_BUDGET.saturating_add(RECORD_LOCK_WAIT);
 
 /// A best-effort commit that skipped its EXPLAIN (no permit, or the view's
 /// lock busy) records the view's lineage `failed`, so the sweep a later

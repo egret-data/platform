@@ -1844,10 +1844,9 @@ async fn a_best_effort_record_under_a_busy_view_lock_leaves_the_lineage_to_the_s
 
 /// Final review I-1: a burst of best-effort commits beyond the cap. The
 /// commit that holds the permit runs its EXPLAIN; every other commit passes
-/// through at once, with no EXPLAIN and no lock connection of its own. Its
-/// lineage is never computed: re-review N-6 records it `failed` only when a
-/// permit is free by then, and otherwise leaves it to the sweep
-/// (`overflow_records_never_hold_more_connections_than_the_cap`).
+/// through at once, with no EXPLAIN and no lock connection of its own, and its
+/// lineage is recorded `failed` (its view's lock is free) for the sweep, once
+/// its record task gets a permit (re-review N-6).
 #[tokio::test]
 async fn a_best_effort_burst_beyond_the_cap_explains_once_and_never_waits() {
     let Some(env) = env_with(Opts {
@@ -1895,15 +1894,12 @@ async fn a_best_effort_burst_beyond_the_cap_explains_once_and_never_waits() {
         env.lineage(names[0]).await,
         computed(&["pii"], &env.catalog)
     );
+    let e = &env;
     for name in &names[1..] {
-        let lineage = env.lineage(name).await;
-        assert!(
-            matches!(
-                lineage,
-                RecordedLineage::Missing | RecordedLineage::Failed { .. }
-            ),
-            "{name}: {lineage:?}"
-        );
+        eventually("a commit past the cap is recorded failed", || async move {
+            matches!(e.lineage(name).await, RecordedLineage::Failed { .. })
+        })
+        .await;
     }
 }
 
@@ -2130,12 +2126,12 @@ async fn record_holders(conn: &mut sqlx::PgConnection, keys: &[String]) -> i64 {
     .unwrap()
 }
 
-/// Re-review N-6: the overflow records are bounded by the best-effort cap.
-/// With the cap at 1, held by a commit whose EXPLAIN is slow, and the
-/// view-tag lock held here, ten commits past the cap each return at once and
-/// no more than `cap` record tasks hold a pooled connection at any moment.
-/// Without a permit the record is skipped: the view's lineage is left to the
-/// sweep.
+/// Re-review N-6 (fix round 1): the overflow records are bounded by the
+/// best-effort cap, and wait for a permit rather than skip. With the cap at 1
+/// and the view-tag lock held here, ten commits past the cap each return at
+/// once. When the permit frees, exactly `cap` record tasks hold a pooled
+/// connection (each waiting on the view-tag lock); the others wait for a
+/// permit holding none. Once the lock frees, every view is recorded `failed`.
 #[tokio::test]
 async fn overflow_records_never_hold_more_connections_than_the_cap() {
     const CAP: usize = 1;
@@ -2148,6 +2144,14 @@ async fn overflow_records_never_hold_more_connections_than_the_cap() {
     else {
         return;
     };
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces/s/views",
+            Some(create_body("dup", "SELECT id FROM orders")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     // The blocker and the sampler stay out of the hold's own pool.
     let dsn = egret_test_db::url().await.expect("database");
     let side = Db::connect(&dsn, 2).await.expect("connect");
@@ -2162,8 +2166,8 @@ async fn overflow_records_never_hold_more_connections_than_the_cap() {
         .map(|n| view_lock_key(&env.prefix, "s", n))
         .collect();
 
-    // The first commit holds the one permit across its EXPLAIN (5 s budget).
-    let first = env.create("p0", "SELECT id, ssn FROM pii WHERE SLOW15");
+    // The one permit is taken for ~1.5 s, then freed while the view-tag
+    // lock is still held here.
     let rest = async {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let mut set = tokio::task::JoinSet::new();
@@ -2176,19 +2180,24 @@ async fn overflow_records_never_hold_more_connections_than_the_cap() {
                 (got, started.elapsed())
             });
         }
+        let answers: Vec<_> = set.join_all().await;
+        // Sample until the freed permit has been taken, then 500 ms more, so
+        // the view-tag lock (global; other tests want it) is held briefly.
         let mut most = 0;
-        let sampled_until = Instant::now() + Duration::from_millis(2500);
-        while Instant::now() < sampled_until {
-            most = most.max(record_holders(&mut sampler, &keys).await);
+        let mut until = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < until {
+            let now = record_holders(&mut sampler, &keys).await;
+            if now > 0 && most == 0 {
+                until = until.min(Instant::now() + Duration::from_millis(500));
+            }
+            most = most.max(now);
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let answers: Vec<_> = set.join_all().await;
         blocker.rollback().await.unwrap();
         (answers, most)
     };
-    let (first, (answers, most)) = tokio::join!(first, rest);
+    let ((), (answers, most)) = tokio::join!(hold_the_permit_briefly(&env, "dup"), rest);
 
-    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
     assert_eq!(answers.len(), names.len());
     for ((status, body), took) in &answers {
         assert_eq!(*status, StatusCode::OK, "{body}");
@@ -2197,12 +2206,87 @@ async fn overflow_records_never_hold_more_connections_than_the_cap() {
             "a commit past the cap waited {took:?}"
         );
     }
-    assert!(
-        most <= CAP as i64,
-        "{most} overflow record tasks held a connection at once (cap {CAP})"
+    assert_eq!(
+        most, CAP as i64,
+        "overflow record tasks holding a connection at once (cap {CAP})"
     );
-    // Every record was skipped (the permit stayed taken): the sweep's job.
+    assert_eq!(
+        env.runner.calls.load(Ordering::SeqCst),
+        1,
+        "only the permit holder ran an EXPLAIN"
+    );
+    // No record was skipped: each waited for the permit.
+    let e = &env;
     for name in &names {
-        assert_eq!(env.lineage(name).await, RecordedLineage::Missing, "{name}");
+        eventually("an overflow record landed failed", || async move {
+            matches!(e.lineage(name).await, RecordedLineage::Failed { .. })
+        })
+        .await;
     }
+}
+
+/// Take the one best-effort permit (cap 1) for about 1.5 s, then free it: a
+/// create of `name`, which already exists, whose EXPLAIN is slow. lakekeeper
+/// refuses it, so it records nothing and takes no view-tag lock.
+async fn hold_the_permit_briefly(env: &Env, name: &str) {
+    let (status, body) = env
+        .create(name, "SELECT id, ssn FROM pii WHERE SLOW1")
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "the duplicate create: {body}");
+}
+
+/// Task 8 fix round 1 (c): a replace past the cap must not leave the view's
+/// previous `computed` lineage in place. It is recorded `failed`, which the
+/// classification sweep (`sweep_unjudged`) picks up; a stale `computed` one
+/// it skips, so a classification of a table only the new definition reads
+/// would reach the view only at the scheduled sweep.
+#[tokio::test]
+async fn an_over_cap_replace_replaces_the_stale_lineage_with_failed() {
+    let Some(env) = env_with(Opts {
+        classified: false,
+        max_holds: 1,
+        ..Opts::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let (status, body) = env.create("v1", "SELECT id, ssn FROM pii").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(env.lineage("v1").await, computed(&["pii"], &env.catalog));
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces/s/views",
+            Some(create_body("dup", "SELECT id FROM orders")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let view = env.view("v1").await.unwrap();
+
+    let ((), (status, body)) = tokio::join!(hold_the_permit_briefly(&env, "dup"), async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        env.call(
+            "POST",
+            "namespaces/s/views/v1",
+            Some(replace_body(&view, "SELECT id, name FROM orders")),
+        )
+        .await
+    });
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        current_sql(&env.view("v1").await.unwrap()),
+        "SELECT id, name FROM orders"
+    );
+    assert_eq!(
+        env.runner.calls.load(Ordering::SeqCst),
+        2,
+        "the replace past the cap ran no EXPLAIN"
+    );
+    let e = &env;
+    eventually("the over-cap replace recorded failed", || async move {
+        matches!(e.lineage("v1").await, RecordedLineage::Failed { .. })
+    })
+    .await;
 }
