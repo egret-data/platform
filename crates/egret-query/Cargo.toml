@@ -13,6 +13,10 @@ egret-auth.workspace = true
 egret-workspace.workspace = true
 egret-secrets.workspace = true
 egret-storage.workspace = true
+# View governance Task 7: `execution::lineage` implements
+# `egret_perm_compile::lineage::ExplainRunner` (already in this graph through
+# `egret-workspace`).
+egret-perm-compile.workspace = true
 axum.workspace = true
 sqlx.workspace = true
 serde.workspace = true

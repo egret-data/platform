@@ -73,6 +73,11 @@ pub enum PolicyAttribution {
         tag_id: Uuid,
         locator: Option<String>,
     },
+    /// `perm-clearance-mv` (`clearance::mv_deny_inputs`, view governance A3):
+    /// the engine-wide `create materialized view` deny of a StarRocks profile.
+    /// It belongs to no single tag: its exceptions are the users cleared for
+    /// every classification on the profile.
+    MaterializedViewDeny,
 }
 
 /// A `Uuid`'s hyphenated `Display` (8-4-4-4-12 hex) is always exactly this
@@ -91,6 +96,9 @@ pub fn attribute_policy_name(name: &str) -> Option<PolicyAttribution> {
         return Some(PolicyAttribution::Rule { id, locator });
     }
     if let Some(rest) = name.strip_prefix(COMPILER_CLEARANCE_PREFIX) {
+        if rest == crate::clearance::MV_DENY_SUFFIX {
+            return Some(PolicyAttribution::MaterializedViewDeny);
+        }
         let (tag_id, locator) = parse_uuid_and_locator(rest)?;
         return Some(PolicyAttribution::Clearance { tag_id, locator });
     }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -38,6 +38,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import ViewExposureSection from "@/routes/governance/ViewExposureSection";
 
 const DEFAULT_COLOR = "#6366f1";
 
@@ -379,22 +380,20 @@ export default function TagDetail() {
               measured, an uncleared user inserted and deleted through a live clearance on Trino —
               so do not assume a classification blocks writes on either one.
             </Badge>
-            {/* SP4c Task 7 / D0b / D5. A view is not covered on either engine,
-                and Trino's DEFINER-rights model makes the hole two-directional.
-                Ruling (2026-09-28): state the limit, do not block view
-                creation — so this sentence IS the control, and an operator
-                told only "views are not covered" would not expect a CLEARED
-                user to be blocked by an uncleared owner. */}
+            {/* View governance Task 12 (C4): the measured behaviour since view
+                governance (Task 11 live run). Trino tags a view's columns from
+                its tables, StarRocks masks the base column. Trino's DEFINER
+                rights still make an uncleared owner's view block everybody. */}
             <Badge
               variant="warning"
               className="w-fit items-start gap-1.5 whitespace-normal text-left font-normal"
             >
               <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-              A view over a classified column is not covered on either engine: reading the column
-              through a view returns it in full to a user without clearance. On Trino a view runs
-              with its owner&apos;s rights, so it fails both ways — a cleared owner&apos;s view
-              hands the column to the uncleared, and an uncleared owner&apos;s view blocks
-              everybody, the cleared included.
+              Trino views in egret&apos;s catalogs carry the classification: a user without
+              clearance is refused through them. On StarRocks a reader who holds the grant reads
+              NULL through a plain or nested view, and an INVOKER view is refused. Existing StarRocks
+              materialized views, and views of other connectors, are not covered. On Trino an
+              uncleared owner&apos;s DEFINER view blocks everybody, the cleared included.
             </Badge>
             <p className="text-xs text-muted-foreground">
               A StarRocks clearance expands to one policy per tagged column, counted per profile:
@@ -416,6 +415,8 @@ export default function TagDetail() {
         />
       </section>
       </div>
+
+      <ViewExposureSection tagId={id} engineGated={engineGated} />
 
       <ConfirmDeleteDialog
         open={deleteOpen}
@@ -477,6 +478,7 @@ function ClearanceTable({
 }) {
   const [type, setType] = useState<ClearanceType>("role");
   const [open, setOpen] = useState(false);
+  const listId = useId();
   const [q, setQ] = useState("");
   const [pending, setPending] = useState<Option | null>(null);
 
@@ -510,6 +512,8 @@ function ClearanceTable({
               <Button
                 variant="outline"
                 role="combobox"
+                aria-expanded={open}
+                aria-controls={listId}
                 aria-label={`${type === "role" ? "Role" : "Group"} to add`}
                 className="w-56 justify-between font-normal"
               >
@@ -526,7 +530,7 @@ function ClearanceTable({
                   onChange={(e) => setQ(e.target.value)}
                 />
               </div>
-              <div className="max-h-64 overflow-y-auto py-1">
+              <div id={listId} className="max-h-64 overflow-y-auto py-1">
                 {matches.length === 0 ? (
                   <p className="px-3 py-2 text-sm text-muted-foreground">No {type}s found.</p>
                 ) : (

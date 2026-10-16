@@ -8,7 +8,7 @@
 //! the `ProfileCase` build, and `compare`. Release only:
 //!
 //! ```bash
-//! cargo test -p egret-perm-compile --release --test gate_timing -- --ignored --nocapture
+//! cargo test -p egret-perm-compile --release --features harness --test gate_timing -- --ignored --nocapture
 //! ```
 //!
 //! Shapes: `base` (single-user allow policies), `deny` (the base plus one deny
@@ -236,5 +236,231 @@ fn gate_time_by_profile_size() {
                 }
             }
         }
+    }
+}
+
+// ── View governance Task 3: the StarRocks clearance shape ────────────────────
+//
+// A StarRocks clearance now emits TWO policies per classified column (the
+// per-column access deny and the priority-1 mask) plus ONE `create materialized
+// view` deny per profile (on `default_catalog`/`*`, A3 revised 2026-10-14). This times the migration gate over a StarRocks
+// profile of N single-user allow policies (distinct tables) and C classified
+// columns, so the profile serves `N + 2C + 1` policies, with one policy changed
+// by the migration:
+//
+// * `access`: the first allow policy gains a user;
+// * `mask`: the first rule mask (on a classified column) changes its type.
+//
+// The clearance policies are built by the compiler's own functions
+// (`harness_support`), so the shape is what egret serves.
+
+fn sr_level(v: &str) -> Value {
+    level(&[v])
+}
+
+fn sr_policy(i: usize, users: &[&str]) -> Value {
+    json!({
+        "id": 500 + i as i64, "name": format!("p{i}"), "service": "sr-p", "policyType": 0,
+        "isEnabled": true, "policyPriority": 0,
+        "resources": {
+            "catalog": sr_level("wh"), "database": sr_level(&format!("s{i}")),
+            "table": sr_level(&format!("t{i}")), "column": sr_level("*")
+        },
+        "policyItems": [{
+            "users": users, "groups": [], "roles": [],
+            "accesses": [{"type": "select", "isAllowed": true}]
+        }],
+        "denyPolicyItems": [], "allowExceptions": [], "denyExceptions": []
+    })
+}
+
+fn sr_column(c: usize) -> egret_perm_compile::TaggedColumn {
+    // Spread over databases: 4 columns a table, 4 tables a database. The MV
+    // deny is one per profile whatever the spread (A3 revised 2026-10-14).
+    egret_perm_compile::TaggedColumn {
+        catalog: "wh".into(),
+        schema: format!("d{}", c / 16),
+        table: format!("tab{}", (c / 4) % 4),
+        column: format!("c{}", c % 4),
+    }
+}
+
+fn sr_deny(c: usize, cleared: &[String]) -> Value {
+    let col = sr_column(c);
+    json!({
+        "id": 2000 + c as i64, "name": format!("perm-clearance-deny-{c}"), "service": "sr-p",
+        "serviceType": "starrocks", "policyType": 0, "isEnabled": true, "policyPriority": 0,
+        "resources": {
+            "catalog": sr_level(&col.catalog), "database": sr_level(&col.schema),
+            "table": sr_level(&col.table), "column": sr_level(&col.column)
+        },
+        "policyItems": [],
+        "denyPolicyItems": [{
+            "users": [], "groups": ["public"], "roles": [],
+            "accesses": [{"type": "select", "isAllowed": true}]
+        }],
+        "allowExceptions": [],
+        "denyExceptions": [{
+            "users": cleared, "groups": [], "roles": [],
+            "accesses": [{"type": "select", "isAllowed": true}]
+        }]
+    })
+}
+
+fn sr_rule_mask(c: usize, mask_type: &str) -> Value {
+    let col = sr_column(c);
+    json!({
+        "id": 3000 + c as i64, "name": format!("rule-mask-{c}"), "service": "sr-p",
+        "serviceType": "starrocks", "policyType": 1, "isEnabled": true, "policyPriority": 0,
+        "resources": {
+            "catalog": sr_level(&col.catalog), "database": sr_level(&col.schema),
+            "table": sr_level(&col.table), "column": sr_level(&col.column)
+        },
+        "dataMaskPolicyItems": [{
+            "users": ["ann"], "groups": [], "roles": [],
+            "accesses": [{"type": "select", "isAllowed": true}],
+            "dataMaskInfo": {"dataMaskType": mask_type}
+        }],
+        "policyItems": [], "denyPolicyItems": []
+    })
+}
+
+/// The whole StarRocks download: N allow policies, C classified columns each
+/// with a deny, a folded mask and one rule mask (so the fold has work to do),
+/// and the profile's one MV deny.
+fn sr_policies(n: usize, c: usize, first_mask: &str) -> Vec<Value> {
+    let cleared: Vec<String> = vec!["ann".into(), "bob".into()];
+    let mut out: Vec<Value> = (0..n)
+        .map(|i| sr_policy(i, &[&format!("user{i}")]))
+        .collect();
+    let rules: Vec<Value> = (0..c)
+        .map(|k| sr_rule_mask(k, if k == 0 { first_mask } else { "MASK_HASH" }))
+        .collect();
+    let mut id = 4000;
+    for k in 0..c {
+        out.push(sr_deny(k, &cleared));
+        let mut mask = egret_perm_compile::harness_support::starrocks_clearance_mask(
+            "sr-p",
+            uuid::Uuid::from_u128(k as u128 + 1),
+            &sr_column(k),
+            &cleared,
+            &rules,
+            PluginVersion::Ranger2_8_0,
+        )
+        .expect("the fold decides");
+        mask["id"] = json!(id);
+        id += 1;
+        out.push(mask);
+    }
+    out.extend(rules);
+    let pending: Vec<_> = (0..c).map(|k| (sr_column(k), cleared.clone())).collect();
+    for mut mv in egret_perm_compile::harness_support::starrocks_mv_denies("sr-p", &pending) {
+        mv["id"] = json!(id);
+        id += 1;
+        out.push(mv);
+    }
+    out
+}
+
+fn sr_envelope(policies: Vec<Value>) -> ServicePolicySet {
+    serde_json::from_value(json!({
+        "serviceName": "sr-p", "serviceId": 1, "policyVersion": 1,
+        "policies": policies, "serviceDef": def_json("starrocks.json"),
+    }))
+    .expect("parse envelope")
+}
+
+fn sr_row(n: usize, c: usize, change: &str, versions: &[PluginVersion], def: &ServiceDef) {
+    let before_p = sr_policies(n, c, "MASK_HASH");
+    let mut after_p = sr_policies(
+        n,
+        c,
+        if change == "mask" {
+            "MASK_NULL"
+        } else {
+            "MASK_HASH"
+        },
+    );
+    if change == "access" {
+        after_p[0] = sr_policy(0, &["user0", "bob"]);
+    }
+    let (before, after) = (sr_envelope(before_p), sr_envelope(after_p));
+    let policies = before.policies.len();
+
+    let total = Instant::now();
+    let counted = planned_probe_count(&before, &after, def, &[], PruneMode::Pruned);
+    let plan = plan_probes(&before, &after, def, &[], PruneMode::Pruned);
+    let pruned = plan.probes.len();
+    let case = ProfileCase {
+        service_id: 1,
+        service_name: "timing".into(),
+        before: &before,
+        after: &after,
+        service_def: def,
+        engine: EngineConfig::without_super_users(),
+        versions: versions.to_vec(),
+        probes: plan.probes,
+    };
+    let ds = compare(&case).expect("the gate answered");
+    let total_secs = total.elapsed().as_secs_f64();
+    let work = pruned * versions.len() * (before.policies.len() + after.policies.len());
+    println!(
+        "starrocks N={n} C={c} policies={policies} change={change} ver={} full={} pruned={pruned} \
+         fallback={:?} work={work} disagreements={} total={total_secs:.2}s us/unit={:.2}",
+        versions.len(),
+        plan.full_count,
+        plan.fallback,
+        ds.len(),
+        total_secs * 1e6 / work.max(1) as f64
+    );
+    assert_eq!(counted, pruned, "the cap check counts what is built");
+    assert!(plan.fallback != Some(FallbackReason::EnvelopeDiffers));
+}
+
+#[test]
+#[ignore = "timing harness; run with --release -- --ignored --nocapture"]
+fn gate_time_for_the_starrocks_clearance_shape() {
+    let def = ServiceDef::parse(&def_json("starrocks.json"));
+    let both = [PluginVersion::Ranger2_8_0, PluginVersion::Ranger2_9_0];
+    for change in ["access", "mask"] {
+        for (n, c) in [
+            (20, 0),
+            (20, 4),
+            (20, 8),
+            (20, 16),
+            (20, 32),
+            (40, 8),
+            (40, 16),
+            (60, 8),
+            (60, 16),
+        ] {
+            sr_row(n, c, change, &both, &def);
+        }
+    }
+}
+
+/// The `mask` change is the worst for the gate: the folded clearance mask (at
+/// priority one) changes with the rule mask, and a non-zero priority in the
+/// delta turns pruning off (`NonZeroPriorityInDelta`), so the probe set is the
+/// full one. The sizes here are the ones whose work lands at or under the cap.
+#[test]
+#[ignore = "timing harness; run with --release -- --ignored --nocapture"]
+fn gate_time_for_the_starrocks_clearance_shape_with_a_changed_rule_mask() {
+    let def = ServiceDef::parse(&def_json("starrocks.json"));
+    let both = [PluginVersion::Ranger2_8_0, PluginVersion::Ranger2_9_0];
+    let one = [PluginVersion::Ranger2_8_0];
+    for (n, c) in [
+        (1, 1),
+        (2, 1),
+        (4, 1),
+        (6, 1),
+        (8, 1),
+        (4, 2),
+        (6, 2),
+        (2, 4),
+        (4, 4),
+    ] {
+        sr_row(n, c, "mask", &one, &def);
+        sr_row(n, c, "mask", &both, &def);
     }
 }

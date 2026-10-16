@@ -508,6 +508,7 @@ impl ClassificationPolicyRepo {
             validate_role_name(role)?;
         }
         let mut tx = self.db.pool.begin().await?;
+        let reach = TagViewReach::of(&mut tx, tag_id).await?;
         sqlx::query(
             "INSERT INTO classification_policies \
                  (tag_id, required_roles, required_groups, created_by, updated_at) \
@@ -523,7 +524,9 @@ impl ClassificationPolicyRepo {
         .bind(by)
         .execute(&mut *tx)
         .await?;
+        reach.retag_and_bump(&mut tx).await?;
         let skipped = Self::recompile_for_clearance_in_tx(&mut tx).await?;
+        reach.refuse_created_overlaps(&mut tx).await?;
         tx.commit().await?;
         self.bus.publish(RolesChanged);
         Ok(skipped)
@@ -538,11 +541,14 @@ impl ClassificationPolicyRepo {
         tag_id: Uuid,
     ) -> Result<Vec<egret_perm_compile::SkippedItem>, BiError> {
         let mut tx = self.db.pool.begin().await?;
+        let reach = TagViewReach::of(&mut tx, tag_id).await?;
         sqlx::query("DELETE FROM classification_policies WHERE tag_id = $1")
             .bind(tag_id)
             .execute(&mut *tx)
             .await?;
+        reach.retag_and_bump(&mut tx).await?;
         let skipped = Self::recompile_for_clearance_in_tx(&mut tx).await?;
+        reach.refuse_created_overlaps(&mut tx).await?;
         tx.commit().await?;
         self.bus.publish(RolesChanged);
         Ok(skipped)
@@ -641,5 +647,85 @@ impl ClassificationPolicyRepo {
         )
         .fetch_all(&self.db.pool)
         .await?)
+    }
+}
+
+/// What a change to `tag_id`'s clearance reaches (view governance B3): a tag
+/// that gains or loses its gate changes which tags a view's lineage carries to
+/// it ([`egret_perm_compile::lineage::view_tag_set`] counts only
+/// clearance-bearing tags), so the views reading a table that carries the tag
+/// are re-tagged in the clearance write's transaction.
+///
+/// Task 9 fix round 1: [`Self::of`] takes the view-tag lock first (I2), and
+/// snapshots the overlaps of every profile bound to the views' warehouses
+/// before anything changes, so a re-tag that puts the tag beside another
+/// masked tag on a view column is refused like any other assignment that
+/// completes an order-ambiguous pair (I4, SP4d-4).
+struct TagViewReach {
+    tables_warehouses: Vec<Uuid>,
+    views: Vec<egret_perm_compile::lineage::ViewRef>,
+    warehouses: Vec<Uuid>,
+    before: egret_perm_compile::overlap::UnitSnapshot,
+}
+
+impl TagViewReach {
+    async fn of(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        tag_id: Uuid,
+    ) -> Result<Self, BiError> {
+        egret_perm_compile::view_tags::lock_view_tags_in_tx(tx).await?;
+        let tables = egret_perm_compile::view_tags::tables_carrying_tag(tx, tag_id).await?;
+        let tables_warehouses: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT warehouse_id FROM catalog_tag_assignments \
+              WHERE tag_id = $1 ORDER BY 1",
+        )
+        .bind(tag_id)
+        .fetch_all(&mut **tx)
+        .await?;
+        let views = egret_perm_compile::view_tags::dependent_views(tx, &tables).await?;
+        let warehouses = egret_perm_compile::view_tags::warehouses_of_views(tx, &views).await?;
+        let services =
+            egret_catalog_registry::services_bound_to_warehouses(&mut **tx, &warehouses).await?;
+        let before = egret_perm_compile::overlap::unit_snapshot_via(tx, &services).await?;
+        Ok(Self {
+            tables_warehouses,
+            views,
+            warehouses,
+            before,
+        })
+    }
+
+    /// Re-tag the views, and bump the warehouses whose view rows changed,
+    /// once each. Asks, at commit, for the sweep of the views that have no
+    /// computed lineage in the tag's tables' profiles.
+    async fn retag_and_bump(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), BiError> {
+        let summary = egret_perm_compile::view_tags::retag_views_in_tx(tx, &self.views).await?;
+        let touched: Vec<Uuid> = summary.warehouses.into_iter().collect();
+        if let Some(outside) = touched.iter().find(|w| !self.warehouses.contains(w)) {
+            return Err(BiError::Conflict(format!(
+                "a view in warehouse {outside} changed while this clearance write ran; retry"
+            )));
+        }
+        if !touched.is_empty() {
+            egret_catalog_registry::bump_tag_versions_for_warehouses(tx, &touched).await?;
+        }
+        egret_perm_compile::view_tags::notify_classification_in_tx(tx, &self.tables_warehouses)
+            .await?;
+        Ok(())
+    }
+
+    /// After the recompile: refuse a pair the re-tag created.
+    async fn refuse_created_overlaps(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), BiError> {
+        egret_perm_compile::overlap::refuse_created_overlaps_via(tx, &self.before)
+            .await
+            .map_err(|e| {
+                BiError::from_assignment_check(e, "this clearance to the views over its tables")
+            })
     }
 }

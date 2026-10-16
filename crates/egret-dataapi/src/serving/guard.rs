@@ -72,7 +72,9 @@ use super::ServingError;
 
 /// What the deployed ingress will wait for a Data API call, in seconds.
 ///
-/// egret's `Ingress` sets `nginx.ingress.kubernetes.io/proxy-read-timeout: "60"`
+/// egret's `egret` Ingress object sets
+/// `nginx.ingress.kubernetes.io/proxy-read-timeout: "60"` for `/data-api` and
+/// every other path but `/catalog`, which has its own object at 120 s
 /// (`deploy/helm/egret/templates/ingress.yaml`). That annotation was added
 /// *with* this constant: before it, 60 was ingress-nginx's **default**, read out
 /// of the running controller's generated config rather than chosen — a number

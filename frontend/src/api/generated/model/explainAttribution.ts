@@ -42,4 +42,6 @@ export type ExplainAttribution = {
   /** @nullable */
   locator?: string | null;
   kind: 'clearance';
+} | {
+  kind: 'materialized_view_deny';
 };

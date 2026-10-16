@@ -365,7 +365,7 @@ fn level_covers(grant: &Option<String>, target: &Option<String>) -> bool {
 /// oracle: an oracle that under-matches would bless a compiler that
 /// over-permits. So this implements real glob matching rather than treating
 /// `"*"` as a single special case.
-fn glob_match(pattern: &str, value: &str) -> bool {
+pub fn glob_match(pattern: &str, value: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let v: Vec<char> = value.chars().collect();
     // Classic greedy wildcard match with backtracking: `star` remembers the

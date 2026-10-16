@@ -380,3 +380,97 @@ async fn a_dangling_tag_service_omits_the_block_and_a_real_one_embeds_it() {
         "the tag service's enabled policies must be in the block: {sp}"
     );
 }
+
+/// **The `tagPolicies` block carries the `tag` service-def, whatever the tag
+/// service's own `type` is.** Found live on Trino 483 / plugin 2.5.0.
+///
+/// `download_policies` used to fetch the block's def by `tsvc.r#type`. The admin
+/// API (`create_profile`) accepts only `trino` and `starrocks`, so a tag service
+/// made through it is a `trino` profile, and the block went out carrying
+/// `trino.json`. That def has no `tag` resource, so the plugin logged
+/// `RangerDefaultPolicyResourceMatcher.init() failed: policyResources elements
+/// are not part of any valid resourcedef hierarchy. (serviceDef=trino,
+/// policyResourceKeys=tag` per tag policy and then applied EVERY tag policy to
+/// EVERY tagged column — measured against the real jar in
+/// `tests/ranger/src/test/java/EgretTagBlockServiceDefTest.java`. Real Ranger
+/// Admin always serves this block with the `tag` def.
+#[tokio::test]
+async fn the_tag_block_carries_the_tag_def_even_for_a_trino_typed_tag_service() {
+    let Some(url) = egret_test_db::url().await else {
+        eprintln!("skip");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let store = PolicyStore::new(db);
+    seed_trino(&store).await.expect("seed trino");
+    egret_policy::seed_tag(&store).await.expect("seed tag def");
+    let app = ranger_router(RangerState {
+        store: store.clone(),
+        auth_token: Arc::from(TOKEN),
+    });
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    // The shape the admin API produces: the tag service is a `trino` profile.
+    let tag_name = format!("tagdef_{suffix}_tag");
+    let tag_svc = store
+        .create_service(&tag_name, "trino", &json!({}))
+        .await
+        .expect("create trino-typed tag service");
+    let linked = format!("tagdef_{suffix}");
+    store
+        .create_service(&linked, "trino", &json!({ "tagService": tag_name }))
+        .await
+        .expect("create linked profile");
+    for (name, tag) in [("tp_key", "vgkey"), ("tp_secret", "vgsecret")] {
+        store
+            .create_policy(
+                tag_svc.id,
+                name,
+                &json!({
+                    "name": name, "policyType": 0, "serviceType": "tag",
+                    "service": tag_name,
+                    "resources": {"tag": {"values": [tag], "isExcludes": false, "isRecursive": false}},
+                    "denyPolicyItems": [
+                        {"users": ["bob"], "accesses": [{"type": "select", "isAllowed": true}]}
+                    ]
+                }),
+            )
+            .await
+            .expect("create tag policy");
+    }
+
+    let r = app
+        .oneshot(req(
+            "GET",
+            &format!("/plugins/policies/download/{linked}"),
+            Some(TOKEN),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let sp: Value =
+        serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let block = &sp["tagPolicies"];
+    assert_eq!(block["serviceName"], tag_name, "{sp}");
+    assert_eq!(
+        block["serviceDef"]["name"], "tag",
+        "the tag block must carry the `tag` service-def, not the tag service's own \
+         type's def: {block}"
+    );
+    let resources: Vec<&str> = block["serviceDef"]["resources"]
+        .as_array()
+        .expect("serviceDef.resources")
+        .iter()
+        .filter_map(|r| r["name"].as_str())
+        .collect();
+    assert_eq!(
+        resources,
+        vec!["tag"],
+        "the block's def must declare exactly the `tag` resource its policies address"
+    );
+    // The resource half keeps its own def.
+    assert_eq!(sp["serviceDef"]["name"], "trino", "{sp}");
+    assert_eq!(block["policies"].as_array().map(Vec::len), Some(2), "{sp}");
+}

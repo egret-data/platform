@@ -3619,6 +3619,138 @@
         }
       }
     },
+    "/api/control-plane/classifications/lineage-sweep": {
+      "post": {
+        "tags": [
+          "control-plane-tags"
+        ],
+        "operationId": "run_lineage_sweep",
+        "responses": {
+          "200": {
+            "description": "The sweep ran. `failures` names every view (or listing) whose lineage could not be computed; those views keep their tags",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SweepReport"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing tag:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A sweep is already running, or the embedded catalog is not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/classifications/{id}/view-exposure": {
+      "get": {
+        "tags": [
+          "control-plane-tags"
+        ],
+        "operationId": "get_view_exposure",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Classification (tag) id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The materialized views that already exist and read a table of this classification",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ViewExposureDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing tag:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such classification",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/clients/{id}": {
       "delete": {
         "tags": [
@@ -8726,7 +8858,7 @@
             }
           },
           "409": {
-            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the mask/row-filter body would form a rule overlap with another policy or compiled rule that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the sentence names both and suggests Override where a priority can fix it). An overlap body adds `code: \"rule_overlap\"`, `rules` (both members: a compiled rule's `id` and name, `id` null for a hand-written policy), `coordinate` and `kind` (`mask` | `row_filter`)",
+            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the mask/row-filter body would form a rule overlap with another policy or compiled rule that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the sentence names both and suggests Override where a priority can fix it). An overlap body adds `code: \"rule_overlap\"`, `rules` (both members: a compiled rule's `id` and name, `id` null for a hand-written policy), `coordinate` and `kind` (`mask` | `row_filter`), or the change is a data mask on a StarRocks profile and the profile cannot be recompiled with it (its classification masks fold the profile's other masks, so the write recompiles the profile in the same transaction and is refused when that recompile is)",
             "content": {
               "application/json": {
                 "schema": {
@@ -8800,7 +8932,7 @@
             }
           },
           "409": {
-            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
+            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the change is a data mask on a StarRocks profile and the profile cannot be recompiled with it (its classification masks fold the profile's other masks, so the write recompiles the profile in the same transaction and is refused when that recompile is)",
             "content": {
               "application/json": {
                 "schema": {
@@ -8886,7 +9018,7 @@
             }
           },
           "409": {
-            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
+            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the change is a data mask on a StarRocks profile and the profile cannot be recompiled with it (its classification masks fold the profile's other masks, so the write recompiles the profile in the same transaction and is refused when that recompile is)",
             "content": {
               "application/json": {
                 "schema": {
@@ -11401,6 +11533,16 @@
               }
             }
           },
+          "400": {
+            "description": "Unknown consumerType (engine or external)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Not authenticated",
             "content": {
@@ -12337,6 +12479,16 @@
               }
             }
           },
+          "400": {
+            "description": "Unknown consumerType (engine or external)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Not authenticated",
             "content": {
@@ -12763,6 +12915,16 @@
           },
           "404": {
             "description": "No such warehouse/browser or tabular",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A view on a catalog whose profile has classified columns: a restored view would bypass the classification hold, so it is refused; re-create it with CREATE VIEW",
             "content": {
               "application/json": {
                 "schema": {
@@ -39860,6 +40022,23 @@
           }
         }
       },
+      "EngineNotChecked": {
+        "type": "object",
+        "description": "An engine that reaches the classification but was not asked.",
+        "required": [
+          "engine",
+          "reason"
+        ],
+        "properties": {
+          "engine": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why it was not asked: `external` (egret never connects to an engine it\ndoes not run, and holds no credential for it) or `not running: <status>`\n(`provisioning`, `failed` or `deleting`)."
+          }
+        }
+      },
       "EnginePodDto": {
         "type": "object",
         "required": [
@@ -40378,9 +40557,52 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "`perm-clearance-mv`: a StarRocks profile's engine-wide `create\nmaterialized view` deny (view governance A3). Its exceptions are the\nusers cleared for EVERY classification with a column on the profile,\nso it names no single tag.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "materialized_view_deny"
+                ]
+              }
+            }
           }
         ],
         "description": "The `perm` model object the DECIDING policy's Ranger NAME maps back to —\n[`crate::attribute_policy_name`], resolved per decision.\n\n**`None` on the owning [`ExplainAccess`] is a real answer, not a gap.**\nFour live categories of policy have no model object at all — the\n`egret-admin`/`all` hierarchies auto-bind seeds onto every generated\nprofile, `egret-engine-mgmt`'s delegator plumbing, operator-written raw\nJSON, and Ranger's own `superuser` short-circuit — and every one of them\ncan decide a real request. They are reported by their Ranger name and id on\nthe decision itself and never dropped: dropping what egret's compiler does\nnot own is exactly the blindness this endpoint was rerouted to remove."
+      },
+      "ExplainMask": {
+        "type": "object",
+        "description": "The data-mask verdict for the target column: Ranger's `select` request\nevaluated as a masked read.",
+        "required": [
+          "access_type",
+          "decision"
+        ],
+        "properties": {
+          "access_type": {
+            "type": "string",
+            "description": "Always `select`: a mask is applied to a read."
+          },
+          "decision": {
+            "$ref": "#/components/schemas/WireMaskDecision"
+          },
+          "attribution": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainAttribution",
+                "description": "The deciding mask policy's `perm` model object, as for an access verdict;\n`None` for no mask or an undecidable answer."
+              }
+            ]
+          }
+        }
       },
       "ExplainOutcome": {
         "type": "string",
@@ -40431,6 +40653,21 @@
             "type": "integer",
             "description": "How many tag policies **this profile's download** carries —\n`tagPolicies.policies.len()`, or `0` when there is no tag block at all\nbecause the profile has no bound tag service.\n\nCarried so the page can say WHY a profile's tag set is empty while the\ncolumn is tagged — the question H1's steward is left with otherwise — and\nit is the predicate [`ExplainProfile::tags`] is narrowed by.",
             "minimum": 0
+          },
+          "mask": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainMask",
+                "description": "What the engine masks the target COLUMN to for this subject — where a\nStarRocks clearance shows (view governance A2). The clearance is a\nper-column deny AND a priority-1 data mask that applies through every\nview. For an uncleared reader the mask is `MASK_NULL`, and then the deny\nis not consulted: see [`ExplainProfile::masked_read_skips_access`].\n\nPresent only for a `read` explain of a COLUMN on a StarRocks profile. A\ntable-level target has no column to mask, a `write` has no masked request,\nand Trino's masks come from the tag service, which the evaluator refuses\n(tier c), so none is asked there."
+              }
+            ]
+          },
+          "masked_read_skips_access": {
+            "type": "boolean",
+            "description": "`true` when StarRocks consults no access policy for the target column:\na `read` of a column whose deciding mask is `MASK_NULL`, from whichever\npolicy (final review V-1, live §3.4 cases 2a/2b/2c). The read returns\n`NULL` for the column whoever denies it, so\n[`ExplainProfile::accesses`] carries no `select` verdict and\n[`ExplainProfile::mask`] is the answer.\n\nWhat this cannot say is the query-level consequence: the query as a\nwhole is still refused unless the reader may select another column it\nreads, and when it selects only such columns StarRocks checks the\ntable's first unmasked column (or `___count___` for `count(*)`).\nExplain does not know the query's other columns.\n\nAny other mask type keeps the `select` verdict (`MASK_HASH` was measured\nchecked; the rest are unmeasured), and so does no mask. When the mask\nverdict is undecidable the access verdict is kept and is provisional: if\nStarRocks applies a `MASK_NULL` there, it does not check that access.\nNever set on Trino, which checks access on a masked column.\n\n(Explain no longer answers `create materialized view`, Task 12 M-4: the\nA3 deny is engine-wide, so no single database's verdict says more than\nthe rule, and the database it asked about held nothing.)"
           }
         }
       },
@@ -41687,6 +41924,15 @@
         },
         "additionalProperties": false
       },
+      "LineageState": {
+        "type": "string",
+        "description": "What egret has recorded of a Trino view's lineage (spec B1).",
+        "enum": [
+          "computed",
+          "missing",
+          "failed"
+        ]
+      },
       "ListingDto": {
         "type": "object",
         "required": [
@@ -41889,6 +42135,15 @@
             "type": "boolean"
           }
         }
+      },
+      "MatchedBy": {
+        "type": "string",
+        "description": "How a view was matched to the classification.",
+        "enum": [
+          "baseTable",
+          "text",
+          "lineage"
+        ]
       },
       "MeResponse": {
         "type": "object",
@@ -45799,6 +46054,15 @@
           }
         }
       },
+      "SecurityMode": {
+        "type": "string",
+        "description": "A Trino view's security mode, read from its stored `trino.run-as-owner`\nproperty and never from the statement.",
+        "enum": [
+          "definer",
+          "invoker",
+          "unknown"
+        ]
+      },
       "SeedResult": {
         "type": "object",
         "description": "Doc-only mirror of the `{ \"created\": <n> }` body `seed_defaults` returns.",
@@ -47056,6 +47320,72 @@
           }
         }
       },
+      "SweepFailure": {
+        "type": "object",
+        "description": "One view (or one catalog listing) the sweep could not judge.",
+        "required": [
+          "catalog",
+          "reason"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "string",
+            "description": "The registry catalog name."
+          },
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The namespace, or `None` when the catalog's namespaces could not be\nlisted."
+          },
+          "view": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The view, or `None` when its namespace could not be listed."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why. The view's tags are unchanged."
+          }
+        }
+      },
+      "SweepReport": {
+        "type": "object",
+        "description": "What one sweep did.",
+        "required": [
+          "views",
+          "computed",
+          "retagged",
+          "failures"
+        ],
+        "properties": {
+          "views": {
+            "type": "integer",
+            "description": "Views the sweep tried.",
+            "minimum": 0
+          },
+          "computed": {
+            "type": "integer",
+            "description": "Views whose lineage it computed.",
+            "minimum": 0
+          },
+          "retagged": {
+            "type": "integer",
+            "description": "Views whose lineage-derived tags it changed.",
+            "minimum": 0
+          },
+          "failures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SweepFailure"
+            },
+            "description": "Views (or listings) it could not judge. Their tags are unchanged."
+          }
+        }
+      },
       "TabularDto": {
         "type": "object",
         "required": [
@@ -47765,6 +48095,80 @@
           }
         ],
         "description": "A row of the workspace list: the flow, then the entry's fields.\n\nThe flow's uuid is `flow_uuid`, not `flow`: the entry is flattened in, and\nits own `flow` (a `Flow` trigger's info) would otherwise be a second key\nof the same name in one object."
+      },
+      "TrinoViewItem": {
+        "type": "object",
+        "description": "One Trino view in the DEFINER audit (spec B5).",
+        "required": [
+          "catalog",
+          "schema",
+          "name",
+          "securityMode",
+          "reason",
+          "lineageState",
+          "matchedBy"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "string",
+            "description": "The registry catalog name."
+          },
+          "schema": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "securityMode": {
+            "$ref": "#/components/schemas/SecurityMode"
+          },
+          "securityModeError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the mode is `unknown`, as a short message (the detail is in the\nserver log); `null` otherwise."
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The DEFINER's `trino.run-as-owner`; `null` for any other mode."
+          },
+          "ownerCleared": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the owner is cleared for every classification the lineage\nreaches. `null` when it cannot be said: not DEFINER, lineage not\ncomputed, or a reached clearance names only groups. Read from current\nrole membership; the engine enforces the last compile, so after a\ngrant expires the two differ until the next recompile."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/TrinoViewReason"
+          },
+          "lineageState": {
+            "$ref": "#/components/schemas/LineageState"
+          },
+          "lineageDetail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the lineage failed; `null` otherwise."
+          },
+          "matchedBy": {
+            "$ref": "#/components/schemas/MatchedBy",
+            "description": "Always `lineage`."
+          }
+        }
+      },
+      "TrinoViewReason": {
+        "type": "string",
+        "description": "Why a Trino view is listed.",
+        "enum": [
+          "classified",
+          "mask_or_row_filter"
+        ]
       },
       "TryRequest": {
         "type": "object",
@@ -48651,6 +49055,84 @@
           "operator"
         ]
       },
+      "ViewExposureDto": {
+        "type": "object",
+        "required": [
+          "enginesNotChecked"
+        ],
+        "properties": {
+          "starrocksMaterializedViews": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ViewExposureItem"
+            },
+            "description": "`null` when at least one listing failed; see `starrocks_list_error`."
+          },
+          "starrocksListError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set exactly when `starrocks_materialized_views` is `null`; names each\nfailing engine."
+          },
+          "enginesNotChecked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EngineNotChecked"
+            },
+            "description": "Engines that reach the classification but were not asked (external, or\nnot running). Their views are unknown, not absent."
+          },
+          "trinoViews": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TrinoViewItem"
+            },
+            "description": "The views in egret's catalogs that the DEFINER audit lists (spec B5):\ntheir lineage reaches a table of this classification, or a table a mask\nor row-filter rule selects, or is unknown. `null` when egret's catalogs\ncould not all be listed; see `trino_list_error`."
+          },
+          "trinoListError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set exactly when `trino_views` is `null`; names what could not be\nlisted."
+          }
+        }
+      },
+      "ViewExposureItem": {
+        "type": "object",
+        "description": "One view that reads a classified table. Shared by the StarRocks list and the\nTrino list (filled by a later task).",
+        "required": [
+          "engine",
+          "catalog",
+          "database",
+          "name",
+          "matchedBy"
+        ],
+        "properties": {
+          "engine": {
+            "type": "string"
+          },
+          "catalog": {
+            "type": "string",
+            "description": "Where the view lives: `default_catalog` for every StarRocks view."
+          },
+          "database": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "matchedBy": {
+            "$ref": "#/components/schemas/MatchedBy"
+          }
+        }
+      },
       "WarehouseConfigDto": {
         "type": "object",
         "required": [
@@ -49057,6 +49539,101 @@
           "data_mask_policy_items",
           "row_filter_policy_items"
         ]
+      },
+      "WireMaskDecision": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "no_mask"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "result",
+              "kind"
+            ],
+            "properties": {
+              "result": {
+                "$ref": "#/components/schemas/WireMaskResult"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "masked"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "why",
+              "kind"
+            ],
+            "properties": {
+              "why": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/WireUndecidableCause"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "undecidable"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`MaskDecision`]."
+      },
+      "WireMaskResult": {
+        "type": "object",
+        "description": "Wire mirror of [`MaskResult`].",
+        "required": [
+          "policy_name"
+        ],
+        "properties": {
+          "policy_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "policy_name": {
+            "type": "string"
+          },
+          "mask_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "masked_value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mask_condition": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       },
       "WirePluginVersion": {
         "type": "string",

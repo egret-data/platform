@@ -239,44 +239,71 @@ fn build_app_with_bearer(
     perm_compiler: Option<Arc<dyn egret_engine_mgmt::ProfileCompilerPort>>,
     ranger_bearer_configured: bool,
 ) -> axum::Router {
+    engine_mgmt_router()
+        .merge(egret_engine_mgmt::workspace_engines_router())
+        .with_state(engine_state(
+            db,
+            sessions,
+            engine_provisioner,
+            kube,
+            pdp,
+            ranger_enabled,
+            starrocks_ddl,
+            perm_compiler,
+            ranger_bearer_configured,
+        ))
+}
+
+/// The `EngineMgmtState` every app here is built over, for the tests that call
+/// a state-taking function directly rather than a route.
+#[allow(clippy::too_many_arguments)]
+fn engine_state(
+    db: &Db,
+    sessions: &SessionService,
+    engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
+    kube: Option<Arc<dyn KubeClient>>,
+    pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+    ranger_enabled: bool,
+    starrocks_ddl: FakeStarRocksDdl,
+    perm_compiler: Option<Arc<dyn egret_engine_mgmt::ProfileCompilerPort>>,
+    ranger_bearer_configured: bool,
+) -> EngineMgmtState {
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
     let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
     let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
     let databases = egret_query::DatabaseRepo::new(db.clone(), secrets, workspace_secrets.clone());
 
-    engine_mgmt_router()
-        .merge(egret_engine_mgmt::workspace_engines_router())
-        .with_state(EngineMgmtState {
-            engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
-            assignment: egret_engine_mgmt::EngineAssignmentService::new(
-                egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
-                databases,
-            ),
-            catalog: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
-            storage_registry: egret_storage::StorageRegistry::new(db.clone()),
-            authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
-            secrets: workspace_secrets,
-            sessions: sessions.clone(),
-            users: egret_auth::users::UserRepo::new(db.clone()),
-            roles: egret_auth::roles::RoleRepo::new(db.clone(), egret_events::EventBus::new()),
-            pdp,
-            engine_provisioner,
-            kube,
-            engine_egret_url: "http://egret:8080".into(),
-            engine_jwks_uri: "https://idp/jwks".into(),
-            engine_oidc_issuer: "https://idp/realms/egret".into(),
-            ranger_enabled,
-            ranger_bearer_configured,
-            sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
-            starrocks_ddl: std::sync::Arc::new(starrocks_ddl),
-            perm_compiler,
-            // SP4a Task 16: no test here exercises `ensure_warehouse_catalog`'s
-            // own recompile through this crate's create-engine callers (it is
-            // a proven no-op there — see `RegistryStore::ensure_warehouse_catalog_with_compiler`'s
-            // doc), so `None` for every fixture.
-            catalog_assignment_compiler: None,
-        })
+    EngineMgmtState {
+        engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+        assignment: egret_engine_mgmt::EngineAssignmentService::new(
+            egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+            databases,
+        ),
+        catalog: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
+        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
+        authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
+        secrets: workspace_secrets,
+        sessions: sessions.clone(),
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        roles: egret_auth::roles::RoleRepo::new(db.clone(), egret_events::EventBus::new()),
+        pdp,
+        engine_provisioner,
+        kube,
+        engine_egret_url: "http://egret:8080".into(),
+        engine_jwks_uri: "https://idp/jwks".into(),
+        engine_oidc_issuer: "https://idp/realms/egret".into(),
+        ranger_enabled,
+        ranger_bearer_configured,
+        sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
+        starrocks_ddl: std::sync::Arc::new(starrocks_ddl),
+        perm_compiler,
+        // SP4a Task 16: no test here exercises `ensure_warehouse_catalog`'s
+        // own recompile through this crate's create-engine callers (it is
+        // a proven no-op there — see `RegistryStore::ensure_warehouse_catalog_with_compiler`'s
+        // doc), so `None` for every fixture.
+        catalog_assignment_compiler: None,
+    }
 }
 
 /// Rebuild `f.app` with a REAL `CedarPdp`. The PDP snapshots the
@@ -13374,4 +13401,127 @@ async fn a_configured_bearer_token_is_reported_as_the_auth_mode_and_the_token_is
         !j["files"].to_string().to_lowercase().contains("bearer"),
         "{j}"
     );
+}
+
+// ---- list_materialized_views (view governance A4; Task 4b review C-1, M-3) ----
+
+/// The state `f.app` runs over, sharing `f.starrocks_ddl`.
+fn mv_state(f: &Fixture) -> EngineMgmtState {
+    engine_state(
+        &f.db,
+        &f.sessions,
+        None,
+        None,
+        std::sync::Arc::new(AllowAllPdp),
+        false,
+        f.starrocks_ddl.clone(),
+        None,
+        false,
+    )
+}
+
+/// A provisioned engine row of `ty`, `running`, optionally with a root
+/// password secret; returns its id.
+async fn mv_engine(f: &Fixture, ty: &str, root_secret: Option<Uuid>) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, status, root_secret_id) \
+         VALUES ($1, $2, 'egret', '{}'::jsonb, 'running', $3) RETURNING id",
+    )
+    .bind(format!("mv-eng-{}", Uuid::new_v4().simple()))
+    .bind(ty)
+    .bind(root_secret)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("engine row")
+}
+
+#[tokio::test]
+async fn list_materialized_views_refuses_an_external_engine_before_any_connection() {
+    let Some(f) = setup_full(None, None).await else {
+        return;
+    };
+    // Stored as SP4d-4 registers one: the placeholder status `running`.
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, status, origin, \
+         external_host, external_port, ranger_plugin_version) \
+         VALUES ($1,'starrocks','','{}'::jsonb,'running','external','sr.example.com',9030,'2.8.0') \
+         RETURNING id",
+    )
+    .bind(format!("mv-ext-{}", Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("external engine row");
+    f.starrocks_ddl
+        .seed_materialized_view("db1", "mv", None, "SELECT 1");
+
+    let got = egret_engine_mgmt::list_materialized_views(&mv_state(&f), id).await;
+
+    let err = got.expect_err("an external engine is never dialled");
+    assert!(err.contains("external"), "{err}");
+    assert!(
+        f.starrocks_ddl.queried().is_empty(),
+        "nothing may be sent to an engine egret does not run: {:?}",
+        f.starrocks_ddl.queried()
+    );
+}
+
+#[tokio::test]
+async fn list_materialized_views_names_an_unknown_engine_and_a_non_starrocks_one() {
+    let Some(f) = setup_full(None, None).await else {
+        return;
+    };
+    let st = mv_state(&f);
+
+    let unknown = egret_engine_mgmt::list_materialized_views(&st, Uuid::new_v4()).await;
+    assert_eq!(unknown, Err("engine no longer exists".to_string()));
+
+    let trino = mv_engine(&f, "trino", None).await;
+    let not_sr = egret_engine_mgmt::list_materialized_views(&st, trino).await;
+    assert_eq!(not_sr, Err("engine is not a StarRocks engine".to_string()));
+
+    assert!(f.starrocks_ddl.queried().is_empty());
+}
+
+#[tokio::test]
+async fn list_materialized_views_reads_a_provisioned_engine_and_scrubs_its_root_password() {
+    let Some(f) = setup_full(None, None).await else {
+        return;
+    };
+    let st = mv_state(&f);
+    // Short enough that the opaque-run redaction (20 chars) leaves it alone:
+    // only the secret scrub can remove it.
+    let password = "hunter2xyz";
+    let secret = st
+        .secrets
+        .create(
+            None,
+            &format!("mv-root-{}", Uuid::new_v4().simple()),
+            None,
+            password,
+        )
+        .await
+        .expect("root secret");
+    let id = mv_engine(&f, "starrocks", Some(secret)).await;
+    f.starrocks_ddl
+        .seed_materialized_view("db1", "mv_a", Some(r#"{"ice.db1.t":"x"}"#), "SELECT 1");
+
+    let rows = egret_engine_mgmt::list_materialized_views(&st, id)
+        .await
+        .expect("a provisioned, running engine is listed");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "mv_a");
+    assert_eq!(rows[0].base_tables, Some(vec!["ice.db1.t".to_string()]));
+    assert_eq!(
+        f.starrocks_ddl.queried(),
+        [egret_engine_mgmt::MATERIALIZED_VIEWS_SQL]
+    );
+
+    f.starrocks_ddl.set_fail(Some(
+        "Access denied for user root using password hunter2xyz",
+    ));
+    let err = egret_engine_mgmt::list_materialized_views(&st, id)
+        .await
+        .expect_err("the FE refused");
+    assert!(err.contains("Access denied"), "{err}");
+    assert!(!err.contains(password), "the root password leaked: {err}");
 }

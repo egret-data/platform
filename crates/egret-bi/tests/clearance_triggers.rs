@@ -131,11 +131,20 @@ async fn seed(db: &Db, engine_type: &str) -> Fixture {
     .expect("warehouse");
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,$2,'egret','{}'::jsonb,$3) RETURNING id",
+         VALUES ($1,$2,'egret',$4,$3) RETURNING id",
     )
     .bind(unique("clrtrig-eng"))
     .bind(engine_type)
     .bind(profile.id)
+    // Pinned to egret's default image: a StarRocks clearance MASK (view
+    // governance A2) is folded at the bound engine's plugin version, and an
+    // engine whose image names no measured plugin refuses the recompile.
+    .bind(match engine_type {
+        "starrocks" => serde_json::json!({
+            "starrocksConfig": {"feImage": egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image}
+        }),
+        _ => serde_json::json!({}),
+    })
     .fetch_one(pool)
     .await
     .expect("engine");
@@ -198,11 +207,14 @@ async fn new_role_with_holder(db: &Db, label: &str) -> (String, String) {
     (role_name, username)
 }
 
-/// Every clearance policy for `tag_id` under `service_id`, as `(name, body)`.
+/// Every clearance DENY for `tag_id` under `service_id`, as `(name, body)`.
+/// `policyType 0` only: since view governance A2 a StarRocks clearance also
+/// emits a per-column MASK under the same prefix.
 async fn clearance_policies(db: &Db, service_id: i64, tag_id: Uuid) -> Vec<(String, Value)> {
     sqlx::query_as(
         "SELECT name, policy_jsonb FROM policy.authz_policies \
-         WHERE service_id = $1 AND (name = $2 OR name LIKE $2 || '-%') ORDER BY name",
+         WHERE service_id = $1 AND (name = $2 OR name LIKE $2 || '-%') \
+           AND (policy_jsonb->>'policyType')::int = 0 ORDER BY name",
     )
     .bind(service_id)
     .bind(format!("{COMPILER_CLEARANCE_PREFIX}{tag_id}"))

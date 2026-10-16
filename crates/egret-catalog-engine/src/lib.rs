@@ -16,6 +16,9 @@ pub mod browse;
 /// Crate-level engine domain error ([`CatalogEngineError`]) for the per-request
 /// warehouse/browse operations — distinct from the store's [`CatalogError`].
 pub mod error;
+/// The view-governance lineage sweep (spec B3): recompute every view's
+/// lineage and re-tag it, on a schedule and on demand.
+pub mod lineage_sweep;
 pub mod mount;
 pub mod pool;
 pub mod recovery;
@@ -23,6 +26,12 @@ pub mod recovery;
 /// merged in from the former `egret-catalog` crate (E3d-1). Runs on the
 /// egret-side pool, which is now the same sqlx major lakekeeper uses.
 pub mod store;
+/// The view-governance DEFINER audit's reader (spec B5): every view in
+/// egret's catalogs and its stored `trino.run-as-owner`.
+pub mod view_audit;
+/// The view-governance hold (spec B2): a classified view's commit waits until
+/// every Ranger plugin holds its classification tags.
+pub mod view_hold;
 pub mod warehouse;
 /// The control-plane catalog admin router (warehouses / roles / grants /
 /// clients / browse), moved out of `egret-controlplane` into this seam (E3d-3).
@@ -51,20 +60,34 @@ pub use lakekeeper::api::ApiContext;
 /// permissive authorizer; EB-3 replaces it with the real egret authorizer.
 pub use lakekeeper::service::authz::AllowAllAuthorizer;
 pub use lakekeeper::CancellationToken;
+pub use lineage_sweep::{
+    spawn_classification_sweeps, LineageSweep, LineageSweeper, NoCatalogSweeper, SweepError,
+    SweepFailure, SweepReport, LINEAGE_SWEEP_INTERVAL,
+};
 /// Test-only [`build_state`] variant that takes the task-queue poll interval, so
 /// integration tests can register the built-in GC queues with a short cadence.
 /// Gated behind `test-utils`; `build_state`'s public signature is unchanged.
 #[cfg(feature = "test-utils")]
 pub use mount::build_state_with_gc_poll;
 pub use mount::{
-    build_state, catalog_engine_router, mount_catalog_engine, spawn_gc_workers, CatalogGuard,
-    EngineServer, EngineState,
+    build_state, catalog_engine_router, front_catalog_router, mount_catalog_engine,
+    spawn_gc_workers, CatalogGuard, EngineServer, EngineState,
 };
 pub use pool::{build_isolated_pool, LAKEKEEPER_SCHEMA};
 pub use recovery::{
     list_deleted_tabulars, set_protection, undrop_tabular, DeletedTabular, ProtectTarget,
     TabularKindName,
 };
+pub use view_audit::{
+    load_view_run_as_owner, CatalogView, CatalogViews, EmbeddedViewCatalog, NoViewCatalog,
+    ViewCatalog, RUN_AS_OWNER_PROPERTY,
+};
+pub use view_hold::{
+    default_hold_limit, view_lock_key, ViewHold, DEFAULT_MAX_HOLDS, EXPLAIN_BUDGET,
+    LINEAGE_REFUSAL, UNCONFIRMED_REFUSAL,
+};
+#[cfg(feature = "test-utils")]
+pub use warehouse::create_memory_warehouse;
 pub use warehouse::{create_lakekeeper_warehouse, S3StorageConfig};
 pub use warehouse_admin::{
     catalog_admin_router, BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition,

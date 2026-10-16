@@ -112,6 +112,7 @@ impl Fixture {
             sessions: self.sessions.clone(),
             engine_egret_url: "http://egret:8080".into(),
             pdp: self.pdp.clone(),
+            recompiler: std::sync::Arc::new(NoRecompile),
         })
     }
     /// Router with no bound engines (the common case).
@@ -4127,4 +4128,21 @@ async fn principal_search_treats_like_metacharacters_literally() {
         vec![format!("back\\{tag}@egret.local")],
         "a \\ in q matches a literal backslash"
     );
+}
+
+/// The editor's recompile seam is `egret_perm_compile::PermRecompiler` in
+/// production, which this crate cannot depend on; these tests are about the
+/// editor's own guards, and the refold it triggers is tested in
+/// `egret-perm-compile` (`tests/clearance_starrocks.rs`).
+struct NoRecompile;
+
+#[async_trait::async_trait]
+impl egret_policy::ProfileRecompiler for NoRecompile {
+    async fn recompile_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        _service_ids: &[i64],
+    ) -> Result<(), egret_policy::PolicyHttpError> {
+        Ok(())
+    }
 }

@@ -144,6 +144,57 @@ pub fn build_connector(spec: &ConnSpec) -> Box<dyn Connector> {
     }
 }
 
+/// The one statement shape [`run_lineage_explain`] sends, spelled once in
+/// `egret_perm_compile::lineage`, whose `explain_only` prepends it to a view's
+/// SQL and refuses a SQL that is itself an `EXPLAIN` (`EXPLAIN ANALYZE`
+/// executes its statement).
+pub use egret_perm_compile::lineage::EXPLAIN_IO_PREFIX;
+
+/// Run one `EXPLAIN (TYPE IO, FORMAT JSON) …` on a Trino coordinator, with
+/// `catalog` (and `schema`, when not empty) as the session defaults — view
+/// governance B1, the view-lineage computation.
+///
+/// Refuses, before any request, a non-Trino `spec` and a `sql` that does not
+/// begin with [`EXPLAIN_IO_PREFIX`]. That prefix check is not what keeps the
+/// principal read-only: Trino's statement protocol runs exactly ONE statement
+/// per request, so the text is an EXPLAIN or a parse error, and the principal
+/// holds only `use` and `select`. It keeps this function from being a
+/// general-purpose way to run SQL as whatever principal `spec` names.
+pub async fn run_lineage_explain(
+    spec: &ConnSpec,
+    catalog: &str,
+    schema: &str,
+    sql: &str,
+    timeout: Duration,
+) -> Result<TabularResult, EngineError> {
+    if spec.engine != Engine::Trino {
+        return Err(EngineError::Engine(
+            "the lineage EXPLAIN runs on Trino only".into(),
+        ));
+    }
+    if !sql.starts_with(EXPLAIN_IO_PREFIX) {
+        return Err(EngineError::Engine(format!(
+            "the lineage client sends only `{}…`",
+            EXPLAIN_IO_PREFIX.trim_end()
+        )));
+    }
+    let connector = trino::TrinoConnector::new(spec).with_session(catalog, schema);
+    // One row: the plan. A second row would be truncated, and the caller's shape
+    // check refuses a plan it cannot read.
+    let limits = Limits {
+        max_rows: 1,
+        timeout,
+    };
+    let cancel = CancellationToken::new();
+    match tokio::time::timeout(timeout, connector.execute(sql, &limits, cancel.clone())).await {
+        Ok(r) => r,
+        Err(_) => {
+            cancel.cancel();
+            Err(EngineError::Timeout)
+        }
+    }
+}
+
 /// The off-by-default TLS insecure opt-out, shared with the notebook kernel
 /// (`EGRET_ENGINE_TLS_INSECURE`). `1`/`true`/`yes` (case-insensitive) enable it.
 /// When set, engine connections skip the transport-security guard below — an

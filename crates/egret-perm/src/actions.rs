@@ -161,6 +161,21 @@ pub enum CompileError {
         count: usize,
         ceiling: usize,
     },
+    /// The StarRocks clearance MASK (view governance A2) for `column` cannot
+    /// be folded for the cleared user `user`: `egret-ranger-eval` is
+    /// `Undecidable` for what the profile's other data-mask policies give that
+    /// user on that column (a same-priority tie between two rule masks, a
+    /// construct the evaluator does not model), or the outcome carries
+    /// something the clearance mask's item cannot reproduce (a mask condition,
+    /// or a value expression on a non-`CUSTOM` type). The clearance mask
+    /// decides for everyone who reaches it, cleared users included, so a
+    /// guessed item would hand that user something no rule says they get.
+    #[error(
+        "the clearance mask on column {column:?} cannot be compiled: what the profile's other \
+         data-mask policies give cleared user {user:?} on that column is undecidable, or cannot \
+         be reproduced in a mask item — resolve the rule masks on that column"
+    )]
+    ClearanceMaskUndecidable { column: String, user: String },
     /// The per-rule [`Self::ExpansionCeiling`] bounds one rule; this bounds the
     /// profile's SUM across every rule and grant compiled for it — the gap
     /// SP4a Task 12 closes (see `egret-perm-compile::trigger::
@@ -231,6 +246,17 @@ pub enum CompileError {
         value = r#ref
     )]
     UnusableUserRef { r#ref: String },
+    /// A grant or rule naming a principal egret itself runs as on an engine
+    /// (`egret-lineage`, view governance R5). egret decides that principal's
+    /// access where it serves a provisioned Trino engine's download (read on
+    /// every governed table, nothing else), so a model grant naming it (a write
+    /// grant above all) is refused rather than compiled.
+    #[error(
+        "user principal {value:?} is reserved: egret runs as it on the engine, and only egret \
+         decides its access",
+        value = r#ref
+    )]
+    ReservedEnginePrincipal { r#ref: String },
     /// A principal kind this compiler cannot yet turn into Ranger users/
     /// groups/roles (`WorkspaceMembers` today — Task 6 expands it into the
     /// member list enumerated at compile time). Dropping it silently on an

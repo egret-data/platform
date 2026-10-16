@@ -561,6 +561,22 @@ impl From<crate::CatalogRole> for RoleDto {
         }
     }
 }
+/// The consumer types the catalog tables accept (their CHECK constraints,
+/// migration 0169).
+const CONSUMER_TYPES: [&str; 2] = ["engine", "external"];
+
+/// An unknown consumer type is the caller's mistake: 400 naming the accepted
+/// values, not a 500 from the CHECK constraint (Task 12, M-8).
+fn check_consumer_type(t: &str) -> Result<(), CatalogHttpError> {
+    if CONSUMER_TYPES.contains(&t) {
+        return Ok(());
+    }
+    Err(CatalogHttpError::BadRequest(format!(
+        "consumerType must be one of {}; got {t:?}",
+        CONSUMER_TYPES.join(", ")
+    )))
+}
+
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CreateRoleBody {
@@ -606,6 +622,7 @@ async fn list_roles(
     request_body = CreateRoleBody,
     responses(
         (status = 201, description = "Catalog role created", body = RoleDto),
+        (status = 400, description = "Unknown consumerType (engine or external)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:create permission", body = ErrorBody),
         (status = 409, description = "A role with this name already exists", body = ErrorBody),
@@ -619,6 +636,7 @@ async fn create_role(
     Json(b): Json<CreateRoleBody>,
 ) -> Result<(StatusCode, Json<RoleDto>), CatalogHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "catalog_registry:create").await?;
+    check_consumer_type(&b.consumer_type)?;
     let desc = b.description.as_deref().filter(|d| !d.trim().is_empty());
     let r = st
         .store
@@ -827,6 +845,7 @@ async fn list_clients(
     request_body = CreateClientBody,
     responses(
         (status = 201, description = "Catalog Client created; client_secret is shown ONCE", body = CreatedClientDto),
+        (status = 400, description = "Unknown consumerType (engine or external)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:create permission", body = ErrorBody),
         (status = 404, description = "No such warehouse or catalog role", body = ErrorBody),
@@ -840,6 +859,7 @@ async fn create_client(
     Json(b): Json<CreateClientBody>,
 ) -> Result<(StatusCode, Json<CreatedClientDto>), CatalogHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "catalog_registry:create").await?;
+    check_consumer_type(&b.consumer_type)?;
     let c = st
         .store
         .create_client(&NewClient {
@@ -1220,6 +1240,7 @@ struct UndropBody {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
         (status = 404, description = "No such warehouse/browser or tabular", body = ErrorBody),
+        (status = 409, description = "A view on a catalog whose profile has classified columns: a restored view would bypass the classification hold, so it is refused; re-create it with CREATE VIEW", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -1233,7 +1254,41 @@ async fn undrop_tabular(
     egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
+    if b.kind != "view" {
+        browser.undrop(&lk, &b.kind, b.id).await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    // View governance B3 (Task 9 fix round 1, I3). An undrop restores a view
+    // through lakekeeper's management API, which the view hold never sees: the
+    // view would come back with no lineage and no tags, readable over its
+    // classified bases. Judging it after the restore leaves it readable
+    // untagged until the plugins confirm, and no confirmation can come before
+    // a restore egret does not hold. So on a profile with a classified column
+    // the undrop is REFUSED (fail-closed); re-creating the view through Trino
+    // goes through the hold. The view-tag lock is held across the check and
+    // the restore, so a first classification cannot slip in between: it
+    // waits, and its own sweep then finds the restored view.
+    let db_err = |e: sqlx::Error| {
+        tracing::error!(error = %e, "undrop: database");
+        CatalogHttpError::Internal
+    };
+    let mut tx = st.store.pool().begin().await.map_err(db_err)?;
+    egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut tx)
+        .await
+        .map_err(db_err)?;
+    if crate::view_hold::profile_has_classified_column(&mut tx, id)
+        .await
+        .map_err(db_err)?
+    {
+        return Err(CatalogHttpError::Conflict(
+            "egret refused to restore the view: its catalog's profile has classified \
+             columns, and a restored view would bypass the classification hold; re-create \
+             it with CREATE VIEW from Trino instead"
+                .into(),
+        ));
+    }
     browser.undrop(&lk, &b.kind, b.id).await?;
+    tx.commit().await.map_err(db_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

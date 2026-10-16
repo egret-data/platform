@@ -22,6 +22,9 @@ license.workspace = true
 # regular dependencies.
 [dependencies]
 egret-perm.workspace = true
+# View governance Task 7: `lineage::ExplainRunner` is implemented by a runner in
+# `egret-query` and faked in tests, and is held as `dyn` by the commit hold.
+async-trait.workspace = true
 egret-policy.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
@@ -58,6 +61,17 @@ egret-ranger-eval.workspace = true
 # be free to drift, and the whole point of this route is that "what explain
 # evaluated" and "what the engine received" cannot.
 egret-policy-api.workspace = true
+
+[features]
+# View governance Task 3: `harness_support`, the doc-hidden wrappers the
+# differential and the timing harness use to build the compiler's own bodies.
+# Off in every production build; enabled only by `egret-ranger-eval`'s
+# dev-dependency and by `tests/gate_timing.rs` (`required-features`).
+harness = []
+
+[[test]]
+name = "gate_timing"
+required-features = ["harness"]
 
 [dev-dependencies]
 egret-metastore.workspace = true

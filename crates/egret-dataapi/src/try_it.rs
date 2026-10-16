@@ -142,7 +142,8 @@ const MAX_TRIAL_BODY: usize = 4 * 1024 * 1024;
 ///
 /// Two things kill it. First, the trial **request** — `POST …/try` from the
 /// console — is an ordinary browser call, and when `ingress.enabled` it crosses
-/// the same Ingress-wide `proxy-read-timeout: "60"`
+/// the `egret` Ingress object's `proxy-read-timeout: "60"`, which covers every
+/// path but `/catalog` (that one has its own object, at 120 s)
 /// (`deploy/helm/egret/templates/ingress.yaml`). So behind an ingress a 120 s
 /// trial deadline is unreachable: nginx answers the author with a generic
 /// gateway error at 60 s instead of egret answering with its own envelope and a

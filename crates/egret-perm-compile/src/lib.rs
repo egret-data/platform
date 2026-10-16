@@ -55,6 +55,14 @@ pub mod explain_wire;
 // — the one place egret emits a tag ACCESS policy, which AMENDS SP4a's D2. The
 // argument is in that module's own doc comment, at the site.
 pub(crate) mod clearance;
+// View governance A2: the StarRocks priority-1 clearance MASK per classified
+// column, its cleared items folded through `egret-ranger-eval`.
+pub(crate) mod clearance_mask;
+// Task 3 of view governance: the two StarRocks bodies the differential harness
+// asks the real jars about, built by the compiler's own functions.
+#[cfg(feature = "harness")]
+#[doc(hidden)]
+pub mod harness_support;
 // SP4d-3 Task 5: classify every policy of a profile (owner, verdict, blocker
 // sentences) for `GET /perm/policies/services/{id}/classify`.
 pub mod classify;
@@ -69,6 +77,11 @@ pub mod grammar;
 // SP4d-3 Task 7: the migration transaction (re-classify, write, recompile,
 // switch off, provenance, re-gate every affected profile) and its undo.
 pub mod grants;
+// View governance B1 (Task 7): a view's table-level lineage from Trino's
+// `EXPLAIN (TYPE IO, FORMAT JSON)`, and the tags it carries to the view.
+pub mod lineage;
+#[cfg(test)]
+mod lineage_compile_tests;
 pub(crate) mod members;
 pub mod migrate;
 // SP4d-4 Task 3: overlapping mask/row-filter rules across the tag/resource
@@ -78,6 +91,11 @@ pub mod role_membership;
 pub mod routes;
 pub mod rules;
 pub mod trigger;
+pub mod view_audit;
+pub mod view_exposure;
+// View governance B3 (Task 9): a view's lineage-derived column tags follow
+// its base tables' classifications.
+pub mod view_tags;
 
 pub use attribution::{attribute_policy_name, PolicyAttribution};
 pub use grants::{compile_grant, validate_grant_shape};
@@ -92,5 +110,7 @@ pub use trigger::{
     affected_services_for_role_membership, affected_services_for_rule,
     affected_services_for_tag_rename, affected_services_for_workspace_members, lock_services_in_tx,
     merge_service_ids, recompile_service, recompile_service_in_tx, recompile_services_in_tx,
-    CompileSummary, SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING, PROFILE_EXPANSION_CEILING,
+    CompileSummary, PermRecompiler, SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING,
+    PROFILE_EXPANSION_CEILING,
 };
+pub use view_tags::{dependent_view_warehouses, retag_view_in_tx, RetagSummary, ViewRetag};

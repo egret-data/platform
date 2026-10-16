@@ -135,6 +135,25 @@ fn a_deny_grants_subtract_compiles_to_deny_exceptions() {
     assert!(out.allow_exceptions.is_empty());
 }
 
+/// A grant naming the lineage principal is refused: only the download transform decides
+/// its access (view governance R5).
+#[test]
+fn a_grant_naming_the_lineage_principal_is_refused() {
+    let mut g = grant_allow_read(&[], &[]);
+    g.actions = vec![egret_perm::Action::Write];
+    g.principals.include = vec![egret_perm::Principal {
+        kind: egret_perm::PrincipalKind::User,
+        r#ref: "egret-lineage".into(),
+    }];
+    assert_eq!(
+        compile_grant(&g, "warehouse", "trino-1", EngineType::Trino).unwrap_err(),
+        egret_perm::CompileError::ReservedEnginePrincipal {
+            r#ref: "egret-lineage".into()
+        }
+    );
+    assert!(egret_perm_compile::validate_grant_shape(&g).is_err());
+}
+
 #[test]
 fn write_maps_to_two_accesses_on_trino_and_three_on_starrocks() {
     assert_eq!(

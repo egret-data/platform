@@ -230,6 +230,9 @@ fn req(method: &str, uri: &str, token: &str, body: Option<serde_json::Value>) ->
 
 // ── Warehouse browse ──────────────────────────────────────────────────────────
 
+/// Every id `FakeBrowser::undrop` was asked to restore.
+static UNDROPPED: std::sync::Mutex<Vec<Uuid>> = std::sync::Mutex::new(Vec::new());
+
 struct FakeBrowser;
 
 #[async_trait::async_trait]
@@ -308,8 +311,9 @@ impl egret_catalog_engine::WarehouseBrowser for FakeBrowser {
         &self,
         _wh: &str,
         _kind: &str,
-        _id: uuid::Uuid,
+        id: uuid::Uuid,
     ) -> Result<(), egret_catalog_engine::CatalogEngineError> {
+        UNDROPPED.lock().unwrap().push(id);
         Ok(())
     }
     async fn set_protection(
@@ -897,4 +901,110 @@ async fn warehouse_with_no_registry_catalog_deletes_cleanly_even_with_other_engi
         "no attachment can exist without a registry catalog, so nothing blocks this delete"
     );
     assert!(store.get_warehouse(wh.id).await.unwrap().is_none());
+}
+
+/// Task 9 fix round 1, I3: an undrop restores a view through lakekeeper's
+/// management API, where the view hold cannot judge it. On a warehouse whose
+/// profile holds a classified column, a VIEW undrop is refused (409) and
+/// nothing is restored. A table undrop, and a view undrop on an unclassified
+/// warehouse, go through.
+#[tokio::test]
+async fn a_view_undrop_on_a_classified_warehouse_is_refused() {
+    let Some(f) = setup_full(Some(Arc::new(FakeBrowser))).await else {
+        return;
+    };
+    let token = session_for(&f, "undrop_admin", true).await;
+    let classified = seed_provisioned_warehouse(&f).await;
+    let plain = seed_provisioned_warehouse(&f).await;
+    let tag: Uuid = sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $1) RETURNING id")
+        .bind(format!("ud-{}", Uuid::new_v4().simple()))
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) VALUES ($1, $2, 's', 'pii', 'ssn')",
+    )
+    .bind(tag)
+    .bind(classified)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, '{ud_role}', '{}')",
+    )
+    .bind(tag)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    let undrop = |wh: Uuid, kind: &str, id: Uuid| {
+        req(
+            "POST",
+            &format!("/warehouses/{wh}/undrop"),
+            &token,
+            Some(serde_json::json!({"kind": kind, "id": id})),
+        )
+    };
+
+    let refused = Uuid::new_v4();
+    let (status, j) = into_json(
+        f.app
+            .clone()
+            .oneshot(undrop(classified, "view", refused))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert!(j.to_string().contains("classified"), "{j}");
+    assert!(
+        !UNDROPPED.lock().unwrap().contains(&refused),
+        "nothing is restored"
+    );
+
+    for (wh, kind) in [(classified, "table"), (plain, "view")] {
+        let id = Uuid::new_v4();
+        let resp = f.app.clone().oneshot(undrop(wh, kind, id)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT, "{kind}");
+        assert!(UNDROPPED.lock().unwrap().contains(&id), "{kind} restored");
+    }
+}
+
+/// View governance Task 12 (live finding M-8): an unknown `consumerType` is
+/// the caller's mistake, answered 400 naming the accepted values, not a 500
+/// from the table's CHECK constraint. Checked before any lookup, so no
+/// warehouse needs to exist.
+#[tokio::test]
+async fn an_unknown_consumer_type_is_a_bad_request() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "consumer_type_400", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    for (path, body) in [
+        (
+            format!("/warehouses/{wh}/roles"),
+            serde_json::json!({"name": "r", "consumerType": "notebook"}),
+        ),
+        (
+            format!("/warehouses/{wh}/clients"),
+            serde_json::json!({"name": "c", "consumerType": "spark",
+                "workspaceId": Uuid::new_v4(), "catalogRoleId": Uuid::new_v4()}),
+        ),
+    ] {
+        let resp = f
+            .app
+            .clone()
+            .oneshot(req("POST", &path, &token, Some(body)))
+            .await
+            .unwrap();
+        let (status, body) = into_json(resp).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: body={body}");
+        assert!(
+            body.to_string().contains("engine") && body.to_string().contains("external"),
+            "{path}: names the accepted values; body={body}"
+        );
+    }
 }

@@ -559,6 +559,29 @@ async fn compile_desired(
         );
     }
 
+    // **View governance A2: the StarRocks clearance MASK, folded through the
+    // evaluator.** A base deny does not hold through a plain view; a base mask
+    // does. Each classified column gets a priority-1 data-mask policy whose
+    // `{public}` item is `MASK_NULL` and whose cleared items reproduce what the
+    // profile's OTHER masks give each cleared user — computed by
+    // `egret-ranger-eval`, refused when undecidable. Folded HERE because only
+    // the complete desired set holds every rule mask (exact AND wildcard) that
+    // can reach the column, and BEFORE the overlap check below, which must see
+    // the masks it will serve. Read `crate::clearance_mask`'s module doc.
+    if engine == EngineType::StarRocks && !clearances.masks.is_empty() {
+        fold_clearance_masks(
+            conn,
+            service_id,
+            &svc.name,
+            engine,
+            clearances.masks,
+            &writable,
+            &mut desired,
+            &mut skipped,
+        )
+        .await?;
+    }
+
     // **SP4d debt Task 6, item 1: the write side of `EvalOrderAmbiguous`** —
     // widened by SP4d-4 Task 3 to the profile's whole evaluation unit.
     // Checked HERE, on the complete desired set, because no single
@@ -648,6 +671,97 @@ struct Compiled {
     /// [`apply_diff_in_tx`]'s [`CompileError::ProfileExpansionCeiling`]
     /// refusal can name the profile, not just its numeric id.
     profile_name: String,
+}
+
+/// Fold one priority-1 clearance mask per classified column into `desired`
+/// (StarRocks only — see the call site and `crate::clearance_mask`).
+///
+/// `others` is every data-mask body this profile will serve that is not a
+/// clearance mask: the desired rule masks, plus the profile's ENABLED
+/// hand-written masks (stored policies outside the compiler's prefixes). The
+/// latter are served beside the compiled set and reach a cleared user exactly
+/// as a rule mask does, so leaving them out would fold a cleared user a weaker
+/// mask than the one they are served today.
+#[allow(clippy::too_many_arguments)]
+async fn fold_clearance_masks(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    profile: &str,
+    engine: EngineType,
+    pending: Vec<crate::clearance_mask::PendingMask>,
+    writable: &HashMap<String, i64>,
+    desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
+    skipped: &mut Vec<SkippedItem>,
+) -> Result<(), CompileError> {
+    let is_mask = |b: &Value| b.get("policyType").and_then(Value::as_i64) == Some(1);
+    let mut others: Vec<Value> = desired
+        .iter()
+        .filter(|((sid, _), dp)| {
+            *sid == service_id && dp.source_kind != SourceKind::Clearance && is_mask(&dp.body)
+        })
+        .map(|(_, dp)| dp.body.clone())
+        .collect();
+    others.extend(
+        egret_policy::enabled_policies_for_service_via(conn, service_id)
+            .await
+            .map_err(db_err)?
+            .into_iter()
+            .filter(|b| {
+                is_mask(b)
+                    && !b
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(egret_policy::is_compiler_owned_policy_name)
+            }),
+    );
+
+    use crate::clearance_mask::{FoldVersions, Folded};
+    let merged = crate::clearance_mask::merge_by_column(pending);
+    let mut skip = |tag_id: Uuid, reason: String| {
+        tracing::warn!(service_id, tag_id = %tag_id, reason = %reason,
+            "clearance mask skipped during recompile; the per-column deny is still compiled");
+        skipped.push(SkippedItem {
+            source_kind: SourceKind::Clearance,
+            id: tag_id,
+            reason,
+        });
+    };
+    let plugins =
+        match crate::clearance_mask::fold_plugin_versions(conn, service_id, profile, engine).await?
+        {
+            FoldVersions::Modelled(v) => v,
+            // An engine-level reason: no mask for ANY column of this profile,
+            // one skip per column so each classified column says so.
+            FoldVersions::Unmodelled(reason) => {
+                for p in &merged {
+                    skip(p.tag_id, reason.clone());
+                }
+                return Ok(());
+            }
+        };
+    for p in merged {
+        let name = crate::clearance_mask::clearance_mask_name(p.tag_id, &p.column);
+        let body = match crate::clearance_mask::fold_at_versions(
+            profile, &name, &p.column, &p.cleared, &others, engine, &plugins,
+        )? {
+            Folded::Mask(body) => body,
+            Folded::Skipped(reason) => {
+                skip(p.tag_id, reason);
+                continue;
+            }
+        };
+        let target = target_service_id(&body, writable, &format!("clearance mask {name}"))?;
+        desired.insert(
+            (target, name),
+            DesiredPolicy {
+                body,
+                source_kind: SourceKind::Clearance,
+                grant_id: None,
+                rule_id: None,
+            },
+        );
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1590,6 +1704,41 @@ pub async fn lock_services_in_tx(
     egret_policy::lock_service_rows_via(tx, &expanded)
         .await
         .map_err(db_err)
+}
+
+/// The policy editor's recompile seam (final review I-3): an editor write that
+/// changes a data mask on a StarRocks profile recompiles that profile in the
+/// editor's own transaction, so the clearance mask's fold of the profile's
+/// other masks is never stale (read [`egret_policy::ProfileRecompiler`]).
+/// A refusal of the recompile refuses the editor's write: an overlap with its
+/// structured body, an unfoldable mask as a 409 that says why.
+pub struct PermRecompiler;
+
+#[async_trait::async_trait]
+impl egret_policy::ProfileRecompiler for PermRecompiler {
+    async fn recompile_in_tx(
+        &self,
+        tx: &mut Transaction<'static, Postgres>,
+        service_ids: &[i64],
+    ) -> Result<(), egret_policy::PolicyHttpError> {
+        use egret_policy::PolicyHttpError;
+        match recompile_services_in_tx(tx, service_ids).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(match crate::overlap::refusal_body(&e) {
+                Some(body) => PolicyHttpError::Overlap { body },
+                None => match e {
+                    CompileError::Db(detail) => {
+                        tracing::error!(%detail, ?service_ids, "editor write: recompile failed");
+                        PolicyHttpError::Internal
+                    }
+                    other => PolicyHttpError::Conflict(format!(
+                        "the profile cannot be recompiled with this change, which its \
+                         classification masks depend on: {other}"
+                    )),
+                },
+            }),
+        }
+    }
 }
 
 /// Recompile every service in `service_ids` on the CALLER's open transaction.

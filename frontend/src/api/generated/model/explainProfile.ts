@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ExplainAccess } from './explainAccess';
+import type { ExplainMask } from './explainMask';
 import type { ExplainResolvedTag } from './explainResolvedTag';
 import type { WireEngineType } from './wireEngineType';
 
@@ -90,4 +91,30 @@ export interface ExplainProfile {
      * @minimum 0
      */
   tag_policies_in_download: number;
+  mask?: null | ExplainMask;
+  /**
+     * `true` when StarRocks consults no access policy for the target column:
+     * a `read` of a column whose deciding mask is `MASK_NULL`, from whichever
+     * policy (final review V-1, live §3.4 cases 2a/2b/2c). The read returns
+     * `NULL` for the column whoever denies it, so
+     * [`ExplainProfile::accesses`] carries no `select` verdict and
+     * [`ExplainProfile::mask`] is the answer.
+     *
+     * What this cannot say is the query-level consequence: the query as a
+     * whole is still refused unless the reader may select another column it
+     * reads, and when it selects only such columns StarRocks checks the
+     * table's first unmasked column (or `___count___` for `count(*)`).
+     * Explain does not know the query's other columns.
+     *
+     * Any other mask type keeps the `select` verdict (`MASK_HASH` was measured
+     * checked; the rest are unmeasured), and so does no mask. When the mask
+     * verdict is undecidable the access verdict is kept and is provisional: if
+     * StarRocks applies a `MASK_NULL` there, it does not check that access.
+     * Never set on Trino, which checks access on a masked column.
+     *
+     * (Explain no longer answers `create materialized view`, Task 12 M-4: the
+     * A3 deny is engine-wide, so no single database's verdict says more than
+     * the rule, and the database it asked about held nothing.)
+     */
+  masked_read_skips_access?: boolean;
 }

@@ -174,6 +174,27 @@ use crate::trigger::{
 /// | wild | 80 | unchanged | 2.5.0 | 13 860 | 2 245 320 | 0.04 s | 2.71 s | 2.75 s | 1.22 |
 /// | wild | 15 | changed | both | 20 790 | 1 330 560 | 0.02 s | 2.32 s | 2.34 s | 1.76 |
 /// | wild | 16 | changed | both | 23 370 | 1 589 160 | 0.02 s | 2.65 s | 2.67 s | 1.68 |
+/// | sr-access | 20 + 4 cols | none | both | 3 240 | 427 680 | – | – | 0.48 s | 1.12 |
+/// | sr-access | 20 + 16 cols | none | both | 3 240 | 894 240 | – | – | 0.85 s | 0.95 |
+/// | sr-access | 20 + 32 cols | none | both | 3 240 | 1 529 280 | – | – | 1.45 s | 0.95 |
+/// | sr-access | 40 + 8 cols | none | both | 5 940 | 1 544 400 | – | – | 1.77 s | 1.15 |
+/// | sr-mask | 4 + 1 col | none | 2.8.0 | 10 584 (full) | 169 344 | – | – | 0.20 s | 1.21 |
+/// | sr-mask | 6 + 1 col | none | both | 17 550 (full) | 702 000 | – | – | 0.84 s | 1.19 |
+/// | sr-mask | 8 + 1 col | none | both | 26 244 (full) | 1 259 712 | – | – | 1.48 s | 1.18 |
+/// | sr-mask | 4 + 4 cols | none | both | 13 176 (full) | 895 968 | – | – | 0.94 s | 1.05 |
+///
+/// The `sr-` rows (view governance Task 3, `gate_time_for_the_starrocks_clearance_shape*`
+/// in `tests/gate_timing.rs`, release) are a StarRocks profile of N single-user allow
+/// policies plus C classified columns. Each classified column serves a deny, a folded
+/// priority-1 clearance mask and a rule mask, and the profile holds one `create
+/// materialized view` deny (on `default_catalog`/`*`), so the profile serves about
+/// N + 3C + 1 policies. `sr-access` changes one allow policy (pruning works, 0.95-1.15 us
+/// per unit). `sr-mask` changes the rule mask on a classified column: the folded mask changes with it, a non-zero priority
+/// in the delta turns pruning off (`NonZeroPriorityInDelta`), and the full probe set is
+/// compared (1.0-1.26 us per unit). The cap is unchanged: 1 259 712 units took 1.48 s.
+/// Migrations that are equivalent still prune; a non-equivalent rule-mask change on a
+/// classified column is refused by this budget (in profiles above about a dozen policies)
+/// rather than with a list of disagreements.
 ///
 /// The versions are independent and equal (2.5.0 and 2.8.0 rows agree to within
 /// 0.05 s at the same size; `both` is twice one), so the time is a function of

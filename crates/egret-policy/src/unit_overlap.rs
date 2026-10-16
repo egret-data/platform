@@ -644,19 +644,26 @@ impl StoredUnit {
 /// the tag service its `tagService` names (when that resolves). A tag service:
 /// one unit per Trino profile naming it (or the tag service alone when none
 /// does). Anything else: itself alone. Ordered by ids.
+///
+/// **A tag service is `type = 'tag'` OR a profile some OTHER profile names as
+/// `tagService`** (live finding I5's class): the admin API creates only
+/// `trino`/`starrocks` profiles, so a hand-made tag service is a `trino` row,
+/// and its policies are served to each linker's engine as `tagPolicies` all the
+/// same.
 pub async fn units_for_service_via(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
 ) -> Result<Vec<UnitIds>, PolicyStoreError> {
     let svc = get_service_by_id_via(conn, service_id).await?;
-    if svc.r#type == "tag" {
-        let profiles: Vec<i64> = sqlx::query_scalar(
-            r#"SELECT id FROM policy.authz_services
-                WHERE config_jsonb ->> 'tagService' = $1 ORDER BY id"#,
-        )
-        .bind(&svc.name)
-        .fetch_all(&mut *conn)
-        .await?;
+    let profiles: Vec<i64> = sqlx::query_scalar(
+        r#"SELECT id FROM policy.authz_services
+            WHERE config_jsonb ->> 'tagService' = $1 AND id <> $2 ORDER BY id"#,
+    )
+    .bind(&svc.name)
+    .bind(service_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    if svc.r#type == "tag" || !profiles.is_empty() {
         if profiles.is_empty() {
             return Ok(vec![UnitIds {
                 resource: None,

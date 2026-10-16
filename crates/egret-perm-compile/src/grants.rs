@@ -95,6 +95,14 @@ pub(crate) fn validate_user_ref(r#ref: &str) -> Result<(), CompileError> {
         Err(CompileError::UnusableUserRef {
             r#ref: r#ref.to_string(),
         })
+    } else if egret_core::engine_principals::is_reserved_engine_username(r#ref) {
+        // View governance R5: what `egret-lineage` may do is decided where
+        // egret serves a provisioned Trino engine's download
+        // (`egret_policy::lineage_transform`), never by the model, so no grant
+        // can widen it to a write and no rule can mask it.
+        Err(CompileError::ReservedEnginePrincipal {
+            r#ref: r#ref.to_string(),
+        })
     } else {
         Ok(())
     }

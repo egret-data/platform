@@ -254,16 +254,45 @@ pub trait CatalogGuard: Send + Sync {
 }
 
 /// Assemble the catalog engine router, fronted by egret's [`CatalogGuard`] (when
-/// `Some`) and then a system [`RequestMetadata`] for lakekeeper's handlers.
+/// `Some`), then a system [`RequestMetadata`] for lakekeeper's handlers, then
+/// the view-governance hold (when `Some`).
 ///
 /// * `engine_state` — the lakekeeper [`ApiContext`] from [`build_state`].
 /// * `guard` — egret's authN/authZ decision. `None` (tests) → no gate, every
 ///   request runs as the internal system actor under `AllowAllAuthorizer`.
+/// * `hold` — the view hold ([`crate::view_hold`], spec B2). It runs after the
+///   guard, so an unauthenticated request does no lineage work, and before
+///   lakekeeper, so a classified view is not committed until its tags are on
+///   every plugin.
 pub fn mount_catalog_engine(
     engine_state: ApiContext<EngineState>,
     guard: Option<std::sync::Arc<dyn CatalogGuard>>,
+    hold: Option<std::sync::Arc<crate::view_hold::ViewHold>>,
 ) -> axum::Router {
-    catalog_engine_router(engine_state).layer(axum::middleware::from_fn_with_state(
+    front_catalog_router(catalog_engine_router(engine_state), guard, hold)
+}
+
+/// The layers [`mount_catalog_engine`] puts in front of `inner`, which is
+/// lakekeeper's router in production. Tests pass lakekeeper's router wrapped
+/// in their own observer, to see when a request reaches lakekeeper.
+pub fn front_catalog_router(
+    inner: axum::Router,
+    guard: Option<std::sync::Arc<dyn CatalogGuard>>,
+    hold: Option<std::sync::Arc<crate::view_hold::ViewHold>>,
+) -> axum::Router {
+    let inner = match hold {
+        // The hold reads a stored view through lakekeeper's own router, with
+        // no hold in front of it.
+        Some(hold) => {
+            let loader = inner.clone();
+            inner.layer(axum::middleware::from_fn_with_state(
+                (hold, loader),
+                crate::view_hold::hold_view_commits,
+            ))
+        }
+        None => inner,
+    };
+    inner.layer(axum::middleware::from_fn_with_state(
         guard,
         guard_then_inject_metadata,
     ))

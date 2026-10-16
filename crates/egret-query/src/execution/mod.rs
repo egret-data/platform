@@ -4,6 +4,8 @@
 pub mod connector;
 mod error;
 mod job;
+/// View governance B1: the `egret-lineage` EXPLAIN runner.
+pub mod lineage;
 pub mod model;
 /// `QueryExecPort` over `EngineState` — the seam the Data API reaches execution
 /// through. Private: consumers hold the trait from `egret-query-api`, never this.

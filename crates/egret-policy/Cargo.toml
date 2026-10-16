@@ -29,6 +29,8 @@ chrono.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# `wait_for_tag_version` sleeps between polls of the ledger.
+tokio = { workspace = true, features = ["time"] }
 axum.workspace = true
 # OpenAPI emit (E0·P4b-5): `#[utoipa::path]` on the policy-admin + ranger routers'
 # handlers + per-router `#[derive(utoipa::OpenApi)]` doc structs, merged into
