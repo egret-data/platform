@@ -86,6 +86,10 @@ mod reaper;
 mod registry;
 mod render;
 mod replay;
+// Plan Task 4 is the pure half; plan Task 6 calls it from the runner seam, and
+// this allowance goes with that call.
+#[allow(dead_code)]
+pub(crate) mod snapshot;
 mod spawn;
 mod stamps;
 mod subflow;
