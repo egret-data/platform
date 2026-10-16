@@ -16,7 +16,7 @@
 
 `io.kestra.plugin.core.flow.WorkingDirectory` runs its child tasks **one after another in the same working directory**, so a file written by one child is there for the next, with no output wiring. It also stages `namespaceFiles` and `inputFiles` into that directory before the children run, collects `outputFiles` after them, and can cache a set of files between runs (`cache:`).
 
-Egret plans it as an opaque `Runnable` (`executor/plan.rs`, `executor/mod.rs:3546`: `K::WorkingDirectory(_) => PlannedAs::Opaque`). The model keeps only `tasks` and `namespaceFiles` (`models/task.rs:568-600`); `inputFiles`, `outputFiles` and `cache` are dropped at parse. A flow that uses `WorkingDirectory` therefore either fails at run (`NotALeaf`) or, for a stored run that predates no-silent-stall, fails with that line. Users writing a working-directory pipeline cannot run it at all.
+Egret plans it as an opaque `Runnable` (`executor/plan.rs`, `executor/mod.rs:3546`: `K::WorkingDirectory(_) => PlannedAs::Opaque`). Since no-silent-stall, `spec::validate` refuses every `WorkingDirectory` at publish (`unsupported_working_directory`, `validate.rs:1759`), so no new flow can run one. The model kept only `tasks` and `namespaceFiles` (`models/task.rs:568-600`); `inputFiles`, `outputFiles` and `cache` were dropped at parse. Plan Task 2 keeps them at parse; Task 3 lifts the refusal.
 
 The corpus has 15 flows that mention `WorkingDirectory`: 13 valid and 2 invalid. Four of the valid ones are in the golden (`valids/task-runif-workingdirectory`, `valids/working-directory-invalid-runif`, `valids/working-directory-taskrun`, `valids/working-directory-taskrun-nested`), and none of them uses `inputFiles`, `outputFiles`, `cache` or `namespaceFiles`. The other 9 valid flows are refused at publish by the artifact, which does not know the test classes they use (`corpus.json`):
 
@@ -72,7 +72,7 @@ Measured on the pinned image, 2026-10-16, on a private compose project (`wd-prob
 
 ## 3. What egret does now
 
-- `models::WorkingDirectory` holds `tasks` and `namespace_files` (`models/task.rs:580`). `inputFiles`, `outputFiles` and `cache` are dropped at parse, so a flow that sets them publishes and runs without them. **This is the silent drop §1 names, and the first thing the plan removes.**
+- `models::WorkingDirectory` holds `tasks`, `namespace_files`, and (since plan Task 2) `input_files`, `output_files` and `cache`, kept verbatim at parse (`models/task.rs`). Publish refuses every `WorkingDirectory` with `unsupported_working_directory` (`validate.rs:1759`), so a flow with one is not stored and cannot run; that refusal is the reason no run reaches the claim. Before Task 2 the three properties were dropped at parse, which was hidden only by that refusal.
 - `spec::validate` refuses a non-runnable child (`working_directory_child_not_runnable`) and an empty block (`working_directory_tasks_required`), and validates `namespaceFiles` at publish (`spec/validate.rs:1663`).
 - `executor::plan` plans the block as an opaque `Runnable`, so the executor never drives its children, and the worker's claim answers `None` for it (`worker/claim.rs`; `NotALeaf` in `worker/mod.rs`).
 - Egret's leaves each run in **their own** runner, and a leaf's working directory is `/egret/working-dir` inside a container or pod that is created for that task (`worker/commands.rs:133`, `WORKING_DIR`). Nothing carries a directory from one leaf to the next.

@@ -33,9 +33,9 @@ Nothing is coded until this is done. The corpus cannot do it (spec §1): its Wor
 
 ## Task 2: keep every property at parse (spec §3, §5.1)
 
-- [ ] **Step 1: failing test.** In `models/task.rs` tests: a `WorkingDirectory` YAML with `inputFiles`, `outputFiles` and `cache` parses and round-trips with all four fields present, not dropped.
-- [ ] **Step 2: add the fields** to `models::WorkingDirectory` (`models/task.rs:580`): `input_files`, `output_files`, `cache`, each with Kestra's shape (`Object`, list of globs, `Cache { patterns, ttl }`). Keep `namespace_files` as it is (W9b).
-- [ ] **Step 3: property treatment.** Update `spec/schema/property-treatment.json` for the three properties: they move from "dropped" to "kept". The diff is only those three entries.
+- [x] **Step 1: failing test.** (done) In `models/task.rs` tests: a `WorkingDirectory` YAML with `inputFiles`, `outputFiles` and `cache` parses and round-trips with all four fields present, not dropped.
+- [x] **Step 2: add the fields** (done: `input_files`, `output_files`, `cache` as verbatim `serde_json::Value`, the test `working_directory_keeps_inputs_outputs_and_cache_at_parse` passes) to `models::WorkingDirectory` (`models/task.rs:580`): `input_files`, `output_files`, `cache`, each with Kestra's shape (`Object`, list of globs, `Cache { patterns, ttl }`). Keep `namespace_files` as it is (W9b).
+- [x] **Step 3: property treatment.** Done 2026-10-16: regenerated; the three properties read `honoured` at the model level, as `namespaceFiles` does. That is a read measurement, not a run; the block is still refused at publish until Task 3. Update `spec/schema/property-treatment.json` for the three properties: they move from "dropped" to "kept". The diff is only those three entries.
 
 **Done when:** the parse test passes and the treatment file says "kept" for the three properties.
 
@@ -43,7 +43,7 @@ Nothing is coded until this is done. The corpus cannot do it (spec §1): its Wor
 
 - [ ] **Step 1: failing plan test.** A flow with a `WorkingDirectory` of two children plans as `TaskKind::WorkingDirectory { tasks }` with the two children, not as an opaque `Runnable`.
 - [ ] **Step 2: add the variant** to `TaskKind` in `executor/plan.rs`, mapped in `flatten_flow` beside `Sequential` and `AllowFailure`.
-- [ ] **Step 3: validate.** `spec/validate.rs` (`walk_task`, the `WorkingDirectory` arm at ~1663) keeps its refusals. Remove any refusal that only existed because the block was opaque; the refusal of a non-runnable child stays.
+- [ ] **Step 3: validate.** `spec/validate.rs` (the `WorkingDirectory` arm, ~1663; the refusal `unsupported_working_directory` at ~1759). Remove `unsupported_working_directory`, since the block is now runnable. Keep the refusal of a non-runnable child and the `working_directory_tasks_required` check. Add back, for the three properties not yet run, a refusal by name `working_directory_property_not_yet_run` (naming the property), removed by Task 7, and add its code to `REFUSED_BY_NAME` in `spec/schema/measure.rs` so the treatment file says `refused`. (Task 2 tried this early and found it redundant while the whole block was refused; it belongs here.)
 - [ ] **Step 4: update the census.** Tests that count the block as opaque move with it, each with a comment: `executor/mod.rs` around 3390-3392, 3546 (`K::WorkingDirectory(_) => PlannedAs::Opaque`), 3589, 3645-3646, 3730, 3975, and 4084 (the "13 WorkingDirectory" note). The derived census numbers in `tests/executor.rs` are re-derived from the planning, not relaxed; each change says why.
 
 **Done when:** `cargo test -p egret-workflow` passes the plan and validate tests, and every census change has its derivation in its assertion message.
