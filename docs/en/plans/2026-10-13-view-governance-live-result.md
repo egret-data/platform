@@ -926,3 +926,54 @@ the 90 s deadline.
   throwaway DB, and `egret-sign.pem` is that DB's signing key.
 - **Untouched:** DB `egret`, every `egret-dev-*` container (including the running `egret-dev-valkey-1` and
   `egret-dev-rustfs-1`), `egret-w7e-postgres`, ports 5173, 5000 and 8080. No product code changed.
+
+## 4. DG backend package: measurements (Task 6)
+
+> **Measured:** 2026-10-16 (UTC), branch `feat/dg-backend-cleanup` at `329e460f` (holds Tasks 2–5: the RFC 8693
+> token exchange, the verification cache that lets a proven repeat skip Argon2 and the token limit, and "a
+> `tagService` must name a `tag` profile"). Brief: DG backend cleanup, Task 6. No product code changes.
+
+### 4.0 Predictions (committed before anything was observed)
+
+Written from the code at `329e460f`, §2–§3 and the Task 12 "I2 investigation", before any engine of this run was
+started. Nothing here is edited after observing; a wrong prediction is a finding.
+
+**Setup the predictions are about.** The §3.2 stack rebuilt: image `egret-backend:vg-dg6` built from `329e460f`,
+DB `egret_dgpkg_live` (created for this run, dropped at the end), `vg-*` containers on `vg-net`, Trino 483 in the
+provisioner's JWT rendering (DEV-1/DEV-2 rows as §2.2), StarRocks 4.1.6 allin1. Profiles `vgtr-tag` (type `tag`,
+created first), `vgtr` (trino, `tagService = vgtr-tag`), `vgsr` (starrocks). Registry catalog `ice`, namespace `s`.
+`EGRET_RATE_LIMIT__TOKEN_MAX_ATTEMPTS` stays at its default (60 per minute).
+
+**1. JWT baseline (brief step 2).** `vcplain` (not a platform admin) holds one perm grant, `select` on table
+`ice.s.pub`. The `vgtr` profile holds only what the compiler writes (no hand-written policy at all; DEV-1 also
+skips the creation-time `seed_admin_all_access`, which covers platform admins only). `vcplain` runs
+`SELECT * FROM ice.s.pub` through `POST /api/ws/default/queries`. egret sends `Authorization: Bearer <vcplain's
+engine JWT>`, `X-Trino-User: vcplain` and `X-Trino-Session: query_max_run_time=…`.
+
+| step | hand-written policies present (`{USER}` = the user macro) | predicted result |
+|---|---|---|
+| J0 | none | `Access Denied: Cannot execute query` (Trino checks `queryid` `execute` in `checkCanExecuteQuery` before it applies the session's system properties) |
+| J1 | `systemproperty = query_max_run_time`, `alter`, `{USER}` | still `Access Denied: Cannot execute query` |
+| J2 | J1 + `queryid = *`, `execute`, `{USER}` | **rows** (the query succeeds) |
+| J3 | `trinouser` self-impersonate | **not needed**: Trino 483 checks impersonation only when `X-Trino-User` differs from the authenticated principal, and both are `vcplain` |
+| J-min | J2 minus the `query_max_run_time` allow (only `queryid`) | `Access Denied: Cannot set system session property query_max_run_time` |
+
+Predicted minimal set: **two** allows for `{USER}`: `queryid` `*` `execute`, and `systemproperty`
+`query_max_run_time` `alter`. No `trinouser` policy. The grant alone (no baseline) never reaches the table check.
+
+I3 at the default limit: no `429` / `slow_down` from `/oauth/token` in Trino's log or egret's for the whole run
+(Task 3: a proven repeat skips the limiter). DEV-5 (raised limit) is not used.
+
+**2. StarRocks (brief step 3).**
+
+| id | setup | query (as the reader) | predicted engine result | predicted explain (`POST /perm/explain`, read, column) | verdict |
+|---|---|---|---|---|---|
+| 3a | table `ice.s.hm(id, c)`, unclassified. Hand-written `{public}` `MASK_NULL` on `hm.c`; hand-written `select` deny on `hm.c` for `vcplain`; `vcplain` holds the perm grant `select` on `ice.s.hm` | `select id, c` | `id` real, `c` `NULL` ×3, **no error**: the skip follows the mask type, whichever policy wrote the mask (§3.4 2b) | `hm.c`: mask `MASK_NULL` decided by the hand-written mask, `masked_read_skips_access`, no `select` verdict | same |
+| 3a | as above | `select c` | `NULL` ×3, no error (the check falls on `id`, which the grant allows) | as above | same |
+| 3a | as above | `select id` | rows | `select` allowed | same |
+| 3b | table `ice.s.full(a, b)`, **every** column classified `vgsecret`; reader `vcnobody`, no grant | `select count(*)` | `ERROR 5204 … COLUMN ___count___` (as §3.4 2a) | — | — |
+| 3b | as above | `select *` | **refused**, `ERROR 5204 … COLUMN a`: with no unmasked column, StarRocks checks the table's first column, masked or not. The row count is **not** learned | `select` denied on `a` and `b`... but explain's V-1 rule answers `MASK_NULL` + skip with no `select` verdict | **differs** (fail-closed: explain says not access-checked, the engine refuses) |
+| 3c | `vgdb.mv1` over `ice.s.pii`, `vgdb.mv2` over `vgdb.mv1`, both refreshed | root: `MATERIALIZED_VIEWS_SQL` (`TABLE_SCHEMA, TABLE_NAME, BASE_TABLE_REFRESH_VERSION_TIMES, MATERIALIZED_VIEW_DEFINITION`) | `mv1`'s map key `ice.s.pii`; **`mv2`'s map key `default_catalog.vgdb.mv1`** (what `reads_a_matched_view` accepts) | — | N-3 closed if so |
+
+If 3b's `select *` returns `NULL` rows instead, the reader learns the row count (the guide's stated risk), and
+explain then agrees with the engine.
