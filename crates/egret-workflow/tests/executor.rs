@@ -7098,6 +7098,7 @@ async fn the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_no
             spec: serde_json::json!({}),
             render: egret_workflow::runners::RenderContext::new(),
             timeout: None,
+            working_dir: None,
             principal: None,
             claimed_at: chrono::DateTime::UNIX_EPOCH,
             log: egret_workflow::logs::RunLog::discard(),

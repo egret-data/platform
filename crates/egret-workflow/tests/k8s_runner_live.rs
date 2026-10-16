@@ -306,6 +306,7 @@ fn task_for(ws: Uuid, execution: Uuid, run: Uuid) -> (TaskInput, Arc<Recorder>) 
         spec: serde_json::Value::Null,
         render: egret_workflow::runners::RenderContext::new(),
         timeout: None,
+        working_dir: None,
         principal: None,
         claimed_at: chrono::DateTime::UNIX_EPOCH,
         log: RunLog::new(

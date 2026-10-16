@@ -678,6 +678,7 @@ mod tests {
             spec: serde_json::Value::Null,
             render: crate::runners::RenderContext::new(),
             timeout: None,
+            working_dir: None,
             principal: None,
             claimed_at: chrono::DateTime::UNIX_EPOCH,
             log: crate::logs::RunLog::discard(),

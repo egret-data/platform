@@ -1086,6 +1086,7 @@ async fn frozen_input(
         spec,
         render: egret_workflow::runners::RenderContext::new().with_files(scope),
         timeout: None,
+        working_dir: None,
         principal: None,
         claimed_at: zombie.claimed_at,
         log: egret_workflow::logs::RunLog::discard(),

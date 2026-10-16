@@ -436,6 +436,7 @@ fn task_over(type_id: &str, spec: serde_json::Value, files: Arc<FileStore>) -> T
         spec,
         render: egret_workflow::runners::RenderContext::new(),
         timeout: None,
+        working_dir: None,
         principal: None,
         claimed_at: chrono::DateTime::UNIX_EPOCH,
         log: RunLog::discard(),

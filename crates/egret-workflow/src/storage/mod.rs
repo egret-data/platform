@@ -207,6 +207,39 @@ impl FileStore {
         )
     }
 
+    /// The object of one snapshot of a `WorkingDirectory` block (spec §4.3):
+    /// `s3://{bucket}/{prefix}{workspace}/executions/{exec}/_wd/{block run}/{name}`.
+    ///
+    /// `name` is `prepare.tar` for the block's prepare claim and `{child run}.tar`
+    /// for a child's copy-out, so every snapshot of one block run sits under
+    /// [`Self::working_dir_prefix`] and is deleted with it. The namespace and
+    /// flow segments of [`Self::execution_prefix`] are left out on purpose: a
+    /// snapshot is keyed by the run that produced it, not by the flow's path.
+    pub fn working_dir_uri(
+        &self,
+        workspace: Uuid,
+        execution: Uuid,
+        block: Uuid,
+        name: &str,
+    ) -> String {
+        format!(
+            "{}{name}",
+            self.working_dir_prefix(workspace, execution, block)
+        )
+    }
+
+    /// The prefix every snapshot of block run `block` is under, ending with `/`.
+    pub fn working_dir_prefix(&self, workspace: Uuid, execution: Uuid, block: Uuid) -> String {
+        format!(
+            "s3://{}/{}{}/executions/{}/_wd/{}/",
+            self.bucket,
+            self.prefix,
+            workspace.hyphenated(),
+            execution.hyphenated(),
+            block.hyphenated()
+        )
+    }
+
     /// `s3://{bucket}/{prefix}{workspace}/{ns}/{flow-slug}/executions/{exec}/`,
     /// ending with `/` as `ObjectStore::delete_prefix` requires.
     pub fn execution_prefix(

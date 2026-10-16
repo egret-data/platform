@@ -362,6 +362,9 @@ pub struct TarEntry {
     pub kind: EntryKind,
     /// The bytes of contents that follow the header (a PAX `size` wins).
     pub size: u64,
+    /// The permission bits of the header's mode field (`0o7777`), so a copy
+    /// keeps the execute bit a script needs (spec §5.2).
+    pub mode: u32,
 }
 
 /// Why an archive could not be read. Both are the transfer failing -- the
@@ -433,6 +436,7 @@ impl<'a> TarReader<'a> {
             }
             check_sum(&h)?;
             let size = parse_size(&h[124..136])?;
+            let mode = (parse_size(&h[100..108])? as u32) & 0o7777;
             let flag = h[156];
             if matches!(flag, b'L' | b'K' | b'x' | b'g') {
                 if size > MAX_META_BYTES {
@@ -479,7 +483,12 @@ impl<'a> TarReader<'a> {
             };
             self.left = size;
             self.pad = pad_of(size);
-            return Ok(Some(TarEntry { name, kind, size }));
+            return Ok(Some(TarEntry {
+                name,
+                kind,
+                size,
+                mode,
+            }));
         }
     }
 

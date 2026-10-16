@@ -216,6 +216,7 @@ pub(crate) mod testing {
             // handler test that wants one sets it on the returned value, so a
             // default here can never make a bounded test look unbounded.
             timeout: None,
+            working_dir: None,
             // `None`, and that is right for the four handlers that share this
             // helper: not one of them reaches an egret object, so an identity
             // they cannot use must not be there to be quietly relied on.
