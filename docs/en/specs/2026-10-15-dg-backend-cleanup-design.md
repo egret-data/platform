@@ -53,8 +53,9 @@ storm, which feeds I3.
   `ClientState { verified: VerifiedClient, secret_hash: String }` and `None` means "may not mint" for any reason.
   Section B uses the same method.
 - Rate limiting (amended by the final review, F3): only refusals are counted, on the same limiter. A subject token
-  that fails verification or names no client (`sub`/`aud`/`cgen` missing) counts against the IP's `ip:exchange`
-  bucket; one that verifies but does not match its client (gone, other audience, `cgen` mismatch) counts against
+  that fails verification counts against the IP's `ip:exchange` bucket; one that verifies but names no client
+  (`sub`/`aud`/`cgen` missing, e.g. pre-`cgen`) is refused `invalid_grant` uncounted, since only egret's key could
+  have signed it; one that names its client but does not match it (gone, other audience, `cgen` mismatch) counts against
   `ip:sub`. An exchange proven against the client's current state is not counted, as a proven repeat of a good secret
   is not counted on `client_credentials` — counting it spent the `ip:client_id` bucket a refresh burst shares with
   `client_credentials` and locked the client out of both for the lockout window. A registry outage is not counted.

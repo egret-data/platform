@@ -34440,7 +34440,7 @@
             }
           },
           "429": {
-            "description": "Too many failed token requests (OAuth `{ \"error\": ... }` body). client_credentials counts every request that runs a secret check, per ip+client_id; a token exchange counts a subject token that fails verification per ip, and one that verifies but no longer matches its client (deleted, other audience, secret rotated) per ip+sub. A proven repeat of a good secret, and an exchange that matches its client's current state, are never counted",
+            "description": "Too many failed token requests (OAuth `{ \"error\": ... }` body). client_credentials counts every request that runs a secret check, per ip+client_id; a token exchange counts a subject token that fails verification per ip, and one that names its client but no longer matches it (deleted, other audience, secret rotated) per ip+sub. A proven repeat of a good secret, and an exchange that matches its client's current state, are never counted",
             "content": {
               "application/json": {
                 "schema": {

@@ -1205,7 +1205,7 @@ async fn compensation_rederives_the_tags_the_previous_lineage_carries() {
 /// test holds, the base write runs, then the stall is released.
 #[tokio::test]
 async fn a_base_classification_racing_a_held_commit_reaches_the_view() {
-    let _shared = shared().await;
+    let _serial = serial().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };

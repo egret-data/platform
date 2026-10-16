@@ -252,7 +252,7 @@ struct JwksDoc {
         (status = 200, description = "A signed access token (client_credentials, or an RFC 8693 exchange of an unexpired token this IdP issued for a fresh one with the same client and audience)", body = TokenResp),
         (status = 400, description = "OAuth `{ \"error\": ... }` body: `invalid_request` (a field the grant requires is missing or malformed; carries `error_description`), `invalid_grant` (the subject_token is invalid, expired, foreign, for another audience, or its client was deleted or its secret rotated), or `unsupported_grant_type`", body = ErrorBody),
         (status = 401, description = "Invalid client credentials (OAuth `{ \"error\": ... }` body)", body = ErrorBody),
-        (status = 429, description = "Too many failed token requests (OAuth `{ \"error\": ... }` body). client_credentials counts every request that runs a secret check, per ip+client_id; a token exchange counts a subject token that fails verification per ip, and one that verifies but no longer matches its client (deleted, other audience, secret rotated) per ip+sub. A proven repeat of a good secret, and an exchange that matches its client's current state, are never counted", body = ErrorBody),
+        (status = 429, description = "Too many failed token requests (OAuth `{ \"error\": ... }` body). client_credentials counts every request that runs a secret check, per ip+client_id; a token exchange counts a subject token that fails verification per ip, and one that names its client but no longer matches it (deleted, other audience, secret rotated) per ip+sub. A proven repeat of a good secret, and an exchange that matches its client's current state, are never counted", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -409,13 +409,16 @@ async fn token_exchange(
     // proven exchange would spend the `ip:<client_id>` bucket a refresh burst
     // shares with `client_credentials` and lock the client out of both.
     //
-    // Until a token verifies AND names its client (`sub`, `aud`, `cgen`)
-    // there is no client to key on, so those refusals share the IP's
-    // `exchange` bucket: a junk flood — or a pre-`cgen` token from before
-    // this grant existed — is limited without touching any real client's
-    // bucket. A refusal after that point counts against `ip:<sub>`.
+    // Until a token verifies there is no client to key on, so a token that
+    // fails verification counts against the IP's shared `exchange` bucket: a
+    // junk flood is limited without touching any real client's bucket. A
+    // token that verifies but names no client (`sub`, `aud` or `cgen`
+    // missing — every token minted before `cgen` existed) is refused
+    // UNCOUNTED: only egret's own key could have signed it, so counting it
+    // bounds no guessing and only adds 429 churn to the rollout. A refusal
+    // after the client is named counts against `ip:<sub>`.
     let ip = client_ip(headers);
-    let refuse_unattributed = || {
+    let refuse_unverified = || {
         if st.rate_limiter.check(&format!("{ip}:exchange")) {
             IdpError::InvalidGrant
         } else {
@@ -425,14 +428,14 @@ async fn token_exchange(
     let jwks = st.keys.all_public_jwks().await?;
     let Ok(claims) = token::verify_issued(subject_token, &jwks, st.issuer.trim_end_matches('/'))
     else {
-        return Err(refuse_unattributed());
+        return Err(refuse_unverified());
     };
     let (Some(sub), Some(aud), Some(cgen)) = (
         claims["sub"].as_str(),
         claims["aud"].as_str(),
         claims["cgen"].as_str(),
     ) else {
-        return Err(refuse_unattributed());
+        return Err(IdpError::InvalidGrant);
     };
     let refuse_for_sub = || {
         if st.rate_limiter.check(&format!("{ip}:{sub}")) {
@@ -2038,11 +2041,12 @@ mod tests {
         }
     }
 
-    /// A signed token that names no client to key on is metered with junk, in
-    /// the IP's `exchange` bucket — never in the client's own `ip:<sub>`
-    /// bucket, which `client_credentials` shares.
+    /// A token egret signed that names no client (pre-`cgen`) is refused
+    /// uncounted: only egret's key could have signed it, so it bounds no
+    /// guessing. It never reaches 429, and the client's own `ip:<sub>`
+    /// bucket, which `client_credentials` shares, is untouched.
     #[tokio::test]
-    async fn a_pre_cgen_token_is_counted_with_junk_not_against_its_client() {
+    async fn a_pre_cgen_token_is_refused_uncounted() {
         let (st, _row) = exchange_state(2);
         let pre_cgen = sign_as_idp(&st, m1_claims_without("cgen")).await;
 
@@ -2057,7 +2061,7 @@ mod tests {
                 .await
                 .status,
         ];
-        assert_eq!(statuses, [400, 400, 429]);
+        assert_eq!(statuses, [400, 400, 400]);
         // The client's own bucket is untouched: two full verifies still run.
         for _ in 0..2 {
             let r = post_form(&st, HeaderMap::new(), cc_form("m1", "wrong")).await;

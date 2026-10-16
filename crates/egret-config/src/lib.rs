@@ -31,8 +31,9 @@ pub struct RateLimitConfig {
     /// first-time secrets and anything after a rotation or revoke still count.
     ///
     /// The RFC 8693 token exchange uses the same numbers. A subject token that
-    /// fails verification, or names no client, counts against the IP's shared
-    /// `ip:exchange` bucket; one that verifies but no longer matches its client
+    /// fails verification counts against the IP's shared `ip:exchange` bucket;
+    /// one egret signed that names no client (pre-`cgen`) is refused
+    /// uncounted; one that names its client but no longer matches it
     /// (deleted, another audience, secret rotated) counts against `ip:<sub>`.
     /// An exchange proven against the client's current state is never counted
     /// (I4) — Iceberg refreshes in bursts, and counting them would lock the
