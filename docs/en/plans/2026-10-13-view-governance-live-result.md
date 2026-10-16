@@ -1063,3 +1063,47 @@ hidden `_file` / `_pos` columns (or `___count___`), which no mask covers.
   the cookie jars and `api.log`.
 - **Untouched:** DB `egret`, every `egret-dev-*` container, `egret-w7f-postgres`, ports 5173, 5000, 8080. No
   product code changed.
+
+### 4.7 Task 6b: the JWT baseline re-run, predictions (committed before anything was observed)
+
+> **Measured:** 2026-10-16 (UTC), branch `feat/dg-backend-cleanup` at `3aa3c8fa` (adds Task 6a: the JWKS is
+> never empty, and an engine 401 answers `502 "engine authentication failed"` instead of `"forbidden"`). Brief:
+> DG backend cleanup, Task 6b (Task 6 step 2 again). No product code changes.
+
+**Setup the predictions are about.** Image `egret-backend:vg-dg6b` built from `3aa3c8fa`; throwaway DB
+`egret_dgpkg_live` (created for this run, dropped at the end); `vg-*` containers on `vg-net`; Trino 483 (digest
+`db58cc93…`) in the provisioner's JWT rendering (TLS 8443, `allow-insecure-over-http=false`,
+`jwt.key-file=http://vg-egret:8096/.well-known/jwks.json`, `principal-field=preferred_username`,
+`required-audience=engine`), the Ranger plugin bound to profile `vgtr`. Engine row and catalog attachment as
+DEV-1 / DEV-2. Trino is started only **after** egret answers `/.well-known/jwks.json` with a key, and one JWT
+login is checked before J0. `EGRET_RATE_LIMIT__TOKEN_MAX_ATTEMPTS` stays at its default. StarRocks is not part of
+this run.
+
+The data is a registry catalog of type `tpch` named `tpch` (Trino's `tpch` connector), not Iceberg: the baseline
+checks (`queryid`, `systemproperty`, `trinouser`) do not depend on the connector, and this removes the catalog
+OAuth2 path (I3/I4) from the measurement. This is a labelled deviation (DEV-14 below).
+
+`vcplain` (not a platform admin, member of workspace `default`) holds one perm grant: `allow` `read` on table
+`tpch.tiny.nation`, principal `{kind: user, ref: "vcplain"}`. The catalog is **not** assigned to the workspace
+(no `workspace_members` grant, DEV-12). The profile holds no hand-written policy at J0. `vcplain` runs
+`SELECT * FROM tpch.tiny.nation` through `POST /api/ws/default/queries`; egret sends `Authorization: Bearer
+<vcplain's engine JWT>`, `X-Trino-User: vcplain`, `X-Trino-Session: query_max_run_time=…`.
+
+| step | hand-written policies present (`{USER}` = the user macro) | predicted result |
+|---|---|---|
+| login check | none (a query as any user) | **not** `502 engine authentication failed`: Trino authenticates the JWT, so any error is an access denial |
+| J0 | none | query `failed`, `Access Denied: Cannot execute query` (`checkCanExecuteQuery` runs right after the session is built, before the session's system properties are checked) |
+| J1 | `systemproperty = query_max_run_time`, `alter`, `{USER}` | still `Access Denied: Cannot execute query` |
+| J2 | J1 + `queryid = *`, `execute`, `{USER}` | **rows** (25 nations) |
+| J3 | `trinouser` self-impersonate | **not needed**: Trino checks impersonation only when `X-Trino-User` differs from the authenticated principal (both `vcplain`) |
+| J-min a | J2 minus the `query_max_run_time` allow (only `queryid`) | `Access Denied: Cannot set system session property query_max_run_time` |
+| J-min b | J2 minus the `queryid` allow (only `query_max_run_time`) | as J1 |
+| J-min c | J2, grant deleted | `Access Denied: Cannot select from columns [...] in table or view tpch.tiny.nation` (the baseline is not what lets the read through) |
+
+Predicted minimal set: **two** allows for `{USER}`: `queryid` `*` `execute`, and `systemproperty`
+`query_max_run_time` `alter`. No `trinouser` policy. With neither, the grant never reaches the table check.
+
+Not predicted with confidence: whether Trino's catalog visibility check (`use` on catalog `tpch`) passes on the
+compiled table grant alone. If it does not, J2 fails with a catalog error, and that is a third member of the set.
+
+No `429` / `slow_down` is expected (no catalog OAuth2 traffic at all in this run).
