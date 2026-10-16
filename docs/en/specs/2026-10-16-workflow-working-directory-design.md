@@ -39,17 +39,24 @@ The **worker** runs the whole block, and the executor sees each child as its own
    - evaluate its `runIf`; a falsy one is recorded `SKIPPED` and the loop goes on;
    - otherwise run it with `runTask(..., cleanUp=false)` in the **same** working directory (`forWorkingDirectorySubtask(..., runContext.workingDir())`);
    - if the child's state is `FAILED` **and it does not have `allowFailure: true`**, `break`: the remaining children are not run.
-3. `postExecuteTasks`, **unconditionally** (after the loop, whatever a child did): capture `outputFiles` and write them as `outputs.ion` (an `outputs.<wdir>.uris` map); then save the cache archive if a matched file changed since the restore.
+3. `postExecuteTasks`, **unconditionally** (after the loop, whatever a child did): capture `outputFiles` and write them as `outputs.ion` (exposed as `outputs.<wdir>.outputFiles`, measured, §2.1); then save the cache archive if a matched file changed since the restore.
 4. Any failure in step 3 fails the block.
 
 The block's final state is then computed by the executor from its children, as for `Sequential` (`resolveNexts` runs the next tasks only when a child failed, `WorkingDirectory.java`).
 
 ### 2.1 Facts this spec depends on, to verify on the image
 
-- **V1.** A child that fails without `allowFailure` stops the loop, and the children after it have **no task run** in the execution (not `CREATED`, not `SKIPPED`). Read from the `break` above; the plan records the image's trace.
-- **V2.** `postExecuteTasks` runs when a child failed, so `outputFiles` are still collected and the cache is still saved. Read from the code; measured by the plan.
-- **V3.** `preExecuteTasks` failing gives the block `FAILED` with no child run. Read from the code.
-- **V4.** A child's `outputs` are its own, as for any task (the block adds `uris`, not the children's outputs).
+Measured on the pinned image, 2026-10-16, on a private compose project (`wd-probe`, removed after), with real script tasks on the Docker runner (`alpine:3.20`). The probe flows and per-run JSON are in the session scratchpad, not the repo.
+
+- **V1 confirmed.** `wd-fail`: a child that fails without `allowFailure` (`exit 1`) ends the block `FAILED`, and the sibling after it has **no task run** at all.
+- **`allowFailure` on a child, measured.** `wd-allowfail`: the same failing child with `allowFailure: true` is `WARNING`, the sibling runs and is `SUCCESS`, and the block is `WARNING`. The child's `allowFailure` lets the loop go on and marks the block `WARNING`.
+- **`runIf` false, measured.** `wd-runif`: the child with `runIf: "{{ false }}"` **does** get a task run, `SKIPPED` with one attempt. It is not absent. The sibling after it runs and reads the file the first child wrote.
+- **Sharing, measured.** `wd-files`: child 1 reads an `inputFiles` entry and writes `a.txt`; child 2 reads `a.txt` (`SECOND_READ_A=hello`). The directory is shared between children, as §1 says.
+- **V2 confirmed.** `wd-finish`: child 1 writes `out.txt` and then fails. The block is `FAILED`, and an `errors:` task still reads `outputs.wdir.outputFiles` containing `out.txt`. So `outputFiles` are collected after a failed child.
+- **V3 confirmed.** `wd-prepare-fail`: an `inputFiles` URI that does not exist makes the block `FAILED` with `attempts = 0` and no child run (`Failed preExecuteTasks on WorkingDirectory: File not found for URI …`).
+- **Cache, measured.** `wd-cache` run twice: the first execution logs `written`, the second `restored` (the archive was read back).
+- **Output key, measured.** `outputs.wdir.outputFiles` is a map from each `outputFiles` glob match to a `kestra:///…/tasks/wdir/{run id}/…-out.txt` URI. The key is **not** `uris`: `outputs.wdir.uris` does not exist on this image, and the Java example in `WorkingDirectory.java` that says `uris` is stale.
+- **V4 not measured.** A child's own outputs being its own is standard for every task; the plan does not spend a probe on it.
 
 ### 2.2 `outputFiles`, `inputFiles`, `namespaceFiles`
 
@@ -123,7 +130,7 @@ A snapshot is an archive of the directory at a point in the block's run, stored 
 
 ### 5.5 Outputs
 
-- The block's `outputs` carries `uris`, a map from each `outputFiles` match to its `kestra://` URI, as Kestra's does (`outputs.wdir.uris['output.json']`). The map is written at the finish claim and is read like any other task output.
+- The block's `outputs` carries `outputFiles`, a map from each `outputFiles` match to its `kestra://` URI, as the image does (`outputs.wdir.outputFiles['out.txt']`, §2.1). The map is written at the finish claim and is read like any other task output.
 
 ### 5.6 What is not changed
 
@@ -148,9 +155,9 @@ The current oracle cannot be the acceptance test for most of this (§1), so the 
 
 1. **Kubernetes copy path.** §3 says a `files-out` helper exists for outputs. Copying a directory **in** a pod, for the snapshot's copy-in, is not built; the plan checks what the k8s runner has and measures it on a kind cluster before §5.2 relies on it.
 2. **Crash leftovers.** A snapshot left by a crashed block is removed by the pruner's retention (`workflow.storage_retention_days`). The plan confirms the pruner reaches the `_wd` prefix, or adds a sweep like the staging sweep of W9b.
-3. **Snapshot cost.** A large directory (for example `node_modules`) is copied twice per child. The plan measures a 100 MB directory across three children before the design is accepted; if it is too slow, §4.1's option B becomes the next decision for the user.
+3. **Snapshot cost (measured on Kestra, the baseline).** A 100 MB file written by child 1 and read by children 2 and 3 takes Kestra 13.6 s for the writer, 43.9 s and 57.4 s for the readers (`wd-cost`), against about 1 s per child for a 1 KB file (`wd-cost-baseline`). So Kestra's own per-child copy in and out of the container already costs tens of seconds at this size. Egret's number, from the same probe on Docker, is measured in plan Task 6 Step 4 and must be at least comparable before option C is accepted.
 4. **`taskRun.value` in a loop.** A block inside a `Loop` takes the iteration's value as its cache object id (§2.3). The plan confirms the value reaches the block's claim.
-5. **Kestra's trace of a skipped child** (`SKIPPED` with no attempt, V1 and §5.2) is read from the worker, not the executor. The plan records the image's trace before §5.2 is coded.
+5. **Kestra's trace of a skipped child** is measured (§2.1): a `runIf`-false child has a task run in state `SKIPPED` with one attempt. Egret's trace must match that shape, and the plan checks it against the golden entry once one exists.
 
 ## 8. Rules this package must meet
 
