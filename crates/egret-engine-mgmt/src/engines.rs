@@ -2401,11 +2401,20 @@ pub(crate) async fn seed_user_baseline(st: &CpState, service_name: &str) -> Resu
 }
 
 /// Seed the per-user baseline on ONE existing engine, without an apply.
-/// Returns whether it seeded: `false` for an engine that is not a delegating
-/// Trino engine, or is bound to no Ranger profile (the same conditions under
-/// which an apply would not seed it).
+/// Returns whether it seeded: `false` for an external engine, for one that is
+/// not a delegating Trino engine, and for one bound to no Ranger profile.
+///
+/// External engines are refused first and explicitly. egret runs nothing on
+/// that cluster, and the apply path never seeds one: every apply handler
+/// refuses it, and the build stops at the missing image. But its stored spec
+/// is `{}`, which `delegation_mode()` reads as `impersonate`, so
+/// `supports_delegation()` alone would let this pass write three allows onto
+/// a profile the external cluster's plugin polls.
 pub async fn seed_engine_user_baseline(st: &CpState, engine: &Engine) -> Result<bool, CpError> {
-    if engine.is_starrocks() || !engine.supports_delegation() {
+    if crate::external::is_external(engine)
+        || engine.is_starrocks()
+        || !engine.supports_delegation()
+    {
         return Ok(false);
     }
     let Some(service_name) = resolve_ranger_service_name(st, engine.authz_service_id).await? else {
@@ -8896,6 +8905,57 @@ mod tests {
         let mut starrocks = jwt.clone();
         starrocks.r#type = "starrocks".into();
         assert!(!seed_engine_user_baseline(&st, &starrocks).await.unwrap());
+
+        // An EXTERNAL Trino engine, bound to a profile, as `register_external`
+        // stores it: `spec = '{}'`, which `delegation_mode()` reads as
+        // `impersonate`, so `supports_delegation()` is true. egret never
+        // touches that cluster, so it must get nothing — not at startup, and
+        // not through an apply either.
+        let ext_profile = format!("ubext_{}", Uuid::new_v4().simple());
+        let ext_svc = st
+            .authz
+            .create_service(&ext_profile, "trino", &serde_json::json!({}))
+            .await
+            .expect("create external engine's profile");
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 2)
+            .await
+            .expect("connect");
+        let ext_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO engine_mgmt.engines \
+               (name, type, namespace, spec, status, origin, external_host, external_port, \
+                ranger_plugin_version, authz_service_id) \
+             VALUES ($1, 'trino', '', '{}'::jsonb, 'running', 'external', 'trino.example', 8443, \
+                     '2.5.0', $2) \
+             RETURNING id",
+        )
+        .bind(format!("trino-ext-{}", Uuid::new_v4().simple()))
+        .bind(ext_svc.id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("register external engine");
+        let external = st
+            .engine_mgmt
+            .get_engine(ext_id)
+            .await
+            .unwrap()
+            .expect("external engine");
+        assert!(
+            crate::external::is_external(&external) && external.supports_delegation(),
+            "the fixture must be the case the guard exists for"
+        );
+        assert!(
+            !seed_engine_user_baseline(&st, &external)
+                .await
+                .expect("an external engine is skipped, not an error"),
+            "an external engine is not seeded"
+        );
+        assert!(stored_policies(ext_svc.id).await.is_empty());
+        // The apply path cannot reach the seed for it either: every apply
+        // handler refuses an external engine, and the build itself stops at
+        // `stored_image` (an external spec carries no image) before any seed.
+        assert!(build_provision_req(&st, &external).await.is_err());
+        assert!(stored_policies(ext_svc.id).await.is_empty());
     }
 
     /// `resolve_ranger_service_name` must fail LOUDLY — never fall back to the
