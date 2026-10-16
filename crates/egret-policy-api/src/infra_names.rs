@@ -7,8 +7,11 @@
 //!    `"{prefix} - {resource, chain, ...}"`, once per resource hierarchy, with
 //!    the prefix [`ADMIN_ALL_ACCESS_NAME_PREFIX`] (the per-admin seeding) or
 //!    [`DEFAULT_ALL_ACCESS_NAME_PREFIX`] (the group-granted default set).
-//! 2. `egret_engine_mgmt::delegator_policy` mints exactly two fixed names,
-//!    [`IMPERSONATE_POLICY_NAME`] and [`QUERY_TIMEOUT_POLICY_NAME`].
+//! 2. `egret_engine_mgmt::delegator_policy` mints exactly four fixed names:
+//!    the delegator's [`IMPERSONATE_POLICY_NAME`] (impersonate engines only)
+//!    and the per-user baseline every delegating Trino engine gets,
+//!    [`SELF_IMPERSONATE_POLICY_NAME`], [`EXECUTE_QUERY_POLICY_NAME`] and
+//!    [`QUERY_TIMEOUT_POLICY_NAME`].
 //!
 //! **Why this list lives here and not beside either producer.** The predicate
 //! has to cover both, and this leaf contract crate is the only one all three
@@ -45,8 +48,21 @@ pub const DEFAULT_ALL_ACCESS_NAME_PREFIX: &str = "all";
 /// re-exports it, so its own callers are unchanged.
 pub const IMPERSONATE_POLICY_NAME: &str = "egret-delegator-impersonate";
 
-/// The delegator's query-timeout policy. Same move, same reason.
+/// The per-user `query_max_run_time` policy (`systemproperty`, `alter`,
+/// users `{USER}`). Same move, same reason. Its name predates the per-user
+/// baseline, when only impersonate engines got it; it is now part of that
+/// baseline on every delegating Trino engine.
 pub const QUERY_TIMEOUT_POLICY_NAME: &str = "egret-query-timeout";
+
+/// Per-user baseline: each user may become THEMSELF (`trinouser = {USER}`,
+/// `impersonate`, users `{USER}`). Trino 483's Ranger plugin implements
+/// `checkCanSetUser` as this check and runs it on every session, even when
+/// principal == user (DG Task 6b, live result §4.8).
+pub const SELF_IMPERSONATE_POLICY_NAME: &str = "egret-user-impersonate-self";
+
+/// Per-user baseline: each user may execute queries (`queryid = *`,
+/// `execute`, users `{USER}`) — Trino's `checkCanExecuteQuery`.
+pub const EXECUTE_QUERY_POLICY_NAME: &str = "egret-user-execute-query";
 
 /// The separator `build_default_policies` puts between the prefix and the
 /// resource chain: `format!("{} - {}", name_prefix, names.join(", "))`. Matching
@@ -67,7 +83,7 @@ pub const DEFAULT_ALL_ACCESS_SERVICE_TYPE: &str = "trino";
 /// Whether a policy named `name` on a profile of type `service_type` is one
 /// egret's own plumbing minted.
 ///
-/// The type matters for one shape only. The delegator's two names and the
+/// The type matters for one shape only. The four fixed names and the
 /// `egret-admin - …` per-admin set are infrastructure on EVERY type (the
 /// per-admin set is seeded StarRocks-shaped on StarRocks profiles by
 /// `seed_admin_all_access(…, "starrocks", …)`, and unlocking it would let an
@@ -77,6 +93,8 @@ pub const DEFAULT_ALL_ACCESS_SERVICE_TYPE: &str = "trino";
 pub fn is_egret_infrastructure_policy(service_type: &str, name: &str) -> bool {
     name == IMPERSONATE_POLICY_NAME
         || name == QUERY_TIMEOUT_POLICY_NAME
+        || name == SELF_IMPERSONATE_POLICY_NAME
+        || name == EXECUTE_QUERY_POLICY_NAME
         || is_seeded_hierarchy_name(name, ADMIN_ALL_ACCESS_NAME_PREFIX)
         || (service_type == DEFAULT_ALL_ACCESS_SERVICE_TYPE
             && is_seeded_hierarchy_name(name, DEFAULT_ALL_ACCESS_NAME_PREFIX))

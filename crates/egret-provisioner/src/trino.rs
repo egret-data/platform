@@ -152,10 +152,17 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
                     // Authenticate the caller as their username, not the raw OIDC
                     // subject. The engine JWT carries `preferred_username` (= egret's
                     // derived username), and the delegated query path sends that same
-                    // value as `X-Trino-User` — so principal == user is a self-
-                    // impersonation Ranger allows by default. Leaving the Trino default
-                    // (`sub`) makes principal (a UUID) != user, which Ranger denies.
-                    // Mirrors the StarRocks `authentication_jwt` principal handling.
+                    // value as `X-Trino-User` — so principal == user, a self-
+                    // impersonation. Ranger does NOT allow that by default: Trino 483's
+                    // plugin checks `impersonate` on `trinouser=<user>` on every
+                    // session, principal == user included (live result
+                    // `docs/en/plans/2026-10-13-view-governance-live-result.md` §4.8,
+                    // `Principal u cannot become user u`). egret seeds the allow as the
+                    // `egret-user-impersonate-self` infrastructure policy
+                    // (`egret_engine_mgmt::delegator_policy`). Leaving the Trino default
+                    // (`sub`) makes principal (a UUID) != user, which that self-only
+                    // policy does not cover. Mirrors the StarRocks `authentication_jwt`
+                    // principal handling.
                     out.push_str(
                         "http-server.authentication.jwt.principal-field=preferred_username\n",
                     );
@@ -1620,6 +1627,10 @@ mod tests {
         assert!(cc.contains("http-server.authentication.jwt.required-audience=trino"));
         // Delegated queries run as the caller's username; authenticate the JWT as
         // `preferred_username` so principal == the sent X-Trino-User (self-impersonation).
+        // Trino 483 does NOT allow that by default: it checks `impersonate` on
+        // `trinouser=<user>` even when principal == user (live result
+        // docs/en/plans/2026-10-13-view-governance-live-result.md §4.8), so egret
+        // seeds `egret-user-impersonate-self` on every delegating profile.
         assert!(cc.contains("http-server.authentication.jwt.principal-field=preferred_username"));
         // workers don't authenticate clients
         assert!(!cm["data"]["config-worker.properties"]

@@ -1,6 +1,7 @@
 use egret_policy::infra_names::{
     is_egret_infrastructure_policy, ADMIN_ALL_ACCESS_NAME_PREFIX, DEFAULT_ALL_ACCESS_NAME_PREFIX,
-    IMPERSONATE_POLICY_NAME, QUERY_TIMEOUT_POLICY_NAME,
+    EXECUTE_QUERY_POLICY_NAME, IMPERSONATE_POLICY_NAME, QUERY_TIMEOUT_POLICY_NAME,
+    SELF_IMPERSONATE_POLICY_NAME,
 };
 
 /// The four shapes the seeder and the delegator actually mint, and the
@@ -32,6 +33,14 @@ fn the_four_infrastructure_shapes_are_recognised_and_nothing_else_is() {
         "trino",
         QUERY_TIMEOUT_POLICY_NAME
     ));
+    assert!(is_egret_infrastructure_policy(
+        "trino",
+        SELF_IMPERSONATE_POLICY_NAME
+    ));
+    assert!(is_egret_infrastructure_policy(
+        "trino",
+        EXECUTE_QUERY_POLICY_NAME
+    ));
 
     // Negatives — an operator's own names, including ones that start with the
     // same words. The seeder's format is `"{prefix} - {chain}"`, so the
@@ -53,6 +62,14 @@ fn the_four_infrastructure_shapes_are_recognised_and_nothing_else_is() {
         "trino",
         "egret-query-timeouts"
     ));
+    assert!(!is_egret_infrastructure_policy(
+        "trino",
+        "egret-user-impersonate-selfish"
+    ));
+    assert!(!is_egret_infrastructure_policy(
+        "trino",
+        "egret-user-execute-query-2"
+    ));
     assert!(!is_egret_infrastructure_policy("trino", ""));
     assert!(!is_egret_infrastructure_policy("trino", "perm-grant-abc"));
 }
@@ -67,6 +84,8 @@ fn the_constants_are_the_values_the_producers_use() {
     assert_eq!(DEFAULT_ALL_ACCESS_NAME_PREFIX, "all");
     assert_eq!(IMPERSONATE_POLICY_NAME, "egret-delegator-impersonate");
     assert_eq!(QUERY_TIMEOUT_POLICY_NAME, "egret-query-timeout");
+    assert_eq!(SELF_IMPERSONATE_POLICY_NAME, "egret-user-impersonate-self");
+    assert_eq!(EXECUTE_QUERY_POLICY_NAME, "egret-user-execute-query");
 }
 
 /// SP4d-3 final review I-1 (USER RULING, narrowed): only the `all - ` shape is
@@ -92,6 +111,14 @@ fn only_the_default_all_shape_depends_on_the_service_type() {
         );
         assert!(
             is_egret_infrastructure_policy(ty, QUERY_TIMEOUT_POLICY_NAME),
+            "{ty:?}"
+        );
+        assert!(
+            is_egret_infrastructure_policy(ty, SELF_IMPERSONATE_POLICY_NAME),
+            "{ty:?}"
+        );
+        assert!(
+            is_egret_infrastructure_policy(ty, EXECUTE_QUERY_POLICY_NAME),
             "{ty:?}"
         );
     }

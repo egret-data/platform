@@ -3410,6 +3410,7 @@ dependencies = [
  "egret-provisioner",
  "egret-query",
  "egret-query-api",
+ "egret-ranger-eval",
  "egret-secrets",
  "egret-storage",
  "egret-test-db",

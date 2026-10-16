@@ -73,9 +73,10 @@ pub const LINEAGE_READ_ACCESSES: [&str; 2] = ["select", "use"];
 
 /// The one system session property egret's client sets on every statement
 /// (`egret_query`'s Trino connector). The lineage EXPLAIN is refused without
-/// `alter` on it, and on a JWT engine nothing else grants it: the
-/// `egret-query-timeout` seed is written for impersonate engines only (live
-/// result §2.6 I2). So the transform allows it, and only it.
+/// `alter` on it (live result §2.6 I2). The transform allows it, and only it,
+/// so the served lineage set does not depend on the stored set: since DG
+/// Task 7 the `egret-query-timeout` seed is on every delegating Trino engine
+/// (JWT included), but this download is built to stand on its own.
 pub const LINEAGE_SYSTEM_PROPERTY: &str = "query_max_run_time";
 
 /// Name prefix of the policies the transform appends. They exist only in a

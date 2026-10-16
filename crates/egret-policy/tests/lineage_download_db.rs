@@ -201,9 +201,9 @@ async fn a_provisioned_jwt_trino_plugin_is_served_the_transform_and_nothing_is_s
 
 /// Task 12 (live finding I2): egret's client sets the system session
 /// property `query_max_run_time` on every statement, so the lineage EXPLAIN
-/// needs `alter` on it. On a JWT engine nothing else grants it (the
-/// `egret-query-timeout` seed is for impersonate engines only), so the served
-/// transform allows it, and only it.
+/// needs `alter` on it. The served transform allows it, and only it, without
+/// relying on the stored `egret-query-timeout` seed (which this fixture does
+/// not write).
 #[tokio::test]
 async fn the_served_transform_allows_query_max_run_time_and_no_other_system_property() {
     use egret_ranger_eval::eval::{

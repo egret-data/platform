@@ -277,7 +277,10 @@ impl TrinoConnector {
     /// sent". With a bearer JWT the engine authenticates the caller's
     /// `principal-field` (provisioned as `preferred_username`), and `session_user`
     /// is that same username, so sending it as `X-Trino-User` is a self-
-    /// impersonation (principal == user) that Ranger allows by default. Without a
+    /// impersonation (principal == user). Ranger does not allow that by default
+    /// on Trino 483 — it checks `impersonate` on `trinouser=<user>` every session
+    /// — so egret seeds `egret-user-impersonate-self` on every delegating profile
+    /// (live result `2026-10-13-view-governance-live-result.md` §4.8). Without a
     /// bearer, send `X-Trino-User` (+ basic-auth when a secret is set).
     ///
     /// `X-Forwarded-Proto: https` is the insecure-HTTP workaround for the

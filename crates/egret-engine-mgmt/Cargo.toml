@@ -91,6 +91,9 @@ egret-policy.workspace = true
 # wires in production behind `ProfileCompilerPort` — dev-only, for the same
 # reason `egret-policy` above is.
 egret-perm-compile.workspace = true
+# Evaluates the per-user baseline seeds (`delegator_policy` tests) with the
+# same evaluator explain uses — dev-only, like the two above.
+egret-ranger-eval.workspace = true
 # Concrete Catalog store — only test state construction builds it directly
 # (production wires it in egret-bin behind `CatalogPort`). The store now lives in
 # egret-catalog-engine (E3d-1); this dev-dep pulls the embedded lakekeeper engine
