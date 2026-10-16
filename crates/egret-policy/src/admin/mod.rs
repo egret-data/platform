@@ -806,7 +806,7 @@ pub struct CreatedProfile {
     request_body = CreateProfileBody,
     responses(
         (status = 200, description = "Profile created", body = CreatedProfile),
-        (status = 400, description = "Invalid type, missing name, a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert), or a `tagService` whose value is not a non-empty string (it names no policy profile, and the plugin download would carry no `tagPolicies` block)", body = ErrorBody),
+        (status = 400, description = "Invalid type (must be `trino`, `starrocks` or `tag`), missing name, a `tagService` that names a profile that is missing or not of type `tag`, a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert), or a `tagService` whose value is not a non-empty string (it names no policy profile, and the plugin download would carry no `tagPolicies` block)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:create permission", body = ErrorBody),
         (status = 409, description = "A profile with this name already exists", body = ErrorBody),
@@ -824,9 +824,9 @@ async fn create_profile(
             "profile name is required".into(),
         ));
     }
-    if b.r#type != "trino" && b.r#type != "starrocks" {
+    if !matches!(b.r#type.as_str(), "trino" | "starrocks" | "tag") {
         return Err(PolicyHttpError::BadRequest(
-            "type must be \"trino\" or \"starrocks\"".into(),
+            "type must be \"trino\", \"starrocks\" or \"tag\"".into(),
         ));
     }
     let cfg = if b.config.is_null() {

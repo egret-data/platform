@@ -124,6 +124,12 @@ Lần chạy thật trên Trino 483 (Task 11) tìm ra hai lỗi nằm ngoài qu�
 - **Giới hạn tốc độ cấp token của egret làm hỏng truy cập catalog của Trino khi tải cao.** Client Iceberg của Trino lấy một OAuth token mới cho mỗi query session, và egret mặc định cho 60 lần xin token mỗi phút. Khi đó các `CREATE VIEW` đồng thời, và lineage sweep 15 phút, lỗi ngay trong Trino với `RESTException: Unable to process (code: 429, type: slow_down)`. **Cách tạm:** tăng `EGRET_RATE_LIMIT__TOKEN_MAX_ATTEMPTS` (lần chạy thật dùng 100000).
 - **Trino làm mới token Iceberg thất bại với egret.** Khoảng một giờ sau khi Trino khởi động, lần refresh OAuth2 (`grant_type=…token-exchange`) nhận `422 … missing field 'client_id'`, và Trino retry liên tục, làm nặng thêm giới hạn ở trên. **Cách tạm:** khởi động lại engine Trino; nó bắt đầu với token mới (lần chạy thật phục hồi như vậy).
 
+## Dịch vụ tag phải là profile loại `tag`
+
+Một profile Trino có thể chỉ định dịch vụ tag trong `config.tagService`. Từ thay đổi này, `POST /policies/services` nhận `type` là `trino`, `starrocks` hoặc `tag`, và từ chối (400) profile mới có `tagService` trỏ tới profile không tồn tại hoặc không phải loại `tag`. Hãy tạo profile `tag` trước, rồi tạo profile Trino chỉ định nó. Việc cấp phát engine đã làm đúng thứ tự này (`{name}_tag`, sau đó profile Trino).
+
+Profile đã lưu trước thay đổi này không bị migrate: profile hiện có chỉ định một profile loại `trino` làm dịch vụ tag vẫn tải được tag policy và vẫn được bump khi dịch vụ đó thay đổi. Chỉ các lần ghi mới bị kiểm tra.
+
 ## Rủi ro đã chấp nhận
 
 - **Người chưa được cấp clearance cho mọi phân loại trên một engine StarRocks không tạo được materialized view nào ở đó**, kể cả trên dữ liệu không phân loại. Muốn cho ai dựng materialized view, cấp cho họ clearance của mọi phân loại trên engine đó, hoặc giữ catalog có phân loại ngoài các engine dùng để dựng materialized view.

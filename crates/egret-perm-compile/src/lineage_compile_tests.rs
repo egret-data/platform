@@ -64,6 +64,10 @@ async fn seed(db: &Db) -> Fixture {
 
     let profile_name = unique("trino_lin");
     let tag_service_name = format!("{profile_name}_tag");
+    policy
+        .create_service(&tag_service_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("tag service");
     let profile = policy
         .create_service(
             &profile_name,
@@ -72,10 +76,6 @@ async fn seed(db: &Db) -> Fixture {
         )
         .await
         .expect("profile");
-    policy
-        .create_service(&tag_service_name, "tag", &serde_json::json!({}))
-        .await
-        .expect("tag service");
 
     let ws_id: Uuid = sqlx::query_scalar(
         "INSERT INTO workspaces (slug, name) VALUES ($1,'Lineage WS') RETURNING id",

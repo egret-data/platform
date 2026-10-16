@@ -8409,7 +8409,7 @@
             }
           },
           "400": {
-            "description": "Invalid type, missing name, a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert), or a `tagService` whose value is not a non-empty string (it names no policy profile, and the plugin download would carry no `tagPolicies` block)",
+            "description": "Invalid type (must be `trino`, `starrocks` or `tag`), missing name, a `tagService` that names a profile that is missing or not of type `tag`, a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert), or a `tagService` whose value is not a non-empty string (it names no policy profile, and the plugin download would carry no `tagPolicies` block)",
             "content": {
               "application/json": {
                 "schema": {

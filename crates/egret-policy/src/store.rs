@@ -360,6 +360,43 @@ fn refuse_tag_service_on_non_trino_profile(
     )))
 }
 
+/// A NEW profile's `tagService` must name an existing profile of type `tag`.
+///
+/// Migration 0191 and the download/bump/overlap code treat a profile as a tag
+/// service when its type is `tag` OR some other profile names it (live finding
+/// I5), because the admin API used to accept only `trino`/`starrocks` and so
+/// tag services made through it were `trino` rows. That tolerance is for rows
+/// already stored; it is NOT a license to mint more. Only [`create_service`]
+/// applies this rule: existing rows naming a non-tag profile are left alone
+/// (spec D4 — no migration), and there is still no `UPDATE` writer of
+/// `config_jsonb` in `src/`.
+///
+/// `found` is the target's stored `type`, or `None` when no such profile exists.
+/// The check-then-insert is not atomic; a target deleted in between yields the
+/// same dangling-name state `usable_tag_service` already tolerates (it joins on
+/// the name, so a dangling one serves no tag policies), so no lock is taken.
+///
+/// **Falsified by** a second `INSERT INTO policy.authz_services` in `src/`, or a
+/// `tag` profile type whose service-def is not seeded (the target would then be
+/// uncreatable and every bind would 400).
+fn refuse_tag_service_naming_a_non_tag_profile(
+    target: &str,
+    found: Option<&str>,
+) -> Result<(), PolicyStoreError> {
+    if found == Some(crate::service_def::TAG_DEF_NAME) {
+        return Ok(());
+    }
+    let what = match found {
+        Some(t) => format!("a profile of type {t:?}"),
+        None => "no profile at all".to_string(),
+    };
+    Err(PolicyStoreError::BadRequest(format!(
+        "{TAG_SERVICE_CONFIG_KEY:?} must name a `tag` profile, and {target:?} is {what}. \
+         Create the tag profile first (`POST /policies/services` with type \"tag\"), then \
+         name it here."
+    )))
+}
+
 /// SP4d debt Task 9, step 4: refuse a [`TAG_SERVICE_CONFIG_KEY`] whose VALUE
 /// names nothing. Pure, like the type rule above, and run straight after it.
 ///
@@ -827,6 +864,15 @@ impl PolicyStore {
         // `refuse_unnameable_tag_service` for the four-behaviours-across-five-readers
         // measurement and for why this one has no migration.
         refuse_unnameable_tag_service(config)?;
+        // Task 5 (D): the value names something, now ask what it names.
+        if let Some(target) = config.get(TAG_SERVICE_CONFIG_KEY).and_then(Value::as_str) {
+            let found: Option<String> =
+                sqlx::query_scalar("SELECT type FROM policy.authz_services WHERE name = $1")
+                    .bind(target)
+                    .fetch_optional(&self.db.pool)
+                    .await?;
+            refuse_tag_service_naming_a_non_tag_profile(target, found.as_deref())?;
+        }
         sqlx::query_as::<_, ServiceRow>(
             r#"INSERT INTO policy.authz_services (name, type, config_jsonb)
                VALUES ($1,$2,$3) RETURNING id, name, type, config_jsonb, policy_version, tag_version, origin"#,

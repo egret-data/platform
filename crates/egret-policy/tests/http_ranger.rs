@@ -244,6 +244,27 @@ impl tracing::Subscriber for CapturedLogs {
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
+/// Inserts a profile WITHOUT `create_service`'s guards. Task 5 (D) made
+/// `create_service` refuse a `tagService` that names a missing or non-`tag`
+/// profile, but rows of exactly that shape already exist (spec D4: they are not
+/// migrated), and what this file pins is how the system treats THEM.
+async fn insert_legacy_service(
+    pool: &sqlx::PgPool,
+    name: &str,
+    typ: &str,
+    config: &serde_json::Value,
+) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO policy.authz_services (name, type, config_jsonb) VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(name)
+    .bind(typ)
+    .bind(config)
+    .fetch_one(pool)
+    .await
+    .expect("raw insert of a pre-existing-shape profile")
+}
+
 /// **SP4d debt Task 9, step 3b — the third mechanism.** `download_policies`
 /// resolved the profile's `tagService` with `if let Ok(tsvc)`, which collapsed
 /// "names no profile" and "the database read failed" into one unlogged omission
@@ -271,6 +292,7 @@ async fn a_dangling_tag_service_omits_the_block_and_a_real_one_embeds_it() {
     };
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
+    let pool = db.pool.clone();
     let store = PolicyStore::new(db);
     seed_trino(&store).await.expect("seed trino");
     egret_policy::seed_tag(&store).await.expect("seed tag def");
@@ -284,10 +306,7 @@ async fn a_dangling_tag_service_omits_the_block_and_a_real_one_embeds_it() {
     // ── A `tagService` naming no policy profile at all.
     let dangling = format!("t9dang_{suffix}");
     let missing = format!("t9missing_{suffix}");
-    store
-        .create_service(&dangling, "trino", &json!({ "tagService": missing }))
-        .await
-        .expect("create profile with a dangling tagService");
+    insert_legacy_service(&pool, &dangling, "trino", &json!({ "tagService": missing })).await;
     let logs = CapturedLogs::default();
     let log_guard = tracing::subscriber::set_default(logs.clone());
     let r = app
@@ -336,10 +355,7 @@ async fn a_dangling_tag_service_omits_the_block_and_a_real_one_embeds_it() {
         .await
         .expect("create tag service");
     let linked = format!("t9real_{suffix}");
-    store
-        .create_service(&linked, "trino", &json!({ "tagService": tag_name }))
-        .await
-        .expect("create linked profile");
+    insert_legacy_service(&pool, &linked, "trino", &json!({ "tagService": tag_name })).await;
     store
         .create_policy(
             tag_svc.id,
@@ -402,6 +418,7 @@ async fn the_tag_block_carries_the_tag_def_even_for_a_trino_typed_tag_service() 
     };
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
+    let pool = db.pool.clone();
     let store = PolicyStore::new(db);
     seed_trino(&store).await.expect("seed trino");
     egret_policy::seed_tag(&store).await.expect("seed tag def");
@@ -418,10 +435,7 @@ async fn the_tag_block_carries_the_tag_def_even_for_a_trino_typed_tag_service() 
         .await
         .expect("create trino-typed tag service");
     let linked = format!("tagdef_{suffix}");
-    store
-        .create_service(&linked, "trino", &json!({ "tagService": tag_name }))
-        .await
-        .expect("create linked profile");
+    insert_legacy_service(&pool, &linked, "trino", &json!({ "tagService": tag_name })).await;
     for (name, tag) in [("tp_key", "vgkey"), ("tp_secret", "vgsecret")] {
         store
             .create_policy(

@@ -29,6 +29,27 @@ use egret_policy::{
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+/// Inserts a profile WITHOUT `create_service`'s guards. Task 5 (D) made
+/// `create_service` refuse a `tagService` that names a missing or non-`tag`
+/// profile, but rows of exactly that shape already exist (spec D4: they are not
+/// migrated), and what this file pins is how the system treats THEM.
+async fn insert_legacy_service(
+    pool: &sqlx::PgPool,
+    name: &str,
+    typ: &str,
+    config: &serde_json::Value,
+) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO policy.authz_services (name, type, config_jsonb) VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(name)
+    .bind(typ)
+    .bind(config)
+    .fetch_one(pool)
+    .await
+    .expect("raw insert of a pre-existing-shape profile")
+}
+
 fn uniq(p: &str) -> String {
     format!("{p}_{}", Uuid::new_v4().simple())
 }
@@ -58,15 +79,13 @@ async fn fixture() -> Option<Fixture> {
         .await
         .unwrap()
         .id;
-    let linker = store
-        .create_service(
-            &uniq("tlink"),
-            "trino",
-            &json!({ "tagService": tag_svc_name }),
-        )
-        .await
-        .unwrap()
-        .id;
+    let linker = insert_legacy_service(
+        &db.pool,
+        &uniq("tlink"),
+        "trino",
+        &json!({ "tagService": tag_svc_name }),
+    )
+    .await;
     let bystander = store
         .create_service(&uniq("tby"), "trino", &json!({}))
         .await

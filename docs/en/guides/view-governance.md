@@ -126,6 +126,12 @@ The live run on Trino 483 (Task 11) found two defects outside view governance th
 - **egret's token rate limit breaks Trino's catalog access under load.** Trino's Iceberg client takes a fresh OAuth token per query session, and egret allows 60 token requests per minute by default. Concurrent `CREATE VIEW`s, and the 15-minute lineage sweep, then fail inside Trino with `RESTException: Unable to process (code: 429, type: slow_down)`. **Workaround:** raise `EGRET_RATE_LIMIT__TOKEN_MAX_ATTEMPTS` (the live run used 100000).
 - **Trino's Iceberg token refresh fails against egret.** About an hour after Trino starts, its OAuth2 refresh (`grant_type=…token-exchange`) is answered `422 … missing field 'client_id'`, and Trino retries in a loop, which feeds the rate limit above. **Workaround:** restart the Trino engine; it starts with fresh tokens (this is how the live run recovered).
 
+## Tag services must be `tag` profiles
+
+A Trino profile may name a tag service in `config.tagService`. Since this change `POST /policies/services` accepts `type` of `trino`, `starrocks` or `tag`, and refuses (400) a new profile whose `tagService` names a profile that does not exist or is not of type `tag`. Create the `tag` profile first, then the Trino profile that names it. Engine provisioning already does this (`{name}_tag`, then the Trino profile).
+
+Profiles stored before this change are not migrated: an existing profile that names a `trino`-typed profile as its tag service keeps downloading its tag policies and keeps being bumped when that service changes. Only new writes are checked.
+
 ## Accepted risks
 
 These were accepted when the design was approved. They are stated here so nobody has to rediscover them.

@@ -23,6 +23,27 @@ use serde_json::json;
 
 const MIGRATION: &str = include_str!("../../../migrations/0190_tag_block_serves_the_tag_def.sql");
 
+/// Inserts a profile WITHOUT `create_service`'s guards. Task 5 (D) made
+/// `create_service` refuse a `tagService` that names a missing or non-`tag`
+/// profile, but rows of exactly that shape already exist (spec D4: they are not
+/// migrated), and what this file pins is how the system treats THEM.
+async fn insert_legacy_service(
+    pool: &sqlx::PgPool,
+    name: &str,
+    typ: &str,
+    config: &serde_json::Value,
+) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO policy.authz_services (name, type, config_jsonb) VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(name)
+    .bind(typ)
+    .bind(config)
+    .fetch_one(pool)
+    .await
+    .expect("raw insert of a pre-existing-shape profile")
+}
+
 fn uniq(p: &str) -> String {
     format!("{p}_{}", uuid::Uuid::new_v4().simple())
 }
@@ -57,7 +78,7 @@ async fn the_migration_bumps_exactly_the_profiles_that_carry_a_tag_block() {
         (uniq("m190_none"), "trino", json!({})),
         (uniq("m190_null"), "trino", json!({ "tagService": null })),
     ] {
-        ids.push(store.create_service(&name, typ, &cfg).await.unwrap().id);
+        ids.push(insert_legacy_service(&db.pool, &name, typ, &cfg).await);
     }
 
     async fn versions(conn: &mut sqlx::PgConnection, ids: &[i64]) -> Vec<i64> {
