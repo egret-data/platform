@@ -1017,7 +1017,7 @@ pub(crate) async fn write_grant(
     // The OLD affected set, and the origin the patched row keeps. Read from
     // the stored row BEFORE anything is written — after the UPDATE the old
     // catalog is gone and the profiles it reached are unrecoverable.
-    let (old_services, origin) = match id {
+    let (old_services, origin, old_principals) = match id {
         Some(id) => {
             let Some(old) = get_grant_via(tx, id).await? else {
                 return Err(PermHttpError::NotFound);
@@ -1039,11 +1039,15 @@ pub(crate) async fn write_grant(
                         .into(),
                 ));
             }
-            (affected_services_for_grant(tx, &old).await?, old.origin)
+            (
+                affected_services_for_grant(tx, &old).await?,
+                old.origin,
+                Some(old.principals),
+            )
         }
         // The database mints the id on a create; `GrantOrigin::Explicit` is the
         // only origin this surface may write — see `NewGrant`'s doc comment.
-        None => (Vec::new(), GrantOrigin::Explicit),
+        None => (Vec::new(), GrantOrigin::Explicit, None),
     };
 
     // **Every ref must name someone egret knows** (J-F3) — include AND exclude,
@@ -1054,8 +1058,15 @@ pub(crate) async fn write_grant(
     // it. Before the shape check, because it also rewrites a username to its
     // stored spelling and the shape check should see what will be stored. See
     // `crate::principal_refs` for the source of truth per kind.
+    //
+    // **A patch passes the STORED set, and a ref it already holds is not
+    // re-checked** (design R6). PATCH takes the whole body, so every edit
+    // re-sends every principal; without this, a grant that validly excludes
+    // `bob` becomes un-editable — even an actions-only change is a 400 — the
+    // moment `bob` is deleted, though the exclude still denies everyone who
+    // carries the name (nobody).
     let mut principals = body.principals;
-    resolve_principal_refs(tx, "principals", &mut principals).await?;
+    resolve_principal_refs(tx, "principals", &mut principals, old_principals.as_ref()).await?;
 
     let g = Grant {
         id: id.unwrap_or_else(Uuid::nil),
@@ -1186,7 +1197,7 @@ pub(crate) async fn write_rule(
         ));
     }
 
-    let old_services = match id {
+    let (old_services, old_exempt) = match id {
         Some(id) => {
             let Some(old) = get_rule_via(tx, id).await? else {
                 return Err(PermHttpError::NotFound);
@@ -1194,16 +1205,20 @@ pub(crate) async fn write_rule(
             // The patch's other end — a rule can be moved between selectors, so
             // see the twin comment in `write_grant`.
             confine_rule_selector(tx, p, &old.selector).await?;
-            affected_services_for_rule(tx, &old).await?
+            (
+                affected_services_for_rule(tx, &old).await?,
+                Some(old.exempt),
+            )
         }
-        None => Vec::new(),
+        None => (Vec::new(), None),
     };
 
     // Same check, same position and same reason as [`write_grant`]'s: an
     // `exempt.include` naming nobody masks someone the author meant to exempt,
-    // and an `exempt.exclude` naming nobody would subtract nobody.
+    // and an `exempt.exclude` naming nobody would subtract nobody. A patch
+    // passes the stored exemptions for the same R6 reason.
     let mut exempt = body.exempt;
-    resolve_principal_refs(tx, "exempt", &mut exempt).await?;
+    resolve_principal_refs(tx, "exempt", &mut exempt, old_exempt.as_ref()).await?;
 
     let r = Rule {
         id: id.unwrap_or_else(Uuid::nil),

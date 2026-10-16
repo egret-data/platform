@@ -7382,3 +7382,97 @@ async fn refs_that_resolve_are_accepted() {
         "a real workspace is not an unknown ref; got {msg:?}"
     );
 }
+
+/// **R6 on the patch path** (J-F3 fix round 1). PATCH takes the whole body, so
+/// every edit re-sends every principal. A grant that validly excluded a user who
+/// was deleted afterwards must stay editable: an actions-only patch is a 200.
+/// A NEW unknown ref added by the same patch is still refused — the skip covers
+/// what the stored row already holds, nothing else.
+#[tokio::test]
+async fn a_patch_keeping_a_since_deleted_principal_is_accepted() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let gone = known_user(&f, unique("jf3_gone")).await;
+    let body = grant_with(
+        f.catalog_id,
+        "allow",
+        json!([{ "kind": "user", "ref": "analyst" }]),
+        json!([{ "kind": "user", "ref": gone }]),
+    );
+    let id = create_grant_returning_id(&f, &token, body.clone()).await;
+    sqlx::query("DELETE FROM users WHERE username = $1")
+        .bind(&gone)
+        .execute(&f.db.pool)
+        .await
+        .expect("delete user");
+
+    let mut actions_only = body.clone();
+    actions_only["actions"] = json!(["read", "write"]);
+    let (status, resp) = send(
+        &f,
+        "PATCH",
+        &format!("/perm/grants/{id}"),
+        &token,
+        actions_only.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {resp}");
+
+    // The same patch adding a fresh unknown ref is refused, naming only that one.
+    let ghost = unique("jf3_ghost");
+    let mut adds_ghost = actions_only;
+    adds_ghost["principals"]["exclude"] =
+        json!([{ "kind": "user", "ref": gone }, { "kind": "user", "ref": ghost }]);
+    let (status, resp) = send(
+        &f,
+        "PATCH",
+        &format!("/perm/grants/{id}"),
+        &token,
+        adds_ghost,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {resp}");
+    let msg = resp["error"].as_str().unwrap_or_default();
+    assert!(msg.contains(&ghost), "got {msg:?}");
+    assert!(
+        !msg.contains(&gone),
+        "the stored ref is not re-checked; got {msg:?}"
+    );
+
+    // Moving the deleted ref to the OTHER list is a new position, so it is checked.
+    let mut moved = body;
+    moved["principals"]["include"] =
+        json!([{ "kind": "user", "ref": "analyst" }, { "kind": "user", "ref": gone }]);
+    moved["principals"]["exclude"] = json!([]);
+    let (status, resp) = send(&f, "PATCH", &format!("/perm/grants/{id}"), &token, moved).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {resp}");
+}
+
+/// The rule twin: an exemption naming a since-deleted user does not block an
+/// edit that leaves it alone.
+#[tokio::test]
+async fn a_rule_patch_keeping_a_since_deleted_exemption_is_accepted() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let gone = known_user(&f, unique("jf3_gone")).await;
+    let body = json!({
+        "name": unique("jf3_rule_patch"),
+        "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+        "selector": { "type": "path", "catalog_id": f.catalog_id,
+                      "schema": "sales", "table": "orders", "column": "email" },
+        "exempt": { "include": [{ "kind": "user", "ref": gone }], "exclude": [] }
+    });
+    let (status, created) = send(&f, "POST", "/perm/rules", &token, body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let id = created["id"].as_str().expect("rule id").to_string();
+    sqlx::query("DELETE FROM users WHERE username = $1")
+        .bind(&gone)
+        .execute(&f.db.pool)
+        .await
+        .expect("delete user");
+
+    let mut renamed = body;
+    renamed["name"] = json!(unique("jf3_rule_renamed"));
+    let (status, resp) = send(&f, "PATCH", &format!("/perm/rules/{id}"), &token, renamed).await;
+    assert_eq!(status, StatusCode::OK, "body: {resp}");
+}

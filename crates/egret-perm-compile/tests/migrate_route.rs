@@ -1757,3 +1757,33 @@ async fn a_provisioned_trino_on_a_floating_image_refuses_the_migration_with_the_
     assert_eq!(grants_on_catalog(&f).await, 0, "nothing is written");
     assert!(enabled(&f, id).await, "the original stays on");
 }
+
+/// J-F3 fix round 1: a migration writes through `write_grant`, so a hand-written
+/// policy naming a user egret does not know is refused like an authored grant —
+/// and the refusal names the POLICY, because the position it also names
+/// (`principals.include[0]`) belongs to a derived body the author never wrote.
+#[tokio::test]
+async fn a_migration_refused_for_an_unknown_principal_names_the_policy() {
+    let Some(f) = setup().await else { return };
+    let ghost = unique("jf3_ghost");
+    let name = unique("ghost reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", &ghost),
+    )
+    .await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains(&format!("migrating policy {name:?} (id {id})")),
+        "names the source policy; got {msg:?}"
+    );
+    assert!(msg.contains(&ghost), "and the ref; got {msg:?}");
+    assert_eq!(grants_on_catalog(&f).await, 0, "nothing written");
+    assert!(enabled(&f, id).await, "the original stays on");
+}

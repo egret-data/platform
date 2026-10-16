@@ -66,10 +66,16 @@
 //!
 //! # What this does NOT do
 //!
-//! It does not rewrite stored rows, and it does not refuse a write because a
-//! principal it does not touch was deleted after it was validly written (design
-//! R5/R6): nobody carries a deleted name, so a deny or exclude on it still denies
-//! everyone who does. A user ref that is empty or a reserved engine principal is
+//! It does not rewrite stored rows (design R5), and it does not refuse a patch
+//! because of a principal the patch does not touch (R6). PATCH takes the whole
+//! body, so every edit re-sends every principal; a ref the STORED row already
+//! holds in the same position (same kind, ref and include/exclude) is therefore
+//! not re-checked. A principal deleted after it was validly written is not a
+//! defect — nobody carries the name any more, so a deny or exclude on it still
+//! denies everyone who does — and refusing every later edit of the row (even an
+//! actions-only one) until the author removed it would be. The accepted
+//! trade-off: a bad ref stored BEFORE this check existed also survives a patch
+//! unchanged; Task 2's report lists such rows. A user ref that is empty or a reserved engine principal is
 //! left to `validate_user_ref`, which already refuses both with a sentence of its
 //! own.
 
@@ -99,6 +105,10 @@ struct Unknown {
 /// named in one 400, not just the first: an author fixing a long list should not
 /// discover the problems one round trip at a time.
 ///
+/// `stored` is the row as it stands on a patch (`None` on a create): an entry the
+/// stored set already holds in the same list, byte-for-byte, is accepted
+/// without a lookup (module doc, "What this does NOT do").
+///
 /// Canonicalising can make two entries equal (`Analyst` and `analyst`), and the
 /// stored table's primary key is `(id, kind, ref, mode)`, so each list is
 /// deduplicated afterwards, first occurrence kept.
@@ -106,10 +116,26 @@ pub(crate) async fn resolve_principal_refs(
     conn: &mut PgConnection,
     field: &str,
     set: &mut PrincipalSet,
+    stored: Option<&PrincipalSet>,
 ) -> Result<(), PermHttpError> {
     let mut unknown = Vec::new();
-    for (mode, list) in [("include", &mut set.include), ("exclude", &mut set.exclude)] {
+    let empty: &[Principal] = &[];
+    for (mode, list, kept) in [
+        (
+            "include",
+            &mut set.include,
+            stored.map_or(empty, |s| s.include.as_slice()),
+        ),
+        (
+            "exclude",
+            &mut set.exclude,
+            stored.map_or(empty, |s| s.exclude.as_slice()),
+        ),
+    ] {
         for (i, p) in list.iter_mut().enumerate() {
+            if kept.contains(p) {
+                continue;
+            }
             if let Some(why) = resolve_one(conn, p).await? {
                 unknown.push(Unknown {
                     kind: p.kind,
