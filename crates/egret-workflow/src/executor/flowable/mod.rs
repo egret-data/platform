@@ -13,6 +13,7 @@
 //! would otherwise be three copies, and three copies of "a `Runnable` gets
 //! `SUBMITTED` first" is three chances for one of them to stop being true.
 
+pub(crate) mod allow_failure;
 pub(crate) mod branch;
 pub(crate) mod dag;
 pub(crate) mod loop_;
