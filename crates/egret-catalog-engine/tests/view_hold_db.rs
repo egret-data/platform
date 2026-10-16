@@ -51,6 +51,30 @@ fn unique(prefix: &str) -> String {
 
 static LAKEKEEPER: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
+/// Final review F5: the timed tests run alone. The view-tag advisory lock is
+/// global to the test database, so a test that holds it (or keeps the one
+/// best-effort permit busy) for seconds stalls every hold running beside it,
+/// and any parallel load slows the commits a timed test measures. A test
+/// whose assertions bound a duration (a 3 s shared deadline, "returned within
+/// 1.2 s") then fails on a stall that is not its own.
+///
+/// So every test that holds that lock or bounds a duration takes [`serial`]
+/// (exclusive); every other test takes [`shared`], and those still run in
+/// parallel with each other. `tokio::sync::RwLock` because each
+/// `#[tokio::test]` has its own runtime and a panicking holder must not
+/// poison the next. Timings are unchanged; only who runs beside whom is.
+static SERIAL: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
+/// Run alone: holds the view-tag lock, or asserts a duration.
+async fn serial() -> tokio::sync::RwLockWriteGuard<'static, ()> {
+    SERIAL.write().await
+}
+
+/// Run beside other untimed tests, never beside a [`serial`] one.
+async fn shared() -> tokio::sync::RwLockReadGuard<'static, ()> {
+    SERIAL.read().await
+}
+
 /// lakekeeper's schema and default project, once per test process.
 async fn lakekeeper_ready(dsn: &str) {
     LAKEKEEPER
@@ -704,6 +728,7 @@ fn computed(tables: &[&str], catalog: &str) -> RecordedLineage {
 /// reports the new tag version.
 #[tokio::test]
 async fn a_classified_view_commits_only_after_the_plugin_holds_its_tags() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -741,6 +766,7 @@ async fn a_classified_view_commits_only_after_the_plugin_holds_its_tags() {
 /// a margin, and nothing remains.
 #[tokio::test]
 async fn a_view_no_plugin_confirms_is_refused_and_nothing_remains() {
+    let _serial = serial().await;
     let limit = Duration::from_secs(2);
     let Some(env) = env(limit, true).await else {
         return;
@@ -780,6 +806,7 @@ async fn a_view_no_plugin_confirms_is_refused_and_nothing_remains() {
 /// lineage is recorded.
 #[tokio::test]
 async fn a_view_over_unclassified_tables_commits_with_no_wait() {
+    let _serial = serial().await;
     // No plugin polls: a hold would time out at the limit.
     let Some(env) = env(LIMIT, true).await else {
         return;
@@ -811,6 +838,7 @@ async fn a_view_over_unclassified_tables_commits_with_no_wait() {
 /// Nothing is written either way.
 #[tokio::test]
 async fn a_lineage_that_cannot_be_computed_refuses_and_writes_nothing() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -838,6 +866,7 @@ async fn a_lineage_that_cannot_be_computed_refuses_and_writes_nothing() {
 /// through the same hold.
 #[tokio::test]
 async fn create_or_replace_goes_through_the_same_hold() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -873,6 +902,7 @@ async fn create_or_replace_goes_through_the_same_hold() {
 /// Test 6: a commit with no new view version passes untouched.
 #[tokio::test]
 async fn a_commit_with_no_new_view_version_passes_untouched() {
+    let _serial = serial().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -903,6 +933,7 @@ async fn a_commit_with_no_new_view_version_passes_untouched() {
 /// that hold remains, and what was there before it does.
 #[tokio::test]
 async fn a_commit_lakekeeper_refuses_after_the_hold_leaves_nothing_behind() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -946,6 +977,7 @@ async fn a_commit_lakekeeper_refuses_after_the_hold_leaves_nothing_behind() {
 /// Test 8: a rename moves the lineage and the tag assignments.
 #[tokio::test]
 async fn a_rename_moves_the_lineage_and_the_tags() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -986,6 +1018,7 @@ async fn a_rename_moves_the_lineage_and_the_tags() {
 /// EXPLAIN, and the lineage stays missing for the B3 sweep.
 #[tokio::test]
 async fn a_profile_with_no_classified_column_commits_without_explain() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, false).await else {
         return;
     };
@@ -1017,6 +1050,7 @@ async fn a_profile_with_no_classified_column_commits_without_explain() {
 /// recorded `failed`, so the sweep a later classification triggers finds it.
 #[tokio::test]
 async fn a_profile_with_no_classified_column_never_refuses_and_records_a_failed_lineage() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, false).await else {
         return;
     };
@@ -1066,6 +1100,7 @@ async fn lock_waiters(db: &Db) -> i64 {
 /// compensates: it removes its own derived rows, never the admin's.
 #[tokio::test]
 async fn compensation_never_removes_a_tag_an_admin_assigned_during_the_wait() {
+    let _shared = shared().await;
     let Some(env) = env(Duration::from_secs(3), true).await else {
         return;
     };
@@ -1117,6 +1152,7 @@ async fn compensation_never_removes_a_tag_an_admin_assigned_during_the_wait() {
 /// refused, compensation restores the previous lineage AND its derived tags.
 #[tokio::test]
 async fn compensation_rederives_the_tags_the_previous_lineage_carries() {
+    let _shared = shared().await;
     let Some(env) = env(Duration::from_secs(3), true).await else {
         return;
     };
@@ -1169,6 +1205,7 @@ async fn compensation_rederives_the_tags_the_previous_lineage_carries() {
 /// test holds, the base write runs, then the stall is released.
 #[tokio::test]
 async fn a_base_classification_racing_a_held_commit_reaches_the_view() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1251,6 +1288,7 @@ async fn a_base_classification_racing_a_held_commit_reaches_the_view() {
 /// `-1` with no version added before it cannot be resolved and is refused.
 #[tokio::test]
 async fn a_commit_switching_to_a_stored_version_is_held_on_that_version() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1318,6 +1356,7 @@ async fn a_commit_switching_to_a_stored_version_is_held_on_that_version() {
 /// is refused; the hold never judges the wrong added version.
 #[tokio::test]
 async fn a_commit_whose_current_cannot_be_loaded_is_refused() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1348,6 +1387,7 @@ async fn a_commit_whose_current_cannot_be_loaded_is_refused() {
 /// it. In `[add A, set -1, add B]` A is current, so A is what is judged.
 #[tokio::test]
 async fn set_current_minus_one_binds_to_the_version_added_before_it() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1383,6 +1423,7 @@ async fn set_current_minus_one_binds_to_the_version_added_before_it() {
 /// last one in the request: the tags go on the columns the view really has.
 #[tokio::test]
 async fn schema_minus_one_is_the_schema_added_before_the_version() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1423,6 +1464,7 @@ async fn nested_namespace(env: &Env) {
 /// profile, and passes on a profile with no classified column.
 #[tokio::test]
 async fn a_multi_level_namespace_is_refused_only_on_a_classified_profile() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1461,6 +1503,7 @@ async fn a_multi_level_namespace_is_refused_only_on_a_classified_profile() {
 /// held) into a single-level one is refused on a classified profile.
 #[tokio::test]
 async fn a_rename_out_of_a_multi_level_namespace_is_refused() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1490,6 +1533,7 @@ async fn a_rename_out_of_a_multi_level_namespace_is_refused() {
 /// I3: the EXPLAIN is bounded (5 s), whatever the engine does.
 #[tokio::test]
 async fn a_slow_explain_is_refused_at_its_bound() {
+    let _serial = serial().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1509,6 +1553,7 @@ async fn a_slow_explain_is_refused_at_its_bound() {
 /// I3: one deadline from arrival covers the EXPLAIN and the wait together.
 #[tokio::test]
 async fn the_explain_and_the_wait_share_one_deadline() {
+    let _serial = serial().await;
     let limit = Duration::from_secs(3);
     let Some(env) = env(limit, true).await else {
         return;
@@ -1530,6 +1575,7 @@ async fn the_explain_and_the_wait_share_one_deadline() {
 /// on a profile with no classified column takes no lock at all.
 #[tokio::test]
 async fn a_busy_view_lock_refuses_at_once_and_an_unclassified_view_takes_none() {
+    let _serial = serial().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1579,6 +1625,7 @@ async fn a_busy_view_lock_refuses_at_once_and_an_unclassified_view_takes_none() 
 /// I4: when the concurrent holds are at their cap, the next is refused fast.
 #[tokio::test]
 async fn a_full_hold_semaphore_refuses_fast() {
+    let _serial = serial().await;
     let Some(env) = env_with(Opts {
         limit: Duration::from_secs(5),
         max_holds: 1,
@@ -1615,6 +1662,7 @@ async fn a_full_hold_semaphore_refuses_fast() {
 /// confirm: refused at once, and nothing remains.
 #[tokio::test]
 async fn no_bound_trino_engine_refuses_at_once() {
+    let _serial = serial().await;
     let Some(env) = env_with(Opts {
         engine_type: "starrocks",
         ..Opts::default()
@@ -1649,6 +1697,7 @@ async fn no_bound_trino_engine_refuses_at_once() {
 /// one view column, the hold refuses and nothing remains.
 #[tokio::test]
 async fn tags_that_would_overlap_two_masks_on_a_view_column_are_refused() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1703,6 +1752,7 @@ async fn tags_that_would_overlap_two_masks_on_a_view_column_are_refused() {
 /// the recorded lineage stays that of the version that is still current.
 #[tokio::test]
 async fn adding_a_version_without_making_it_current_keeps_the_lineage() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -1740,6 +1790,7 @@ async fn adding_a_version_without_making_it_current_keeps_the_lineage() {
 /// its own.
 #[tokio::test]
 async fn a_refused_rename_leaves_nothing_on_the_destination() {
+    let _shared = shared().await;
     let Some(env) = env(Duration::from_secs(2), true).await else {
         return;
     };
@@ -1795,6 +1846,7 @@ async fn a_refused_rename_leaves_nothing_on_the_destination() {
 /// other writer records, and the sweep repairs a lineage that may be stale.
 #[tokio::test]
 async fn a_best_effort_record_under_a_busy_view_lock_leaves_the_lineage_to_the_sweep() {
+    let _serial = serial().await;
     let Some(env) = env(LIMIT, false).await else {
         return;
     };
@@ -1849,6 +1901,7 @@ async fn a_best_effort_record_under_a_busy_view_lock_leaves_the_lineage_to_the_s
 /// its record task gets a permit (re-review N-6).
 #[tokio::test]
 async fn a_best_effort_burst_beyond_the_cap_explains_once_and_never_waits() {
+    let _serial = serial().await;
     let Some(env) = env_with(Opts {
         classified: false,
         max_holds: 1,
@@ -1910,6 +1963,7 @@ async fn a_best_effort_burst_beyond_the_cap_explains_once_and_never_waits() {
 /// step 3 wrote are removed.
 #[tokio::test]
 async fn a_request_cancelled_during_the_wait_still_compensates() {
+    let _serial = serial().await;
     let limit = Duration::from_secs(3);
     let Some(env) = env(limit, true).await else {
         return;
@@ -1948,6 +2002,7 @@ async fn a_request_cancelled_during_the_wait_still_compensates() {
 /// hold refuses cleanly, in time, and writes nothing.
 #[tokio::test]
 async fn a_hold_that_cannot_take_the_view_tag_lock_in_time_refuses_cleanly() {
+    let _serial = serial().await;
     let limit = Duration::from_secs(3);
     let Some(env) = env(limit, true).await else {
         return;
@@ -1986,6 +2041,7 @@ async fn a_hold_that_cannot_take_the_view_tag_lock_in_time_refuses_cleanly() {
 /// carries the tag on every column.
 #[tokio::test]
 async fn a_classification_during_a_step_two_commit_reaches_the_view() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -2018,6 +2074,7 @@ async fn a_classification_during_a_step_two_commit_reaches_the_view() {
 /// its permit runs in a task the request's cancellation cannot drop.
 #[tokio::test]
 async fn a_best_effort_commit_cancelled_after_lakekeeper_commits_still_records() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, false).await else {
         return;
     };
@@ -2045,6 +2102,7 @@ async fn a_best_effort_commit_cancelled_after_lakekeeper_commits_still_records()
 /// lakekeeper commits still drops what the source held.
 #[tokio::test]
 async fn a_rename_cancelled_after_lakekeeper_commits_still_moves_everything() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -2085,6 +2143,7 @@ async fn a_rename_cancelled_after_lakekeeper_commits_still_moves_everything() {
 /// lakekeeper commits still forgets the view's lineage and derived tags.
 #[tokio::test]
 async fn a_drop_cancelled_after_lakekeeper_commits_still_forgets_the_view() {
+    let _shared = shared().await;
     let Some(env) = env(LIMIT, true).await else {
         return;
     };
@@ -2134,6 +2193,7 @@ async fn record_holders(conn: &mut sqlx::PgConnection, keys: &[String]) -> i64 {
 /// permit holding none. Once the lock frees, every view is recorded `failed`.
 #[tokio::test]
 async fn overflow_records_never_hold_more_connections_than_the_cap() {
+    let _serial = serial().await;
     const CAP: usize = 1;
     let Some(env) = env_with(Opts {
         classified: false,
@@ -2242,6 +2302,7 @@ async fn hold_the_permit_briefly(env: &Env, name: &str) {
 /// would reach the view only at the scheduled sweep.
 #[tokio::test]
 async fn an_over_cap_replace_replaces_the_stale_lineage_with_failed() {
+    let _serial = serial().await;
     let Some(env) = env_with(Opts {
         classified: false,
         max_holds: 1,
