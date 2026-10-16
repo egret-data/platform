@@ -80,11 +80,12 @@ Measurement notes:
 
 ### 5.2 Where the change lands
 
-- `models/task.rs`: no change. The node already exists as `TaskKind::AllowFailure(AllowFailure)`.
-- `executor/plan.rs`: the new variant; `flatten_flow` maps the node to it.
-- `executor/flowable/allow_failure.rs`: new. Its terminal mapping is a pure function, unit-tested as a table.
+- `models/task.rs`: **changed, not "no change"** (found in Task 3). `models::AllowFailure` held only `tasks`, so an `errors:` on the block was dropped at parse, and `finally:` was dropped everywhere (no kind implements it). It gains `errors` and `finally` fields; `finally` is a control-flow child (`children()`), `errors` is `error_children()`, so every walk that finds children sees both.
+- `executor/plan.rs`: the new variant `TaskKind::AllowFailure { tasks, finally }`. `errors` stays on `PlanTask::errors` as for every flowable; `finally` is on the variant because no other kind has one. `flatten_flow` maps the node.
+- `executor/flowable/allow_failure.rs`: new. Its terminal mapping, `block_state(children, allow_warning)`, is a pure function unit-tested as a table. The handler emits the block's terminal as a `SetRunState` and does not return a `Step::Done`, because `descend` would apply the block's own `allowWarning:` to that `Done` again and turn the measured `WARNING` into `SUCCESS`.
 - `executor/flowable/mod.rs`: dispatches the variant (one arm), next to `Sequential`.
-- `spec/validate.rs`: the refusal for `AllowFailure` is removed. `unsupported_allow_failure` stays for nothing.
+- `spec/validate.rs`: the `unsupported_allow_failure` refusal is removed. A block-level `retry:` is refused as `unsupported_allow_failure_retry` (spec §2, §5.3), and nested `errors:` and `finally:` are walked.
+- `graph/mod.rs`: draws a block's `finally:` beside its `errors:`, so that every planned task is a graph node.
 - `executor/mod.rs`: `build_plan` plans it; the tests that counted it as opaque (`executor/mod.rs:3390-3410`, `3960-3970`, `4140`, `4235`) move with it.
 
 ### 5.3 What is not changed

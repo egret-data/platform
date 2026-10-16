@@ -551,8 +551,6 @@ valids/after-execution-error
 valids/after-execution-finally
 valids/after-execution-flowable
 valids/all-flowable
-valids/allow-failure
-valids/allow-failure-with-retry
 valids/assert
 valids/dag
 valids/disable-flowable
@@ -561,7 +559,6 @@ valids/exit
 valids/exit-cancelled
 valids/exit-killed
 valids/exit-nested
-valids/finally-allowfailure
 valids/finally-dag
 valids/finally-flow
 valids/finally-flow-error
@@ -619,6 +616,9 @@ valids/retry-failed-flow-duration
 valids/retry-flowable-parallel
 valids/retry-subflow
 valids/retry-success
+# valids/retry-with-flowable-errors: a retry on the BLOCK itself, the non-goal of the
+# AllowFailure flowable package (spec §2). The image retries the failing child; egret
+# refuses the block-level retry as `unsupported_allow_failure_retry`, so the flow is refused.
 valids/retry-with-flowable-errors
 valids/set-variables
 valids/set-variables-duplicate

@@ -1616,21 +1616,21 @@ fn walk_task(
                     path: format!("{path}.tasks"),
                 });
             }
-            // no-silent-stall Task 1 (spec §3). `build_plan` plans it an
-            // opaque runnable -- it turns a child's failure into `WARNING`,
-            // which `RunState` cannot hold -- and no handler runs that, so
-            // every execution of it stalled in `RUNNING`. An ERROR now, beside
-            // `allow_failure_tasks_required`, which stays.
-            report.errors.push(Finding {
-                code: "unsupported_allow_failure",
-                message: format!(
-                    "task '{}' has type '{}', which egret does not run, so the flow cannot be \
-                     published or started. To let a child task fail without failing the \
-                     flow, set `allowFailure: true` on each child task instead",
-                    task.id, task.r#type
-                ),
-                path: path.clone(),
-            });
+            // Block-level `retry:` is a non-goal (spec §2): the image retries the
+            // failing child, and egret has no measured retry for the block. It is
+            // refused, not run without its retry, so the flow cannot stall or
+            // silently lose the property.
+            if task.retry.is_some() {
+                report.errors.push(Finding {
+                    code: "unsupported_allow_failure_retry",
+                    message: format!(
+                        "task '{}' has type '{}': a retry on an AllowFailure block is not \
+                         supported; put `retry:` on the child task that should be retried",
+                        task.id, task.r#type
+                    ),
+                    path: format!("{path}.retry"),
+                });
+            }
         }
         // W8 Task 3. `tasks:` is NOT required -- `valids/pause-delay` writes
         // none and the artifact published it with a 200. A `Pause` whose
@@ -3691,17 +3691,15 @@ mod tests {
     }
 
     #[test]
-    fn allow_failure_tasks_present_draws_only_the_refusal() {
+    fn allow_failure_tasks_present_is_valid() {
         let f = parse(
             "id: f\nnamespace: a.b\ntasks:\n  - id: a\n    type: core.allowfailure\n    tasks:\n      - id: c\n        type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
-        // Since no-silent-stall Task 1 the construct itself is refused; the
-        // pair this test belongs to is about `tasks:`, so "silent" is now
-        // "the refusal and nothing else".
-        let codes: Vec<&str> = r.errors.iter().map(|e| e.code).collect();
-        assert_eq!(codes, ["unsupported_allow_failure"], "{r:?}");
+        // The construct is planned now (spec §5.2), so a block with children
+        // and no `retry:` draws nothing at all.
+        assert!(r.errors.is_empty() && r.warnings.is_empty(), "{r:?}");
     }
 
     #[test]
@@ -4693,6 +4691,21 @@ mod tests {
         ]
     }
 
+    fn allow_failure_retry_body(ty: &str) -> Vec<String> {
+        vec![
+            "id: c".into(),
+            format!("type: {ty}"),
+            "retry:".into(),
+            "  type: constant".into(),
+            "  interval: PT1S".into(),
+            "  maxAttempts: 3".into(),
+            "tasks:".into(),
+            "  - id: inner".into(),
+            "    type: core.log".into(),
+            "    message: hi".into(),
+        ]
+    }
+
     fn loop_until_gap_body(ty: &str) -> Vec<String> {
         vec![
             "id: c".into(),
@@ -4713,16 +4726,16 @@ mod tests {
 
     const REFUSED: &[Refused] = &[
         Refused {
-            code: "unsupported_allow_failure",
+            code: "unsupported_allow_failure_retry",
             spellings: &[
                 "io.kestra.plugin.core.flow.AllowFailure",
                 "core.allowfailure",
                 "io.kestra.plugin.core.flow.allowFAILURE",
                 "core.AllowFailure",
             ],
-            body: branch_body,
-            suffix: "",
-            hints: &["set `allowFailure: true` on each child task instead"],
+            body: allow_failure_retry_body,
+            suffix: ".retry",
+            hints: &["put `retry:` on the child task that should be retried"],
         },
         Refused {
             code: "unsupported_working_directory",
@@ -4950,35 +4963,26 @@ mod tests {
         assert!(r.errors.is_empty() && r.warnings.is_empty(), "{r:?}");
     }
 
-    /// The paths that keep their errors (§3): an `AllowFailure` or a
-    /// `WorkingDirectory` with no `tasks:` draws its `*_tasks_required` AND
-    /// the new refusal.
+    /// The paths that keep their errors (§3): a `WorkingDirectory` with no
+    /// `tasks:` draws its `*_tasks_required` AND the refusal.
     #[test]
-    fn an_empty_allow_failure_or_working_directory_keeps_its_old_error_too() {
-        for (ty, old, new) in [
-            (
-                "core.allowfailure",
-                "allow_failure_tasks_required",
-                "unsupported_allow_failure",
-            ),
-            (
-                "core.workingdirectory",
-                "working_directory_tasks_required",
-                "unsupported_working_directory",
-            ),
-        ] {
-            let r = validate(
-                &parse(&format!(
-                    "id: f\nnamespace: a.b\ntasks:\n  - id: c\n    type: {ty}\n"
-                ))
-                .unwrap(),
-            );
-            let codes: Vec<&str> = r.errors.iter().map(|e| e.code).collect();
-            assert!(
-                codes.contains(&old) && codes.contains(&new),
-                "{ty}: {codes:?}"
-            );
-        }
+    fn an_empty_working_directory_keeps_its_old_error_too() {
+        let (ty, old, new) = (
+            "core.workingdirectory",
+            "working_directory_tasks_required",
+            "unsupported_working_directory",
+        );
+        let r = validate(
+            &parse(&format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: c\n    type: {ty}\n"
+            ))
+            .unwrap(),
+        );
+        let codes: Vec<&str> = r.errors.iter().map(|e| e.code).collect();
+        assert!(
+            codes.contains(&old) && codes.contains(&new),
+            "{ty}: {codes:?}"
+        );
     }
 
     /// A typo is reported ONCE, as an error, wherever it sits -- including

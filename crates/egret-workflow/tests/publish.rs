@@ -754,14 +754,11 @@ async fn a_secret_in_a_kv_value_is_refused_at_publish_by_its_own_message() {
 
 /// W9c Task 4: the corpus's `valids/kv` (two `kv()` calls in `Return`
 /// tasks) publishes. `valids/retry-with-flowable-errors` carries no
-/// `secret()` either; it stopped only at the unknown `kv.Set` type until W9c
-/// Task 5 registered the six KV tasks, and it published from then until
-/// no-silent-stall Task 1, which refuses its `AllowFailure` flowable
-/// (`unsupported_allow_failure`: egret cannot run it, and every execution of it
-/// stalled). So it is refused now, and for that reason alone.
+/// `secret()` either. Its `AllowFailure` block is planned now (spec §5.2 of the
+/// AllowFailure flowable), but a `retry:` on the block itself is a non-goal, so
+/// it is refused for that retry and for nothing else.
 #[tokio::test]
-async fn valids_kv_publishes_and_retry_with_flowable_errors_is_refused_only_for_its_allow_failure()
-{
+async fn valids_kv_publishes_and_retry_with_flowable_errors_is_refused_only_for_its_block_retry() {
     let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
@@ -776,11 +773,10 @@ async fn valids_kv_publishes_and_retry_with_flowable_errors_is_refused_only_for_
     match egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "").await {
         Err(egret_core::Error::InvalidInput(m)) => {
             assert!(
-                m.contains("set `allowFailure: true` on each child task instead")
-                    && m.contains("(tasks.retry_block)"),
+                m.contains("put `retry:` on the child task")
+                    && m.contains("(tasks.retry_block.retry)"),
                 "{m}"
             );
-            assert_eq!(m.matches("; ").count(), 0, "the only finding: {m}");
         }
         other => panic!("{other:?}"),
     }

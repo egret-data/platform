@@ -459,6 +459,11 @@ pub(crate) fn descend(
         TaskKind::Sequential { tasks } => {
             sequential::drive(plan, state, tasks, errors, Some(run), now)
         }
+        // Returned without the `Done` mapping below, for the reason
+        // `allow_failure::drive` gives: its terminal is already the block's.
+        TaskKind::AllowFailure { tasks, finally } => {
+            return allow_failure::drive(plan, state, run, task, tasks, finally, now)
+        }
         TaskKind::Parallel { tasks, concurrency } => {
             parallel::drive(plan, state, tasks, errors, Some(run), *concurrency, now)
         }

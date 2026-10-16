@@ -125,6 +125,9 @@ impl Plan {
             // then run in a different execution, and unlike a `Pause`'s, which
             // a planned `Pause` never has.
             | TaskKind::LoopUntil { tasks, .. } => tasks.clone(),
+            TaskKind::AllowFailure { tasks, finally } => {
+                tasks.iter().chain(finally).copied().collect()
+            }
             TaskKind::If { then_, else_, .. } => then_.iter().chain(else_).copied().collect(),
             TaskKind::Switch { cases, default, .. } => cases
                 .iter()
@@ -369,6 +372,14 @@ pub enum TaskKind {
     },
     Sequential {
         tasks: Vec<TaskIx>,
+    },
+    /// `io.kestra.plugin.core.flow.AllowFailure`: a `Sequential` whose failure
+    /// is a warning (spec §5.1). Its `errors:` are on [`PlanTask::errors`], as
+    /// for every flowable; `finally` runs after the block ends, whatever its
+    /// state, and is carried here because no other kind has one.
+    AllowFailure {
+        tasks: Vec<TaskIx>,
+        finally: Vec<TaskIx>,
     },
     /// `io.kestra.plugin.core.flow.Parallel`.
     ///
@@ -737,6 +748,7 @@ pub(super) const MAX_TASK_DEPTH: usize = 8 * MEASURED_MAX_CORPUS_DEPTH;
 /// `every_spelling_of_a_flowable_reaches_the_same_plan`, which plans a chain
 /// past the bound in each of the four and requires the refusal from every one.
 const SEQUENTIAL_TYPE: &str = "sequential";
+const ALLOW_FAILURE_TYPE: &str = "allowfailure";
 const PARALLEL_TYPE: &str = "parallel";
 const DAG_TYPE: &str = "dag";
 const IF_TYPE: &str = "if";
@@ -1217,6 +1229,17 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
             out[ix].errors = flatten_list(out, &seq.errors, depth + 1)?;
             out[ix].kind = TaskKind::Sequential { tasks: children };
         }
+        // `errors` after `tasks`, and `finally` after both, which is Kestra's
+        // order (`AbstractBranch.allChildTasks()` is `tasks + errors + _finally`).
+        (ModelKind::AllowFailure(af), Some(ALLOW_FAILURE_TYPE)) => {
+            let children = flatten_list(out, &af.tasks, depth + 1)?;
+            out[ix].errors = flatten_list(out, &af.errors, depth + 1)?;
+            let finally = flatten_list(out, &af.finally, depth + 1)?;
+            out[ix].kind = TaskKind::AllowFailure {
+                tasks: children,
+                finally,
+            };
+        }
         (ModelKind::Parallel(par), Some(PARALLEL_TYPE)) => {
             let children = flatten_list(out, &par.tasks, depth + 1)?;
             out[ix].errors = flatten_list(out, &par.errors, depth + 1)?;
@@ -1602,4 +1625,36 @@ fn reaches_itself(start: &str, nodes: &[(&Task, &[String])]) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod allow_failure_plan_tests {
+    use super::*;
+
+    /// One `AllowFailure` holding two children, with its own `errors:` and
+    /// `finally:`. It plans as the flowable it is, and the three lists come
+    /// through in Kestra's order: `tasks` first, then `errors`, then `finally`.
+    #[test]
+    fn allow_failure_plans_its_tasks_errors_and_finally() {
+        let flow = crate::spec::parse(
+            "id: af\nnamespace: io.kestra.tests\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.AllowFailure\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n      - id: b\n        type: io.kestra.plugin.core.debug.Return\n        format: b\n    errors:\n      - id: e\n        type: io.kestra.plugin.core.debug.Return\n        format: e\n    finally:\n      - id: f\n        type: io.kestra.plugin.core.debug.Return\n        format: f\n",
+        )
+        .expect("parses");
+        let plan = flatten_flow(&flow).expect("plans");
+        let block = plan.roots[0];
+        let TaskKind::AllowFailure { tasks, finally } = &plan.tasks[block].kind else {
+            panic!("expected AllowFailure, got {:?}", plan.tasks[block].kind);
+        };
+        let id = |ix: &TaskIx| plan.tasks[*ix].id.as_str();
+        assert_eq!(tasks.iter().map(id).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(
+            plan.tasks[block].errors.iter().map(id).collect::<Vec<_>>(),
+            ["e"]
+        );
+        assert_eq!(finally.iter().map(id).collect::<Vec<_>>(), ["f"]);
+        assert!(
+            tasks.iter().chain(finally).all(|ix| *ix > block),
+            "pre-order: a child's index is greater than its parent's"
+        );
+    }
 }

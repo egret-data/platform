@@ -1742,7 +1742,9 @@ async fn a_new_start_of_each_refused_flow_is_still_refused(pool: sqlx::PgPool) {
     let (_db, ws) = seed(&pool).await;
     let flows = [
         one_opaque_flowable("new-wd", "io.kestra.plugin.core.flow.WorkingDirectory").0,
-        one_opaque_flowable("new-af", "io.kestra.plugin.core.flow.AllowFailure").0,
+        // An AllowFailure is planned now (spec §5.2); a `retry:` on the block is
+        // the refusal that remains (spec §2).
+        "id: new-af\nnamespace: t\ntasks:\n  - id: af\n    type: io.kestra.plugin.core.flow.AllowFailure\n    retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 3\n    tasks:\n      - id: t\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n".to_string(),
         format!(
             "id: new-ov\nnamespace: t\ntasks:\n  - id: o\n    type: {OUTPUT_VALUES}\n    \
              values:\n      k: v\n"

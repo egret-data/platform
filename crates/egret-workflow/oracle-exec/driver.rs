@@ -819,7 +819,7 @@ const CREATE_REFUSED: usize = 4;
 /// eight. `unknown_task_type` becoming an error moved nothing here: publish
 /// already refused every flow it names, through reference resolution, and
 /// [`publish_class`] still files them under [`UNKNOWN_TYPE_REFUSED`].
-const LIVE: usize = 237;
+const LIVE: usize = 240;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -900,7 +900,13 @@ const UNKNOWN_TYPE_REFUSED: usize = 65;
 ///
 /// **25 → 33 at no-silent-stall Task 1**: the eight flows [`LIVE`] names,
 /// refused by `unsupported_allow_failure` and `unsupported_working_directory`.
-const VALIDATE_REFUSED: usize = 33;
+///
+/// **33 → 30 with the AllowFailure flowable package**: `valids/allow-failure`,
+/// `valids/allow-failure-with-retry` and `valids/finally-allowfailure` no longer
+/// draw `unsupported_allow_failure`, so they publish live (their [`LIVE`] row
+/// moved 237 → 240 with them). `valids/retry-with-flowable-errors` stays refused,
+/// now by `unsupported_allow_failure_retry`, the block-level retry non-goal.
+const VALIDATE_REFUSED: usize = 30;
 
 /// Every corpus flow that has a draft row and no live version — the sum of the
 /// two above, derived rather than written down a third time.
