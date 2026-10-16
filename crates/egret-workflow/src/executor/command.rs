@@ -355,4 +355,22 @@ pub enum Command {
         /// The run of the `Loop` this iteration belongs to.
         parent_run: RunIx,
     },
+    /// Begin a `WorkingDirectory` block's prepare claim: `namespaceFiles`,
+    /// `inputFiles` and the cache restore, before its first child (spec §5.1).
+    /// The block stays `RUNNING`; the claim is the worker's, not a run.
+    BeginWorkingDirectory {
+        run: RunIx,
+    },
+    /// The block's children are done, so its finish claim runs: `outputFiles`
+    /// and the cache save. It runs whether a child failed or not (spec §5.3, V2).
+    FinishWorkingDirectory {
+        run: RunIx,
+    },
+    /// The worker completed the claim that [`Command::BeginWorkingDirectory`]
+    /// or [`Command::FinishWorkingDirectory`] asked for. A claim that FAILED is
+    /// not this command: the worker fails the block's run with
+    /// [`Command::SetRunState`], as it fails any run (spec §5.3, V3).
+    CompleteWorkingDirectoryClaim {
+        run: RunIx,
+    },
 }

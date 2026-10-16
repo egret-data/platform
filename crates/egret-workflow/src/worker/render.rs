@@ -1005,6 +1005,7 @@ mod tests {
             attempts: Vec::<Attempt>::new(),
             not_before: None,
             resume_with: None,
+            working_dir: None,
         };
         let state = ExecutionState {
             runs: vec![run(0, RunState::Success), run(1, RunState::Running)],

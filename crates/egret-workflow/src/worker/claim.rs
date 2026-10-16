@@ -78,7 +78,7 @@ use super::txn::{transaction, Ended, Fetched, Finish, Gate, InTxn, Isolation, Tx
 use super::{from_wire, Outcome, Registry, TaskInput, WorkerError, MAX_ROUNDS};
 use crate::executor::{
     advance, apply, build_plan, plan_stored, Attempt, Command, ExecutionMeta, ExecutionState, Plan,
-    Resume, RunIx, RunState, TaskKind, TaskRun, Tick,
+    Resume, RunIx, RunState, TaskKind, TaskRun, Tick, WorkingDirPhase,
 };
 #[cfg(any(test, feature = "test-util"))]
 use crate::storage::prefetch::Prefetch;
@@ -3168,7 +3168,7 @@ pub(super) async fn load_with(
 
     let rows = sqlx::query(
         "SELECT id, run_ix, task_ix, parent_ix, value, rendered, rendered_run_if, \
-                history, attempts, not_before_ms, resume_with \
+                history, attempts, not_before_ms, resume_with, working_dir \
            FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix",
     )
     .bind(execution_id)
@@ -3208,6 +3208,10 @@ pub(super) async fn load_with(
                 id,
                 r.get::<Option<String>, _>("resume_with").as_deref(),
                 r.get::<Option<i64>, _>("not_before_ms").map(Tick),
+            )?,
+            working_dir: parse_working_dir(
+                id,
+                r.get::<Option<String>, _>("working_dir").as_deref(),
             )?,
         });
     }
@@ -3620,7 +3624,7 @@ pub const RUN_STATE_UPDATE: &str = concat!(
             claimed_at = CASE WHEN $7 THEN NULL ELSE claimed_at END, \
             ended_seq = $10, \
             created_seq = COALESCE($12, created_seq), \
-            resume_with = $13, ",
+            resume_with = $13, working_dir = $16, ",
     stamp_set!("$1", "$2", "$14", "$15"),
     ", updated_at = now() \
       WHERE execution_id = $8 AND run_ix = $9 \
@@ -3740,6 +3744,7 @@ async fn persist(
                 .bind(run.resume_with.as_ref().map(Resume::wire))
                 .bind(entered.running)
                 .bind(entered.terminal)
+                .bind(run.working_dir.map(WorkingDirPhase::wire))
                 .execute(&mut *conn)
                 .await
                 .map_err(db_err)?;
@@ -3772,9 +3777,9 @@ async fn persist(
                 "INSERT INTO workflow.task_runs \
                    (execution_id, run_ix, task_ix, task_id, type_id, parent_ix, value, \
                     rendered, rendered_run_if, state, history, attempts, not_before_ms, \
-                    created_seq, ended_seq, resume_with, ",
+                    created_seq, ended_seq, resume_with, working_dir, ",
                 stamp_columns!(),
-                ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, ",
+                ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, ",
                 stamp_values!("$10", "$11"),
                 ")",
             ))
@@ -3798,6 +3803,7 @@ async fn persist(
             // this writer never mentions is a column the next author has to
             // discover.
             .bind(run.resume_with.as_ref().map(Resume::wire))
+            .bind(run.working_dir.map(WorkingDirPhase::wire))
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;
@@ -3874,6 +3880,18 @@ fn attempts_json(attempts: &[Attempt]) -> serde_json::Value {
 /// being wrong -- which is `WorkerError::Corrupt`'s whole class, and the one
 /// class `oracle-exec/driver.rs` reports as `Broken` rather than swallowing as
 /// an ordinary divergence.
+fn parse_working_dir(owner: Uuid, wire: Option<&str>) -> Result<Option<WorkingDirPhase>> {
+    match wire {
+        None => Ok(None),
+        Some(w) => WorkingDirPhase::parse(w).map(Some).ok_or_else(|| {
+            worker_err(WorkerError::Corrupt(
+                owner,
+                format!("working_dir {w:?} is not a phase"),
+            ))
+        }),
+    }
+}
+
 fn parse_resume(owner: Uuid, wire: Option<&str>, at: Option<Tick>) -> Result<Option<Resume>> {
     let corrupt = |what: String| worker_err(WorkerError::Corrupt(owner, what));
     Ok(match (wire, at) {
@@ -3977,6 +3995,7 @@ mod tests {
             attempts: Vec::<_Attempt>::new(),
             not_before: None,
             resume_with: None,
+            working_dir: None,
         };
         let state = ExecutionState {
             runs: vec![

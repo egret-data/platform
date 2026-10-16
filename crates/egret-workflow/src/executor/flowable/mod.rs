@@ -21,6 +21,7 @@ pub(crate) mod loop_until;
 pub(crate) mod parallel;
 pub(crate) mod pause;
 pub(crate) mod sequential;
+pub(crate) mod working_directory;
 
 use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx, TaskKind};
@@ -475,10 +476,11 @@ pub(crate) fn descend(
             branch::drive_switch(plan, state, run, cases, default, errors, now)
         }
         TaskKind::Loop { .. } => return Step::Waiting,
-        // Plan Task 3 only: the block's driver is plan Task 5, and until it
-        // lands a planned block waits here rather than being driven by a
-        // half-built rule.
-        TaskKind::WorkingDirectory { .. } => return Step::Waiting,
+        // Not returned: its `Done` is the block's, and it takes the same
+        // `allowFailure:` mapping below as every other flowable.
+        TaskKind::WorkingDirectory { tasks } => {
+            working_directory::drive(plan, state, run, tasks, now)
+        }
         // W8 Task 3. It is neither `Waiting` (there is a command to emit, and
         // the executor is the only thing that can emit it) nor a list to walk:
         // the whole of a `Pause` is the transition into `PAUSED`, which

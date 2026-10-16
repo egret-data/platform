@@ -638,11 +638,11 @@ async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name
             other => panic!("{id}: {other:?}"),
         }
     }
-    // The control: the corpus flow's block, and a templated one, raise no
-    // `namespaceFiles` finding. Since no-silent-stall Task 1 a
-    // `WorkingDirectory` does not PUBLISH at all -- egret cannot run it, so it
-    // is refused as `unsupported_working_directory` at the task's own path --
-    // so the control is that the refusal is that one alone.
+    // The control: a valid `namespaceFiles` raises no finding UNDER the
+    // property. Since plan Task 3 the block publishes once its properties run,
+    // and until Task 7 runs `namespaceFiles` the whole property is refused by
+    // name, at its own path (`working_directory_property_not_yet_run`). That
+    // refusal is the one thing a valid block draws.
     for (id, block) in [
         (
             "good",
@@ -662,11 +662,14 @@ async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name
         let good = common::draft(&repo, ws, user, &working_directory(id, block)).await;
         let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, good.id, "")
             .await
-            .expect_err("a WorkingDirectory is refused: egret cannot run it");
+            .expect_err("a WorkingDirectory with unrun properties is refused");
         match err {
             egret_core::Error::InvalidInput(m) => {
-                assert!(m.contains("(tasks.wd)") && m.contains("outputFiles"), "{id}: {m}");
-                assert!(!m.contains("namespaceFiles"), "{id}: a valid block: {m}");
+                assert!(m.contains("(tasks.wd.namespaceFiles)"), "{id}: {m}");
+                assert!(
+                    !m.contains("(tasks.wd.namespaceFiles."),
+                    "{id}: a valid block draws the property refusal alone: {m}"
+                );
             }
             other => panic!("{id}: {other:?}"),
         }

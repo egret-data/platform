@@ -1741,7 +1741,9 @@ async fn a_new_start_of_each_refused_flow_is_still_refused(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
     let flows = [
-        one_opaque_flowable("new-wd", "io.kestra.plugin.core.flow.WorkingDirectory").0,
+        // A `WorkingDirectory` runs now (plan Task 3); its `inputFiles` is the
+        // refusal that remains until plan Task 7 runs it.
+        "id: new-wd\nnamespace: t\ntasks:\n  - id: wd\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    inputFiles:\n      in.txt: hello\n    tasks:\n      - id: c\n        type: io.kestra.plugin.core.debug.Return\n        format: c\n".to_string(),
         // An AllowFailure is planned now (spec §5.2); a `retry:` on the block is
         // the refusal that remains (spec §2).
         "id: new-af\nnamespace: t\ntasks:\n  - id: af\n    type: io.kestra.plugin.core.flow.AllowFailure\n    retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 3\n    tasks:\n      - id: t\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n".to_string(),

@@ -55,6 +55,7 @@ pub use plan::{
 };
 pub use state::{
     apply, Attempt, ExecutionMeta, ExecutionState, Resume, RunIx, RunState, TaskRun, Tick,
+    WorkingDirPhase,
 };
 
 /// Kestra's `FlowableUtils.resolveValues`, over a rendered `Loop.values`.
@@ -9601,6 +9602,7 @@ tasks:
             attempts: Vec::new(),
             not_before: Some(Tick(5)),
             resume_with: None,
+            working_dir: None,
         });
         nested.runs.push(crate::executor::TaskRun {
             task: 1,
@@ -9612,6 +9614,7 @@ tasks:
             attempts: Vec::new(),
             not_before: None,
             resume_with: None,
+            working_dir: None,
         });
         assert_eq!(crate::executor::loop_iteration(&nested, 0), 2);
         apply(&mut nested, &Command::RestartLoop { run: 0 });
