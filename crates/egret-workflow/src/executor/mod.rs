@@ -688,7 +688,8 @@ mod tests {
                     | TaskKind::If { .. }
                     | TaskKind::Switch { .. }
                     | TaskKind::Loop { .. }
-                    | TaskKind::LoopUntil { .. } => {
+                    | TaskKind::LoopUntil { .. }
+                    | TaskKind::AllowFailure { .. } => {
                         flowables += 1;
                         assert_eq!(
                             wire(&run.history),
@@ -3388,35 +3389,30 @@ mod tests {
         // Task 4**, which gave them a `plan::TaskKind::LoopUntil` and flattened
         // their children. They are still driven below, by the classifier probe,
         // where they now declare the `LoopUntil` arm and the `Descends` tier.
-        for ty in [
-            "io.kestra.plugin.core.flow.AllowFailure",
-            "io.kestra.plugin.core.flow.WorkingDirectory",
-        ] {
-            let flow = crate::spec::parse(&branch(ty)).unwrap_or_else(|e| panic!("{ty}: {e:?}"));
-            let plan = plan::flatten_flow(&flow).unwrap_or_else(|e| panic!("{ty}: {e}"));
-            assert_eq!(
-                plan.tasks.len(),
-                1,
-                "{ty} is opaque, so `inner` must not be in the plan at all"
-            );
-            // And refused, because no handler can run the opaque task.
-            let refused = build_plan(&branch(ty)).expect_err("an opaque flowable must not plan");
-            assert!(
-                refused.message.starts_with("unsupported_allow_failure:")
-                    || refused
-                        .message
-                        .starts_with("unsupported_working_directory:"),
-                "{ty}: {}",
-                refused.message
-            );
-            assert_eq!(
-                plan.tasks[0].kind,
-                TaskKind::Runnable {
-                    type_id: ty.to_string()
-                },
-                "{ty} must be planned opaque"
-            );
-        }
+        let ty = "io.kestra.plugin.core.flow.WorkingDirectory";
+        let flow = crate::spec::parse(&branch(ty)).unwrap_or_else(|e| panic!("{ty}: {e:?}"));
+        let plan = plan::flatten_flow(&flow).unwrap_or_else(|e| panic!("{ty}: {e}"));
+        assert_eq!(
+            plan.tasks.len(),
+            1,
+            "{ty} is opaque, so `inner` must not be in the plan at all"
+        );
+        // And refused, because no handler can run the opaque task.
+        let refused = build_plan(&branch(ty)).expect_err("an opaque flowable must not plan");
+        assert!(
+            refused
+                .message
+                .starts_with("unsupported_working_directory:"),
+            "{ty}: {}",
+            refused.message
+        );
+        assert_eq!(
+            plan.tasks[0].kind,
+            TaskKind::Runnable {
+                type_id: ty.to_string()
+            },
+            "{ty} must be planned opaque"
+        );
 
         // The YAML for the typed flowables whose shape `branch` cannot
         // produce. They are bound here rather than written inline at their
@@ -3546,7 +3542,8 @@ mod tests {
                     PlannedAs::Descends
                 }
                 K::LoopUntil(_) => PlannedAs::Opaque,
-                K::AllowFailure(_) | K::WorkingDirectory(_) => PlannedAs::Opaque,
+                K::AllowFailure(_) => PlannedAs::Descends,
+                K::WorkingDirectory(_) => PlannedAs::Opaque,
                 K::Leaf { .. } => PlannedAs::Opaque,
             }
         }
@@ -3567,7 +3564,8 @@ mod tests {
                 | TaskKind::Switch { .. }
                 | TaskKind::Dag { .. }
                 | TaskKind::Loop { .. }
-                | TaskKind::LoopUntil { .. } => PlannedAs::Descends,
+                | TaskKind::LoopUntil { .. }
+                | TaskKind::AllowFailure { .. } => PlannedAs::Descends,
                 TaskKind::Pause { .. } => PlannedAs::Waits,
             }
         }
@@ -3960,12 +3958,18 @@ mod tests {
             format!("id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n")
         };
         let mut probes: Vec<(&str, String)> = Vec::new();
+        // A block-level `retry:` on an AllowFailure is refused (spec §2). Every
+        // spelling of the type gets the refusal, and the flow without the retry
+        // is planned (see `every_static_refusal_...` and the plan test).
         for ty in [
             "io.kestra.plugin.core.flow.AllowFailure",
             "core.allowfailure",
             "core.AllowFailure",
         ] {
-            probes.push(("unsupported_allow_failure", branch(ty)));
+            let with_retry = format!(
+                "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n    retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 3\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
+            );
+            probes.push(("unsupported_allow_failure_retry", with_retry));
         }
         for ty in [
             "io.kestra.plugin.core.flow.WorkingDirectory",
@@ -4137,9 +4141,14 @@ mod tests {
         assert_eq!(
             by_type,
             BTreeMap::from([
-                ("allowfailure".to_string(), 6),
                 ("pause".to_string(), 3),
-                ("workingdirectory".to_string(), 13),
+                // `allowfailure` left this map at spec §5.2: an AllowFailure is
+                // planned now, so it is no longer an opaque task. The 2 more
+                // `workingdirectory` are the two WorkingDirectory tasks nested
+                // in `valids/working-directory-namespace-files*`'s AllowFailure,
+                // which the opaque tier hid from this walk. Both are still
+                // refused, by `unsupported_working_directory`.
+                ("workingdirectory".to_string(), 15),
             ]),
             "the corpus population this guard judges; if it moves, re-measure \
              and say why"
@@ -4231,16 +4240,6 @@ mod tests {
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
-            id: "valids/allow-failure-with-retry",
-            cause: "an `AllowFailure` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it turns a child's failure into `WARNING`, which `RunState` cannot hold. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_allow_failure`: a deliberate refusal, not an over-refusal to close, until egret runs `AllowFailure`. W8's",
-            codes: &["unsupported_allow_failure"],
-        },
-        PublishedButRefused {
-            id: "valids/allow-failure",
-            cause: "an `AllowFailure` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it turns a child's failure into `WARNING`, which `RunState` cannot hold. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_allow_failure`: a deliberate refusal, not an over-refusal to close, until egret runs `AllowFailure`. W8's",
-            codes: &["unsupported_allow_failure"],
-        },
-        PublishedButRefused {
             id: "valids/assert",
             cause: "a task of type `io.kestra.plugin.core.execution.Assert`, `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
@@ -4264,11 +4263,6 @@ mod tests {
             id: "valids/exit",
             cause: "a task of type `io.kestra.plugin.core.execution.Exit`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
-        },
-        PublishedButRefused {
-            id: "valids/finally-allowfailure",
-            cause: "an `AllowFailure` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it turns a child's failure into `WARNING`, which `RunState` cannot hold. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_allow_failure`: a deliberate refusal, not an over-refusal to close, until egret runs `AllowFailure`. W8's",
-            codes: &["unsupported_allow_failure"],
         },
         PublishedButRefused {
             id: "valids/flow-concurrency-queue-after-execution",
@@ -4372,8 +4366,8 @@ mod tests {
         },
         PublishedButRefused {
             id: "valids/retry-with-flowable-errors",
-            cause: "an `AllowFailure` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it turns a child's failure into `WARNING`, which `RunState` cannot hold. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_allow_failure`: a deliberate refusal, not an over-refusal to close, until egret runs `AllowFailure`. W8's",
-            codes: &["unsupported_allow_failure"],
+            cause: "an `AllowFailure` flowable with `retry:` on the block itself. Kestra retries the failing child; egret refuses the block-level `retry:` on purpose (spec §2, a non-goal for the AllowFailure flowable package), so the flow is refused where Kestra ran it.",
+            codes: &["unsupported_allow_failure_retry"],
         },
         PublishedButRefused {
             id: "valids/set-variables-duplicate",
@@ -5536,11 +5530,13 @@ mod tests {
         );
         assert_eq!(
             (flows, declared, planned),
-            (23, 24, 24),
-            "23 corpus flows declare a `retry:` on a task `build_plan` plans (or \
-             on the flow), 24 policies between them (25 and 26 until \
-             no-silent-stall Task 1, whose static refusals made two more flows \
-             refusable), and every one of them is \
+            (24, 25, 25),
+            "24 corpus flows declare a `retry:` on a task `build_plan` plans (or \
+             on the flow), 25 policies between them -- one more than before \
+             `valids/allow-failure-with-retry`, whose child retry plans now that \
+             AllowFailure is planned (spec §5.2). Before that it was 23, 24, 24; \
+             25 and 26 until no-silent-stall Task 1, whose static refusals made \
+             two more flows refusable, and every one of them is \
              readable as literals. If this moves, the corpus moved -- OR a flow \
              left the population by becoming refusable, which is what took this \
              from (26, 27, 27) at Task 7: `invalids/duplicate-parallel` declares \
@@ -10164,5 +10160,134 @@ tasks:
              comment saying no corpus `LoopUntil` contains one was false when it
              was written, and this is what compares it"
         );
+    }
+}
+
+#[cfg(test)]
+mod allow_failure_drive_tests {
+    use super::state::{apply, ExecutionState, RunState, Tick};
+    use super::{advance, plan, Command, Plan, TaskKind};
+
+    const T0: Tick = Tick(0);
+
+    /// Runs the flow to its end. Each in-flight `Runnable` finishes `FAILED` if
+    /// its id is in `fail`, and `SUCCESS` otherwise. Returns the execution's
+    /// final state as `advance` reports it, with the run states.
+    fn run(src: &str, fail: &[&str]) -> (Plan, ExecutionState, RunState) {
+        let flow = crate::spec::parse(src).expect("parses");
+        let plan = plan::flatten_flow(&flow).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        let mut final_state = None;
+        for _ in 0..1000 {
+            let cmds = advance(&plan, &state, T0);
+            if !cmds.is_empty() {
+                for cmd in &cmds {
+                    if let Command::SetExecutionState { state } = cmd {
+                        final_state = Some(*state);
+                    }
+                    apply(&mut state, cmd);
+                }
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            let Some(ix) = in_flight else { break };
+            let id = plan.tasks[state.runs[ix].task].id.as_str();
+            // The worker decides a runnable's terminal (`worker::claim`), and
+            // that is where `allowFailure:` softens a `FAILED`.
+            let raw = if fail.contains(&id) {
+                RunState::Failed
+            } else {
+                RunState::Success
+            };
+            let outcome = super::allow_failure::for_runnable(&plan, &state, ix, raw, T0);
+            apply(
+                &mut state,
+                &Command::SetRunState {
+                    run: ix,
+                    state: outcome,
+                },
+            );
+        }
+        let final_state = final_state.expect("the execution reached a terminal state");
+        (plan, state, final_state)
+    }
+
+    /// The last state of the run for `id`, or `None` if no run was created.
+    fn last_of(plan: &Plan, state: &ExecutionState, id: &str) -> Option<RunState> {
+        let task = plan.tasks.iter().position(|t| t.id == id)?;
+        state
+            .runs
+            .iter()
+            .find(|r| r.task == task)
+            .and_then(|r| r.history.last().copied())
+    }
+
+    const BLOCK: &str = "id: af\nnamespace: io.kestra.tests\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.AllowFailure\n{ALLOW}    tasks:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n      - id: ko\n        type: io.kestra.plugin.core.execution.Fail\n{KO_FLAG}      - id: skipped\n        type: io.kestra.plugin.core.debug.Return\n        format: s\n    errors:\n      - id: handler\n        type: io.kestra.plugin.core.debug.Return\n        format: h\n    finally:\n      - id: fin\n        type: io.kestra.plugin.core.debug.Return\n        format: f\n  - id: after\n    type: io.kestra.plugin.core.debug.Return\n    format: after\n";
+
+    fn block(allow_warning: bool, child_allow_failure: bool) -> String {
+        BLOCK
+            .replace(
+                "{ALLOW}",
+                if allow_warning {
+                    "    allowWarning: true\n"
+                } else {
+                    ""
+                },
+            )
+            .replace(
+                "{KO_FLAG}",
+                if child_allow_failure {
+                    "        allowFailure: true\n"
+                } else {
+                    ""
+                },
+            )
+    }
+
+    /// A failed child skips its siblings, runs `errors:` and `finally:`, makes
+    /// the block `WARNING`, and lets the task after the block run. Measured on
+    /// the image: `valids/allow-failure` and `valids/finally-allowfailure`.
+    #[test]
+    fn a_failed_child_makes_the_block_a_warning_and_the_flow_goes_on() {
+        let (plan, state, flow) = run(&block(false, false), &["ko"]);
+        assert_eq!(last_of(&plan, &state, "block"), Some(RunState::Warning));
+        assert_eq!(last_of(&plan, &state, "ko"), Some(RunState::Failed));
+        assert_eq!(
+            last_of(&plan, &state, "skipped"),
+            None,
+            "a sibling after the failed child is not run"
+        );
+        assert_eq!(last_of(&plan, &state, "handler"), Some(RunState::Success));
+        assert_eq!(last_of(&plan, &state, "fin"), Some(RunState::Success));
+        assert_eq!(last_of(&plan, &state, "after"), Some(RunState::Success));
+        assert_eq!(flow, RunState::Warning);
+    }
+
+    /// The block's `allowWarning:` maps a child that already WARNED to SUCCESS.
+    /// Measured: `probe-combo-warn` (SUCCESS) and `probe-combo-nowarn` (WARNING).
+    #[test]
+    fn a_warned_child_is_a_success_only_under_the_blocks_allow_warning() {
+        // `ko` is a `Fail`, so it fails; its own `allowFailure:` makes it WARN.
+        let (plan, state, _) = run(&block(true, true), &["ko"]);
+        assert_eq!(last_of(&plan, &state, "ko"), Some(RunState::Warning));
+        assert_eq!(last_of(&plan, &state, "block"), Some(RunState::Success));
+
+        let (plan, state, _) = run(&block(false, true), &["ko"]);
+        assert_eq!(last_of(&plan, &state, "block"), Some(RunState::Warning));
+    }
+
+    /// `finally:` runs when the block succeeded too, and `errors:` do not.
+    #[test]
+    fn finally_runs_after_a_successful_block_and_errors_do_not() {
+        let (plan, state, flow) = run(&block(false, false), &[]);
+        assert_eq!(last_of(&plan, &state, "block"), Some(RunState::Success));
+        assert_eq!(last_of(&plan, &state, "fin"), Some(RunState::Success));
+        assert_eq!(last_of(&plan, &state, "handler"), None);
+        assert_eq!(flow, RunState::Success);
     }
 }

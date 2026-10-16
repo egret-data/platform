@@ -814,8 +814,10 @@ impl Builder {
         }
 
         let errors = Ctx {
+            path: inner.path.clone(),
+            uid: inner.uid.clone(),
             branch: Branch::Errors,
-            ..inner
+            cluster: inner.cluster,
         };
         self.chain(
             &start,
@@ -826,6 +828,17 @@ impl Builder {
             None,
             &end,
         );
+        // `finally:` of an `AllowFailure` is a nested list of its own, drawn
+        // beside its `errors:` (both leave `start` and reach `end`).
+        if let TaskKind::AllowFailure(a) = &task.kind {
+            let finally = Ctx {
+                path: inner.path.clone(),
+                uid: inner.uid.clone(),
+                branch: Branch::Finally,
+                cluster: inner.cluster,
+            };
+            self.chain(&start, &a.finally, &finally, Finally, Finally, None, &end);
+        }
         self.add_node(end.clone(), NodeKind::End, Some(ix));
         Span {
             entry: start,

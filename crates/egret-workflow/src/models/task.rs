@@ -139,7 +139,9 @@ impl Task {
             TaskKind::Dag(d) => d.tasks.iter().filter_map(|n| n.task.as_ref()).collect(),
             TaskKind::Loop(l) => l.tasks.iter().collect(),
             TaskKind::LoopUntil(l) => l.tasks.iter().collect(),
-            TaskKind::AllowFailure(a) => a.tasks.iter().collect(),
+            // `finally` is a control-flow child like `tasks`: it runs, so the
+            // walks that find children (validation, claiming) must see it.
+            TaskKind::AllowFailure(a) => a.tasks.iter().chain(a.finally.iter()).collect(),
             TaskKind::WorkingDirectory(w) => w.tasks.iter().collect(),
             // `Pause.tasks` is Kestra's own field -- the list a pause runs
             // AFTER it is resumed -- so it is a control-flow child like any
@@ -186,6 +188,7 @@ impl Task {
             // same reason `children()` reads `Pause.tasks`: a handler nested
             // in it must be findable by `worker::claim::leaf_spec`.
             TaskKind::Pause(p) => p.errors.iter().collect(),
+            TaskKind::AllowFailure(a) => a.errors.iter().collect(),
             _ => Vec::new(),
         }
     }
@@ -540,7 +543,10 @@ pub struct Pause {
 }
 
 // kestra: AllowFailure.java -- `extends Sequential` with no fields of its
-// own, so its Rust shape is identical to `Sequential`'s.
+// own. `tasks` and `errors` are `AbstractBranch`'s, as for `Sequential`, and
+// `finally` is `AbstractBranch`'s `_finally`, which `Sequential` drops and this
+// kind does not: a block whose failure is a warning runs it after the block
+// has ended, whatever the block's state (spec §3.3).
 //
 // `tasks` carries the same `@NotEmpty`-on-`AbstractBranch` (via `Sequential`)
 // debt `Sequential` documents above (Task 4 fix round 3).
@@ -549,6 +555,14 @@ pub struct Pause {
 pub struct AllowFailure {
     #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub tasks: Vec<Task>,
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
+    pub errors: Vec<Task>,
+    #[serde(
+        default,
+        rename = "finally",
+        deserialize_with = "crate::models::wire::null_is_absent"
+    )]
+    pub finally: Vec<Task>,
 }
 
 // kestra: WorkingDirectory.java -- also `extends Sequential`; `cache`,

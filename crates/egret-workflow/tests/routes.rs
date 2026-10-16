@@ -354,9 +354,10 @@ async fn update_replaces_the_draft() {
 }
 
 /// **Drafts still save** (no-silent-stall §3): a `PUT` of a flow holding an
-/// `AllowFailure` -- which egret cannot run, so publish and every start path
-/// refuse it -- answers 200 and stores the draft, and the report it carries
-/// holds the ERROR `unsupported_allow_failure` at the task's path.
+/// `AllowFailure` with a `retry:` on the block -- which egret refuses (spec §2,
+/// a non-goal), so publish and every start path refuse it -- answers 200 and
+/// stores the draft, and the report it carries holds the ERROR
+/// `unsupported_allow_failure_retry` at the block's `retry` path.
 #[tokio::test]
 async fn a_draft_with_an_allow_failure_saves_and_its_report_carries_the_error() {
     let Some(db) = common::db().await else { return };
@@ -377,7 +378,8 @@ async fn a_draft_with_an_allow_failure_saves_and_its_report_carries_the_error() 
     let id = created["id"].as_str().unwrap();
 
     let source = "id: f\nnamespace: a.allowfailure\ntasks:\n  - id: risky\n    \
-                  type: io.kestra.plugin.core.flow.AllowFailure\n    tasks:\n      \
+                  type: io.kestra.plugin.core.flow.AllowFailure\n    retry:\n      \
+                  type: constant\n      interval: PT1S\n      maxAttempts: 3\n    tasks:\n      \
                   - id: t\n        type: core.log\n        message: hi\n";
     let res = common::put(
         &app,
@@ -396,7 +398,8 @@ async fn a_draft_with_an_allow_failure_saves_and_its_report_carries_the_error() 
     assert!(
         errors
             .iter()
-            .any(|e| e["code"] == "unsupported_allow_failure" && e["path"] == "tasks.risky"),
+            .any(|e| e["code"] == "unsupported_allow_failure_retry"
+                && e["path"] == "tasks.risky.retry"),
         "{errors:?}"
     );
     assert_eq!(updated["source"], source, "and the draft is the one sent");

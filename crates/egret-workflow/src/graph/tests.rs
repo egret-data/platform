@@ -802,16 +802,14 @@ fn a_disabled_task_is_drawn_and_keeps_its_edges() {
 }
 
 #[test]
-fn refusal_is_the_validation_error_at_the_tasks_own_path() {
+fn the_typo_is_refused_at_its_own_path_and_allow_failure_is_not() {
     let g = graph(&format!(
         "tasks:\n  - {{id: af, type: {FLOW}.AllowFailure, tasks: [{}]}}\n  - {{id: typo, type: io.kestra.plugin.core.log.Logg, message: m}}\n  - {}\n",
         leaf("inner"),
         leaf("ok")
     ));
-    assert_eq!(
-        task(&g, "tasks.af").refusal,
-        Some("unsupported_allow_failure")
-    );
+    // An AllowFailure with children is planned now (spec §5.2): no refusal.
+    assert_eq!(task(&g, "tasks.af").refusal, None);
     assert_eq!(task(&g, "tasks.af").kind, TaskNodeKind::Flowable);
     assert_eq!(task(&g, "tasks.typo").refusal, Some("unknown_task_type"));
     assert_eq!(task(&g, "tasks.ok").refusal, None);
@@ -874,13 +872,11 @@ fn a_loop_until_with_an_expression_bound_carries_its_refusal() {
     assert_eq!(task(&g, "tasks.l.a").refusal, None);
 }
 
-/// An `AllowFailure` with no tasks has TWO errors of its own: validation
-/// reports `allow_failure_tasks_required` at the property path
-/// `tasks.af.tasks` FIRST, then `unsupported_allow_failure` at the task's own
-/// path. The first in validation order wins, whichever path it is at -- the
-/// tie-break between an own-path and a property-path error.
+/// An `AllowFailure` with no tasks has one error of its own, at the property
+/// path `tasks.af.tasks`. It drew a second, `unsupported_allow_failure`, at the
+/// task's own path until the flowable was planned (spec §5.2).
 #[test]
-fn the_first_error_in_validation_order_is_the_refusal() {
+fn an_empty_allow_failure_is_refused_at_its_tasks_path() {
     let body = format!("tasks:\n  - {{id: af, type: {FLOW}.AllowFailure, tasks: []}}\n");
     let yaml = format!("id: f\nnamespace: company.team\n{body}");
     let mine: Vec<_> = errors_of(&yaml)
@@ -889,10 +885,7 @@ fn the_first_error_in_validation_order_is_the_refusal() {
         .collect();
     assert_eq!(
         mine,
-        [
-            ("allow_failure_tasks_required", "tasks.af.tasks".to_string()),
-            ("unsupported_allow_failure", "tasks.af".to_string()),
-        ]
+        [("allow_failure_tasks_required", "tasks.af.tasks".to_string())]
     );
     let g = graph(&body);
     assert_eq!(

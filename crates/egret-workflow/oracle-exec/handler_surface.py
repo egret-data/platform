@@ -202,6 +202,23 @@ def collect_tasks(node, path, out):
             collect_tasks(v, path, out)
 
 
+def unported_finally(node):
+    """True if some `finally:` is NOT the block-level `finally:` of an AllowFailure.
+
+    The AllowFailure flowable runs its own `finally:` (spec §5.2 of its design),
+    so that one is ported; a `finally:` on any other task is not.
+    """
+    if isinstance(node, dict):
+        ty = node.get("type")
+        is_allow_failure = isinstance(ty, str) and ty.rsplit(".", 1)[-1].lower() == "allowfailure"
+        if "finally" in node and not is_allow_failure:
+            return True
+        return any(unported_finally(v) for v in node.values())
+    if isinstance(node, list):
+        return any(unported_finally(v) for v in node)
+    return False
+
+
 def collect_keys(node, acc):
     if isinstance(node, dict):
         for k, v in node.items():
@@ -466,6 +483,10 @@ W3A_FLOWABLES = {
     # cost something the moment one of those four banked, and the `blocked`
     # guard below is what would say so.
     "io.kestra.plugin.core.flow.Pause",
+    # The AllowFailure flowable (spec §5.2): `executor::flowable::allow_failure`
+    # drives the block, so it is not a handler and no worker claims it. Its
+    # `allowFailure:` FLAG on a child is a different construct and stays a row.
+    "io.kestra.plugin.core.flow.AllowFailure",
     # W8 Task 4, and the pair is ONE Kestra class: `LoopUntil.java` carries
     # `@Plugin(aliases = "io.kestra.plugin.core.flow.WaitFor")`, so both
     # spellings now reach `models::TaskKind::LoopUntil` and `build_plan`
@@ -586,7 +607,7 @@ def run_blockers(entry, flows, kinds):
         if ty not in W3B_HANDLERS and ty not in W3A_FLOWABLES:
             kind = kinds.get(ty, {}).get("kind", "unresolved")
             out.add(("handler" if kind == "RunnableTask" else "construct", ty))
-        if "finally" in path:
+        if "finally" in path and unported_finally(flows[fid]["doc"]):
             out.add(("construct", "finally:"))
         if "afterExecution" in path:
             out.add(("construct", "afterExecution:"))
@@ -614,7 +635,7 @@ def declared_blockers(entry, flows, kinds):
             continue
         kind = kinds.get(ty, {}).get("kind", "unresolved")
         out.add(("handler" if kind == "RunnableTask" else "construct", ty))
-    if "finally" in keys:
+    if unported_finally(doc):
         out.add(("construct", "finally:"))
     if "afterExecution" in keys:
         out.add(("construct", "afterExecution:"))
@@ -927,9 +948,11 @@ def check_inputs(flows, kinds, golden, baseline):
     # `valids/sla-execution-condition`; 108 since W9a Task 11 banked
     # `valids/loop-values-from-uri` (a `Loop` over an ION file); 107 since
     # no-silent-stall Task 1 banked `invalids/invalid-task` (egret refuses an
-    # unknown task type now, as Kestra does).
-    if len(baseline) != 107:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 107; the split "
+    # unknown task type now, as Kestra does); 104 since the AllowFailure
+    # flowable banked `valids/allow-failure`, `valids/allow-failure-with-retry`
+    # and `valids/finally-allowfailure`.
+    if len(baseline) != 104:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 104; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1564,8 +1587,8 @@ def self_test():
          "not 266",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 107",
-         "not 107",
+    case("baseline.txt is no longer 104",
+         "not 104",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

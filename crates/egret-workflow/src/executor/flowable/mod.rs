@@ -13,6 +13,7 @@
 //! would otherwise be three copies, and three copies of "a `Runnable` gets
 //! `SUBMITTED` first" is three chances for one of them to stop being true.
 
+pub(crate) mod allow_failure;
 pub(crate) mod branch;
 pub(crate) mod dag;
 pub(crate) mod loop_;
@@ -457,6 +458,11 @@ pub(crate) fn descend(
         TaskKind::Executable { .. } => return Step::Waiting,
         TaskKind::Sequential { tasks } => {
             sequential::drive(plan, state, tasks, errors, Some(run), now)
+        }
+        // Returned without the `Done` mapping below, for the reason
+        // `allow_failure::drive` gives: its terminal is already the block's.
+        TaskKind::AllowFailure { tasks, finally } => {
+            return allow_failure::drive(plan, state, run, task, tasks, finally, now)
         }
         TaskKind::Parallel { tasks, concurrency } => {
             parallel::drive(plan, state, tasks, errors, Some(run), *concurrency, now)
