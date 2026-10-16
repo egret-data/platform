@@ -4,7 +4,7 @@
 `runnable.txt` is a pure function of `corpus.json` + `probe.json`.  This file is
 the same shape: `handler-surface.txt` is a pure function of
 
-    corpus/            the 345 flow sources, as published to Kestra
+    corpus/            the 351 flow sources, as published to Kestra
     golden.json        what Kestra did with them
     baseline.txt       what egret does NOT reproduce today
     task-kinds.json    every corpus task type resolved to its Kestra interface
@@ -264,8 +264,10 @@ def read_corpus():
             collect_keys(doc, keys)
             flows[fid] = {"doc": doc, "raw": raw, "tasks": tasks, "keys": keys,
                           "by_id": {t[0]: (t[1], t[2]) for t in tasks if t[0]}}
-    if len(flows) != 345:
-        bail(f"corpus/ holds {len(flows)} flows, not the 345 `runnable.txt` "
+    # 345 -> 351 with the six `working-directory-real-*` flows (WorkingDirectory
+    # Task 8); `runnable.txt` says `total flows 351` after the same harvest.
+    if len(flows) != 351:
+        bail(f"corpus/ holds {len(flows)} flows, not the 351 `runnable.txt` "
              f"counts. Re-derive both or neither")
     return flows
 
@@ -444,6 +446,11 @@ W3B_HANDLERS = {
     "io.kestra.plugin.core.namespace.DownloadFiles",
     "io.kestra.plugin.core.namespace.DeleteFiles",
     "io.kestra.plugin.core.namespace.PurgeFiles",
+    # WorkingDirectory Task 8: the script task the `working-directory-real-*`
+    # flows run, through `worker::handlers::script` on the Docker runner (the
+    # driver registers it, `driver::registry`). Egret's own script types are
+    # `egret.script.*`/`egret.container`, which the corpus does not write.
+    "io.kestra.plugin.scripts.shell.Commands",
 }
 
 # The flowables `advance()` already drives and decides for (W3a Tasks 3-6).
@@ -487,6 +494,11 @@ W3A_FLOWABLES = {
     # drives the block, so it is not a handler and no worker claims it. Its
     # `allowFailure:` FLAG on a child is a different construct and stays a row.
     "io.kestra.plugin.core.flow.AllowFailure",
+    # WorkingDirectory Task 3: `build_plan` gives it a `TaskKind::WorkingDirectory`
+    # and `executor::flowable::working_directory` drives its children and its two
+    # claims. Its children are `Runnable`s the worker claims, which is why it is
+    # here (a flowable the executor drives) and the children are not.
+    "io.kestra.plugin.core.flow.WorkingDirectory",
     # W8 Task 4, and the pair is ONE Kestra class: `LoopUntil.java` carries
     # `@Plugin(aliases = "io.kestra.plugin.core.flow.WaitFor")`, so both
     # spellings now reach `models::TaskKind::LoopUntil` and `build_plan`
@@ -931,12 +943,12 @@ def load_inputs():
 
 def check_inputs(flows, kinds, golden, baseline):
     """Everything downstream reads a number off these; they are checked first."""
-    if len(golden) != 294:
-        bail(f"golden.json holds {len(golden)} entries, not 294. The comparable "
+    if len(golden) != 301:
+        bail(f"golden.json holds {len(golden)} entries, not 301. The comparable "
              f"population moved and every count in handler-surface.txt with it")
     runs = [e for e in golden if e["verdict"] == "runs"]
-    if len(runs) != 266:
-        bail(f"golden.json holds {len(runs)} `runs` entries, not 266")
+    if len(runs) != 273:
+        bail(f"golden.json holds {len(runs)} `runs` entries, not 273")
     # 143 through W5; 131 after W6 Task 3 banked the 12 `Subflow` entries; 127
     # after W6 Task 4 banked the four `retry-new-execution-*` replays; 119 after
     # W8 Task 3 banked eight `Pause` entries; 118 after W8 Task 4 banked
@@ -950,9 +962,10 @@ def check_inputs(flows, kinds, golden, baseline):
     # no-silent-stall Task 1 banked `invalids/invalid-task` (egret refuses an
     # unknown task type now, as Kestra does); 104 since the AllowFailure
     # flowable banked `valids/allow-failure`, `valids/allow-failure-with-retry`
-    # and `valids/finally-allowfailure`.
-    if len(baseline) != 104:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 104; the split "
+    # and `valids/finally-allowfailure`; 103 since WorkingDirectory Task 8 banked
+    # `valids/working-directory-taskrun`, whose Kestra trace egret now reproduces.
+    if len(baseline) != 103:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 103; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -985,8 +998,23 @@ def check_inputs(flows, kinds, golden, baseline):
     # checkout. So the guard is over the `runs` half only; over all 294 it fires
     # on the corpus as committed and would have to be weakened to something that
     # never fires at all.
+    #
+    # Two types are exempt, and each is exempt for a reason the checkout states:
+    #   `io.kestra.plugin.scripts.shell.Commands` is a shell plugin task whose
+    #     class is in a plugin artifact, not in this core checkout (`git ls-files`
+    #     holds no `scripts/shell/Commands.java`); the pinned image loads it.
+    #   `io.kestra.plugin.scripts.runner.docker.Docker` is a `taskRunner:` type,
+    #     declared as a `TaskRunner` (script/.../runner/docker/Docker.java), not a
+    #     task, so it has no task kind. The corpus parser reads every `type:`
+    #     line, the runner's included.
+    # Added at WorkingDirectory Task 8, when the six `working-directory-real-*`
+    # flows became the first corpus flows to run a script task.
+    OUTSIDE_THE_CHECKOUT = {
+        "io.kestra.plugin.scripts.shell.Commands",
+        "io.kestra.plugin.scripts.runner.docker.Docker",
+    }
     ran = sorted({ty for e in runs for _i, ty, _p in flows[e["id"]]["tasks"]
-                  if ty not in kinds})
+                  if ty not in kinds and ty not in OUTSIDE_THE_CHECKOUT})
     if ran:
         bail(f"{len(ran)} task types are declared by a flow Kestra RAN and have "
              f"no entry in task-kinds.json, e.g. {ran[:3]}; run --refresh-kinds")
@@ -1186,7 +1214,7 @@ def render(d, checkout):
 
     # ---- 1. the census ----------------------------------------------------
     w("")
-    w("1. EVERY TASK TYPE THE 266 COMPARABLE `runs` ENTRIES DECLARE")
+    w("1. EVERY TASK TYPE THE 273 COMPARABLE `runs` ENTRIES DECLARE")
     w("-" * 78)
     w("")
     w("Kind is the Kestra interface the type's class implements, resolved")
@@ -1208,7 +1236,7 @@ def render(d, checkout):
     w("  * = a handler W3b writes.")
     w("")
     w("`entries` is the number of comparable `runs` entries that declare the")
-    w("type at least once; the rows OVERLAP and do not sum to 266. `runs` is")
+    w("type at least once; the rows OVERLAP and do not sum to 273. `runs` is")
     w("raw declarations and does sum.")
     if d["unresolved"]:
         w("")
@@ -1375,7 +1403,7 @@ def render(d, checkout):
     w("5. THE CEILING")
     w("-" * 78)
     w("")
-    w("How many of the 294 comparable entries could agree with the golden if")
+    w("How many of the 301 comparable entries could agree with the golden if")
     w("W3b's driver were perfect and its four handlers exact. It is an UPPER")
     w("BOUND and no later task may report above it without moving it here.")
     w("")
@@ -1579,16 +1607,16 @@ def self_test():
          lose_a_task)
 
     # -- the input denominators ---------------------------------------------
-    case("golden.json is no longer 294",
-         "not 294",
+    case("golden.json is no longer 301",
+         "not 301",
          lambda: run(golden_=golden[:-1]))
     first_run = next(e for e in golden if e["verdict"] == "runs")
-    case("the `runs` half is no longer 266",
-         "not 266",
+    case("the `runs` half is no longer 273",
+         "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 104",
-         "not 104",
+    case("baseline.txt is no longer 103",
+         "not 103",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

@@ -744,9 +744,12 @@ def image_tag():
     provenance line that names the wrong image is worse than none.
     """
     src = open(os.path.join(HERE, "docker-compose.yml"), encoding="utf-8").read()
-    m = re.search(r"^\s*image:\s*(kestra/kestra:\S+)\s*$", src, re.M)
+    # Accepts the digest pin the file uses today (`kestra/kestra@sha256:...`) as
+    # well as a tag. The tag-only form made `--traces` fail after five rounds,
+    # at the final write, because the file had moved to a digest pin.
+    m = re.search(r"^\s*image:\s*(kestra/kestra(?::\S+|@sha256:[0-9a-f]{64}))\s*$", src, re.M)
     if not m:
-        bail("docker-compose.yml has no `image: kestra/kestra:<tag>` line")
+        bail("docker-compose.yml has no `image: kestra/kestra:<tag>` or `@sha256:` line")
     if m.group(1).endswith(":latest"):
         bail(f"docker-compose.yml pins {m.group(1)}: a moving tag is a moving golden")
     return m.group(1)

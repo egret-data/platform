@@ -142,6 +142,25 @@ const BATCH: usize = 1;
 pub fn registry(pool: &PgPool) -> Handlers {
     let files = egret_workflow::storage::install_mem_for_tests();
     let mut r = Handlers::new();
+    // WorkingDirectory Task 8: the script task the six `working-directory-real-*`
+    // flows run, on the Docker runner `tests/working_dir_docker_live.rs` uses.
+    // Without a handler a script task FAILS by name (no-silent-stall), which
+    // would make every child of those flows a driver fact, not a flow fact.
+    egret_workflow::worker::handlers::script::register(
+        &mut r,
+        std::sync::Arc::new(egret_workflow::worker::handlers::script::ScriptRuntime {
+            runner_kind: egret_workflow::scripts::RunnerKind::Docker,
+            runner: std::sync::Arc::new(
+                egret_workflow::worker::commands::DockerRunner::new().with_files(files.clone()),
+            ),
+            plugin_configurations: oracle_plugin_configurations(),
+            features: std::sync::Arc::new(
+                egret_workflow::worker::handlers::script::PgFeatureState::new(pool.clone()),
+            ),
+            files: Some(files.clone()),
+            pool: None,
+        }),
+    );
     r.add(std::sync::Arc::new(
         egret_workflow::worker::handlers::storage::Write::new(Some(files.clone())),
     ));
@@ -190,6 +209,20 @@ pub fn registry(pool: &PgPool) -> Handlers {
         egret_workflow::worker::handlers::sleep::Sleep::capped(Duration::ZERO),
     ));
     r
+}
+
+/// The platform's container allowlist for the oracle: the Docker runner, every
+/// image allowed. The same configuration `tests/working_dir_docker_live.rs`
+/// registers, so a script task here passes the gate the live test passes.
+fn oracle_plugin_configurations() -> egret_config::PluginConfigurations {
+    use egret_config::{PluginConfiguration, PluginConfigurationValues, PluginConfigurations};
+    PluginConfigurations(vec![PluginConfiguration {
+        r#type: egret_workflow::scripts::DOCKER_RUNNER.to_string(),
+        values: PluginConfigurationValues {
+            allowed_images: Some(vec!["*".into(), "*/*".into(), "*/*/*".into()]),
+            allowed_types: None,
+        },
+    }])
 }
 
 /// Where [`unconnected_pool`] points: nothing listens on port 1. ONE
@@ -304,6 +337,27 @@ pub async fn publish_corpus(pool: &PgPool, ws: Uuid, by: UserId) -> BTreeMap<Str
          the census this function asserts counts rows it did not write"
     );
 
+    // WorkingDirectory Task 8: the oracle's workspace has `workflow_containers`
+    // ON, and publish's script gate is open to the Docker runner, so the six
+    // `working-directory-real-*` flows publish live. The row is the one the
+    // run side reads (`PgFeatureState`), so the publish gate and the run gate
+    // agree. Every other corpus flow has no script task and does not read it.
+    sqlx::query(
+        "INSERT INTO workspace_features (workspace_id, feature, enabled) \
+         VALUES ($1, 'workflow_containers', true)",
+    )
+    .bind(ws)
+    .execute(pool)
+    .await
+    .expect("enable workflow_containers for the oracle's workspace");
+    let plugin_configurations = oracle_plugin_configurations();
+    let script_gate = egret_workflow::publish::ScriptGate {
+        feature_enabled: true,
+        plugin_configurations: &plugin_configurations,
+        default_runner: Some(egret_workflow::scripts::RunnerKind::Docker),
+        kestra_plugins_enabled: false,
+    };
+
     let entries = super::corpus();
     let mut filed: BTreeMap<String, Filed> = BTreeMap::new();
     let mut drafts: Vec<(String, Uuid)> = Vec::new();
@@ -367,11 +421,20 @@ pub async fn publish_corpus(pool: &PgPool, ws: Uuid, by: UserId) -> BTreeMap<Str
     let (mut on_published, mut on_refused) = (0usize, 0usize);
     for (corpus_id, flow) in &drafts {
         let before = refs.count();
-        let outcome =
-            match egret_workflow::publish::publish(&repo, &refs, ws, by, *flow, "oracle").await {
-                Ok(_) => Filed::Live,
-                Err(e) => Filed::DraftOnly(format!("{e}")),
-            };
+        let outcome = match egret_workflow::publish::publish_gated(
+            &repo,
+            &refs,
+            ws,
+            by,
+            *flow,
+            "oracle",
+            &script_gate,
+        )
+        .await
+        {
+            Ok(_) => Filed::Live,
+            Err(e) => Filed::DraftOnly(format!("{e}")),
+        };
         // Attributed to the publish that made them, because a lookup on a flow
         // that goes on to be refused proves nothing about a flow that ships.
         let made = refs.count() - before;
@@ -819,7 +882,17 @@ const CREATE_REFUSED: usize = 4;
 /// eight. `unknown_task_type` becoming an error moved nothing here: publish
 /// already refused every flow it names, through reference resolution, and
 /// [`publish_class`] still files them under [`UNKNOWN_TYPE_REFUSED`].
-const LIVE: usize = 240;
+///
+/// **240 -> 244 at WorkingDirectory Task 3**: the four existing WorkingDirectory
+/// valids (`task-runif-workingdirectory`, `working-directory-invalid-runif`,
+/// `working-directory-taskrun`, `working-directory-taskrun-nested`) plan as
+/// flowables and publish live; `unsupported_working_directory` refused them
+/// before. **244 -> 250 at WorkingDirectory Task 8**: the six
+/// `working-directory-real-*` corpus flows publish live, because the driver's
+/// publish gate is open to the Docker runner and the registry carries the
+/// script handler (see [`registry`] and `publish_corpus`). The four above are
+/// the only WorkingDirectory valids that did not need a script runner.
+const LIVE: usize = 250;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -906,7 +979,15 @@ const UNKNOWN_TYPE_REFUSED: usize = 65;
 /// draw `unsupported_allow_failure`, so they publish live (their [`LIVE`] row
 /// moved 237 → 240 with them). `valids/retry-with-flowable-errors` stays refused,
 /// now by `unsupported_allow_failure_retry`, the block-level retry non-goal.
-const VALIDATE_REFUSED: usize = 30;
+///
+/// **30 -> 26 at WorkingDirectory Task 3**: the four WorkingDirectory valids
+/// named in [`LIVE`] stop being refused by `unsupported_working_directory`.
+/// **26, unchanged at WorkingDirectory Task 8.** The six `working-directory-real-*`
+/// flows were draft-only while the driver published through `publish::publish`,
+/// which uses the closed script gate. `publish_corpus` now calls
+/// `publish_gated` with the workspace's `workflow_containers` ON and the Docker
+/// runner allowed, so they are live and not refused.
+const VALIDATE_REFUSED: usize = 26;
 
 /// Every corpus flow that has a draft row and no live version — the sum of the
 /// two above, derived rather than written down a third time.
@@ -964,7 +1045,10 @@ fn census(filed: &BTreeMap<String, Filed>) {
     eprintln!("[publish_corpus]   name-contested losers: {create_refused:?}");
     eprintln!("[publish_corpus]   live: {live:?}");
 
-    assert_eq!(filed.len(), 345, "every corpus flow is accounted for");
+    // 345 -> 351 with the six `working-directory-real-*` corpus flows added at
+    // WorkingDirectory Task 8 (`corpus/valids/`; see `corpus.json`). The live
+    // count, 244 -> 250, is asserted through `LIVE` above.
+    assert_eq!(filed.len(), 351, "every corpus flow is accounted for");
     assert_eq!(live.len(), LIVE, "live versions: {live:?}");
     assert_eq!(
         unknown_type.len() + validate_refused.len(),
