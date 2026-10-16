@@ -103,10 +103,12 @@ export interface ExplainProfile {
      *
      * What this cannot say is the query-level consequence: the query as a
      * whole is still refused unless the reader may select another column it
-     * reads, and when it selects only such columns StarRocks checks a column
-     * the mask does not cover: on an Iceberg table the hidden `_file` / `_pos`
-     * columns (or `___count___` for `count(*)`), so a no-grant reader of a
-     * fully classified table is refused (live result §4.4, case 3b).
+     * reads, and when it selects only such columns StarRocks checks the
+     * table's first unmasked column (measured: `id` on a partly classified
+     * Iceberg table, live result §3.4 case 2a) or `___count___` for
+     * `count(*)` (§3.4 case 2a). When no column is unmasked, on an Iceberg
+     * table it checks the hidden `_file` / `_pos` columns, so a no-grant
+     * reader of a fully classified Iceberg table is refused (§4.4 case 3b).
      * Explain does not know the query's other columns.
      *
      * Any other mask type keeps the `select` verdict (`MASK_HASH` was measured
