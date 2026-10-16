@@ -1,0 +1,18 @@
+id: working-directory-real-cache
+namespace: io.kestra.tests
+
+tasks:
+  - id: wdir
+    type: io.kestra.plugin.core.flow.WorkingDirectory
+    cache:
+      patterns:
+        - cache/**
+      ttl: PT1H
+    tasks:
+      - id: check
+        type: io.kestra.plugin.scripts.shell.Commands
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+        containerImage: alpine:3.20
+        commands:
+          - if [ -f cache/f.txt ]; then echo restored; else mkdir -p cache && echo x > cache/f.txt && echo written; fi

@@ -1,0 +1,31 @@
+id: working-directory-real-runif-false
+namespace: io.kestra.tests
+
+tasks:
+  - id: wdir
+    type: io.kestra.plugin.core.flow.WorkingDirectory
+    tasks:
+      - id: write
+        type: io.kestra.plugin.scripts.shell.Commands
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+        containerImage: alpine:3.20
+        commands:
+          - echo one > one.txt
+
+      - id: skipped
+        type: io.kestra.plugin.scripts.shell.Commands
+        runIf: "{{ false }}"
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+        containerImage: alpine:3.20
+        commands:
+          - echo skipped
+
+      - id: read
+        type: io.kestra.plugin.scripts.shell.Commands
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+        containerImage: alpine:3.20
+        commands:
+          - cat one.txt

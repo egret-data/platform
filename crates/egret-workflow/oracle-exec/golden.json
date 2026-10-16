@@ -1858,11 +1858,6 @@
    ],
    [
     4,
-    5,
-    "overlapping"
-   ],
-   [
-    4,
     6,
     "before"
    ]
@@ -5568,11 +5563,6 @@
    ],
    [
     1,
-    5,
-    "overlapping"
-   ],
-   [
-    1,
     6,
     "before"
    ],
@@ -8963,6 +8953,11 @@
    ],
    [
     1,
+    9,
+    "before"
+   ],
+   [
+    1,
     10,
     "before"
    ],
@@ -9043,11 +9038,6 @@
    ],
    [
     3,
-    9,
-    "overlapping"
-   ],
-   [
-    3,
     10,
     "before"
    ],
@@ -9055,16 +9045,6 @@
     3,
     11,
     "before"
-   ],
-   [
-    4,
-    5,
-    "overlapping"
-   ],
-   [
-    4,
-    6,
-    "overlapping"
    ],
    [
     4,
@@ -9098,6 +9078,11 @@
    ],
    [
     5,
+    8,
+    "before"
+   ],
+   [
+    5,
     9,
     "before"
    ],
@@ -9118,6 +9103,11 @@
    ],
    [
     6,
+    8,
+    "before"
+   ],
+   [
+    6,
     9,
     "before"
    ],
@@ -9133,6 +9123,11 @@
    ],
    [
     7,
+    9,
+    "before"
+   ],
+   [
+    7,
     10,
     "before"
    ],
@@ -9140,16 +9135,6 @@
     7,
     11,
     "before"
-   ],
-   [
-    9,
-    10,
-    "overlapping"
-   ],
-   [
-    9,
-    11,
-    "overlapping"
    ],
    [
     10,
@@ -17767,11 +17752,6 @@
    ],
    [
     5,
-    8,
-    "overlapping"
-   ],
-   [
-    5,
     9,
     "before"
    ],
@@ -17799,11 +17779,6 @@
     6,
     10,
     "before"
-   ],
-   [
-    7,
-    8,
-    "overlapping"
    ],
    [
     7,
@@ -20048,6 +20023,63 @@
       "RUNNING",
       "FAILED"
      ],
+     [
+      "CREATED",
+      "RUNNING",
+      "FAILED"
+     ],
+     [
+      "CREATED",
+      "RUNNING",
+      "FAILED"
+     ],
+     [
+      "CREATED",
+      "RUNNING",
+      "FAILED"
+     ]
+    ]
+   }
+  ],
+  "order": [],
+  "spawned": []
+ },
+ {
+  "id": "valids/retry-failed-task-duration",
+  "verdict": "runs",
+  "execution": [
+   "CREATED",
+   "RUNNING",
+   "FAILED",
+   "RETRYING",
+   "RUNNING",
+   "FAILED",
+   "RETRYING",
+   "RUNNING",
+   "FAILED"
+  ],
+  "runs": [
+   {
+    "task": "fail",
+    "value": null,
+    "parent": null,
+    "state": [
+     "CREATED",
+     "SUBMITTED",
+     "RUNNING",
+     "FAILED",
+     "RETRYING",
+     "CREATED",
+     "SUBMITTED",
+     "RUNNING",
+     "FAILED",
+     "RETRYING",
+     "CREATED",
+     "SUBMITTED",
+     "RUNNING",
+     "FAILED"
+    ],
+    "attempts": [
      [
       "CREATED",
       "RUNNING",
@@ -26490,6 +26522,462 @@
     0,
     1,
     "overlapping"
+   ]
+  ],
+  "spawned": []
+ },
+ {
+  "id": "valids/working-directory-real-allowfail",
+  "verdict": "runs",
+  "execution": [
+   "CREATED",
+   "RUNNING",
+   "WARNING"
+  ],
+  "runs": [
+   {
+    "task": "wdir",
+    "value": null,
+    "parent": null,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "WARNING"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "WARNING"
+     ]
+    ]
+   },
+   {
+    "task": "fails",
+    "value": null,
+    "parent": 0,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "WARNING"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "FAILED"
+     ]
+    ]
+   },
+   {
+    "task": "sibling",
+    "value": null,
+    "parent": 0,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "SUCCESS"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "SUCCESS"
+     ]
+    ]
+   }
+  ],
+  "order": [
+   [
+    0,
+    1,
+    "overlapping"
+   ],
+   [
+    0,
+    2,
+    "overlapping"
+   ],
+   [
+    1,
+    2,
+    "before"
+   ]
+  ],
+  "spawned": []
+ },
+ {
+  "id": "valids/working-directory-real-cache",
+  "verdict": "runs",
+  "execution": [
+   "CREATED",
+   "RUNNING",
+   "SUCCESS"
+  ],
+  "runs": [
+   {
+    "task": "wdir",
+    "value": null,
+    "parent": null,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "SUCCESS"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "SUCCESS"
+     ]
+    ]
+   },
+   {
+    "task": "check",
+    "value": null,
+    "parent": 0,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "SUCCESS"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "SUCCESS"
+     ]
+    ]
+   }
+  ],
+  "order": [
+   [
+    0,
+    1,
+    "overlapping"
+   ]
+  ],
+  "spawned": []
+ },
+ {
+  "id": "valids/working-directory-real-child-fails",
+  "verdict": "runs",
+  "execution": [
+   "CREATED",
+   "RUNNING",
+   "FAILED"
+  ],
+  "runs": [
+   {
+    "task": "wdir",
+    "value": null,
+    "parent": null,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "FAILED"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "FAILED"
+     ]
+    ]
+   },
+   {
+    "task": "fails",
+    "value": null,
+    "parent": 0,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "FAILED"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "FAILED"
+     ]
+    ]
+   }
+  ],
+  "order": [
+   [
+    0,
+    1,
+    "overlapping"
+   ]
+  ],
+  "spawned": []
+ },
+ {
+  "id": "valids/working-directory-real-input-output-files",
+  "verdict": "runs",
+  "execution": [
+   "CREATED",
+   "RUNNING",
+   "SUCCESS"
+  ],
+  "runs": [
+   {
+    "task": "wdir",
+    "value": null,
+    "parent": null,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "SUCCESS"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "SUCCESS"
+     ]
+    ]
+   },
+   {
+    "task": "first",
+    "value": null,
+    "parent": 0,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "SUCCESS"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "SUCCESS"
+     ]
+    ]
+   },
+   {
+    "task": "second",
+    "value": null,
+    "parent": 0,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "SUCCESS"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "SUCCESS"
+     ]
+    ]
+   }
+  ],
+  "order": [
+   [
+    0,
+    1,
+    "overlapping"
+   ],
+   [
+    0,
+    2,
+    "overlapping"
+   ],
+   [
+    1,
+    2,
+    "before"
+   ]
+  ],
+  "spawned": []
+ },
+ {
+  "id": "valids/working-directory-real-runif-false",
+  "verdict": "runs",
+  "execution": [
+   "CREATED",
+   "RUNNING",
+   "SUCCESS"
+  ],
+  "runs": [
+   {
+    "task": "wdir",
+    "value": null,
+    "parent": null,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "SUCCESS"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "SUCCESS"
+     ]
+    ]
+   },
+   {
+    "task": "write",
+    "value": null,
+    "parent": 0,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "SUCCESS"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "SUCCESS"
+     ]
+    ]
+   },
+   {
+    "task": "skipped",
+    "value": null,
+    "parent": 0,
+    "state": [
+     "CREATED",
+     "SKIPPED"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "SKIPPED"
+     ]
+    ]
+   },
+   {
+    "task": "read",
+    "value": null,
+    "parent": 0,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "SUCCESS"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "SUCCESS"
+     ]
+    ]
+   }
+  ],
+  "order": [
+   [
+    0,
+    1,
+    "overlapping"
+   ],
+   [
+    0,
+    2,
+    "overlapping"
+   ],
+   [
+    0,
+    3,
+    "overlapping"
+   ],
+   [
+    1,
+    2,
+    "before"
+   ],
+   [
+    1,
+    3,
+    "before"
+   ],
+   [
+    2,
+    3,
+    "before"
+   ]
+  ],
+  "spawned": []
+ },
+ {
+  "id": "valids/working-directory-real-shared-file",
+  "verdict": "runs",
+  "execution": [
+   "CREATED",
+   "RUNNING",
+   "SUCCESS"
+  ],
+  "runs": [
+   {
+    "task": "wdir",
+    "value": null,
+    "parent": null,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "SUCCESS"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "SUCCESS"
+     ]
+    ]
+   },
+   {
+    "task": "writer",
+    "value": null,
+    "parent": 0,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "SUCCESS"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "SUCCESS"
+     ]
+    ]
+   },
+   {
+    "task": "reader",
+    "value": null,
+    "parent": 0,
+    "state": [
+     "CREATED",
+     "RUNNING",
+     "SUCCESS"
+    ],
+    "attempts": [
+     [
+      "CREATED",
+      "RUNNING",
+      "SUCCESS"
+     ]
+    ]
+   }
+  ],
+  "order": [
+   [
+    0,
+    1,
+    "overlapping"
+   ],
+   [
+    0,
+    2,
+    "overlapping"
+   ],
+   [
+    1,
+    2,
+    "before"
    ]
   ],
   "spawned": []
