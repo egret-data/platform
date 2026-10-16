@@ -95,15 +95,18 @@ export interface ExplainProfile {
   /**
      * `true` when StarRocks consults no access policy for the target column:
      * a `read` of a column whose deciding mask is `MASK_NULL`, from whichever
-     * policy (final review V-1, live §3.4 cases 2a/2b/2c). The read returns
+     * policy (final review V-1, live §3.4 cases 2a/2b/2c; a hand-written
+     * `MASK_NULL` with a hand-written deny measured too, §4.4 case 3a). The read returns
      * `NULL` for the column whoever denies it, so
      * [`ExplainProfile::accesses`] carries no `select` verdict and
      * [`ExplainProfile::mask`] is the answer.
      *
      * What this cannot say is the query-level consequence: the query as a
      * whole is still refused unless the reader may select another column it
-     * reads, and when it selects only such columns StarRocks checks the
-     * table's first unmasked column (or `___count___` for `count(*)`).
+     * reads, and when it selects only such columns StarRocks checks a column
+     * the mask does not cover: on an Iceberg table the hidden `_file` / `_pos`
+     * columns (or `___count___` for `count(*)`), so a no-grant reader of a
+     * fully classified table is refused (live result §4.4, case 3b).
      * Explain does not know the query's other columns.
      *
      * Any other mask type keeps the `select` verdict (`MASK_HASH` was measured

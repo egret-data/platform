@@ -124,7 +124,14 @@ pub trait ProfileRecompiler: Send + Sync {
 }
 
 /// Whether a write to `body` under `service_id` changes what a StarRocks
-/// clearance mask folds: a data mask (`policyType` 1) on a StarRocks profile.
+/// clearance mask folds: a data mask (`policyType` 1) on a StarRocks profile
+/// that has something to refold, that is, a compiled clearance mask or a
+/// `generated` origin (final re-review N-2).
+///
+/// A profile with neither has no clearance mask for the write to leave stale,
+/// so refolding would only let an unrelated refusal of the recompile (an
+/// expansion ceiling, a stored overlap) block a steward from disabling or
+/// deleting a hand-written mask: the way out of that state.
 async fn changes_the_clearance_fold(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
@@ -133,13 +140,21 @@ async fn changes_the_clearance_fold(
     if body.get("policyType").and_then(Value::as_i64) != Some(1) {
         return Ok(false);
     }
-    let service_type: Option<String> =
-        sqlx::query_scalar("SELECT type FROM policy.authz_services WHERE id = $1")
-            .bind(service_id)
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(crate::PolicyStoreError::from)?;
-    Ok(service_type.as_deref() == Some(crate::STARROCKS_DEF_NAME))
+    let folds: Option<bool> = sqlx::query_scalar(
+        "SELECT s.type = $2 AND (s.origin = 'generated' OR EXISTS ( \
+             SELECT 1 FROM policy.authz_policies p \
+              WHERE p.service_id = s.id \
+                AND left(p.name, char_length($3)) = $3 \
+                AND (p.policy_jsonb->>'policyType')::int = 1)) \
+           FROM policy.authz_services s WHERE s.id = $1",
+    )
+    .bind(service_id)
+    .bind(crate::STARROCKS_DEF_NAME)
+    .bind(crate::COMPILER_CLEARANCE_PREFIX)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(crate::PolicyStoreError::from)?;
+    Ok(folds.unwrap_or(false))
 }
 
 /// The stored `(service_id, policy_jsonb)` of policy `id`, if it exists.

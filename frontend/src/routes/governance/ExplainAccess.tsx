@@ -900,10 +900,13 @@ function ProfileBlock({
             This column is not access-checked on StarRocks: its mask is MASK_NULL, so the read
             returns NULL for it, whoever denies it. The query as a whole is still refused unless the
             reader may select another column it reads; when it selects only such columns, StarRocks
-            checks the table’s first unmasked column (or{" "}
+            checks a column the mask does not cover: on an Iceberg table the hidden{" "}
+            <span className="font-mono text-xs">_file</span> /{" "}
+            <span className="font-mono text-xs">_pos</span> columns (or{" "}
             <span className="font-mono text-xs">___count___</span> for{" "}
-            <span className="font-mono text-xs">count(*)</span>). Measured on StarRocks 4.1.6;
-            Trino checks access on a masked column.
+            <span className="font-mono text-xs">count(*)</span>). Measured on StarRocks 4.1.6, for
+            the clearance’s mask and for a hand-written MASK_NULL; Trino checks access on a masked
+            column.
           </li>
         )}
         {profile.accesses.length === 0 && !profile.masked_read_skips_access && (

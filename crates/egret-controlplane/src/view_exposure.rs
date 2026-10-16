@@ -344,6 +344,10 @@ fn matched_rows(engine: &ClassifiedEngine, rows: Vec<MvRow>) -> Vec<(MvRow, Matc
 
 /// How `row` reads one of the `matched` materialized views
 /// (`(database, name)`), if it does. Case-insensitive, as [`match_row`].
+///
+/// A base map names the matched view as `default_catalog.<db>.<name>`: that is
+/// the spelling measured on StarRocks 4.1.6 (Task 6). `<db>.<name>` is accepted
+/// too, defensively and unmeasured; the extra comparison can only over-report.
 fn reads_a_matched_view(row: &MvRow, matched: &[(String, String)]) -> Option<MatchedBy> {
     match &row.base_tables {
         Some(bases) => bases
@@ -351,6 +355,7 @@ fn reads_a_matched_view(row: &MvRow, matched: &[(String, String)]) -> Option<Mat
             .any(|base| {
                 matched.iter().any(|(db, name)| {
                     base.eq_ignore_ascii_case(&format!("{MV_CATALOG}.{db}.{name}"))
+                        || base.eq_ignore_ascii_case(&format!("{db}.{name}"))
                 })
             })
             .then_some(MatchedBy::BaseTable),
