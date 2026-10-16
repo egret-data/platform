@@ -74,7 +74,13 @@ const NO_EFFECT: &[&str] = &["warningOnStdErr"];
 /// bad sample. `unsupported_pause_property` is `spec::validate`'s refusal of a
 /// `Pause` declaring a property `executor::pause_gap` names (the user's ruling
 /// of 2026-10-11): the model parses it, egret does not run it.
-const REFUSED_BY_NAME: &[&str] = &["unsupported_pause_property"];
+/// `working_directory_property_not_yet_run` is the same refusal for a
+/// `WorkingDirectory` property whose claim is not built yet (spec §8); Task 7
+/// removes each code's use as its property starts running.
+const REFUSED_BY_NAME: &[&str] = &[
+    "unsupported_pause_property",
+    "working_directory_property_not_yet_run",
+];
 
 /// The base trigger fields each trigger's own firing path reads, measured by
 /// searching that path for each `models::Trigger` field (fix round 1):

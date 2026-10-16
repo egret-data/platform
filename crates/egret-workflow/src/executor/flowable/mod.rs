@@ -475,6 +475,10 @@ pub(crate) fn descend(
             branch::drive_switch(plan, state, run, cases, default, errors, now)
         }
         TaskKind::Loop { .. } => return Step::Waiting,
+        // Plan Task 3 only: the block's driver is plan Task 5, and until it
+        // lands a planned block waits here rather than being driven by a
+        // half-built rule.
+        TaskKind::WorkingDirectory { .. } => return Step::Waiting,
         // W8 Task 3. It is neither `Waiting` (there is a command to emit, and
         // the executor is the only thing that can emit it) nor a list to walk:
         // the whole of a `Pause` is the transition into `PAUSED`, which

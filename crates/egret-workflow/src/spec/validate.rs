@@ -54,7 +54,8 @@
 //!    an opaque runnable no handler serves, and every execution that reached
 //!    it stalled in `RUNNING` for ever. So each is an ERROR, in
 //!    `validate_for_run`, which publish and every start path ask:
-//!    `unsupported_allow_failure`, `unsupported_working_directory`,
+//!    `unsupported_allow_failure`, `working_directory_property_not_yet_run`
+//!    (a `WorkingDirectory` property its claim does not run yet, plan Task 3),
 //!    `unsupported_loop_until_property` (a bound `executor::loop_until_gap`
 //!    names), `unsupported_pause_property` (`executor::pause_gap`, W7b),
 //!    `unsupported_foreach` (W7b), `unsupported_flow_task` (a type spelled
@@ -1728,23 +1729,30 @@ fn walk_task(
                     });
                 }
             }
-            // no-silent-stall Task 1 (spec §3). `build_plan` plans it an
-            // opaque runnable -- it hands its whole subtree to one worker --
-            // and no handler runs that, so every execution of it stalled in
-            // `RUNNING`. An ERROR now, pushed LAST in this arm: the three checks
-            // above stay and keep their order, so a flow Kestra refuses for one
-            // of them is still refused by `build_plan` for that cause first
-            // (`invalids/workingdirectory-invalid`'s `RefusalGroup`).
-            report.errors.push(Finding {
-                code: "unsupported_working_directory",
-                message: format!(
-                    "task '{}' has type '{}', which egret does not run, so the flow cannot be \
-                     published or started. To share files between tasks, pass files between \
-                     script tasks with `outputFiles` and `inputFiles`",
-                    task.id, task.r#type
-                ),
-                path: path.clone(),
-            });
+            // The block runs (spec §4.2), but its properties run in steps: each
+            // is refused by name until its claim runs it (spec §8, no silent
+            // drop). `namespaceFiles` is refused too, though the user's ruling
+            // named three: once the block runs, a `namespaceFiles` the block
+            // ignored would be exactly that drop. Task 7 removes each refusal
+            // when its property runs.
+            for (property, present) in [
+                ("namespaceFiles", w.namespace_files.is_some()),
+                ("inputFiles", w.input_files.is_some()),
+                ("outputFiles", w.output_files.is_some()),
+                ("cache", w.cache.is_some()),
+            ] {
+                if present {
+                    report.errors.push(Finding {
+                        code: "working_directory_property_not_yet_run",
+                        message: format!(
+                            "task '{}' has type '{}', and its '{property}' is not run by egret \
+                             yet, so the flow cannot be published or started",
+                            task.id, task.r#type
+                        ),
+                        path: format!("{path}.{property}"),
+                    });
+                }
+            }
         }
         // (Wherever this comment says "warns", read "is refused": both
         // findings below are ERRORS since no-silent-stall Task 1, spec §3.)
@@ -3716,18 +3724,16 @@ mod tests {
         );
     }
 
+    /// The block runs now (plan Task 3), so a block with children and none of
+    /// the properties that are not run yet draws nothing at all.
     #[test]
-    fn working_directory_tasks_present_draws_only_the_refusal() {
+    fn working_directory_tasks_present_is_valid() {
         let f = parse(
             "id: f\nnamespace: a.b\ntasks:\n  - id: w\n    type: core.workingdirectory\n    tasks:\n      - id: c\n        type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
-        // Since no-silent-stall Task 1 the construct itself is refused; the
-        // pair this test belongs to is about `tasks:`, so "silent" is now
-        // "the refusal and nothing else".
-        let codes: Vec<&str> = r.errors.iter().map(|e| e.code).collect();
-        assert_eq!(codes, ["unsupported_working_directory"], "{r:?}");
+        assert!(r.errors.is_empty() && r.warnings.is_empty(), "{r:?}");
     }
 
     /// Secondary item: `Loop::concurrency_limit` accepted absence (it has a
@@ -4680,10 +4686,12 @@ mod tests {
         hints: &'static [&'static str],
     }
 
-    fn branch_body(ty: &str) -> Vec<String> {
+    fn working_directory_property_body(ty: &str) -> Vec<String> {
         vec![
             "id: c".into(),
             format!("type: {ty}"),
+            "inputFiles:".into(),
+            "  in.txt: hello".into(),
             "tasks:".into(),
             "  - id: inner".into(),
             "    type: core.log".into(),
@@ -4738,16 +4746,16 @@ mod tests {
             hints: &["put `retry:` on the child task that should be retried"],
         },
         Refused {
-            code: "unsupported_working_directory",
+            code: "working_directory_property_not_yet_run",
             spellings: &[
                 "io.kestra.plugin.core.flow.WorkingDirectory",
                 "core.workingdirectory",
                 "io.kestra.plugin.core.flow.workingDIRECTORY",
                 "core.WorkingDirectory",
             ],
-            body: branch_body,
-            suffix: "",
-            hints: &["pass files between script tasks with `outputFiles` and `inputFiles`"],
+            body: working_directory_property_body,
+            suffix: ".inputFiles",
+            hints: &["'inputFiles'"],
         },
         Refused {
             code: "unsupported_loop_until_property",
@@ -4963,15 +4971,11 @@ mod tests {
         assert!(r.errors.is_empty() && r.warnings.is_empty(), "{r:?}");
     }
 
-    /// The paths that keep their errors (§3): a `WorkingDirectory` with no
-    /// `tasks:` draws its `*_tasks_required` AND the refusal.
+    /// A `WorkingDirectory` with no `tasks:` draws its `*_tasks_required` and
+    /// nothing else: the block is runnable now, so there is no refusal beside it.
     #[test]
-    fn an_empty_working_directory_keeps_its_old_error_too() {
-        let (ty, old, new) = (
-            "core.workingdirectory",
-            "working_directory_tasks_required",
-            "unsupported_working_directory",
-        );
+    fn an_empty_working_directory_draws_only_its_tasks_required() {
+        let ty = "core.workingdirectory";
         let r = validate(
             &parse(&format!(
                 "id: f\nnamespace: a.b\ntasks:\n  - id: c\n    type: {ty}\n"
@@ -4979,10 +4983,7 @@ mod tests {
             .unwrap(),
         );
         let codes: Vec<&str> = r.errors.iter().map(|e| e.code).collect();
-        assert!(
-            codes.contains(&old) && codes.contains(&new),
-            "{ty}: {codes:?}"
-        );
+        assert_eq!(codes, ["working_directory_tasks_required"], "{ty}: {r:?}");
     }
 
     /// A typo is reported ONCE, as an error, wherever it sits -- including
