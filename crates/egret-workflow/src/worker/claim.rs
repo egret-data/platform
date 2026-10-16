@@ -1508,7 +1508,13 @@ async fn run_block_claim(
     timing: WorkerTiming,
     leased_at: tokio::time::Instant,
 ) -> Result<Committed> {
-    let done = working_dir::run_claim(c);
+    // The block's own render, the one its children render with (spec §5.1). A
+    // failure to read it is egret's outage, and the claim stays leased.
+    let render = {
+        let mut conn = pool.acquire().await.map_err(db_err)?;
+        render_context(&mut conn, c).await?
+    };
+    let done = working_dir::run_claim(pool, c, &render);
     let (done, held, _renewed_at) = match under_lease(
         pool,
         c,
@@ -1840,12 +1846,25 @@ async fn input_for(
     script_default: std::time::Duration,
 ) -> Result<(TaskInput, Budget)> {
     let mut conn = pool.acquire().await.map_err(db_err)?;
-    // A reader: no `settle` runs on this context. The handler's render below
-    // is LIVE (`scope_for`, which takes this POOL connection -- never a
-    // transaction): it runs after this connection is returned, outside any
-    // transaction.
-    let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No, Stack::Reader).await?;
-    let mut surface = Surface::load(&mut conn, &ctx).await?;
+    let render = render_context(&mut conn, c).await?;
+    c.input(render, reg.log_sink(), script_default)
+}
+
+/// The render context a claimed run's properties render with: the flow's
+/// variables and its outputs as the run's state has them, and the file scope
+/// the run may read (spec §5.1: a `WorkingDirectory`'s own properties render
+/// with the same context as its children's). Shared by a leaf's input and a
+/// block's claims, so the two cannot render the same text differently.
+///
+/// A reader: no `settle` runs on this context. The render is LIVE
+/// (`scope_for`, which takes a POOL connection -- never a transaction): it
+/// runs after `conn` is returned, outside any transaction.
+pub(super) async fn render_context(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    c: &Claimed,
+) -> Result<crate::runners::RenderContext> {
+    let (ctx, state, _now) = load_with(conn, c.execution_id, Lock::No, Stack::Reader).await?;
+    let mut surface = Surface::load(conn, &ctx).await?;
     // W9a Task 4: the claimed run's OWN execution -- an iteration's id inside
     // a `Loop` (spec §3), never the loop root -- reads through a snapshot of
     // every URI in its source and render context. `task_prefix` is this run's
@@ -1860,7 +1879,7 @@ async fn input_for(
         .chain(c.value.as_deref())
         .collect();
     let files = crate::storage::scope::scope_for(
-        &mut conn,
+        conn,
         crate::storage::current(),
         c.workspace_id,
         c.execution_id,
@@ -1877,11 +1896,7 @@ async fn input_for(
             format!("negative run_ix {}", c.run_ix),
         ))
     })?;
-    c.input(
-        surface.context(&ctx.plan, &state, Some(run)),
-        reg.log_sink(),
-        script_default,
-    )
+    Ok(surface.context(&ctx.plan, &state, Some(run)))
 }
 
 /// Record one handler's result, drive `advance()` to a fixed point, and write

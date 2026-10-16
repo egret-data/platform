@@ -111,6 +111,7 @@ Recorded when the snapshot, the block's claims and the Docker copy were built (p
 - **The finish claim discards the block's snapshots after it commits**, with one `delete_prefix`. A failure to delete is a warning; the pruner sweeps what is left (open point 2 below stays open).
 - **Docker only, and refused elsewhere.** A child whose runner is not Docker fails by name before the gate runs (`script.rs`). This is the no-silent-drop rule (§8): a Kubernetes child would otherwise run on an empty directory and succeed.
 - **Over-cap and link problems fail the child.** `TooLarge` and `Refused` from a copy-out fail the child with the problem as its reason and remove the object. The block then stops (§5.3). Outputs of a finish claim after such a child are read from the last admitted snapshot (Task 7; not yet built).
+- **`namespaceFiles` runs in the prepare claim (Task 7).** The prepare claim renders the block's `namespaceFiles` with the block run's own render context (`claim::render_context`, the context a leaf of the same flow renders with, so no second renderer exists), stages it with W9b's `stage` for the flow's own namespace, and writes the directory as the first snapshot with `write_tar` over the stored inputs, streamed through a pipe. A render, staging or cap failure fails the block before any child (V3). The `working_directory_property_not_yet_run` code stays in `REFUSED_BY_NAME` while `inputFiles`, `outputFiles` and `cache` are refused by it. Recorded in `property-treatment.json` as `honoured`.
 
 ## 5. Design
 

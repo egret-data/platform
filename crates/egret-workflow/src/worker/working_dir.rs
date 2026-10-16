@@ -11,12 +11,23 @@
 //! [`BlockDone::Failed`] rather than an `Err`, so a block never sits in
 //! `PREPARING` for want of a completed claim (V3 and the no-silent-stall rule).
 
-use super::claim::Claimed;
-use super::WorkingDirCarry;
+use std::collections::BTreeMap;
 
-/// The object a block's prepare claim writes: the empty directory the first
-/// child starts from. Its name is under the block's prefix, so the finish
-/// claim's discard removes it with the children's snapshots.
+use sqlx::PgPool;
+
+use super::claim::Claimed;
+use super::commands::{StoredInput, WORKING_DIR};
+use super::handlers::script::WORKING_DIR_VAR;
+use super::WorkingDirCarry;
+use crate::models::{Flow, Task, TaskKind, WorkingDirectory};
+use crate::runners::{render_str, RenderContext};
+use crate::storage::nsfiles::stage::{check_task_bytes, stage, NamespaceFilesSpec};
+use crate::storage::transfer::{write_tar, TarSource};
+use crate::storage::FileStore;
+
+/// The object a block's prepare claim writes: the directory the first child
+/// starts from. Its name is under the block's prefix, so the finish claim's
+/// discard removes it with the children's snapshots.
 const PREPARE_OBJECT: &str = "prepare.tar";
 
 /// What a block's own claim produced, for `claim::run_block_claim` to commit.
@@ -65,8 +76,9 @@ pub(crate) fn carry_of(c: &Claimed) -> Result<Option<WorkingDirCarry>, String> {
 
 /// Do the block's own claim named by `c.block_phase`. Never `Err`: whatever
 /// goes wrong, the block is failed, and the failure is committed like any
-/// outcome.
-pub(crate) async fn run_claim(c: &Claimed) -> BlockDone {
+/// outcome. `render` is the block run's own render context, the one a leaf of
+/// the same flow renders with (spec §5.1).
+pub(crate) async fn run_claim(pool: &PgPool, c: &Claimed, render: &RenderContext) -> BlockDone {
     let Some(store) = crate::storage::current() else {
         return BlockDone::Failed(format!(
             "the WorkingDirectory {} needs internal storage for its snapshots, and none is installed",
@@ -74,23 +86,153 @@ pub(crate) async fn run_claim(c: &Claimed) -> BlockDone {
         ));
     };
     match c.block_phase.as_deref() {
-        Some("PREPARING") => {
-            let uri = store.working_dir_uri(c.workspace_id, c.execution_id, c.id, PREPARE_OBJECT);
-            // An archive of nothing: a directory with no entries, which the
-            // first child starts from. 1024 zero bytes is the ustar end marker.
-            match store.store.put(&uri, vec![0u8; 1024]).await {
-                Ok(()) => BlockDone::Prepared { snapshot: uri },
-                Err(e) => BlockDone::Failed(format!(
-                    "the WorkingDirectory {} could not write its snapshot: {e}",
-                    c.task_id
-                )),
-            }
-        }
+        Some("PREPARING") => match prepare(pool, &store, c, render).await {
+            Ok(snapshot) => BlockDone::Prepared { snapshot },
+            Err(reason) => BlockDone::Failed(reason),
+        },
         Some("FINISHING") => BlockDone::Finished,
         other => BlockDone::Failed(format!(
             "the WorkingDirectory {} was claimed in {other:?}, which is not a phase it runs",
             c.task_id
         )),
+    }
+}
+
+/// The block's definition, found by its task id in the frozen flow source.
+/// `None` when the flow has no such block, which is corruption.
+fn block_of<'a>(flow: &'a Flow, id: &str) -> Option<&'a WorkingDirectory> {
+    fn walk<'a>(task: &'a Task, id: &str) -> Option<&'a WorkingDirectory> {
+        if task.id == id {
+            return match &task.kind {
+                TaskKind::WorkingDirectory(w) => Some(w),
+                _ => None,
+            };
+        }
+        task.children()
+            .into_iter()
+            .chain(task.error_children())
+            .find_map(|c| walk(c, id))
+    }
+    flow.tasks.iter().find_map(|t| walk(t, id))
+}
+
+/// Renders one string of the block with the block's render context, as a
+/// script task's property renders: the same `render_str`, with `{{ workingDir }}`
+/// bound to the directory a child sees.
+fn render_with(cx: &RenderContext, what: &str, s: &str) -> Result<String, String> {
+    let mut cx = cx.clone();
+    cx.insert(WORKING_DIR_VAR, serde_json::json!(WORKING_DIR));
+    render_str(s, &cx).map_err(|e| format!("{what} did not render: {e}"))
+}
+
+/// The prepare claim's work (spec §5.1, §5.2): the directory the first child
+/// starts from, written as the block's first snapshot. Returns the object's
+/// URI, which the block's pointer names. `Err` is the block's failure.
+///
+/// The order is Kestra's (`preExecuteTasks`): `namespaceFiles` first, then
+/// the `inputFiles` that overwrite them (spec §2.2). `namespaceFiles` is
+/// staged by the same [`stage`] a script task uses, with the flow's own
+/// namespace as the default.
+async fn prepare(
+    pool: &PgPool,
+    store: &FileStore,
+    c: &Claimed,
+    render: &RenderContext,
+) -> Result<String, String> {
+    let flow = crate::spec::parse(&c.source).map_err(|e| {
+        format!(
+            "the WorkingDirectory {} cannot be prepared: its flow does not parse: {}",
+            c.task_id, e.message
+        )
+    })?;
+    let Some(block) = block_of(&flow, &c.task_id) else {
+        return Err(format!(
+            "the WorkingDirectory {} is not a block of its flow",
+            c.task_id
+        ));
+    };
+    let mut files: BTreeMap<String, StoredInput> = BTreeMap::new();
+    if let Some(v) = &block.namespace_files {
+        let spec = NamespaceFilesSpec::parse(v).map_err(|(path, message)| {
+            if path.is_empty() {
+                format!("namespaceFiles {message}")
+            } else {
+                format!("namespaceFiles.{path} {message}")
+            }
+        })?;
+        let rendered = spec.render(|what, s| render_with(render, what, s))?;
+        if rendered.enabled {
+            let own = render
+                .files()
+                .and_then(|f| f.0.flow_namespace())
+                .ok_or_else(|| {
+                    format!(
+                        "namespace files cannot be staged for {}: this run is not a task run \
+                         of a flow's execution, whose namespace they are read as",
+                        c.task_id
+                    )
+                })?;
+            files = match stage(pool, store, c.workspace_id, own, &rendered).await {
+                Ok(Ok(staged)) => {
+                    for line in &staged.warnings {
+                        tracing::warn!(task_id = %c.task_id, "{line}");
+                    }
+                    staged.files
+                }
+                Ok(Err(why)) => return Err(why),
+                Err(e) => {
+                    return Err(format!(
+                        "the namespace files of {} could not be staged: {e}",
+                        c.task_id
+                    ))
+                }
+            };
+        }
+    }
+    check_task_bytes(&files, store.caps.max_task_bytes)?;
+    let uri = store.working_dir_uri(c.workspace_id, c.execution_id, c.id, PREPARE_OBJECT);
+    write_archive(store, &uri, &files).await.map_err(|e| {
+        format!(
+            "the WorkingDirectory {} could not write its snapshot: {e}",
+            c.task_id
+        )
+    })?;
+    Ok(uri)
+}
+
+/// Write `files` as one ustar archive at `uri`, streamed: [`write_tar`] writes
+/// into a pipe that the store reads, so no archive is held whole (spec §4.4).
+/// A failed write removes the object, so a half archive is never a pointer.
+async fn write_archive(
+    store: &FileStore,
+    uri: &str,
+    files: &BTreeMap<String, StoredInput>,
+) -> Result<(), String> {
+    let sources: BTreeMap<String, TarSource<'_>> = files
+        .iter()
+        .map(|(name, input)| (name.clone(), TarSource::Stored(input)))
+        .collect();
+    let (mut writer, mut reader) = tokio::io::duplex(256 * 1024);
+    let write = async {
+        let res = write_tar(&mut writer, &sources, Some(store)).await;
+        // Closing the write half is what ends the upload.
+        drop(writer);
+        res
+    };
+    // `reader` moves into the upload, so a failed upload closes the pipe and
+    // the writer stops, rather than blocking on a full buffer.
+    let upload = async move { store.store.put_stream(uri, &mut reader, None).await };
+    let (written, stored) = tokio::join!(write, upload);
+    match (written, stored) {
+        (Ok(()), Ok(_)) => Ok(()),
+        (Err(e), _) => {
+            let _ = store.store.delete(uri).await;
+            Err(e.to_string())
+        }
+        (Ok(()), Err(e)) => {
+            let _ = store.store.delete(uri).await;
+            Err(e.to_string())
+        }
     }
 }
 
@@ -109,5 +251,135 @@ pub(crate) async fn discard(c: &Claimed) {
             "the snapshots of a finished WorkingDirectory could not be removed (the pruner will \
              sweep them): {e}"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::nsfiles::stage::testing::{self as ns};
+    use crate::storage::transfer::TarReader;
+    use crate::worker::{start_execution, tick_with, Handlers, WorkerTiming};
+    use serde_json::json;
+    use tokio::io::AsyncReadExt;
+
+    /// One flow of two `Return` children, with `block_props` written under
+    /// the block (indented to its `tasks:` level).
+    fn block_flow(namespace: &str, block_props: &str) -> String {
+        format!(
+            "id: wd-props\nnamespace: {namespace}\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n{block_props}    tasks:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n      - id: b\n        type: io.kestra.plugin.core.debug.Return\n        format: b\n"
+        )
+    }
+
+    /// The task types this test binary serves: the Docker set a deployment with
+    /// containers serves (`tests/common` installs the same one).
+    fn install_served() {
+        let mut cfg = egret_config::Config::default().workflow;
+        cfg.container_runner = egret_config::ContainerRunner::Docker;
+        crate::runtime::install_served_for_tests(crate::runtime::served_for(&cfg));
+    }
+
+    /// The block's `working_dir_snapshot`, once it is set.
+    async fn snapshot_of(pool: &PgPool, ex: uuid::Uuid) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT working_dir_snapshot FROM workflow.task_runs \
+              WHERE execution_id = $1 AND task_id = 'block'",
+        )
+        .bind(ex)
+        .fetch_one(pool)
+        .await
+        .expect("the block's run")
+    }
+
+    /// Every regular file of the archive at `uri`, as `name -> contents`.
+    async fn files_in(fs: &crate::storage::FileStore, uri: &str) -> BTreeMap<String, String> {
+        let bytes = fs.store.get(uri).await.expect("the snapshot object");
+        let mut src: &[u8] = &bytes;
+        let mut reader = TarReader::new(&mut src);
+        let mut out = BTreeMap::new();
+        while let Some(entry) = reader.next_entry().await.expect("a header") {
+            if entry.kind == crate::storage::transfer::EntryKind::File {
+                let mut body = Vec::new();
+                reader
+                    .body()
+                    .read_to_end(&mut body)
+                    .await
+                    .expect("the body");
+                out.insert(entry.name, String::from_utf8(body).expect("utf-8"));
+            }
+        }
+        out
+    }
+
+    /// Tick until the block is terminal.
+    async fn settle(pool: &PgPool, reg: &Handlers, ex: uuid::Uuid) {
+        for _ in 0..60 {
+            tick_with(pool, 8, reg, WorkerTiming::default())
+                .await
+                .expect("a tick");
+            let state: String = sqlx::query_scalar(
+                "SELECT state FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'block'",
+            )
+            .bind(ex)
+            .fetch_one(pool)
+            .await
+            .expect("the block");
+            if matches!(state.as_str(), "SUCCESS" | "FAILED" | "WARNING") {
+                return;
+            }
+        }
+        panic!("the block did not settle");
+    }
+
+    /// Spec §2.2 (`namespaceFiles` loads before the first child): the file
+    /// the flow's own namespace holds is in the directory the first child
+    /// starts from, and publish no longer refuses the property by name.
+    #[tokio::test]
+    async fn namespace_files_are_in_the_directory_the_first_child_starts_from() {
+        install_served();
+        let pool = ns::pool().await.expect("the test database");
+        let fs = crate::storage::install_mem_for_tests();
+        let ws = ns::workspace(&pool).await;
+        ns::write(&pool, &fs, ws, "w11.nsf", "/data/ref.txt", "from-namespace").await;
+        ns::write(&pool, &fs, ws, "w11.nsf", "/other.txt", "not-included").await;
+        let src = block_flow(
+            "w11.nsf",
+            "    namespaceFiles:\n      include: [\"data/**\"]\n",
+        );
+
+        let flow = crate::spec::parse(&src).expect("the flow parses");
+        let refused: Vec<_> = crate::spec::validate(&flow)
+            .errors
+            .into_iter()
+            .filter(|f| f.code == "working_directory_property_not_yet_run")
+            .collect();
+        assert!(
+            refused.is_empty(),
+            "namespaceFiles publishes once it runs: {refused:?}"
+        );
+
+        let reg = Handlers::with_core_tasks(Some(fs.clone()));
+        let ex = start_execution(&pool, ws, None, &src, json!({}))
+            .await
+            .expect("start");
+        // One tick: the prepare claim. The finish claim discards the snapshot
+        // after the block ends, so the directory is read while it is PREPARED.
+        tick_with(&pool, 8, &reg, WorkerTiming::default())
+            .await
+            .expect("the prepare claim");
+        let uri = snapshot_of(&pool, ex)
+            .await
+            .expect("the prepare claim's pointer");
+        let files = files_in(&fs, &uri).await;
+        assert_eq!(
+            files.get("data/ref.txt").map(String::as_str),
+            Some("from-namespace"),
+            "the included namespace file is staged into the directory: {files:?}"
+        );
+        assert!(
+            !files.contains_key("other.txt"),
+            "the exclusion is the block's include: {files:?}"
+        );
+        settle(&pool, &reg, ex).await;
     }
 }

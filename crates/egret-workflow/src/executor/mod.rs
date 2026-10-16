@@ -3966,8 +3966,8 @@ mod tests {
             probes.push(("unsupported_allow_failure_retry", with_retry));
         }
         // Plan Task 3: a `WorkingDirectory` plans and is refused only for a
-        // property its claims do not run yet (`namespaceFiles`, `inputFiles`,
-        // `outputFiles`, `cache`), by name, until Task 7 removes each.
+        // property its claims do not run yet (`inputFiles`, `outputFiles`,
+        // `cache`), by name, until Task 7 removes each.
         for ty in [
             "io.kestra.plugin.core.flow.WorkingDirectory",
             "core.workingdirectory",

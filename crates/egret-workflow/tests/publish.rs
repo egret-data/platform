@@ -638,11 +638,8 @@ async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name
             other => panic!("{id}: {other:?}"),
         }
     }
-    // The control: a valid `namespaceFiles` raises no finding UNDER the
-    // property. Since plan Task 3 the block publishes once its properties run,
-    // and until Task 7 runs `namespaceFiles` the whole property is refused by
-    // name, at its own path (`working_directory_property_not_yet_run`). That
-    // refusal is the one thing a valid block draws.
+    // The control: a valid `namespaceFiles` publishes. Its claim runs in the
+    // prepare step (spec §5.1), so the property is no longer refused by name.
     for (id, block) in [
         (
             "good",
@@ -660,19 +657,9 @@ async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name
         ),
     ] {
         let good = common::draft(&repo, ws, user, &working_directory(id, block)).await;
-        let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, good.id, "")
+        egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, good.id, "")
             .await
-            .expect_err("a WorkingDirectory with unrun properties is refused");
-        match err {
-            egret_core::Error::InvalidInput(m) => {
-                assert!(m.contains("(tasks.wd.namespaceFiles)"), "{id}: {m}");
-                assert!(
-                    !m.contains("(tasks.wd.namespaceFiles."),
-                    "{id}: a valid block draws the property refusal alone: {m}"
-                );
-            }
-            other => panic!("{id}: {other:?}"),
-        }
+            .unwrap_or_else(|e| panic!("{id}: a valid namespaceFiles publishes: {e:?}"));
     }
 }
 

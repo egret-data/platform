@@ -1731,12 +1731,10 @@ fn walk_task(
             }
             // The block runs (spec §4.2), but its properties run in steps: each
             // is refused by name until its claim runs it (spec §8, no silent
-            // drop). `namespaceFiles` is refused too, though the user's ruling
-            // named three: once the block runs, a `namespaceFiles` the block
-            // ignored would be exactly that drop. Task 7 removes each refusal
+            // drop). `namespaceFiles` runs in the prepare claim (spec §5.1), so
+            // it is no longer refused. Task 7 removes each remaining refusal
             // when its property runs.
             for (property, present) in [
-                ("namespaceFiles", w.namespace_files.is_some()),
                 ("inputFiles", w.input_files.is_some()),
                 ("outputFiles", w.output_files.is_some()),
                 ("cache", w.cache.is_some()),
