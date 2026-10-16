@@ -408,7 +408,7 @@ The plan's last task runs on the local image `kestra/kestra` `28f59bf175e1` (`se
 
 Limit: backfills created without inputs or labels cannot be told apart from regular executions by greeting, so their verdicts rest on the backfill state.
 
-**egret, verified.** The backend gate and the frontend gate pass (counts in the commit message). The Playwright suite `frontend/tests/e2e/workflows-backfill.spec.ts` passes 8/8 on a private stack. Its measurements found: the global page's Backfill column is outside the visible table area at 1280 px and at 390 px (the table scrolls); the create dialog has no side gutter at 390 px. Both are open.
+**egret, verified.** The backend gate and the frontend gate pass (counts in the commit message). The Playwright suite `frontend/tests/e2e/workflows-backfill.spec.ts` passes 8/8 on a private stack. Its measurements found: the global page's Backfill column is outside the visible table area at 1280 px and at 390 px (the table scrolls); the create dialog has no side gutter at 390 px. The column is still open. The dialog's gutter is fixed in code (`BackfillDialog.tsx`, `w-[calc(100%-2rem)]` below `sm`) but not re-measured in a browser.
 
 ## 8. Rules this package must meet
 

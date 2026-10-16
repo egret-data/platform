@@ -150,7 +150,7 @@ export default function BackfillDialog({
 
   return (
     <Dialog open onOpenChange={(o) => !o && !pending && onClose()}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
+      <DialogContent className="max-h-[90vh] w-[calc(100%-2rem)] overflow-y-auto sm:w-full sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>Backfill {triggerId}</DialogTitle>
           <DialogDescription>

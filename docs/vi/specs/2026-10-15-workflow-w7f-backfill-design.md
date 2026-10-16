@@ -2,7 +2,7 @@
 
 > Bản tham khảo tiếng Việt. Bản chính là `docs/en/specs/2026-10-15-workflow-w7f-backfill-design.md`; khi hai bản khác nhau, bản tiếng Anh thắng.
 
-**Trạng thái:** thiết kế, 2026-10-15. Chưa xây gì. Mọi khẳng định về code của egret đã được kiểm tra trong worktree `egret-w7f` tại `f73c13647` (main, migration đến 0189) và được trích dẫn `path:line` từ `crates/egret-workflow/src/`, trừ khi ghi root khác. Kestra là checkout tại `data-portal/kestra`, `96893b589`; path của nó tính tương đối từ đó.
+**Trạng thái:** đã xây và kiểm chứng, 2026-10-15 (gate backend và frontend đều xanh; §7 đo trên Kestra 28f59bf175e1; bộ Playwright đạt 8/8 trên stack riêng). Các dòng đo ở §7 là **quan sát**; phần còn lại là **đọc từ mã nguồn**. Mọi khẳng định về code của egret đã được kiểm tra trong worktree `egret-w7f` tại `f73c13647` (main, migration đến 0189) và được trích dẫn `path:line` từ `crates/egret-workflow/src/`, trừ khi ghi root khác. Kestra là checkout tại `data-portal/kestra`, `96893b589`; path của nó tính tương đối từ đó.
 
 **Phụ thuộc:**
 - W7e (#672, `f73c13647`): các route trigger, `TriggerEntryDto`, thứ tự lock, tab Triggers, trang Triggers toàn cục, `useTriggerSwitch`, dialog bật. Spec của nó là `docs/en/specs/2026-10-14-workflow-w7e-triggers-design.md`; §9 ở đó đã dành sẵn chỗ cho gói này.
@@ -56,8 +56,9 @@ Bộ rule frontend `docs/en/frontend-rules.md` ràng buộc mọi dòng code fro
 | Kestra | egret | Vì sao |
 |---|---|---|
 | **Đọc từ mã nguồn.** Create, pause, resume và delete không validate gì trên server: không có `start < end`, không kiểm end ở tương lai, không có "đã có một cái" (create thay thế backfill đang chạy), không kiểm trigger có phải `Schedule` (`TriggerController.java:222-314`; `TriggerEventHandler.java:154-183`). UI chặn ngày tương lai và `start > end` (`ui/src/components/flows/FlowTriggers.vue:262-277`), input bắt buộc và label điền dở (`:509-540`) | Server từ chối từng trường hợp (D8, §3.4), kèm một code; create lần hai là 409 `backfill_exists` | Một caller API không được nhận 200 cho một request mà UI sẽ không bao giờ gửi, và việc thay thế âm thầm làm mất một cửa sổ đang chạy |
-| **Đọc từ mã nguồn.** Pause, resume hoặc delete khi không có backfill không làm gì và trả 200 (`TriggerEventHandler.java:193, 214`) | 404 `no_backfill` | Nói rõ chuyện gì đã xảy ra |
+| **Quan sát.** Pause, resume hoặc delete khi không có backfill trả 200 trên Kestra (`PUT .../backfill/pause`, `.../unpause`, `POST .../delete`; probe 2026-10-15) | 404 `no_backfill` | Nói rõ chuyện gì đã xảy ra |
 | **Đọc từ mã nguồn.** Cửa sổ loại tick nằm đúng ở `start`: create tính lại ngày kế tiếp từ `currentDate = start` bằng `executionTime.nextExecution`, vốn là strictly-after (`TriggerEventHandler.java:177-179`, `Schedule.java:247-249, 273, 466-468`). Nó bao gồm tick ở `end` (`TriggerState.java:338-342`: chỉ xoá khi `next > end`) | `[start, end]`, bao gồm cả hai đầu (D4) | "Backfill 1 đến 7 tháng 10" trên cron nửa đêm phải chạy 7 lần, không phải 6 |
+| **Quan sát (2026-10-15): khác.** Sau pause và delete, Kestra khôi phục vị trí thường (10:49, `previousNextExecutionDate` đã lưu), không phải một ngày của cửa sổ; rồi các tick thường 10:49 và 10:50 chạy. Vì vậy dòng đọc từ mã nguồn bên dưới sai với phiên bản này. | — | — |
 | **Đọc từ mã nguồn.** Create lưu `previousNextExecutionDate = nextEvaluationDate`, và mỗi pause và resume cũng vậy, vì cả hai dựng lại backfill qua cùng `TriggerState.backfill(...)` (`TriggerState.java:229-239`; `TriggerEventHandler.java:211-220`). Sau một lần pause, delete khôi phục một **ngày của cửa sổ** (`:190-203`), và scheduler sau đó phát lại mọi tick thường từ ngày đó đến bây giờ. Nếu không có ngày được lưu, delete sẽ throw (`TriggerState.java:204-206`) | Lưu một lần, lúc create (D5); delete tiếp tục schedule thường như §3.6 nói | Cái quirk này phát lại những tick không ai yêu cầu |
 | **Đọc từ mã nguồn.** Khi hoàn tất tự nhiên, ngày kế tiếp là tick kế tiếp sau **bây giờ** (`Schedule.java:278-280`): các tick thường đến hạn trong lúc backfill bị bỏ qua. Khi delete, ngày kế tiếp cũ được khôi phục, nên chúng được phát lại. Hai đầu mâu thuẫn nhau | Cả hai đầu tiếp tục từ vị trí của chính schedule thường và áp dụng `recoverMissedSchedules` của trigger (vắng = `ALL`) cho các tick thường đến hạn trong lúc đó (D6) | Một backfill không được âm thầm làm mất các lần chạy thường, và cách nó kết thúc không được quyết định chúng có chạy hay không |
 | **Đọc từ mã nguồn.** Một backfill đang tạm dừng được đánh giá ở mỗi lượt rồi bị bỏ qua (`Schedule.java:342-345`); ngày kế tiếp của nó nằm yên trong quá khứ | Một backfill đang tạm dừng không được claim (D7) | Không tốn việc và không ghi dòng nào cho mỗi trigger tạm dừng mỗi giây |
@@ -390,6 +391,27 @@ Các chip label của trang tổng quan và dấu "Backfill" (§3.3). Không có
 ## 7. So sánh với Kestra
 
 Task cuối của plan chạy trên image cục bộ `kestra/kestra` `28f59bf175e1` (`server local`, một container dùng một lần), với kịch bản 1-3 và 5 của §6 trên một flow `* * * * *`, và kiểm từng dòng **đọc từ mã nguồn** của §2: một cửa sổ bắt đầu đúng ở một tick (start loại trừ); một cửa sổ trên các ngày đã chạy (execution thứ hai); một label backfill trùng key với label flow (cái nào thắng); input ghi đè của schedule; pause, resume, delete (ngày nào được khôi phục, và các tick thường có phát lại không); hoàn tất tự nhiên với một tick thường nằm trong thời gian backfill (bị bỏ qua); API với `end` ở tương lai, `start > end`, create lần hai, pause khi không có backfill; hàng loạt theo trigger (202); công thức tiến độ trên màn hình. Mỗi dòng đã đo trở thành **quan sát**; khác biệt tìm thấy được thêm vào §2 (FE-REF-2).
+
+**Kết quả quan sát (2026-10-15).** Flow probe `* * * * *` UTC, create lúc 10:48:05, Kestra `server local` image `28f59bf175e1`; log thô và danh sách execution nằm trong vùng scratch của worktree, không nằm trong git.
+
+| Dòng | Kết quả |
+|---|---|
+| Start loại trừ | KHỚP: tick đúng tại `start` không bắn (10:45, 10:49) |
+| Tick ở end được bao gồm | KHỚP: 10:51 bắn với end 10:51 |
+| Chạy lại trên ngày đã chạy | KHỚP: execution thứ hai ở 10:46 và 10:47 |
+| Label backfill và label flow cùng key | KHỚP: giá trị label backfill thắng |
+| Input ghi đè input của schedule | KHỚP |
+| Pause, delete: ngày được khôi phục | KHÁC: vị trí thường, không phải ngày của cửa sổ; các tick thường bị phát lại |
+| Hoàn tất tự nhiên bỏ qua tick thường | KHỚP |
+| Tắt runtime đóng băng; bật (skip) làm mất một tick của cửa sổ | KHỚP |
+| Create với end ở tương lai / start > end / create lần hai | KHỚP: cả ba đều 200; create lần hai thay thế cái cũ |
+| Pause, resume, delete khi không có backfill | KHỚP: 200 |
+| Hàng loạt theo trigger | KHỚP: 202 kèm operation id |
+| Công thức tiến độ | Chỉ ở UI (BackfillBanner.vue); API không có trường này |
+
+Giới hạn: backfill tạo không có input hay label không phân biệt được với lần chạy thường bằng lời chào, nên kết luận của chúng dựa vào state của backfill.
+
+**egret, đã kiểm chứng.** Gate backend và gate frontend đều đạt (số liệu trong commit message). Bộ Playwright `frontend/tests/e2e/workflows-backfill.spec.ts` đạt 8/8 trên stack riêng. Các đo đạc của nó phát hiện: cột Backfill của trang toàn cục nằm ngoài vùng bảng hiển thị ở 1280 px và 390 px (bảng cuộn ngang); dialog tạo không có lề hai bên ở 390 px. Cột vẫn mở. Lề của dialog đã được sửa trong code (`BackfillDialog.tsx`, `w-[calc(100%-2rem)]` dưới `sm`), nhưng chưa đo lại trên trình duyệt.
 
 ## 8. Các rule gói này phải đáp ứng
 
