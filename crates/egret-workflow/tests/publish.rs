@@ -703,6 +703,37 @@ tasks:\n  - id: wd\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    o
         .expect("plain names and file-name patterns publish");
 }
 
+/// Plan Task 7 (spec §5.4): a `cache` that does not say what it caches is
+/// refused at publish, naming the property. A `patterns` list is required; a
+/// `ttl` must be an ISO-8601 duration.
+#[tokio::test]
+async fn a_working_directory_cache_that_is_malformed_is_refused_at_publish() {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    for (id, cache) in [
+        ("no-patterns", "      ttl: PT1H\n"),
+        (
+            "bad-ttl",
+            "      patterns: [\"cache/**\"]\n      ttl: soon\n",
+        ),
+    ] {
+        let yaml = format!(
+            "id: wd-cache-{id}\nnamespace: w9b.wd\ntasks:\n  - id: wd\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    cache:\n{cache}    tasks:\n      - id: t\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n"
+        );
+        let draft = common::draft(&repo, ws, user, &yaml).await;
+        let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "")
+            .await
+            .expect_err("a malformed cache must not publish");
+        match err {
+            egret_core::Error::InvalidInput(m) => {
+                assert!(m.contains("(tasks.wd.cache)"), "{id}: {m}");
+            }
+            other => panic!("{id}: {other:?}"),
+        }
+    }
+}
+
 /// The block is kept in the model, verbatim: serialize -> parse -> equal,
 /// and the parse of the kept value is the parse of the written one.
 #[tokio::test]

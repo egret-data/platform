@@ -12,9 +12,11 @@
 //! `PREPARING` for want of a completed claim (V3 and the no-silent-stall rule).
 
 use std::collections::BTreeMap;
+use std::future::Future;
 
 use serde_json::Value;
 use sqlx::PgPool;
+use tokio::io::AsyncReadExt;
 
 use super::claim::Claimed;
 use super::commands::{
@@ -26,17 +28,50 @@ use crate::models::{Flow, Task, TaskKind, WorkingDirectory};
 use crate::runners::files::is_namespace_file_uri;
 use crate::runners::{render_str, RenderContext};
 use crate::storage::collect::collect_one;
-use crate::storage::nsfiles::glob::wildcard_match;
+use crate::storage::nsfiles::glob::{wildcard_match, PathMatcher};
 use crate::storage::nsfiles::stage::{
     check_task_bytes, merge, resolve_ns_file, stage, NamespaceFilesSpec,
 };
-use crate::storage::transfer::{write_tar, EntryKind, TarReader, TarSource};
+use crate::storage::transfer::{
+    write_tar, write_tar_over, EntryKind, TarError, TarReader, TarSource,
+};
 use crate::storage::{FileStore, StoredFile};
 
 /// The object a block's prepare claim writes: the directory the first child
 /// starts from. Its name is under the block's prefix, so the finish claim's
 /// discard removes it with the children's snapshots.
 const PREPARE_OBJECT: &str = "prepare.tar";
+
+/// The first entry of a cache archive: the instant it was saved, in nanoseconds
+/// since the epoch, as decimal text. It is written first, is never restored into
+/// a directory and is never matched by the cache's patterns (spec §5.4).
+const CACHE_MARKER: &str = ".egret-cache-saved-at";
+
+/// The object a block's cache is kept in (spec §5.4, §2.3):
+/// `{prefix}{workspace}/{namespace as path}/_cache/{flow}/{task}/{sha-256 of the
+/// task run value}.tar`. The key is the flow's and not the execution's, so each
+/// run of one flow shares it. The value is the empty text when there is none.
+pub(crate) fn cache_uri(
+    store: &FileStore,
+    workspace: uuid::Uuid,
+    namespace: &str,
+    flow: &str,
+    task: &str,
+    value: Option<&str>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(value.unwrap_or_default().as_bytes());
+    format!(
+        "s3://{}/{}{}/{}/_cache/{}/{}/{}.tar",
+        store.bucket,
+        store.prefix,
+        workspace.hyphenated(),
+        crate::storage::uri::namespace_as_path(namespace),
+        crate::storage::uri::slugify_str(flow),
+        crate::storage::uri::slugify_str(task),
+        hex::encode(digest),
+    )
+}
 
 /// What a block's own claim produced, for `claim::run_block_claim` to commit.
 #[derive(Debug, Clone, PartialEq)]
@@ -97,6 +132,18 @@ pub(crate) fn carry_of(
         cap: store.caps.max_task_bytes,
         outputs: rendered_outputs(render, parent)?,
     }))
+}
+
+/// The cache object of the block a claim belongs to, for the flow it runs.
+fn cache_key_of(store: &FileStore, c: &Claimed, flow: &Flow) -> String {
+    cache_uri(
+        store,
+        c.workspace_id,
+        &flow.namespace,
+        &flow.id,
+        &c.task_id,
+        c.value.as_deref(),
+    )
 }
 
 /// Do the block's own claim named by `c.block_phase`. Never `Err`: whatever
@@ -224,14 +271,34 @@ async fn prepare(
     let merged = merge(files, &contents, input_stored);
     check_task_bytes(&merged, store.caps.max_task_bytes)?;
     let uri = store.working_dir_uri(c.workspace_id, c.execution_id, c.id, PREPARE_OBJECT);
-    write_archive(store, &uri, &contents, &merged)
-        .await
-        .map_err(|e| {
-            format!(
-                "the WorkingDirectory {} could not write its snapshot: {e}",
-                c.task_id
-            )
-        })?;
+    // A live cache is restored first, and the files above are written over it
+    // (spec §5.4, Kestra's preExecuteTasks order). A miss, or an expired cache,
+    // starts from the files alone.
+    let mut restored = false;
+    if let Some(cache) = block.cache.as_ref().map(parse_cache).transpose()? {
+        let key = cache_key_of(store, c, &flow);
+        if live_cache(store, &key, cache.ttl).await? {
+            restore_archive(store, &uri, &key, &contents, &merged)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "the WorkingDirectory {} could not restore its cache: {e}",
+                        c.task_id
+                    )
+                })?;
+            restored = true;
+        }
+    }
+    if !restored {
+        write_archive(store, &uri, &contents, &merged)
+            .await
+            .map_err(|e| {
+                format!(
+                    "the WorkingDirectory {} could not write its snapshot: {e}",
+                    c.task_id
+                )
+            })?;
+    }
     Ok(uri)
 }
 
@@ -323,36 +390,36 @@ async fn input_files(
     Ok((contents, stored))
 }
 
-/// Write one ustar archive at `uri`, streamed: [`write_tar`] writes into a
-/// pipe that the store reads, so no archive is held whole (spec §4.4). The
-/// entries are `contents` (inline) and `stored` (files in storage). The two
-/// never share a name: [`merge`] removed the namespace file a name of
-/// `contents` would shadow. A failed write removes the object, so a half
-/// archive is never a pointer.
-async fn write_archive(
-    store: &FileStore,
-    uri: &str,
-    contents: &BTreeMap<String, String>,
-    stored: &BTreeMap<String, StoredInput>,
-) -> Result<(), String> {
-    let mut sources: BTreeMap<String, TarSource<'_>> = contents
+/// The entries of an archive: `contents` (inline) and `stored` (files in
+/// storage). A name both hold takes the stored one, which is what [`merge`]
+/// made the only survivor of a collision.
+fn sources_of<'a>(
+    contents: &'a BTreeMap<String, String>,
+    stored: &'a BTreeMap<String, StoredInput>,
+) -> BTreeMap<String, TarSource<'a>> {
+    let mut sources: BTreeMap<String, TarSource<'a>> = contents
         .iter()
         .map(|(name, text)| (name.clone(), TarSource::Contents(text)))
         .collect();
     for (name, input) in stored {
         sources.insert(name.clone(), TarSource::Stored(input));
     }
-    let (mut writer, mut reader) = tokio::io::duplex(256 * 1024);
-    let write = async {
-        let res = write_tar(&mut writer, &sources, Some(store)).await;
-        // Closing the write half is what ends the upload.
-        drop(writer);
-        res
-    };
+    sources
+}
+
+/// Stream one archive into the store at `uri`: `build` writes it into the pipe
+/// the store reads, so no archive is held whole (spec §4.4). A failed write
+/// removes the object, so a half archive is never a pointer or a cache.
+async fn stream_archive<F, Fut>(store: &FileStore, uri: &str, build: F) -> Result<(), String>
+where
+    F: FnOnce(tokio::io::DuplexStream) -> Fut,
+    Fut: Future<Output = Result<(), TarError>>,
+{
+    let (writer, mut reader) = tokio::io::duplex(256 * 1024);
     // `reader` moves into the upload, so a failed upload closes the pipe and
     // the writer stops, rather than blocking on a full buffer.
     let upload = async move { store.store.put_stream(uri, &mut reader, None).await };
-    let (written, stored) = tokio::join!(write, upload);
+    let (written, stored) = tokio::join!(build(writer), upload);
     match (written, stored) {
         (Ok(()), Ok(_)) => Ok(()),
         (Err(e), _) => {
@@ -364,6 +431,225 @@ async fn write_archive(
             Err(e.to_string())
         }
     }
+}
+
+/// Write `contents` and `stored` as the directory's first archive at `uri`.
+async fn write_archive(
+    store: &FileStore,
+    uri: &str,
+    contents: &BTreeMap<String, String>,
+    stored: &BTreeMap<String, StoredInput>,
+) -> Result<(), String> {
+    let sources = sources_of(contents, stored);
+    stream_archive(store, uri, move |mut out| async move {
+        write_tar(&mut out, &sources, Some(store)).await
+    })
+    .await
+}
+
+/// The matcher of a cache's patterns, which are relative to the working
+/// directory. `PathMatcher` reads paths with their leading `/` (as namespace
+/// files are), so each pattern gets one.
+fn cache_matcher(patterns: &[String]) -> Result<PathMatcher, String> {
+    let rooted: Vec<String> = patterns
+        .iter()
+        .map(|p| {
+            if p.starts_with('/') {
+                p.clone()
+            } else {
+                format!("/{p}")
+            }
+        })
+        .collect();
+    PathMatcher::new(&rooted, &[])
+}
+
+/// Whether the cache keeps `name`, a path relative to the working directory.
+fn cache_keeps(matcher: &PathMatcher, name: &str) -> bool {
+    matcher.matches_str(&format!("/{name}"))
+}
+
+/// The nanoseconds since the epoch: the clock of a cache's marker and TTL.
+fn now_nanos() -> i128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i128)
+        .unwrap_or(0)
+}
+
+/// A block's `cache` (spec §2.3): the patterns of the files it keeps, and the
+/// `ttl` after which a saved cache is expired (`None`: it never is).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CacheSpec {
+    pub patterns: Vec<String>,
+    pub ttl: Option<chrono::TimeDelta>,
+}
+
+/// The `cache` of a block, parsed and checked. Publish runs it too, so a cache
+/// egret cannot keep is refused there, by name.
+pub(crate) fn parse_cache(v: &Value) -> Result<CacheSpec, String> {
+    let Value::Object(map) = v else {
+        return Err("cache is not a map of `patterns` and `ttl`".to_string());
+    };
+    if let Some(k) = map
+        .keys()
+        .find(|k| k.as_str() != "patterns" && k.as_str() != "ttl")
+    {
+        return Err(format!("cache.{k} is not a property of `cache`"));
+    }
+    let patterns = match map.get("patterns") {
+        Some(Value::Array(items)) if !items.is_empty() => items
+            .iter()
+            .map(|i| {
+                i.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "cache.patterns: a pattern is not a string".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => {
+            return Err(
+                "cache.patterns is required, and is a non-empty list of patterns".to_string(),
+            )
+        }
+    };
+    cache_matcher(&patterns).map_err(|e| format!("cache.patterns: {e}"))?;
+    let ttl = match map.get("ttl") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => Some(
+            crate::trigger::duration::parse_duration(text)
+                .map_err(|e| format!("cache.ttl {text:?}: {e}"))?,
+        ),
+        Some(_) => return Err("cache.ttl is not an ISO-8601 duration".to_string()),
+    };
+    Ok(CacheSpec { patterns, ttl })
+}
+
+/// Whether the cache at `key` is live (spec §2.3): present, and saved less than
+/// its `ttl` ago. A cache that is expired, or has no marker, is deleted on read
+/// and reported absent.
+async fn live_cache(
+    store: &FileStore,
+    key: &str,
+    ttl: Option<chrono::TimeDelta>,
+) -> Result<bool, String> {
+    match store.store.head(key).await {
+        Ok(None) => return Ok(false),
+        Ok(Some(_)) => {}
+        Err(e) => return Err(format!("the cache {key} could not be read: {e}")),
+    }
+    let mut src = store
+        .store
+        .get_stream(key)
+        .await
+        .map_err(|e| format!("the cache {key} could not be read: {e}"))?;
+    let mut reader = TarReader::new(&mut src);
+    let saved: Option<i128> = match reader.next_entry().await {
+        Ok(Some(entry)) if entry.name == CACHE_MARKER && entry.kind == EntryKind::File => {
+            let mut text = String::new();
+            reader
+                .body()
+                .read_to_string(&mut text)
+                .await
+                .ok()
+                .and_then(|_| text.trim().parse::<i128>().ok())
+        }
+        _ => None,
+    };
+    let live = match (saved, ttl) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(saved), Some(ttl)) => {
+            let age = now_nanos() - saved;
+            let ttl_nanos = i128::from(ttl.num_seconds()) * 1_000_000_000;
+            age < ttl_nanos
+        }
+    };
+    if !live {
+        let _ = store.store.delete(key).await;
+    }
+    Ok(live)
+}
+
+/// The files of the archive at `uri` that `keep` accepts, by name, each with
+/// its size and the SHA-256 of its contents.
+async fn digests_of(
+    store: &FileStore,
+    uri: &str,
+    keep: impl Fn(&str) -> bool,
+) -> Result<BTreeMap<String, (u64, String)>, String> {
+    use sha2::{Digest, Sha256};
+    let unread = |e: &dyn std::fmt::Display| format!("{uri} could not be read: {e}");
+    let mut src = store.store.get_stream(uri).await.map_err(|e| unread(&e))?;
+    let mut reader = TarReader::new(&mut src);
+    let mut out = BTreeMap::new();
+    while let Some(entry) = reader.next_entry().await.map_err(|e| unread(&e))? {
+        if entry.kind != EntryKind::File || !keep(&entry.name) {
+            continue;
+        }
+        let mut hasher = Sha256::new();
+        let mut body = reader.body();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut left = entry.size;
+        while left > 0 {
+            let want = buf.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+            let n = body.read(&mut buf[..want]).await.map_err(|e| unread(&e))?;
+            if n == 0 {
+                return Err(unread(&format!("the archive ends inside {:?}", entry.name)));
+            }
+            hasher.update(&buf[..n]);
+            left -= n as u64;
+        }
+        out.insert(
+            entry.name.clone(),
+            (entry.size, hex::encode(hasher.finalize())),
+        );
+    }
+    Ok(out)
+}
+
+/// Restore the cache at `key` as the directory's first archive at `uri` (spec
+/// §5.4): the cache's files, with `contents` and `stored` written over them.
+async fn restore_archive(
+    store: &FileStore,
+    uri: &str,
+    key: &str,
+    contents: &BTreeMap<String, String>,
+    stored: &BTreeMap<String, StoredInput>,
+) -> Result<(), String> {
+    let mut base = store
+        .store
+        .get_stream(key)
+        .await
+        .map_err(|e| format!("the cache {key} could not be read: {e}"))?;
+    let sources = sources_of(contents, stored);
+    stream_archive(store, uri, move |mut out| async move {
+        let keep = |name: &str| name != CACHE_MARKER;
+        write_tar_over(&mut out, &mut base, &keep, &sources, Some(store)).await
+    })
+    .await
+}
+
+/// Save the matched files of the snapshot at `pointer` as the cache at `key`,
+/// with a fresh marker (spec §5.4).
+async fn save_archive(
+    store: &FileStore,
+    key: &str,
+    pointer: &str,
+    matcher: &PathMatcher,
+) -> Result<(), String> {
+    let mut base = store
+        .store
+        .get_stream(pointer)
+        .await
+        .map_err(|e| format!("the snapshot {pointer} could not be read: {e}"))?;
+    let marker = now_nanos().to_string();
+    let mut overlay = BTreeMap::new();
+    overlay.insert(CACHE_MARKER.to_string(), TarSource::Contents(&marker));
+    stream_archive(store, key, move |mut out| async move {
+        let keep = |name: &str| name != CACHE_MARKER && cache_keeps(matcher, name);
+        write_tar_over(&mut out, &mut base, &keep, &overlay, Some(store)).await
+    })
+    .await
 }
 
 /// The `WorkingDirectory` whose `tasks` hold the child `child`, found in the
@@ -502,10 +788,10 @@ pub(crate) async fn check_child_outputs(wd: &WorkingDirCarry) -> Result<(), Stri
     Ok(())
 }
 
-/// The finish claim's `outputFiles` (spec §5.5): every file of the last
-/// snapshot that a declared name matches is collected into internal storage
-/// under the block run's own task prefix, and the block's outputs map each
-/// name to its `kestra://` URI. `Ok((None, []))` when no output is declared.
+/// The finish claim (spec §5.4, §5.5): `outputFiles` collected from the last
+/// snapshot into internal storage under the block run's own task prefix, and
+/// the block's outputs, which map each name to its `kestra://` URI; then the
+/// cache saved, if the block has one. `Ok((None, []))` when neither applies.
 async fn finish(
     pool: &PgPool,
     store: &FileStore,
@@ -525,7 +811,8 @@ async fn finish(
         ));
     };
     let globs = rendered_outputs(render, block)?;
-    if globs.is_empty() {
+    let cache = block.cache.as_ref().map(parse_cache).transpose()?;
+    if globs.is_empty() && cache.is_none() {
         return Ok((None, Vec::new()));
     }
     let pointer: Option<String> =
@@ -541,30 +828,72 @@ async fn finish(
             })?;
     let Some(pointer) = pointer else {
         return Err(format!(
-            "corrupt: the WorkingDirectory {} has no snapshot to collect its outputs from",
+            "corrupt: the WorkingDirectory {} has no snapshot to finish from",
             c.task_id
         ));
     };
-    let task_prefix = crate::storage::uri::task_prefix(
-        &flow.namespace,
-        &flow.id,
-        c.execution_id,
-        &c.task_id,
-        c.id,
-    )
-    .map_err(|e| format!("the WorkingDirectory {}: {e}", c.task_id))?;
-    let to = CollectTo {
-        workspace: c.workspace_id,
-        task_prefix,
-        naming: Naming::KestraOutputName,
+    let (outputs, files) = if globs.is_empty() {
+        (None, Vec::new())
+    } else {
+        let task_prefix = crate::storage::uri::task_prefix(
+            &flow.namespace,
+            &flow.id,
+            c.execution_id,
+            &c.task_id,
+            c.id,
+        )
+        .map_err(|e| format!("the WorkingDirectory {}: {e}", c.task_id))?;
+        let to = CollectTo {
+            workspace: c.workspace_id,
+            task_prefix,
+            naming: Naming::KestraOutputName,
+        };
+        let collected = collect_outputs(store, &pointer, &to, &globs).await?;
+        let map: serde_json::Map<String, Value> = collected
+            .iter()
+            .map(|(name, file)| (name.clone(), Value::String(file.uri.clone())))
+            .collect();
+        (
+            Some(serde_json::json!({ "outputFiles": map })),
+            collected.into_values().collect(),
+        )
     };
-    let collected = collect_outputs(store, &pointer, &to, &globs).await?;
-    let map: serde_json::Map<String, Value> = collected
-        .iter()
-        .map(|(name, file)| (name.clone(), Value::String(file.uri.clone())))
-        .collect();
-    let outputs = serde_json::json!({ "outputFiles": map });
-    Ok((Some(outputs), collected.into_values().collect()))
+    if let Some(cache) = cache {
+        save_cache(store, &cache, &cache_key_of(store, c, &flow), &pointer).await?;
+    }
+    Ok((outputs, files))
+}
+
+/// Save the cache at `key` from the snapshot at `pointer`, when a matched file
+/// changed since the cache was restored (spec §5.4). "Changed" is a matched
+/// file whose contents differ from the cache's, or a cache that is absent or
+/// expired; a matched file the snapshot no longer has is a change too. The
+/// total of the matched files is bounded by `max_task_bytes`, and an over-cap
+/// cache fails the finish, naming the cap.
+async fn save_cache(
+    store: &FileStore,
+    cache: &CacheSpec,
+    key: &str,
+    pointer: &str,
+) -> Result<(), String> {
+    let matcher = cache_matcher(&cache.patterns).map_err(|e| format!("cache.patterns: {e}"))?;
+    let matched = |name: &str| name != CACHE_MARKER && cache_keeps(&matcher, name);
+    let snapshot = digests_of(store, pointer, matched).await?;
+    let total: u64 = snapshot.values().map(|(size, _)| *size).sum();
+    if total > store.caps.max_task_bytes {
+        return Err(format!(
+            "the files the cache keeps come to {total} bytes, over the {} one task run may \
+             store (workflow.storage.max_task_bytes); the cache is not saved",
+            store.caps.max_task_bytes
+        ));
+    }
+    if live_cache(store, key, cache.ttl).await? {
+        let archived = digests_of(store, key, |name| name != CACHE_MARKER).await?;
+        if archived == snapshot {
+            return Ok(());
+        }
+    }
+    save_archive(store, key, pointer, &matcher).await
 }
 
 /// Collect the files of the archive at `uri` that `globs` name (see
@@ -787,14 +1116,10 @@ mod tests {
         );
 
         let flow = crate::spec::parse(&src).expect("the flow parses");
-        let refused: Vec<_> = crate::spec::validate(&flow)
-            .errors
-            .into_iter()
-            .filter(|f| f.code == "working_directory_property_not_yet_run")
-            .collect();
+        let errors = crate::spec::validate(&flow).errors;
         assert!(
-            refused.is_empty(),
-            "namespaceFiles publishes once it runs: {refused:?}"
+            errors.is_empty(),
+            "namespaceFiles publishes once it runs: {errors:?}"
         );
 
         let reg = CaptureStart::new(fs.clone());
@@ -832,14 +1157,10 @@ mod tests {
         );
 
         let flow = crate::spec::parse(&src).expect("the flow parses");
-        let refused: Vec<_> = crate::spec::validate(&flow)
-            .errors
-            .into_iter()
-            .filter(|f| f.code == "working_directory_property_not_yet_run")
-            .collect();
+        let errors = crate::spec::validate(&flow).errors;
         assert!(
-            refused.is_empty(),
-            "inputFiles publishes once it runs: {refused:?}"
+            errors.is_empty(),
+            "inputFiles publishes once it runs: {errors:?}"
         );
 
         let reg = CaptureStart::new(fs.clone());
@@ -941,5 +1262,122 @@ mod tests {
             message.contains("sub") && message.contains("DIRECTORY"),
             "{message}"
         );
+    }
+
+    /// The cache object of the block of `flow` (no `taskRun.value`): its marker
+    /// (the nanosecond its save wrote) and its matched files.
+    async fn cache_of(
+        fs: &crate::storage::FileStore,
+        ws: uuid::Uuid,
+        namespace: &str,
+        flow: &str,
+        block: &str,
+    ) -> Option<(String, BTreeMap<String, String>)> {
+        let key = cache_uri(fs, ws, namespace, flow, block, None);
+        let bytes = fs.store.get(&key).await.ok()?;
+        let mut files = files_in(&bytes).await;
+        let marker = files.remove(CACHE_MARKER)?;
+        Some((marker, files))
+    }
+
+    /// Spec §5.4 and §2.3: a cache is restored into the directory before the
+    /// first child, and saved after the last only when a matched file changed.
+    /// Run 1 saves (a miss). Run 2 starts with the restored file and changes
+    /// nothing, so it leaves the cache as it was. Run 3 changes the file, and the
+    /// cache is saved again.
+    #[tokio::test]
+    async fn a_cache_is_restored_and_saved_again_only_when_a_matched_file_changed() {
+        install_served();
+        let pool = ns::pool().await.expect("the test database");
+        let fs = crate::storage::install_mem_for_tests();
+        let ws = ns::workspace(&pool).await;
+        const NS: &str = "w11.cache";
+        let cache = "    cache:\n      patterns:\n        - \"cache/**\"\n      ttl: PT1H\n";
+        let with = |input: Option<&str>| {
+            let inputs = input.map_or(String::new(), |body| {
+                format!("    inputFiles:\n      cache/a.txt: {body}\n")
+            });
+            block_flow(NS, &format!("{inputs}{cache}"))
+        };
+        let reg = CaptureStart::new(fs.clone());
+
+        let first = start_execution(&pool, ws, None, &with(Some("one")), json!({}))
+            .await
+            .expect("start");
+        settle(&pool, &reg, first).await;
+        let (saved, files) = cache_of(&fs, ws, NS, "wd-props", "block")
+            .await
+            .expect("run 1 saved the cache");
+        assert_eq!(files.get("cache/a.txt").map(String::as_str), Some("one"));
+
+        let second = start_execution(&pool, ws, None, &with(None), json!({}))
+            .await
+            .expect("start");
+        settle(&pool, &reg, second).await;
+        let restored = files_in(&reg.first_start(second)).await;
+        assert_eq!(
+            restored.get("cache/a.txt").map(String::as_str),
+            Some("one"),
+            "run 2 starts with the file the cache holds: {restored:?}"
+        );
+        let (unchanged, _) = cache_of(&fs, ws, NS, "wd-props", "block")
+            .await
+            .expect("the cache is still there");
+        assert_eq!(
+            unchanged, saved,
+            "a restore that changed nothing saves nothing"
+        );
+
+        let third = start_execution(&pool, ws, None, &with(Some("two")), json!({}))
+            .await
+            .expect("start");
+        settle(&pool, &reg, third).await;
+        let (resaved, files) = cache_of(&fs, ws, NS, "wd-props", "block")
+            .await
+            .expect("the cache is still there");
+        assert_ne!(resaved, saved, "a changed matched file is saved again");
+        assert_eq!(files.get("cache/a.txt").map(String::as_str), Some("two"));
+    }
+
+    /// Spec §2.3: an expired cache is deleted on read and treated as absent. The
+    /// flow's `ttl` is `PT0S`, so a cache is expired as soon as it is saved: the
+    /// next run starts empty and saves again.
+    #[tokio::test]
+    async fn an_expired_cache_is_treated_as_absent() {
+        install_served();
+        let pool = ns::pool().await.expect("the test database");
+        let fs = crate::storage::install_mem_for_tests();
+        let ws = ns::workspace(&pool).await;
+        const NS: &str = "w11.ttl";
+        let cache = "    cache:\n      patterns:\n        - \"cache/**\"\n      ttl: PT0S\n";
+        let with = |input: Option<&str>| {
+            let inputs = input.map_or(String::new(), |body| {
+                format!("    inputFiles:\n      cache/a.txt: {body}\n")
+            });
+            block_flow(NS, &format!("{inputs}{cache}"))
+        };
+        let reg = CaptureStart::new(fs.clone());
+
+        let first = start_execution(&pool, ws, None, &with(Some("one")), json!({}))
+            .await
+            .expect("start");
+        settle(&pool, &reg, first).await;
+        let (saved, _) = cache_of(&fs, ws, NS, "wd-props", "block")
+            .await
+            .expect("run 1 saved the cache");
+
+        let second = start_execution(&pool, ws, None, &with(None), json!({}))
+            .await
+            .expect("start");
+        settle(&pool, &reg, second).await;
+        let started = files_in(&reg.first_start(second)).await;
+        assert!(
+            !started.contains_key("cache/a.txt"),
+            "an expired cache is not restored: {started:?}"
+        );
+        let (resaved, _) = cache_of(&fs, ws, NS, "wd-props", "block")
+            .await
+            .expect("run 2 saved the cache again");
+        assert_ne!(resaved, saved, "the expired cache was replaced");
     }
 }

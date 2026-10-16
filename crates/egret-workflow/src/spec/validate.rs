@@ -54,8 +54,7 @@
 //!    an opaque runnable no handler serves, and every execution that reached
 //!    it stalled in `RUNNING` for ever. So each is an ERROR, in
 //!    `validate_for_run`, which publish and every start path ask:
-//!    `unsupported_allow_failure`, `working_directory_property_not_yet_run`
-//!    (a `WorkingDirectory` property its claim does not run yet, plan Task 3),
+//!    `unsupported_allow_failure`,
 //!    `unsupported_loop_until_property` (a bound `executor::loop_until_gap`
 //!    names), `unsupported_pause_property` (`executor::pause_gap`, W7b),
 //!    `unsupported_foreach` (W7b), `unsupported_flow_task` (a type spelled
@@ -1764,16 +1763,16 @@ fn walk_task(
                     }
                 }
             }
-            if w.cache.is_some() {
-                report.errors.push(Finding {
-                    code: "working_directory_property_not_yet_run",
-                    message: format!(
-                        "task '{}' has type '{}', and its 'cache' is not run by egret \
-                         yet, so the flow cannot be published or started",
-                        task.id, task.r#type
-                    ),
-                    path: format!("{path}.cache"),
-                });
+            // `cache` is kept by the prepare and finish claims (spec §5.4); a cache
+            // egret cannot keep is refused here, by name.
+            if let Some(v) = &w.cache {
+                if let Err(problem) = crate::worker::working_dir::parse_cache(v) {
+                    report.errors.push(Finding {
+                        code: "working_directory_cache_invalid",
+                        message: format!("task '{}': {problem}", task.id),
+                        path: format!("{path}.cache"),
+                    });
+                }
             }
         }
         // (Wherever this comment says "warns", read "is refused": both
@@ -4708,20 +4707,6 @@ mod tests {
         hints: &'static [&'static str],
     }
 
-    fn working_directory_property_body(ty: &str) -> Vec<String> {
-        vec![
-            "id: c".into(),
-            format!("type: {ty}"),
-            "cache:".into(),
-            "  patterns:".into(),
-            "    - x.txt".into(),
-            "tasks:".into(),
-            "  - id: inner".into(),
-            "    type: core.log".into(),
-            "    message: hi".into(),
-        ]
-    }
-
     fn allow_failure_retry_body(ty: &str) -> Vec<String> {
         vec![
             "id: c".into(),
@@ -4767,18 +4752,6 @@ mod tests {
             body: allow_failure_retry_body,
             suffix: ".retry",
             hints: &["put `retry:` on the child task that should be retried"],
-        },
-        Refused {
-            code: "working_directory_property_not_yet_run",
-            spellings: &[
-                "io.kestra.plugin.core.flow.WorkingDirectory",
-                "core.workingdirectory",
-                "io.kestra.plugin.core.flow.workingDIRECTORY",
-                "core.WorkingDirectory",
-            ],
-            body: working_directory_property_body,
-            suffix: ".cache",
-            hints: &["'cache'"],
         },
         Refused {
             code: "unsupported_loop_until_property",

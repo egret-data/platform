@@ -653,7 +653,7 @@
       "allowFailure": "honoured",
       "allowWarning": "honoured",
       "assets": "ignored",
-      "cache": "refused",
+      "cache": "honoured",
       "description": "honoured",
       "disabled": "honoured",
       "errors": "ignored",
