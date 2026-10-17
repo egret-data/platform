@@ -460,16 +460,16 @@ pub async fn unresolved_principals_via(
 /// A rule's `exempt.exclude` cannot be written (`validate_rule_shape` refuses
 /// it) and is flagged conservatively should one be stored.
 fn widens_access_when_empty(row: &ReportRow) -> bool {
-    match (
-        row.source.as_str(),
-        row.effect.as_deref(),
-        row.position.as_str(),
-    ) {
-        ("grant", Some("deny"), "include") => true,
-        ("grant", Some("allow"), "exclude") => true,
-        ("rule", _, "exclude") => true,
-        _ => false,
-    }
+    matches!(
+        (
+            row.source.as_str(),
+            row.effect.as_deref(),
+            row.position.as_str(),
+        ),
+        ("grant", Some("deny"), "include")
+            | ("grant", Some("allow"), "exclude")
+            | ("rule", _, "exclude")
+    )
 }
 
 async fn classify_stored(conn: &mut PgConnection, p: &Principal) -> Result<Stored, PermHttpError> {

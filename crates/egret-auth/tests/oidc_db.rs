@@ -353,7 +353,7 @@ async fn a_group_created_mid_sync_is_not_joined_without_its_lock() {
     // The next login sees the group: joined, and locked first.
     let rc2 = Recorder::default();
     groups
-        .sync_user_oidc_groups(id, &[late.clone()], &rc2)
+        .sync_user_oidc_groups(id, std::slice::from_ref(&late), &rc2)
         .await
         .unwrap();
     let calls = rc2.take();
