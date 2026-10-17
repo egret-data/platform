@@ -44,6 +44,7 @@
 pub(crate) mod allow_failure;
 mod command;
 mod flowable;
+mod kill;
 mod plan;
 mod retry;
 mod state;
@@ -175,6 +176,13 @@ use flowable::{sequential, Step};
 pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     if state.history.last().is_some_and(|s| s.is_terminal()) {
         return Vec::new();
+    }
+
+    // A kill in progress (spec §5): nothing is created, started, retried or
+    // resumed, and nothing below -- `reopen_due`, the walk, `retry::scan`,
+    // `pause_mark` -- sees this state. See [`kill`].
+    if state.history.last() == Some(&RunState::Killing) {
+        return kill::advance_killing(plan, state);
     }
 
     // The execution-delay loop, which in the artifact is a different loop from

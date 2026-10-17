@@ -754,6 +754,7 @@ pub async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<
                                       WHERE c.parent_execution_id = e.id \
                                         AND c.parent_run_ix IS NULL))) \
             AND (r.state = ANY($2) OR NOT (e.state = ANY($2))) \
+            AND e.state <> $3 \
             AND r.not_before_ms IS NOT NULL \
             AND r.not_before_ms <= \
                 (EXTRACT(EPOCH FROM (now() - e.created_at)) * 1000)::bigint \
@@ -775,6 +776,14 @@ pub async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<
             .map(|s| s.wire())
             .collect::<Vec<_>>(),
     )
+    // Kill Task 2: no arm wakes a run of a `KILLING` execution. `advance()`
+    // reopens no retry and resumes no pause under one (`executor::kill`), so
+    // a wake would settle into nothing every tick, for ever -- the endless case
+    // the term above closes for a terminal execution. The `RETRIED` arm is
+    // unaffected in practice: its execution is `RETRIED`, and the kill route
+    // refuses a terminal execution. `a_killing_execution_hides_its_waiting_
+    // runs_from_the_waker`.
+    .bind(RunState::Killing.wire())
     .fetch_all(exec)
     .await
     .map_err(db_err)
@@ -3699,6 +3708,15 @@ fn sla_terminal(surface: &Surface, ctx: &ExecutionCtx, state: &ExecutionState) -
         return None;
     }
     if state.history.last().is_some_and(|s| s.is_terminal()) {
+        return None;
+    }
+    // Kill Task 2: **a kill in progress wins.** A `KILLING` execution is live
+    // (not terminal), so without this an SLA violated mid-kill would move it
+    // `FAILED`/`CANCELLED`; `advance()` then returns nothing for a terminal
+    // execution and every `KILLING` flowable run under it is stranded. The kill
+    // ends the execution `KILLED` (`executor::kill`), and this does not act.
+    // `an_sla_violated_during_a_kill_leaves_the_execution_to_end_killed`.
+    if state.history.last() == Some(&RunState::Killing) {
         return None;
     }
     // `run: None` -- an execution-level render with no run of its own, which is

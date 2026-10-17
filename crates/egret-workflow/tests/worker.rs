@@ -10396,3 +10396,206 @@ async fn a_subflow_to_a_foreach_creates_no_child_and_fails(pool: sqlx::PgPool) {
     .expect("count children");
     assert_eq!(children, 1, "a Loop target is started");
 }
+
+/// Kill Task 2 (spec §5): the waker names no run of a `KILLING` execution.
+///
+/// Its `RETRYING` and `PAUSED` arms exist for `retry::reopen_due` and
+/// `flowable::resume_paused`, and under a `KILLING` execution `advance()`
+/// calls neither (`executor::kill`): a leaf is left for the route or the
+/// worker, and a flowable is closed by whatever settle comes next. Naming such
+/// a run would relock and settle the execution every tick into nothing, which
+/// is the endless case the terminal-execution term already closes. The two
+/// `RUNNING` rows are the control: without them every `false` is satisfied by
+/// a waker that named nobody.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_killing_execution_hides_its_waiting_runs_from_the_waker(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+
+    let cases: [(&str, &str, bool); 4] = [
+        ("RETRYING", "KILLING", false),
+        ("PAUSED", "KILLING", false),
+        ("RETRYING", "RUNNING", true),
+        ("PAUSED", "RUNNING", true),
+    ];
+    let mut planted: Vec<(&str, &str, bool, Uuid)> = Vec::new();
+    for (run_state, execution_state, want) in cases {
+        let ex = start_execution(
+            &pool,
+            ws,
+            None,
+            &one_task(&format!(
+                "kill-wake-{}-{}",
+                run_state.to_lowercase(),
+                execution_state.to_lowercase()
+            )),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("start execution");
+        sqlx::query(
+            "UPDATE workflow.task_runs \
+                SET state = $2, not_before_ms = 0, resume_with = 'TERMINAL:SUCCESS' \
+              WHERE execution_id = $1 AND task_id = 'a'",
+        )
+        .bind(ex)
+        .bind(run_state)
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("plant a due {run_state} run: {e}"));
+        sqlx::query("UPDATE workflow.executions SET state = $2 WHERE id = $1")
+            .bind(ex)
+            .bind(execution_state)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("set the execution {execution_state}: {e}"));
+        planted.push((run_state, execution_state, want, ex));
+    }
+
+    let named: std::collections::BTreeSet<Uuid> = due_retries(&pool, 64)
+        .await
+        .expect("due_retries")
+        .into_iter()
+        .collect();
+    let wrong: Vec<String> = planted
+        .iter()
+        .filter(|(_, _, want, ex)| named.contains(ex) != *want)
+        .map(|(r, e, want, ex)| format!("run {r} in a {e} execution: expected named={want} ({ex})"))
+        .collect();
+    assert!(wrong.is_empty(), "{}\nNamed: {named:?}", wrong.join("\n"));
+}
+
+/// A flow whose `sla:` CANCELs once its input reads `CANCEL`, so the violation
+/// can be switched on after the execution is running.
+fn sla_cancel_flow(id: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ninputs:\n  - id: string\n    type: SELECT\n    values:\n      - PASS\n      - CANCEL\n    defaults: PASS\nsla:\n  - id: condition\n    type: EXECUTION_ASSERTION\n    behavior: CANCEL\n    assert: \"{{{{inputs.string != 'CANCEL'}}}}\"\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    )
+}
+
+async fn kill_history(pool: &sqlx::PgPool, ex: Uuid) -> Vec<String> {
+    let h: serde_json::Value =
+        sqlx::query_scalar("SELECT history FROM workflow.executions WHERE id = $1")
+            .bind(ex)
+            .fetch_one(pool)
+            .await
+            .expect("read execution history");
+    serde_json::from_value(h).expect("history is a list of states")
+}
+
+/// Kill Task 2, item 1: an SLA violated while the execution is `KILLING` does
+/// not act. The kill wins and the execution ends `KILLED`.
+///
+/// Without the guard in `claim::sla_terminal`, the violation moves the
+/// execution `CANCELLED` mid-kill; `advance()` then returns nothing for a
+/// terminal execution, and any `KILLING` flowable run is stranded. The control
+/// is the same flow, the same flipped input, and no kill: it must CANCEL, or
+/// the fixture never violates and the kill assertion proves nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_sla_violated_during_a_kill_leaves_the_execution_to_end_killed(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+
+    let mut ids = Vec::new();
+    for label in ["control", "killed"] {
+        let ex = start_execution(
+            &pool,
+            ws,
+            None,
+            &sla_cancel_flow(&format!("sla-kill-{label}")),
+            serde_json::json!({"string": "PASS"}),
+        )
+        .await
+        .expect("start execution");
+        ids.push(ex);
+    }
+    let (control, killed) = (ids[0], ids[1]);
+    for ex in [control, killed] {
+        assert_eq!(
+            kill_history(&pool, ex).await.last().map(String::as_str),
+            Some("RUNNING"),
+            "the SLA must not fire before its input is flipped"
+        );
+    }
+
+    // The kill route's half (spec §3.2), written by hand: the run is leased and
+    // goes KILLING, and so does the execution.
+    let claimed = claim(&pool, 64).await.expect("claim");
+    assert!(
+        claimed.iter().any(|c| c.execution_id == killed),
+        "the run to kill must be leased"
+    );
+    sqlx::query(
+        "UPDATE workflow.task_runs \
+            SET state = 'KILLING', history = history || '[\"KILLING\"]'::jsonb \
+          WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(killed)
+    .execute(&pool)
+    .await
+    .expect("run -> KILLING");
+    sqlx::query(
+        "UPDATE workflow.executions \
+            SET state = 'KILLING', history = history || '[\"KILLING\"]'::jsonb \
+          WHERE id = $1",
+    )
+    .bind(killed)
+    .execute(&pool)
+    .await
+    .expect("execution -> KILLING");
+
+    // The violation switches on for both.
+    sqlx::query(
+        "UPDATE workflow.executions SET inputs = '{\"string\": \"CANCEL\"}'::jsonb \
+          WHERE id = ANY($1)",
+    )
+    .bind(vec![control, killed])
+    .execute(&pool)
+    .await
+    .expect("flip the input");
+
+    egret_workflow::worker::resume(&pool, control)
+        .await
+        .expect("settle the control");
+    assert_eq!(
+        kill_history(&pool, control)
+            .await
+            .last()
+            .map(String::as_str),
+        Some("CANCELLED"),
+        "the control: the flipped input must violate the SLA"
+    );
+
+    egret_workflow::worker::resume(&pool, killed)
+        .await
+        .expect("settle the kill");
+    let h = kill_history(&pool, killed).await;
+    assert_eq!(
+        h.last().map(String::as_str),
+        Some("KILLING"),
+        "a kill in progress wins over the SLA, and the KILLING run is still the \
+         worker's: {h:?}"
+    );
+
+    // The worker's half (spec §4.2): the run ends KILLED.
+    sqlx::query(
+        "UPDATE workflow.task_runs \
+            SET state = 'KILLED', claimed_at = NULL, ended_at = now(), \
+                history = history || '[\"KILLED\"]'::jsonb \
+          WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(killed)
+    .execute(&pool)
+    .await
+    .expect("run -> KILLED");
+    egret_workflow::worker::resume(&pool, killed)
+        .await
+        .expect("settle after the worker");
+    let h = kill_history(&pool, killed).await;
+    assert_eq!(
+        &h[h.len() - 2..],
+        &["KILLING".to_string(), "KILLED".to_string()],
+        "{h:?}"
+    );
+    assert!(!h.iter().any(|s| s == "CANCELLED"), "{h:?}");
+}
