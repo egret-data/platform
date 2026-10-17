@@ -14,6 +14,7 @@ import { ObjectHeader, type HeaderKind, type HeaderTags } from "@/routes/governa
 import { ObjectTabs, type ObjectLevel } from "@/routes/governance/data/ObjectTabs";
 import { assignmentsOf, enginesOf, scopeOf, type CatalogState, type ObjectKind, type TagsResult } from "@/routes/governance/data/objectData";
 import { urlToPath } from "@/routes/governance/data/objectPath";
+import { sameName } from "@/routes/governance/data/coverage";
 import { DetailsTab } from "@/routes/governance/data/tabs/DetailsTab";
 import { OverviewTab } from "@/routes/governance/data/tabs/OverviewTab";
 import { LineageTab } from "@/routes/governance/data/tabs/LineageTab";
@@ -84,11 +85,12 @@ export default function ObjectPage() {
     { query: { enabled: !!found && found.warehouseId != null && level === "object", retry: false } },
   );
 
+  // The object as its schema's listing names it: the URL may differ in case,
+  // which the engines and egret's tags ignore; the listing's spelling is the source's.
+  const siblings = level === "object" && parent.data?.status === 200 ? (parent.data.data.items ?? []) : [];
+  const item = siblings.find((i) => i.name === path.object) ?? siblings.find((i) => sameName(i.name, path.object ?? ""));
   let kind: NodeKind | null = level === "object" ? null : level;
-  if (level === "object" && parent.data?.status === 200) {
-    const item = parent.data.data.items?.find((i) => i.name === path.object);
-    if (item && OBJECT_KINDS.includes(item.kind)) kind = item.kind;
-  }
+  if (item && OBJECT_KINDS.includes(item.kind)) kind = item.kind;
   // An object's kind is "loading" only while something that can still tell it is on its way.
   const headerKind: HeaderKind =
     kind ??
@@ -112,7 +114,8 @@ export default function ObjectPage() {
             catalogId: found.id,
             warehouseId: found.warehouseId,
             schema: path.schema,
-            table: path.object,
+            // Written with the source's spelling, as the column panel writes a column's.
+            table: item?.name ?? path.object,
             assigned: (assignmentsOf(tags) ?? []).filter((a) => a.column === "").map((a) => a.tag.id),
           });
         }

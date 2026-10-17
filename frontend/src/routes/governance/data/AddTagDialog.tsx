@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Loader2, Tag as TagIcon } from "lucide-react";
 import { toast } from "sonner";
 import { ApiError } from "@/api/client";
+import { tagsQueryKey } from "@/api/tags";
 import { useControlPlaneCatalogAssignResourceTag } from "@/api/generated/control-plane-catalog/control-plane-catalog";
 import { getControlPlaneGovernanceObjectTagsQueryKey } from "@/api/generated/control-plane-governance/control-plane-governance";
 import { getControlPlaneTagsListTagsQueryKey, useControlPlaneTagsListTags } from "@/api/generated/control-plane-tags/control-plane-tags";
@@ -48,7 +49,9 @@ export type TagTarget = {
  *
  * On success it refetches the object's tags (the header, the Overview's
  * columns, the column panel and the tag rules all read them) and the tag
- * catalogue (its assignment counts), closes and toasts. On failure the
+ * catalogue (its assignment counts) under both keys it is cached by, the
+ * generated `GET /tags` key and `tagsQueryKey` (`api/tags.ts`), closes and
+ * toasts. On failure the
  * server's sentence shows beside the field and the choice is kept: a 409
  * names the two rules the tag would make overlap, a 400 the level a
  * coordinate cannot be stored at.
@@ -79,6 +82,8 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
       onSuccess: () => {
         void queryClient.invalidateQueries({ queryKey: [getControlPlaneGovernanceObjectTagsQueryKey(target.catalogId)[0]] });
         void queryClient.invalidateQueries({ queryKey: getControlPlaneTagsListTagsQueryKey() });
+        // Classifications, TagDetail, RuleDialog and the rule lists read the catalogue under this key.
+        void queryClient.invalidateQueries({ queryKey: tagsQueryKey });
         toast.success("Tag added.");
         onDone();
       },

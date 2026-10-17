@@ -4,7 +4,9 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Me } from "@/api/hooks";
+import { getControlPlaneTagsListTagsQueryKey } from "@/api/generated/control-plane-tags/control-plane-tags";
 import type { BrowseResponse, ExplainResponse, GrantView, ObjectTags, RuleView, Scope } from "@/api/generated/model";
+import { tagsQueryKey } from "@/api/tags";
 import { AuthContext } from "@/auth/useAuth";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import DataRoutes from "@/routes/governance/data/DataRoutes";
@@ -152,8 +154,7 @@ function Where() {
   return <output data-testid="where">{`${l.pathname}${l.search}`}</output>;
 }
 
-function renderPage(url: string, me: Me | null = STEWARD) {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function renderPage(url: string, me: Me | null = STEWARD, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   return render(
     <AuthContext.Provider value={{ me, isLoading: false }}>
       <QueryClientProvider client={client}>
@@ -503,6 +504,46 @@ describe("Add tag", () => {
     ]);
     expect(toast.success).toHaveBeenCalledWith("Tag added.");
     await waitFor(() => expect(tagCalls.length).toBeGreaterThan(before));
+  });
+
+  // M4: Classifications, TagDetail, RuleDialog and the rule lists read the catalogue under `tagsQueryKey`.
+  it("refetches the tag catalogue under both keys it is cached by", async () => {
+    serveData(fixture());
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?column=email", TAGGER, client);
+    const panel = await screen.findByRole("dialog", { name: "email" });
+    await user.click(await within(panel).findByRole("button", { name: "Add tag" }));
+    const dialog = await screen.findByRole("dialog", { name: "Add tag" });
+    await user.click(within(dialog).getByRole("combobox", { name: "Tag" }));
+    await user.click(await screen.findByRole("option", { name: "SECRET" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add tag" }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Tag added."));
+    const keys = invalidate.mock.calls.map(([filters]) => filters?.queryKey);
+    expect(keys).toContainEqual(tagsQueryKey);
+    expect(keys).toContainEqual(getControlPlaneTagsListTagsQueryKey());
+  });
+
+  // M5: the URL may differ in case from the source; the tag is written with the listing's spelling.
+  it("adds a tag from the header with the table's source spelling, whatever case the URL uses", async () => {
+    const base = fixture();
+    const { tagWrites } = serveData(
+      fixture({
+        browse: { ...base.browse, "c-ice|sales|ORDERS": ok(ORDERS_COLUMNS) },
+        tags: { "c-ice|sales|ORDERS": ok(ORDERS_TAGS) },
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/ORDERS", TAGGER);
+    await user.click(await screen.findByRole("button", { name: "Add tag" }));
+    const dialog = await screen.findByRole("dialog", { name: "Add tag" });
+    await waitFor(() => expect(within(dialog).getByText("ice.sales.orders")).toBeInTheDocument());
+    await user.click(within(dialog).getByRole("combobox", { name: "Tag" }));
+    await user.click(await screen.findByRole("option", { name: "PII" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add tag" }));
+    await waitFor(() => expect(tagWrites).toHaveLength(1));
+    expect(tagWrites[0]).toEqual({ warehouseId: "wh-c-ice", body: { schema: "sales", table: "orders", column: "", tag_id: "t-pii" } });
   });
 
   it("adds a tag to the table from the header", async () => {
