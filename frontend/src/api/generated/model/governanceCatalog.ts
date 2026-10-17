@@ -6,12 +6,15 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { GovernanceCatalogSource } from './governanceCatalogSource';
+import type { GovernanceWorkspace } from './governanceWorkspace';
 
 /**
  * One registry catalog as the Governance Data tree sees it. Only names and
  * kinds: never the catalog's config, URIs, credentials, warehouse location
  * or properties. Nothing here is more than browse already reveals under the
- * same permission (its `engines`, and the catalog it is asked about).
+ * same permission (its `engines`, and the catalog it is asked about), except
+ * the workspaces it is assigned to, which `policy:read` already shows as
+ * workspace-assignment grants.
  */
 export interface GovernanceCatalog {
   id: string;
@@ -25,4 +28,20 @@ export interface GovernanceCatalog {
   connectorType: string;
   /** The names of the engines the catalog is attached to, by name. */
   engines: string[];
+  /**
+     * The warehouse an egret catalog is; `null` for any other catalog.
+     * @nullable
+     */
+  warehouseId?: string | null;
+  /**
+     * That warehouse's name; `null` exactly when `warehouse_id` is.
+     * @nullable
+     */
+  warehouseName?: string | null;
+  /**
+     * The workspaces the catalog is assigned to, by name: the rows `GET
+     * /control-plane/catalogs/{id}/workspaces` reads
+     * (`registry.catalog_workspaces`).
+     */
+  workspaces: GovernanceWorkspace[];
 }

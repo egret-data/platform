@@ -6203,6 +6203,106 @@
         }
       }
     },
+    "/api/control-plane/governance/tags/{catalog_id}": {
+      "get": {
+        "tags": [
+          "control-plane-governance"
+        ],
+        "operationId": "object_tags",
+        "parameters": [
+          {
+            "name": "catalog_id",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "schema",
+            "in": "query",
+            "description": "The table's schema (dotted for a nested egret namespace).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table",
+            "in": "query",
+            "description": "The table or view.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The table's and its columns' tags, or that the catalog cannot carry tags",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectTags"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A missing or empty `schema` or `table`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read and tag:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/grants/{grant_id}": {
       "delete": {
         "tags": [
@@ -41848,13 +41948,14 @@
       },
       "GovernanceCatalog": {
         "type": "object",
-        "description": "One registry catalog as the Governance Data tree sees it. Only names and\nkinds: never the catalog's config, URIs, credentials, warehouse location\nor properties. Nothing here is more than browse already reveals under the\nsame permission (its `engines`, and the catalog it is asked about).",
+        "description": "One registry catalog as the Governance Data tree sees it. Only names and\nkinds: never the catalog's config, URIs, credentials, warehouse location\nor properties. Nothing here is more than browse already reveals under the\nsame permission (its `engines`, and the catalog it is asked about), except\nthe workspaces it is assigned to, which `policy:read` already shows as\nworkspace-assignment grants.",
         "required": [
           "id",
           "name",
           "source",
           "connectorType",
-          "engines"
+          "engines",
+          "workspaces"
         ],
         "properties": {
           "id": {
@@ -41878,6 +41979,28 @@
               "type": "string"
             },
             "description": "The names of the engines the catalog is attached to, by name."
+          },
+          "warehouseId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The warehouse an egret catalog is; `null` for any other catalog."
+          },
+          "warehouseName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "That warehouse's name; `null` exactly when `warehouse_id` is."
+          },
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GovernanceWorkspace"
+            },
+            "description": "The workspaces the catalog is assigned to, by name: the rows `GET\n/control-plane/catalogs/{id}/workspaces` reads\n(`registry.catalog_workspaces`)."
           }
         }
       },
@@ -41888,6 +42011,27 @@
           "egret",
           "engine"
         ]
+      },
+      "GovernanceWorkspace": {
+        "type": "object",
+        "description": "A workspace a catalog is assigned to.",
+        "required": [
+          "id",
+          "name",
+          "slug"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
       },
       "Grant": {
         "type": "object",
@@ -43948,6 +44092,29 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "ObjectTags": {
+        "type": "object",
+        "description": "The tags on one table and on its columns.",
+        "required": [
+          "supported"
+        ],
+        "properties": {
+          "supported": {
+            "type": "boolean",
+            "description": "`false` for a catalog that is not egret's: its objects cannot be\ntagged (tags are keyed by an egret warehouse), and `assignments` is\n`null`."
+          },
+          "assignments": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ResourceTagDto"
+            },
+            "description": "Each tag directly on the table (`column` empty) or on one of its\ncolumns, sorted by column then tag key. `null` exactly when not\n`supported`."
           }
         }
       },

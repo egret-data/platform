@@ -24,9 +24,11 @@ import type {
   BrowseResponse,
   ControlPlaneGovernanceBrowseParams,
   ControlPlaneGovernanceObjectLineageParams,
+  ControlPlaneGovernanceObjectTagsParams,
   ErrorBody,
   GovernanceCatalog,
-  ObjectLineage
+  ObjectLineage,
+  ObjectTags
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -481,6 +483,154 @@ export function useControlPlaneGovernanceObjectLineage<TData = Awaited<ReturnTyp
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getControlPlaneGovernanceObjectLineageQueryOptions(catalogId,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneGovernanceObjectTagsResponse200 = {
+  data: ObjectTags
+  status: 200
+}
+
+export type controlPlaneGovernanceObjectTagsResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneGovernanceObjectTagsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneGovernanceObjectTagsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneGovernanceObjectTagsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneGovernanceObjectTagsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneGovernanceObjectTagsResponseSuccess = (controlPlaneGovernanceObjectTagsResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneGovernanceObjectTagsResponseError = (controlPlaneGovernanceObjectTagsResponse400 | controlPlaneGovernanceObjectTagsResponse401 | controlPlaneGovernanceObjectTagsResponse403 | controlPlaneGovernanceObjectTagsResponse404 | controlPlaneGovernanceObjectTagsResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneGovernanceObjectTagsResponse = (controlPlaneGovernanceObjectTagsResponseSuccess | controlPlaneGovernanceObjectTagsResponseError)
+
+export const getControlPlaneGovernanceObjectTagsUrl = (catalogId: string,
+    params: ControlPlaneGovernanceObjectTagsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/control-plane/governance/tags/${encodeURIComponent(catalogId)}?${stringifiedParams}` : `/api/control-plane/governance/tags/${encodeURIComponent(catalogId)}`
+}
+
+export const controlPlaneGovernanceObjectTags = async (catalogId: string,
+    params: ControlPlaneGovernanceObjectTagsParams, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneGovernanceObjectTagsResponse> => {
+
+  return customInstance<controlPlaneGovernanceObjectTagsResponse>(getControlPlaneGovernanceObjectTagsUrl(catalogId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneGovernanceObjectTagsQueryKey = (catalogId: string,
+    params?: ControlPlaneGovernanceObjectTagsParams,) => {
+    return [
+    `/api/control-plane/governance/tags/${encodeURIComponent(catalogId)}`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getControlPlaneGovernanceObjectTagsQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>, TError = ErrorBody>(catalogId: string,
+    params: ControlPlaneGovernanceObjectTagsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneGovernanceObjectTagsQueryKey(catalogId,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>> = ({ signal }) => controlPlaneGovernanceObjectTags(catalogId,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: catalogId !== null && catalogId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneGovernanceObjectTagsQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>>
+export type ControlPlaneGovernanceObjectTagsQueryError = ErrorBody
+
+
+export function useControlPlaneGovernanceObjectTags<TData = Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>, TError = ErrorBody>(
+ catalogId: string,
+    params: ControlPlaneGovernanceObjectTagsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceObjectTags<TData = Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>, TError = ErrorBody>(
+ catalogId: string,
+    params: ControlPlaneGovernanceObjectTagsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceObjectTags<TData = Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>, TError = ErrorBody>(
+ catalogId: string,
+    params: ControlPlaneGovernanceObjectTagsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlaneGovernanceObjectTags<TData = Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>, TError = ErrorBody>(
+ catalogId: string,
+    params: ControlPlaneGovernanceObjectTagsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceObjectTags>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneGovernanceObjectTagsQueryOptions(catalogId,params,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

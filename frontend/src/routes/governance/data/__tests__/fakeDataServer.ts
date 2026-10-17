@@ -9,7 +9,16 @@ import type { BrowseResponse, GovernanceCatalog } from "@/api/generated/model";
  */
 
 export function catalog(id: string, name: string, connectorType: string, egret = false): GovernanceCatalog {
-  return { id, name, source: egret ? "egret" : "engine", connectorType, engines: [] };
+  return {
+    id,
+    name,
+    source: egret ? "egret" : "engine",
+    connectorType,
+    engines: [],
+    warehouseId: egret ? `wh-${id}` : null,
+    warehouseName: egret ? `${name}_wh` : null,
+    workspaces: [],
+  };
 }
 
 export const browseItems = (items: BrowseResponse["items"], source: BrowseResponse["source"] = { kind: "egret" }): BrowseResponse => ({

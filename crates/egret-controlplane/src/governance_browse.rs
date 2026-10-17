@@ -58,7 +58,9 @@ pub enum GovernanceCatalogSource {
 /// One registry catalog as the Governance Data tree sees it. Only names and
 /// kinds: never the catalog's config, URIs, credentials, warehouse location
 /// or properties. Nothing here is more than browse already reveals under the
-/// same permission (its `engines`, and the catalog it is asked about).
+/// same permission (its `engines`, and the catalog it is asked about), except
+/// the workspaces it is assigned to, which `policy:read` already shows as
+/// workspace-assignment grants.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GovernanceCatalog {
@@ -71,6 +73,22 @@ pub struct GovernanceCatalog {
     pub connector_type: String,
     /// The names of the engines the catalog is attached to, by name.
     pub engines: Vec<String>,
+    /// The warehouse an egret catalog is; `null` for any other catalog.
+    pub warehouse_id: Option<Uuid>,
+    /// That warehouse's name; `null` exactly when `warehouse_id` is.
+    pub warehouse_name: Option<String>,
+    /// The workspaces the catalog is assigned to, by name: the rows `GET
+    /// /control-plane/catalogs/{id}/workspaces` reads
+    /// (`registry.catalog_workspaces`).
+    pub workspaces: Vec<GovernanceWorkspace>,
+}
+
+/// A workspace a catalog is assigned to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GovernanceWorkspace {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -79,7 +97,9 @@ struct CatalogListRow {
     name: String,
     kind: String,
     warehouse_id: Option<Uuid>,
+    warehouse_name: Option<String>,
     engines: Vec<String>,
+    workspaces: sqlx::types::Json<Vec<GovernanceWorkspace>>,
 }
 
 /// `GET /governance/catalogs`: every registry catalog, by name, for the
@@ -103,13 +123,20 @@ async fn list_catalogs(
 ) -> Result<Json<Vec<GovernanceCatalog>>, CpError> {
     require_governance_read(&st, &p).await?;
     let rows = sqlx::query_as::<_, CatalogListRow>(
-        "SELECT c.id, c.name, c.kind, c.warehouse_id, \
-                COALESCE(array_agg(e.name ORDER BY e.name) FILTER (WHERE e.id IS NOT NULL), \
-                         '{}') AS engines \
+        "SELECT c.id, c.name, c.kind, c.warehouse_id, w.name AS warehouse_name, \
+                COALESCE((SELECT array_agg(e.name ORDER BY e.name) \
+                            FROM registry.engine_catalog_attachments a \
+                            JOIN engine_mgmt.engines e ON e.id = a.engine_id \
+                           WHERE a.catalog_id = c.id), '{}') AS engines, \
+                COALESCE((SELECT jsonb_agg(jsonb_build_object( \
+                                     'id', ws.id, 'name', ws.name, 'slug', ws.slug) \
+                                   ORDER BY ws.name) \
+                            FROM registry.catalog_workspaces cw \
+                            JOIN workspaces ws ON ws.id = cw.workspace_id \
+                           WHERE cw.catalog_id = c.id), '[]'::jsonb) AS workspaces \
            FROM registry.catalogs c \
-           LEFT JOIN registry.engine_catalog_attachments a ON a.catalog_id = c.id \
-           LEFT JOIN engine_mgmt.engines e ON e.id = a.engine_id \
-          GROUP BY c.id ORDER BY c.name",
+           LEFT JOIN catalog.warehouses w ON w.id = c.warehouse_id \
+          ORDER BY c.name",
     )
     .fetch_all(&st.db.pool)
     .await
@@ -129,6 +156,9 @@ async fn list_catalogs(
                 },
                 connector_type: r.kind,
                 engines: r.engines,
+                warehouse_id: r.warehouse_id,
+                warehouse_name: r.warehouse_name,
+                workspaces: r.workspaces.0,
             })
             .collect(),
     ))
@@ -724,6 +754,7 @@ async fn read_warehouse(
     components(schemas(
         GovernanceCatalog,
         GovernanceCatalogSource,
+        GovernanceWorkspace,
         BrowseResponse,
         BrowseSource,
         BrowseEngine,

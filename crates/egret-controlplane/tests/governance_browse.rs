@@ -989,11 +989,14 @@ async fn catalogs_lists_egret_and_external_catalogs_with_their_source_and_engine
     let (x, x_name) = engine(&f, "gc-1x", Eng::ExternalTrino).await;
     attach(&f, t, ext).await;
     attach(&f, x, ext).await;
-    let egret_name: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
-        .bind(egret)
-        .fetch_one(&f.db.pool)
-        .await
-        .unwrap();
+    let (egret_name, wh_id, wh_name): (String, Uuid, String) = sqlx::query_as(
+        "SELECT c.name, w.id, w.name FROM registry.catalogs c \
+           JOIN catalog.warehouses w ON w.id = c.warehouse_id WHERE c.id = $1",
+    )
+    .bind(egret)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
 
     let (status, j) = get(
         app(&f, FakeLister::new(Answer::Levels)),
@@ -1007,6 +1010,7 @@ async fn catalogs_lists_egret_and_external_catalogs_with_their_source_and_engine
         serde_json::json!({
             "id": egret, "name": egret_name, "source": "egret",
             "connectorType": "iceberg", "engines": [],
+            "warehouseId": wh_id, "warehouseName": wh_name, "workspaces": [],
         })
     );
     // Engines by name: `gc-1x…` before `gc-2t…`, whatever order they were attached in.
@@ -1015,6 +1019,7 @@ async fn catalogs_lists_egret_and_external_catalogs_with_their_source_and_engine
         serde_json::json!({
             "id": ext, "name": ext_name, "source": "engine",
             "connectorType": "tpch", "engines": [x_name, t_name],
+            "warehouseId": null, "warehouseName": null, "workspaces": [],
         })
     );
 }
@@ -1036,7 +1041,16 @@ async fn catalogs_carry_only_their_names_and_kinds_never_config_or_secrets() {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["connectorType", "engines", "id", "name", "source"],
+            [
+                "connectorType",
+                "engines",
+                "id",
+                "name",
+                "source",
+                "warehouseId",
+                "warehouseName",
+                "workspaces"
+            ],
             "catalog {id}: {c}"
         );
     }
@@ -1063,4 +1077,253 @@ async fn catalogs_need_policy_read_or_tag_read() {
         let (status, j) = get(router, "/governance/catalogs", &session(&f).await).await;
         assert_eq!(status, want, "allowed={allowed:?} body={j}");
     }
+}
+
+/// A workspace named `<name>-<random>`; returns `(id, name, slug)`.
+async fn workspace(f: &Fixture, name: &str) -> (Uuid, String, String) {
+    let s = suffix();
+    let (name, slug) = (format!("{name}-{s}"), format!("gc-ws-{s}"));
+    let id: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$2) RETURNING id")
+            .bind(&slug)
+            .bind(&name)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    (id, name, slug)
+}
+
+/// The catalog's workspaces are the rows `GET /control-plane/catalogs/{id}/workspaces`
+/// reads (`registry.catalog_workspaces`), by name, and only this catalog's.
+#[tokio::test]
+async fn catalogs_carry_the_workspaces_they_are_assigned_to_by_name() {
+    let Some(f) = setup().await else { return };
+    let (ext, _) = external_catalog(&f).await;
+    let (other, _) = external_catalog(&f).await;
+    let (b, b_name, b_slug) = workspace(&f, "zz-b").await;
+    let (a, a_name, a_slug) = workspace(&f, "zz-a").await;
+    let (c, _, _) = workspace(&f, "zz-c").await;
+    for (cat, ws) in [(ext, b), (ext, a), (other, c)] {
+        sqlx::query(
+            "INSERT INTO registry.catalog_workspaces (catalog_id, workspace_id) VALUES ($1,$2)",
+        )
+        .bind(cat)
+        .bind(ws)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    }
+    let (status, j) = get(
+        app(&f, FakeLister::new(Answer::Levels)),
+        "/governance/catalogs",
+        &session(&f).await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    assert_eq!(
+        listed(&j, ext)["workspaces"],
+        serde_json::json!([
+            {"id": a, "name": a_name, "slug": a_slug},
+            {"id": b, "name": b_name, "slug": b_slug},
+        ])
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `GET /governance/tags/{catalog_id}?schema=&table=`: a table's and its
+// columns' tags, from the store `…/resource-tags` reads, under browse's
+// permission.
+
+/// A tag keyed `gt_<random>`; returns `(id, key)`.
+async fn tag(f: &Fixture) -> (Uuid, String) {
+    let key = format!("gt_{}", suffix());
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO tags (key, name, color) VALUES ($1,$1,'#123456') RETURNING id",
+    )
+    .bind(&key)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    (id, key)
+}
+
+async fn warehouse_of(f: &Fixture, catalog: Uuid) -> Uuid {
+    sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+        .bind(catalog)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap()
+}
+
+async fn tag_resource(f: &Fixture, tag: Uuid, wh: Uuid, schema: &str, table: &str, column: &str) {
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) VALUES ($1,$2,$3,$4,$5)",
+    )
+    .bind(tag)
+    .bind(wh)
+    .bind(schema)
+    .bind(table)
+    .bind(column)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn tags_lists_a_tables_and_its_columns_direct_tags_only() {
+    let Some(f) = setup().await else { return };
+    let (cat, _) = egret_catalog(&f).await;
+    let wh = warehouse_of(&f, cat).await;
+    let (pii, pii_key) = tag(&f).await;
+    let (fin, fin_key) = tag(&f).await;
+    tag_resource(&f, pii, wh, "sales", "orders", "").await;
+    tag_resource(&f, fin, wh, "sales", "orders", "amount").await;
+    // Another table, and the same table name in another schema: not listed.
+    tag_resource(&f, pii, wh, "sales", "customers", "").await;
+    tag_resource(&f, pii, wh, "hr", "orders", "").await;
+
+    let (status, j) = get(
+        app(&f, FakeLister::new(Answer::Levels)),
+        &format!("/governance/tags/{cat}?schema=sales&table=orders"),
+        &session(&f).await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    assert_eq!(j["supported"], true, "body={j}");
+    let got: Vec<(String, String, String, String)> = j["assignments"]
+        .as_array()
+        .unwrap_or_else(|| panic!("assignments: {j}"))
+        .iter()
+        .map(|a| {
+            (
+                s(a["schema"].as_str().unwrap()),
+                s(a["table"].as_str().unwrap()),
+                s(a["column"].as_str().unwrap()),
+                s(a["tag"]["key"].as_str().unwrap()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (s("sales"), s("orders"), s(""), pii_key),
+            (s("sales"), s("orders"), s("amount"), fin_key),
+        ]
+    );
+}
+
+/// The shape is the one `…/resource-tags` returns (`ResourceTagDto`), pinned.
+#[tokio::test]
+async fn tags_carry_the_resource_tag_shape() {
+    let Some(f) = setup().await else { return };
+    let (cat, _) = egret_catalog(&f).await;
+    let wh = warehouse_of(&f, cat).await;
+    let (t, _) = tag(&f).await;
+    tag_resource(&f, t, wh, "s", "t", "c").await;
+    let (_, j) = get(
+        app(&f, FakeLister::new(Answer::Levels)),
+        &format!("/governance/tags/{cat}?schema=s&table=t"),
+        &session(&f).await,
+    )
+    .await;
+    let mut top: Vec<&str> = j.as_object().unwrap().keys().map(String::as_str).collect();
+    top.sort_unstable();
+    assert_eq!(top, ["assignments", "supported"], "body={j}");
+    let a = &j["assignments"][0];
+    let mut keys: Vec<&str> = a.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["column", "schema", "table", "tag"], "body={j}");
+    let mut tag_keys: Vec<&str> = a["tag"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    tag_keys.sort_unstable();
+    assert_eq!(
+        tag_keys,
+        [
+            "assignment_count",
+            "color",
+            "created_at",
+            "description",
+            "id",
+            "key",
+            "name"
+        ],
+        "body={j}"
+    );
+}
+
+/// A catalog that is not egret's cannot carry tags: it says so, and never
+/// answers an empty list a page would read as "no tags".
+#[tokio::test]
+async fn tags_on_a_catalog_that_is_not_egrets_are_unsupported_not_empty() {
+    let Some(f) = setup().await else { return };
+    let (ext, _) = external_catalog(&f).await;
+    let (status, j) = get(
+        app(&f, FakeLister::new(Answer::Levels)),
+        &format!("/governance/tags/{ext}?schema=sales&table=orders"),
+        &session(&f).await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    assert_eq!(
+        j,
+        serde_json::json!({"supported": false, "assignments": null})
+    );
+}
+
+#[tokio::test]
+async fn tags_need_policy_read_or_tag_read() {
+    let Some(f) = setup().await else { return };
+    let (cat, _) = egret_catalog(&f).await;
+    let uri = format!("/governance/tags/{cat}?schema=s&table=t");
+    for (allowed, want) in [
+        (&[][..], StatusCode::FORBIDDEN),
+        (&["catalog_registry:read"][..], StatusCode::FORBIDDEN),
+        (&["policy:read"][..], StatusCode::OK),
+        (&["tag:read"][..], StatusCode::OK),
+    ] {
+        let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(AllowOnly(allowed));
+        let router = app_with(
+            &f,
+            pdp,
+            FakeLister::new(Answer::Levels),
+            None,
+            std::time::Duration::from_secs(15),
+        );
+        let (status, j) = get(router, &uri, &session(&f).await).await;
+        assert_eq!(status, want, "allowed={allowed:?} body={j}");
+    }
+}
+
+#[tokio::test]
+async fn tags_refuse_an_empty_or_missing_level_and_an_unknown_catalog() {
+    let Some(f) = setup().await else { return };
+    let token = session(&f).await;
+    let (cat, _) = egret_catalog(&f).await;
+    for query in [
+        "",
+        "?schema=s",
+        "?table=t",
+        "?schema=&table=t",
+        "?schema=s&table=",
+    ] {
+        let (status, j) = get(
+            app(&f, FakeLister::new(Answer::Levels)),
+            &format!("/governance/tags/{cat}{query}"),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query:?}: body={j}");
+    }
+    let (status, _) = get(
+        app(&f, FakeLister::new(Answer::Levels)),
+        &format!("/governance/tags/{}?schema=s&table=t", Uuid::new_v4()),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
