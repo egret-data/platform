@@ -13236,13 +13236,13 @@ was excluded as unstable until `normalise.py` numbered runs by their CREATED ins
   order in all five. Numbering runs by `CREATED` (ties by list position) makes all five
   rounds one trace. For every other corpus flow the two orders agree, and the golden
   entries not listed above are byte-identical after the change.
-- `retry-failed-task-duration` (4 attempts, Kestra 3): **pre-existing, and still open.**
+- `retry-failed-task-duration` (4 attempts, Kestra 3): **pre-existing, now baselined.**
   At 58d21e5b, with this same golden, egret also makes 4 attempts. Egret's retry clock
   has no scheduler latency: a retry is due `now + interval`, and the driver's attempts
   take no logical time, so the fourth attempt fits in `maxDuration`. Kestra's three
   attempts take about 0.6 s of scheduling each. This is the class `retry-failed-flow-duration`
-  is already baselined for. The entry is NOT baselined here, because the rule is that
-  baseline lines are only removed; see the report.
+  is already baselined for. The entry is baselined by the user's decision (option a) and
+  listed in `UNATTRIBUTED` in `tests/executor.rs` with this cause.
 - The four WorkingDirectory valids, each against its golden entry:
   - `task-runif-workingdirectory`: still mismatches. The block FAILs because its child
     `log_orders` FAILs at creation (no RUNNING, no attempt) where Kestra runs it. Not
