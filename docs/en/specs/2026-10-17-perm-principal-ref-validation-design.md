@@ -29,6 +29,7 @@ containing `@`.
 | R4 | `workspace_members`: the ref must name an existing workspace (it is expanded at compile time) | default decision (2026-10-17) |
 | R5 | Existing rows are not rewritten. A read-only report lists stored grant/rule principals whose ref resolves to nothing, flagged `fails_open` when it is a deny include or any exclude. Expose it the way `GET /perm/overlaps` exposes pre-existing overlaps (same permission), and log one `warn!` per such row at startup | default decision (2026-10-17) |
 | R6 | A principal that is deleted AFTER a valid write is not a defect: no one carries the name any more, so a deny or exclude on it still denies everyone who carries it. The report does flag it (R5), so the author can clean up; writes that do not touch it are not refused | default decision (2026-10-17) |
+| R8 | A `group` principal is expanded at compile time into its members' stored usernames (`user_groups` → `users.username`, minted as `members.rs` mints), the way SP4c expanded roles. Every writer of `user_groups` triggers the recompile of the affected profiles in the same transaction, as `role_membership.rs` does for roles. `public` stays a Ranger group (engines resolve it). Reason: D7 measured that no egret engine ever sees a group, so a group in a deny include or an exclude fails open, and an allow on a group grants nobody while `explain` says it does | user, 2026-10-17 |
 | R7 | The frontend `PrincipalPicker` free-text role input shows the server's 400 inline; no new UI otherwise | default decision (2026-10-17) |
 
 ## Plan
@@ -47,10 +48,33 @@ containing `@`.
 - Frontend: `PrincipalPicker` / `GrantDialog` / `RuleDialog` show the 400 text (check they already do; add a
   vitest if a path drops it).
 
+### Task 1b: expand groups to their members (R8)
+
+- Read `members.rs` (role expansion, `role_usernames`), `role_membership.rs` (write + recompile in one
+  transaction, `affected_services_for_role_membership`), `grants.rs:158` (where a group goes into the Ranger `groups`
+  bucket today), `rules.rs:731` (a rule exemption's group), `clearance.rs` (does a clearance name groups?), and every
+  writer of `user_groups` (`crates/egret-auth/src/groups.rs`, OIDC/SSO group sync in `egret-auth`, admin routes,
+  SCIM if any). List every writer in the report with file:line.
+- Expand a non-`public` group into its members' usernames on both include and exclude, for grants and rule
+  exemptions, through one enumeration function used by every consumer. A group with no members expands to nobody:
+  on an include that compiles to no item (fails closed); on an exclude it subtracts nobody, which is correct because
+  nobody is in it.
+- Make every `user_groups` writer recompile the affected profiles in the same transaction (one affected-service
+  function, the union of all consumers, as `role_membership.rs` argues). A writer that cannot recompile in-transaction
+  (for example an OIDC login path) must enqueue a recompile the way the codebase already does for a deferred one;
+  find that mechanism and cite it, or report NEEDS_CONTEXT.
+- `explain` (`egret_perm::eval::matches_principal`) already matches groups by membership; after expansion the engine
+  agrees with it. Add a differential/unit test that a group grant and a deny on a group compile to the members'
+  usernames.
+- DB tests: allow on group → members' usernames in the compiled item; deny on group and exclude on group → members
+  named in the deny / the exception; adding and removing a member recompiles (the compiled policy changes in the
+  same transaction); `public` unchanged; empty group.
+- PR note: an allow grant on a group that granted nobody before now grants its members.
+
 ### Task 2: the report of stored refs that match nobody
 
 - `GET /api/control-plane/perm/unresolved-principals` (same permission as `/perm/overlaps`): every stored grant
-  principal and rule exemption whose ref resolves to nothing, with grant/rule id, kind, ref, position
+  principal and rule exemption whose ref resolves to nothing (after Task 1b, groups resolve through membership; a group with no members is listed as `empty`, not as unresolved), with grant/rule id, kind, ref, position
   (include/exclude), effect, and `failsOpen`.
 - Startup `warn!` per row (where the overlap startup pass or the perm startup lives).
 - DB tests: a seeded UUID-ref deny grant and an exclude are reported `failsOpen: true`; an allow include `false`;
