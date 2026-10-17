@@ -24,8 +24,8 @@
 //! listing that fails or misses the deadline, and an engine that was not
 //! asked, sets `readersIncomplete` with a sentence naming the engine; the
 //! engine's own text goes to the log only. So does, fail closed as the
-//! DEFINER audit is, every view of an egret catalog whose lineage `failed` or
-//! is `missing` (listed through [`CpState::view_catalog`] under the same
+//! DEFINER audit is, every view in ANY of egret's catalogs whose lineage
+//! `failed` or is `missing` (listed through [`CpState::view_catalog`] under the same
 //! deadline): it may read this table. In a catalog that is not egret's,
 //! `readersIncomplete` is always set: views defined there are not tracked. For
 //! a VIEW the readers are always incomplete: recorded lineage names base
@@ -122,8 +122,8 @@ pub struct ObjectLineage {
     /// The views and materialized views that read this table. See
     /// `readers_incomplete`.
     pub readers: Vec<LineageReader>,
-    /// Set when `readers` may be missing some: a view of this egret catalog
-    /// has unknown lineage (failed or not yet computed), egret's views or an
+    /// Set when `readers` may be missing some: a view in any of egret's
+    /// catalogs has unknown lineage (failed or not yet computed), egret's views or an
     /// engine's materialized views could not be listed or were not asked, the
     /// catalog is not egret's (its own views are not tracked), or the object
     /// is a view.
@@ -212,10 +212,9 @@ async fn object_lineage(
         }));
     }
 
-    let mut incomplete = Vec::new();
-    if lakekeeper.is_some() {
-        incomplete.extend(unknown_lineage(&st, &catalog.name).await?);
-    } else {
+    // A view in any of egret's catalogs may read a table of any catalog.
+    let mut incomplete = unknown_lineage(&st).await?;
+    if lakekeeper.is_none() {
         // Only egret's view commits record lineage, so a view defined in
         // this catalog is never seen, and this object may itself be one.
         incomplete.push(VIEWS_NOT_TRACKED.to_string());
@@ -424,27 +423,32 @@ async fn security_mode(
     }
 }
 
-/// Why the views of the egret catalog `catalog` may hold readers that
+/// Why egret's views may hold readers that
 /// [`view_readers`] cannot see: views whose lineage `failed` (from
 /// `view_lineage_state`), and views egret's catalog lists that have no lineage
 /// recorded at all (`missing`). Fail closed, as the classification page's
 /// DEFINER audit lists such views: either may read this table. A listing that
 /// fails or misses [`CpState::browse_timeout`] is said too.
 ///
-/// Scoped to this catalog's views: a view in another egret catalog that reads
-/// this table with unknown lineage is not counted.
-async fn unknown_lineage(st: &CpState, catalog: &str) -> Result<Vec<String>, CpError> {
-    let mut unknown: BTreeSet<(String, String)> = {
+/// Across ALL of egret's catalogs: a view in one catalog may read a table of
+/// another (`view_lineage` keeps the two catalogs apart, migration 0187), as
+/// [`view_readers`] already reports for computed lineage.
+async fn unknown_lineage(st: &CpState) -> Result<Vec<String>, CpError> {
+    let mut unknown: BTreeSet<ViewRef> = {
         let mut conn = acquire(st).await?;
-        sqlx::query_as::<_, (String, String)>(
-            "SELECT view_schema, view_name FROM view_lineage_state \
-              WHERE view_catalog = $1 AND state <> 'computed'",
+        sqlx::query_as::<_, (String, String, String)>(
+            "SELECT view_catalog, view_schema, view_name FROM view_lineage_state \
+              WHERE state <> 'computed'",
         )
-        .bind(catalog)
         .fetch_all(&mut *conn)
         .await
         .map_err(db("failed lineages"))?
         .into_iter()
+        .map(|(catalog, schema, name)| ViewRef {
+            catalog,
+            schema,
+            name,
+        })
         .collect()
     };
     let mut out = Vec::new();
@@ -467,7 +471,6 @@ async fn unknown_lineage(st: &CpState, catalog: &str) -> Result<Vec<String>, CpE
             let refs: Vec<ViewRef> = listing
                 .views
                 .into_iter()
-                .filter(|v| v.catalog == catalog)
                 .map(|v| ViewRef {
                     catalog: v.catalog,
                     schema: v.schema,
@@ -480,7 +483,7 @@ async fn unknown_lineage(st: &CpState, catalog: &str) -> Result<Vec<String>, CpE
                 .map_err(db("recorded lineages"))?;
             for (v, r) in refs.into_iter().zip(recorded) {
                 if !matches!(&r, RecordedLineage::Computed(t) if !t.is_empty()) {
-                    unknown.insert((v.schema, v.name));
+                    unknown.insert(v);
                 }
             }
         }
@@ -490,7 +493,7 @@ async fn unknown_lineage(st: &CpState, catalog: &str) -> Result<Vec<String>, CpE
         out.insert(
             0,
             format!(
-                "{n} {} in this catalog {} lineage egret does not know (failed or not yet \
+                "{n} {} in egret's catalogs {} lineage egret does not know (failed or not yet \
                  computed); {} may read this table",
                 if n == 1 { "view" } else { "views" },
                 if n == 1 { "has" } else { "have" },

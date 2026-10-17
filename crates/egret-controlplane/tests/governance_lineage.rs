@@ -602,8 +602,8 @@ async fn a_table_read_by_two_views_lists_both_and_no_other() {
         ],
         "body={j}"
     );
-    assert_eq!(
-        j["readersIncomplete"]["detail"], NOT_TRACKED,
+    assert!(
+        incomplete(&j).contains(NOT_TRACKED),
         "views defined in a catalog that is not egret's are never seen: {j}"
     );
     assert!(j["view"].is_null(), "a table has no view half: {j}");
@@ -613,6 +613,7 @@ async fn a_table_read_by_two_views_lists_both_and_no_other() {
 #[tokio::test]
 async fn an_egret_table_lists_its_view_readers_and_the_starrocks_mvs_that_read_it() {
     let f = setup().await;
+    let _serial = SERIAL.lock().await;
     let (cat, name, _) = egret_catalog(&f).await;
     computed(&f, &name, "v_orders", &[(&name, "sales", "orders")]).await;
     let (sr, sr_name) = starrocks(&f, "running", false).await;
@@ -786,16 +787,9 @@ async fn a_view_with_computed_lineage_shows_its_bases_mode_owner_and_state() {
 #[tokio::test]
 async fn a_view_whose_lineage_failed_says_so_and_why() {
     let f = setup().await;
+    let _serial = SERIAL.lock().await;
     let (cat, name, _) = egret_catalog(&f).await;
-    let mut conn = f.db.pool.acquire().await.unwrap();
-    egret_perm_compile::lineage::record_lineage_failure(
-        &mut conn,
-        &view_ref(&name, "sales", "v_failed"),
-        "EXPLAIN failed: table not found",
-    )
-    .await
-    .unwrap();
-    drop(conn);
+    fail(&f, &name, "v_failed", "EXPLAIN failed: table not found").await;
     let mut w = Wiring::new();
     w.views = Arc::new(FakeViews::default().view("v_failed", Ok(Some("alice"))));
 
@@ -810,6 +804,7 @@ async fn a_view_whose_lineage_failed_says_so_and_why() {
         v["ownerCleared"].is_null(),
         "with no lineage, clearance cannot be said: {j}"
     );
+    forget(&f, &name, "v_failed").await;
 }
 
 #[tokio::test]
@@ -954,16 +949,9 @@ fn incomplete(j: &serde_json::Value) -> String {
 #[tokio::test]
 async fn a_view_whose_lineage_failed_makes_the_readers_incomplete() {
     let f = setup().await;
+    let _serial = SERIAL.lock().await;
     let (cat, name) = egret_table_with_reader(&f).await;
-    let mut conn = f.db.pool.acquire().await.unwrap();
-    egret_perm_compile::lineage::record_lineage_failure(
-        &mut conn,
-        &view_ref(&name, "sales", "v_failed"),
-        "EXPLAIN failed",
-    )
-    .await
-    .unwrap();
-    drop(conn);
+    fail(&f, &name, "v_failed", "EXPLAIN failed").await;
     let mut w = Wiring::new();
     w.views = Arc::new(FakeViews::default().listing(Listing::Views(vec![
         listed(&name, "v_orders"),
@@ -973,54 +961,51 @@ async fn a_view_whose_lineage_failed_makes_the_readers_incomplete() {
     let j = lineage(&f, &w, cat, "sales", "orders").await;
 
     let detail = incomplete(&j);
-    assert!(detail.starts_with("1 view in this catalog has"), "{detail}");
+    assert!(
+        detail.starts_with("1 view in egret's catalogs has"),
+        "{detail}"
+    );
     assert_eq!(
         readers(&j),
         vec![(s(&name), s("sales"), s("v_orders"), s("view"), None)]
     );
+    forget(&f, &name, "v_failed").await;
 }
 
 #[tokio::test]
 async fn a_failed_view_counts_even_when_the_listing_does_not_show_it() {
     let f = setup().await;
+    let _serial = SERIAL.lock().await;
     let (cat, name) = egret_table_with_reader(&f).await;
-    let mut conn = f.db.pool.acquire().await.unwrap();
-    egret_perm_compile::lineage::record_lineage_failure(
-        &mut conn,
-        &view_ref(&name, "sales", "v_failed"),
-        "EXPLAIN failed",
-    )
-    .await
-    .unwrap();
-    drop(conn);
+    fail(&f, &name, "v_failed", "EXPLAIN failed").await;
     let w = Wiring::new();
 
     let j = lineage(&f, &w, cat, "sales", "orders").await;
 
     assert!(
-        incomplete(&j).starts_with("1 view in this catalog has"),
+        incomplete(&j).starts_with("1 view in egret's catalogs has"),
         "{j}"
     );
+    forget(&f, &name, "v_failed").await;
 }
 
 #[tokio::test]
 async fn a_listed_view_with_no_lineage_makes_the_readers_incomplete() {
     let f = setup().await;
+    let _serial = SERIAL.lock().await;
     let (cat, name) = egret_table_with_reader(&f).await;
     let mut w = Wiring::new();
     w.views = Arc::new(FakeViews::default().listing(Listing::Views(vec![
         listed(&name, "v_orders"),
         listed(&name, "v_new"),
         listed(&name, "v_new2"),
-        // Another catalog's view: not this catalog's to count.
-        listed("some_other_catalog", "v_elsewhere"),
     ])));
 
     let j = lineage(&f, &w, cat, "sales", "orders").await;
 
     let detail = incomplete(&j);
     assert!(
-        detail.starts_with("2 views in this catalog have"),
+        detail.starts_with("2 views in egret's catalogs have"),
         "{detail}"
     );
 }
@@ -1040,7 +1025,7 @@ async fn egret_views_that_cannot_all_be_listed_make_the_readers_incomplete() {
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
         let detail = incomplete(&j);
         assert!(
-            detail.starts_with("egret's views could not all be listed"),
+            detail.contains("egret's views could not all be listed"),
             "{detail}"
         );
         assert!(
@@ -1053,6 +1038,7 @@ async fn egret_views_that_cannot_all_be_listed_make_the_readers_incomplete() {
 #[tokio::test]
 async fn a_non_egret_catalog_never_answers_complete_and_never_invents_a_view() {
     let f = setup().await;
+    let _serial = SERIAL.lock().await;
     let (cat, name) = external_catalog(&f).await;
     let (sr, sr_name) = starrocks(&f, "running", false).await;
     attach(&f, sr, cat).await;
@@ -1068,18 +1054,11 @@ async fn a_non_egret_catalog_never_answers_complete_and_never_invents_a_view() {
     assert!(detail.contains(&sr_name), "and the MV failure: {detail}");
 
     // A view with recorded lineage is answered as a view.
-    let mut conn = f.db.pool.acquire().await.unwrap();
-    egret_perm_compile::lineage::record_lineage_failure(
-        &mut conn,
-        &view_ref(&name, "sales", "v_rec"),
-        "x",
-    )
-    .await
-    .unwrap();
-    drop(conn);
+    fail(&f, &name, "v_rec", "x").await;
     let j = lineage(&f, &w, cat, "sales", "v_rec").await;
     assert_eq!(j["view"]["lineageState"], "failed", "{j}");
     assert_eq!(j["view"]["securityMode"], "unknown");
+    forget(&f, &name, "v_rec").await;
 }
 
 #[tokio::test]
@@ -1109,4 +1088,103 @@ async fn a_warehouse_that_fails_is_a_503_and_one_that_hangs_a_504() {
         msg.contains("egret's warehouse") && msg.contains("0.3 s"),
         "names the warehouse and the deadline: {msg}"
     );
+}
+
+/// Serialises the tests that write a `failed` lineage (every table's answer
+/// counts them, in any catalog) with the tests that assert an exact count or
+/// a complete list. The test DB is this process's own, so only this file's
+/// rows matter; each writer removes its rows before releasing the lock.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Record `catalog.sales.view`'s lineage as failed with `detail`.
+async fn fail(f: &Fixture, catalog: &str, view: &str, detail: &str) {
+    let mut conn = f.db.pool.acquire().await.unwrap();
+    egret_perm_compile::lineage::record_lineage_failure(
+        &mut conn,
+        &view_ref(catalog, "sales", view),
+        detail,
+    )
+    .await
+    .unwrap();
+}
+
+/// Remove `catalog.sales.view`'s lineage rows and state.
+async fn forget(f: &Fixture, catalog: &str, view: &str) {
+    let mut conn = f.db.pool.acquire().await.unwrap();
+    egret_perm_compile::lineage::delete_lineage(&mut conn, &view_ref(catalog, "sales", view))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_view_in_another_egret_catalog_makes_the_readers_incomplete() {
+    let f = setup().await;
+    let _serial = SERIAL.lock().await;
+    let (cat, name) = egret_table_with_reader(&f).await;
+    let (_, other, _) = egret_catalog(&f).await;
+    fail(&f, &other, "v_cross", "EXPLAIN failed").await;
+    let w = Wiring::new();
+
+    let j = lineage(&f, &w, cat, "sales", "orders").await;
+
+    let detail = incomplete(&j);
+    assert!(
+        detail.starts_with("1 view in egret's catalogs has"),
+        "{detail}"
+    );
+    assert_eq!(
+        readers(&j),
+        vec![(s(&name), s("sales"), s("v_orders"), s("view"), None)]
+    );
+    forget(&f, &other, "v_cross").await;
+}
+
+#[tokio::test]
+async fn a_listed_view_with_no_lineage_in_another_egret_catalog_makes_the_readers_incomplete() {
+    let f = setup().await;
+    let _serial = SERIAL.lock().await;
+    let (cat, name) = egret_table_with_reader(&f).await;
+    let (_, other, _) = egret_catalog(&f).await;
+    let mut w = Wiring::new();
+    w.views = Arc::new(FakeViews::default().listing(Listing::Views(vec![
+        listed(&name, "v_orders"),
+        listed(&other, "v_unstated"),
+    ])));
+
+    let j = lineage(&f, &w, cat, "sales", "orders").await;
+
+    assert!(
+        incomplete(&j).starts_with("1 view in egret's catalogs has"),
+        "{j}"
+    );
+}
+
+#[tokio::test]
+async fn a_computed_state_with_no_bases_counts_as_unknown() {
+    // `write_lineage` refuses an empty set, so only a direct write makes one;
+    // the route treats it as unknown, as the classification page does.
+    let f = setup().await;
+    let _serial = SERIAL.lock().await;
+    let (cat, name) = egret_table_with_reader(&f).await;
+    sqlx::query(
+        "INSERT INTO view_lineage_state (view_catalog, view_schema, view_name, state) \
+         VALUES ($1, 'sales', 'v_empty', 'computed')",
+    )
+    .bind(&name)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    let mut w = Wiring::new();
+    w.views = Arc::new(FakeViews::default().listing(Listing::Views(vec![
+        listed(&name, "v_orders"),
+        listed(&name, "v_empty"),
+    ])));
+
+    let j = lineage(&f, &w, cat, "sales", "orders").await;
+
+    assert!(
+        incomplete(&j).starts_with("1 view in egret's catalogs has"),
+        "{j}"
+    );
+    forget(&f, &name, "v_empty").await;
 }

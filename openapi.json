@@ -43810,7 +43810,7 @@
               },
               {
                 "$ref": "#/components/schemas/ReadersIncomplete",
-                "description": "Set when `readers` may be missing some: a view of this egret catalog\nhas unknown lineage (failed or not yet computed), egret's views or an\nengine's materialized views could not be listed or were not asked, the\ncatalog is not egret's (its own views are not tracked), or the object\nis a view."
+                "description": "Set when `readers` may be missing some: a view in any of egret's\ncatalogs has unknown lineage (failed or not yet computed), egret's views or an\nengine's materialized views could not be listed or were not asked, the\ncatalog is not egret's (its own views are not tracked), or the object\nis a view."
               }
             ]
           },
