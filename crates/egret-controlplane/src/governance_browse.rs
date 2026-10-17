@@ -40,7 +40,98 @@ use crate::error::CpError;
 use crate::CpState;
 
 pub fn router() -> Router<CpState> {
-    Router::new().route("/governance/browse/{catalog_id}", get(browse))
+    Router::new()
+        .route("/governance/catalogs", get(list_catalogs))
+        .route("/governance/browse/{catalog_id}", get(browse))
+}
+
+/// How a catalog is read: from egret's own warehouse, or through an engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GovernanceCatalogSource {
+    /// An egret-managed Iceberg catalog (it has a warehouse).
+    Egret,
+    /// Any other catalog: listed through an engine attached to it.
+    Engine,
+}
+
+/// One registry catalog as the Governance Data tree sees it. Only names and
+/// kinds: never the catalog's config, URIs, credentials, warehouse location
+/// or properties. Nothing here is more than browse already reveals under the
+/// same permission (its `engines`, and the catalog it is asked about).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GovernanceCatalog {
+    pub id: Uuid,
+    /// The registry name, which is also the catalog's SQL name on every engine.
+    pub name: String,
+    pub source: GovernanceCatalogSource,
+    /// The catalog's kind as the registry stores it (`iceberg`, `hive`,
+    /// `jdbc`, ...).
+    pub connector_type: String,
+    /// The names of the engines the catalog is attached to, by name.
+    pub engines: Vec<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct CatalogListRow {
+    id: Uuid,
+    name: String,
+    kind: String,
+    warehouse_id: Option<Uuid>,
+    engines: Vec<String>,
+}
+
+/// `GET /governance/catalogs`: every registry catalog, by name, for the
+/// Governance Data tree. Gated like browse, on `policy:read` OR `tag:read`,
+/// so a steward who cannot read the catalog registry
+/// (`catalog_registry:read`) can still pick a catalog to browse.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/governance/catalogs",
+    tag = "control-plane-governance",
+    responses(
+        (status = 200, description = "Every registry catalog, by name", body = [GovernanceCatalog]),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read and tag:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_catalogs(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+) -> Result<Json<Vec<GovernanceCatalog>>, CpError> {
+    require_governance_read(&st, &p).await?;
+    let rows = sqlx::query_as::<_, CatalogListRow>(
+        "SELECT c.id, c.name, c.kind, c.warehouse_id, \
+                COALESCE(array_agg(e.name ORDER BY e.name) FILTER (WHERE e.id IS NOT NULL), \
+                         '{}') AS engines \
+           FROM registry.catalogs c \
+           LEFT JOIN registry.engine_catalog_attachments a ON a.catalog_id = c.id \
+           LEFT JOIN engine_mgmt.engines e ON e.id = a.engine_id \
+          GROUP BY c.id ORDER BY c.name",
+    )
+    .fetch_all(&st.db.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "governance: list catalogs");
+        CpError::Internal
+    })?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| GovernanceCatalog {
+                id: r.id,
+                name: r.name,
+                source: if r.warehouse_id.is_some() {
+                    GovernanceCatalogSource::Egret
+                } else {
+                    GovernanceCatalogSource::Engine
+                },
+                connector_type: r.kind,
+                engines: r.engines,
+            })
+            .collect(),
+    ))
 }
 
 /// The engines egret can list a catalog through.
@@ -629,8 +720,10 @@ async fn read_warehouse(
 
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(browse),
+    paths(list_catalogs, browse),
     components(schemas(
+        GovernanceCatalog,
+        GovernanceCatalogSource,
         BrowseResponse,
         BrowseSource,
         BrowseEngine,

@@ -6029,6 +6029,60 @@
         }
       }
     },
+    "/api/control-plane/governance/catalogs": {
+      "get": {
+        "tags": [
+          "control-plane-governance"
+        ],
+        "summary": "`GET /governance/catalogs`: every registry catalog, by name, for the\nGovernance Data tree. Gated like browse, on `policy:read` OR `tag:read`,\nso a steward who cannot read the catalog registry\n(`catalog_registry:read`) can still pick a catalog to browse.",
+        "operationId": "list_catalogs",
+        "responses": {
+          "200": {
+            "description": "Every registry catalog, by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GovernanceCatalog"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read and tag:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/governance/lineage/{catalog_id}": {
       "get": {
         "tags": [
@@ -41791,6 +41845,49 @@
             "description": "Policy names the download now serves that it did not. A compiled name\nembeds its grant or rule id (`perm-grant-<id>`), so when `committed` is\nfalse that id is the rolled-back write's and is never stored; the real\nmigration's compiled policies are named when written."
           }
         }
+      },
+      "GovernanceCatalog": {
+        "type": "object",
+        "description": "One registry catalog as the Governance Data tree sees it. Only names and\nkinds: never the catalog's config, URIs, credentials, warehouse location\nor properties. Nothing here is more than browse already reveals under the\nsame permission (its `engines`, and the catalog it is asked about).",
+        "required": [
+          "id",
+          "name",
+          "source",
+          "connectorType",
+          "engines"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "description": "The registry name, which is also the catalog's SQL name on every engine."
+          },
+          "source": {
+            "$ref": "#/components/schemas/GovernanceCatalogSource"
+          },
+          "connectorType": {
+            "type": "string",
+            "description": "The catalog's kind as the registry stores it (`iceberg`, `hive`,\n`jdbc`, ...)."
+          },
+          "engines": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The names of the engines the catalog is attached to, by name."
+          }
+        }
+      },
+      "GovernanceCatalogSource": {
+        "type": "string",
+        "description": "How a catalog is read: from egret's own warehouse, or through an engine.",
+        "enum": [
+          "egret",
+          "engine"
+        ]
       },
       "Grant": {
         "type": "object",

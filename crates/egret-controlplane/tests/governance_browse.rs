@@ -964,3 +964,103 @@ async fn an_empty_schema_or_table_is_refused() {
     }
     assert!(lister.calls().is_empty(), "{:?}", lister.calls());
 }
+
+// ---------------------------------------------------------------------------
+// `GET /governance/catalogs`: the registry's catalogs for the Data tree, under
+// the same permission as browse, so a steward without `catalog_registry:read`
+// can still pick a catalog.
+
+/// The listed catalog with `id`; panics naming the body when it is missing.
+fn listed(j: &serde_json::Value, id: Uuid) -> serde_json::Value {
+    j.as_array()
+        .unwrap_or_else(|| panic!("catalogs: {j}"))
+        .iter()
+        .find(|c| c["id"] == id.to_string())
+        .unwrap_or_else(|| panic!("catalog {id} not listed: {j}"))
+        .clone()
+}
+
+#[tokio::test]
+async fn catalogs_lists_egret_and_external_catalogs_with_their_source_and_engines() {
+    let Some(f) = setup().await else { return };
+    let (egret, _) = egret_catalog(&f).await;
+    let (ext, ext_name) = external_catalog(&f).await;
+    let (t, t_name) = engine(&f, "gc-2t", Eng::TrinoJwt("running")).await;
+    let (x, x_name) = engine(&f, "gc-1x", Eng::ExternalTrino).await;
+    attach(&f, t, ext).await;
+    attach(&f, x, ext).await;
+    let egret_name: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(egret)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+
+    let (status, j) = get(
+        app(&f, FakeLister::new(Answer::Levels)),
+        "/governance/catalogs",
+        &session(&f).await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    assert_eq!(
+        listed(&j, egret),
+        serde_json::json!({
+            "id": egret, "name": egret_name, "source": "egret",
+            "connectorType": "iceberg", "engines": [],
+        })
+    );
+    // Engines by name: `gc-1x…` before `gc-2t…`, whatever order they were attached in.
+    assert_eq!(
+        listed(&j, ext),
+        serde_json::json!({
+            "id": ext, "name": ext_name, "source": "engine",
+            "connectorType": "tpch", "engines": [x_name, t_name],
+        })
+    );
+}
+
+#[tokio::test]
+async fn catalogs_carry_only_their_names_and_kinds_never_config_or_secrets() {
+    let Some(f) = setup().await else { return };
+    let (egret, _) = egret_catalog(&f).await;
+    let (ext, _) = external_catalog(&f).await;
+    let (_, j) = get(
+        app(&f, FakeLister::new(Answer::Levels)),
+        "/governance/catalogs",
+        &session(&f).await,
+    )
+    .await;
+    for id in [egret, ext] {
+        let c = listed(&j, id);
+        let mut keys: Vec<&str> = c.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["connectorType", "engines", "id", "name", "source"],
+            "catalog {id}: {c}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn catalogs_need_policy_read_or_tag_read() {
+    let Some(f) = setup().await else { return };
+    external_catalog(&f).await;
+    for (allowed, want) in [
+        (&[][..], StatusCode::FORBIDDEN),
+        (&["catalog_registry:read"][..], StatusCode::FORBIDDEN),
+        (&["policy:read"][..], StatusCode::OK),
+        (&["tag:read"][..], StatusCode::OK),
+    ] {
+        let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(AllowOnly(allowed));
+        let router = app_with(
+            &f,
+            pdp,
+            FakeLister::new(Answer::Levels),
+            None,
+            std::time::Duration::from_secs(15),
+        );
+        let (status, j) = get(router, "/governance/catalogs", &session(&f).await).await;
+        assert_eq!(status, want, "allowed={allowed:?} body={j}");
+    }
+}

@@ -25,6 +25,7 @@ import type {
   ControlPlaneGovernanceBrowseParams,
   ControlPlaneGovernanceObjectLineageParams,
   ErrorBody,
+  GovernanceCatalog,
   ObjectLineage
 } from '../model';
 
@@ -187,6 +188,141 @@ export function useControlPlaneGovernanceBrowse<TData = Awaited<ReturnType<typeo
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getControlPlaneGovernanceBrowseQueryOptions(catalogId,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneGovernanceListCatalogsResponse200 = {
+  data: GovernanceCatalog[]
+  status: 200
+}
+
+export type controlPlaneGovernanceListCatalogsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneGovernanceListCatalogsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneGovernanceListCatalogsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneGovernanceListCatalogsResponseSuccess = (controlPlaneGovernanceListCatalogsResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneGovernanceListCatalogsResponseError = (controlPlaneGovernanceListCatalogsResponse401 | controlPlaneGovernanceListCatalogsResponse403 | controlPlaneGovernanceListCatalogsResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneGovernanceListCatalogsResponse = (controlPlaneGovernanceListCatalogsResponseSuccess | controlPlaneGovernanceListCatalogsResponseError)
+
+export const getControlPlaneGovernanceListCatalogsUrl = () => {
+
+
+
+
+  return `/api/control-plane/governance/catalogs`
+}
+
+/**
+ * @summary `GET /governance/catalogs`: every registry catalog, by name, for the
+Governance Data tree. Gated like browse, on `policy:read` OR `tag:read`,
+so a steward who cannot read the catalog registry
+(`catalog_registry:read`) can still pick a catalog to browse.
+ */
+export const controlPlaneGovernanceListCatalogs = async ( options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneGovernanceListCatalogsResponse> => {
+
+  return customInstance<controlPlaneGovernanceListCatalogsResponse>(getControlPlaneGovernanceListCatalogsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneGovernanceListCatalogsQueryKey = () => {
+    return [
+    `/api/control-plane/governance/catalogs`
+    ] as const;
+    }
+
+
+export const getControlPlaneGovernanceListCatalogsQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>, TError = ErrorBody>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneGovernanceListCatalogsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>> = ({ signal }) => controlPlaneGovernanceListCatalogs({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneGovernanceListCatalogsQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>>
+export type ControlPlaneGovernanceListCatalogsQueryError = ErrorBody
+
+
+export function useControlPlaneGovernanceListCatalogs<TData = Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>, TError = ErrorBody>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceListCatalogs<TData = Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneGovernanceListCatalogs<TData = Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary `GET /governance/catalogs`: every registry catalog, by name, for the
+Governance Data tree. Gated like browse, on `policy:read` OR `tag:read`,
+so a steward who cannot read the catalog registry
+(`catalog_registry:read`) can still pick a catalog to browse.
+ */
+
+export function useControlPlaneGovernanceListCatalogs<TData = Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneGovernanceListCatalogs>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneGovernanceListCatalogsQueryOptions(options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

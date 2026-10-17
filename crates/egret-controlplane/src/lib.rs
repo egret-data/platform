@@ -25,8 +25,8 @@ mod view_exposure;
 pub use error::CpError;
 pub use governance_browse::{
     BrowseColumn, BrowseEngine, BrowseItem, BrowseKind, BrowseResponse, BrowseSource,
-    CatalogLister, Listing, ListingEngine, ListingEngineType, NotListed, NotListedReason,
-    UnwiredCatalogLister,
+    CatalogLister, GovernanceCatalog, GovernanceCatalogSource, Listing, ListingEngine,
+    ListingEngineType, NotListed, NotListedReason, UnwiredCatalogLister,
 };
 pub use governance_lineage::{
     LineageReader, LineageTableRef, ObjectLineage, ReadersIncomplete, ViewLineageInfo,

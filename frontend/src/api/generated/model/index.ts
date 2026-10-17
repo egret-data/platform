@@ -252,6 +252,8 @@ export * from './flowVersionDtoSnapshot';
 export * from './folderDto';
 export * from './formatPolicyBody';
 export * from './gatedProfile';
+export * from './governanceCatalog';
+export * from './governanceCatalogSource';
 export * from './grant';
 export * from './grantDto';
 export * from './grantInvokeInput';
