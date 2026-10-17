@@ -105,6 +105,13 @@ allows `notListed` there), but it is reported for a ruling.
 ### 1.1 Result (read this first)
 
 **F8 holds where the spec needs it to. Nothing is BLOCKED.** Measured 2026-10-16 between 19:13 and 19:20 UTC.
+
+**Scope.** Measured on one external catalog kind (JDBC/Postgres, `ext`) and one egret Iceberg catalog (`ice`).
+Other connector kinds (Hive, Delta, an external Iceberg REST catalog, …) were not tried. For Trino they are
+reasoned, not measured: the lineage transform grants `use`+`select` on every attached catalog whatever its kind, and
+the listing checks are connector-independent `_any` checks. Every query went directly to the engines with egret's
+identity shapes (§1.2), not through egret's query or lineage code.
+
 - **Trino JWT engine:** `egret-lineage` lists `ext` and `ice` with every statement tried: `SHOW SCHEMAS`,
   `SHOW TABLES`, `DESCRIBE`, and `information_schema.schemata` / `tables` / `columns`. Each one took 0.2–2.3 s.
   No new grant is needed: the download-time lineage transform already serves `use`+`select` on every attached
@@ -118,23 +125,26 @@ allows `notListed` there), but it is reported for a ruling.
   person's identity, not egret's, so it is reported for a ruling, not used. The predicted decision stands:
   impersonate engines answer `notListed` (`engine_error`), unless a grant is approved.
 
-25 predicted cells (J1–J12, I1–I4, S1–S9): 21 matched, 4 did not (J1 and J5 `pg_catalog`, J8 `system` schema, S8). None changes the verdict.
-Two of them matter for Task 3, below.
+25 predicted cells (J1–J12, I1–I4, S1–S9): 19 matched, 6 did not: J1, J5 and I4 (`pg_catalog` is listed), J8
+(`system` schema), J12 (J1 took 2.33 s, over the predicted 2 s) and S8. None changes the verdict. S8 matters for
+Task 3, below.
 
 **Facts Task 3 must build on:**
-1. **The kind is not recoverable for a JDBC catalog on either engine.** Trino `information_schema.tables` and
-   StarRocks `SHOW FULL TABLES` / `information_schema.tables` both report the Postgres view `v_orders` and the
-   Postgres MV `mv_orders` as `BASE TABLE` (J6, S5, S6a). On StarRocks the same is true for the Iceberg view `v_t`
-   (S7b, S7d). Trino reports an Iceberg view as `VIEW` (J8d). So the listers map `BASE TABLE` → `table` and `VIEW`
-   → `view`, and accept that a remote view or MV shows as `table`. A Trino or StarRocks MV of `ext` is never
-   listed as such.
+1. **The kind was lost for the one JDBC/Postgres catalog measured.** In `ext` (one Postgres view `v_orders`, one
+   Postgres MV `mv_orders`), Trino `information_schema.tables` and StarRocks `SHOW FULL TABLES` /
+   `information_schema.tables` both report the view and the MV as `BASE TABLE` (J6, S5, S6a). On StarRocks the same
+   is true for the StarRocks-written Iceberg view `v_t` (S7b, S7d). Trino reports that Iceberg view as `VIEW` (J8d).
+   So for these cases the listers can map `BASE TABLE` → `table` and `VIEW` → `view`, and must accept that a remote
+   view or MV may show as `table`. **Not tried:** a Trino Iceberg MV, a Hive catalog, an external Iceberg REST
+   catalog, other JDBC dialects. Whether those report `VIEW` / an MV kind is unmeasured.
 2. **Empty answers come in two kinds.**
    - *Trustworthy empty:* `SHOW TABLES FROM ext.empty_s` answers an empty set on both engines (J3, S3), which is
      a real empty schema.
    - *Silent empty:* a StarRocks user without privilege also gets an empty set, not an error, for `SHOW
      DATABASES FROM ext` and `SHOW TABLES FROM ext.sales` (S8a, S8b). On Trino, `SHOW CATALOGS` for
-     `egret_delegator` was empty too (I1c). Trino's `SHOW SCHEMAS` / `SHOW TABLES` / `information_schema` on a
-     catalog the identity cannot access give an error (J9, J10, J10b), not an empty set.
+     `egret_delegator` was empty too (I1c). Trino's `SHOW SCHEMAS` and `information_schema.schemata` on a
+     catalog the identity cannot access give an error (J9, J10, J10b), not an empty set. (`SHOW TABLES` on a
+     denied catalog was not run.)
    - So on StarRocks an empty listing is trustworthy **only because the identity is `root`**. Task 3 must not
      list StarRocks as any other account.
 3. **Missing objects are errors, not empty sets.** Trino: `Schema 'nosuch' does not exist` (`SCHEMA_NOT_FOUND`)
@@ -192,6 +202,10 @@ Two of them matter for Task 3, below.
 - **DEV-6 (impersonate rendering).** `vgti` ran `http-server.authentication.type=PASSWORD` over TLS 8443, with a
   `password.db` holding only `egret_delegator`. Requests were made directly with Basic auth plus `X-Trino-User`,
   which is the shape of `egret-query`'s impersonate connection. They did not go through egret's query API.
+- **Path of the queries.** Every listing query in §1.3 went directly to the engines (Trino `/v1/statement`,
+  StarRocks `mysql` inside `vg-sr`) with egret's identity shapes: the lineage JWT claims, Basic `egret_delegator` +
+  `X-Trino-User`, StarRocks `root` without a password. None went through egret's query API, lineage runner or MV
+  lister code.
 - **What egret's own code did.** It served the lineage transform to the `vgtr` pod-shaped `pluginId`. Its cache
   file holds `egret-lineage-read-ext`, `egret-lineage-read-ice`, the `query_max_run_time` allow and 12
   override-priority denies, at `policyVersion 5`. It served `vgti` the stored policies only (17, no lineage
@@ -214,7 +228,7 @@ Two of them matter for Task 3, below.
 | J9 | `SHOW SCHEMAS FROM tpch` (not attached in the registry) | `Access Denied: Cannot access catalog tpch` (`PERMISSION_DENIED`) | match |
 | J10 | J1 as `vcplain` | `Access Denied: Cannot access catalog ext`; the `information_schema.schemata` form too | match |
 | J11 | `SELECT * FROM system.metadata.materialized_views` | `Access Denied: Cannot access catalog system`. `SHOW CATALOGS` → `ext`, `ice` only | match |
-| J12 | durations | 0.07–2.33 s, all well inside 15 s | match |
+| J12 | durations | 0.07–2.33 s, all well inside 15 s; J1 (the first query on a fresh engine) took 2.33 s, over the predicted 2 s | mismatch (J1 only) |
 
 **Trino impersonate engine `vgti`, Basic auth `egret_delegator`.**
 
@@ -223,7 +237,7 @@ Two of them matter for Task 3, below.
 | I1 | `egret_delegator` | `Access Denied: Cannot access catalog ext`; `information_schema.schemata` the same; `SHOW CATALOGS` → **empty set** | match |
 | I2 | `egret-lineage` | `Access Denied: Cannot access catalog ext` (also the `information_schema` form) | match |
 | I3 | `vcplain` | `Access Denied: Cannot access catalog ext` | match |
-| I4 | `admin` | the J1 rows; `SHOW TABLES FROM ext.sales` and `DESCRIBE ext.sales.orders` as J2/J4; `SHOW CATALOGS` → `ext`, `ice`, `system`, `tpch` | match |
+| I4 | `admin` | the J1 rows (so `pg_catalog` too); `SHOW TABLES FROM ext.sales` and `DESCRIBE ext.sales.orders` as J2/J4; `SHOW CATALOGS` → `ext`, `ice`, `system`, `tpch` | mismatch: lists, as predicted, but the predicted rows (J1's) omitted `pg_catalog` |
 
 **StarRocks `vgsr`, `mysql -uroot` (no password, as `fe_target` with no root secret).**
 
@@ -241,14 +255,31 @@ Two of them matter for Task 3, below.
 
 ### 1.4 The statements that work (for Task 3)
 
+**Shape only.** The battery ran these with unquoted identifiers and string literals on simple lowercase names
+(`ext`, `sales`, `orders`). Quoting/escaping (Trino `"…"`, StarRocks backticks, mixed-case, hyphens, quotes or
+backslashes in names) and parameter binding were **not measured**; Trino's statement protocol has no `?` binding.
+Task 3 uses the engines' existing quoting helpers and literal escaping. Below, `c`, `s`, `t` stand for the
+catalog, schema and table, and `'s'`, `'t'` for escaped string literals.
+
 | engine, identity | schemas | tables (+ kind) | columns |
 |---|---|---|---|
-| Trino JWT, `egret-lineage` (lineage token) | `SHOW SCHEMAS FROM "c"` | `SELECT table_name, table_type FROM "c".information_schema.tables WHERE table_schema = ?`. `SHOW TABLES FROM "c"."s"` works too but carries no kind | `DESCRIBE "c"."s"."t"`, or `SELECT column_name, data_type FROM "c".information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position` |
-| StarRocks, `root` (the MV lister's `fe_target`) | `SHOW DATABASES FROM c` | `SHOW FULL TABLES FROM c.s` (`Table_type`) | `SHOW FULL COLUMNS FROM c.s.t` or `DESCRIBE c.s.t` |
+| Trino JWT, `egret-lineage` (lineage token) | `SHOW SCHEMAS FROM c` (column `Schema`) | `SELECT table_name, table_type FROM c.information_schema.tables WHERE table_schema = 's'` (`BASE TABLE` / `VIEW`). `SHOW TABLES FROM c.s` (column `Table`) also works but carries no kind | `DESCRIBE c.s.t` → columns `Column, Type, Extra, Comment`, types lowercase Trino types (`integer`, `decimal(10,2)`, `varchar`); or `SELECT column_name, data_type FROM c.information_schema.columns WHERE table_schema = 's' AND table_name = 't' ORDER BY ordinal_position` |
+| StarRocks, `root` (the MV lister's `fe_target`) | `SHOW DATABASES FROM c` (column `Database`) | `SHOW FULL TABLES FROM c.s` → columns `Tables_in_<s>, Table_type` (`BASE TABLE` for everything measured) | `SHOW FULL COLUMNS FROM c.s.t` → `Field, Type, Collation, Null, Key, Default, Extra, Privileges, Comment`, types lowercase (`int`, `decimal(10,2)`, `varchar(1048576)`); `DESCRIBE c.s.t` → `Field, Type, Null, Key, Default, Extra, Comment`, types UPPERCASE (`INT`, `DECIMAL(10,2)`, `VARCHAR(1048576)`) |
 | Trino impersonate | none without a new grant → `notListed` (`engine_error`) | — | — |
 
 Trino's errors carry `errorName` (`PERMISSION_DENIED`, `SCHEMA_NOT_FOUND`, `TABLE_NOT_FOUND`). StarRocks's carry
 codes `5204`, `5501` and `1064`.
+
+**Also observed, not in the battery files** (`dgfe1/{jwt,imp,sr}-battery.txt`): read from logs, caches and the DB
+during the run.
+- `vgtr`'s plugin cache `trino_vgtr.json` at `policyVersion 5`: the three baseline policies, `egret-lineage-read-ext`,
+  `egret-lineage-read-ice`, `egret-lineage-alter-query_max_run_time` and 12 override-priority `egret-lineage-deny-*`
+  policies. Trino log `Switched policy engine to [5]`.
+- `vgti`'s plugin cache at `policyVersion 6`: 17 policies, none named `egret-lineage-*`.
+- egret log `per-user Ranger baseline pass seeded=2 failed=0` after the restart.
+- StarRocks `SHOW CATALOGS` after egret's attach: `default_catalog`, `ext Jdbc`, `ice Iceberg`. The only `vgsr`
+  policy was `perm-grant-…` (`select` on `ice.*.*.*` for `admin`, from the warehouse's workspace assignment).
+- The Trino plugin's `Error getting Roles; service not found … response=404` at startup (known, T10-O2).
 
 ### 1.5 Left behind
 
