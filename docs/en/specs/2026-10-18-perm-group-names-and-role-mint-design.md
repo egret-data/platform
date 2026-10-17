@@ -5,6 +5,9 @@ Two pre-existing holes in how egret-perm expands principals. The user approved f
 
 ## Questions for the user
 
+**Answered by the user 2026-10-18:** Q1 → refuse delete/rename with 409 (R1; R1-alt dropped). Q2 → do not create, warn (R2). Q3 → mint at compile (R5, R6). Q4 → background pass at startup (R7).
+
+
 Each question has a default decision, and the plan is written for that default. The answer changes only the task
 named.
 
