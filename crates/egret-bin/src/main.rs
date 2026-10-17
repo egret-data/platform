@@ -2190,6 +2190,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             }
         });
     }
+    // Design R5 (2026-10-17): one `warn!` per group membership whose
+    // provenance is unknown — local groups with OIDC-provider members (a login
+    // before R1 may have added them), and local users in OIDC groups (no login
+    // removes them). Report only: no row is changed, there is no endpoint, and
+    // a failure is logged and never blocks boot.
+    {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            if let Err(e) = egret_auth::groups::warn_unknown_membership_provenance(&pool).await {
+                tracing::warn!(error = %e, "the group-membership provenance check did not run");
+            }
+        });
+    }
 
     // Engine-mgmt seam: owns the engine domain (HTTP router + provisioning).
     let engine_mgmt = Some(egret_engine_mgmt::EngineMgmtState {

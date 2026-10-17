@@ -771,6 +771,117 @@ struct MemberUserRow {
     name: String,
 }
 
+/// A local group with members whose `users.provider = 'oidc'` — report (a)
+/// of [`membership_provenance_report`].
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct LocalGroupWithOidcMembers {
+    pub group_id: Uuid,
+    pub group_name: String,
+    /// How many of its members are OIDC-provider users.
+    pub oidc_members: i64,
+}
+
+/// A `provider = 'local'` user's membership in an OIDC-sourced group — report
+/// (b) of [`membership_provenance_report`].
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct LocalUserInOidcGroup {
+    pub user_id: Uuid,
+    pub group_id: Uuid,
+    pub group_name: String,
+}
+
+/// Both lists of [`membership_provenance_report`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MembershipProvenanceReport {
+    pub local_groups_with_oidc_members: Vec<LocalGroupWithOidcMembers>,
+    pub local_users_in_oidc_groups: Vec<LocalUserInOidcGroup>,
+}
+
+/// **The memberships whose provenance is unknown** (design R5), read in one
+/// read-only snapshot. Nothing is changed: the rows are mostly legitimate,
+/// `user_groups` records no writer, and an operator who reviews them already
+/// sees each group's members in the console.
+///
+/// - **(a)** Local groups with ≥1 member whose `users.provider = 'oidc'`, with
+///   that count. Before R1 the login sync joined a user to ANY group whose name
+///   their IdP claim carried, local ones included, so such a row may be the
+///   IdP's doing and not an admin's — and it survives R1, which only stops new
+///   ones (the sync never touches a local row).
+/// - **(b)** Each membership of a `provider = 'local'` user in an OIDC group:
+///   an admin add from before R4. No login ever reaches a local user, so
+///   nothing ever removes it.
+///
+/// Returns rows and logs nothing, so the rows are testable;
+/// [`warn_unknown_membership_provenance`] is the startup wrapper.
+pub async fn membership_provenance_report(
+    pool: &sqlx::PgPool,
+) -> Result<MembershipProvenanceReport> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    let local_groups_with_oidc_members = sqlx::query_as(
+        "SELECT g.id AS group_id, g.name AS group_name, count(*) AS oidc_members \
+         FROM groups g JOIN user_groups ug ON ug.group_id = g.id \
+         JOIN users u ON u.id = ug.user_id \
+         WHERE g.source = 'local' AND u.provider = 'oidc' \
+         GROUP BY g.id, g.name ORDER BY g.name",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    let local_users_in_oidc_groups = sqlx::query_as(
+        "SELECT u.id AS user_id, g.id AS group_id, g.name AS group_name \
+         FROM groups g JOIN user_groups ug ON ug.group_id = g.id \
+         JOIN users u ON u.id = ug.user_id \
+         WHERE g.source = 'oidc' AND u.provider = 'local' \
+         ORDER BY g.name, u.id",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    tx.rollback().await.map_err(db_err)?;
+    Ok(MembershipProvenanceReport {
+        local_groups_with_oidc_members,
+        local_users_in_oidc_groups,
+    })
+}
+
+/// **The startup pass** (design R5): one `warn!` per row of
+/// [`membership_provenance_report`]. Returns the rows it logged. Logs ids,
+/// group names and counts — no email.
+///
+/// Best-effort by design, like
+/// `egret_perm_compile::principal_refs::warn_fail_open_principals`: the caller
+/// spawns it off the boot path and logs an error instead of refusing to start,
+/// because the rows are served either way.
+pub async fn warn_unknown_membership_provenance(
+    pool: &sqlx::PgPool,
+) -> Result<MembershipProvenanceReport> {
+    let report = membership_provenance_report(pool).await?;
+    for r in &report.local_groups_with_oidc_members {
+        tracing::warn!(
+            group_id = %r.group_id,
+            group = %r.group_name,
+            oidc_members = r.oidc_members,
+            "a local group has members who sign in through OIDC; their provenance is unknown: \
+             a login before the OIDC-groups fix may have added them from an IdP claim. \
+             Review the group's members"
+        );
+    }
+    for r in &report.local_users_in_oidc_groups {
+        tracing::warn!(
+            user_id = %r.user_id,
+            group_id = %r.group_id,
+            group = %r.group_name,
+            "a local user is a member of an OIDC-synced group; no login ever removes this \
+             membership. Review it, and remove it if the identity provider did not intend it"
+        );
+    }
+    Ok(report)
+}
+
 fn db_err(e: sqlx::Error) -> egret_core::Error {
     egret_core::Error::Internal(anyhow::anyhow!(e))
 }

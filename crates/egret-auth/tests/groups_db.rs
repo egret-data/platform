@@ -285,3 +285,122 @@ async fn an_admin_add_to_an_oidc_group_is_refused_and_a_remove_is_not() {
     );
     assert_eq!(rc.take(), vec![Call::Lock(vec![local]), Call::Recompile]);
 }
+
+/// Design R5: rows whose provenance is unknown are REPORTED, never changed.
+/// (a) a local group with members whose `users.provider = 'oidc'` — a login
+/// before R1 may have added them — with the count of such members; (b) each
+/// membership of a `provider = 'local'` user in an OIDC group — the R4 class,
+/// which no login ever removes. A local user in a local group and an OIDC user
+/// in an OIDC group are the expected shapes and appear in neither list.
+/// Assertions are scoped to the seeded ids: the shared test DB holds others.
+#[tokio::test]
+async fn the_provenance_report_lists_only_the_two_unknown_shapes() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let groups = GroupRepo::new(db.clone());
+    let users = UserRepo::new(db.clone());
+    let seed = |uid: egret_core::UserId, gid: uuid::Uuid| {
+        let db = db.clone();
+        async move {
+            sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+                .bind(uid.0)
+                .bind(gid)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+        }
+    };
+    let oidc_user = |tag: &'static str| {
+        let users = &users;
+        async move {
+            users
+                .insert_oidc(&uniq("sub"), &format!("{}@idp.local", uniq(tag)), "O")
+                .await
+                .unwrap()
+        }
+    };
+    let local_user = |tag: &'static str| {
+        let users = &users;
+        async move {
+            users
+                .insert_local(&format!("{}@test.local", uniq(tag)), "L", "x")
+                .await
+                .unwrap()
+        }
+    };
+
+    let (o1, o2, o3) = (
+        oidc_user("o1").await,
+        oidc_user("o2").await,
+        oidc_user("o3").await,
+    );
+    let (l1, l2) = (local_user("l1").await, local_user("l2").await);
+    // (a): two OIDC users and one local user in a local group → count 2.
+    let mixed_local = groups.create_local(&uniq("t_prov_mixed")).await.unwrap();
+    seed(o1, mixed_local).await;
+    seed(o2, mixed_local).await;
+    seed(l1, mixed_local).await;
+    // Neither: a local group with only local members.
+    let pure_local = groups.create_local(&uniq("t_prov_local")).await.unwrap();
+    seed(l2, pure_local).await;
+    // (b): a local user in an OIDC group; the OIDC member beside them is not.
+    let oidc_name = uniq("t_prov_oidc");
+    let oidc_gid = groups.upsert_oidc_group(&oidc_name).await.unwrap();
+    seed(l1, oidc_gid).await;
+    seed(o3, oidc_gid).await;
+
+    let report = egret_auth::groups::membership_provenance_report(&db.pool)
+        .await
+        .unwrap();
+
+    let a: Vec<_> = report
+        .local_groups_with_oidc_members
+        .iter()
+        .filter(|r| [mixed_local, pure_local, oidc_gid].contains(&r.group_id))
+        .map(|r| (r.group_id, r.oidc_members))
+        .collect();
+    assert_eq!(
+        a,
+        vec![(mixed_local, 2)],
+        "(a) counts OIDC members of local groups only"
+    );
+    let b: Vec<_> = report
+        .local_users_in_oidc_groups
+        .iter()
+        .filter(|r| [o1.0, o2.0, o3.0, l1.0, l2.0].contains(&r.user_id))
+        .map(|r| (r.user_id, r.group_id, r.group_name.clone()))
+        .collect();
+    assert_eq!(
+        b,
+        vec![(l1.0, oidc_gid, oidc_name)],
+        "(b) lists local users in OIDC groups only"
+    );
+
+    // The logging wrapper reports the same rows and changes none.
+    let before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM user_groups WHERE group_id = ANY($1)")
+            .bind(vec![mixed_local, pure_local, oidc_gid])
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let logged = egret_auth::groups::warn_unknown_membership_provenance(&db.pool)
+        .await
+        .unwrap();
+    assert!(logged
+        .local_groups_with_oidc_members
+        .iter()
+        .any(|r| r.group_id == mixed_local && r.oidc_members == 2));
+    assert!(logged
+        .local_users_in_oidc_groups
+        .iter()
+        .any(|r| r.user_id == l1.0 && r.group_id == oidc_gid));
+    let after: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM user_groups WHERE group_id = ANY($1)")
+            .bind(vec![mixed_local, pure_local, oidc_gid])
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!((before, after), (6, 6), "the report changes no row");
+}
