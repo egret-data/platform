@@ -14,6 +14,11 @@
 # needs no script runner). 104 -> 103. Its three siblings stay here, with the causes
 # in `README.md`'s WorkingDirectory Task 8 section. Nothing was added.
 #
+# Kill-and-exit Task 3 (2026-10-17): banked `valids/exit`, `valids/exit-cancelled`,
+# `valids/exit-killed` and `valids/exit-nested` -- `io.kestra.plugin.core.execution.Exit`
+# is registered and planned `TaskKind::Exit` (`executor::exit`). 104 -> 100.
+# Nothing else moved and nothing was added.
+#
 # Written by W3a Task 2 at 294 entries, which is EVERY comparable golden entry.
 # `advance()` and `build_plan()` are stubs, so each of the 266 `runs` entries
 # produces an execution that never leaves [CREATED] with no runs at all, and
@@ -560,10 +565,6 @@ valids/assert
 valids/dag
 valids/disable-flowable
 valids/errors
-valids/exit
-valids/exit-cancelled
-valids/exit-killed
-valids/exit-nested
 valids/finally-dag
 valids/finally-flow
 valids/finally-flow-error

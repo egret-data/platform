@@ -861,8 +861,13 @@ pub struct Served(std::collections::BTreeSet<String>);
 impl Served {
     /// Whether this deployment has a handler for `type_id`: an exact match,
     /// as [`Handlers::get`] is.
+    ///
+    /// **An executor-level type is served by every deployment**
+    /// (`spec::registry::EXECUTOR_LEVEL`, kill-and-exit Task 3): `advance()`
+    /// runs it and no handler is ever asked for it, so it is not in the set
+    /// [`handlers_for`] builds and needs no entry to be served.
     pub fn serves(&self, type_id: &str) -> bool {
-        self.0.contains(type_id)
+        self.0.contains(type_id) || crate::spec::registry::executor_level(type_id)
     }
 
     /// Every key `h` is registered under. For the drift test, which holds

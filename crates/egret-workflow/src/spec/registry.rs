@@ -197,6 +197,14 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         aliases: &[],
         references: &[],
     },
+    // Kill-and-exit Task 3 (spec §6). **A row with no worker handler on
+    // purpose**: the executor runs it (`executor::TaskKind::Exit`), so it is
+    // in [`EXECUTOR_LEVEL`] and every deployment serves it.
+    TaskTypeSpec {
+        r#type: crate::executor::exit::TYPE_ID,
+        aliases: &[],
+        references: &[],
+    },
     TaskTypeSpec {
         r#type: "io.kestra.plugin.core.flow.Sleep",
         aliases: &[],
@@ -315,6 +323,16 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         references: &[],
     },
 ];
+
+/// The registered types `advance()` runs itself, with no worker handler:
+/// `build_plan` plans them as executor-level kinds, so no run of one is ever
+/// claimed, and every deployment serves them (`runtime::Served::serves`).
+pub const EXECUTOR_LEVEL: &[&str] = &[crate::executor::exit::TYPE_ID];
+
+/// Whether `t` is one of [`EXECUTOR_LEVEL`].
+pub fn executor_level(t: &str) -> bool {
+    EXECUTOR_LEVEL.contains(&t)
+}
 
 /// The row for `t`, matching the canonical spelling **or any alias**.
 ///

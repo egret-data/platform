@@ -513,6 +513,11 @@ W3A_FLOWABLES = {
     # bounds -- so the coarser key costs nothing today.
     "io.kestra.plugin.core.flow.LoopUntil",
     "io.kestra.plugin.core.flow.WaitFor",
+    # Kill-and-exit Task 3: Kestra's one `ExecutionUpdatableTask` egret runs.
+    # `build_plan` gives it a `TaskKind::Exit` and `advance()` decides it (the
+    # run, its ancestors and the execution), so no worker claims it -- the
+    # same shape as `Pause`, though it is not a flowable in Kestra.
+    "io.kestra.plugin.core.execution.Exit",
 }
 
 # `executor::RunState::ALL`, which is 12 of the golden's 13 states.  A trace
@@ -966,9 +971,11 @@ def check_inputs(flows, kinds, golden, baseline):
     # `valids/working-directory-taskrun`, whose Kestra trace egret now reproduces;
     # 104 since the same WorkingDirectory pass baselined
     # `valids/retry-failed-task-duration` (Kestra's ~0.6 s per-retry scheduler
-    # latency lets it stop at three attempts where egret makes four).
-    if len(baseline) != 104:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 104; the split "
+    # latency lets it stop at three attempts where egret makes four); 100 since
+    # kill-and-exit Task 3 banked the four `valids/exit*` entries (the
+    # executor runs `io.kestra.plugin.core.execution.Exit`).
+    if len(baseline) != 100:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 100; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1618,8 +1625,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 104",
-         "not 104",
+    case("baseline.txt is no longer 100",
+         "not 100",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

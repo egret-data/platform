@@ -116,7 +116,9 @@ impl Plan {
     /// alone.
     fn direct_task_children(&self, ix: TaskIx) -> Vec<TaskIx> {
         match &self.tasks[ix].kind {
-            TaskKind::Runnable { .. } | TaskKind::Executable { .. } => Vec::new(),
+            TaskKind::Runnable { .. } | TaskKind::Executable { .. } | TaskKind::Exit { .. } => {
+                Vec::new()
+            }
             TaskKind::Sequential { tasks }
             | TaskKind::Parallel { tasks, .. }
             | TaskKind::Loop { tasks, .. }
@@ -601,6 +603,21 @@ pub enum TaskKind {
         max_duration: Option<std::time::Duration>,
         /// `failOnMaxReached`, Kestra's `@Builder.Default` of `false`.
         fail_on_max_reached: bool,
+    },
+    /// `io.kestra.plugin.core.execution.Exit` -- kill-and-exit Task 3 (spec
+    /// §6). An `ExecutionUpdatableTask` in Kestra: the executor runs it, no
+    /// worker ever sees it (no `type_id` is persisted, so no claim takes it),
+    /// and it has no children. Started like a flowable (no `SUBMITTED`; the
+    /// golden reads `CREATED RUNNING <state>`) and decided the round after by
+    /// [`super::exit::drive`].
+    ///
+    /// `state` is the author's `state:`, **unrendered**: `None` is "none
+    /// written", Kestra's default `SUCCESS`. A literal one of the five is
+    /// read as it is; anything else is the caller's to render into
+    /// [`TaskRun::rendered`](crate::executor::TaskRun::rendered) at `RUNNING`
+    /// ([`super::exit::expression`]).
+    Exit {
+        state: Option<String>,
     },
 }
 
@@ -1313,6 +1330,13 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         // W6. It takes no children: a `Subflow` runs a DIFFERENT flow, whose
         // tasks get runs in the child execution and never in this one -- which
         // is why `models::TaskKind::Subflow` has no `children()` either.
+        // Kill-and-exit Task 3. An `Exit` is a registered leaf type to
+        // `models` and `spec`, and an executor-level task here.
+        (ModelKind::Leaf { spec }, _) if task.r#type == super::exit::TYPE_ID => {
+            out[ix].kind = TaskKind::Exit {
+                state: super::exit::source_of(spec),
+            };
+        }
         (ModelKind::Subflow(_), Some(SUBFLOW_TYPE)) => {
             out[ix].kind = TaskKind::Executable {
                 type_id: task.r#type.clone(),
