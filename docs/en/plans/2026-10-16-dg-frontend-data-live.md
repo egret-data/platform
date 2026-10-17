@@ -400,3 +400,165 @@ incomplete" in every catalog, including tables no view reads.
 **P10. Brief steps.** Browsing `ice` lists `s` and its four objects from the warehouse. `v_t` is a View, and its
 Overview shows a security mode and an unknown lineage state. `ext.sales.v_orders` and `mv_orders` show as
 **Table** (§1.1 fact 1). Opening a column opens the panel with its tags, rules, grants and Who can read.
+
+### 2.1 Result (read this first)
+
+Measured 2026-10-17 between 07:21 and 07:52 UTC, on an image built from `8d9e4fa8` (predictions commit `928123c4`
+changes only this file).
+
+**The Data area works end to end against real engines.**
+- Browsing `ice` (from the warehouse), `ext` (on Trino as `egret-lineage`) and `exsr` (on StarRocks as `root`)
+  lists real schemas, tables, views and columns.
+- Grant, tag and mask written from the page reach both engines within one poll.
+- Who can read? agrees with a real query on both engines for a cleared user and an uncleared one.
+
+**12 defects**, none Critical. They are listed in §2.4.
+- The two that break the spec's "never an empty branch" are silent empty listings: a mixed-case Postgres schema on
+  Trino (D1), and a schema with a backslash on StarRocks (D2).
+- The worst UX defect: a grant created from a schema page never appears on that page, nor on the page its "Open in
+  Data" link opens (D4).
+
+24 predicted cells in §2.3 (the row "P5 390" is a finding, not a prediction): 18 matched and 6 did not (P1c,
+P1d, P4 clipping, P5 panel focus, P9 pattern, P10's lineage wording).
+
+### 2.2 Stack and deviations
+
+- **Image and frontend.**
+  - Image `egret-backend:vg-dgfe12` was built from `8d9e4fa8`: a warm release build, 11.5 min. Free disk stayed
+    ≥ 90 GiB.
+  - Vite 8.2.1 ran from this worktree on port 5291, through a scratch config that pointed the `/api`, `/catalog`
+    and `/oauth` proxies at `localhost:18096`.
+  - The browser was the Playwright MCP Chromium, at 1280×900 and 390×844, in light and dark mode.
+- **DB and containers.** DB `egret_dgfe_live` (`migrate`, `init`, `serve`), with the log line `kubernetes
+  unavailable; engine provisioning disabled`. Containers on `vg-net`:
+  - `vg-egret`;
+  - `vg-rustfs` (`rustfs/rustfs:1.0.1`);
+  - `vg-pg` (`postgres:16`, database `extdb`);
+  - `vg-trino-coord` (Trino 483 `db58cc93…`, host `vgtr-coordinator-6d5f7c9b8-ab1cd`, JWT/TLS rendering of §1.2);
+  - `vg-sr` (allin1 4.1.6, `access_control = ranger`).
+- **Catalogs** were created through the API:
+  - `ice` (warehouse `ice`);
+  - `ext`, `exsr` and `exti` (`jdbc`/`postgresql` → `vg-pg:5432/extdb`, password in an egret secret).
+
+  StarRocks attached `ice`, `ext` and `exsr` through egret's own `POST /engines/{id}/catalogs/{cid}` (`applied`).
+  The Iceberg data (`ice.s.pii`, `pub`, `t`, view `v_t`) was written as StarRocks `root` before Ranger was
+  switched on and before Trino was attached.
+- **DEV-1 (SQL): engine rows.** As in §1.2:
+  - `vgtr` (JWT, profile `vgtr` with tag profile `vgtr-tag`);
+  - `vgti` (`delegationMode: impersonate`, profile `vgti`, **no container**: browse never dials it);
+  - `vgsr` (profile `vgsr`).
+- **DEV-2 (SQL): Trino attachments.** `vgtr`→`ice`/`ext` and `vgti`→`exti` were inserted as `applied`. Then `PUT
+  /engines/{vgtr}/workspaces` materialised the delegated `query.databases` row the Trino lister needs. The per-user
+  baseline came from a restart (`seeded=2 failed=0`).
+- **DEV-3 (SQL): usernames.** Users created through `POST /users` have no `users.username`. The principal picker
+  shows them as "no allocated username yet" and cannot pick them. `users.username` was set to the email local part
+  for `vcplain`, `vccleared` and `vcsteward` (the slug `ensure_username` would allocate).
+- **DEV-4 (identity): the real queries.**
+  - Trino queries went straight to Trino, with JWTs signed by egret's active key and `engine_claims`'s claim set.
+  - StarRocks queries ran as the same-named StarRocks users through `mysql` inside `vg-sr`.
+  - None went through egret's query API.
+- **DEV-5 (config).** The Ranger poll was 5000 ms on both engines.
+- **DEV-6 (setup).** The first `vgtr-tag` profile was created with type `trino`; the API requires type `tag`. It
+  was deleted and recreated, before any engine existed.
+- **DEV-7 (harness).** The shared Playwright browser still carried route intercepts from an earlier session, which
+  answered `/src/api/*.ts` with `[]`. `unrouteAll` cleared them before any measurement.
+- No privilege of `egret-lineage` or of StarRocks `root` was changed. Logins: admin twice (curl, browser) and
+  `vcsteward` once.
+
+### 2.3 Every cell
+
+| id | observed | verdict |
+|---|---|---|
+| P1a | `ext` on Trino lists `b`s`, `bs\s`, `d.s`, `empty_s`, `mixs`, `pg_catalog`, `public`, `q"s`, `sales`, `sp s`. `system` and `information_schema` are absent | match |
+| P1b | every odd schema on Trino lists its table. DESCRIBE answers each one, including `c"1`, `` c`1 ``, `c.1`, `c\1`, `c 1` | match |
+| P1c | `ext.mixs` shows **"No tables or views"**. Trino itself answers an empty set to `information_schema.tables` and to `SHOW TABLES FROM ext.mixs` / `ext."MixS"`. `DESCRIBE ext.mixs.mixt` → `TABLE_NOT_FOUND` | **mismatch → D1** |
+| P1d | `exsr` on StarRocks lists every schema as stored (`MixS`, `system`). `MixS.MixT`, `q"s`, `d.s`, `sp s` and `system` list their tables and columns. ``b`s`` → `engine_error` (StarRocks itself: ``SHOW FULL TABLES FROM `exsr`.`b``s` `` → `Unknown database 'bs'`). `bs\s` → **"No tables or views"** (StarRocks itself answers `Empty set`). `MixT`'s column is listed as `"MixC"`, with literal quotes | **mismatch → D2, D3** |
+| P1e | each odd-name object opened from the tree and showed the same header, kind and columns after a reload. The URLs were `ext/q%22s/t%22q`, `ext/b%60s/t%60b`, `ext/d.s/t.d`, `ext/bs%5Cs/t%5Cb` and `ext/sp%20s/t%20s`. Go to path `ext.d.s.t.d` opened `ext/d.s.t/d`: "Kind unknown", `engine_error` (`Schema 'd.s.t' does not exist`) | match (D8) |
+| P1f | the header prints `ext.d.s.t.d` | match |
+| P2 | Trino hides `system`. Go to path `ext.system.t_sys` opens the table with columns `id integer`, `s varchar`. StarRocks lists `system` | match |
+| P3 | `exti` → the text "vgti runs in impersonate mode; egret has no identity there that can list catalogs", with a Go to path link. `exti.sales.orders` → the same text in Overview, and "Kind unknown" | match |
+| P4 page | at 390 px, light and dark, on the index, the open tree, all 5 tabs, the column panel, Add tag and Who can read?: `scrollWidth == clientWidth == 390` every time. The tree is folded behind "Show catalogs" and closes on open (`aria-expanded=false`) | match |
+| P4 dialog | Who can read? with the long `vcplain` result: the dialog is 778 px high with an inner `overflow-y-auto` region (2385/730 px) and no sideways scroll | match |
+| P4 clipping | the app's icon rail stays at 390 px, leaving about 300 px. The tab list cuts "Masks & filter…", with Lineage and Details off-screen. The Masks table's Actions column (right edge 456 px) and the Overview's "Masking rules" column are clipped inside their scroll containers | **partly → D10** |
+| P4 dark | screenshots readable, with no white surface | match |
+| P5 tree | Tab order: Go to path, Go, the filter, then one row. Down/Up/Home/End move. Right expands, then enters. Left goes to the parent, then collapses. Enter opens the object. Enter on the `exti` notListed row puts `exti.` in Go to path and focuses it; typing `sales.orders` and Enter opens it | match |
+| P5 tabs | Radix: Right/Left/Home/End move and select. Left on Overview wraps to Details. `?tab=` follows | match |
+| P5 panel | Escape closes the panel and removes `?column=`, but focus goes to `<body>`, not to the `ssn` link that opened it. When the panel was opened by URL, focus also goes to `<body>`, as predicted | **mismatch → D6** |
+| P5 390 | Enter on a tree row at 390 px opens the object and folds the tree; focus drops to `<body>` | finding D7 |
+| P6 | "This list may be incomplete. 1 view in egret's catalogs has lineage egret does not know…" appears on `ice.s.pii`, `ice.s.pub` and `ext.sales.orders` (the last also adds "views defined in this catalog are not tracked"): on every table checked | match (D12) |
+| P7 grant | Grant access on `ice.s.pub` for `vcplain` (preview: "Would recompile vgsr, vgtr"). Toast "Grant created."; the Permissions tab shows it under Here. Before: Trino `Access Denied: Cannot access catalog ice`, StarRocks `5204`. 10 s after: rows on both. On `ext.sales.orders` (as `vcsteward`): Trino denied → rows, StarRocks (`ext`) `5204` → rows; `exsr` (not granted) still `5204` | match |
+| P7 tag | Add tag `vgsecret` on `ice.s.pii.ssn` from the panel: toast, the panel's Tags and the Overview row show it, the header shows "None on this object". Add tag `vgpub` on `ice.s.pub`: the header shows `vgpub` | match |
+| P7 mask | rule `vg-mask-name` (`MASK` on `ice.s.pii.name`) from Masks & filters. The tab, the Overview's Masking rules column and the `name` panel ("by path") show it. 15 s later `vcplain` and `vccleared` read `xxxxx`, `xxx`, `xxxxx` on both engines | match |
+| P7 who | `vccleared`: vgsr allowed, `MASK_NONE`; vgtr allowed. Real queries: real `ssn` on both engines. `vcplain`: vgsr "not access-checked … returns NULL (MASK_NULL)"; vgtr "Refused by a deny item" (clearance). Real queries: Trino `Access Denied: Cannot select from columns [name, id, ssn]`, StarRocks `NULL` ×3. On `ext.sales.orders`, `vcplain` is allowed on both (rows on both) and `vccleared` gets "No policy matched" (refused on both) | match |
+| P8 | as `vcsteward`: the tree lists 4 catalogs and browses `ext`/`exti`/`ice`. Header: Grant access and Who can read?, with Add tag hidden. Permissions, Masks, Lineage and Overview tags all load. The GrantDialog catalog picker offers `exsr`, `ext`, `exti`, `ice`. Data permissions shows 4 Open in Data links and Mask & filter rules 1. Who can read? answers. No `/api` response ≥ 400 | match |
+| P9 links | `pub` → `/governance/data/ice/s/pub?tab=permissions`. `vg-mask-name` → `/governance/data/ice/s/pii?column=name&tab=masks`, which lands with Masks & filters selected and the panel open on `name`. `ice.s.*` → `/governance/data/ice/s?tab=permissions`, labelled "opens the nearest level above its pattern" | match |
+| P9 pattern | the schema page that link opens does not list the `ice.s.*` grant | **mismatch → D4** |
+| P10 | `ice.s` lists `pii`, `pub`, `t`, `v_t` (View). `v_t`: security mode INVOKER, "Owner cleared: Not known", lineage **"Failed: the view version carries no Trino SQL representation"** (predicted "unknown"). `ext.sales.v_orders` and `mv_orders` show as Table. Column panel as predicted | match except lineage wording |
+
+### 2.4 Defects
+
+Severity is a guess. Screenshots are in the scratchpad, `dgfe12/shots/` (390×844 or 1280×900, checked with `sips`).
+
+- **D1 (Important): silent empty on Trino for a mixed-case Postgres schema.** `ext.mixs` (Postgres `MixS` holding
+  `MixT`) shows "No tables or views". Trino's JDBC connector lowercases the name and then answers an empty set to
+  both `information_schema.tables` and the lister's `SHOW TABLES` probe, so the probe cannot tell it from a real
+  empty schema. Repro: Postgres `CREATE SCHEMA "MixS"; CREATE TABLE "MixS"."MixT"(id int)`, attach to a JWT Trino,
+  expand `ext` → `mixs`. Candidate fix: render JDBC catalogs with `case-insensitive-name-matching=true`, or flag
+  any lowercased name.
+- **D2 (Important): silent empty on StarRocks for a schema whose name holds a backslash.** `exsr.bs\s` shows "No
+  tables or views". StarRocks `` SHOW FULL TABLES FROM `exsr`.`bs\s` `` answers `Empty set`: the JDBC metadata
+  pattern reads `\` as an escape. Related: `pg_catalog` lists "No tables or views" on both engines (the connectors
+  drop system tables).
+- **D3 (Minor): StarRocks cannot list a schema whose name holds a backtick.** ``exsr.b`s`` → `engine_error`.
+  StarRocks reads `` `b``s` `` as `bs` (`Unknown database 'bs'`). This is an engine limit, and the message is
+  honest. Also, StarRocks lists a mixed-case Postgres column as `"MixC"`, with literal quotes, shown verbatim.
+- **D4 (Important): a grant on a pattern below the page is invisible where it was made, and where its link lands.**
+  Repro: `/governance/data/ice/s?tab=permissions`, Grant access, Table `*`, include `vcsteward`, Create. The toast
+  says "Grant created.", but the tab still shows only the catalog's workspace grant. The grants on `s.pub` and
+  `s.pii` are not listed either. Data permissions' "Open in Data" for this grant opens the same tab. The table
+  pages list it under "Matching a pattern".
+- **D5 (Minor): a workspace grant is shown with a raw id.** `workspace_members 220f80e1-17f9-4653-be41-26c7af644963
+  can read ice.*` appears in the Permissions tab and in Data permissions, although the same row says "Set by
+  workspace assignment · Default".
+- **D6 (Minor, a11y): the column panel loses focus on close.** Focus the `ssn` link in Overview, press Enter, then
+  Escape: `?column=` is removed, but `document.activeElement` is `<body>`, not the link. (WCAG 2.4.3.)
+- **D7 (Minor, a11y): at 390 px, opening from the tree loses focus.** Show catalogs, arrow to a row, Enter: the tree
+  folds and focus is `<body>`.
+- **D8 (Minor): Go to path cannot name an object whose name holds a dot.** `ext.d.s.t.d` opens `ext/d.s.t/d`, which
+  shows Kind unknown and an engine error. The tree link to `ext.d.s.t.d` works.
+- **D9 (Minor, pre-existing `PrincipalPicker`, reached from the object page's Grant access).**
+  - After one principal is picked, the suggestion list does not reopen while the input keeps focus. A second user
+    cannot be added without a blur and a refocus more than 150 ms later.
+  - A user who never queried has no username and cannot be picked (DEV-3).
+- **D10 (Minor, 390 px): content is clipped inside scroll containers with no affordance.** The icon rail leaves
+  about 300 px. The tab list hides Lineage and Details, and the Masks table's edit and delete actions are off-screen
+  (`390-light-tab-masks.png`). The page itself never scrolls sideways.
+- **D11 (Cosmetic):** the Lineage tab reads "Failed: egret could not work out what this view reads. the view version
+  carries…" (a lowercase "the" after the full stop).
+- **D12 (Minor, design): `readersIncomplete` is on every table.** One egret view with unknown lineage, here a
+  StarRocks-written view with no Trino SQL, puts "This list may be incomplete" on every table of every catalog,
+  external ones included. On an install that has any such view, the warning is permanent.
+
+**Not measured:**
+- a view with known lineage (so the Lineage tab's reader list with entries);
+- a Trino Iceberg MV;
+- a timeout or `engine_not_running` live;
+- the egret query API path for the real queries (DEV-4);
+- browsers other than Chromium.
+
+### 2.5 Left behind
+
+- **Removed:**
+  - containers `vg-egret`, `vg-rustfs`, `vg-pg`, `vg-sr`, `vg-trino-coord`;
+  - network `vg-net`;
+  - DB `egret_dgfe_live`;
+  - image `egret-backend:vg-dgfe12`;
+  - the vite process.
+
+  `docker ps -a`, `docker network ls` and `docker images` show no `vg-` entry.
+- **Secrets deleted from the scratchpad:** env files, the S3 and Postgres passwords, the signing key, the TLS key and
+  keystore, the catalog client and the cookie jar.
+- **Kept:** the scratchpad `dgfe12/` (screenshots, `extdb.sql`, `odd-cols.txt`, configs, the public cert). BuildKit
+  cache grew from 8.1 to 9.6 GB (reclaimable).
+- **Untouched:** DB `egret`, every `egret-dev-*` container, `egret-w7*-postgres`, `egret-grpa-starrocks`, ports 5173,
+  5000 and 8080. Free disk at the end: 82 GiB. No product code changed.
