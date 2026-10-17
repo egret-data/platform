@@ -83,7 +83,7 @@ afterEach(() => {
 describe("Governance routing in App", () => {
   it("sends a governance-only user who opens /control-plane to Governance, not a 403", async () => {
     openApp("/control-plane", GOVERNANCE_ONLY);
-    await waitFor(() => expect(currentUrl()).toBe("/governance/policies"), TIMEOUT);
+    await waitFor(() => expect(currentUrl()).toBe("/governance/data"), TIMEOUT);
     await screen.findByTestId("app-sidebar", {}, TIMEOUT);
     expect(screen.queryByText("403 — Forbidden")).not.toBeInTheDocument();
   }, 15_000);
@@ -108,14 +108,27 @@ describe("Governance routing in App", () => {
     expect(await screen.findByRole("heading", { name: "Data Lineage" }, TIMEOUT)).toBeInTheDocument();
   }, 15_000);
 
-  it("opens a tag-only user's Governance landing on Classifications", async () => {
-    openApp("/governance", TAG_ONLY);
-    await waitFor(() => expect(currentUrl()).toBe("/governance/classifications"), TIMEOUT);
+  it.each([
+    ["a governance user", GOVERNANCE_ONLY],
+    ["a tag-only user", TAG_ONLY],
+    ["a policy-only user", me(["policy:read"])],
+    ["an admin", ADMIN],
+  ])("opens the Governance index on Data for %s", async (_who, as) => {
+    openApp("/governance", as);
+    await waitFor(() => expect(currentUrl()).toBe("/governance/data"), TIMEOUT);
+    expect(await screen.findByRole("heading", { level: 1, name: "Data" }, TIMEOUT)).toBeInTheDocument();
+    expect(screen.queryByText("403 — Forbidden")).not.toBeInTheDocument();
   }, 15_000);
 
-  it("sends an unknown Governance URL to the first section", async () => {
+  it("sends an unknown Governance URL to Data", async () => {
     openApp("/governance/nope", GOVERNANCE_ONLY);
-    await waitFor(() => expect(currentUrl()).toBe("/governance/policies"), TIMEOUT);
+    await waitFor(() => expect(currentUrl()).toBe("/governance/data"), TIMEOUT);
+  }, 15_000);
+
+  it("keeps a Data object URL, names and all", async () => {
+    openApp("/governance/data/my%20cat/50%25/a%2Fb?tab=details", TAG_ONLY);
+    expect(await screen.findByRole("heading", { level: 1, name: "a/b" }, TIMEOUT)).toBeInTheDocument();
+    expect(currentUrl()).toBe("/governance/data/my%20cat/50%25/a%2Fb?tab=details");
   }, 15_000);
 
   it("403s an infra-only user who opens a Governance URL, without changing the URL", async () => {
@@ -136,13 +149,13 @@ describe("Governance routing in App", () => {
     // for anyone but an admin. With a Governance permission too, there is
     // somewhere else to send them.
     openApp("/control-plane", me(["workspace:read", "policy:read"]));
-    await waitFor(() => expect(currentUrl()).toBe("/governance/policies"), TIMEOUT);
+    await waitFor(() => expect(currentUrl()).toBe("/governance/data"), TIMEOUT);
     expect(screen.queryByText("403 — Forbidden")).not.toBeInTheDocument();
   }, 15_000);
 
   it("sends a user with no workspace but Governance access from / to Governance", async () => {
     openApp("/", GOVERNANCE_ONLY);
-    await waitFor(() => expect(currentUrl()).toBe("/governance/policies"), TIMEOUT);
+    await waitFor(() => expect(currentUrl()).toBe("/governance/data"), TIMEOUT);
   }, 15_000);
 
   it("sends a user with no workspace but only Control Plane access from / to Control Plane", async () => {

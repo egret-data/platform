@@ -263,3 +263,6 @@ jobs:
       # `type` is tsc-clean, lint-clean, and puts ~3.8MB back on every page including login.
       # Only a production build can be asked, because neither vitest nor `vite dev` splits.
       - run: npm run test:bundle:monaco
+      # Asserts the Governance Data area (the catalog tree and object pages) is still a lazy
+      # chunk, out of the entry and its preloads. Same reason: only a production build splits.
+      - run: npm run test:bundle:governance-data
