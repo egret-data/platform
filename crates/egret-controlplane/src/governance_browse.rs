@@ -307,15 +307,15 @@ struct Level<'a> {
 }
 
 #[derive(sqlx::FromRow)]
-struct CatalogRow {
+pub(crate) struct CatalogRow {
     /// The catalog's SQL name on every engine (SP3 D5).
-    name: String,
+    pub(crate) name: String,
     /// Set exactly for an egret Iceberg catalog
     /// (`catalogs_warehouse_mirrors_config`, migration 0147).
-    warehouse_id: Option<Uuid>,
+    pub(crate) warehouse_id: Option<Uuid>,
 }
 
-async fn load_catalog(st: &CpState, id: Uuid) -> Result<Option<CatalogRow>, CpError> {
+pub(crate) async fn load_catalog(st: &CpState, id: Uuid) -> Result<Option<CatalogRow>, CpError> {
     sqlx::query_as::<_, CatalogRow>(
         "SELECT name, warehouse_id FROM registry.catalogs WHERE id = $1",
     )
@@ -329,17 +329,20 @@ async fn load_catalog(st: &CpState, id: Uuid) -> Result<Option<CatalogRow>, CpEr
 }
 
 #[derive(sqlx::FromRow)]
-struct AttachedEngine {
-    id: Uuid,
-    name: String,
-    engine_type: String,
-    origin: String,
-    status: String,
+pub(crate) struct AttachedEngine {
+    pub(crate) id: Uuid,
+    pub(crate) name: String,
+    pub(crate) engine_type: String,
+    pub(crate) origin: String,
+    pub(crate) status: String,
     /// `spec.trinoConfig.delegationMode`; `None` when absent.
     delegation_mode: Option<String>,
 }
 
-async fn attached_engines(st: &CpState, catalog_id: Uuid) -> Result<Vec<AttachedEngine>, CpError> {
+pub(crate) async fn attached_engines(
+    st: &CpState,
+    catalog_id: Uuid,
+) -> Result<Vec<AttachedEngine>, CpError> {
     sqlx::query_as::<_, AttachedEngine>(
         "SELECT e.id, e.name, e.type AS engine_type, e.origin, e.status, \
                 e.spec->'trinoConfig'->>'delegationMode' AS delegation_mode \
@@ -459,7 +462,7 @@ fn names<'a>(engines: impl Iterator<Item = &'a AttachedEngine>) -> String {
 }
 
 /// Seconds as the page shows them: `15`, or `0.3` below a whole second.
-fn seconds(d: std::time::Duration) -> String {
+pub(crate) fn seconds(d: std::time::Duration) -> String {
     if d.subsec_millis() == 0 {
         d.as_secs().to_string()
     } else {
@@ -638,6 +641,6 @@ async fn read_warehouse(
         NotListedReason,
         ErrorBody
     )),
-    tags((name = "control-plane-governance", description = "Governance Data: browse a catalog (DG frontend redesign #1)")),
+    tags((name = "control-plane-governance", description = "Governance Data: browse a catalog and read an object's lineage (DG frontend redesign #1)")),
 )]
 pub struct ControlPlaneGovernanceBrowseApi;
