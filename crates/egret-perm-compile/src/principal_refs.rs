@@ -492,11 +492,17 @@ fn widens_access_when_empty(row: &ReportRow) -> bool {
 async fn classify_stored(conn: &mut PgConnection, p: &Principal) -> Result<Stored, PermHttpError> {
     match lookup(conn, p).await? {
         Lookup::Unknown(why) => Ok(Stored::Unresolved(why)),
-        Lookup::Found { canonical } if canonical != p.r#ref => Ok(Stored::Unresolved(format!(
+        // Users only: a username is named byte for byte, so a case variant
+        // names nobody. A non-canonical `workspace_members` spelling is not
+        // that — the compiler parses it into the same id
+        // (`crate::members::referenced_principals`) — so it resolves.
+        Lookup::Found { canonical } if p.kind == PrincipalKind::User && canonical != p.r#ref => {
+            Ok(Stored::Unresolved(format!(
             "this matches the username {canonical:?} only case-insensitively, and the compiled \
              policy names the ref byte-for-byte — an engine sees {canonical:?}, never this \
              spelling"
-        ))),
+            )))
+        }
         Lookup::Found { .. } if p.kind == PrincipalKind::Group && p.r#ref != PUBLIC_GROUP => {
             // The join `crate::members::expand_enumerated_principals` expands
             // a group through.
@@ -621,6 +627,45 @@ mod tests {
             .await
             .expect("resolve");
         assert_eq!(set.include.len(), 1);
+
+        // A non-canonical spelling already STORED still names the workspace
+        // the compiler expands: it resolves, it is not "unmatched".
+        for form in [
+            ws.to_string().to_uppercase(),
+            format!("{{{ws}}}"),
+            ws.urn().to_string(),
+        ] {
+            let stored = classify_stored(
+                &mut conn,
+                &Principal {
+                    kind: PrincipalKind::WorkspaceMembers,
+                    r#ref: form.clone(),
+                },
+            )
+            .await
+            .expect("classify");
+            assert!(matches!(stored, Stored::Resolves), "{form}");
+        }
+        // A user ref differing from the stored username in case still does not.
+        let username = format!("CanonUser{}", &slug[6..]);
+        sqlx::query(
+            "INSERT INTO users (provider, email, name, username) VALUES ('local', $1, $1, $2)",
+        )
+        .bind(format!("{}@egret.local", username.to_lowercase()))
+        .bind(username.to_lowercase())
+        .execute(&db.pool)
+        .await
+        .expect("user");
+        let stored = classify_stored(
+            &mut conn,
+            &Principal {
+                kind: PrincipalKind::User,
+                r#ref: username.clone(),
+            },
+        )
+        .await
+        .expect("classify");
+        assert!(matches!(stored, Stored::Unresolved(_)), "{username}");
     }
 
     fn user(r: &str) -> Principal {

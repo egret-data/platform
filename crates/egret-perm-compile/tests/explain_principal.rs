@@ -492,3 +492,26 @@ async fn the_route_is_gated_on_policy_read() {
     let (status, body) = explain_principal(&e, &e.reader, "group", &g).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }
+
+#[tokio::test]
+async fn a_group_of_people_with_no_username_is_answered_by_not_evaluated_alone() {
+    let Some(e) = env().await else { return };
+    let t = tag();
+    let p = &e.db.pool;
+    let u1 = insert_user(p, &format!("n1_{t}@x.local"), None).await;
+    let u2 = insert_user(p, &format!("n2_{t}@x.local"), None).await;
+    let g = format!("xn_{t}");
+    group_with(p, &g, &[u1, u2]).await;
+    let (status, body) = explain_principal(&e, &e.admin, "group", &g).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["membersTotal"], json!(2));
+    assert_eq!(body["truncated"], json!(false));
+    assert_eq!(body["evaluated"], json!([]));
+    let ids: Vec<Value> = body["notEvaluated"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["userId"].clone())
+        .collect();
+    assert_eq!(ids, vec![json!(u1), json!(u2)], "sorted by label");
+}

@@ -442,7 +442,13 @@ pub(super) async fn explain_principal(
         .iter()
         .map(|m| m.username.clone().unwrap_or_default())
         .collect();
-    let results = super::explain_users(&mut conn, &usernames, body.action, &body.target).await?;
+    // Nobody to evaluate: no artifact is read (a group of people with no
+    // username is answered by `notEvaluated` alone).
+    let results = if usernames.is_empty() {
+        Vec::new()
+    } else {
+        super::explain_users(&mut conn, &usernames, body.action, &body.target).await?
+    };
     let evaluated = named
         .into_iter()
         .zip(results)

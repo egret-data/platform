@@ -416,7 +416,6 @@ pub enum EngineClearance {
     /// Not excepted; `because` says why when they hold a required role in a
     /// way engines do not apply, or are in a required group (whose half of
     /// the gate engines never enforce).
-    /// way engines do not apply.
     NotCleared {
         because: Option<EngineNotClearedReason>,
     },
