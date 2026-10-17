@@ -9,7 +9,8 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { formatPrincipals, formatRuleKind } from "@/routes/governance/permFormat";
+import { useWorkspaceNames } from "@/routes/governance/openInData";
+import { formatPrincipals, formatRuleKind, type WorkspaceNames } from "@/routes/governance/permFormat";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { emptyLevel, KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
 import { ruleSelects, sameName, tagNamesOn } from "@/routes/governance/data/coverage";
@@ -276,6 +277,7 @@ function Columns({
 }) {
   const canReadRules = usePolicyPermissions()("policy:read");
   const rulesQ = usePermListRules({ query: { enabled: canReadRules, retry: false } });
+  const workspaceName = useWorkspaceNames(catalog);
   if (columns.length === 0) {
     const empty = emptyLevel(source, "columns");
     return <EmptyState icon={Columns3} title={empty.detail ? empty.title : "No columns returned"} description={empty.detail} />;
@@ -340,6 +342,7 @@ function Columns({
                       column={col.name}
                       rules={masks.filter((r) => selectsColumn(r, { ...path, column: col.name }, catalog.id, reach))}
                       tagRulesUnknown={reach.status === "error" && masks.some((r) => r.selector.type === "tag")}
+                      workspaceName={workspaceName}
                     />
                   )}
                 </TableCell>
@@ -381,7 +384,17 @@ function selectsColumn(r: RuleView, p: ObjectPath, catalogId: string, reach: Tag
   return ruleSelects(r, p, catalogId, names) !== null;
 }
 
-function ColumnMasks({ column, rules, tagRulesUnknown }: { column: string; rules: RuleView[]; tagRulesUnknown: boolean }) {
+function ColumnMasks({
+  column,
+  rules,
+  tagRulesUnknown,
+  workspaceName,
+}: {
+  column: string;
+  rules: RuleView[];
+  tagRulesUnknown: boolean;
+  workspaceName: WorkspaceNames;
+}) {
   const unknown = tagRulesUnknown ? <span className="text-xs text-muted-foreground">Tag rules not checked</span> : null;
   if (rules.length === 0) return unknown ?? <span className="text-muted-foreground">—</span>;
   const sorted = [...rules].sort((a, b) => a.name.localeCompare(b.name));
@@ -393,7 +406,7 @@ function ColumnMasks({ column, rules, tagRulesUnknown }: { column: string; rules
             {r.name}
             <span className="text-xs text-muted-foreground">
               {` ${formatRuleKind(r)}`}
-              {r.exempt.include.length > 0 ? ` · except ${formatPrincipals(r.exempt.include)}` : ""}
+              {r.exempt.include.length > 0 ? ` · except ${formatPrincipals(r.exempt.include, workspaceName)}` : ""}
             </span>
           </li>
         ))}

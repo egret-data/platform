@@ -13,7 +13,7 @@ import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AssignmentBadge } from "@/routes/governance/GrantDialog";
 import { useWorkspaceNames } from "@/routes/governance/openInData";
-import { grantSentence, type WorkspaceNames } from "@/routes/governance/permFormat";
+import { grantSentence } from "@/routes/governance/permFormat";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
 import { grantCoverage, insideGroup, insideName, patternLevels, type PatternLevel } from "@/routes/governance/data/coverage";
@@ -84,9 +84,7 @@ function Grants({
   const canRead = can("policy:read");
   const canWrite = can("policy:update");
   const grantsQ = usePermListGrants({ query: { enabled: canRead, retry: false } });
-  const knownWorkspace = useWorkspaceNames();
-  // This catalog's own workspaces first: they are known as soon as the page is.
-  const workspaceName: WorkspaceNames = (id) => catalog.workspaces.find((w) => w.id === id)?.name ?? knownWorkspace(id);
+  const workspaceName = useWorkspaceNames(catalog);
   const sentenceOf = (g: GrantView) => grantSentence(g, workspaceName);
 
   const queryClient = useQueryClient();

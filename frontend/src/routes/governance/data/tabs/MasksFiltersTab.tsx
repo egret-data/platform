@@ -11,7 +11,8 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
-import { formatPrincipals, formatRuleKind, formatSelector } from "@/routes/governance/permFormat";
+import { useWorkspaceNames } from "@/routes/governance/openInData";
+import { formatPrincipals, formatRuleKind, formatSelector, type WorkspaceNames } from "@/routes/governance/permFormat";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
 import {
@@ -33,6 +34,9 @@ import { ACTIONS_CELL, CatalogGate, Section, TabError } from "@/routes/governanc
  * module's bundle marker (`scripts/assert-governance-data-lazy.mjs`).
  */
 export const RULES_NEED_POLICY_READ = "Reading rules needs the policy:read permission, which this account does not have.";
+
+/** M1: what a schema or catalog page says, since it never lists a tag rule (see {@link MasksFiltersTab}). */
+export const TAG_RULES_ON_TABLES = "Tag-based rules are listed on each table's page.";
 
 const LEVEL_LABEL = { catalog: "Catalog", schema: "Schema", table: "Table" } as const;
 
@@ -58,7 +62,7 @@ const GROUPS: { id: Group; title: string; head?: string; mono?: boolean }[] = [
  * tag the object (or one of its columns) carries, or matching a pattern
  * (including a pattern below a schema or catalog, such as `table = "*"`).
  * A tag rule is listed on a table only: a schema or catalog page does not
- * read the tags of the tables inside it.
+ * read the tags of the tables inside it, and says so.
  *
  * F10: this lists the rules that select the object; it never says who sees
  * what. Only explain evaluates (an exemption, a clearance, a second rule).
@@ -77,7 +81,7 @@ const GROUPS: { id: Group; title: string; head?: string; mono?: boolean }[] = [
  * in a note, never silently dropped.
  *
  * Each row shows the rule's exemptions, so a rule never reads as applying to
- * everyone. Inside a group, masks come before row filters.
+ * everyone; a `workspace_members` exemption reads by the workspace's name. Inside a group, masks come before row filters.
  *
  * The rules come from `GET /perm/rules` (`policy:read`), filtered here (spec
  * §2.3, "Not new"). Add rule, Edit and Delete each need `policy:update`, the
@@ -118,6 +122,7 @@ function Rules({
   const canRead = can("policy:read");
   const canWrite = can("policy:update");
   const rulesQ = usePermListRules({ query: { enabled: canRead, retry: false } });
+  const workspaceName = useWorkspaceNames(catalog);
 
   const [dialog, setDialog] = useState<{ existing: RuleView | null } | null>(null);
   const [deleting, setDeleting] = useState<RuleView | null>(null);
@@ -160,6 +165,9 @@ function Rules({
     body = (
       <div className="space-y-6">
         {reach.status === "error" ? <TabError what="tags" onRetry={reach.retry} /> : null}
+        {target.object === undefined ? (
+          <p className="text-xs text-muted-foreground">{TAG_RULES_ON_TABLES}</p>
+        ) : null}
         {unresolved.length > 0 ? (
           <Alert>
             <AlertDescription>
@@ -191,6 +199,7 @@ function Rules({
                   rows={inGroup}
                   extra={head ? { head, mono: g.mono } : undefined}
                   canWrite={canWrite}
+                  workspaceName={workspaceName}
                   onEdit={(rule) => setDialog({ existing: rule })}
                   onDelete={setDeleting}
                 />
@@ -300,6 +309,7 @@ function RuleTable({
   rows,
   extra,
   canWrite,
+  workspaceName,
   onEdit,
   onDelete,
 }: {
@@ -307,6 +317,7 @@ function RuleTable({
   rows: Row[];
   extra?: { head: string; mono?: boolean };
   canWrite: boolean;
+  workspaceName: WorkspaceNames;
   onEdit: (r: RuleView) => void;
   onDelete: (r: RuleView) => void;
 }) {
@@ -338,7 +349,7 @@ function RuleTable({
             {extra ? <TableCell className={extra.mono ? "font-mono text-xs" : undefined}>{extraText}</TableCell> : null}
             <TableCell className="whitespace-normal break-words">
               {rule.exempt.include.length > 0 ? (
-                formatPrincipals(rule.exempt.include)
+                formatPrincipals(rule.exempt.include, workspaceName)
               ) : (
                 <span className="text-muted-foreground">—</span>
               )}

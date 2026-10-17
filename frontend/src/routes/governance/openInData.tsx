@@ -57,15 +57,19 @@ export function useCatalogNameById(): ReadonlyMap<string, string> {
 /**
  * A workspace's name by its id, from the workspaces the Governance catalog
  * list names (each catalog's assignments; one shared query). A workspace no
- * catalog is assigned to is not known (`undefined`).
+ * catalog is assigned to is not known (`undefined`). `first`, a catalog a page
+ * already holds, is asked before the list: its workspaces are known as soon
+ * as the page is.
  */
-export function useWorkspaceNames(): WorkspaceNames {
+export function useWorkspaceNames(first?: { workspaces: { id: string; name: string }[] }): WorkspaceNames {
   const q = useControlPlaneGovernanceListCatalogs({ query: { retry: false } });
+  const own = first?.workspaces;
   return useMemo(() => {
     const names = new Map<string, string>();
     if (q.data?.status === 200) for (const c of q.data.data) for (const w of c.workspaces) names.set(w.id, w.name);
+    for (const w of own ?? []) names.set(w.id, w.name);
     return (id: string) => names.get(id);
-  }, [q.data]);
+  }, [q.data, own]);
 }
 
 /** A quiet text link to a page; `title` says more when the link lands higher than the row's scope. */

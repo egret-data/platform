@@ -477,7 +477,10 @@ describe("OverviewTab", () => {
   });
 
   it("lists each column's masking rules by name and kind, by path or by tag, and says nothing of who sees what", async () => {
-    const exempted = { ...R.colPath, exempt: { include: [{ kind: "user" as const, ref: "bob" }], exclude: [] } };
+    const exempted = {
+      ...R.colPath,
+      exempt: { include: [{ kind: "user" as const, ref: "bob" }, { kind: "workspace_members" as const, ref: "w2" }], exclude: [] },
+    };
     serveData(fixture({ rules: ok(ALL_RULES.map((r) => (r === R.colPath ? exempted : r))) }));
     renderPage("/governance/data/ice/sales/orders");
     const columns = await within(panel()).findByRole("table", { name: "Columns" });
@@ -485,7 +488,7 @@ describe("OverviewTab", () => {
     const items = (list: HTMLElement) => within(list).getAllByRole("listitem").map((li) => li.textContent);
     // By name; a row filter never shows on a column; nothing from another table, catalog or tag.
     expect(items(email)).toEqual([
-      "hash_email mask · MASK_HASH · except user bob",
+      "hash_email mask · MASK_HASH · except user bob, members of workspace Sales",
       "null_sales mask · MASK_NULL",
       "redact_confidential mask · MASK",
       "redact_pii mask · MASK",
@@ -1089,6 +1092,8 @@ describe("MasksFiltersTab", () => {
     expect(rowsOf("Matching a pattern").map((r) => r[0])).toEqual(["star_ordersice.sales.“ord*”"]);
     expect(within(panel()).queryByText(/pg_mask|redact_/)).not.toBeInTheDocument();
     expect(tagCalls).toEqual([]);
+    // M1: and says where the tag rules are.
+    expect(within(panel()).getByText("Tag-based rules are listed on each table's page.")).toBeInTheDocument();
   });
 
   it("lists on a schema the rules on its tables and columns", async () => {
@@ -1100,6 +1105,17 @@ describe("MasksFiltersTab", () => {
       ["hash_emailice.sales.orders.email", "orders.email"],
       ["us_onlyice.sales.orders", "orders"],
     ]);
+    expect(within(panel()).getByText("Tag-based rules are listed on each table's page.")).toBeInTheDocument();
+  });
+
+  it("names a workspace exemption by the workspace's name", async () => {
+    const exempted = { ...R.tableFilter, exempt: { include: [{ kind: "workspace_members" as const, ref: "w1" }], exclude: [] } };
+    serveData(fixture({ rules: ok([exempted]) }));
+    renderPage("/governance/data/ice/sales/orders?tab=masks");
+    await within(panel()).findByRole("table", { name: "Here" });
+    expect(rowsOf("Here")).toEqual([["us_onlyice.sales.orders", "row filter · region = 'us'", "members of workspace Finance"]]);
+    // A table page lists its tag rules itself, so it does not point elsewhere.
+    expect(within(panel()).queryByText("Tag-based rules are listed on each table's page.")).not.toBeInTheDocument();
   });
 
   it("lists no tag rule on a table of a catalog that is not egret's, and never asks for its tags", async () => {

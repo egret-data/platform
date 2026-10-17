@@ -276,6 +276,7 @@ function TagList({ column, own, fromTable }: { column: string; own: ResourceTagD
 /** The mask rules that select the column, by path or by a tag it carries (its own or its table's). */
 function Masks({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceCatalog; tags: TagsResult }) {
   const rulesQ = usePermListRules({ query: { retry: false } });
+  const workspaceName = useWorkspaceNames(catalog);
   if (rulesQ.isError) return <TabError what="masking rules" onRetry={() => void rulesQ.refetch()} />;
   const reach = tagReach(path, catalog, tags);
   if (rulesQ.data?.status !== 200 || reach.status === "loading") return <ListSkeleton rows={2} cols={2} />;
@@ -308,7 +309,7 @@ function Masks({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceC
             <span className="text-xs text-muted-foreground">
               {` ${formatRuleKind(rule)} · `}
               {by === "path" ? "by path" : `by tag ${rule.tag_name ?? ""}`}
-              {rule.exempt.include.length > 0 ? ` · except ${formatPrincipals(rule.exempt.include)}` : ""}
+              {rule.exempt.include.length > 0 ? ` · except ${formatPrincipals(rule.exempt.include, workspaceName)}` : ""}
             </span>
           </li>
         ))}

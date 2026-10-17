@@ -212,6 +212,15 @@ describe("ColumnPanel", () => {
     expect(within(panel).queryByText(/can see|cannot see/i)).not.toBeInTheDocument();
   });
 
+  it("names a workspace exemption by the workspace's name", async () => {
+    const withWorkspace = { ...ICE, workspaces: [{ id: "w1", name: "Finance", slug: "finance" }] };
+    const exempted = { ...pathRule("hash_email", { schema: "sales", table: "orders", column: "email" }, HASH), exempt: { include: [{ kind: "workspace_members" as const, ref: "w1" }], exclude: [] } };
+    serveData(fixture({ catalogs: ok([PG, withWorkspace]), rules: ok([exempted]) }));
+    renderPage("/governance/data/ice/sales/orders?column=email");
+    const panel = await screen.findByRole("dialog", { name: "email" });
+    await waitFor(() => expect(items(panel, "Masking rules of email")).toEqual(["hash_email mask · MASK_HASH · by path · except members of workspace Finance"]));
+  });
+
   it("lists the grants set on the column, a pattern one marked, deny marked, and none from other columns", async () => {
     serveData(fixture());
     renderPage("/governance/data/ice/sales/orders?column=email");
