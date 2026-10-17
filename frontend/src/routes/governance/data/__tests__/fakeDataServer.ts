@@ -6,7 +6,8 @@ import type { BrowseResponse, GovernanceCatalog } from "@/api/generated/model";
  * `GET …/governance/browse/{catalog_id}?schema=&table=`, and an object's
  * `…/governance/tags/{catalog_id}` and `…/governance/lineage/{catalog_id}`
  * (both `?schema=&table=`), and the perm routes the Permissions tab and
- * `GrantDialog` call (`…/perm/grants`, `…/perm/grants/{id}`, `…/perm/preview`). Answers go
+ * `GrantDialog` call (`…/perm/grants`, `…/perm/grants/{id}`, `…/perm/preview`), and the rule
+ * routes the Masks & filters tab and `RuleDialog` call (`…/perm/rules`, `…/perm/rules/{id}`). Answers go
  * through the real generated client and `apiFetch`, so a test sees exactly
  * what the page sees, including a 403 as an `ApiError`.
  */
@@ -55,6 +56,10 @@ export interface FakeData {
   preview?: Answer;
   /** Every grant write (`POST …/perm/grants`, `PATCH`/`DELETE …/perm/grants/{id}`); default 200 `{}`. */
   grantWrite?: Answer;
+  /** `GET …/perm/rules`. A list is answered in order, its last answer repeating; none is a 404. */
+  rules?: Answer | Answer[];
+  /** Every rule write (`POST …/perm/rules`, `PATCH`/`DELETE …/perm/rules/{id}`); default 200 `{}`. */
+  ruleWrite?: Answer;
 }
 
 /** What the fake was asked, as keys of {@link FakeData}. */
@@ -115,7 +120,15 @@ export function serveData(data: FakeData): DataCalls {
           const a = data.grants;
           return reply(Array.isArray(a) ? a[Math.min(asked, a.length - 1)] : a);
         }
+        if (call === "GET /perm/rules") {
+          const asked = permCalls.filter((c) => c.call === call).length - 1;
+          const a = data.rules;
+          return reply(Array.isArray(a) ? a[Math.min(asked, a.length - 1)] : a);
+        }
         if (call === "POST /perm/preview") return reply(data.preview);
+        if (/^(POST \/perm\/rules|(PATCH|DELETE) \/perm\/rules\/[^/]+)$/.test(call)) {
+          return reply(data.ruleWrite ?? { status: 200, body: {} });
+        }
         if (/^(POST \/perm\/grants|(PATCH|DELETE) \/perm\/grants\/[^/]+)$/.test(call)) {
           return reply(data.grantWrite ?? { status: 200, body: {} });
         }

@@ -2,20 +2,26 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Columns3, Folder, Table2 } from "lucide-react";
 import { useControlPlaneGovernanceObjectLineage } from "@/api/generated/control-plane-governance/control-plane-governance";
-import type { BrowseResponse, GovernanceCatalog, ResourceTagDto, ViewLineageInfo } from "@/api/generated/model";
+import { usePermListRules } from "@/api/generated/perm/perm";
+import type { BrowseResponse, GovernanceCatalog, ResourceTagDto, RuleView, ViewLineageInfo } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { formatRuleKind } from "@/routes/governance/permFormat";
+import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
+import { ruleSelects, tagKeysOn } from "@/routes/governance/data/coverage";
 import {
   assignmentsOf,
   capitalise,
   engineTypeLabel,
   enginesOf,
+  tagReach,
   type BrowseResult,
   type CatalogState,
+  type TagReach,
   type TagsResult,
 } from "@/routes/governance/data/objectData";
 import { pathToUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
@@ -26,7 +32,7 @@ const byName = <T extends { name: string }>(a: T, b: T) => a.name.localeCompare(
 /**
  * An object's Overview tab (spec §2.2): a catalog's schemas, attached engines
  * and workspaces; a schema's tables and views; a table's columns with their
- * type and tags, plus, for a view or materialized view, its security mode,
+ * type, tags and the masking rules that select them, plus, for a view or materialized view, its security mode,
  * whether its owner is cleared and its lineage state.
  *
  * Each read has its own loading, empty and error state; a level browse could
@@ -61,7 +67,15 @@ export function OverviewTab({
             ) : null}
             <Section title="Columns">
               <Level browse={browse} what="columns">
-                {(body) => <Columns columns={body.columns ?? []} tags={tags} taggable={c.warehouseId != null} />}
+                {(body) => (
+                  <Columns
+                    path={path}
+                    catalog={c}
+                    columns={body.columns ?? []}
+                    tags={tags}
+                    taggable={c.warehouseId != null}
+                  />
+                )}
               </Level>
             </Section>
           </div>
@@ -221,30 +235,49 @@ function ObjectList({ path, items }: { path: ObjectPath; items: NonNullable<Brow
  * table" (a column inherits its table's tags). It is left out when the
  * catalog cannot carry tags (`taggable` false: not an egret catalog, whose
  * tags the page never asks for), and says so when the tags could not be read.
+ *
+ * The Masking rules column (shown with `policy:read`, which `GET /perm/rules`
+ * needs) lists each column's mask rules by name and kind: those whose path
+ * selects the column, and those whose tag the column carries itself or
+ * through its table (`ruleSelects`, `tagKeysOn`). F10: which rules select a
+ * column, never who sees what; only explain evaluates.
  */
 function Columns({
+  path,
+  catalog,
   columns,
   tags,
   taggable,
 }: {
+  path: ObjectPath;
+  catalog: GovernanceCatalog;
   columns: NonNullable<BrowseResponse["columns"]>;
   tags: TagsResult;
   taggable: boolean;
 }) {
+  const canReadRules = usePolicyPermissions()("policy:read");
+  const rulesQ = usePermListRules({ query: { enabled: canReadRules, retry: false } });
   if (columns.length === 0) return <EmptyState icon={Columns3} title="No columns returned" />;
   const assignments = assignmentsOf(tags);
   const showTags = taggable && assignments !== null;
   const onTable = (assignments ?? []).filter((a) => a.column === "");
   const onColumn = (name: string) => (assignments ?? []).filter((a) => a.column === name);
+  const masks =
+    rulesQ.data?.status === 200 ? rulesQ.data.data.filter((r) => r.kind.type === "mask") : undefined;
+  const reach = tagReach(path, catalog, tags);
   return (
     <div className="space-y-2">
       {showTags && tags.isError ? <TabError what="tags" onRetry={() => void tags.refetch()} /> : null}
+      {canReadRules && rulesQ.isError ? (
+        <TabError what="masking rules" onRetry={() => void rulesQ.refetch()} />
+      ) : null}
       <Table aria-label="Columns">
         <TableHeader>
           <TableRow>
             <TableHead>Name</TableHead>
             <TableHead>Type</TableHead>
             {showTags ? <TableHead>Tags</TableHead> : null}
+            {canReadRules ? <TableHead>Masking rules</TableHead> : null}
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -262,6 +295,21 @@ function Columns({
                     )
                   ) : (
                     <ColumnTags column={col.name} own={onColumn(col.name)} inherited={onTable} />
+                  )}
+                </TableCell>
+              ) : null}
+              {canReadRules ? (
+                <TableCell className="whitespace-normal">
+                  {rulesQ.isError ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : masks === undefined || reach.status === "loading" ? (
+                    <span className="sr-only">Loading masking rules</span>
+                  ) : (
+                    <ColumnMasks
+                      column={col.name}
+                      rules={masks.filter((r) => selectsColumn(r, { ...path, column: col.name }, catalog.id, reach))}
+                      tagRulesUnknown={reach.status === "error" && masks.some((r) => r.selector.type === "tag")}
+                    />
                   )}
                 </TableCell>
               ) : null}
@@ -293,6 +341,31 @@ function ColumnTags({ column, own, inherited }: { column: string; own: ResourceT
         </li>
       ))}
     </ul>
+  );
+}
+
+/** Whether mask rule `r` selects the column `p`, with the tags it can find there. */
+function selectsColumn(r: RuleView, p: ObjectPath, catalogId: string, reach: TagReach): boolean {
+  const keys = reach.status === "ok" ? tagKeysOn(reach.assignments, p) : [];
+  return ruleSelects(r, p, catalogId, keys) !== null;
+}
+
+function ColumnMasks({ column, rules, tagRulesUnknown }: { column: string; rules: RuleView[]; tagRulesUnknown: boolean }) {
+  const unknown = tagRulesUnknown ? <span className="text-xs text-muted-foreground">Tag rules not checked</span> : null;
+  if (rules.length === 0) return unknown ?? <span className="text-muted-foreground">—</span>;
+  const sorted = [...rules].sort((a, b) => a.name.localeCompare(b.name));
+  return (
+    <div className="space-y-1">
+      <ul aria-label={`Masking rules of ${column}`} className="space-y-0.5">
+        {sorted.map((r) => (
+          <li key={r.id} className="text-sm break-words">
+            {r.name}
+            <span className="text-xs text-muted-foreground">{` ${formatRuleKind(r)}`}</span>
+          </li>
+        ))}
+      </ul>
+      {unknown}
+    </div>
   );
 }
 

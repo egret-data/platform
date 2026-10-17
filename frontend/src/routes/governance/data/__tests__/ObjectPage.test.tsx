@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Me } from "@/api/hooks";
-import type { BrowseResponse, GrantView, ObjectLineage, ObjectTags, Scope } from "@/api/generated/model";
+import type { BrowseResponse, GrantView, ObjectLineage, ObjectTags, RuleView, Scope } from "@/api/generated/model";
 import { AuthContext } from "@/auth/useAuth";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import DataRoutes from "@/routes/governance/data/DataRoutes";
@@ -86,6 +86,53 @@ const V_ORDERS_LINEAGE: ObjectLineage = {
 const ok = (body: unknown) => ({ status: 200, body });
 const boom = { status: 500, body: { error: "internal error" } };
 
+function pathRule(id: string, scope: Omit<Scope, "catalog_id">, kind: RuleView["kind"], catalogId = "c-ice"): RuleView {
+  return {
+    id,
+    name: id,
+    kind,
+    selector: { type: "path", catalog_id: catalogId, ...scope },
+    exempt: { include: [], exclude: [] },
+    catalog_name: catalogId === "c-ice" ? "ice" : "pg",
+  };
+}
+function tagRule(id: string, key: string, kind: RuleView["kind"]): RuleView {
+  return { id, name: id, kind, selector: { type: "tag", key }, exempt: { include: [], exclude: [] }, tag_name: key.toUpperCase() };
+}
+const HASH = { type: "mask", mask_type: "MASK_HASH" } as const;
+const NULLIFY = { type: "mask", mask_type: "MASK_NULL" } as const;
+const REDACT = { type: "mask", mask_type: "MASK" } as const;
+const US_ONLY = { type: "row_filter", filter_expr: "region = 'us'" } as const;
+
+/** Rules around `ice.sales.orders` (tags: CONFIDENTIAL on the table, PII on `email`). Unsorted on purpose. */
+const R = {
+  colPath: pathRule("hash_email", { schema: "sales", table: "orders", column: "email" }, HASH),
+  tableFilter: pathRule("us_only", { schema: "sales", table: "orders" }, US_ONLY),
+  schemaMask: pathRule("null_sales", { schema: "sales" }, NULLIFY),
+  catalogFilter: pathRule("ice_filter", {}, US_ONLY),
+  pattern: pathRule("star_orders", { schema: "sales", table: "ord*" }, REDACT),
+  tagOnColumn: tagRule("redact_pii", "pii", REDACT),
+  tagOnTable: tagRule("redact_confidential", "confidential", REDACT),
+  // PII is on a column only: a row filter is a table request, and a column's tag does not reach up to it.
+  tagFilterOnColumn: tagRule("pii_filter", "pii", US_ONLY),
+  otherTable: pathRule("hash_customers", { schema: "sales", table: "customers", column: "email" }, HASH),
+  otherCatalog: pathRule("pg_mask", { schema: "sales", table: "orders", column: "email" }, HASH, "c-pg"),
+  otherTag: tagRule("redact_secret", "secret", REDACT),
+};
+const ALL_RULES = [
+  R.tagOnColumn,
+  R.otherTable,
+  R.colPath,
+  R.tagFilterOnColumn,
+  R.schemaMask,
+  R.otherCatalog,
+  R.pattern,
+  R.tableFilter,
+  R.otherTag,
+  R.tagOnTable,
+  R.catalogFilter,
+];
+
 function fixture(over: Partial<FakeData> = {}): FakeData {
   return {
     catalogs: ok([PG, ICE]),
@@ -107,6 +154,7 @@ function fixture(over: Partial<FakeData> = {}): FakeData {
       "c-ice|sales|v_orders": ok(V_ORDERS_LINEAGE),
       "c-ice|sales|mv_daily": ok({ readers: [], view: null }),
     },
+    rules: ok([]),
     ...over,
   };
 }
@@ -423,6 +471,58 @@ describe("OverviewTab", () => {
     expect(emailTags.map((li) => li.textContent)).toEqual(["PII", "CONFIDENTIAL from table"]);
     const idTags = within(within(rows[0]).getByRole("list", { name: "Tags of id" })).getAllByRole("listitem");
     expect(idTags.map((li) => li.textContent)).toEqual(["CONFIDENTIAL from table"]);
+  });
+
+  it("lists each column's masking rules by name and kind, by path or by tag, and says nothing of who sees what", async () => {
+    serveData(fixture({ rules: ok(ALL_RULES) }));
+    renderPage("/governance/data/ice/sales/orders");
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    const email = await within(columns).findByRole("list", { name: "Masking rules of email" });
+    const items = (list: HTMLElement) => within(list).getAllByRole("listitem").map((li) => li.textContent);
+    // By name; a row filter never shows on a column; nothing from another table, catalog or tag.
+    expect(items(email)).toEqual([
+      "hash_email mask · MASK_HASH",
+      "null_sales mask · MASK_NULL",
+      "redact_confidential mask · MASK",
+      "redact_pii mask · MASK",
+      "star_orders mask · MASK",
+    ]);
+    // `id` carries only the table's tag, which reaches it.
+    expect(items(within(columns).getByRole("list", { name: "Masking rules of id" }))).toEqual([
+      "null_sales mask · MASK_NULL",
+      "redact_confidential mask · MASK",
+      "star_orders mask · MASK",
+    ]);
+    expect(within(panel()).queryByText(/sees|can see|masked for/i)).not.toBeInTheDocument();
+  });
+
+  it("matches only path rules on a catalog that is not egret's, and never asks for its tags", async () => {
+    const { tagCalls } = serveData(
+      fixture({
+        browse: { ...fixture().browse, "c-pg|public": ok(browseItems([{ name: "orders", kind: "table" }])), "c-pg|public|orders": ok(ORDERS_COLUMNS) },
+        rules: ok([pathRule("pg_mask", { schema: "public", table: "orders", column: "email" }, HASH, "c-pg"), R.tagOnTable]),
+      }),
+    );
+    renderPage("/governance/data/pg/public/orders");
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    const email = await within(columns).findByRole("list", { name: "Masking rules of email" });
+    expect(within(email).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["pg_mask mask · MASK_HASH"]);
+    expect(tagCalls).toEqual([]);
+  });
+
+  it("says the masking rules could not be loaded, and keeps the columns", async () => {
+    serveData(fixture({ rules: boom }));
+    renderPage("/governance/data/ice/sales/orders");
+    expect(await within(panel()).findByText("The masking rules could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
+    expect(within(panel()).getByRole("table", { name: "Columns" })).toBeInTheDocument();
+  });
+
+  it("shows no masking rules without policy:read, and never asks for them", async () => {
+    const { permCalls } = serveData(fixture({ rules: ok(ALL_RULES) }));
+    renderPage("/governance/data/ice/sales/orders", { ...STEWARD, permissions: ["tag:read"] });
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    expect(within(columns).queryByRole("columnheader", { name: "Masking rules" })).not.toBeInTheDocument();
+    expect(permCalls).toEqual([]);
   });
 
   it("shows a view's security mode, whether its owner is cleared, and its lineage state", async () => {
@@ -806,5 +906,164 @@ describe("PermissionsTab", () => {
     await within(panel()).findByRole("table", { name: "Here" });
     expect(rowsOf("Here")[0][0]).toBe("role analyst can read ice.sales.orders");
     expect(permCalls.filter((c) => c.call === "GET /perm/grants")).toHaveLength(2);
+  });
+});
+
+describe("MasksFiltersTab", () => {
+  const EDITOR: Me = { ...STEWARD, permissions: ["policy:read", "policy:update"] };
+  const rowsOf = (name: string) =>
+    within(within(panel()).getByRole("table", { name }))
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) => within(r).getAllByRole("cell").map((c) => c.textContent));
+
+  it("lists the masks and row filters that select a table, grouped by how they reach it", async () => {
+    const { permCalls } = serveData(fixture({ rules: ok(ALL_RULES) }));
+    renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
+    await within(panel()).findByRole("table", { name: "Here" });
+
+    expect(within(panel()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual([
+      "Here",
+      "Inherited",
+      "On columns",
+      "By tag",
+      "Matching a pattern",
+    ]);
+    expect(rowsOf("Here")).toEqual([["us_onlyice.sales.orders", "row filter · region = 'us'", ""]]);
+    // Catalog before schema.
+    expect(rowsOf("Inherited")).toEqual([
+      ["ice_filterice.*", "row filter · region = 'us'", "Catalog", ""],
+      ["null_salesice.sales.*", "mask · MASK_NULL", "Schema", ""],
+    ]);
+    expect(rowsOf("On columns")).toEqual([["hash_emailice.sales.orders.email", "mask · MASK_HASH", "email", ""]]);
+    // A tag on the table reaches the table; a mask by a column's tag reaches that column; a row filter by it reaches nothing.
+    expect(rowsOf("By tag")).toEqual([
+      ["redact_confidentialtag CONFIDENTIAL", "mask · MASK", "On the table", ""],
+      ["redact_piitag PII", "mask · MASK", "On column email", ""],
+    ]);
+    expect(rowsOf("Matching a pattern")).toEqual([["star_ordersice.sales.“ord*”", "mask · MASK", "table “ord*”", ""]]);
+    expect(within(panel()).queryByText(/pii_filter|hash_customers|pg_mask|redact_secret/)).not.toBeInTheDocument();
+    expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/rules"]);
+  });
+
+  it("lists only the rules on a catalog itself, and no tag rule", async () => {
+    const { tagCalls } = serveData(fixture({ rules: ok(ALL_RULES) }));
+    renderPage("/governance/data/ice?tab=masks", EDITOR);
+    await within(panel()).findByRole("table", { name: "Here" });
+    expect(rowsOf("Here").map((r) => r[0])).toEqual(["ice_filterice.*"]);
+    expect(within(panel()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual(["Here"]);
+    expect(tagCalls).toEqual([]);
+  });
+
+  it("lists no tag rule on a table of a catalog that is not egret's, and never asks for its tags", async () => {
+    const { tagCalls } = serveData(
+      fixture({
+        browse: { ...fixture().browse, "c-pg|public": ok(browseItems([{ name: "orders", kind: "table" }])), "c-pg|public|orders": ok(ORDERS_COLUMNS) },
+        rules: ok([pathRule("pg_filter", { schema: "public", table: "orders" }, US_ONLY, "c-pg"), R.tagOnTable]),
+      }),
+    );
+    renderPage("/governance/data/pg/public/orders?tab=masks", EDITOR);
+    await within(panel()).findByRole("table", { name: "Here" });
+    expect(rowsOf("Here").map((r) => r[0])).toEqual(["pg_filterpg.public.orders"]);
+    expect(within(panel()).queryByRole("table", { name: "By tag" })).not.toBeInTheDocument();
+    expect(tagCalls).toEqual([]);
+  });
+
+  it("says no rule selects the object", async () => {
+    serveData(fixture({ rules: ok([R.otherTable, R.otherCatalog, R.otherTag]) }));
+    renderPage("/governance/data/ice/sales/orders?tab=masks");
+    expect(await within(panel()).findByText("No mask or row filter selects this table")).toBeInTheDocument();
+  });
+
+  it("says the rules could not be loaded, never that there are none", async () => {
+    serveData(fixture({ rules: boom }));
+    renderPage("/governance/data/ice/sales/orders?tab=masks");
+    expect(await within(panel()).findByText("The rules could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
+    expect(within(panel()).queryByText(/No mask or row filter/)).not.toBeInTheDocument();
+  });
+
+  it("says the tags could not be loaded, and still lists the path rules", async () => {
+    serveData(fixture({ rules: ok(ALL_RULES), tags: { "c-ice|sales|orders": boom } }));
+    renderPage("/governance/data/ice/sales/orders?tab=masks");
+    expect(await within(panel()).findByText("The tags could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
+    expect(within(panel()).getByRole("table", { name: "Here" })).toBeInTheDocument();
+    expect(within(panel()).queryByRole("table", { name: "By tag" })).not.toBeInTheDocument();
+  });
+
+  it("tells a viewer without policy:read why, and never asks for the rules", async () => {
+    const { permCalls } = serveData(fixture({ rules: ok(ALL_RULES) }));
+    renderPage("/governance/data/ice/sales/orders?tab=masks", { ...STEWARD, permissions: ["tag:read"] });
+    expect(
+      await within(panel()).findByText("Reading rules needs the policy:read permission, which this account does not have."),
+    ).toBeInTheDocument();
+    expect(permCalls).toEqual([]);
+  });
+
+  it("offers no Add rule, Edit or Delete without policy:update", async () => {
+    serveData(fixture({ rules: ok(ALL_RULES) }));
+    renderPage("/governance/data/ice/sales/orders?tab=masks");
+    await within(panel()).findByRole("table", { name: "Here" });
+    expect(within(panel()).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("opens Add rule in RuleDialog with a path selector for this object", async () => {
+    serveData(fixture({ rules: ok([]) }));
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
+    await user.click(await within(panel()).findByRole("button", { name: "Add rule" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("heading", { name: "New rule" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("combobox", { name: "Selects by" })).toHaveTextContent("Path");
+    await waitFor(() => expect(within(dialog).getByRole("combobox", { name: "Catalog" })).toHaveTextContent("ice"));
+    expect(within(dialog).getByLabelText("Schema")).toHaveValue("sales");
+    expect(within(dialog).getByLabelText("Table")).toHaveValue("orders");
+    expect(within(dialog).getByText("Selects ice.sales.orders")).toBeInTheDocument();
+  });
+
+  it("edits a rule in RuleDialog", async () => {
+    serveData(fixture({ rules: ok([R.tableFilter]) }));
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
+    await user.click(await within(panel()).findByRole("button", { name: "Edit us_only" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("heading", { name: "Edit rule" })).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Name")).toHaveValue("us_only");
+  });
+
+  it("deletes a rule after confirmation, then refetches the tab and confirms", async () => {
+    const { permCalls } = serveData(fixture({ rules: [ok([R.tableFilter]), ok([])] }));
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
+    await user.click(await within(panel()).findByRole("button", { name: "Delete us_only" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await user.type(within(dialog).getByRole("textbox"), "delete");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    expect(await within(panel()).findByText("No mask or row filter selects this table")).toBeInTheDocument();
+    expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/rules", "DELETE /perm/rules/us_only", "GET /perm/rules"]);
+    expect(toast.success).toHaveBeenCalledWith("Rule deleted.");
+  });
+
+  it("says how far a pattern rule reaches before deleting it", async () => {
+    serveData(fixture({ rules: ok([R.pattern]) }));
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
+    await user.click(await within(panel()).findByRole("button", { name: "Delete star_orders" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/This rule selects every table matching “ord\*”, not one object\./)).toBeInTheDocument();
+  });
+
+  it("shows a refused delete's reason and keeps the rule", async () => {
+    serveData(fixture({ rules: ok([R.tableFilter]), ruleWrite: { status: 403, body: { error: "forbidden" } } }));
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
+    await user.click(await within(panel()).findByRole("button", { name: "Delete us_only" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await user.type(within(dialog).getByRole("textbox"), "delete");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith("This account cannot do that: it needs the policy:update permission."),
+    );
+    expect(within(panel()).getByRole("table", { name: "Here" })).toBeInTheDocument();
   });
 });

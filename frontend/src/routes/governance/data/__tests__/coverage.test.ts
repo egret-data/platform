@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Grant, Scope } from "@/api/generated/model";
-import { globMatch, grantCoverage, patternLevels } from "@/routes/governance/data/coverage";
+import type { Grant, ResourceTagDto, Rule, Scope } from "@/api/generated/model";
+import { globMatch, grantCoverage, patternLevels, ruleSelects, tagKeysOn } from "@/routes/governance/data/coverage";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
 
 const CAT = "c-ice";
@@ -118,5 +118,88 @@ describe("patternLevels", () => {
       { level: "schema", value: "sal*" },
       { level: "table", value: "order?" },
     ]);
+  });
+});
+
+function rule(selector: Rule["selector"], kind: Rule["kind"] = { type: "mask", mask_type: "MASK_HASH" }): Rule {
+  return { id: "r", name: "r", kind, selector, exempt: { include: [], exclude: [] } };
+}
+const pathRule = (scope: Omit<Scope, "catalog_id">, catalogId = CAT) => rule({ type: "path", catalog_id: catalogId, ...scope });
+const tagRule = (key: string, kind?: Rule["kind"]) => rule({ type: "tag", key }, kind);
+
+describe("ruleSelects", () => {
+  // A path selector selects p when it is set at p's level or above (egret-perm `selector_hits` → `covers`).
+  it.each([
+    ["catalog", {}, CATALOG, "path"],
+    ["catalog", {}, SCHEMA, "path"],
+    ["catalog", {}, TABLE, "path"],
+    ["catalog", {}, COLUMN, "path"],
+    ["schema", { schema: "sales" }, CATALOG, null],
+    ["schema", { schema: "sales" }, SCHEMA, "path"],
+    ["schema", { schema: "sales" }, COLUMN, "path"],
+    ["table", { schema: "sales", table: "orders" }, SCHEMA, null],
+    ["table", { schema: "sales", table: "orders" }, TABLE, "path"],
+    ["table", { schema: "sales", table: "orders" }, COLUMN, "path"],
+    ["column", { schema: "sales", table: "orders", column: "email" }, TABLE, null],
+    ["column", { schema: "sales", table: "orders", column: "email" }, COLUMN, "path"],
+    ["another column", { schema: "sales", table: "orders", column: "id" }, COLUMN, null],
+    ["a pattern table", { schema: "sales", table: "ord*" }, COLUMN, "path"],
+    ["a pattern that misses", { schema: "sales", table: "cust*" }, TABLE, null],
+  ] as const)("a %s path rule at %j", (_what, scope, p, expected) => {
+    expect(ruleSelects(pathRule(scope), p, CAT, [])).toBe(expected);
+  });
+
+  it("a path rule in another catalog selects nothing", () => {
+    for (const p of [CATALOG, SCHEMA, TABLE, COLUMN]) {
+      expect(ruleSelects(pathRule({}, "c-other"), p, CAT, [])).toBeNull();
+      expect(ruleSelects(pathRule({ schema: "sales", table: "orders" }, "c-other"), p, CAT, [])).toBeNull();
+    }
+  });
+
+  it("a tag rule selects a table or a column whose resolved tags carry its key", () => {
+    expect(ruleSelects(tagRule("pii"), COLUMN, CAT, ["pii"])).toBe("tag");
+    expect(ruleSelects(tagRule("pii"), TABLE, CAT, ["confidential", "pii"])).toBe("tag");
+    expect(ruleSelects(tagRule("pii"), COLUMN, CAT, ["confidential"])).toBeNull();
+  });
+
+  it("a tag rule never selects a catalog or a schema, which cannot carry a tag", () => {
+    expect(ruleSelects(tagRule("pii"), CATALOG, CAT, ["pii"])).toBeNull();
+    expect(ruleSelects(tagRule("pii"), SCHEMA, CAT, ["pii"])).toBeNull();
+  });
+
+  it("a tag rule matches the tag's key, never its name", () => {
+    expect(ruleSelects(tagRule("pii"), COLUMN, CAT, ["PII"])).toBeNull();
+  });
+});
+
+describe("tagKeysOn", () => {
+  const a = (column: string, key: string, table = "orders", schema = "sales"): ResourceTagDto => ({
+    schema,
+    table,
+    column,
+    tag: { id: `t-${key}`, key, name: key.toUpperCase(), description: "", color: "#000", assignment_count: 0, created_at: "" },
+  });
+  const ASSIGNMENTS = [a("email", "pii"), a("", "confidential"), a("id", "key"), a("", "other", "customers")];
+
+  it("gives a column its own tags and its table's (the table's reach it as an ancestor)", () => {
+    expect(tagKeysOn(ASSIGNMENTS, COLUMN).sort()).toEqual(["confidential", "pii"]);
+  });
+
+  it("gives a table only its own tags: a column's tag does not reach up to its table", () => {
+    expect(tagKeysOn(ASSIGNMENTS, TABLE)).toEqual(["confidential"]);
+  });
+
+  it("gives a catalog or a schema no tags", () => {
+    expect(tagKeysOn(ASSIGNMENTS, CATALOG)).toEqual([]);
+    expect(tagKeysOn(ASSIGNMENTS, SCHEMA)).toEqual([]);
+  });
+
+  it("matches the column, table and schema without regard to case, as egret resolves them", () => {
+    const upper = [a("EMAIL", "pii", "ORDERS", "Sales")];
+    expect(tagKeysOn(upper, COLUMN)).toEqual(["pii"]);
+  });
+
+  it("puts a tag reached at both levels in once", () => {
+    expect(tagKeysOn([a("email", "pii"), a("", "pii")], COLUMN)).toEqual(["pii"]);
   });
 });

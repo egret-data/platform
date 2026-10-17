@@ -1,20 +1,20 @@
 import { useState } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import {
   useControlPlaneGovernanceBrowse,
   useControlPlaneGovernanceListCatalogs,
   useControlPlaneGovernanceObjectTags,
 } from "@/api/generated/control-plane-governance/control-plane-governance";
-import type { GrantView, Scope } from "@/api/generated/model";
+import type { GrantView } from "@/api/generated/model";
 import { GrantDialog } from "@/routes/governance/GrantDialog";
-import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import type { NodeKind } from "@/routes/governance/data/CatalogTree";
 import { ObjectHeader, type HeaderKind, type HeaderTags } from "@/routes/governance/data/ObjectHeader";
 import { ObjectTabs, type ObjectLevel } from "@/routes/governance/data/ObjectTabs";
-import { assignmentsOf, enginesOf, type CatalogState, type ObjectKind, type TagsResult } from "@/routes/governance/data/objectData";
-import { urlToPath, type ObjectPath } from "@/routes/governance/data/objectPath";
+import { assignmentsOf, enginesOf, scopeOf, type CatalogState, type ObjectKind, type TagsResult } from "@/routes/governance/data/objectData";
+import { urlToPath } from "@/routes/governance/data/objectPath";
 import { DetailsTab } from "@/routes/governance/data/tabs/DetailsTab";
 import { OverviewTab } from "@/routes/governance/data/tabs/OverviewTab";
+import { MasksFiltersTab } from "@/routes/governance/data/tabs/MasksFiltersTab";
 import { PermissionsTab } from "@/routes/governance/data/tabs/PermissionsTab";
 
 const OBJECT_KINDS: readonly string[] = ["table", "view", "materialized_view"] satisfies ObjectKind[];
@@ -111,7 +111,7 @@ export default function ObjectPage() {
               onEdit={(existing) => setGrantDialog({ existing })}
             />
           ),
-          masks: <ElsewhereNote what="mask and row-filter rules" to="/governance/mask-filter-rules" page="Mask & filter rules" />,
+          masks: <MasksFiltersTab path={path} kind={kind} catalog={catalog} tags={tags} />,
           lineage: <p className="text-sm text-muted-foreground">Lineage is not shown on this page yet.</p>,
           details: <DetailsTab path={path} catalog={catalog} />,
         }}
@@ -128,16 +128,6 @@ export default function ObjectPage() {
   );
 }
 
-/** The grant scope that names exactly this object (never its column). */
-function scopeOf(path: ObjectPath, catalogId: string): Scope {
-  const scope: Scope = { catalog_id: catalogId };
-  if (path.schema !== undefined) {
-    scope.schema = path.schema;
-    if (path.object !== undefined) scope.table = path.object;
-  }
-  return scope;
-}
-
 /** The header's tag section: only an object in an egret catalog has one (tags are table and column only). */
 function headerTags(level: ObjectLevel, catalog: CatalogState, tags: TagsResult): HeaderTags {
   if (level !== "object") return null;
@@ -148,25 +138,4 @@ function headerTags(level: ObjectLevel, catalog: CatalogState, tags: TagsResult)
   if (assignments === null) return null;
   if (assignments === undefined) return { state: "loading" };
   return { state: "ok", tags: assignments.filter((a) => a.column === "").map((a) => a.tag) };
-}
-
-/**
- * A tab whose list still lives on its own Governance page. The link shows
- * only to a viewer who can open that page (`policy:read`).
- */
-function ElsewhereNote({ what, to, page }: { what: string; to: string; page: string }) {
-  const can = usePolicyPermissions();
-  return (
-    <p className="text-sm text-muted-foreground">
-      {`The ${what} that reach this object are not listed on this page yet.`}
-      {can("policy:read") ? (
-        <>
-          {" "}
-          <Link to={to} className="text-foreground underline underline-offset-2 hover:no-underline">
-            {`Open ${page}`}
-          </Link>
-        </>
-      ) : null}
-    </p>
-  );
 }

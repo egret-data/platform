@@ -431,3 +431,44 @@ describe("RuleDialog — it resolves the catalog's name itself (review M-6)", ()
     expect(screen.queryByText(/Selects cat-1/)).not.toBeInTheDocument();
   });
 });
+
+describe("RuleDialog — initialSelector seeds a new rule's selector", () => {
+  test("a path selector opens on Path with the scope filled in, and is sent as given", async () => {
+    const user = userEvent.setup();
+    renderDialog({ initialSelector: { type: "path", catalog_id: "cat-1", schema: "sales", table: "orders" } });
+
+    expect(screen.getByRole("combobox", { name: "Selects by" })).toHaveTextContent("Path");
+    expect(JSON.parse(screen.getByTestId("scope-value").textContent ?? "")).toEqual({
+      catalog_id: "cat-1",
+      schema: "sales",
+      table: "orders",
+    });
+    expect(screen.getByText(/Selects wh\.sales\.orders/)).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Name"), "mask-orders");
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+    expect(previewMutateAsync.mock.calls[0][0].data.rule.selector).toEqual({
+      type: "path",
+      catalog_id: "cat-1",
+      schema: "sales",
+      table: "orders",
+    });
+  });
+
+  test("an existing rule's selector wins over initialSelector", () => {
+    renderDialog({
+      existing: {
+        id: "r1",
+        name: "mask-ssn",
+        kind: { type: "mask", mask_type: "MASK_HASH" },
+        selector: { type: "tag", key: "pii_v2" },
+        exempt: { include: [], exclude: [] },
+      },
+      initialSelector: { type: "path", catalog_id: "cat-1", schema: "sales" },
+    });
+
+    expect(screen.getByRole("combobox", { name: "Selects by" })).toHaveTextContent("Tag");
+    expect(screen.getByText("PII Data")).toBeInTheDocument();
+  });
+});
