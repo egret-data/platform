@@ -331,7 +331,7 @@ impl GroupRepo {
 
         let mut held = HeldGroupLocks::default();
         let mut passes = 0;
-        let moved: Vec<String> = loop {
+        let (moved, claimed) = loop {
             let before: Vec<(String, String)> = sqlx::query_as(
                 "SELECT g.name, g.source FROM user_groups ug \
                  JOIN groups g ON g.id = ug.group_id WHERE ug.user_id = $1",
@@ -352,14 +352,14 @@ impl GroupRepo {
                 .iter()
                 .filter(|(_, source)| source != "oidc")
                 .map(|(n, _)| n.clone())
-                .chain(claimed)
+                .chain(claimed.iter().cloned())
                 .collect();
             let moved: Vec<String> = before_set
                 .symmetric_difference(&after_set)
                 .cloned()
                 .collect();
             if !held.cover(&mut tx, &moved).await? {
-                break moved;
+                break (moved, claimed);
             }
             passes += 1;
             if passes >= MAX_LOCK_PASSES {
@@ -381,7 +381,14 @@ impl GroupRepo {
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
-        for name in names {
+        // Only the names the final pass resolved to a group (J-F3 final review
+        // I2), never the raw claim: every one of them the user did not already
+        // hold is in `moved`, so it is locked above and recompiled below. A
+        // claimed name whose group was created after that read is not joined
+        // now — nothing naming it was locked or recompiled, so a deny or an
+        // allow's exclude on it would keep compiling to nobody while it had a
+        // member. The next login, which sees the group, joins it properly.
+        for name in &claimed {
             sqlx::query(
                 "INSERT INTO user_groups (user_id, group_id) \
                  SELECT $1, id FROM groups WHERE name = $2 \

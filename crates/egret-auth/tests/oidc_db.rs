@@ -264,3 +264,101 @@ async fn a_login_recompiles_only_the_groups_it_moved() {
         "dropping b and gaining c moves exactly those two"
     );
 }
+
+/// Creates `late` (on its own connection, committed) the moment the sync asks
+/// for its locks — after the sync read which claimed names name a group, and
+/// before its INSERT. Records the names it was asked to lock.
+struct CreatesGroupMidSync {
+    pool: sqlx::PgPool,
+    late: String,
+    locked: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl egret_auth::groups::GroupMembershipRecompiler for CreatesGroupMidSync {
+    async fn lock_affected_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        group_names: &[String],
+    ) -> egret_core::Result<Vec<i64>> {
+        self.locked
+            .lock()
+            .unwrap()
+            .extend(group_names.iter().cloned());
+        sqlx::query("INSERT INTO groups (name, source) VALUES ($1, 'oidc')")
+            .bind(&self.late)
+            .execute(&self.pool)
+            .await
+            .expect("create the late group");
+        Ok(Vec::new())
+    }
+
+    async fn recompile_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        _service_ids: &[i64],
+    ) -> egret_core::Result<()> {
+        Ok(())
+    }
+}
+
+/// J-F3 final review I2: the sync must insert only the memberships it locked
+/// and recompiles. A claimed name whose group is created after the sync read
+/// the claimed set — so it was never locked and nothing naming it was
+/// recompiled — must not become a membership; a stored deny or allow-exclude
+/// naming it would otherwise keep compiling to nobody while it has a member.
+/// The next login, which sees the group, adds it with a lock and a recompile.
+#[tokio::test]
+async fn a_group_created_mid_sync_is_not_joined_without_its_lock() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let users = UserRepo::new(db.clone());
+    let groups = GroupRepo::new(db.clone());
+    let id = users
+        .insert_oidc(&uniq("sub"), &format!("{}@idp.local", uniq("u")), "T")
+        .await
+        .unwrap();
+    let known = uniq("g");
+    groups.upsert_oidc_group(&known).await.unwrap();
+    let late = uniq("late");
+    let rc = CreatesGroupMidSync {
+        pool: db.pool.clone(),
+        late: late.clone(),
+        locked: std::sync::Mutex::new(Vec::new()),
+    };
+
+    groups
+        .sync_user_oidc_groups(id, &[known.clone(), late.clone()], &rc)
+        .await
+        .unwrap();
+
+    let held: Vec<String> = sqlx::query_scalar(
+        "SELECT g.name FROM user_groups ug JOIN groups g ON g.id = ug.group_id \
+          WHERE ug.user_id = $1 ORDER BY g.name",
+    )
+    .bind(id.0)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let locked = rc.locked.lock().unwrap().clone();
+    assert_eq!(
+        locked,
+        vec![known.clone()],
+        "only the known group was locked"
+    );
+    assert_eq!(held, vec![known], "every membership inserted was locked");
+
+    // The next login sees the group: joined, and locked first.
+    let rc2 = Recorder::default();
+    groups
+        .sync_user_oidc_groups(id, &[late.clone()], &rc2)
+        .await
+        .unwrap();
+    let calls = rc2.take();
+    assert!(
+        matches!(calls.first(), Some(Call::Lock(names)) if names.contains(&late)),
+        "{calls:?}"
+    );
+}
