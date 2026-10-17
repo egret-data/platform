@@ -9,10 +9,10 @@
 export type WorkflowKillExecutionParams = {
 /**
  * Also kill the execution's child executions -- its `Loop` iterations
- * and its `Subflow` children, recursively (default `true`, as Kestra's
- * `isOnKillCascade`). A replay of it, or an execution a Flow trigger
- * fired on it, is not a child. With `false`, the children run on, and
- * what they report when they end changes nothing in the killed parent.
+ * and its `Subflow` children, recursively (default `true`). A replay of
+ * it, or an execution a Flow trigger fired on it, is not a child. With
+ * `false`, the children run on, and what they report when they end
+ * changes nothing in the killed parent.
  * @nullable
  */
 cascade?: boolean | null;

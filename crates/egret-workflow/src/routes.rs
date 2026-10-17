@@ -2977,10 +2977,10 @@ async fn replay_execution(
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 pub struct KillQuery {
     /// Also kill the execution's child executions -- its `Loop` iterations
-    /// and its `Subflow` children, recursively (default `true`, as Kestra's
-    /// `isOnKillCascade`). A replay of it, or an execution a Flow trigger
-    /// fired on it, is not a child. With `false`, the children run on, and
-    /// what they report when they end changes nothing in the killed parent.
+    /// and its `Subflow` children, recursively (default `true`). A replay of
+    /// it, or an execution a Flow trigger fired on it, is not a child. With
+    /// `false`, the children run on, and what they report when they end
+    /// changes nothing in the killed parent.
     pub cascade: Option<bool>,
 }
 
@@ -3039,18 +3039,23 @@ impl axum::response::IntoResponse for KillError {
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
-/// Kill an execution (workflow kill spec §3).
+/// Kill an execution that has not ended.
 ///
-/// The terminal check is made twice, as resume's is: here off the scoped
-/// read (so a foreign id never reaches the worker, and the common refusal is
-/// cheap), and again by [`worker::kill_execution`](crate::worker::kill_execution)
-/// under the execution's lock, which decides the race with a worker ending it.
+/// Tasks waiting, retrying, paused or not yet started end `KILLED` at once; a
+/// task a worker is running is stopped by that worker, and the execution is
+/// `KILLING` until it has. With `cascade` (the default) its `Loop` iterations
+/// and `Subflow` child executions are killed the same way.
 async fn kill_execution(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
     Query(q): Query<KillQuery>,
 ) -> std::result::Result<(StatusCode, Json<ExecutionDto>), KillError> {
+    // Workflow kill spec §3. The terminal check is made twice, as resume's
+    // is: here off the scoped read (so a foreign id never reaches the worker,
+    // and the common refusal is cheap), and again by
+    // `worker::kill_execution` under the execution's lock, which decides the
+    // race with a worker ending it.
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
     let before = st.executions.get(ctx.workspace_id.0, id).await?;
     // An unknown spelling is not called terminal: the worker's `load` refuses

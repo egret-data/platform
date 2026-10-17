@@ -1094,11 +1094,11 @@ export const getWorkflowKillExecutionUrl = (workspace: string,
 }
 
 /**
- * The terminal check is made twice, as resume's is: here off the scoped
- * read (so a foreign id never reaches the worker, and the common refusal is
- * cheap), and again by [`worker::kill_execution`](crate::worker::kill_execution)
- * under the execution's lock, which decides the race with a worker ending it.
- * @summary Kill an execution (workflow kill spec §3).
+ * Tasks waiting, retrying, paused or not yet started end `KILLED` at once; a
+ * task a worker is running is stopped by that worker, and the execution is
+ * `KILLING` until it has. With `cascade` (the default) its `Loop` iterations
+ * and `Subflow` child executions are killed the same way.
+ * @summary Kill an execution that has not ended.
  */
 export const workflowKillExecution = async (workspace: string,
     id: string,
@@ -1149,7 +1149,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type WorkflowKillExecutionMutationError = ErrorBody
 
     /**
- * @summary Kill an execution (workflow kill spec §3).
+ * @summary Kill an execution that has not ended.
  */
 export const useWorkflowKillExecution = <TError = ErrorBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowKillExecution>>, TError,{workspace: string;id: string;params?: WorkflowKillExecutionParams}, TContext>, request?: SecondParameter<typeof customInstance>}

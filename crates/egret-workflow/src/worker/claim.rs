@@ -2862,10 +2862,10 @@ pub(super) struct Frame<'a> {
     /// Settles this one has started and not yet run, in order.
     jobs: VecDeque<Job>,
     phase: Phase,
-    /// This settle's own `advance()` moved the execution into `KILLING` or
-    /// `KILLED` -- an `Exit` with `state: KILLED`, never the kill route,
-    /// which applies `KILLING` before the settle -- so its live child
-    /// executions are killed too ([`Phase::Cascade`]).
+    /// An `Exit` with `state: KILLED` decided in this settle's `drive`
+    /// ([`exit_kills`]) -- never the kill route, which kills the children
+    /// itself, and never a `KILLED` reached by aggregation -- so the
+    /// execution's live child executions are killed too ([`Phase::Cascade`]).
     kill_children: bool,
 }
 
@@ -3219,8 +3219,8 @@ async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result
 
 /// Steps 1-2 of a settle: the render scope, the SLA, `drive`, `persist` and
 /// the render side. Starts no settle. Returns the surface, what `drive`
-/// asked to spawn, and whether `drive` itself killed the execution
-/// ([`Frame::kill_children`]).
+/// asked to spawn, and whether an `Exit` with `state: KILLED` killed the
+/// execution in `drive` ([`Frame::kill_children`]).
 async fn begin(
     conn: &mut PgConnection,
     ctx: &ExecutionCtx,
@@ -3292,10 +3292,8 @@ async fn begin(
     // failed WITH a message, and a file `Loop`'s values -- written after the
     // state `persist` writes and BEFORE `spawn::open_batch`, which reads the values.
     let mut side = render::RenderSide::default();
-    let killing = |s: Option<&RunState>| matches!(s, Some(RunState::Killing | RunState::Killed));
-    let was_killing = killing(state.history.last());
-    let (spawns, subflows) = drive(ctx, &surface, state, now, &mut marks, &mut seq, &mut side)?;
-    let killed = !was_killing && killing(state.history.last());
+    let (spawns, subflows, killed) =
+        drive(ctx, &surface, state, now, &mut marks, &mut seq, &mut side)?;
     // W7b Task 1: the attempt ends this settle produced, stamped into the state
     // `persist` serialises, so they ride the same UPDATE as the terminal state.
     stamps::stamp_attempt_ends(before, state, now);
@@ -4432,14 +4430,16 @@ fn drive(
     marks: &mut Marks,
     seq: &mut i64,
     side: &mut render::RenderSide,
-) -> Result<(Vec<Requested>, Vec<subflow::Requested>)> {
+) -> Result<(Vec<Requested>, Vec<subflow::Requested>, bool)> {
     let plan = &ctx.plan;
     let mut spawns = Vec::new();
     let mut subflows = Vec::new();
+    let mut exit_killed = false;
     for _ in 0..MAX_ROUNDS {
         let snapshot = state.clone();
         let cmds = advance(plan, state, now);
         if !cmds.is_empty() {
+            exit_killed |= exit_kills(plan, state, &cmds);
             note_create_beside_a_created_sibling(state, &cmds);
             *seq += 1;
             for cmd in &cmds {
@@ -4469,9 +4469,29 @@ fn drive(
             continue;
         }
 
-        return Ok((spawns, subflows));
+        return Ok((spawns, subflows, exit_killed));
     }
     Err(worker_err(WorkerError::NoFixedPoint(ctx.id)))
+}
+
+/// **This round is an `Exit` with `state: KILLED` deciding** (`exit::kill`):
+/// it sets the `Exit` run itself `KILLED` while the execution is not yet
+/// being killed. Nothing else does: `advance_killing` runs only once the
+/// execution is `KILLING`, and an execution that reaches `KILLED` by plain
+/// aggregation -- a flowable over a `KILLED` child, such as a `Subflow` run
+/// whose child was killed -- sets no `Exit` run. So the cascade
+/// ([`Frame::kill_children`]) follows the `Exit`, not the state, as Kestra's
+/// kill event does: a natural `KILLED` end kills no child.
+fn exit_kills(plan: &Plan, state: &ExecutionState, cmds: &[Command]) -> bool {
+    !matches!(
+        state.history.last(),
+        Some(RunState::Killing | RunState::Killed)
+    ) && cmds.iter().any(|c| {
+        matches!(c, Command::SetRunState { run, state: RunState::Killed }
+        if state.runs.get(*run).is_some_and(|r| {
+            matches!(plan.tasks[r.task].kind, TaskKind::Exit { .. })
+        }))
+    })
 }
 
 /// The `Err` the test-only caller-owned wrappers ([`apply_outcome`],

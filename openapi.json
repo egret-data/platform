@@ -29242,8 +29242,8 @@
         "tags": [
           "workflow"
         ],
-        "summary": "Kill an execution (workflow kill spec §3).",
-        "description": "The terminal check is made twice, as resume's is: here off the scoped\nread (so a foreign id never reaches the worker, and the common refusal is\ncheap), and again by [`worker::kill_execution`](crate::worker::kill_execution)\nunder the execution's lock, which decides the race with a worker ending it.",
+        "summary": "Kill an execution that has not ended.",
+        "description": "Tasks waiting, retrying, paused or not yet started end `KILLED` at once; a\ntask a worker is running is stopped by that worker, and the execution is\n`KILLING` until it has. With `cascade` (the default) its `Loop` iterations\nand `Subflow` child executions are killed the same way.",
         "operationId": "kill_execution",
         "parameters": [
           {
@@ -29268,7 +29268,7 @@
           {
             "name": "cascade",
             "in": "query",
-            "description": "Also kill the execution's child executions -- its `Loop` iterations\nand its `Subflow` children, recursively (default `true`, as Kestra's\n`isOnKillCascade`). A replay of it, or an execution a Flow trigger\nfired on it, is not a child. With `false`, the children run on, and\nwhat they report when they end changes nothing in the killed parent.",
+            "description": "Also kill the execution's child executions -- its `Loop` iterations\nand its `Subflow` children, recursively (default `true`). A replay of\nit, or an execution a Flow trigger fired on it, is not a child. With\n`false`, the children run on, and what they report when they end\nchanges nothing in the killed parent.",
             "required": false,
             "schema": {
               "type": [

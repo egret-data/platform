@@ -1349,6 +1349,7 @@ fn renders_at(plan: &Plan, task: usize) -> RunState {
     }
 }
 
+/// Keeps the `sqlx::Error` as the source (see `spawn`'s).
 fn db_err(e: sqlx::Error) -> egret_core::Error {
-    egret_core::Error::Internal(anyhow::anyhow!("{e}"))
+    egret_core::Error::Internal(anyhow::Error::new(e))
 }

@@ -675,3 +675,118 @@ async fn an_exit_killed_kills_its_subflow_child(pool: sqlx::PgPool) {
     assert_eq!(exec_state(&pool, child).await, "KILLING");
     assert_eq!(run_row(&pool, child, "a").await.0, "KILLING");
 }
+
+// ── Fix round 1: the cascade follows the Exit, not the state ───────────────
+
+/// The `Subflow` child of `parent` started by its run of task `task_id`.
+async fn child_of_task(pool: &sqlx::PgPool, parent: Uuid, task_id: &str) -> Uuid {
+    sqlx::query_scalar(
+        "SELECT e.id FROM workflow.executions e \
+           JOIN workflow.task_runs r \
+             ON r.execution_id = e.trigger_execution_id AND r.run_ix = e.trigger_run_ix \
+          WHERE e.trigger_execution_id = $1 AND r.task_id = $2",
+    )
+    .bind(parent)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| panic!("the child of {task_id}: {e}"))
+}
+
+/// **An execution that ends `KILLED` by aggregation kills no child**: its
+/// `Subflow` child was killed on its own, the report made the `Subflow` run
+/// `KILLED` and the `Parallel` over it `KILLED`, and the parent ended
+/// `KILLED` -- with no `Exit` and no kill of the parent. Its other child, a
+/// `wait: false` one nobody asked to stop, runs on (Kestra cascades a kill
+/// event, not a natural `KILLED` end).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_parent_killed_by_aggregation_kills_no_other_child(pool: sqlx::PgPool) {
+    let (db, ws, user, app) = setup(&pool).await;
+    file_flow(&db, ws, user, &one_log("child")).await;
+    file_flow(&db, ws, user, &one_log("detached")).await;
+    let source = "id: agg\nnamespace: t\ntasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n\
+         \x20     - id: waits\n        type: io.kestra.plugin.core.flow.Subflow\n        namespace: t\n\
+         \x20       flowId: child\n\
+         \x20     - id: fire\n        type: io.kestra.plugin.core.flow.Subflow\n        namespace: t\n\
+         \x20       flowId: detached\n        wait: false\n";
+    let parent = start(&pool, ws, source).await;
+    let waited = child_of_task(&pool, parent, "waits").await;
+    let detached = child_of_task(&pool, parent, "fire").await;
+    assert_eq!(run_row(&pool, parent, "fire").await.0, "SUCCESS");
+
+    assert_eq!(kill(&app, ws, waited, "", user).await.status(), 202);
+    assert_eq!(exec_state(&pool, waited).await, "KILLED");
+    // The scenario: the parent reached KILLED by aggregation alone.
+    assert_eq!(run_row(&pool, parent, "waits").await.0, "KILLED");
+    assert_eq!(exec_state(&pool, parent).await, "KILLED");
+
+    assert_eq!(exec_state(&pool, detached).await, "RUNNING");
+    assert_eq!(run_row(&pool, detached, "a").await.0, "RUNNING");
+}
+
+/// A registry whose handlers succeed and whose `cancel` stops nothing and
+/// says so: what finishing a claimed `KILLING` run needs.
+struct StopsCleanly;
+
+#[async_trait::async_trait]
+impl egret_workflow::worker::Registry for StopsCleanly {
+    async fn run(
+        &self,
+        _task: &egret_workflow::worker::TaskInput,
+    ) -> egret_core::Result<egret_workflow::worker::Outcome> {
+        Ok(egret_workflow::worker::Outcome::success())
+    }
+    async fn cancel(&self, _task: &egret_workflow::worker::TaskInput) -> egret_core::Result<()> {
+        Ok(())
+    }
+}
+
+/// **The settle that closes an already-`KILLING` execution does not
+/// cascade**: a `cascade=false` kill leaves the parent `KILLING` over a leased
+/// leaf and its `wait: false` child running; the claim of the abandoned
+/// `KILLING` run finishes it and the parent ends `KILLED`, and the child is
+/// still running.
+#[sqlx::test(migrations = "../../migrations")]
+async fn closing_a_killing_execution_does_not_cascade(pool: sqlx::PgPool) {
+    let (db, ws, user, app) = setup(&pool).await;
+    file_flow(&db, ws, user, &one_log("detached")).await;
+    let source = "id: closing\nnamespace: t\ntasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n\
+         \x20     - id: a\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n\
+         \x20     - id: fire\n        type: io.kestra.plugin.core.flow.Subflow\n        namespace: t\n\
+         \x20       flowId: detached\n        wait: false\n";
+    let parent = start(&pool, ws, source).await;
+    let detached = child_of_task(&pool, parent, "fire").await;
+    // Both leaves leased: the parent's `a` and the child's `a`.
+    assert_eq!(
+        egret_workflow::worker::claim(&pool, 10)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    assert_eq!(
+        kill(&app, ws, parent, "?cascade=false", user)
+            .await
+            .status(),
+        202
+    );
+    assert_eq!(exec_state(&pool, parent).await, "KILLING");
+    // Its worker is gone: the lease is given back, as the reaper would.
+    sqlx::query(
+        "UPDATE workflow.task_runs SET claimed_at = NULL \
+          WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(parent)
+    .execute(&pool)
+    .await
+    .unwrap();
+    egret_workflow::worker::tick(&pool, 10, &StopsCleanly)
+        .await
+        .expect("the claim finishes the kill");
+
+    assert_eq!(run_row(&pool, parent, "a").await.0, "KILLED");
+    assert_eq!(exec_state(&pool, parent).await, "KILLED");
+    assert_eq!(exec_state(&pool, detached).await, "RUNNING");
+    assert_eq!(run_row(&pool, detached, "a").await.0, "RUNNING");
+}
