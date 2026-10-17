@@ -42,12 +42,16 @@
 //! claimed). Both cases end the same way, by two different doors: if a worker
 //! holds the run, that worker sees `KILLING` and stops it (spec §4.2, plan
 //! Task 4); if nobody holds it, the next claim takes the `KILLING` row,
-//! cancels and writes `KILLED` (spec §4.3, plan Task 5). **Until Task 5
-//! lands, an unclaimed sibling is not finished and the execution stays
-//! `KILLING`**: the claim does not yet take `KILLING` rows, and
-//! `advance_killing` never writes a leaf. That is the spec's path for an
-//! unclaimed `KILLING` run, not a separate one, so no DB behaviour is added
-//! here (kill-and-exit Task 3 fix round 1, the coordinator's ruling).
+//! cancels and writes `KILLED` (spec §4.3, plan Task 5). The execution
+//! stays `KILLING` until that claim commits, because `advance_killing` never
+//! writes a leaf. That is the spec's path for an unclaimed `KILLING` run, not
+//! a separate one, so no DB behaviour is added here (kill-and-exit Task 3 fix
+//! round 1, the coordinator's ruling).
+//!
+//! **A `KILLED` exit also kills the execution's child executions** (`Subflow`
+//! and loop children), as Kestra's `isOnKillCascade(true)` does: `claim`'s
+//! settle sees this round set an `Exit` run `KILLED` (`claim::exit_kills`)
+//! and runs the kill route's cascade (`worker::kill::cascade`, plan Task 6).
 //!
 //! # Any other state leaves the siblings alone (D5)
 //!
@@ -189,8 +193,9 @@ fn end_with(state: &ExecutionState, run: RunIx, s: RunState) -> Vec<Command> {
 ///
 /// A sibling `Runnable` this state calls running becomes `KILLING` whether or
 /// not a worker holds it: a holder stops it (plan Task 4), and an unheld one
-/// is finished by the next claim (plan Task 5). Until Task 5 lands, the
-/// unheld case leaves the execution `KILLING`.
+/// is finished by the next claim, which takes a `KILLING` run only to cancel
+/// it and record `KILLED` (plan Task 5, `claim::finish_claimed_kill`). The
+/// execution stays `KILLING` until then.
 fn kill(plan: &Plan, state: &ExecutionState, run: RunIx) -> Vec<Command> {
     let line = line(state, run);
     let mut cmds: Vec<Command> = line

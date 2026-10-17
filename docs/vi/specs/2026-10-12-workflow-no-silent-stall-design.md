@@ -49,7 +49,7 @@ Dấu vết duy nhất là một `warn` mỗi chu kỳ trong log server. UI củ
 ## 2. Gói này không làm gì
 
 - Không chạy `AllowFailure`, `WorkingDirectory`, `LoopUntil` có cận là biểu thức, hay sáu type chưa nối dây. Mỗi cái vẫn là một quyết định riêng: `AllowFailure` cần một state `WARNING` mà `RunState` không chứa được, và `WorkingDirectory` giao cả một cây con cho một worker.
-- Không thêm route kill. §5 kết thúc các execution đang kẹt hiện có; route kill vẫn là việc nối tiếp.
+- Không thêm route kill. §5 kết thúc các execution đang kẹt hiện có; route kill vẫn là việc nối tiếp. *(Ghi chú, 2026-10-18: route kill sau đó đã được ship; xem `docs/{en,vi}/specs/2026-10-17-workflow-kill-and-exit-design.md`.)*
 - Không thêm code frontend. Các code mới đến editor qua báo cáo validation và tab Problems hiện có, và schema mất các type không được phục vụ qua bộ lọc hiện có.
 
 ## 3. Từ chối tĩnh (không phụ thuộc deployment, trong `validate_for_run`)

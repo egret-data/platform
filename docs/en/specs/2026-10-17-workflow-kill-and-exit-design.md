@@ -1,6 +1,11 @@
 # Workflow follow-ups, group B: kill an execution, and the `Exit` task
 
-**Status:** designed 2026-10-17, not built. Every claim about egret's code was checked in the worktree `egret-kill` at `6e995c1f` (main, after #686) and is cited `path:line` from `crates/egret-workflow/src/` unless another root is given. Kestra is the checkout at `data-portal/kestra`; its paths are relative to it.
+**Status:** built and verified 2026-10-18 on `feat/workflow-kill-exit` (plan Tasks 1-8; dated notes below record where the build differs from this design).
+- **Oracle ratchet** (`cargo test -p egret-workflow --test executor`): before, 104 mismatching and 104 baselined; after, 100 mismatching and 100 baselined; 0 broken in both. The refused set went from 45 to 41. The four `valids/exit*` entries (`exit`, `exit-cancelled`, `exit-killed`, `exit-nested`) are banked and removed from `oracle-exec/baseline.txt`; no other entry moved. `golden.json` was not edited.
+- **Live, Docker** (`tests/container_docker_live.rs`, each case run alone): the kill of a running `sleep 600` container took 2.00 s, with `KILLED` committed about 0.75 s after the kill was written. The kill whose worker dies took 3.05 s; the second worker finished the kill about 0.3 s after the reaper freed the lease.
+- **Mutations** (in `worker/claim.rs::end_kill`): with the cancel removed, the live cases go RED (the `taskRunner.delete: false` case on the daemon, "still running"). With the release removed, the live cases still pass, because on Docker the cancel has already removed the container (§4.2 note); the release on the kill path is pinned by the non-daemon worker tests (`tests/worker.rs`'s `KillRecorder`, `claim.rs` unit tests).
+
+**Designed** 2026-10-17. Every claim about egret's code was checked in the worktree `egret-kill` at `6e995c1f` (main, after #686) and is cited `path:line` from `crates/egret-workflow/src/` unless another root is given. Kestra is the checkout at `data-portal/kestra`; its paths are relative to it.
 
 **Programme spec:** `docs/{en,vi}/specs/2026-09-01-workflow-programme-design.md` §9 (W7's "kill/restart" left out of W7; W8's execution-level kill never shipped).
 
@@ -42,19 +47,26 @@
 ### 3.1 Contract
 
 `POST /api/v1/workspaces/{ws}/workflows/executions/{id}/kill?cascade=true|false` (default `true`).
+
+*Note, 2026-10-18:* the route as built is `POST /api/ws/{workspace}/workflows/executions/{id}/kill`, the prefix every workflow route has (`routes.rs`), as the plan's Global Constraints say.
 - `202` with the execution DTO: it is now `KILLING`, or `KILLED` if nothing was running.
 - `404` if the execution is not in the workspace; `409 execution_terminated` if it is terminal (D3).
 - `WF_MANAGE` (D4). utoipa-documented, regenerated into the frontend client with `npm run gen:api`.
 
 ### 3.2 One transaction
 
-Lock the execution row (`FOR UPDATE`), then, for the execution and, with `cascade`, every descendant execution reached through `workflow.executions.parent_execution_id` (`migrations/0135_workflow_loop_sub_executions.sql:21`) and the subflow parent link (the plan names its column after reading `worker/subflow.rs`):
+Lock the execution row (`FOR UPDATE`), then, for the execution and, with `cascade`, every descendant execution, recursively, that is a loop child (`parent_execution_id = <parent>` AND `parent_run_ix IS NOT NULL`, `migrations/0135_workflow_loop_sub_executions.sql:21`) or a subflow child (`trigger_execution_id = <parent>` AND `trigger_run_ix IS NOT NULL`, migration 0138). A replay (`parent_run_ix` NULL) and an execution a Flow trigger fired (`trigger_run_ix` NULL) are not children:
 1. A non-terminal leaf run that is **leased** (`claimed_at IS NOT NULL`, state `RUNNING`) → `KILLING`. `claimed_at` is left as it is.
 2. A non-terminal leaf run that is **not leased** (waiting to be claimed, `RETRYING`, `PAUSED`, `CREATED`) → `KILLED`, with `ended_at`.
 3. A non-terminal flowable run is left to `advance()` (§5).
 4. The execution → `KILLING`. If step 1 changed nothing, `advance()` closes it on the next tick; the route also runs one `advance()` in the same transaction so a kill with nothing running returns `KILLED` at once.
 
-Executions are locked parent first, then children in id order, to avoid deadlocking against a concurrent kill of a child.
+Executions are locked the execution first, then its descendants by depth and then by id (`worker/kill.rs`, "Lock order"). Depth first is what keeps a kill of a parent and a concurrent kill of a child in one order. One deadlock this order cannot remove: a child that ends inside a worker's transaction locks child, then parent. Postgres aborts one side, and the kill re-runs its transaction up to 3 times on `40P01` (`deadlock_detected`).
+
+*Note, 2026-10-18 (corrections):*
+- *The subflow link.* This section first left the subflow column for the plan to name, and the plan's Global Constraints named `execution_trigger->>'type' = 'io.kestra.plugin.core.flow.Subflow'` AND `execution_trigger->'variables'->>'executionId' = <parent>`. That matches no row: `subflow::spawn_one` writes `trigger_execution_id` / `trigger_run_ix` and leaves `execution_trigger` NULL (that column is written only by the webhook and the scheduler). The predicate above is the one built (plan Task 6), and it is the link `subflow::trigger_of` reads on completion.
+- *Lock order.* This section first said "parent first, then children in id order". Pure id order can deadlock: a kill of a parent could hold a low-id descendant of a child while waiting for that child. The order and the retry above are what was built.
+- *Step 2* also covers every `Subflow` run, which is `KILLED` by the kill and does not wait for a worker; its child execution is killed by the cascade.
 
 ## 4. The worker stops the handler
 
@@ -67,10 +79,16 @@ Executions are locked parent first, then children in id order, to avoid deadlock
 
 `under_lease_with` (`worker/claim.rs:1769`) gets a third wake-up beside the renewal and the deadline: every `kill_poll_ms`, `SELECT state, claimed_at FROM workflow.task_runs WHERE id = $1`. If the row is `KILLING` with this worker's `claimed_at`:
 1. the handler future is dropped;
-2. `handler.cancel(task, grace)` is called, the same call the timeout path makes (`worker/cancel.rs`, `worker/timeout.rs`), with the configured grace (`workflow.plugin_host.kill_grace_s` for plugin tasks, the container grace for containers);
+2. the handler's `cancel` is called (`cancel::kill`), the same call the timeout path makes (`worker/cancel.rs`, `worker/timeout.rs`). The kill passes no grace: each handler applies its own inside `cancel`, `workflow.plugin_host.kill_grace_s` for a plugin task and zero for a script task (`handlers/script.rs`);
 3. the run is written `KILLED` (with `ended_at`, the attempt closed) `WHERE id = $1 AND claimed_at = $held AND state = 'KILLING'`, and `advance()` runs in the same transaction, as `apply_outcome` does.
 
 A handler whose `cancel` returns `Err` (`handlers/sql.rs`) is still written `KILLED` after the drop; the error goes to `tracing`, as the timeout path does (`worker/cancel.rs`, fact 2).
+
+Once `KILLED` has committed, the worker calls `Registry::release`, as after any committed outcome. A kill whose commit is `LeaseLost` releases nothing.
+
+*Note, 2026-10-18 (corrections):*
+- *No grace parameter.* This section first wrote `handler.cancel(task, grace)` with "the container grace for containers". The built `finish_kill(pool, claimed, held, reg, task)` takes no grace, and a script task's container is cancelled with grace zero, as W5a's cancel always was.
+- *A killed container is removed, `taskRunner.delete: false` included.* On Docker, `DockerRunner::cancel` is `docker rm --force` (after `docker stop -t <grace>` when the grace is not zero, which is the plugin host's case). The Kubernetes runner's cancel deletes the pod. `delete: false` is read only by `release`, which runs after the cancel and finds nothing left. So a killed `delete: false` container is not kept for inspection. This is existing W5a behaviour, unchanged by the kill. Whether a killed `delete: false` container should be kept is an open product question.
 
 A renewal that fails because the state is no longer `RUNNING` is not a lost lease: the worker reads the state and takes the kill path above instead of `Leased::Lost` (which drops the handler with no cancel on purpose, `worker/claim.rs:1715-1721`).
 
@@ -94,6 +112,12 @@ A renewal that fails because the state is no longer `RUNNING` is not a lost leas
 - `state` is a property that may be templated; it is rendered with the run's render context. A value outside the five is a run failure naming the value.
 
 The refusal of `Exit` (`executor/mod.rs:4235-4250`, the four `valids/exit*` entries) is removed.
+
+*Note, 2026-10-18 (as built, measured against the golden):* `KILLED` does not go through `KILLING` when nothing else is live. `oracle-exec/golden.json`'s `valids/exit-killed` reads `CREATED RUNNING KILLED` for the execution and for the `If`, with no `KILLING`, and the `Exit` run is `KILLED` too. Histories are compared exactly, so the first bullet above would not bank. The built shape is Kestra's own (`ExecutorService.handleExecutionUpdatingTasks`, then `ExecutionService.killParentTaskruns`; `executor/exit.rs`):
+- With nothing else live, the `Exit` run, its ancestors and the execution are set `KILLED` at once, with no `KILLING` step.
+- With a live sibling, the `Exit` run and its ancestors are `KILLED`, the execution goes `KILLING`, and the `Exit` does the kill route's leaf steps itself, because no route ran: a running `Runnable` goes `KILLING`, every other live leaf goes `KILLED`. Flowables are left to §5.
+- `Exit(KILLED)` also kills the execution's child executions (subflow and loop children), as Kestra's `isOnKillCascade(true)` does. `claim::exit_kills` sees the round that set an `Exit` run `KILLED` and runs the kill route's cascade (`worker::kill::cascade`, plan Task 6).
+- An `Exit` inside a `WorkingDirectory` is refused at validate with `working_directory_child_not_runnable`.
 
 ## 7. Frontend (W7b's execution page)
 

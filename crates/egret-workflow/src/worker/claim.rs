@@ -1671,8 +1671,8 @@ async fn run_one(
 /// `KILLED`.
 ///
 /// No lease renewal runs here: `cancel` is bounded by the handler's own grace
-/// (`workflow.plugin_host.kill_grace_s`, the container grace), well inside a
-/// third of `working_timeout`. A cancel that takes longer still only costs a
+/// (`workflow.plugin_host.kill_grace_s` for a plugin task, zero for a script
+/// task), well inside a third of `working_timeout`. A cancel that takes longer still only costs a
 /// `LeaseLost` commit, and the next holder repeats the kill.
 ///
 /// # A row whose handler cannot be built is still killed (fix round 1)
@@ -2323,7 +2323,8 @@ async fn killing_under(pool: &PgPool, run: Uuid, held: DateTime<Utc>) -> Result<
 /// The stop is [`cancel::kill`], the call the budget's expiry makes
 /// ([`cancel::guarded`]), so each handler stops its work with the grace it
 /// already applies there -- `workflow.plugin_host.kill_grace_s` for a plugin
-/// task, the container grace for a container -- and no second grace exists.
+/// task, zero for a script task (`handlers::script`'s `cancel`) -- and this
+/// function takes no grace of its own.
 /// A handler that refuses (`handlers::sql`) is logged and the run is still
 /// recorded `KILLED`: the future was dropped, which is all egret can do, and
 /// the refusal is the operator's fact (the module doc of [`cancel`], fact 2).
@@ -2333,10 +2334,20 @@ async fn killing_under(pool: &PgPool, run: Uuid, held: DateTime<Utc>) -> Result<
 /// (`finish_claimed_kill`, spec §4.3).
 ///
 /// **What the run held is released once `KILLED` has committed**, as after any
-/// committed outcome (`run_one`'s "released AFTER the commit"): `cancel` only
-/// stops a script task's container or pod, and [`Registry::release`] is what
-/// deletes it -- or keeps it, for `taskRunner.delete: false`. A kill whose
+/// committed outcome (`run_one`'s "released AFTER the commit"). A kill whose
 /// commit is `LeaseLost` releases nothing: the run is someone else's.
+///
+/// **On the runners egret has, the cancel already removed the container or
+/// pod, `taskRunner.delete: false` included** (W5a's cancel, unchanged). The
+/// Docker runner's `cancel` ends in `docker rm --force` (after `docker stop
+/// -t <grace>` when the grace is not zero), and the Kubernetes runner's
+/// deletes the pod; `delete: false` is read only by `release`. So a killed
+/// `delete: false` container is not kept for inspection, and the release that
+/// follows finds nothing left there (`rm --force` of an absent name exits 0).
+/// The release is still made: after a cancel that failed it is a second try
+/// at removing a `delete: true` container or pod. It is pinned by the worker
+/// tests' `KillRecorder`, not by the Docker live suite, which cannot observe
+/// it (workflow kill spec §4.2).
 async fn finish_kill(
     pool: &PgPool,
     claimed: &Claimed,

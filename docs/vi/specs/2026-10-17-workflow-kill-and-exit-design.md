@@ -2,7 +2,12 @@
 
 > Bản tham khảo tiếng Việt. Bản chính là `docs/en/specs/2026-10-17-workflow-kill-and-exit-design.md`; khi hai bản khác nhau, bản tiếng Anh thắng.
 
-**Trạng thái:** đã thiết kế 2026-10-17, chưa xây. Mọi khẳng định về code của egret đã được kiểm tra trong worktree `egret-kill` tại `6e995c1f` (main, sau #686) và được trích dẫn `path:line` từ `crates/egret-workflow/src/` trừ khi ghi gốc khác. Kestra là checkout tại `data-portal/kestra`; đường dẫn của nó tính từ gốc đó.
+**Trạng thái:** đã xây và đã kiểm chứng 2026-10-18 trên `feat/workflow-kill-exit` (Task 1-8 của plan; các ghi chú có ngày bên dưới ghi lại chỗ bản xây khác thiết kế này).
+- **Ratchet của oracle** (`cargo test -p egret-workflow --test executor`): trước, 104 mismatching và 104 baselined; sau, 100 mismatching và 100 baselined; 0 broken ở cả hai. Tập refused đi từ 45 xuống 41. Bốn mục `valids/exit*` (`exit`, `exit-cancelled`, `exit-killed`, `exit-nested`) đã bank và được gỡ khỏi `oracle-exec/baseline.txt`; không mục nào khác dịch chuyển. `golden.json` không bị sửa.
+- **Live, Docker** (`tests/container_docker_live.rs`, mỗi case chạy riêng): kill một container `sleep 600` đang chạy mất 2.00 s, với `KILLED` được commit khoảng 0.75 s sau khi lệnh kill được ghi. Kill mà worker chết giữa chừng mất 3.05 s; worker thứ hai hoàn tất kill khoảng 0.3 s sau khi reaper giải phóng lease.
+- **Mutation** (trong `worker/claim.rs::end_kill`): bỏ cancel thì các case live chuyển ĐỎ (case `taskRunner.delete: false` đỏ trên daemon, "still running"). Bỏ release thì các case live vẫn qua, vì trên Docker cancel đã xoá container (ghi chú ở §4.2); release trên đường kill được ghim bởi các test worker không cần daemon (`KillRecorder` của `tests/worker.rs`, unit test trong `claim.rs`).
+
+**Đã thiết kế** 2026-10-17. Mọi khẳng định về code của egret đã được kiểm tra trong worktree `egret-kill` tại `6e995c1f` (main, sau #686) và được trích dẫn `path:line` từ `crates/egret-workflow/src/` trừ khi ghi gốc khác. Kestra là checkout tại `data-portal/kestra`; đường dẫn của nó tính từ gốc đó.
 
 **Spec chương trình:** `docs/{en,vi}/specs/2026-09-01-workflow-programme-design.md` §9 ("kill/restart" của W7 bị bỏ khỏi W7; kill ở mức execution của W8 chưa bao giờ được ship).
 
@@ -44,19 +49,26 @@
 ### 3.1 Hợp đồng
 
 `POST /api/v1/workspaces/{ws}/workflows/executions/{id}/kill?cascade=true|false` (mặc định `true`).
+
+*Ghi chú, 2026-10-18:* route như đã xây là `POST /api/ws/{workspace}/workflows/executions/{id}/kill`, tiền tố mà mọi route workflow dùng (`routes.rs`), như Global Constraints của plan ghi.
 - `202` kèm execution DTO: lúc này nó là `KILLING`, hoặc `KILLED` nếu không có gì đang chạy.
 - `404` nếu execution không thuộc workspace; `409 execution_terminated` nếu nó đã terminal (D3).
 - `WF_MANAGE` (D4). Có tài liệu utoipa, được sinh lại vào client frontend bằng `npm run gen:api`.
 
 ### 3.2 Một transaction
 
-Khoá dòng execution (`FOR UPDATE`), rồi, với execution đó và, khi có `cascade`, mọi descendant execution đi qua `workflow.executions.parent_execution_id` (`migrations/0135_workflow_loop_sub_executions.sql:21`) và liên kết parent của subflow (plan đặt tên cột sau khi đọc `worker/subflow.rs`):
+Khoá dòng execution (`FOR UPDATE`), rồi, với execution đó và, khi có `cascade`, mọi descendant execution, đệ quy, là child của loop (`parent_execution_id = <parent>` AND `parent_run_ix IS NOT NULL`, `migrations/0135_workflow_loop_sub_executions.sql:21`) hoặc child của subflow (`trigger_execution_id = <parent>` AND `trigger_run_ix IS NOT NULL`, migration 0138). Một replay (`parent_run_ix` NULL) và một execution do Flow trigger kích hoạt (`trigger_run_ix` NULL) không phải child:
 1. Run leaf không terminal đang **có lease** (`claimed_at IS NOT NULL`, state `RUNNING`) → `KILLING`. `claimed_at` được giữ nguyên.
 2. Run leaf không terminal **không có lease** (đang chờ được claim, `RETRYING`, `PAUSED`, `CREATED`) → `KILLED`, kèm `ended_at`.
 3. Run flowable không terminal được để cho `advance()` (§5).
 4. Execution → `KILLING`. Nếu bước 1 không đổi gì, `advance()` đóng nó ở tick kế tiếp; route cũng chạy một `advance()` trong cùng transaction để kill khi không có gì đang chạy trả về `KILLED` ngay.
 
-Các execution được khoá parent trước, rồi child theo thứ tự id, để tránh deadlock với một lần kill đồng thời của child.
+Các execution được khoá theo thứ tự: execution trước, rồi các descendant theo độ sâu, rồi theo id (`worker/kill.rs`, "Lock order"). Xếp theo độ sâu trước là điều giữ cho một lần kill parent và một lần kill child đồng thời đi cùng một thứ tự. Có một deadlock thứ tự này không gỡ được: child kết thúc trong transaction của worker khoá child rồi mới tới parent. Postgres huỷ một bên, và kill chạy lại transaction của nó tối đa 3 lần khi gặp `40P01` (`deadlock_detected`).
+
+*Ghi chú, 2026-10-18 (đính chính):*
+- *Liên kết subflow.* Ban đầu mục này để plan đặt tên cột subflow, và Global Constraints của plan ghi `execution_trigger->>'type' = 'io.kestra.plugin.core.flow.Subflow'` AND `execution_trigger->'variables'->>'executionId' = <parent>`. Vị từ đó không khớp dòng nào: `subflow::spawn_one` ghi `trigger_execution_id` / `trigger_run_ix` và để `execution_trigger` NULL (cột đó chỉ do webhook và scheduler ghi). Vị từ ở trên là cái đã xây (plan Task 6), và là liên kết mà `subflow::trigger_of` đọc khi hoàn tất.
+- *Thứ tự khoá.* Ban đầu mục này ghi "parent trước, rồi child theo thứ tự id". Thứ tự id thuần có thể deadlock: một lần kill parent có thể giữ một descendant id thấp của một child trong khi chờ chính child đó. Thứ tự và việc chạy lại ở trên là cái đã xây.
+- *Bước 2* cũng gồm mọi run `Subflow`: kill ghi nó `KILLED` mà không chờ worker; child execution của nó bị kill bởi cascade.
 
 ## 4. Worker dừng handler
 
@@ -69,10 +81,16 @@ Các execution được khoá parent trước, rồi child theo thứ tự id, �
 
 `under_lease_with` (`worker/claim.rs:1769`) có thêm lần wake-up thứ ba bên cạnh renewal và deadline: mỗi `kill_poll_ms`, `SELECT state, claimed_at FROM workflow.task_runs WHERE id = $1`. Nếu dòng là `KILLING` với `claimed_at` của worker này:
 1. future của handler bị drop;
-2. `handler.cancel(task, grace)` được gọi, cùng lời gọi mà đường timeout dùng (`worker/cancel.rs`, `worker/timeout.rs`), với grace đã cấu hình (`workflow.plugin_host.kill_grace_s` cho plugin task, grace của container cho container);
+2. `cancel` của handler được gọi (`cancel::kill`), cùng lời gọi mà đường timeout dùng (`worker/cancel.rs`, `worker/timeout.rs`). Kill không truyền grace: mỗi handler tự áp grace của nó bên trong `cancel`, `workflow.plugin_host.kill_grace_s` cho plugin task và bằng không cho script task (`handlers/script.rs`);
 3. run được ghi `KILLED` (kèm `ended_at`, attempt được đóng) `WHERE id = $1 AND claimed_at = $held AND state = 'KILLING'`, và `advance()` chạy trong cùng transaction, như `apply_outcome` làm.
 
 Handler có `cancel` trả `Err` (`handlers/sql.rs`) vẫn được ghi `KILLED` sau khi drop; lỗi đi vào `tracing`, như đường timeout làm (`worker/cancel.rs`, fact 2).
+
+Khi `KILLED` đã commit, worker gọi `Registry::release`, như sau mọi outcome đã commit. Kill có commit là `LeaseLost` không release gì.
+
+*Ghi chú, 2026-10-18 (đính chính):*
+- *Không có tham số grace.* Ban đầu mục này viết `handler.cancel(task, grace)` với "grace của container cho container". `finish_kill(pool, claimed, held, reg, task)` đã xây không nhận grace, và container của script task bị cancel với grace bằng không, như cancel của W5a vẫn luôn làm.
+- *Container bị kill thì bị xoá, kể cả `taskRunner.delete: false`.* Trên Docker, `DockerRunner::cancel` là `docker rm --force` (sau `docker stop -t <grace>` khi grace khác không, tức trường hợp plugin host). Cancel của runner Kubernetes xoá pod. `delete: false` chỉ được `release` đọc, mà release chạy sau cancel và không còn gì để giữ. Vì vậy container `delete: false` bị kill không được giữ lại để xem xét. Đây là hành vi có sẵn của W5a, kill không đổi nó. Có nên giữ container `delete: false` bị kill hay không là một câu hỏi sản phẩm còn mở.
 
 Renewal thất bại vì state không còn là `RUNNING` không phải mất lease: worker đọc state và đi theo đường kill ở trên thay vì `Leased::Lost` (cái drop handler mà không cancel, có chủ đích, `worker/claim.rs:1715-1721`).
 
@@ -96,6 +114,12 @@ Renewal thất bại vì state không còn là `RUNNING` không phải mất lea
 - `state` là property có thể templating; nó được render với render context của run. Giá trị ngoài năm giá trị trên là run failure nêu tên giá trị đó.
 
 Việc từ chối `Exit` (`executor/mod.rs:4235-4250`, bốn mục `valids/exit*`) được gỡ bỏ.
+
+*Ghi chú, 2026-10-18 (như đã xây, đo theo golden):* `KILLED` không đi qua `KILLING` khi không còn gì khác đang sống. `valids/exit-killed` trong `oracle-exec/golden.json` ghi `CREATED RUNNING KILLED` cho execution và cho `If`, không có `KILLING`, và run `Exit` cũng là `KILLED`. History được so khớp chính xác, nên gạch đầu dòng đầu tiên ở trên sẽ không bank. Dạng đã xây là dạng của chính Kestra (`ExecutorService.handleExecutionUpdatingTasks`, rồi `ExecutionService.killParentTaskruns`; `executor/exit.rs`):
+- Khi không còn gì khác đang sống, run `Exit`, các tổ tiên của nó và execution được đặt `KILLED` ngay, không qua bước `KILLING`.
+- Khi có một sibling đang sống, run `Exit` và các tổ tiên của nó là `KILLED`, execution sang `KILLING`, và `Exit` tự làm các bước leaf của route kill, vì không có route nào chạy: một `Runnable` đang chạy sang `KILLING`, mọi leaf đang sống khác sang `KILLED`. Flowable được để cho §5.
+- `Exit(KILLED)` cũng kill các child execution của execution (child của subflow và của loop), như `isOnKillCascade(true)` của Kestra. `claim::exit_kills` nhận ra vòng nào đặt một run `Exit` sang `KILLED` và chạy cascade của route kill (`worker::kill::cascade`, plan Task 6).
+- `Exit` nằm trong `WorkingDirectory` bị từ chối lúc validate với `working_directory_child_not_runnable`.
 
 ## 7. Frontend (trang execution của W7b)
 

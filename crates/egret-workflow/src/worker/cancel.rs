@@ -39,7 +39,7 @@
 //!    moved to `KILLING` under the worker's lease, after `claim::under_lease`
 //!    found it and dropped the handler. Both sites go through [`kill`], so a
 //!    handler stops with the one grace it applies (the plugin host's
-//!    `kill_grace_s`, the container grace) whichever site asked. See *Where
+//!    `kill_grace_s`, zero for a script task) whichever site asked. See *Where
 //!    the kill path does NOT go* below.
 //! 2. **A kill that fails does not change the run.** The state comes from
 //!    `exceptionHandler(TimeoutExceededException)` — `FAILED`, carrying
