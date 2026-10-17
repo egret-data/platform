@@ -22,9 +22,10 @@
 
 Trên `starrocks/allin1-ubuntu:4.1.6@sha256:5cbf09c4…` đã ghim, container riêng, 2026-10-17 (Task 1 của plan; output thô trong báo cáo task):
 
-- **Đường thật của egret, connector chưa sửa:** `tokio::time::timeout(3 s, c.execute(LONG_SQL, …))` hết hạn, future bị drop, và một kết nối mới **không** thấy dòng nào của statement trong `SHOW FULL PROCESSLIST` ở +1 s, +5 s hay +20 s. Tương tự với `INSERT INTO probe.t SELECT …` qua `execute`, và với `execute_with_params` (`WHERE ? = 1`, `Param::I64(1)`). Drop future đóng socket và StarRocks tự huỷ statement. Kill client CLI `mysql` cũng cho kết quả như vậy.
+- **Đường thật của egret, connector chưa sửa:** `tokio::time::timeout(3 s, c.execute(LONG_SQL, …))` hết hạn, future bị drop, và một kết nối mới **không** thấy dòng nào của statement trong `SHOW FULL PROCESSLIST` ở +1 s, +5 s hay +20 s. Tương tự với `INSERT INTO probe.t SELECT …` qua `execute`, và với `execute_with_params` (`WHERE ? = 1`, `Param::I64(1)`). Sau khi drop, statement biến mất khỏi processlist, khớp với việc kết nối bị đóng (connector tự mở và ngắt `Conn` riêng cho mỗi lời gọi, `starrocks.rs:258`). Kill client CLI `mysql` cũng cho kết quả như vậy.
 - `LONG_SQL` = `SELECT count(*) AS n, 'egret-deadline-probe' AS marker FROM TABLE(generate_series(1, 100000000000))`: chạy lâu hơn 70 s nếu không có gì kết thúc nó.
 - Để tham khảo, không áp dụng (§1.3): `query_timeout` (mặc định 300) và `insert_timeout` (mặc định 14400) đều tồn tại; `SET query_timeout = 2` kết thúc `LONG_SQL` ở 2 s với `ERROR 5024 (53400): Query reached its timeout of 2 seconds, …`; `INSERT … SELECT` chỉ tuân theo `insert_timeout` (chỉ đặt `query_timeout = 2` thì nó chạy 159 s).
+- Đối chứng dương: cả ba test đều assert đã thấy statement đang chạy trước khi drop, nên probe không nhìn thấy statement thì không thể xanh. Needle: `egret-deadline-probe` (SELECT), `INSERT INTO egret_drop_probe.t` (INSERT), `egret-params-deadline-probe` (SELECT có tham số, binary protocol).
 - Lưu ý khi đo: StarRocks bỏ comment `/* */` khỏi `Info`, nên marker phải nằm trong chính text SQL; kết nối `mysql_async` thô để dò cần `prefer_socket(false)`.
 
 Vậy khẳng định ở §1.1 sai trên 4.1.6, với mọi đường egret dùng. Lý do từng giữ biến phiên ở ngoài (*"sẽ làm hỏng query hôm nay chạy được"*, `handlers/sql.rs:562-565`) cũng không còn ý nghĩa.
@@ -38,7 +39,7 @@ Vậy khẳng định ở §1.1 sai trên 4.1.6, với mọi đường egret dù
 
 ### 1.4 Test
 
-- Live, trong `crates/egret-query/tests/connector_starrocks.rs` (gate bằng `EGRET_TEST_STARROCKS_URL`), hai test: `LONG_SQL` qua `execute`, và một `INSERT … SELECT` từ `generate_series` vào bảng nháp qua `execute`. Mỗi test bọc lời gọi trong `tokio::time::timeout(3 s, …)`, assert timeout ngoài đã nổ, rồi dò `SHOW FULL PROCESSLIST` trên kết nối mới tối đa 10 s và assert text của statement đã biến mất. Mỗi test cũng assert nó **đã thấy** statement trong processlist khi đang chạy (dò trước deadline, trên kết nối mới), để một probe không nhìn thấy statement thì không thể xanh.
+- Live, trong `crates/egret-query/tests/connector_starrocks.rs` (gate bằng `EGRET_TEST_STARROCKS_URL`), ba test: `LONG_SQL` qua `execute`, một `INSERT … SELECT` từ `generate_series` vào bảng nháp qua `execute`, và một SELECT `WHERE ? = 1` qua `execute_with_params`. Mỗi test bọc lời gọi trong `tokio::time::timeout(3 s, …)`, assert timeout ngoài đã nổ, rồi dò `SHOW FULL PROCESSLIST` trên kết nối mới tối đa 10 s và assert text của statement đã biến mất. Mỗi test cũng assert nó **đã thấy** statement trong processlist khi đang chạy (dò trước deadline, trên kết nối mới), để một probe không nhìn thấy statement thì không thể xanh.
 - Test này đo một tính chất hôm nay đang đúng, nên lần chạy đỏ được chứng minh bằng **mutation của probe, không phải của code**: trỏ phép so processlist vào một chuỗi không bao giờ có trong `Info` thì assertion "đã thấy đang chạy" phải fail. Một lần chạy xanh phải cho thấy test thực sự chạy (không phải dòng `skip`), vì test gate theo engine skip im lặng.
 
 ## 2. `http()`: từ chối vì nơi nó sẽ chạy
