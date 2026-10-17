@@ -738,6 +738,7 @@ async fn list_group_members(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Requires platform_admin", body = ErrorBody),
         (status = 404, description = "No such group or user", body = ErrorBody),
+        (status = 409, description = "Cannot add members to an OIDC-synced group", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -750,7 +751,9 @@ async fn add_group_member(
     egret_core::authz::require(&*st.pdp, &p, "group:manage_members").await?;
     // J-F3 Task 1b: a group compiles to its members' usernames, so the write
     // and the recompile of every policy the group reaches share one transaction
-    // (`egret_perm_compile::group_membership`).
+    // (`egret_perm_compile::group_membership`). Design R4: an OIDC-synced
+    // group answers 409 — the repo refuses it, since its membership is the
+    // identity provider's.
     st.groups
         .add_member(
             id,

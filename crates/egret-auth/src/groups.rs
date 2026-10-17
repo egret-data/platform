@@ -29,7 +29,8 @@
 //! moving the transaction into the compiler crate, which works because every
 //! role writer is an HTTP handler in a crate ABOVE the compiler. Groups cannot:
 //! one writer is the per-login OIDC sync ([`GroupRepo::sync_user_oidc_groups`],
-//! called from `crate::oidc_routes`, in this crate), and another is
+//! called from `crate::oidc_routes`, in this crate; it writes rows of
+//! OIDC-sourced groups only, design R1), and another is
 //! `UserRepo::hard_delete`, called from `egret-dataapi`, which does not depend
 //! on the compiler either. So the recompile is the [`GroupMembershipRecompiler`]
 //! port, the same dependency inversion `egret_policy::ProfileRecompiler` uses
@@ -296,15 +297,58 @@ impl GroupRepo {
         Ok(id)
     }
 
+    /// Which of `names` name a LOCAL (admin-managed) group, each paired with
+    /// whether `user_id` is a member of it now — the input to the login's R2
+    /// warning ([`crate::oidc::provision_and_sync`]). One read, no lock: it
+    /// only feeds a log line, and [`Self::sync_user_oidc_groups`] ignores
+    /// these names whatever it returns.
+    pub async fn claimed_local_groups(
+        &self,
+        user_id: UserId,
+        names: &[String],
+    ) -> Result<Vec<(String, bool)>> {
+        sqlx::query_as(
+            "SELECT g.name, EXISTS (SELECT 1 FROM user_groups ug \
+                 WHERE ug.group_id = g.id AND ug.user_id = $2) \
+             FROM groups g WHERE g.name = ANY($1) AND g.source = 'local' \
+             ORDER BY g.name",
+        )
+        .bind(names)
+        .bind(user_id.0)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
+
     /// Replace the user's OIDC-sourced group memberships with `names` (in one tx).
     /// Manual (source='local') memberships are left untouched.
     ///
+    /// **It manages memberships in OIDC-sourced groups ONLY (design R1,
+    /// 2026-10-17).** A claimed name that names a LOCAL group is ignored: the
+    /// user is not joined, nothing moves, nothing is recompiled. Before R1 the
+    /// claimed set matched any group by name, so an IdP group called `admins`
+    /// made its members members of the local group `admins` — and of every
+    /// role and policy an admin had attached to it — although the API, the UI
+    /// and the RBAC spec all say a local group's members are the admin's to
+    /// manage. The claimed-set read filters on `source = 'oidc'`, which keeps
+    /// a local name out of `moved` (no lock, no recompile) and out of the
+    /// INSERT loop. The INSERT repeats the filter as a second guard on the
+    /// row itself: while it iterates `claimed` it is redundant (a mutation
+    /// dropping it alone survives every test), but if the loop is ever fed
+    /// the raw claim again it still cannot write a local membership. A local
+    /// membership the user already holds is never touched either way: the
+    /// DELETE below is scoped to OIDC groups, and the local rows are carried
+    /// into the "after" set unchanged.
+    /// [`crate::oidc::provision_and_sync`] logs a warning for each claimed local
+    /// name (R2), since a row such a claim added before R1 is still there.
+    ///
     /// **Runs on every OIDC login, so it recompiles only what the login
     /// CHANGED.** The groups the user would hold after the write are computed
-    /// before it (the local ones they keep, plus every claimed name that names a
-    /// group — the INSERT below joins `groups` by name, so a claimed name with
-    /// no row is not a membership), and only the symmetric difference with the
-    /// groups they hold now is handed to `recompiler`. A login whose claim did
+    /// before it (the local ones they keep, plus every claimed name that names
+    /// an OIDC group — the INSERT below joins `groups` by name and source, so a
+    /// claimed name with no OIDC row is not a membership), and only the
+    /// symmetric difference with the groups they hold now is handed to
+    /// `recompiler`. A login whose claim did
     /// not move — the common case — takes no profile lock and compiles nothing;
     /// one that did recompiles only the profiles whose policies name one of
     /// the moved groups. Recompiling on every login would make every login an
@@ -340,12 +384,13 @@ impl GroupRepo {
             .fetch_all(&mut *tx)
             .await
             .map_err(db_err)?;
-            let claimed: Vec<String> =
-                sqlx::query_scalar("SELECT name FROM groups WHERE name = ANY($1)")
-                    .bind(names)
-                    .fetch_all(&mut *tx)
-                    .await
-                    .map_err(db_err)?;
+            let claimed: Vec<String> = sqlx::query_scalar(
+                "SELECT name FROM groups WHERE name = ANY($1) AND source = 'oidc'",
+            )
+            .bind(names)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(db_err)?;
             let before_set: std::collections::BTreeSet<String> =
                 before.iter().map(|(n, _)| n.clone()).collect();
             let after_set: std::collections::BTreeSet<String> = before
@@ -381,7 +426,7 @@ impl GroupRepo {
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
-        // Only the names the final pass resolved to a group (J-F3 final review
+        // Only the names the final pass resolved to an OIDC group (J-F3 final review
         // I2), never the raw claim: every one of them the user did not already
         // hold is in `moved`, so it is locked above and recompiled below. A
         // claimed name whose group was created after that read is not joined
@@ -391,7 +436,7 @@ impl GroupRepo {
         for name in &claimed {
             sqlx::query(
                 "INSERT INTO user_groups (user_id, group_id) \
-                 SELECT $1, id FROM groups WHERE name = $2 \
+                 SELECT $1, id FROM groups WHERE name = $2 AND source = 'oidc' \
                  ON CONFLICT DO NOTHING",
             )
             .bind(user_id.0)
@@ -531,6 +576,15 @@ impl GroupRepo {
 
     /// Add a user to a group (idempotent), recompiling every policy the group
     /// reaches in the same transaction (module doc).
+    ///
+    /// **Refused with `Conflict` on an OIDC-sourced group (design R4).** That
+    /// group's membership is owned by the identity provider: an admin add
+    /// would be undone at the next login of an OIDC user (the sync replaces
+    /// their OIDC rows) and never undone for a local user, whom no login
+    /// reaches — a member the IdP never named, holding every role and policy
+    /// the group reaches. With R1 (the sync writes OIDC groups only) this
+    /// makes a row's provenance follow from its group's source. The console
+    /// already offers no add on such a group; this is the server half.
     pub async fn add_member(
         &self,
         group_id: Uuid,
@@ -544,6 +598,10 @@ impl GroupRepo {
     /// Remove a user from a group (idempotent), recompiling in the same
     /// transaction — the direction that fails OPEN when it is missed (module
     /// doc).
+    ///
+    /// Allowed on an OIDC-sourced group, unlike [`Self::add_member`] (design
+    /// R4): a remove fails closed, so it serves as an emergency revoke until
+    /// the user's next login re-applies the IdP's claim.
     pub async fn remove_member(
         &self,
         group_id: Uuid,
@@ -575,11 +633,26 @@ impl GroupRepo {
         let mut held = HeldGroupLocks::default();
         let mut passes = 0;
         let name: Option<String> = loop {
-            let name: Option<String> = sqlx::query_scalar("SELECT name FROM groups WHERE id = $1")
-                .bind(group_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db_err)?;
+            let row: Option<(String, String)> =
+                sqlx::query_as("SELECT name, source FROM groups WHERE id = $1")
+                    .bind(group_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
+            // Design R4 (`add_member`'s doc): refused before any group or
+            // profile lock and before the write, so nothing is recompiled. The
+            // check sits on this read, not a separate one, so it judges the
+            // same row the write would use; a group's source never changes
+            // (`upsert_oidc_group` does not flip a local group, and rename and
+            // delete refuse an OIDC one).
+            if add && matches!(&row, Some((_, source)) if source == "oidc") {
+                return Err(egret_core::Error::Conflict(
+                    "Cannot add members to an OIDC-synced group; \
+                     its membership is owned by the identity provider"
+                        .to_string(),
+                ));
+            }
+            let name = row.map(|(n, _)| n);
             match &name {
                 Some(n) if held.cover(&mut tx, std::slice::from_ref(n)).await? => {
                     passes += 1;
@@ -696,6 +769,128 @@ struct MemberUserRow {
     id: Uuid,
     email: String,
     name: String,
+}
+
+/// A local group with members whose `users.provider = 'oidc'` — report (a)
+/// of [`membership_provenance_report`].
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct LocalGroupWithOidcMembers {
+    pub group_id: Uuid,
+    pub group_name: String,
+    /// How many of its members are OIDC-provider users.
+    pub oidc_members: i64,
+}
+
+/// A non-OIDC user's (`provider` `'local'` or `'service'`) membership in an
+/// OIDC-sourced group — report (b) of [`membership_provenance_report`].
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct NonOidcUserInOidcGroup {
+    pub user_id: Uuid,
+    /// `'local'` or `'service'`.
+    pub provider: String,
+    pub group_id: Uuid,
+    pub group_name: String,
+}
+
+/// Both lists of [`membership_provenance_report`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MembershipProvenanceReport {
+    pub local_groups_with_oidc_members: Vec<LocalGroupWithOidcMembers>,
+    pub non_oidc_users_in_oidc_groups: Vec<NonOidcUserInOidcGroup>,
+}
+
+/// **The memberships whose provenance is unknown** (design R5), read in one
+/// read-only snapshot. Nothing is changed: the rows are mostly legitimate,
+/// `user_groups` records no writer, and an operator who reviews them already
+/// sees each group's members in the console.
+///
+/// - **(a)** Local groups with ≥1 member whose `users.provider = 'oidc'`, with
+///   that count. Before R1 the login sync joined a user to ANY group whose name
+///   their IdP claim carried, local ones included, so such a row may be the
+///   IdP's doing and not an admin's — and it survives R1, which only stops new
+///   ones (the sync never touches a local row).
+/// - **(b)** Each membership of a non-OIDC user (`provider <> 'oidc'`: a local
+///   user or a service account) in an OIDC group: an admin add from before R4.
+///   No login ever reaches such a user — a service account cannot log in at
+///   all (migration 0119) — so nothing ever removes the row, and the user keeps
+///   expanding as a member of every policy and role the group reaches. The
+///   predicate is `<> 'oidc'`, not `= 'local'`, so a provider added later is
+///   reported rather than silently missed (final review I1: `= 'local'` missed
+///   service accounts).
+///
+/// Returns rows and logs nothing, so the rows are testable;
+/// [`warn_unknown_membership_provenance`] is the startup wrapper.
+pub async fn membership_provenance_report(
+    pool: &sqlx::PgPool,
+) -> Result<MembershipProvenanceReport> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    let local_groups_with_oidc_members = sqlx::query_as(
+        "SELECT g.id AS group_id, g.name AS group_name, count(*) AS oidc_members \
+         FROM groups g JOIN user_groups ug ON ug.group_id = g.id \
+         JOIN users u ON u.id = ug.user_id \
+         WHERE g.source = 'local' AND u.provider = 'oidc' \
+         GROUP BY g.id, g.name ORDER BY g.name",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    let non_oidc_users_in_oidc_groups = sqlx::query_as(
+        "SELECT u.id AS user_id, u.provider, g.id AS group_id, g.name AS group_name \
+         FROM groups g JOIN user_groups ug ON ug.group_id = g.id \
+         JOIN users u ON u.id = ug.user_id \
+         WHERE g.source = 'oidc' AND u.provider <> 'oidc' \
+         ORDER BY g.name, u.id",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    tx.rollback().await.map_err(db_err)?;
+    Ok(MembershipProvenanceReport {
+        local_groups_with_oidc_members,
+        non_oidc_users_in_oidc_groups,
+    })
+}
+
+/// **The startup pass** (design R5): one `warn!` per row of
+/// [`membership_provenance_report`]. Returns the rows it logged. Logs ids,
+/// group names and counts — no email. A group name is logged with `?`
+/// (Debug), not `%`: an OIDC group's name is IdP-supplied, and Debug escapes a
+/// newline that Display would write as a forged second log line
+/// (`tests/provenance_log_escapes.rs`).
+///
+/// Best-effort by design, like
+/// `egret_perm_compile::principal_refs::warn_fail_open_principals`: the caller
+/// spawns it off the boot path and logs an error instead of refusing to start,
+/// because the rows are served either way.
+pub async fn warn_unknown_membership_provenance(
+    pool: &sqlx::PgPool,
+) -> Result<MembershipProvenanceReport> {
+    let report = membership_provenance_report(pool).await?;
+    for r in &report.local_groups_with_oidc_members {
+        tracing::warn!(
+            group_id = %r.group_id,
+            group = ?r.group_name,
+            oidc_members = r.oidc_members,
+            "a local group has members who sign in through OIDC; their provenance is unknown: \
+             a login before the OIDC-groups fix may have added them from an IdP claim. \
+             Review the group's members"
+        );
+    }
+    for r in &report.non_oidc_users_in_oidc_groups {
+        tracing::warn!(
+            user_id = %r.user_id,
+            group_id = %r.group_id,
+            group = ?r.group_name,
+            provider = %r.provider,
+            "a non-OIDC user is a member of an OIDC-synced group; no login ever removes this \
+             membership. Review it, and remove it if the identity provider did not intend it"
+        );
+    }
+    Ok(report)
 }
 
 fn db_err(e: sqlx::Error) -> egret_core::Error {

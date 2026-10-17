@@ -1124,6 +1124,39 @@ async fn groups_local_and_oidc() {
         StatusCode::CONFLICT,
         "deleting an oidc-synced group must 409; body={j}"
     );
+
+    // Design R4: nor can an admin add a member to it — the IdP owns that
+    // membership. The 409 carries the reason the console shows.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/groups/{oidc_group_id}/members"),
+            &admin,
+            Some(serde_json::json!({ "userId": member_id })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "adding a member to an oidc-synced group must 409; body={j}"
+    );
+    assert!(
+        j.to_string()
+            .contains("Cannot add members to an OIDC-synced group"),
+        "the 409 says why; body={j}"
+    );
+    assert!(
+        !oidc_repo
+            .members_of(oidc_group_id)
+            .await
+            .unwrap()
+            .contains(&member_id),
+        "the refused add wrote no row"
+    );
 }
 
 /// `POST /access/roles` creates a custom role; `PUT .../permissions` accepts

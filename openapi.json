@@ -6753,6 +6753,16 @@
               }
             }
           },
+          "409": {
+            "description": "Cannot add members to an OIDC-synced group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {

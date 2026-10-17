@@ -125,9 +125,11 @@ pub async fn load_rule_index(conn: &mut sqlx::PgConnection) -> Result<RuleIndex,
 /// selects any of `tables`.
 ///
 /// - **A path rule** selects a table when its catalog is the table's and its
-///   schema and table levels are absent or glob-match
-///   ([`egret_perm::eval::glob_match`], case-folded). A column-level rule
-///   selects its table: the mask applies to a column the view may read.
+///   schema and table levels are absent or match by
+///   [`egret_perm::eval::resource_level_matches`] — the engine's
+///   `ignoreCase: true` fold, so `NGƯỜI.Bảng` selects `người.bảng` (see
+///   [`path_rule_selects`]). A column-level rule selects its table: the mask
+///   applies to a column the view may read.
 /// - **A tag rule** selects a table that carries the tag on a column or on
 ///   the table.
 ///
@@ -139,17 +141,7 @@ pub async fn tables_have_rule(
     tables: &BTreeSet<LineageTable>,
 ) -> Result<bool, CompileError> {
     let db = |e: &dyn std::fmt::Display| CompileError::Db(e.to_string());
-    let level = |rule: &Option<String>, value: &str| match rule {
-        None => true,
-        Some(p) => {
-            egret_perm::eval::glob_match(&p.to_ascii_lowercase(), &value.to_ascii_lowercase())
-        }
-    };
-    if index.paths.iter().any(|(catalog, schema, table)| {
-        tables
-            .iter()
-            .any(|(c, s, t)| c == catalog && level(schema, s) && level(table, t))
-    }) {
+    if path_rule_selects(index, tables) {
         return Ok(true);
     }
     let tag_keys: Vec<&str> = index.tag_keys.iter().map(String::as_str).collect();
@@ -176,6 +168,28 @@ pub async fn tables_have_rule(
     .fetch_one(&mut *conn)
     .await
     .map_err(|e| db(&e))
+}
+
+/// The path half of [`tables_have_rule`], pure so it can be tested without a
+/// database: whether any path rule in `index` selects any of `tables`.
+///
+/// The schema and table levels go through
+/// [`egret_perm::eval::resource_level_matches`], the same fold the model
+/// oracle and the engine apply. It replaced a `to_ascii_lowercase` fold here
+/// (design R9), which left `Ư`/`Ờ` unfolded, so a rule on `NGƯỜI.Bảng` missed
+/// a view reading `người.bảng` and the audit failed open in reporting: the
+/// view went unlisted. The catalog compares exactly: both sides are the
+/// registry name, not a user-typed one.
+fn path_rule_selects(index: &RuleIndex, tables: &BTreeSet<LineageTable>) -> bool {
+    let level = |rule: &Option<String>, value: &str| match rule {
+        None => true,
+        Some(p) => egret_perm::eval::resource_level_matches(p, value),
+    };
+    index.paths.iter().any(|(catalog, schema, table)| {
+        tables
+            .iter()
+            .any(|(c, s, t)| c == catalog && level(schema, s) && level(table, t))
+    })
 }
 
 /// Whether `owner` (a `users.username`, as Trino names the DEFINER) is cleared
@@ -225,4 +239,39 @@ pub async fn owner_cleared(
                 .is_some_and(|names| names.iter().any(|n| n == owner))
         })
     })))
+}
+
+#[cfg(test)]
+mod path_rule_selects_tests {
+    use super::*;
+
+    fn index(schema: &str, table: &str) -> RuleIndex {
+        RuleIndex {
+            paths: vec![("lake".into(), Some(schema.into()), Some(table.into()))],
+            tag_keys: vec![],
+        }
+    }
+
+    fn tables(schema: &str, table: &str) -> BTreeSet<LineageTable> {
+        BTreeSet::from([("lake".into(), schema.into(), table.into())])
+    }
+
+    #[test]
+    fn a_rule_selects_a_non_ascii_table_named_in_another_case() {
+        // `to_ascii_lowercase` leaves `Ư`, `Ờ` and `Ả` alone and misses this.
+        assert!(path_rule_selects(
+            &index("NGƯỜI", "Bảng"),
+            &tables("người", "bảng")
+        ));
+    }
+
+    #[test]
+    fn a_rule_does_not_select_a_different_table_or_catalog() {
+        assert!(!path_rule_selects(
+            &index("người", "bảng"),
+            &tables("người", "bàn")
+        ));
+        let other_catalog = BTreeSet::from([("other".into(), "người".into(), "bảng".into())]);
+        assert!(!path_rule_selects(&index("người", "bảng"), &other_catalog));
+    }
 }

@@ -668,3 +668,135 @@ fn a_grant_naming_the_user_as_well_as_a_group_is_not_group_only() {
         "{d:?}"
     );
 }
+
+// R6/R7: the resource levels fold like the Ranger service-defs egret serves
+// (`ignoreCase: true` on every Trino and StarRocks resource level), and tag
+// keys do not (the `tag` def sets `ignoreCase: false`). Each case below names
+// the stored side in one case and the target in another, so an evaluator that
+// compares exactly answers the opposite of the engine.
+
+/// The fail-open direction: an exact-match oracle says this deny does not
+/// apply, while the engine applies it. An oracle that misses a deny the
+/// engine enforces would bless a compiler that drops one.
+#[test]
+fn a_deny_on_a_mixed_case_table_denies_the_lowercase_target() {
+    let allow = grant(Effect::Allow, &["analysts"], &[], scope_schema("sales"));
+    let deny = grant(
+        Effect::Deny,
+        &["analysts"],
+        &[],
+        scope_table("sales", "Orders"),
+    );
+    let d = evaluate(
+        &subject_in_group("analysts"),
+        Action::Read,
+        &scope_table("sales", "orders"),
+        &[allow, deny.clone()],
+        &[],
+        &[],
+        &[],
+    );
+    assert!(!d.allowed, "the engine folds the table level: {d:?}");
+    assert_eq!(d.reasons, vec![Reason::ExplicitDeny { grant_id: deny.id }]);
+}
+
+#[test]
+fn an_allow_on_an_uppercase_schema_glob_allows_the_lowercase_target() {
+    let allow = grant(Effect::Allow, &["analysts"], &[], scope_table("SALES", "*"));
+    let d = evaluate(
+        &subject_in_group("analysts"),
+        Action::Read,
+        &scope_table("sales", "orders"),
+        std::slice::from_ref(&allow),
+        &[],
+        &[],
+        &[],
+    );
+    assert!(d.allowed, "the engine folds the schema level: {d:?}");
+    assert_eq!(
+        d.reasons,
+        vec![Reason::AllowedByGrant { grant_id: allow.id }]
+    );
+}
+
+#[test]
+fn a_path_selected_mask_on_mixed_case_levels_applies_to_the_lowercase_column() {
+    let g = grant(Effect::Allow, &["analysts"], &[], scope_schema("sales"));
+    let r = Rule {
+        id: Uuid::new_v4(),
+        name: "mask_email".into(),
+        kind: RuleKind::Mask {
+            mask_type: "MASK_HASH".into(),
+            value_expr: None,
+        },
+        selector: Selector::Path(scope_column("Sales", "Orders", "Email")),
+        exempt: PrincipalSet::default(),
+    };
+    let d = evaluate(
+        &subject_in_group("analysts"),
+        Action::Read,
+        &scope_column("sales", "orders", "email"),
+        &[g],
+        std::slice::from_ref(&r),
+        &[],
+        &[],
+    );
+    assert!(d.allowed);
+    assert!(
+        d.reasons.contains(&Reason::MaskedByRule {
+            rule_id: r.id,
+            mask_type: "MASK_HASH".into(),
+        }),
+        "the path selector folds like a grant's scope: {d:?}"
+    );
+}
+
+/// R7: the `tag` service-def sets `ignoreCase: false`, so a rule keyed `PII`
+/// is a different tag from `pii`. Folding here would mask a column the engine
+/// leaves alone.
+#[test]
+fn a_tag_rule_key_stays_case_sensitive() {
+    let g = grant(Effect::Allow, &["analysts"], &[], scope_schema("sales"));
+    let r = mask_rule_on_tag("PII", "MASK_HASH", &[]);
+    let d = evaluate(
+        &subject_in_group("analysts"),
+        Action::Read,
+        &scope_column("sales", "orders", "email"),
+        std::slice::from_ref(&g),
+        &[r],
+        &["pii".into()],
+        &[],
+    );
+    assert!(d.allowed);
+    assert_eq!(
+        d.reasons,
+        vec![Reason::AllowedByGrant { grant_id: g.id }],
+        "a tag rule keyed `PII` must not hit tag `pii`"
+    );
+}
+
+/// R7, the clearance half: a gate is a tag policy, so its key is exact too.
+#[test]
+fn a_clearance_gate_key_stays_case_sensitive() {
+    let g = grant(
+        Effect::Allow,
+        &["everyone"],
+        &[],
+        scope_table("sales", "orders"),
+    );
+    let gate = ClearanceGate {
+        tag: "PII".into(),
+        required_roles: vec!["analyst".into()],
+    };
+    let d = evaluate(
+        &subject_in_group("everyone"),
+        Action::Read,
+        &scope_column("sales", "orders", "ssn"),
+        std::slice::from_ref(&g),
+        &[],
+        &["pii".into()],
+        &[gate],
+    );
+    assert!(d.allowed, "a gate on `PII` does not gate `pii`: {d:?}");
+    assert_eq!(d.reasons, vec![Reason::AllowedByGrant { grant_id: g.id }]);
+}

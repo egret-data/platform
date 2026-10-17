@@ -218,3 +218,201 @@ async fn every_membership_writer_calls_the_recompile_port() {
     assert_eq!(groups.delete_local(gid, &rc).await.unwrap(), 1);
     assert_eq!(rc.take(), vec![Call::Lock(vec![renamed]), Call::Recompile]);
 }
+
+/// Design R4: an OIDC group's membership is owned by the identity provider.
+/// An admin ADD is refused with `Conflict` before any profile lock or
+/// recompile and writes no row — it would be undone at the next login of an
+/// OIDC user, and never undone for a local user, whom no login reaches. A
+/// REMOVE stays allowed: it fails closed and serves as an emergency revoke
+/// until the user's next login, so it still recompiles. An add to a LOCAL
+/// group is unchanged.
+#[tokio::test]
+async fn an_admin_add_to_an_oidc_group_is_refused_and_a_remove_is_not() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let groups = GroupRepo::new(db.clone());
+    let users = UserRepo::new(db.clone());
+    let rc = Recorder::default();
+    let uid = users
+        .insert_local(&format!("{}@test.local", uniq("r4")), "R", "x")
+        .await
+        .unwrap();
+    let oidc = uniq("t_oidc_group");
+    let oidc_gid = groups.upsert_oidc_group(&oidc).await.unwrap();
+    let is_member = |gid: uuid::Uuid| {
+        let groups = &groups;
+        async move { groups.members_of(gid).await.unwrap().contains(&uid.0) }
+    };
+
+    let err = groups.add_member(oidc_gid, uid, &rc).await.unwrap_err();
+    match err {
+        egret_core::Error::Conflict(msg) => assert_eq!(
+            msg,
+            "Cannot add members to an OIDC-synced group; its membership is owned by the identity provider"
+        ),
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+    assert!(!is_member(oidc_gid).await, "a refused add writes no row");
+    assert_eq!(
+        rc.take(),
+        Vec::<Call>::new(),
+        "a refused add locks no profile and recompiles nothing"
+    );
+
+    // A row the login sync wrote: the admin can still remove it.
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(uid.0)
+        .bind(oidc_gid)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    groups.remove_member(oidc_gid, uid, &rc).await.unwrap();
+    assert!(!is_member(oidc_gid).await, "the remove deleted the row");
+    assert_eq!(
+        rc.take(),
+        vec![Call::Lock(vec![oidc.clone()]), Call::Recompile],
+        "the remove recompiles what the group reaches"
+    );
+
+    let local = uniq("t_local_group");
+    let local_gid = groups.create_local(&local).await.unwrap();
+    groups.add_member(local_gid, uid, &rc).await.unwrap();
+    assert!(
+        is_member(local_gid).await,
+        "an add to a local group still works"
+    );
+    assert_eq!(rc.take(), vec![Call::Lock(vec![local]), Call::Recompile]);
+}
+
+/// Design R5: rows whose provenance is unknown are REPORTED, never changed.
+/// (a) a local group with members whose `users.provider = 'oidc'` — a login
+/// before R1 may have added them — with the count of such members; (b) each
+/// membership of a non-OIDC user (`provider` `'local'` or `'service'`) in an
+/// OIDC group — the R4 class, which no login ever removes. A local user in a local group and an OIDC user
+/// in an OIDC group are the expected shapes and appear in neither list.
+/// Assertions are scoped to the seeded ids: the shared test DB holds others.
+#[tokio::test]
+async fn the_provenance_report_lists_only_the_two_unknown_shapes() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let groups = GroupRepo::new(db.clone());
+    let users = UserRepo::new(db.clone());
+    let seed = |uid: egret_core::UserId, gid: uuid::Uuid| {
+        let db = db.clone();
+        async move {
+            sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+                .bind(uid.0)
+                .bind(gid)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+        }
+    };
+    let oidc_user = |tag: &'static str| {
+        let users = &users;
+        async move {
+            users
+                .insert_oidc(&uniq("sub"), &format!("{}@idp.local", uniq(tag)), "O")
+                .await
+                .unwrap()
+        }
+    };
+    let local_user = |tag: &'static str| {
+        let users = &users;
+        async move {
+            users
+                .insert_local(&format!("{}@test.local", uniq(tag)), "L", "x")
+                .await
+                .unwrap()
+        }
+    };
+
+    let (o1, o2, o3) = (
+        oidc_user("o1").await,
+        oidc_user("o2").await,
+        oidc_user("o3").await,
+    );
+    let (l1, l2) = (local_user("l1").await, local_user("l2").await);
+    // A service account (`provider = 'service'`) is no more reached by a login
+    // than a local user is, so it belongs in (b) too (final review I1).
+    let svc = users
+        .insert_service(&format!("{}@svc.local", uniq("svc")), "S")
+        .await
+        .unwrap();
+    // (a): two OIDC users and one local user in a local group → count 2.
+    let mixed_local = groups.create_local(&uniq("t_prov_mixed")).await.unwrap();
+    seed(o1, mixed_local).await;
+    seed(o2, mixed_local).await;
+    seed(l1, mixed_local).await;
+    // Neither: a local group with only local members.
+    let pure_local = groups.create_local(&uniq("t_prov_local")).await.unwrap();
+    seed(l2, pure_local).await;
+    // (b): a local user in an OIDC group; the OIDC member beside them is not.
+    let oidc_name = uniq("t_prov_oidc");
+    let oidc_gid = groups.upsert_oidc_group(&oidc_name).await.unwrap();
+    seed(l1, oidc_gid).await;
+    seed(o3, oidc_gid).await;
+    seed(svc, oidc_gid).await;
+
+    let report = egret_auth::groups::membership_provenance_report(&db.pool)
+        .await
+        .unwrap();
+
+    let a: Vec<_> = report
+        .local_groups_with_oidc_members
+        .iter()
+        .filter(|r| [mixed_local, pure_local, oidc_gid].contains(&r.group_id))
+        .map(|r| (r.group_id, r.oidc_members))
+        .collect();
+    assert_eq!(
+        a,
+        vec![(mixed_local, 2)],
+        "(a) counts OIDC members of local groups only"
+    );
+    let mut b: Vec<_> = report
+        .non_oidc_users_in_oidc_groups
+        .iter()
+        .filter(|r| [o1.0, o2.0, o3.0, l1.0, l2.0, svc.0].contains(&r.user_id))
+        .map(|r| (r.user_id, r.group_id, r.group_name.clone()))
+        .collect();
+    b.sort();
+    let mut want = vec![
+        (l1.0, oidc_gid, oidc_name.clone()),
+        (svc.0, oidc_gid, oidc_name),
+    ];
+    want.sort();
+    assert_eq!(
+        b, want,
+        "(b) lists non-OIDC users (local and service) in OIDC groups only"
+    );
+
+    // The logging wrapper reports the same rows and changes none.
+    let before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM user_groups WHERE group_id = ANY($1)")
+            .bind(vec![mixed_local, pure_local, oidc_gid])
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let logged = egret_auth::groups::warn_unknown_membership_provenance(&db.pool)
+        .await
+        .unwrap();
+    assert!(logged
+        .local_groups_with_oidc_members
+        .iter()
+        .any(|r| r.group_id == mixed_local && r.oidc_members == 2));
+    assert!(logged
+        .non_oidc_users_in_oidc_groups
+        .iter()
+        .any(|r| r.user_id == l1.0 && r.group_id == oidc_gid));
+    let after: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM user_groups WHERE group_id = ANY($1)")
+            .bind(vec![mixed_local, pure_local, oidc_gid])
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!((before, after), (7, 7), "the report changes no row");
+}

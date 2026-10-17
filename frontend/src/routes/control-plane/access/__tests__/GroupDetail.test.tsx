@@ -8,8 +8,11 @@ import GroupDetail from "@/routes/control-plane/access/GroupDetail";
 import * as api from "@/api/access";
 import { AuthContext } from "@/auth/useAuth";
 import type { Me } from "@/api/hooks";
+import { ApiError } from "@/api/client";
+import { toast } from "sonner";
 
 vi.mock("@/api/access");
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 const ADMIN_ME: Me = {
   user_id: "1",
@@ -63,6 +66,8 @@ describe("GroupDetail", () => {
     vi.mocked(api.unassignGroupRole).mockResolvedValue(undefined);
     vi.mocked(api.renameGroup).mockResolvedValue(GROUPS[0]);
     vi.mocked(api.deleteGroup).mockResolvedValue(undefined);
+    vi.mocked(toast.success).mockClear();
+    vi.mocked(toast.error).mockClear();
   });
 
   test("renders a local group with its member and assigned role", async () => {
@@ -90,6 +95,29 @@ describe("GroupDetail", () => {
     await user.click(addBtn);
 
     await waitFor(() => expect(api.addMember).toHaveBeenCalledWith("g1", "u2"));
+  });
+
+  test("a refused add (409 on an OIDC-synced group) shows the server's reason", async () => {
+    // The page hides Add on a group it knows is OIDC-synced; a stale list can
+    // still offer it, and the server refuses (design R4). The reason must
+    // reach the admin rather than a generic failure.
+    const reason =
+      "conflict: Cannot add members to an OIDC-synced group; its membership is owned by the identity provider";
+    vi.mocked(api.addMember).mockRejectedValueOnce(new ApiError(409, reason));
+    const user = userEvent.setup();
+    renderDetail("g1");
+    await screen.findByText("alice@example.com");
+
+    await user.click(screen.getByRole("combobox", { name: "User to add" }));
+    await user.type(screen.getByPlaceholderText("Search by email…"), "bob");
+    await user.click(await screen.findByText("bob@example.com"));
+    const membersSection = screen
+      .getByRole("heading", { name: "Members" })
+      .closest("section") as HTMLElement;
+    await user.click(within(membersSection).getByRole("button", { name: /^Add$/ }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(reason));
+    expect(toast.success).not.toHaveBeenCalledWith("Member added");
   });
 
   test("removing a member calls removeMember", async () => {
