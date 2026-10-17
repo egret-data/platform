@@ -1094,9 +1094,9 @@ export const getWorkflowKillExecutionUrl = (workspace: string,
 }
 
 /**
- * Tasks waiting, retrying, paused or not yet started end `KILLED` at once; a
- * task a worker is running is stopped by that worker, and the execution is
- * `KILLING` until it has. With `cascade` (the default) its `Loop` iterations
+ * Tasks retrying, paused or not yet started end `KILLED` at once; a running
+ * task is stopped by a worker -- the one running it, or the next one to claim
+ * it -- and the execution is `KILLING` until it has. With `cascade` (the default) its `Loop` iterations
  * and `Subflow` child executions are killed the same way.
  * @summary Kill an execution that has not ended.
  */

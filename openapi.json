@@ -29243,7 +29243,7 @@
           "workflow"
         ],
         "summary": "Kill an execution that has not ended.",
-        "description": "Tasks waiting, retrying, paused or not yet started end `KILLED` at once; a\ntask a worker is running is stopped by that worker, and the execution is\n`KILLING` until it has. With `cascade` (the default) its `Loop` iterations\nand `Subflow` child executions are killed the same way.",
+        "description": "Tasks retrying, paused or not yet started end `KILLED` at once; a running\ntask is stopped by a worker -- the one running it, or the next one to claim\nit -- and the execution is `KILLING` until it has. With `cascade` (the default) its `Loop` iterations\nand `Subflow` child executions are killed the same way.",
         "operationId": "kill_execution",
         "parameters": [
           {
@@ -29288,7 +29288,7 @@
         ],
         "responses": {
           "202": {
-            "description": "The kill is recorded. The body is the execution afterwards: `KILLING` while a worker still has to stop a running task (it then becomes `KILLED` on its own), or `KILLED` if nothing was running. Every run that was waiting, retrying, paused or not yet started is `KILLED` already.",
+            "description": "The kill is recorded. The body is the execution afterwards: `KILLING` while a running task still has to be stopped by a worker (it then becomes `KILLED` on its own), or `KILLED` if nothing was running. Every run that was retrying, paused or not yet started is `KILLED` already.",
             "content": {
               "application/json": {
                 "schema": {

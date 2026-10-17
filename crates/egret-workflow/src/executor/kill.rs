@@ -143,26 +143,24 @@ pub(crate) fn advance_killing(plan: &Plan, state: &ExecutionState) -> Vec<Comman
 /// **The kill route's leaf steps** (spec §3.2 steps 1, 2 and 4), as commands
 /// for the route to apply to a loaded execution before its `settle`:
 ///
-/// 1. a `Runnable` that is running (`RUNNING` or `SUBMITTED`) **and** that a
-///    worker holds (`leased(run)`) becomes `KILLING`: its worker stops it and
-///    writes `KILLED` (spec §4.2);
-/// 2. every other live leaf -- a `Runnable` waiting for a worker, `CREATED`,
-///    `RETRYING`, and every `Subflow` (`Executable`) run -- becomes `KILLED`;
+/// 1. a `Runnable` that is running (`RUNNING` or `SUBMITTED`) becomes
+///    `KILLING`, **whether or not a worker holds it**: a holder stops it and
+///    writes `KILLED` (spec §4.2), and with no lease the kill-only claim
+///    cancels it by run and attempt and writes `KILLED` (spec §4.3);
+/// 2. every other live leaf -- `CREATED`, `RETRYING`, `PAUSED`, and every
+///    `Subflow` (`Executable`) run -- becomes `KILLED`;
 /// 3. a flowable is left alone: `advance_killing` closes it (§5), and so is a
 ///    leaf that is already `KILLING`;
 /// 4. the execution becomes `KILLING` unless it already is.
 ///
-/// `leased` is the database's answer (`claimed_at IS NOT NULL`), which
-/// `advance()` cannot see; it is why this is not [`advance_killing`]'s and why
-/// `exit::kill`, which has no lease to read, calls every running `Runnable`
-/// held. A run waiting for a worker is therefore `KILLED` here at once rather
-/// than left `KILLING` for the claim to finish (spec §4.3): nothing is running
-/// it, and nothing will once this commits.
-pub(crate) fn kill_leaves(
-    plan: &Plan,
-    state: &ExecutionState,
-    leased: impl Fn(RunIx) -> bool,
-) -> Vec<Command> {
+/// **Why no lease is read** (final review I1, 2026-10-18, superseding Task
+/// 6's "unleased `RUNNING` → `KILLED`"): a run whose worker died and was
+/// reaped is `RUNNING` with `claimed_at` NULL, yet its container may still be
+/// running -- W5a re-attaches to it on the next claim. Writing it `KILLED`
+/// asked nobody to stop it, and the orphan sweep never removes a
+/// `taskRunner.delete: false` container. `KILLING` hands it to the claim,
+/// which cancels it as `exit::kill` already does for the same reason.
+pub(crate) fn kill_leaves(plan: &Plan, state: &ExecutionState) -> Vec<Command> {
     let mut cmds = Vec::new();
     for (ix, run) in state.runs.iter().enumerate() {
         let Some(&last) = run.history.last() else {
@@ -172,16 +170,9 @@ pub(crate) fn kill_leaves(
         if last.is_terminal() || last == RunState::Killing || !is_leaf(kind) {
             continue;
         }
-        let held = matches!(kind, TaskKind::Runnable { .. })
-            && matches!(last, RunState::Running | RunState::Submitted)
-            && leased(ix);
         cmds.push(Command::SetRunState {
             run: ix,
-            state: if held {
-                RunState::Killing
-            } else {
-                RunState::Killed
-            },
+            state: leaf_kill(kind, last),
         });
     }
     if state.history.last() != Some(&RunState::Killing) {
@@ -760,12 +751,12 @@ mod tests {
         );
     }
 
-    /// **The route's leaf steps** (`kill_leaves`): a held running leaf is
-    /// `KILLING`, every other live leaf `KILLED` (waiting, `CREATED`,
-    /// `RETRYING`, a `Subflow`), a flowable and a terminal or `KILLING` run
-    /// untouched, and the execution `KILLING`.
+    /// **The route's leaf steps** (`kill_leaves`): a running leaf is
+    /// `KILLING` whether or not it is held (final review I1), every other
+    /// live leaf `KILLED` (`CREATED`, `RETRYING`, a `Subflow`), a flowable and
+    /// a terminal or `KILLING` run untouched, and the execution `KILLING`.
     #[test]
-    fn the_route_kills_each_live_leaf_by_whether_it_is_held() {
+    fn the_route_kills_each_live_leaf_by_whether_it_is_running() {
         let p = plan(
             "  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n\
              \x20     - id: held\n        type: io.kestra.plugin.core.log.Log\n        message: h\n\
@@ -791,15 +782,13 @@ mod tests {
             history: vec![Created, Running],
             metadata: ExecutionMeta::default(),
         };
-        // `held`, and also `dying` and `par`: a lease on a row that is not a
-        // running leaf changes nothing.
-        let leased = |ix: RunIx| matches!(ix, 0 | 1 | 6);
-        let cmds = kill_leaves(&p, &s, leased);
+        // `held` and `waiting` differ only in a lease the route does not read.
+        let cmds = kill_leaves(&p, &s);
         assert_eq!(
             cmds,
             vec![
                 set_run(1, Killing),
-                set_run(2, Killed),
+                set_run(2, Killing),
                 set_run(3, Killed),
                 set_run(4, Killed),
                 set_run(7, Killed),
@@ -811,7 +800,7 @@ mod tests {
         }
         // Applied once, a second call adds nothing but the leaves it never
         // owned: the execution is already `KILLING`.
-        assert_eq!(kill_leaves(&p, &s, leased), Vec::<Command>::new());
+        assert_eq!(kill_leaves(&p, &s), Vec::<Command>::new());
         // And `advance` takes it from there: `par` waits on `held`.
         assert_eq!(advance(&p, &s, LATE), vec![set_run(0, Killing)]);
     }

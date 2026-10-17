@@ -8,12 +8,15 @@
 //!
 //! For the execution, and with `cascade` for every live descendant:
 //!
-//! 1. a running leaf a worker holds (`claimed_at IS NOT NULL`) becomes
-//!    `KILLING` with its lease untouched; its worker stops the handler and
-//!    writes `KILLED` (spec §4.2);
-//! 2. every other live leaf -- waiting for a worker, `CREATED`, `RETRYING`,
-//!    and every `Subflow` run -- becomes `KILLED`, with its `ended_at` and its
-//!    open attempt closed `KILLED`;
+//! 1. a running leaf (`RUNNING` or `SUBMITTED`) becomes `KILLING` with its
+//!    lease untouched, **leased or not** (final review I1, 2026-10-18): a
+//!    holder stops the handler and writes `KILLED` (spec §4.2); with no lease
+//!    -- waiting for its first claim, or reaped while its container may still
+//!    run -- the kill-only claim cancels it by run and attempt and writes
+//!    `KILLED` (spec §4.3);
+//! 2. every other live leaf -- `CREATED`, `RETRYING`, `PAUSED`, and every
+//!    `Subflow` run -- becomes `KILLED`, with its `ended_at` and its open
+//!    attempt closed `KILLED`;
 //! 3. flowables, a `Pause` and a `WorkingDirectory` block among them, are
 //!    left to `executor::kill::advance_killing`;
 //! 4. the execution becomes `KILLING`, and the settle that writes all of this
@@ -27,16 +30,17 @@
 //! `stamps::stamp_attempt_ends` the attempt's, and nothing here writes a
 //! state column by hand.
 //!
-//! # "Leased" is read under the run rows' locks
+//! # The run rows are locked before they are written
 //!
 //! The claim takes a row with `FOR UPDATE SKIP LOCKED` and no execution lock,
-//! so the execution's lock alone does not stop a worker claiming a run
-//! between the read of `claimed_at` and the write of `KILLED`, and that worker
-//! would then run a task of a killed execution. So every run row of the
-//! execution is read `FOR UPDATE`: a claim that got there first has committed
-//! by the time the read returns, and the run is `KILLING`; one that comes
-//! after skips the locked row, and finds it terminal or `KILLING`-and-leased
-//! once this commits.
+//! so the execution's lock alone does not order the kill against a claim.
+//! Every run row of the execution is therefore locked `FOR UPDATE` first: a
+//! claim that got there first has committed by the time the lock is held,
+//! and its holder finds the run `KILLING`; one that comes after skips the
+//! locked row, and finds it terminal, or `KILLING` -- which it takes only as a
+//! kill-only claim -- once this commits. (Until final review I1 this lock also
+//! read the lease, to write an unleased running run `KILLED`; no lease is
+//! read now.)
 //!
 //! # Which executions are children
 //!
@@ -91,8 +95,9 @@ use crate::executor::{apply, ExecutionState, RunState};
 /// What [`kill_execution`] found and did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KillOutcome {
-    /// A worker holds a leaf of the execution: the execution is `KILLING`
-    /// until that worker has stopped it.
+    /// A leaf of the execution is being stopped -- by the worker that holds
+    /// it, or by the kill-only claim that will take it: the execution is
+    /// `KILLING` until then.
     Killing,
     /// Nothing was running: the execution is `KILLED`.
     Killed,
@@ -227,29 +232,23 @@ const DESCENDANTS: &str = "WITH RECURSIVE tree (id, depth) AS ( \
       ORDER BY t.depth, t.id";
 
 /// The loaded `state` of `ctx`'s execution, and the same with
-/// `executor::kill::kill_leaves` applied, its leases read under the run rows'
-/// locks (module doc).
+/// `executor::kill::kill_leaves` applied, under the run rows' locks (module
+/// doc).
 async fn kill_loaded(
     conn: &mut PgConnection,
     ctx: &ExecutionCtx,
     state: ExecutionState,
 ) -> Result<(ExecutionState, ExecutionState)> {
-    let leased: HashSet<i32> = sqlx::query_as::<_, (i32, bool)>(
-        "SELECT run_ix, claimed_at IS NOT NULL FROM workflow.task_runs \
-          WHERE execution_id = $1 ORDER BY run_ix FOR UPDATE",
+    sqlx::query(
+        "SELECT 1 FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix FOR UPDATE",
     )
     .bind(ctx.id)
-    .fetch_all(&mut *conn)
+    .execute(&mut *conn)
     .await
-    .map_err(db_err)?
-    .into_iter()
-    .filter_map(|(ix, held)| held.then_some(ix))
-    .collect();
+    .map_err(db_err)?;
     let before = state.clone();
     let mut state = state;
-    let cmds = crate::executor::kill::kill_leaves(&ctx.plan, &state, |ix| {
-        i32::try_from(ix).is_ok_and(|ix| leased.contains(&ix))
-    });
+    let cmds = crate::executor::kill::kill_leaves(&ctx.plan, &state);
     for cmd in &cmds {
         apply(&mut state, cmd);
     }

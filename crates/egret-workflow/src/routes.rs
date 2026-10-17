@@ -3030,7 +3030,7 @@ impl axum::response::IntoResponse for KillError {
         KillQuery,
     ),
     responses(
-        (status = 202, description = "The kill is recorded. The body is the execution afterwards: `KILLING` while a worker still has to stop a running task (it then becomes `KILLED` on its own), or `KILLED` if nothing was running. Every run that was waiting, retrying, paused or not yet started is `KILLED` already.", body = ExecutionDto),
+        (status = 202, description = "The kill is recorded. The body is the execution afterwards: `KILLING` while a running task still has to be stopped by a worker (it then becomes `KILLED` on its own), or `KILLED` if nothing was running. Every run that was retrying, paused or not yet started is `KILLED` already.", body = ExecutionDto),
         (status = 400, description = "`cascade` is not `true` or `false`", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
@@ -3041,9 +3041,9 @@ impl axum::response::IntoResponse for KillError {
 )]
 /// Kill an execution that has not ended.
 ///
-/// Tasks waiting, retrying, paused or not yet started end `KILLED` at once; a
-/// task a worker is running is stopped by that worker, and the execution is
-/// `KILLING` until it has. With `cascade` (the default) its `Loop` iterations
+/// Tasks retrying, paused or not yet started end `KILLED` at once; a running
+/// task is stopped by a worker -- the one running it, or the next one to claim
+/// it -- and the execution is `KILLING` until it has. With `cascade` (the default) its `Loop` iterations
 /// and `Subflow` child executions are killed the same way.
 async fn kill_execution(
     State(st): State<WorkflowState>,

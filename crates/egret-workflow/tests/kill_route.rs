@@ -184,6 +184,65 @@ fn last_attempt_state(attempts: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A registry that records each `cancel` by `(run, attempt)` and whether any
+/// handler was run: what a kill-only claim must and must not do.
+#[derive(Default)]
+struct CancelRecorder {
+    cancels: std::sync::Mutex<Vec<(Uuid, usize)>>,
+    ran: std::sync::atomic::AtomicBool,
+}
+
+impl CancelRecorder {
+    fn cancels(&self) -> Vec<(Uuid, usize)> {
+        self.cancels.lock().unwrap().clone()
+    }
+    fn ran(&self) -> bool {
+        self.ran.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl egret_workflow::worker::Registry for CancelRecorder {
+    async fn run(
+        &self,
+        _task: &egret_workflow::worker::TaskInput,
+    ) -> egret_core::Result<egret_workflow::worker::Outcome> {
+        self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(egret_workflow::worker::Outcome::success())
+    }
+    async fn cancel(&self, task: &egret_workflow::worker::TaskInput) -> egret_core::Result<()> {
+        self.cancels
+            .lock()
+            .unwrap()
+            .push((task.run_id, task.attempt));
+        Ok(())
+    }
+}
+
+/// One worker tick whose only work is the kill-only claims of `KILLING`
+/// leaves: it cancels each and runs no handler.
+async fn finish_kills(pool: &sqlx::PgPool) {
+    let reg = CancelRecorder::default();
+    egret_workflow::worker::tick(pool, 10, &reg)
+        .await
+        .expect("the kill-only claims");
+    assert!(!reg.ran(), "a tick that finishes kills runs no handler");
+}
+
+/// Lease `execution`'s run of `task_id`, as a worker's claim would, so a
+/// tick does not take it.
+async fn lease(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) {
+    sqlx::query(
+        "UPDATE workflow.task_runs SET claimed_at = now() \
+          WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .expect("lease the run");
+}
+
 // ── Spec §3.2 step 1: a leased leaf ─────────────────────────────────────────
 
 /// **A leaf a worker holds is moved to `KILLING` and keeps its lease**: the
@@ -215,21 +274,33 @@ async fn a_leased_leaf_is_left_killing_under_its_lease(pool: sqlx::PgPool) {
     assert_eq!(last_attempt_state(&attempts).as_deref(), Some("KILLING"));
 }
 
-// ── Spec §3.2 step 2: a leaf nobody holds ───────────────────────────────────
+// ── Spec §3.2 step 1: a running leaf nobody holds ───────────────────────────
 
-/// **A leaf waiting for a worker is `KILLED` at once, with `ended_at`**, and
-/// with nothing else running the execution answers `KILLED` (step 4's
-/// `advance()` in the same transaction). Its open attempt is closed `KILLED`.
+/// **A running leaf nobody holds is `KILLING`, and one worker tick finishes
+/// it through the kill-only claim** (final review I1, superseding Task 6's
+/// "unleased RUNNING → KILLED"): no lease does not mean nothing is running --
+/// a reaped worker's container may be -- so the claim cancels it by run and
+/// attempt, without running the handler, and writes `KILLED`. Its open
+/// attempt is then closed `KILLED` and the execution ends `KILLED`.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_waiting_leaf_is_killed_at_once_and_so_is_its_execution(pool: sqlx::PgPool) {
+async fn a_waiting_leaf_is_killing_until_one_tick_kills_it(pool: sqlx::PgPool) {
     let (_db, ws, user, app) = setup(&pool).await;
     let ex = start(&pool, ws, &one_log("waiting")).await;
 
     let res = kill(&app, ws, ex, "", user).await;
     assert_eq!(res.status(), 202);
     let body = common::json(res).await;
-    assert_eq!(body["state"], "KILLED", "{body}");
+    assert_eq!(body["state"], "KILLING", "{body}");
+    let (state, claimed_at, ended_at, _) = run_row(&pool, ex, "a").await;
+    assert_eq!(state, "KILLING");
+    assert_eq!(claimed_at, None);
+    assert_eq!(ended_at, None);
 
+    let reg = CancelRecorder::default();
+    egret_workflow::worker::tick(&pool, 10, &reg)
+        .await
+        .expect("the kill-only claim");
+    assert!(!reg.ran(), "the handler of a killed run is never run");
     let (state, claimed_at, ended_at, attempts) = run_row(&pool, ex, "a").await;
     assert_eq!(state, "KILLED");
     assert_eq!(claimed_at, None);
@@ -250,11 +321,64 @@ async fn a_waiting_leaf_is_killed_at_once_and_so_is_its_execution(pool: sqlx::Pg
         exec_history(&pool, ex).await,
         json!(["CREATED", "RUNNING", "KILLING", "KILLED"])
     );
+    assert_eq!(exec_state(&pool, ex).await, "KILLED");
     // Nothing is left for a worker.
     assert!(egret_workflow::worker::claim(&pool, 10)
         .await
         .unwrap()
         .is_empty());
+}
+
+/// **Final review I1: a reaped run is cancelled, not just written `KILLED`.**
+/// Its worker died and the reaper cleared the lease, so the run is `RUNNING`
+/// with `claimed_at` NULL and an attempt that was started -- and its
+/// container may still be running (W5a re-attaches to it on the next claim).
+/// The route makes it `KILLING`; the next worker tick takes it kill-only and
+/// asks the handler to stop exactly that `(run, attempt)`, without running
+/// it, and the run and the execution end `KILLED`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_reaped_run_is_cancelled_by_run_and_attempt_then_killed(pool: sqlx::PgPool) {
+    let (_db, ws, user, app) = setup(&pool).await;
+    let ex = start(&pool, ws, &one_log("reaped")).await;
+    let claimed = egret_workflow::worker::claim(&pool, 10).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    let (run_id, attempt) = (claimed[0].id, claimed[0].attempt as usize);
+    assert!(attempt > 0, "the attempt was started: {attempt}");
+    // The worker dies; its lease expires and the reaper clears it.
+    assert_eq!(
+        egret_workflow::worker::reap(&pool, std::time::Duration::ZERO)
+            .await
+            .expect("reap"),
+        1
+    );
+    let (state, claimed_at, _, _) = run_row(&pool, ex, "a").await;
+    assert_eq!(
+        (state.as_str(), claimed_at),
+        ("RUNNING", None),
+        "the fixture: reaped"
+    );
+
+    let res = kill(&app, ws, ex, "", user).await;
+    assert_eq!(res.status(), 202);
+    assert_eq!(common::json(res).await["state"], "KILLING");
+    assert_eq!(run_row(&pool, ex, "a").await.0, "KILLING");
+
+    let reg = CancelRecorder::default();
+    egret_workflow::worker::tick(&pool, 10, &reg)
+        .await
+        .expect("the kill-only claim");
+    assert_eq!(
+        reg.cancels(),
+        vec![(run_id, attempt)],
+        "the reaped run's own attempt is cancelled, once"
+    );
+    assert!(!reg.ran(), "and its handler is not run again");
+    let (state, claimed_at, ended_at, attempts) = run_row(&pool, ex, "a").await;
+    assert_eq!(state, "KILLED");
+    assert_eq!(claimed_at, None);
+    assert!(ended_at.is_some());
+    assert_eq!(last_attempt_state(&attempts).as_deref(), Some("KILLED"));
+    assert_eq!(exec_state(&pool, ex).await, "KILLED");
 }
 
 /// **D2: a paused execution is killed without a worker** -- its `Pause` run
@@ -346,6 +470,7 @@ async fn the_refusals_write_nothing(pool: sqlx::PgPool) {
     // Terminal.
     let done = start(&pool, ws, &one_log("done")).await;
     assert_eq!(kill(&app, ws, done, "", user).await.status(), 202);
+    finish_kills(&pool).await;
     assert_eq!(exec_state(&pool, done).await, "KILLED");
     let history = exec_history(&pool, done).await;
     let res = kill(&app, ws, done, "", user).await;
@@ -390,10 +515,11 @@ async fn a_kill_writes_an_audit_record(pool: sqlx::PgPool) {
     assert_eq!(audit[0].1.as_deref(), Some(ex.to_string().as_str()));
     assert_eq!(
         audit[0].2,
-        json!({"from_state": "RUNNING", "cascade": false, "outcome": "KILLED"})
+        json!({"from_state": "RUNNING", "cascade": false, "outcome": "KILLING"})
     );
 
     // A refusal audits nothing.
+    finish_kills(&pool).await;
     assert_eq!(kill(&app, ws, ex, "", user).await.status(), 409);
     assert!(common::audit_mutations(&app).is_empty());
 }
@@ -438,10 +564,12 @@ async fn cascade_kills_loop_and_subflow_children(pool: sqlx::PgPool) {
     );
 }
 
-/// **The same with nothing leased**: every execution in the tree ends
-/// `KILLED` in the route's own transaction.
+/// **The same with nothing leased**: the parent, which has no leaf of its
+/// own, ends `KILLED` in the route's own transaction; the children's running
+/// leaves are `KILLING` (final review I1) and one tick's kill-only claims end
+/// the whole tree `KILLED`, with no handler run.
 #[sqlx::test(migrations = "../../migrations")]
-async fn cascade_with_nothing_leased_kills_the_whole_tree_at_once(pool: sqlx::PgPool) {
+async fn cascade_with_nothing_leased_kills_the_whole_tree_after_one_tick(pool: sqlx::PgPool) {
     let (db, ws, user, app) = setup(&pool).await;
     file_flow(&db, ws, user, &one_log("child")).await;
     let parent = start(&pool, ws, &parent_with_children("cascade-free")).await;
@@ -450,6 +578,16 @@ async fn cascade_with_nothing_leased_kills_the_whole_tree_at_once(pool: sqlx::Pg
 
     let res = kill(&app, ws, parent, "?cascade=true", user).await;
     assert_eq!(res.status(), 202);
+    assert_eq!(exec_state(&pool, parent).await, "KILLED");
+    for ex in [iteration[0], child] {
+        assert_eq!(exec_state(&pool, ex).await, "KILLING", "{ex}");
+    }
+    let reg = CancelRecorder::default();
+    egret_workflow::worker::tick(&pool, 10, &reg)
+        .await
+        .expect("the kill-only claims");
+    assert!(!reg.ran(), "no handler is run");
+    assert_eq!(reg.cancels().len(), 2, "one cancel per killed leaf");
     for ex in [parent, iteration[0], child] {
         assert_eq!(exec_state(&pool, ex).await, "KILLED", "{ex}");
     }
@@ -534,7 +672,7 @@ async fn cascade_does_not_reach_a_replay_or_a_flow_trigger_execution(pool: sqlx:
         kill(&app, ws, source, "?cascade=true", user).await.status(),
         202
     );
-    assert_eq!(exec_state(&pool, source).await, "KILLED");
+    assert_eq!(exec_state(&pool, source).await, "KILLING");
     assert_eq!(exec_state(&pool, replay).await, "RUNNING");
     assert_eq!(run_row(&pool, replay, "a").await.0, "RUNNING");
     assert_eq!(exec_state(&pool, fired).await, "RUNNING");
@@ -631,7 +769,8 @@ async fn after_a_kill_every_live_run_in_the_tree_is_killing(pool: sqlx::PgPool) 
         .map(|(_, t, _)| t.as_str())
         .collect();
     assert!(leased.contains(&"leased"), "{live:?}");
-    assert_eq!(run_row(&pool, ex, "waiting").await.0, "KILLED");
+    // Final review I1: running and unleased is KILLING too, for the claim.
+    assert!(leased.contains(&"waiting"), "{live:?}");
     assert_eq!(run_row(&pool, ex, "created").await.0, "KILLED");
     assert_eq!(run_row(&pool, ex, "retrying").await.0, "KILLED");
     assert_eq!(run_row(&pool, ex, "pause").await.0, "KILLED");
@@ -714,7 +853,12 @@ async fn a_parent_killed_by_aggregation_kills_no_other_child(pool: sqlx::PgPool)
     let detached = child_of_task(&pool, parent, "fire").await;
     assert_eq!(run_row(&pool, parent, "fire").await.0, "SUCCESS");
 
+    // The detached child's leaf is leased, so the tick below finishes only
+    // the kill (final review I1: the killed leaf is KILLING until a claim
+    // cancels it) and does not run the detached one.
+    lease(&pool, detached, "a").await;
     assert_eq!(kill(&app, ws, waited, "", user).await.status(), 202);
+    finish_kills(&pool).await;
     assert_eq!(exec_state(&pool, waited).await, "KILLED");
     // The scenario: the parent reached KILLED by aggregation alone.
     assert_eq!(run_row(&pool, parent, "waits").await.0, "KILLED");
