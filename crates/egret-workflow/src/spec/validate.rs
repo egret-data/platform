@@ -54,7 +54,10 @@
 //!    an opaque runnable no handler serves, and every execution that reached
 //!    it stalled in `RUNNING` for ever. So each is an ERROR, in
 //!    `validate_for_run`, which publish and every start path ask:
-//!    `unsupported_allow_failure`,
+//!    `unsupported_allow_failure` (until #680, which made `AllowFailure` a
+//!    flowable; since then only `unsupported_allow_failure_retry`, a block
+//!    `retry:`; `unsupported_working_directory` likewise went with #683 --
+//!    noted 2026-10-17, kill Task 2 fix round 1),
 //!    `unsupported_loop_until_property` (a bound `executor::loop_until_gap`
 //!    names), `unsupported_pause_property` (`executor::pause_gap`, W7b),
 //!    `unsupported_foreach` (W7b), `unsupported_flow_task` (a type spelled

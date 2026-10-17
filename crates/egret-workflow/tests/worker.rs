@@ -10469,7 +10469,7 @@ async fn a_killing_execution_hides_its_waiting_runs_from_the_waker(pool: sqlx::P
 /// can be switched on after the execution is running.
 fn sla_cancel_flow(id: &str) -> String {
     format!(
-        "id: {id}\nnamespace: t\ninputs:\n  - id: string\n    type: SELECT\n    values:\n      - PASS\n      - CANCEL\n    defaults: PASS\nsla:\n  - id: condition\n    type: EXECUTION_ASSERTION\n    behavior: CANCEL\n    assert: \"{{{{inputs.string != 'CANCEL'}}}}\"\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+        "id: {id}\nnamespace: t\ninputs:\n  - id: string\n    type: SELECT\n    values:\n      - PASS\n      - CANCEL\n    defaults: PASS\nsla:\n  - id: condition\n    type: EXECUTION_ASSERTION\n    behavior: CANCEL\n    assert: \"{{{{inputs.string != 'CANCEL'}}}}\"\ntasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n"
     )
 }
 
@@ -10598,4 +10598,32 @@ async fn an_sla_violated_during_a_kill_leaves_the_execution_to_end_killed(pool: 
         "{h:?}"
     );
     assert!(!h.iter().any(|s| s == "CANCELLED"), "{h:?}");
+
+    // Fix round 1: a flowable closed by the kill gets its run-level `ended_at`
+    // (and its attempt's) from `persist`, as any terminal does; so does the
+    // execution.
+    let (state, history, ended, attempt_ended): (String, serde_json::Value, bool, bool) =
+        sqlx::query_as(
+            "SELECT state, history, ended_at IS NOT NULL, \
+                    (attempts -> -1 ->> 'ended_at') IS NOT NULL \
+               FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'seq'",
+        )
+        .bind(killed)
+        .fetch_one(&pool)
+        .await
+        .expect("read seq");
+    assert_eq!(state, "KILLED");
+    assert_eq!(
+        history,
+        serde_json::json!(["CREATED", "RUNNING", "KILLING", "KILLED"])
+    );
+    assert!(ended, "the KILLED flowable has a run-level ended_at");
+    assert!(attempt_ended, "its attempt is closed with an ended_at");
+    let exec_ended: bool =
+        sqlx::query_scalar("SELECT ended_at IS NOT NULL FROM workflow.executions WHERE id = $1")
+            .bind(killed)
+            .fetch_one(&pool)
+            .await
+            .expect("read the execution");
+    assert!(exec_ended, "the KILLED execution has an ended_at");
 }

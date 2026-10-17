@@ -4,9 +4,13 @@
 //! **This module is the `allowFailure:` FLAG, not the `AllowFailure`
 //! flowable.** They are different constructs with the same word in them:
 //! `io.kestra.plugin.core.flow.AllowFailure` is a class that `extends
-//! Sequential` and is still planned opaque here
-//! ([`plan::TaskKind::Runnable`](super::plan::TaskKind)) -- and refused at
-//! validate as `unsupported_allow_failure` since no-silent-stall Task 1 --
+//! Sequential`, planned as its own flowable
+//! ([`plan::TaskKind::AllowFailure`](super::plan::TaskKind), driven by
+//! `flowable::allow_failure`) -- **corrected 2026-10-17 (kill Task 2 fix round
+//! 1):** this said it was still planned opaque and refused at validate as
+//! `unsupported_allow_failure`; that was true from no-silent-stall Task 1 until
+//! #680 (`a0e232b3`) made it a flowable, and validate now refuses only a block
+//! `retry:` (`unsupported_allow_failure_retry`) --
 //! while
 //! `allowFailure:` is a `Task.java` property every task in the language may
 //! write. Four of `oracle-exec/baseline.txt`'s twelve entries for this row hold

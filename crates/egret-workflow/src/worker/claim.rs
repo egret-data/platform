@@ -1617,11 +1617,19 @@ async fn apply_block_claim_on(
     };
     // The fence, on the block's own row, as an outcome's write is. The block's
     // `outputs` are written here too, for the finish claim (spec §5.5).
+    //
+    // Kill Task 2 fix round 1: **and the block is still `RUNNING`.** A claim
+    // whose block was moved on (a kill, or anything else that ended it) under
+    // the lease commits nothing, so a late prepare cannot write a snapshot
+    // pointer onto a `KILLED` block. `executor::kill` leaves a block with a
+    // claim out `RUNNING`, so a kill alone never refuses a claim; this is the
+    // fence for a writer that did not wait. Task 4 adds the same term to a
+    // leaf outcome's fence.
     let hit = sqlx::query(
         "UPDATE workflow.task_runs \
             SET message = $1, working_dir_snapshot = COALESCE($2, working_dir_snapshot), \
                 outputs = COALESCE($5, outputs) \
-          WHERE id = $3 AND claimed_at = $4",
+          WHERE id = $3 AND claimed_at = $4 AND state = 'RUNNING'",
     )
     .bind(message)
     .bind(snapshot)
@@ -4446,5 +4454,124 @@ mod tests {
         })
         .await;
         assert!(matches!(out, Leased::Kept { out: 9, .. }));
+    }
+
+    // ---- Kill Task 2 fix round 1: the block-claim fence ----------------------
+
+    /// **A block claim does not commit onto a block that is no longer
+    /// `RUNNING`.** A prepare whose block was moved to `KILLING` under its
+    /// lease writes no snapshot pointer, does not move the phase on, and is
+    /// refused; the control, the same claim on a `RUNNING` block, commits.
+    ///
+    /// The execution is created and its block leased in ONE transaction, so no
+    /// concurrent `tick` in this test process can claim it in between.
+    #[tokio::test]
+    async fn a_block_claim_does_not_commit_onto_a_block_that_is_no_longer_running() {
+        let mut cfg = egret_config::Config::default().workflow;
+        cfg.container_runner = egret_config::ContainerRunner::Docker;
+        crate::runtime::install_served_for_tests(crate::runtime::served_for(&cfg));
+        let pool = crate::storage::nsfiles::stage::testing::pool()
+            .await
+            .expect("the test database");
+        let _fs = crate::storage::install_mem_for_tests();
+        let ws = crate::storage::nsfiles::stage::testing::workspace(&pool).await;
+        let src = "id: kill-wd-fence\nnamespace: t\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n";
+
+        for killed in [false, true] {
+            let mut tx = pool.begin().await.expect("begin");
+            let ex = start_execution_in(
+                &mut tx,
+                NewExecution {
+                    workspace_id: ws,
+                    flow_id: None,
+                    source: src,
+                    inputs: serde_json::json!({}),
+                    trigger: None,
+                    scheduled_date: None,
+                    trigger_execution_id: None,
+                    execution_depth: 0,
+                    flow_trigger_event_id: None,
+                    born_failed: false,
+                    replayed_from_execution_id: None,
+                    id: None,
+                    input_files: Vec::new(),
+                    labels: None,
+                    backfill_id: None,
+                },
+            )
+            .await
+            .expect("start");
+            let c: Claimed = sqlx::query_as(
+                "WITH leased AS ( \
+                   UPDATE workflow.task_runs SET claimed_at = now() \
+                    WHERE execution_id = $1 AND working_dir = 'PREPARING' \
+                      AND state = 'RUNNING' AND claimed_at IS NULL \
+                   RETURNING * ) \
+                 SELECT t.id, t.execution_id, e.workspace_id, t.run_ix, t.task_ix, t.task_id, \
+                        '' AS type_id, t.value, jsonb_array_length(t.attempts) AS attempt, \
+                        e.source, NULL::uuid AS principal_id, t.claimed_at, \
+                        t.working_dir AS block_phase, NULL::uuid AS block_id, \
+                        NULL::text AS block_snapshot \
+                   FROM leased t JOIN workflow.executions e ON e.id = t.execution_id",
+            )
+            .bind(ex)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("the block's prepare claim, leased");
+            if killed {
+                sqlx::query(
+                    "UPDATE workflow.task_runs SET state = 'KILLING', \
+                        history = history || '[\"KILLING\"]'::jsonb WHERE id = $1",
+                )
+                .bind(c.id)
+                .execute(&mut *tx)
+                .await
+                .expect("block -> KILLING");
+                sqlx::query(
+                    "UPDATE workflow.executions SET state = 'KILLING', \
+                        history = history || '[\"KILLING\"]'::jsonb WHERE id = $1",
+                )
+                .bind(ex)
+                .execute(&mut *tx)
+                .await
+                .expect("execution -> KILLING");
+            }
+            tx.commit().await.expect("commit");
+
+            let done = BlockDone::Prepared {
+                snapshot: "s3://b/x/prepare.tar".into(),
+            };
+            let pool_ref = &pool;
+            let out: Result<()> = transaction!(pool_ref, |at| {
+                apply_block_claim_with(at, &c, &done).await
+            });
+            let (state, phase, snapshot): (String, Option<String>, Option<String>) =
+                sqlx::query_as(
+                    "SELECT state, working_dir, working_dir_snapshot \
+                       FROM workflow.task_runs WHERE id = $1",
+                )
+                .bind(c.id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the block");
+            if killed {
+                assert!(
+                    matches!(&out, Err(e) if e.to_string().contains(&c.id.to_string())),
+                    "a claim on a KILLING block must be refused: {out:?}"
+                );
+                assert_eq!(
+                    (state.as_str(), phase.as_deref(), snapshot.as_deref()),
+                    ("KILLING", Some("PREPARING"), None),
+                    "nothing of the late prepare is recorded"
+                );
+            } else {
+                out.expect("the control: a RUNNING block's prepare commits");
+                assert_eq!(
+                    (phase.as_deref(), snapshot.as_deref()),
+                    (Some("PREPARED"), Some("s3://b/x/prepare.tar")),
+                    "the control's prepare is recorded (state {state})"
+                );
+            }
+        }
     }
 }

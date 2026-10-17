@@ -550,9 +550,13 @@ pub enum TaskKind {
     /// `type_id`, the worker claimed it and failed with `NotALeaf` before
     /// recording an outcome, and the execution stalled in `RUNNING` for ever.
     /// **The same was true of `AllowFailure` and `WorkingDirectory`**, which
-    /// published with no finding at all; no-silent-stall Task 1 refuses them
+    /// published with no finding at all; no-silent-stall Task 1 refused them
     /// the same way (`unsupported_allow_failure`,
-    /// `unsupported_working_directory`).
+    /// `unsupported_working_directory`). **Corrected 2026-10-17 (kill Task 2
+    /// fix round 1):** neither is refused any more -- #680 and #683 plan them
+    /// as the flowables [`TaskKind::AllowFailure`] and
+    /// [`TaskKind::WorkingDirectory`]; only an `AllowFailure` block `retry:`
+    /// is refused (`unsupported_allow_failure_retry`).
     Pause {
         duration: Option<String>,
     },
@@ -920,7 +924,8 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
 /// no handler can run. Measured at Task 1: `validate` reports errors on **52**
 /// of the 266 `runs` entries (3 `unsupported_pause_property`, 4
 /// `unsupported_allow_failure`, 4 `unsupported_working_directory`, 41
-/// `unknown_task_type`), and on **57** of the 295 flows this Kestra published
+/// `unknown_task_type`; the first two codes are gone since #680 and #683 --
+/// noted 2026-10-17, kill Task 2 fix round 1, the counts are Task 1's), and on **57** of the 295 flows this Kestra published
 /// with 200 (those 52, three more with no golden entry, and the two named
 /// over-refusals). Each is a row of `executor::PUBLISHED_BUT_REFUSED`, with its
 /// cause, and `every_flow_kestra_published_plans_except_the_named_refusals`
@@ -977,8 +982,9 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
 /// in tension.** An opaque `Runnable` that is not a `Leaf` is a task no
 /// handler can run, and every execution of it stalled in `RUNNING`; so
 /// `spec::validate` refuses each such construct BY NAME
-/// (`unsupported_allow_failure`, `unsupported_working_directory`,
-/// `unsupported_loop_until_property`, `unsupported_pause_property`, and for a
+/// (`unsupported_allow_failure` and `unsupported_working_directory` until #680
+/// and #683 made both real flowables -- noted 2026-10-17, kill Task 2 fix
+/// round 1 --, `unsupported_loop_until_property`, `unsupported_pause_property`, and for a
 /// `Leaf`, `unsupported_flow_task` and `unknown_task_type`). That is not M8's
 /// rule below: M8 refused by SPELLING, in the builder, and its refusals landed
 /// on flows Kestra refused for other reasons. Measured at Task 1, the named

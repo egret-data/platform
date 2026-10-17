@@ -3352,7 +3352,9 @@ mod tests {
     /// **"Planned" here means the flattening, not `build_plan`'s answer**, since
     /// no-silent-stall Task 1. Every construct this test classifies `Opaque`
     /// except a `Leaf` is now a validation ERROR (`unsupported_allow_failure`,
-    /// `unsupported_working_directory`, `unsupported_loop_until_property`), so
+    /// `unsupported_working_directory`, `unsupported_loop_until_property`; the
+    /// first two went with #680 and #683, which planned both as flowables --
+    /// noted 2026-10-17, kill Task 2 fix round 1), so
     /// `build_plan`'s third gate answers `Err` for it, as it already did for a
     /// gapped `Pause`. The tiers are read off [`plan::flatten_flow`], the first
     /// two gates alone, and the refusal is asserted beside each.

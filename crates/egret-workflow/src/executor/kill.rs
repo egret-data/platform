@@ -31,6 +31,16 @@
 //! ended" and marks the execution `RESTARTED` — is never applied to this
 //! function's output, because `advance` returns it directly.
 //!
+//! # A `WorkingDirectory` block waits for its own claim (fix round 1)
+//!
+//! A block in `PREPARING` or `FINISHING` has a claim with the worker, or one
+//! a worker is about to take, and no live child. It is not written until the
+//! claim has completed: closing it under a leased claim let a late prepare
+//! commit onto a `KILLED` block. A block killed after its prepare and before
+//! its finish leaves its `_wd/{block}/` snapshots behind -- recorded in the
+//! Task 2 report as NEEDS_CONTEXT, because the only discard today is the
+//! finish claim's.
+//!
 //! # The attempt ends `KILLED`
 //!
 //! The commands are plain [`Command::SetRunState`]s, the shape every flowable
@@ -42,7 +52,7 @@
 
 use super::command::Command;
 use super::plan::{Plan, TaskKind};
-use super::state::{ExecutionState, RunIx, RunState};
+use super::state::{ExecutionState, RunIx, RunState, WorkingDirPhase};
 
 /// One round of closing a `KILLING` execution. Pure, like
 /// [`advance`](super::advance), which calls it and returns its result when the
@@ -59,6 +69,18 @@ pub(crate) fn advance_killing(plan: &Plan, state: &ExecutionState) -> Vec<Comman
             continue;
         };
         if last.is_terminal() || is_leaf(&plan.tasks[run.task].kind) {
+            continue;
+        }
+        // A `WorkingDirectory` block whose prepare or finish claim is out --
+        // claimable or leased -- is waited for, as a leased leaf is. The block
+        // stays `RUNNING` so the claim can still be taken and its commit
+        // passes the block-claim fence (`claim::apply_block_claim_on`, which
+        // refuses a block that is not `RUNNING`); a finish that commits
+        // discards the block's snapshots, as it always has.
+        if matches!(
+            run.working_dir,
+            Some(WorkingDirPhase::Preparing | WorkingDirPhase::Finishing)
+        ) {
             continue;
         }
         if last != RunState::Killing {
@@ -396,5 +418,168 @@ mod tests {
         let p = plan(LEAF);
         let s = killing(Vec::new());
         assert_eq!(advance(&p, &s, LATE), vec![set_exec(Killed)]);
+    }
+
+    // ---- fix round 1: WorkingDirectory and AllowFailure under a kill --------
+
+    const WD: &str = "  - id: block\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n      - id: b\n        type: io.kestra.plugin.core.debug.Return\n        format: b\n";
+
+    fn block(p: &Plan, history: &[RunState], phase: Option<WorkingDirPhase>) -> TaskRun {
+        let mut r = run(task(p, "block"), None, history);
+        r.working_dir = phase;
+        r
+    }
+
+    /// No command in any round asks for a claim or a run.
+    fn no_claim_and_no_run(all: &[Vec<Command>]) {
+        for c in all.iter().flatten() {
+            assert!(
+                !matches!(
+                    c,
+                    Command::BeginWorkingDirectory { .. }
+                        | Command::FinishWorkingDirectory { .. }
+                        | Command::CreateRun { .. }
+                        | Command::StartRun { .. }
+                ),
+                "a kill asked for {c:?}: {all:?}"
+            );
+        }
+    }
+
+    /// Before the prepare claim was asked for: no claim, nothing to discard,
+    /// and the block closes at once.
+    #[test]
+    fn a_block_killed_before_its_prepare_is_closed_and_asks_for_no_claim() {
+        let p = plan(WD);
+        let mut s = killing(vec![block(&p, &[Created, Running], None)]);
+        let all = rounds(&p, &mut s);
+        no_claim_and_no_run(&all);
+        assert_eq!(
+            all,
+            vec![
+                vec![set_run(0, Killing)],
+                vec![set_run(0, Killed)],
+                vec![set_exec(Killed)],
+            ]
+        );
+    }
+
+    /// A prepare claim that is out is waited for, with the block left
+    /// `RUNNING` (so the claim can be taken and its commit passes the fence);
+    /// once it completes, the block closes without starting a child.
+    #[test]
+    fn a_block_whose_prepare_is_out_waits_for_it_then_closes() {
+        let p = plan(WD);
+        let mut s = killing(vec![block(
+            &p,
+            &[Created, Running],
+            Some(WorkingDirPhase::Preparing),
+        )]);
+        assert_eq!(advance(&p, &s, LATE), Vec::<Command>::new());
+        // The worker's prepare commits.
+        apply(&mut s, &Command::CompleteWorkingDirectoryClaim { run: 0 });
+        let all = rounds(&p, &mut s);
+        no_claim_and_no_run(&all);
+        assert_eq!(
+            all,
+            vec![
+                vec![set_run(0, Killing)],
+                vec![set_run(0, Killed)],
+                vec![set_exec(Killed)],
+            ]
+        );
+    }
+
+    /// Children running: the block goes `KILLING`, waits for the killed child,
+    /// and closes without a finish claim and without the second child.
+    #[test]
+    fn a_block_killed_while_a_child_runs_closes_after_it_without_a_finish() {
+        let p = plan(WD);
+        let mut s = killing(vec![
+            block(&p, &[Created, Running], Some(WorkingDirPhase::Prepared)),
+            run(task(&p, "a"), Some(0), &[Created, Running, Killing]),
+        ]);
+        let first = rounds(&p, &mut s);
+        assert_eq!(first, vec![vec![set_run(0, Killing)]]);
+        apply(&mut s, &set_run(1, Killed));
+        let rest = rounds(&p, &mut s);
+        no_claim_and_no_run(&first);
+        no_claim_and_no_run(&rest);
+        assert_eq!(rest, vec![vec![set_run(0, Killed)], vec![set_exec(Killed)]]);
+        assert_eq!(s.runs.len(), 2, "b was never created");
+    }
+
+    /// A finish claim that is out is waited for; its commit (which discards
+    /// the snapshots, `claim::run_block_claim`) is what lets the block close.
+    #[test]
+    fn a_block_whose_finish_is_out_waits_for_it_then_closes() {
+        let p = plan(WD);
+        let mut s = killing(vec![
+            block(&p, &[Created, Running], Some(WorkingDirPhase::Finishing)),
+            run(task(&p, "a"), Some(0), &[Created, Running, Success]),
+            run(task(&p, "b"), Some(0), &[Created, Running, Killing, Killed]),
+        ]);
+        assert_eq!(advance(&p, &s, LATE), Vec::<Command>::new());
+        apply(&mut s, &Command::CompleteWorkingDirectoryClaim { run: 0 });
+        let all = rounds(&p, &mut s);
+        no_claim_and_no_run(&all);
+        assert_eq!(
+            all,
+            vec![
+                vec![set_run(0, Killing)],
+                vec![set_run(0, Killed)],
+                vec![set_exec(Killed)],
+            ]
+        );
+        assert_eq!(s.runs[0].working_dir, Some(WorkingDirPhase::Finished));
+    }
+
+    /// IMPORTANT 2: an `AllowFailure` over a KILLED child ends `KILLED`, not
+    /// the `WARNING` its own drive would soften a failure to, and its
+    /// `finally:` is not run. `advance_killing` never goes through
+    /// `allow_failure::drive` or `soften`; this pins that a refactor through
+    /// `descend` cannot change it silently.
+    #[test]
+    fn an_allow_failure_over_a_killed_child_ends_killed_and_runs_no_finally() {
+        let p = plan(
+            "  - id: af\n    type: io.kestra.plugin.core.flow.AllowFailure\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n      - id: ko\n        type: io.kestra.plugin.core.debug.Return\n        format: ko\n    finally:\n      - id: fin\n        type: io.kestra.plugin.core.debug.Return\n        format: f\n",
+        );
+        let mut s = killing(vec![
+            run(task(&p, "af"), None, &[Created, Running]),
+            run(task(&p, "a"), Some(0), &[Created, Running, Success]),
+            run(
+                task(&p, "ko"),
+                Some(0),
+                &[Created, Running, Killing, Killed],
+            ),
+        ]);
+        let all = rounds(&p, &mut s);
+        no_claim_and_no_run(&all);
+        assert_eq!(
+            all,
+            vec![
+                vec![set_run(0, Killing)],
+                vec![set_run(0, Killed)],
+                vec![set_exec(Killed)],
+            ]
+        );
+        assert_eq!(s.runs.len(), 3, "fin was never created");
+        // The control: the same block under a RUNNING execution, over a
+        // FAILED child, runs its `finally:` -- so "no fin" above is the kill's.
+        let mut live = s.clone();
+        live.history = vec![Created, Running];
+        live.runs.truncate(3);
+        live.runs[0].history = vec![Created, Running];
+        live.runs[0].attempts[0].history = vec![Created, Running];
+        live.runs[2].history = vec![Created, Running, RunState::Failed];
+        let fin = task(&p, "fin");
+        let created_fin = rounds(&p, &mut live)
+            .iter()
+            .flatten()
+            .any(|c| matches!(c, Command::CreateRun { task, .. } if *task == fin));
+        assert!(
+            created_fin,
+            "the control: a live AllowFailure runs its finally"
+        );
     }
 }
