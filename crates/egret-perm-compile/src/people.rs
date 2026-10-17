@@ -262,3 +262,1064 @@ pub async fn list_people_via(
 fn count(set: Option<&BTreeSet<Uuid>>) -> i64 {
     set.map_or(0, |s| i64::try_from(s.len()).unwrap_or(i64::MAX))
 }
+
+// ---------------------------------------------------------------------------
+// One principal: memberships, `standsFor`, clearances (Task 3, spec §4.2)
+// ---------------------------------------------------------------------------
+//
+// **Where each answer comes from.** "Do engines apply this membership" is
+// answered by the compiler's own reads, never by a predicate written here:
+// a user's group by [`group_members_via`], a role by [`role_holders_via`], a
+// workspace by [`workspace_members_via`] (spec §1, §4.1). What this module
+// reads itself is only what those reads deliberately leave out, so that the
+// page can SHOW it, marked: expired rows (spec P3), and the roles and
+// workspaces a GROUP holds, which egret's own authoriser counts
+// (`crates/egret-auth/src/grants.rs:47-60`) and the compiler does not
+// (`members.rs` module doc, narrowing 1). Deny-effect `access_grants` rows are
+// not memberships for either (`members.rs` `role_holders_via`; the PDP's
+// clearance roles filter `effect = 'allow'`, `egret_auth::pdp`), so none is
+// listed.
+//
+// **No username, no engine identity.** The bare username is the only name an
+// engine sees (`members.rs` module doc), so for a user with none every entry
+// is `no_username`. For a group or workspace membership that is "not YET": a
+// compile of a grant naming the group or workspace mints one (`members.rs`,
+// "A member with no username yet is MINTED"); a role holder is never minted
+// (`members.rs` `role_usernames`).
+
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+
+use egret_perm::{PrincipalKind, PUBLIC_GROUP};
+
+use crate::members::workspace_members_via;
+
+/// How a principal comes to stand for another (spec §4.2).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Via {
+    /// The principal itself (`user:<username>`, `group:<name>`, `role:<name>`).
+    Itself,
+    /// A group the user is a direct member of.
+    Group { name: String },
+    /// A role held directly (a user's or, on a group's page, the group's).
+    Role { name: String },
+    /// A workspace held directly. `name` is the workspace's name, or its id
+    /// when no workspace has that id any more.
+    Workspace { id: Uuid, name: String },
+    /// `group:public`: everyone.
+    Public,
+    /// A role held by one of the user's groups (egret only).
+    GroupRole { group: String, role: String },
+    /// A workspace held by one of the user's groups (egret only).
+    GroupWorkspace {
+        group: String,
+        id: Uuid,
+        name: String,
+    },
+}
+
+/// Why engines do not apply a membership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NotOnEngines {
+    /// Held by a group: the compiler expands a `group` principal to its
+    /// members, but not a group's own roles or workspace memberships
+    /// (`members.rs` module doc, narrowing 1; measured, live doc §1.1 C3b).
+    HeldThroughGroup,
+    /// Expired. The compiler reads only unexpired rows, but a lapse is not a
+    /// write, so engines may apply it until the profile next recompiles
+    /// (`members.rs` module doc, narrowing 2).
+    Expired,
+    /// The user has no `users.username`, so no engine knows them.
+    NoUsername,
+}
+
+/// The scope of an `access_grants` row.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MembershipScope {
+    Platform,
+    Workspace {
+        id: Uuid,
+        name: String,
+    },
+    Object {
+        id: Uuid,
+        #[serde(rename = "objectType")]
+        object_type: Option<String>,
+    },
+}
+
+/// A principal, `(kind, ref)` exactly as a grant or rule stores it, that
+/// stands for the principal being read (spec P4). The client lists a grant or
+/// rule when one of its principals equals an entry byte for byte.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StandsFor {
+    pub kind: PrincipalKind,
+    pub r#ref: String,
+    pub via: Via,
+    pub on_engines: bool,
+    pub not_on_engines: Option<NotOnEngines>,
+}
+
+/// One membership: a group, a role grant, or a workspace grant.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Membership {
+    pub via: Via,
+    /// The role of a role or workspace grant; null for a group membership.
+    pub role: Option<String>,
+    /// The grant's scope; null for a group membership (it has none).
+    pub scope: Option<MembershipScope>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub expired: bool,
+    pub on_engines: bool,
+    pub not_on_engines: Option<NotOnEngines>,
+}
+
+/// A group member or a role holder.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberRef {
+    pub user_id: Uuid,
+    /// Name, else email.
+    pub label: String,
+    pub username: Option<String>,
+    /// A Data API service account (migration `0119`). Listed like anyone:
+    /// a grant can name it and engines enforce on it.
+    pub service_account: bool,
+    /// False only for a person with no username (`noUsername`).
+    pub on_engines: bool,
+    pub not_on_engines: Option<NotOnEngines>,
+}
+
+/// A group holding a role (egret only).
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupRef {
+    pub name: String,
+    pub source: String,
+}
+
+/// Whether engines clear a principal for a gated tag.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EngineClearance {
+    /// Directly holds `role`, unexpired, and has a username: the compiled
+    /// deny excepts them (`clearance.rs:33-58`, `members.rs:146-160`).
+    Cleared { role: String },
+    /// Not excepted; `because` says why when they hold a required role in a
+    /// way engines do not apply.
+    NotCleared { because: Option<NotOnEngines> },
+    /// The gate names only groups, so nothing is compiled for it
+    /// (`clearance.rs:266-276`; measured, live doc §1.1 C6).
+    NotEnforcedGroupsOnly,
+}
+
+/// Whether egret's own object-access check clears a principal for a gated
+/// tag (`crates/egret-auth/src/pdp/templates.rs:82-106`): a required role
+/// held directly or through a group (`crates/egret-auth/src/grants.rs:47-60`),
+/// membership in a required group, or the platform-admin exemption.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EgretClearance {
+    /// `scope` is the clearing role grant's: a workspace role clears only that
+    /// workspace's objects, an object role only that object. Null for a group
+    /// membership or the principal itself.
+    Cleared {
+        via: Via,
+        scope: Option<MembershipScope>,
+    },
+    NotCleared,
+}
+
+/// One gated tag and both answers.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearanceFact {
+    pub tag_id: Uuid,
+    pub tag_key: String,
+    pub tag_name: String,
+    pub required_roles: Vec<String>,
+    /// Group NAMES (a gate stores ids; an id no group has any more is shown
+    /// as the id).
+    pub required_groups: Vec<String>,
+    pub engines: EngineClearance,
+    pub egret: EgretClearance,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UserPrincipal {
+    pub id: Uuid,
+    pub email: String,
+    pub name: String,
+    pub username: Option<String>,
+    /// `active` or `disabled`.
+    pub status: String,
+    pub service_account: bool,
+    pub groups: Vec<Membership>,
+    /// Role grants, direct and through a group.
+    pub roles: Vec<Membership>,
+    /// Workspace-scoped grants, direct and through a group.
+    pub workspaces: Vec<Membership>,
+    pub stands_for: Vec<StandsFor>,
+    pub clearances: Vec<ClearanceFact>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupPrincipal {
+    pub name: String,
+    /// `local` or `oidc`; null for `public`.
+    pub source: Option<String>,
+    pub is_public: bool,
+    /// Direct members, as the compiler reads them; empty for `public`.
+    pub members: Vec<MemberRef>,
+    /// How many of `members` are service accounts.
+    pub service_accounts: i64,
+    pub roles: Vec<Membership>,
+    pub workspaces: Vec<Membership>,
+    pub stands_for: Vec<StandsFor>,
+    pub clearances: Vec<ClearanceFact>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RolePrincipal {
+    pub name: String,
+    /// Every scope defining the name, sorted.
+    pub scopes: Vec<String>,
+    /// Live allow holders that are users, as the compiler reads them.
+    pub holders: Vec<MemberRef>,
+    /// How many of `holders` are service accounts.
+    pub service_accounts: i64,
+    /// Groups holding the role, unexpired (egret only).
+    pub holder_groups: Vec<GroupRef>,
+    pub stands_for: Vec<StandsFor>,
+    pub clearances: Vec<ClearanceFact>,
+}
+
+/// One allow `access_grants` row of a user or group, expired or not.
+#[derive(sqlx::FromRow)]
+struct HeldRow {
+    principal_id: Uuid,
+    role_name: String,
+    scope_type: String,
+    scope_id: Option<Uuid>,
+    object_type: Option<String>,
+    workspace_name: Option<String>,
+    expires_at: Option<DateTime<Utc>>,
+    expired: bool,
+}
+
+impl HeldRow {
+    fn scope(&self) -> MembershipScope {
+        let id = self.scope_id.unwrap_or_default();
+        match self.scope_type.as_str() {
+            "workspace" => MembershipScope::Workspace {
+                id,
+                name: self.ws_name(),
+            },
+            "object" => MembershipScope::Object {
+                id,
+                object_type: self.object_type.clone(),
+            },
+            _ => MembershipScope::Platform,
+        }
+    }
+    fn ws_name(&self) -> String {
+        self.workspace_name.clone().unwrap_or_default()
+    }
+    fn workspace(&self) -> Option<Uuid> {
+        (self.scope_type == "workspace").then(|| self.scope_id.unwrap_or_default())
+    }
+    /// Platform first, then workspace, then object: the widest clearance.
+    fn breadth(&self) -> u8 {
+        match self.scope_type.as_str() {
+            "platform" => 0,
+            "workspace" => 1,
+            _ => 2,
+        }
+    }
+}
+
+/// The allow role grants of `ids` (users or groups), expired ones included,
+/// so a page can show them marked.
+async fn held_rows_via(
+    conn: &mut sqlx::PgConnection,
+    principal_type: &str,
+    ids: &[Uuid],
+) -> Result<Vec<HeldRow>, CompileError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(
+        "SELECT ag.principal_id, r.name AS role_name, ag.scope_type, ag.scope_id, \
+                ag.object_type, \
+                CASE WHEN ag.scope_type = 'workspace' \
+                     THEN COALESCE(w.name, ag.scope_id::text) END AS workspace_name, \
+                ag.expires_at, \
+                (ag.expires_at IS NOT NULL AND ag.expires_at <= now()) AS expired \
+           FROM access_grants ag \
+           JOIN roles r ON r.id = ag.role_id \
+           LEFT JOIN workspaces w ON ag.scope_type = 'workspace' AND w.id = ag.scope_id \
+          WHERE ag.principal_type = $1 AND ag.principal_id = ANY($2) \
+            AND ag.effect = 'allow' \
+          ORDER BY r.name, ag.scope_type, w.name, ag.scope_id, ag.principal_id",
+    )
+    .bind(principal_type)
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db)
+}
+
+#[derive(sqlx::FromRow)]
+struct UserRow {
+    id: Uuid,
+    name: String,
+    email: String,
+    username: Option<String>,
+    status: String,
+    service_account: bool,
+}
+
+fn label(name: &str, email: &str) -> String {
+    match name.trim() {
+        "" => email.to_string(),
+        n => n.to_string(),
+    }
+}
+
+/// Members or holders `ids` as rows, sorted by label.
+async fn member_refs_via(
+    conn: &mut sqlx::PgConnection,
+    ids: &[Uuid],
+) -> Result<Vec<MemberRef>, CompileError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<UserRow> = sqlx::query_as(
+        "SELECT id, name, email::text AS email, username::text AS username, status, \
+                provider = 'service' AS service_account \
+           FROM users WHERE id = ANY($1)",
+    )
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db)?;
+    let mut out: Vec<MemberRef> = rows
+        .into_iter()
+        .map(|u| {
+            let (on_engines, not_on_engines) = mark(u.username.is_some(), true, None);
+            MemberRef {
+                user_id: u.id,
+                label: label(&u.name, &u.email),
+                username: u.username,
+                service_account: u.service_account,
+                on_engines,
+                not_on_engines,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        (a.label.to_lowercase(), a.user_id).cmp(&(b.label.to_lowercase(), b.user_id))
+    });
+    Ok(out)
+}
+
+/// The engine mark of one entry: no username wins (no engine knows the
+/// person); else it applies, or `otherwise` says why not.
+fn mark(
+    has_username: bool,
+    applies: bool,
+    otherwise: Option<NotOnEngines>,
+) -> (bool, Option<NotOnEngines>) {
+    if !has_username {
+        (false, Some(NotOnEngines::NoUsername))
+    } else if applies {
+        (true, None)
+    } else {
+        (false, otherwise)
+    }
+}
+
+/// Collects `standsFor` entries, once per `(kind, ref, via)`.
+#[derive(Default)]
+struct StandsForList(Vec<StandsFor>);
+
+impl StandsForList {
+    fn push(&mut self, kind: PrincipalKind, r: String, via: Via, m: (bool, Option<NotOnEngines>)) {
+        if self
+            .0
+            .iter()
+            .any(|s| s.kind == kind && s.r#ref == r && s.via == via)
+        {
+            return;
+        }
+        self.0.push(StandsFor {
+            kind,
+            r#ref: r,
+            via,
+            on_engines: m.0,
+            not_on_engines: m.1,
+        });
+    }
+}
+
+/// One gate: a tag with a non-empty `required_roles` or `required_groups`.
+#[derive(sqlx::FromRow)]
+struct Gate {
+    tag_id: Uuid,
+    tag_key: String,
+    tag_name: String,
+    required_roles: Vec<String>,
+    required_groups: Vec<Uuid>,
+}
+
+/// Every gate, and the names of the groups they require. Both lists empty is
+/// no gate (`clearance.rs`, "BOTH lists empty is NO gate").
+async fn gates_via(
+    conn: &mut sqlx::PgConnection,
+) -> Result<(Vec<Gate>, BTreeMap<Uuid, String>), CompileError> {
+    let mut gates: Vec<Gate> = sqlx::query_as(
+        "SELECT cp.tag_id, t.key AS tag_key, t.name AS tag_name, cp.required_roles, \
+                cp.required_groups \
+           FROM classification_policies cp \
+           JOIN tags t ON t.id = cp.tag_id \
+          WHERE cardinality(cp.required_roles) > 0 OR cardinality(cp.required_groups) > 0 \
+          ORDER BY lower(t.name), t.key",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db)?;
+    for g in &mut gates {
+        g.required_roles.sort();
+        g.required_roles.dedup();
+    }
+    let ids: Vec<Uuid> = gates
+        .iter()
+        .flat_map(|g| g.required_groups.iter().copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let names: Vec<(Uuid, String)> = if ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as("SELECT id, name FROM groups WHERE id = ANY($1)")
+            .bind(&ids)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db)?
+    };
+    Ok((gates, names.into_iter().collect()))
+}
+
+fn fact(
+    g: &Gate,
+    group_names: &BTreeMap<Uuid, String>,
+    engines: EngineClearance,
+    egret: EgretClearance,
+) -> ClearanceFact {
+    let mut required_groups: Vec<String> = g
+        .required_groups
+        .iter()
+        .map(|id| {
+            group_names
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| id.to_string())
+        })
+        .collect();
+    required_groups.sort();
+    ClearanceFact {
+        tag_id: g.tag_id,
+        tag_key: g.tag_key.clone(),
+        tag_name: g.tag_name.clone(),
+        required_roles: g.required_roles.clone(),
+        required_groups,
+        engines,
+        egret,
+    }
+}
+
+/// The name of the role whose platform-scoped grant exempts its holder from
+/// every classification gate in egret (`egret_auth::pdp`: `is_platform_admin`
+/// is a platform-scoped grant of the role with this name).
+const PLATFORM_ADMIN: &str = "platform_admin";
+
+/// The widest live row in `rows` granting one of `roles`.
+fn clearing_row<'a>(rows: &'a [HeldRow], roles: &[String]) -> Option<&'a HeldRow> {
+    rows.iter()
+        .filter(|r| !r.expired && roles.contains(&r.role_name))
+        .min_by_key(|r| (r.breadth(), r.role_name.clone()))
+}
+
+/// A live platform-scoped `platform_admin` row in `rows`.
+fn admin_row(rows: &[HeldRow]) -> Option<&HeldRow> {
+    rows.iter()
+        .find(|r| !r.expired && r.scope_type == "platform" && r.role_name == PLATFORM_ADMIN)
+}
+
+/// One user: identity, memberships, `standsFor`, clearances. `None` when no
+/// user has `id`. Service accounts are read like anyone (a grant can name
+/// one).
+pub async fn read_user_via(
+    conn: &mut sqlx::PgConnection,
+    id: Uuid,
+) -> Result<Option<UserPrincipal>, CompileError> {
+    let user: Option<UserRow> = sqlx::query_as(
+        "SELECT id, name, email::text AS email, username::text AS username, status, \
+                provider = 'service' AS service_account \
+           FROM users WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db)?;
+    let Some(user) = user else {
+        return Ok(None);
+    };
+    let has_username = user.username.is_some();
+
+    let groups: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT g.id, g.name FROM user_groups ug JOIN groups g ON g.id = ug.group_id \
+          WHERE ug.user_id = $1 ORDER BY g.name",
+    )
+    .bind(id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db)?;
+    let group_names: Vec<String> = groups.iter().map(|(_, n)| n.clone()).collect();
+    let group_ids: Vec<Uuid> = groups.iter().map(|(g, _)| *g).collect();
+    let group_name_of: BTreeMap<Uuid, String> = groups.iter().cloned().collect();
+
+    let direct = held_rows_via(conn, "user", &[id]).await?;
+    let through = held_rows_via(conn, "group", &group_ids).await?;
+    let (gates, gate_group_names) = gates_via(conn).await?;
+
+    // What the compiler applies, from its own reads (spec §4.1).
+    let in_group: BTreeSet<String> = group_members_via(conn, &group_names)
+        .await?
+        .into_iter()
+        .filter(|m| m.user_id == id)
+        .map(|m| m.group_name)
+        .collect();
+    let role_names: Vec<String> = direct
+        .iter()
+        .map(|r| r.role_name.clone())
+        .chain(gates.iter().flat_map(|g| g.required_roles.iter().cloned()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let holds: BTreeSet<String> = role_holders_via(conn, &role_names)
+        .await?
+        .into_iter()
+        .filter(|h| h.user_id == id)
+        .map(|h| h.role_name)
+        .collect();
+    let ws_ids: Vec<Uuid> = direct
+        .iter()
+        .filter_map(HeldRow::workspace)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let member_of: BTreeSet<Uuid> = workspace_members_via(conn, &ws_ids)
+        .await?
+        .into_iter()
+        .filter(|m| m.user_id == id)
+        .map(|m| m.workspace_id)
+        .collect();
+
+    let group_of = |r: &HeldRow| {
+        group_name_of
+            .get(&r.principal_id)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let expired = Some(NotOnEngines::Expired);
+    let through_group = Some(NotOnEngines::HeldThroughGroup);
+
+    // Memberships.
+    let group_memberships: Vec<Membership> = group_names
+        .iter()
+        .map(|name| {
+            let (on_engines, not_on_engines) = mark(has_username, in_group.contains(name), None);
+            Membership {
+                via: Via::Group { name: name.clone() },
+                role: None,
+                scope: None,
+                expires_at: None,
+                expired: false,
+                on_engines,
+                not_on_engines,
+            }
+        })
+        .collect();
+    let membership = |via: Via, r: &HeldRow, m: (bool, Option<NotOnEngines>)| Membership {
+        via,
+        role: Some(r.role_name.clone()),
+        scope: Some(r.scope()),
+        expires_at: r.expires_at,
+        expired: r.expired,
+        on_engines: m.0,
+        not_on_engines: m.1,
+    };
+    let mut roles = Vec::new();
+    let mut workspaces = Vec::new();
+    for r in &direct {
+        roles.push(membership(
+            Via::Role {
+                name: r.role_name.clone(),
+            },
+            r,
+            mark(
+                has_username,
+                !r.expired && holds.contains(&r.role_name),
+                expired,
+            ),
+        ));
+        if let Some(ws) = r.workspace() {
+            workspaces.push(membership(
+                Via::Workspace {
+                    id: ws,
+                    name: r.ws_name(),
+                },
+                r,
+                mark(has_username, !r.expired && member_of.contains(&ws), expired),
+            ));
+        }
+    }
+    for r in &through {
+        roles.push(membership(
+            Via::GroupRole {
+                group: group_of(r),
+                role: r.role_name.clone(),
+            },
+            r,
+            mark(has_username, false, through_group),
+        ));
+        if let Some(ws) = r.workspace() {
+            workspaces.push(membership(
+                Via::GroupWorkspace {
+                    group: group_of(r),
+                    id: ws,
+                    name: r.ws_name(),
+                },
+                r,
+                mark(has_username, false, through_group),
+            ));
+        }
+    }
+
+    // standsFor (spec §4.2).
+    let mut sf = StandsForList::default();
+    if let Some(username) = &user.username {
+        sf.push(
+            PrincipalKind::User,
+            username.clone(),
+            Via::Itself,
+            (true, None),
+        );
+    }
+    for name in &group_names {
+        sf.push(
+            PrincipalKind::Group,
+            name.clone(),
+            Via::Group { name: name.clone() },
+            mark(has_username, in_group.contains(name), None),
+        );
+    }
+    for r in &direct {
+        sf.push(
+            PrincipalKind::Role,
+            r.role_name.clone(),
+            Via::Role {
+                name: r.role_name.clone(),
+            },
+            mark(has_username, holds.contains(&r.role_name), expired),
+        );
+    }
+    for r in &direct {
+        if let Some(ws) = r.workspace() {
+            sf.push(
+                PrincipalKind::WorkspaceMembers,
+                ws.to_string(),
+                Via::Workspace {
+                    id: ws,
+                    name: r.ws_name(),
+                },
+                mark(has_username, member_of.contains(&ws), expired),
+            );
+        }
+    }
+    sf.push(
+        PrincipalKind::Group,
+        PUBLIC_GROUP.to_string(),
+        Via::Public,
+        mark(has_username, true, None),
+    );
+    // A group's lapsed row reaches neither egret nor engines: not listed here
+    // (it is on the Memberships, marked expired).
+    for r in through.iter().filter(|r| !r.expired) {
+        sf.push(
+            PrincipalKind::Role,
+            r.role_name.clone(),
+            Via::GroupRole {
+                group: group_of(r),
+                role: r.role_name.clone(),
+            },
+            mark(has_username, false, through_group),
+        );
+    }
+    for r in through.iter().filter(|r| !r.expired) {
+        if let Some(ws) = r.workspace() {
+            sf.push(
+                PrincipalKind::WorkspaceMembers,
+                ws.to_string(),
+                Via::GroupWorkspace {
+                    group: group_of(r),
+                    id: ws,
+                    name: r.ws_name(),
+                },
+                mark(has_username, false, through_group),
+            );
+        }
+    }
+
+    // Clearances.
+    let clearances = gates
+        .iter()
+        .map(|g| {
+            let engines = if g.required_roles.is_empty() {
+                EngineClearance::NotEnforcedGroupsOnly
+            } else {
+                match g.required_roles.iter().find(|r| holds.contains(*r)) {
+                    Some(role) if has_username => EngineClearance::Cleared { role: role.clone() },
+                    Some(_) => EngineClearance::NotCleared {
+                        because: Some(NotOnEngines::NoUsername),
+                    },
+                    None => EngineClearance::NotCleared {
+                        because: if direct
+                            .iter()
+                            .any(|r| r.expired && g.required_roles.contains(&r.role_name))
+                        {
+                            expired
+                        } else if clearing_row(&through, &g.required_roles).is_some() {
+                            through_group
+                        } else {
+                            None
+                        },
+                    },
+                }
+            };
+            let egret = if let Some(r) = clearing_row(&direct, &g.required_roles) {
+                EgretClearance::Cleared {
+                    via: Via::Role {
+                        name: r.role_name.clone(),
+                    },
+                    scope: Some(r.scope()),
+                }
+            } else if let Some((_, name)) = groups
+                .iter()
+                .find(|(gid, _)| g.required_groups.contains(gid))
+            {
+                EgretClearance::Cleared {
+                    via: Via::Group { name: name.clone() },
+                    scope: None,
+                }
+            } else if let Some(r) = clearing_row(&through, &g.required_roles) {
+                EgretClearance::Cleared {
+                    via: Via::GroupRole {
+                        group: group_of(r),
+                        role: r.role_name.clone(),
+                    },
+                    scope: Some(r.scope()),
+                }
+            } else if let Some(r) = admin_row(&direct) {
+                EgretClearance::Cleared {
+                    via: Via::Role {
+                        name: r.role_name.clone(),
+                    },
+                    scope: Some(r.scope()),
+                }
+            } else if let Some(r) = admin_row(&through) {
+                EgretClearance::Cleared {
+                    via: Via::GroupRole {
+                        group: group_of(r),
+                        role: r.role_name.clone(),
+                    },
+                    scope: Some(r.scope()),
+                }
+            } else {
+                EgretClearance::NotCleared
+            };
+            fact(g, &gate_group_names, engines, egret)
+        })
+        .collect();
+
+    Ok(Some(UserPrincipal {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        username: user.username,
+        status: user.status,
+        service_account: user.service_account,
+        groups: group_memberships,
+        roles,
+        workspaces,
+        stands_for: sf.0,
+        clearances,
+    }))
+}
+
+fn service_accounts(refs: &[MemberRef]) -> i64 {
+    i64::try_from(refs.iter().filter(|m| m.service_account).count()).unwrap_or(i64::MAX)
+}
+
+/// One group. `public` answers the `public` shape whatever the `groups`
+/// table holds: the compiler never expands it, every engine resolves it
+/// itself (`members.rs` `is_expanded_group`). `None` when no group has `name`.
+pub async fn read_group_via(
+    conn: &mut sqlx::PgConnection,
+    name: &str,
+) -> Result<Option<GroupPrincipal>, CompileError> {
+    if name == PUBLIC_GROUP {
+        return Ok(Some(GroupPrincipal {
+            name: PUBLIC_GROUP.to_string(),
+            source: None,
+            is_public: true,
+            members: Vec::new(),
+            service_accounts: 0,
+            roles: Vec::new(),
+            workspaces: Vec::new(),
+            stands_for: vec![StandsFor {
+                kind: PrincipalKind::Group,
+                r#ref: PUBLIC_GROUP.to_string(),
+                via: Via::Public,
+                on_engines: true,
+                not_on_engines: None,
+            }],
+            clearances: Vec::new(),
+        }));
+    }
+    let row: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT id, source FROM groups WHERE name = $1")
+            .bind(name)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db)?;
+    let Some((gid, source)) = row else {
+        return Ok(None);
+    };
+    let member_ids: Vec<Uuid> = group_members_via(conn, &[name.to_string()])
+        .await?
+        .into_iter()
+        .map(|m| m.user_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let members = member_refs_via(conn, &member_ids).await?;
+    let held = held_rows_via(conn, "group", &[gid]).await?;
+    let (gates, gate_group_names) = gates_via(conn).await?;
+    let through_group = (false, Some(NotOnEngines::HeldThroughGroup));
+
+    let membership = |via: Via, r: &HeldRow| Membership {
+        via,
+        role: Some(r.role_name.clone()),
+        scope: Some(r.scope()),
+        expires_at: r.expires_at,
+        expired: r.expired,
+        on_engines: false,
+        not_on_engines: through_group.1,
+    };
+    let roles: Vec<Membership> = held
+        .iter()
+        .map(|r| {
+            membership(
+                Via::Role {
+                    name: r.role_name.clone(),
+                },
+                r,
+            )
+        })
+        .collect();
+    let workspaces: Vec<Membership> = held
+        .iter()
+        .filter_map(|r| {
+            r.workspace().map(|ws| {
+                membership(
+                    Via::Workspace {
+                        id: ws,
+                        name: r.ws_name(),
+                    },
+                    r,
+                )
+            })
+        })
+        .collect();
+
+    let mut sf = StandsForList::default();
+    // A grant to the group reaches its members: the compiler expands it.
+    sf.push(
+        PrincipalKind::Group,
+        name.to_string(),
+        Via::Itself,
+        (true, None),
+    );
+    sf.push(
+        PrincipalKind::Group,
+        PUBLIC_GROUP.to_string(),
+        Via::Public,
+        (true, None),
+    );
+    for r in held.iter().filter(|r| !r.expired) {
+        sf.push(
+            PrincipalKind::Role,
+            r.role_name.clone(),
+            Via::Role {
+                name: r.role_name.clone(),
+            },
+            through_group,
+        );
+    }
+    for r in held.iter().filter(|r| !r.expired) {
+        if let Some(ws) = r.workspace() {
+            sf.push(
+                PrincipalKind::WorkspaceMembers,
+                ws.to_string(),
+                Via::Workspace {
+                    id: ws,
+                    name: r.ws_name(),
+                },
+                through_group,
+            );
+        }
+    }
+
+    let clearances = gates
+        .iter()
+        .map(|g| {
+            let held_role = clearing_row(&held, &g.required_roles);
+            let engines = if g.required_roles.is_empty() {
+                EngineClearance::NotEnforcedGroupsOnly
+            } else {
+                EngineClearance::NotCleared {
+                    because: held_role.map(|_| NotOnEngines::HeldThroughGroup),
+                }
+            };
+            let egret = if g.required_groups.contains(&gid) {
+                EgretClearance::Cleared {
+                    via: Via::Itself,
+                    scope: None,
+                }
+            } else if let Some(r) = held_role.or_else(|| admin_row(&held)) {
+                EgretClearance::Cleared {
+                    via: Via::Role {
+                        name: r.role_name.clone(),
+                    },
+                    scope: Some(r.scope()),
+                }
+            } else {
+                EgretClearance::NotCleared
+            };
+            fact(g, &gate_group_names, engines, egret)
+        })
+        .collect();
+
+    Ok(Some(GroupPrincipal {
+        name: name.to_string(),
+        source: Some(source),
+        is_public: false,
+        service_accounts: service_accounts(&members),
+        members,
+        roles,
+        workspaces,
+        stands_for: sf.0,
+        clearances,
+    }))
+}
+
+/// One role NAME, across every scope defining it. `None` when no role has
+/// `name`.
+pub async fn read_role_via(
+    conn: &mut sqlx::PgConnection,
+    name: &str,
+) -> Result<Option<RolePrincipal>, CompileError> {
+    let scopes: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT scope FROM roles WHERE name = $1 ORDER BY scope")
+            .bind(name)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db)?;
+    if scopes.is_empty() {
+        return Ok(None);
+    }
+    let holder_ids: Vec<Uuid> = role_holders_via(conn, &[name.to_string()])
+        .await?
+        .into_iter()
+        .map(|h| h.user_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let holders = member_refs_via(conn, &holder_ids).await?;
+    let holder_groups: Vec<(String, String)> = sqlx::query_as(
+        "SELECT DISTINCT g.name, g.source \
+           FROM access_grants ag \
+           JOIN roles r ON r.id = ag.role_id \
+           JOIN groups g ON g.id = ag.principal_id \
+          WHERE ag.principal_type = 'group' AND r.name = $1 AND ag.effect = 'allow' \
+            AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+          ORDER BY g.name",
+    )
+    .bind(name)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db)?;
+    let (gates, gate_group_names) = gates_via(conn).await?;
+    let clearances = gates
+        .iter()
+        .map(|g| {
+            let required = g.required_roles.iter().any(|r| r == name);
+            let engines = if g.required_roles.is_empty() {
+                EngineClearance::NotEnforcedGroupsOnly
+            } else if required {
+                EngineClearance::Cleared {
+                    role: name.to_string(),
+                }
+            } else {
+                EngineClearance::NotCleared { because: None }
+            };
+            let egret = if required {
+                EgretClearance::Cleared {
+                    via: Via::Itself,
+                    scope: None,
+                }
+            } else {
+                EgretClearance::NotCleared
+            };
+            fact(g, &gate_group_names, engines, egret)
+        })
+        .collect();
+    Ok(Some(RolePrincipal {
+        name: name.to_string(),
+        scopes,
+        service_accounts: service_accounts(&holders),
+        holders,
+        holder_groups: holder_groups
+            .into_iter()
+            .map(|(name, source)| GroupRef { name, source })
+            .collect(),
+        stands_for: vec![StandsFor {
+            kind: PrincipalKind::Role,
+            r#ref: name.to_string(),
+            via: Via::Itself,
+            on_engines: true,
+            not_on_engines: None,
+        }],
+        clearances,
+    }))
+}

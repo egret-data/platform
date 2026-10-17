@@ -640,3 +640,643 @@ async fn a_service_account_is_found_by_username_listed_on_request_and_marked() {
     assert_eq!(roles["items"][0]["memberCount"], json!(1), "{roles}");
     assert_eq!(roles["items"][0]["withoutUsername"], json!(0), "{roles}");
 }
+
+// ---------------------------------------------------------------------------
+// Task 3: one principal's memberships, `standsFor` and clearances
+// ---------------------------------------------------------------------------
+
+async fn get_path(e: &Env, token: &str, path: &str) -> (StatusCode, Value) {
+    let resp = e
+        .app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("GET")
+                .uri(path)
+                .header("Cookie", format!("egret_session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| json!({ "_raw": String::from_utf8_lossy(&bytes).to_string() }));
+    (status, json)
+}
+
+async fn principal(e: &Env, path: &str) -> Value {
+    let (status, body) = get_path(e, &e.admin, path).await;
+    assert_eq!(status, StatusCode::OK, "{path}: {body}");
+    body
+}
+
+async fn insert_group(pool: &sqlx::PgPool, name: &str, members: &[Uuid]) -> Uuid {
+    let id: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .expect("group");
+    for m in members {
+        sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+            .bind(m)
+            .bind(id)
+            .execute(pool)
+            .await
+            .expect("member");
+    }
+    id
+}
+
+/// The fixture of the agreement test and the per-`Via` assertions:
+///
+/// - `ua` (username) in `g1`; holds `r1` live; `rw` in `W` EXPIRED.
+/// - `ub` (NO username) in `g1`; holds `r1` live.
+/// - `uc` (username) in `g2`; `g2` holds `r1` (egret only).
+/// - `ud` (username) holds `rw` in `W` live.
+/// - `ue` (username) holds `r1` EXPIRED only.
+/// - `g1` holds `rw` in `W` (egret only).
+struct Org {
+    t: String,
+    ws: Uuid,
+    ua: Uuid,
+    ub: Uuid,
+    uc: Uuid,
+    ud: Uuid,
+    ue: Uuid,
+    g1: Uuid,
+    g2: Uuid,
+}
+
+impl Org {
+    fn n(&self, s: &str) -> String {
+        format!("{s}_{}", self.t)
+    }
+}
+
+async fn org(e: &Env) -> Org {
+    let t = tag();
+    let p = &e.db.pool;
+    let email = |n: &str| format!("{n}_{t}@egret.local");
+    let uname = |n: &str| format!("{n}_{t}");
+    let ua = insert_user(p, &email("ua"), "User A", Some(&uname("ua"))).await;
+    let ub = insert_user(p, &email("ub"), "User B", None).await;
+    let uc = insert_user(p, &email("uc"), "User C", Some(&uname("uc"))).await;
+    let ud = insert_user(p, &email("ud"), "User D", Some(&uname("ud"))).await;
+    let ue = insert_user(p, &email("ue"), "User E", Some(&uname("ue"))).await;
+    let g1 = insert_group(p, &uname("g1"), &[ua, ub]).await;
+    let g2 = insert_group(p, &uname("g2"), &[uc]).await;
+    let r1 = insert_role(p, "platform", &uname("r1")).await;
+    let rw = insert_role(p, "workspace", &uname("rw")).await;
+    let ws: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("ppl-w-{t}"))
+            .bind(format!("W {t}"))
+            .fetch_one(p)
+            .await
+            .expect("workspace");
+    insert_grant(p, "user", ua, r1, "platform", None, "allow", false).await;
+    insert_grant(p, "user", ub, r1, "platform", None, "allow", false).await;
+    insert_grant(p, "user", ue, r1, "platform", None, "allow", true).await;
+    insert_grant(p, "group", g2, r1, "platform", None, "allow", false).await;
+    insert_grant(p, "user", ud, rw, "workspace", Some(ws), "allow", false).await;
+    insert_grant(p, "user", ua, rw, "workspace", Some(ws), "allow", true).await;
+    insert_grant(p, "group", g1, rw, "workspace", Some(ws), "allow", false).await;
+    // A deny-effect grant is no membership, on engines or in egret.
+    insert_grant(p, "user", ud, r1, "platform", None, "deny", false).await;
+    Org {
+        t,
+        ws,
+        ua,
+        ub,
+        uc,
+        ud,
+        ue,
+        g1,
+        g2,
+    }
+}
+
+fn stands_for(body: &Value) -> Vec<Value> {
+    body["standsFor"].as_array().expect("standsFor").clone()
+}
+
+/// The `standsFor` entry for `(kind, ref)` reached `via`.
+fn entry(body: &Value, kind: &str, r: &str, via: &Value) -> Value {
+    stands_for(body)
+        .into_iter()
+        .find(|s| s["kind"] == json!(kind) && s["ref"] == json!(r) && &s["via"] == via)
+        .unwrap_or_else(|| panic!("no {kind}:{r} via {via} in {body}"))
+}
+
+#[tokio::test]
+async fn a_users_stands_for_marks_each_via_and_why_engines_do_not_apply_it() {
+    let Some(e) = env().await else { return };
+    let o = org(&e).await;
+
+    let ua = principal(&e, &format!("/perm/people/users/{}", o.ua)).await;
+    let on = |s: Value| (s["onEngines"].clone(), s["notOnEngines"].clone());
+    assert_eq!(
+        on(entry(&ua, "user", &o.n("ua"), &json!({"kind": "itself"}))),
+        (json!(true), Value::Null)
+    );
+    assert_eq!(
+        on(entry(
+            &ua,
+            "group",
+            &o.n("g1"),
+            &json!({"kind": "group", "name": o.n("g1")})
+        )),
+        (json!(true), Value::Null)
+    );
+    assert_eq!(
+        on(entry(
+            &ua,
+            "role",
+            &o.n("r1"),
+            &json!({"kind": "role", "name": o.n("r1")})
+        )),
+        (json!(true), Value::Null)
+    );
+    assert_eq!(
+        on(entry(&ua, "group", "public", &json!({"kind": "public"}))),
+        (json!(true), Value::Null)
+    );
+    let w = json!({"kind": "workspace", "id": o.ws, "name": format!("W {}", o.t)});
+    assert_eq!(
+        on(entry(&ua, "workspace_members", &o.ws.to_string(), &w)),
+        (json!(false), json!("expired")),
+        "an expired direct row is listed, marked"
+    );
+    let gw = json!({"kind": "group_workspace", "group": o.n("g1"), "id": o.ws, "name": format!("W {}", o.t)});
+    assert_eq!(
+        on(entry(&ua, "workspace_members", &o.ws.to_string(), &gw)),
+        (json!(false), json!("held_through_group"))
+    );
+
+    let uc = principal(&e, &format!("/perm/people/users/{}", o.uc)).await;
+    let gr = json!({"kind": "group_role", "group": o.n("g2"), "role": o.n("r1")});
+    assert_eq!(
+        on(entry(&uc, "role", &o.n("r1"), &gr)),
+        (json!(false), json!("held_through_group"))
+    );
+
+    // No username: no `user` entry, and every entry is `no_username`.
+    let ub = principal(&e, &format!("/perm/people/users/{}", o.ub)).await;
+    assert_eq!(ub["username"], Value::Null);
+    let entries = stands_for(&ub);
+    assert!(!entries.iter().any(|s| s["kind"] == json!("user")), "{ub}");
+    assert!(
+        entries.len() >= 4,
+        "group, role, public, group workspace: {ub}"
+    );
+    for s in &entries {
+        assert_eq!(s["onEngines"], json!(false), "{s}");
+        assert_eq!(s["notOnEngines"], json!("no_username"), "{s}");
+    }
+
+    // The deny-effect grant makes `ud` no holder of r1.
+    let ud = principal(&e, &format!("/perm/people/users/{}", o.ud)).await;
+    assert!(
+        !stands_for(&ud).iter().any(|s| s["ref"] == json!(o.n("r1"))),
+        "{ud}"
+    );
+    assert_eq!(
+        on(entry(&ud, "workspace_members", &o.ws.to_string(), &w)),
+        (json!(true), Value::Null)
+    );
+}
+
+#[tokio::test]
+async fn a_users_memberships_carry_scope_expiry_and_engine_marks() {
+    let Some(e) = env().await else { return };
+    let o = org(&e).await;
+    let ua = principal(&e, &format!("/perm/people/users/{}", o.ua)).await;
+
+    assert_eq!(ua["id"], json!(o.ua.to_string()));
+    assert_eq!(ua["name"], json!("User A"));
+    assert_eq!(ua["username"], json!(o.n("ua")));
+    assert_eq!(ua["status"], json!("active"));
+    assert_eq!(
+        ua["groups"],
+        json!([{
+            "via": {"kind": "group", "name": o.n("g1")},
+            "role": null, "scope": null, "expiresAt": null, "expired": false,
+            "onEngines": true, "notOnEngines": null,
+        }])
+    );
+    let roles = ua["roles"].as_array().unwrap();
+    let r1 = roles
+        .iter()
+        .find(|m| m["via"] == json!({"kind": "role", "name": o.n("r1")}))
+        .expect("r1");
+    assert_eq!(r1["scope"], json!({"type": "platform"}));
+    assert_eq!(r1["onEngines"], json!(true));
+    let rw = roles
+        .iter()
+        .find(|m| m["via"] == json!({"kind": "role", "name": o.n("rw")}))
+        .expect("rw, expired, still listed");
+    assert_eq!(rw["expired"], json!(true));
+    assert!(rw["expiresAt"].is_string());
+    assert_eq!(rw["notOnEngines"], json!("expired"));
+    assert_eq!(
+        rw["scope"],
+        json!({"type": "workspace", "id": o.ws, "name": format!("W {}", o.t)})
+    );
+    // g1's workspace membership, egret only.
+    let gws = ua["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["via"]["kind"] == json!("group_workspace"))
+        .cloned()
+        .expect("group workspace");
+    assert_eq!(gws["role"], json!(o.n("rw")));
+    assert_eq!(gws["notOnEngines"], json!("held_through_group"));
+}
+
+#[tokio::test]
+async fn a_group_lists_members_with_and_without_a_username_and_what_it_holds() {
+    let Some(e) = env().await else { return };
+    let o = org(&e).await;
+    let svc: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name, username) \
+         VALUES ('service', $1, $1, $1) RETURNING id",
+    )
+    .bind(o.n("svc"))
+    .fetch_one(&e.db.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(svc)
+        .bind(o.g1)
+        .execute(&e.db.pool)
+        .await
+        .unwrap();
+
+    let g1 = principal(&e, &format!("/perm/people/groups/{}", o.n("g1"))).await;
+    assert_eq!(g1["name"], json!(o.n("g1")));
+    assert_eq!(g1["source"], json!("local"));
+    assert_eq!(g1["isPublic"], json!(false));
+    assert_eq!(g1["serviceAccounts"], json!(1));
+    let members = g1["members"].as_array().unwrap();
+    assert_eq!(members.len(), 3, "{g1}");
+    let m = |id: Uuid| {
+        members
+            .iter()
+            .find(|m| m["userId"] == json!(id.to_string()))
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(m(o.ua)["username"], json!(o.n("ua")));
+    assert_eq!(m(o.ua)["onEngines"], json!(true));
+    assert_eq!(m(o.ub)["username"], Value::Null);
+    assert_eq!(m(o.ub)["onEngines"], json!(false));
+    assert_eq!(m(o.ub)["notOnEngines"], json!("no_username"));
+    assert_eq!(
+        m(svc)["serviceAccount"],
+        json!(true),
+        "service accounts are not filtered out"
+    );
+
+    let w = json!({"kind": "workspace", "id": o.ws, "name": format!("W {}", o.t)});
+    assert_eq!(g1["workspaces"][0]["via"], w);
+    assert_eq!(
+        g1["workspaces"][0]["notOnEngines"],
+        json!("held_through_group")
+    );
+    let sf = |b: &Value| -> BTreeSet<(String, String, String)> {
+        stands_for(b)
+            .iter()
+            .map(|s| {
+                (
+                    s["kind"].as_str().unwrap().to_string(),
+                    s["ref"].as_str().unwrap().to_string(),
+                    s["notOnEngines"].as_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        sf(&g1),
+        [
+            ("group".to_string(), o.n("g1"), String::new()),
+            ("group".to_string(), "public".to_string(), String::new()),
+            (
+                "role".to_string(),
+                o.n("rw"),
+                "held_through_group".to_string()
+            ),
+            (
+                "workspace_members".to_string(),
+                o.ws.to_string(),
+                "held_through_group".to_string()
+            ),
+        ]
+        .into_iter()
+        .collect()
+    );
+    let g2 = principal(&e, &format!("/perm/people/groups/{}", o.n("g2"))).await;
+    assert!(sf(&g2).contains(&(
+        "role".to_string(),
+        o.n("r1"),
+        "held_through_group".to_string()
+    )));
+    let _ = o.g2;
+}
+
+#[tokio::test]
+async fn a_role_lists_holders_with_and_without_a_username_and_its_holder_groups() {
+    let Some(e) = env().await else { return };
+    let o = org(&e).await;
+    let r1 = principal(&e, &format!("/perm/people/roles/{}", o.n("r1"))).await;
+    assert_eq!(r1["name"], json!(o.n("r1")));
+    assert_eq!(r1["scopes"], json!(["platform"]));
+    let holders: BTreeSet<(String, bool)> = r1["holders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| {
+            (
+                h["userId"].as_str().unwrap().to_string(),
+                h["onEngines"] == json!(true),
+            )
+        })
+        .collect();
+    // ue's is expired, ud's is a deny, uc holds it through g2: not holders.
+    assert_eq!(
+        holders,
+        [(o.ua.to_string(), true), (o.ub.to_string(), false)]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(r1["serviceAccounts"], json!(0));
+    assert_eq!(
+        r1["holderGroups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["name"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(o.n("g2"))]
+    );
+    assert_eq!(
+        r1["standsFor"],
+        json!([{ "kind": "role", "ref": o.n("r1"), "via": {"kind": "itself"},
+                 "onEngines": true, "notOnEngines": null }])
+    );
+    let _ = (o.uc, o.ud, o.ue);
+}
+
+async fn gate(pool: &sqlx::PgPool, key: &str, roles: &[String], groups: &[Uuid]) -> Uuid {
+    let id: Uuid = sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $1) RETURNING id")
+        .bind(key)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(id)
+    .bind(roles)
+    .bind(groups)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+fn clearance(body: &Value, tag_id: Uuid) -> Value {
+    body["clearances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["tagId"] == json!(tag_id))
+        .cloned()
+        .unwrap_or_else(|| panic!("no clearance for {tag_id}: {body}"))
+}
+
+#[tokio::test]
+async fn clearances_answer_for_engines_and_for_egret_per_gate() {
+    let Some(e) = env().await else { return };
+    let o = org(&e).await;
+    let p = &e.db.pool;
+    // roles-only on r1; groups-only on g1; mixed: a role nobody holds, or g2.
+    let a = gate(p, &o.n("cla"), &[o.n("r1")], &[]).await;
+    let b = gate(p, &o.n("clb"), &[], &[o.g1]).await;
+    let c = gate(p, &o.n("clc"), &[o.n("rx")], &[o.g2]).await;
+
+    let user = |u: Uuid| format!("/perm/people/users/{u}");
+    let both = |body: &Value, tag: Uuid| {
+        let c = clearance(body, tag);
+        (c["engines"].clone(), c["egret"].clone())
+    };
+    let not_cleared = json!({"kind": "not_cleared"});
+    let engines_no = |because: Value| json!({"kind": "not_cleared", "because": because});
+    let groups_only = json!({"kind": "not_enforced_groups_only"});
+
+    // ua: cleared directly.
+    let ua = principal(&e, &user(o.ua)).await;
+    let ca = clearance(&ua, a);
+    assert_eq!(ca["tagKey"], json!(o.n("cla")));
+    assert_eq!(ca["requiredRoles"], json!([o.n("r1")]));
+    assert_eq!(ca["requiredGroups"], json!([]));
+    assert_eq!(
+        both(&ua, a),
+        (
+            json!({"kind": "cleared", "role": o.n("r1")}),
+            json!({"kind": "cleared", "via": {"kind": "role", "name": o.n("r1")}, "scope": {"type": "platform"}})
+        )
+    );
+    assert_eq!(
+        clearance(&ua, b)["requiredGroups"],
+        json!([o.n("g1")]),
+        "group NAMES"
+    );
+    assert_eq!(
+        both(&ua, b),
+        (
+            groups_only.clone(),
+            json!({"kind": "cleared", "via": {"kind": "group", "name": o.n("g1")}, "scope": null})
+        )
+    );
+    assert_eq!(both(&ua, c), (engines_no(Value::Null), not_cleared.clone()));
+
+    // uc: cleared in egret through its group, never on engines.
+    let uc = principal(&e, &user(o.uc)).await;
+    assert_eq!(
+        both(&uc, a),
+        (
+            engines_no(json!("held_through_group")),
+            json!({"kind": "cleared", "via": {"kind": "group_role", "group": o.n("g2"), "role": o.n("r1")}, "scope": {"type": "platform"}})
+        )
+    );
+    assert_eq!(both(&uc, b), (groups_only.clone(), not_cleared.clone()));
+    assert_eq!(
+        both(&uc, c),
+        (
+            engines_no(Value::Null),
+            json!({"kind": "cleared", "via": {"kind": "group", "name": o.n("g2")}, "scope": null})
+        )
+    );
+
+    // ud: cleared nowhere (its r1 grant is a deny).
+    let ud = principal(&e, &user(o.ud)).await;
+    assert_eq!(both(&ud, a), (engines_no(Value::Null), not_cleared.clone()));
+    assert_eq!(both(&ud, b), (groups_only.clone(), not_cleared.clone()));
+    assert_eq!(both(&ud, c), (engines_no(Value::Null), not_cleared.clone()));
+
+    // ub holds r1 but has no username; ue's r1 is expired.
+    let ub = principal(&e, &user(o.ub)).await;
+    assert_eq!(both(&ub, a).0, engines_no(json!("no_username")));
+    let ue = principal(&e, &user(o.ue)).await;
+    assert_eq!(
+        both(&ue, a),
+        (engines_no(json!("expired")), not_cleared.clone())
+    );
+
+    // A group and a role answer for themselves.
+    let g2 = principal(&e, &format!("/perm/people/groups/{}", o.n("g2"))).await;
+    assert_eq!(
+        both(&g2, a),
+        (
+            engines_no(json!("held_through_group")),
+            json!({"kind": "cleared", "via": {"kind": "role", "name": o.n("r1")}, "scope": {"type": "platform"}})
+        )
+    );
+    assert_eq!(
+        both(&g2, c).1,
+        json!({"kind": "cleared", "via": {"kind": "itself"}, "scope": null})
+    );
+    let r1 = principal(&e, &format!("/perm/people/roles/{}", o.n("r1"))).await;
+    assert_eq!(
+        both(&r1, a),
+        (
+            json!({"kind": "cleared", "role": o.n("r1")}),
+            json!({"kind": "cleared", "via": {"kind": "itself"}, "scope": null})
+        )
+    );
+    assert_eq!(both(&r1, b), (groups_only, not_cleared));
+}
+
+#[tokio::test]
+async fn public_unknown_names_and_ids() {
+    let Some(e) = env().await else { return };
+    let public = principal(&e, "/perm/people/groups/public").await;
+    assert_eq!(public["isPublic"], json!(true));
+    assert_eq!(public["members"], json!([]));
+    assert_eq!(
+        public["standsFor"],
+        json!([{ "kind": "group", "ref": "public", "via": {"kind": "public"},
+                 "onEngines": true, "notOnEngines": null }])
+    );
+
+    let t = tag();
+    for path in [
+        format!("/perm/people/groups/nogroup_{t}"),
+        format!("/perm/people/roles/norole_{t}"),
+        format!("/perm/people/users/{}", Uuid::new_v4()),
+    ] {
+        let (status, body) = get_path(&e, &e.admin, &path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+        let msg = body["error"].as_str().expect("a sentence");
+        assert!(
+            msg.len() > "not found".len() && msg.ends_with('.'),
+            "{path}: {msg}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn principal_reads_are_gated_on_policy_read_and_reveal_only_identity_and_membership() {
+    let Some(e) = env().await else { return };
+    let o = org(&e).await;
+    let paths = [
+        format!("/perm/people/users/{}", o.ua),
+        format!("/perm/people/groups/{}", o.n("g1")),
+        format!("/perm/people/roles/{}", o.n("r1")),
+    ];
+    for path in &paths {
+        let (status, body) = get_path(&e, &e.nobody, path).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
+        let (status, body) = get_path(&e, &e.reader, path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{path}: policy:read suffices: {body}"
+        );
+    }
+    let keys = |v: &Value| -> BTreeSet<String> { v.as_object().unwrap().keys().cloned().collect() };
+    let set = |ks: &[&str]| -> BTreeSet<String> { ks.iter().map(|s| s.to_string()).collect() };
+    let (_, user) = get_path(&e, &e.reader, &paths[0]).await;
+    assert_eq!(
+        keys(&user),
+        set(&[
+            "id",
+            "email",
+            "name",
+            "username",
+            "status",
+            "serviceAccount",
+            "groups",
+            "roles",
+            "workspaces",
+            "standsFor",
+            "clearances"
+        ])
+    );
+    let (_, group) = get_path(&e, &e.reader, &paths[1]).await;
+    assert_eq!(
+        keys(&group),
+        set(&[
+            "name",
+            "source",
+            "isPublic",
+            "members",
+            "serviceAccounts",
+            "roles",
+            "workspaces",
+            "standsFor",
+            "clearances"
+        ])
+    );
+    for m in group["members"].as_array().unwrap() {
+        assert_eq!(
+            keys(m),
+            set(&[
+                "userId",
+                "label",
+                "username",
+                "serviceAccount",
+                "onEngines",
+                "notOnEngines"
+            ])
+        );
+    }
+    let (_, role) = get_path(&e, &e.reader, &paths[2]).await;
+    assert_eq!(
+        keys(&role),
+        set(&[
+            "name",
+            "scopes",
+            "holders",
+            "serviceAccounts",
+            "holderGroups",
+            "standsFor",
+            "clearances"
+        ])
+    );
+    let text = format!("{user}{group}{role}");
+    for leak in [
+        "password",
+        "session",
+        "permission",
+        "token",
+        "lastLogin",
+        "last_login",
+    ] {
+        assert!(!text.contains(leak), "{leak} in a response");
+    }
+}

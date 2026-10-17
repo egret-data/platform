@@ -132,6 +132,9 @@ pub fn perm_router() -> Router<PermState> {
             get(list_unresolved_principals),
         )
         .route("/perm/people", get(people::list_people))
+        .route("/perm/people/users/{user_id}", get(people::read_user))
+        .route("/perm/people/groups/{name}", get(people::read_group))
+        .route("/perm/people/roles/{name}", get(people::read_role))
         .route("/perm/preview", post(preview))
         .route("/perm/explain", post(explain))
         .route("/perm/compile/{service_id}", post(compile))
@@ -175,6 +178,9 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         list_overlaps,
         list_unresolved_principals,
         people::list_people,
+        people::read_user,
+        people::read_group,
+        people::read_role,
         preview,
         explain,
         compile,
@@ -190,6 +196,19 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         PeoplePage,
         PersonRow,
         PersonKind,
+        crate::people::UserPrincipal,
+        crate::people::GroupPrincipal,
+        crate::people::RolePrincipal,
+        crate::people::Membership,
+        crate::people::MembershipScope,
+        crate::people::MemberRef,
+        crate::people::GroupRef,
+        crate::people::StandsFor,
+        crate::people::Via,
+        crate::people::NotOnEngines,
+        crate::people::ClearanceFact,
+        crate::people::EngineClearance,
+        crate::people::EgretClearance,
         NewGrant,
         NewRule,
         PreviewRequest,

@@ -16,6 +16,10 @@ pub enum PermHttpError {
     Forbidden,
     #[error("not found")]
     NotFound,
+    /// Not found, with the sentence that says what was looked for (People &
+    /// groups Task 3: "No group is named x.").
+    #[error("{0}")]
+    Missing(String),
     #[error("bad request: {0}")]
     BadRequest(String),
     /// The row a PATCH read changed under it before it held the profile locks,
@@ -139,6 +143,7 @@ impl IntoResponse for PermHttpError {
         let (status, body) = match self {
             PermHttpError::Forbidden => (StatusCode::FORBIDDEN, error_body("forbidden")),
             PermHttpError::NotFound => (StatusCode::NOT_FOUND, error_body("not found")),
+            PermHttpError::Missing(_) => (StatusCode::NOT_FOUND, error_body(&msg)),
             PermHttpError::BadRequest(_) => (StatusCode::BAD_REQUEST, error_body(&msg)),
             PermHttpError::Conflict(_) => (StatusCode::CONFLICT, error_body(&msg)),
             // The structured body, served as is: its `error` is the sentence.

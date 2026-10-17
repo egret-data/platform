@@ -1,16 +1,22 @@
-//! `GET /perm/people` — the People & groups index (spec §4.2). Gated
-//! `policy:read` (Q2, user 2026-10-17), as `list_grants` is. The reads, and
-//! why their counts are the compiler's, are in [`crate::people`].
+//! `GET /perm/people` — the People & groups index — and
+//! `GET /perm/people/{users,groups,roles}/…`, one principal (spec §4.2).
+//! Gated `policy:read` (Q2, user 2026-10-17), as `list_grants` is. The reads,
+//! and why their membership answers are the compiler's, are in
+//! [`crate::people`].
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use egret_auth::principal::Auth;
 use egret_core::http::ErrorBody;
+use uuid::Uuid;
 
 use super::{PermHttpError, PermState};
-use crate::people::{list_people_via, ListKind, PeopleFilter, PeopleList};
+use crate::people::{
+    list_people_via, read_group_via, read_role_via, read_user_via, GroupPrincipal, ListKind,
+    PeopleFilter, PeopleList, RolePrincipal, UserPrincipal,
+};
 
 /// The default page size, and the largest one a caller may ask for.
 const DEFAULT_LIMIT: i64 = 50;
@@ -213,4 +219,93 @@ pub(super) async fn list_people(
         ),
     };
     Ok(Json(PeoplePage { items, total }))
+}
+
+/// Run one principal read in a read-only snapshot, as `list_people` does: the
+/// memberships, the compiler's reads and the gates see one state.
+macro_rules! snapshot {
+    ($st:expr, |$conn:ident| $read:expr) => {{
+        let mut tx = $st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .map_err(PermHttpError::db)?;
+        let $conn: &mut sqlx::PgConnection = &mut tx;
+        let out = $read.await?;
+        tx.rollback().await.map_err(PermHttpError::db)?;
+        out
+    }};
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/people/users/{user_id}",
+    tag = "perm",
+    params(("user_id" = Uuid, Path, description = "The user's id")),
+    responses(
+        (status = 200, description = "The user: identity, memberships (groups, roles and workspaces, direct and through a group, expired ones included and marked), `standsFor` (every grant principal that reaches the user, and whether engines apply it) and a clearance answer per gated tag, for engines and for egret. A service account is read like any user", body = UserPrincipal),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No user has this id", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+pub(super) async fn read_user(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(user_id): Path<Uuid>,
+) -> Result<Json<UserPrincipal>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    let user = snapshot!(st, |conn| read_user_via(conn, user_id));
+    user.map(Json)
+        .ok_or_else(|| PermHttpError::Missing("No user has this id.".to_string()))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/people/groups/{name}",
+    tag = "perm",
+    params(("name" = String, Path, description = "The group's name, as a grant principal stores it; `public` for everyone")),
+    responses(
+        (status = 200, description = "The group: source, direct members (as the compiler reads them; service accounts included), the roles and workspaces it holds (egret only), `standsFor` and clearances. `public` answers `isPublic: true` with no members", body = GroupPrincipal),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No group has this name", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+pub(super) async fn read_group(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(name): Path<String>,
+) -> Result<Json<GroupPrincipal>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    let group = snapshot!(st, |conn| read_group_via(conn, &name));
+    group
+        .map(Json)
+        .ok_or_else(|| PermHttpError::Missing(format!("No group is named {name}.")))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/people/roles/{name}",
+    tag = "perm",
+    params(("name" = String, Path, description = "The role's name, across every scope defining it")),
+    responses(
+        (status = 200, description = "The role: scopes, live holders that are users (as the compiler reads them; service accounts included), groups holding it (egret only), `standsFor` and clearances", body = RolePrincipal),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No role has this name", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+pub(super) async fn read_role(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(name): Path<String>,
+) -> Result<Json<RolePrincipal>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    let role = snapshot!(st, |conn| read_role_via(conn, &name));
+    role.map(Json)
+        .ok_or_else(|| PermHttpError::Missing(format!("No role is named {name}.")))
 }
