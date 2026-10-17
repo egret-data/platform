@@ -405,6 +405,104 @@ describe("the index's Check access dialog", () => {
     expect(within(dialog).queryByRole("listbox")).not.toBeInTheDocument();
   });
 
+  // Live check D2: Radix closes the dialog on Escape from the document's capture phase.
+  it("Escape in the Group field closes its list, not the dialog", async () => {
+    serve({
+      people: ok({ items: [{ kind: "group", key: "analysts", label: "analysts", detail: "local", serviceAccount: false }], total: 1 }),
+    });
+    const user = userEvent.setup();
+    open("/governance/people");
+    await user.click(await screen.findByRole("button", { name: "Check access" }));
+    const dialog = await screen.findByRole("dialog", { name: "Check access" });
+    await user.click(within(dialog).getByRole("combobox", { name: "Subject" }));
+    await user.click(await screen.findByRole("option", { name: "Group" }));
+    const field = within(dialog).getByRole("combobox", { name: "Group" });
+    await user.type(field, "a");
+    expect(await within(dialog).findByRole("option", { name: /analysts/ })).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+
+    expect(within(dialog).queryByRole("listbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Check access" })).toBeInTheDocument();
+    expect(field).toHaveFocus();
+    expect(field).toHaveValue("a");
+    // With the list closed, Escape is the dialog's again.
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Check access" })).not.toBeInTheDocument());
+  });
+
+  // Live check D1: the User field was a plain input over buttons.
+  describe("the User field, by keyboard", () => {
+    const principals = ok([
+      { kind: "user", name: "alice@egret.local", label: "Alice Doe", username: "alice-doe-2" },
+      { kind: "user", name: "bob@egret.local", label: "Bob Roe", username: null },
+    ]);
+    async function openUserField() {
+      serve({ principals });
+      const user = userEvent.setup();
+      open("/governance/people");
+      await user.click(await screen.findByRole("button", { name: "Check access" }));
+      const dialog = await screen.findByRole("dialog", { name: "Check access" });
+      const field = within(dialog).getByRole("combobox", { name: "User" });
+      await user.type(field, "o");
+      expect(await within(dialog).findByRole("option", { name: /Alice Doe/ })).toBeInTheDocument();
+      return { user, dialog, field };
+    }
+
+    it("arrows and Enter pick the username; a user with none is not an option", async () => {
+      const { user, dialog, field } = await openUserField();
+      expect(within(dialog).queryByRole("option", { name: /Bob Roe/ })).not.toBeInTheDocument();
+      expect(within(dialog).getByText("no allocated username yet")).toBeInTheDocument();
+
+      await user.keyboard("{ArrowDown}");
+      expect(field).toHaveAttribute("aria-activedescendant", within(dialog).getByRole("option", { name: /Alice Doe/ }).id);
+      await user.keyboard("{Enter}");
+
+      expect(field).toHaveValue("alice-doe-2");
+      expect(field).toHaveFocus();
+      expect(within(dialog).queryByRole("listbox")).not.toBeInTheDocument();
+      expect(screen.getByRole("dialog", { name: "Check access" })).toBeInTheDocument();
+    });
+
+    it("Tab moves on to the next control and closes the list, keeping focus in the dialog", async () => {
+      const { user, dialog, field } = await openUserField();
+      await user.keyboard("{ArrowDown}");
+      await user.tab();
+
+      expect(field).not.toHaveFocus();
+      expect(dialog).toContainElement(document.activeElement as HTMLElement);
+      expect(document.activeElement).not.toBe(dialog);
+      expect(document.activeElement?.tagName).not.toBe("LI");
+      expect(within(dialog).queryByRole("listbox")).not.toBeInTheDocument();
+      expect(field).toHaveValue("o");
+    });
+
+    it("Escape closes the list, not the dialog", async () => {
+      const { user, dialog, field } = await openUserField();
+      await user.keyboard("{Escape}");
+
+      expect(within(dialog).queryByRole("listbox")).not.toBeInTheDocument();
+      expect(screen.getByRole("dialog", { name: "Check access" })).toBeInTheDocument();
+      expect(field).toHaveFocus();
+      expect(field).toHaveAttribute("aria-expanded", "false");
+      expect(field).not.toHaveAttribute("aria-controls");
+    });
+
+    it("aria-controls names the listbox while it is open, even with no match", async () => {
+      serve({ principals: ok([]) });
+      const user = userEvent.setup();
+      open("/governance/people");
+      await user.click(await screen.findByRole("button", { name: "Check access" }));
+      const dialog = await screen.findByRole("dialog", { name: "Check access" });
+      const field = within(dialog).getByRole("combobox", { name: "User" });
+      await user.type(field, "zz");
+      expect(await within(dialog).findByText("No matches.")).toBeInTheDocument();
+      const list = within(dialog).getByRole("listbox", { name: "User suggestions" });
+      expect(field).toHaveAttribute("aria-controls", list.id);
+      expect(list).not.toHaveTextContent("No matches.");
+    });
+  });
+
   // Moved from the Explain access page's tests (DG redesign #2, P8), as the dialog asks them now.
   it("names what a disabled Explain waits for, until the question is complete", async () => {
     serve({});

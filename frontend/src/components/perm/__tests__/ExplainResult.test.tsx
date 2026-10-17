@@ -2010,7 +2010,7 @@ describe("SubjectUserField — the subject's ref is the allocated username (fact
     wrap(<SubjectUserField value="" onChange={onChange} />);
     await user.click(screen.getByLabelText("User"));
 
-    const option = await screen.findByRole("button", { name: /Alice Doe/ });
+    const option = await screen.findByRole("option", { name: /Alice Doe/ });
     expect(option).toHaveTextContent("stored as alice-doe-2");
     await user.click(option);
 
@@ -2033,6 +2033,6 @@ describe("SubjectUserField — the subject's ref is the allocated username (fact
     await user.click(screen.getByLabelText("User"));
 
     expect(await screen.findByText(/no allocated username yet/)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Bob Roe/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Bob Roe/ })).not.toBeInTheDocument();
   });
 });

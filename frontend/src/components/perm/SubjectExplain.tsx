@@ -1,4 +1,5 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
+import { keepPreviousData } from "@tanstack/react-query";
 import { Loader2, Search } from "lucide-react";
 import type { ApiError } from "@/api/client";
 import type { Action, ExplainPrincipalResponse, ExplainResponse, Scope } from "@/api/generated/model";
@@ -6,6 +7,7 @@ import { usePermExplain, usePermExplainPrincipal, usePermListPeople } from "@/ap
 import { ExplainResultView, SubjectUserField } from "@/components/perm/ExplainResult";
 import { MembersExplainView } from "@/components/perm/MembersExplainView";
 import { ScopePicker } from "@/components/perm/ScopePicker";
+import { useDebounced, useSuggestionCombobox } from "@/components/perm/useSuggestionCombobox";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
@@ -73,14 +75,11 @@ export function SubjectField({
   return <SubjectNameField kind={kind} value={value} onChange={onChange} />;
 }
 
-/** How long typing pauses before a group or role search is sent. */
-const SEARCH_DEBOUNCE_MS = 200;
-
 /**
- * A group or role name: a combobox (ARIA 1.2 pattern) over the People list.
- * The search is sent once typing pauses (`SEARCH_DEBOUNCE_MS`). Arrow keys
- * move through the suggestions (`aria-activedescendant`, focus stays in the
- * field), Enter picks one, Escape closes the list; a click picks too.
+ * A group or role name: a combobox over the People list, with the keyboard
+ * and focus behaviour every governance suggestion field shares
+ * (`useSuggestionCombobox`: arrows, Enter, Escape closing only the list, even
+ * inside a dialog). The search is sent once typing pauses; a click picks too.
  */
 function SubjectNameField({
   kind,
@@ -92,82 +91,57 @@ function SubjectNameField({
   onChange: (name: string) => void;
 }) {
   const id = useId();
-  const listId = `${id}-list`;
-  const [open, setOpen] = useState(false);
-  const [active, setActive] = useState(-1);
-  const [q, setQ] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setQ(value), SEARCH_DEBOUNCE_MS);
-    return () => clearTimeout(t);
-  }, [value]);
-  const people = usePermListPeople({ kind, q: q || undefined, limit: 20 }, { query: { enabled: open, retry: false } });
+  const q = useDebounced(value);
+  // Searched from the first focus on (as the list first opens), never on mount.
+  const [enabled, setEnabled] = useState(false);
+  const people = usePermListPeople({ kind, q: q || undefined, limit: 20 }, { query: { enabled, retry: false, placeholderData: keepPreviousData } });
   const rows = people.data?.status === 200 ? people.data.data.items.filter((p) => p.key !== "public") : [];
-  const activeRow = open && active >= 0 && active < rows.length ? active : -1;
-
-  const pick = (name: string) => {
-    onChange(name);
-    setOpen(false);
-    setActive(-1);
-  };
+  const boxRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const combo = useSuggestionCombobox({ count: rows.length, onPick: (i) => onChange(rows[i].key), boxRef, inputRef });
 
   return (
-    <div className="relative space-y-1.5">
+    <div className="space-y-1.5">
       <Label htmlFor={id}>{SUBJECT_KIND_LABEL[kind]}</Label>
-      <Input
-        id={id}
-        role="combobox"
-        aria-expanded={open}
-        aria-controls={listId}
-        aria-autocomplete="list"
-        aria-activedescendant={activeRow >= 0 ? `${listId}-${activeRow}` : undefined}
-        value={value}
-        onChange={(e) => {
-          onChange(e.target.value);
-          setOpen(true);
-          setActive(-1);
-        }}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
-        onKeyDown={(e) => {
-          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-            e.preventDefault();
-            setOpen(true);
-            if (rows.length === 0) return;
-            const step = e.key === "ArrowDown" ? 1 : -1;
-            setActive((i) => (i < 0 ? (step > 0 ? 0 : rows.length - 1) : (i + step + rows.length) % rows.length));
-          } else if (e.key === "Enter" && activeRow >= 0) {
-            // Picks the suggestion instead of submitting the form.
-            e.preventDefault();
-            pick(rows[activeRow].key);
-          } else if (e.key === "Escape" && open) {
-            e.preventDefault();
-            setOpen(false);
-            setActive(-1);
-          }
-        }}
-        placeholder={kind === "group" ? "Search groups…" : "Search roles…"}
-        autoComplete="off"
-      />
-      {open ? (
-        <div className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md">
-          {rows.length > 0 ? (
-            <ul id={listId} role="listbox" aria-label={`${SUBJECT_KIND_LABEL[kind]} suggestions`}>
+      <div ref={boxRef} className="relative">
+        <Input
+          id={id}
+          {...combo.inputProps}
+          ref={inputRef}
+          onFocus={() => {
+            setEnabled(true);
+            combo.inputProps.onFocus();
+          }}
+          value={value}
+          onChange={(e) => {
+            setEnabled(true);
+            onChange(e.target.value);
+            combo.typed();
+          }}
+          placeholder={kind === "group" ? "Search groups…" : "Search roles…"}
+        />
+        {combo.open ? (
+          <div
+            className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md"
+            {...combo.popupProps}
+          >
+            <ul id={combo.listId} role="listbox" aria-label={`${SUBJECT_KIND_LABEL[kind]} suggestions`}>
               {rows.map((p, i) => (
                 <li
                   key={p.key}
-                  id={`${listId}-${i}`}
+                  id={combo.optionId(i)}
                   role="option"
-                  aria-selected={i === activeRow}
+                  aria-selected={i === combo.activeRow}
                   className={`flex w-full cursor-pointer items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent ${
-                    i === activeRow ? "bg-accent" : ""
+                    i === combo.activeRow ? "bg-accent" : ""
                   }`}
                   // Keeps focus in the field, so the list does not close before the click lands.
                   onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => pick(p.key)}
+                  onClick={() => combo.pick(i)}
                   // Options never take focus (the field keeps it and handles the keys); this
                   // only answers an assistive technology that sends Enter to the option itself.
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") pick(p.key);
+                    if (e.key === "Enter") combo.pick(i);
                   }}
                 >
                   <span>{p.label}</span>
@@ -175,17 +149,18 @@ function SubjectNameField({
                 </li>
               ))}
             </ul>
-          ) : (
-            <div id={listId} className="px-2 py-1.5 text-xs text-muted-foreground">
-              {people.isFetching || q !== value
-                ? "Searching…"
-                : people.isError
-                  ? "The list could not be loaded; type a name."
-                  : "No matches."}
-            </div>
-          )}
-        </div>
-      ) : null}
+            {rows.length === 0 ? (
+              <p className="px-2 py-1.5 text-xs text-muted-foreground">
+                {people.isFetching || q !== value
+                  ? "Searching…"
+                  : people.isError
+                    ? "The list could not be loaded; type a name."
+                    : "No matches."}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }

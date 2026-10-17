@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { toast } from "sonner";
 import { Link } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Loader2, Users, X } from "lucide-react";
 
 import { ApiError } from "@/api/client";
@@ -38,6 +39,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useDebounced, useSuggestionCombobox } from "@/components/perm/useSuggestionCombobox";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 
 /**
@@ -265,9 +267,6 @@ function PrincipalListEditor({
   );
 }
 
-/** How long typing pauses before a search is sent (as `SubjectNameField` in `SubjectExplain.tsx`). */
-const SEARCH_DEBOUNCE_MS = 200;
-
 /** What the field says under itself after an allocation: the stored name, or the refusal (FE-FORM-4). */
 type AllocationNotice =
   | { kind: "stored"; label: string; username: string }
@@ -286,8 +285,17 @@ function staleRefsOf(e: unknown): StoredUserRef[] {
  * unique; `q` is a substring match, so every other row is dropped.
  */
 async function findUserId(principal: Principal): Promise<string> {
-  // FE-DATA-2 exception: parameters computed at fetch time (the picked row's email, once allocation is confirmed).
-  const res = await permListPeople({ kind: "user", q: principal.name, includeServiceAccounts: true, limit: 200 });
+  let res: Awaited<ReturnType<typeof permListPeople>>;
+  try {
+    // FE-DATA-2 exception: parameters computed at fetch time (the picked row's email, once allocation is confirmed).
+    res = await permListPeople({ kind: "user", q: principal.name, includeServiceAccounts: true, limit: 200 });
+  } catch (e) {
+    // The lookup is `GET /perm/people`, which needs policy:read; the allocation's own refusal names policy:update.
+    if (e instanceof ApiError && e.status === 403) {
+      throw new Error("This account cannot look the user up: it needs the policy:read permission.", { cause: e });
+    }
+    throw e;
+  }
   const email = principal.name.toLowerCase();
   const matches = res.status === 200 ? res.data.items.filter((row) => row.detail?.toLowerCase() === email) : [];
   if (matches.length !== 1) {
@@ -297,8 +305,8 @@ async function findUserId(principal: Principal): Promise<string> {
 }
 
 /**
- * A user or group search: a combobox (ARIA 1.2, the pattern of
- * `SubjectNameField` in `SubjectExplain.tsx`) over `list_principals`.
+ * A user or group search: a combobox (ARIA 1.2, `useSuggestionCombobox`, as
+ * every governance suggestion field) over `list_principals`.
  *
  * D9a (spec P12): the list stays open after a pick while the field has focus,
  * so several principals are picked in a row; typing or a click reopens it,
@@ -325,26 +333,16 @@ function PrincipalSearchField({
   principals: PermPrincipal[];
   onAdd: (p: PermPrincipal) => void;
 }) {
-  const id = useId();
-  const listId = `${id}-list`;
-  const noticeId = `${id}-notice`;
-  const boxRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const skipNextOpen = useRef(false);
-  const [open, setOpen] = useState(false);
-  const [active, setActive] = useState(-1);
+  const noticeId = `${useId()}-notice`;
   const [q, setQ] = useState("");
-  const [sent, setSent] = useState("");
+  const sent = useDebounced(q);
+  // Searched from the first focus on (as the list first opens), never on mount.
+  const [enabled, setEnabled] = useState(false);
   const [confirming, setConfirming] = useState<Principal | null>(null);
   const [notice, setNotice] = useState<AllocationNotice | null>(null);
   const can = usePolicyPermissions();
   const canAllocate = kind === "user" && can("policy:update");
   const queryClient = useQueryClient();
-
-  useEffect(() => {
-    const t = setTimeout(() => setSent(q), SEARCH_DEBOUNCE_MS);
-    return () => clearTimeout(t);
-  }, [q]);
 
   const suggestions = useQuery({
     queryKey: ["perm-principals", kind, sent],
@@ -352,8 +350,10 @@ function PrincipalSearchField({
       const res = await policyAdminListPrincipals({ q: sent, kind });
       return res.status === 200 ? res.data : [];
     },
-    enabled: open,
+    enabled,
     retry: false,
+    // The previous search's rows stay while the next loads, so an option never vanishes under the pointer.
+    placeholderData: keepPreviousData,
   });
   const rows = suggestions.data ?? [];
   // A `user` principal with no allocated `username` has no `ref` the engine
@@ -363,42 +363,23 @@ function PrincipalSearchField({
     return ref ? [{ principal, ref }] : [];
   });
   const unallocated = rows.filter((principal) => !refFor(kind, principal));
-  const activeRow = open && active >= 0 && active < pickable.length ? active : -1;
   const isAdded = (ref: string) => principals.some((p) => p.kind === kind && p.ref === ref);
 
-  const close = () => {
-    setOpen(false);
-    setActive(-1);
-  };
-
-  // Escape closes the list and nothing else. An enclosing Radix dialog (the
-  // grant and rule dialogs) listens for Escape in the document's capture
-  // phase, before any handler on the field, and dismisses itself unless the
-  // event is already `defaultPrevented`; a window capture listener runs first
-  // and prevents it.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || !(e.target instanceof Node) || !boxRef.current?.contains(e.target)) return;
-      e.preventDefault();
-      setOpen(false);
-      setActive(-1);
-      inputRef.current?.focus();
-    };
-    window.addEventListener("keydown", onKey, { capture: true });
-    return () => window.removeEventListener("keydown", onKey, { capture: true });
-  }, [open]);
-
-  // Focus moving between the field and the list (Tab to an allocation button) keeps it open.
-  const closeUnlessInside = (next: EventTarget | null) => {
-    if (next instanceof Node && boxRef.current?.contains(next)) return;
-    close();
-  };
-
-  const pick = (ref: string) => {
-    onAdd({ kind, ref });
-    setNotice(null);
-  };
+  // The shared keyboard and focus behaviour (Escape closes only the list, even
+  // in the grant and rule dialogs). Focus moving between the field and the
+  // popup (Tab to an allocation button) keeps it open, and so does a pick.
+  const boxRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const combo = useSuggestionCombobox({
+    count: pickable.length,
+    closeOnPick: false,
+    boxRef,
+    inputRef,
+    onPick: (i) => {
+      onAdd({ kind, ref: pickable[i].ref });
+      setNotice(null);
+    },
+  });
 
   // The latest `onAdd`: an allocation settles after the chips may have changed.
   const onAddRef = useRef(onAdd);
@@ -417,6 +398,8 @@ function PrincipalSearchField({
     onSuccess: ({ userId, username, principal }) => {
       onAddRef.current({ kind: "user", ref: username });
       setNotice({ kind: "stored", label: principal.label, username });
+      // FE-ACTION-2: the form stays open, so a toast confirms it too; the line under the field keeps the name.
+      toast.success(`${principal.label} was allocated the username ${username} and added.`);
       setConfirming(null);
       void queryClient.invalidateQueries({ queryKey: ["perm-principals"] });
       void queryClient.invalidateQueries({ queryKey: getPermListPeopleQueryKey() });
@@ -436,88 +419,64 @@ function PrincipalSearchField({
     <div className="flex-1 space-y-1.5">
       <div ref={boxRef} className="relative">
         <Input
+          {...combo.inputProps}
           ref={inputRef}
-          role="combobox"
           aria-label={`${label} ${kind} search`}
-          aria-expanded={open}
-          aria-controls={listId}
-          aria-autocomplete="list"
-          aria-activedescendant={activeRow >= 0 ? `${listId}-${activeRow}` : undefined}
           aria-describedby={notice ? noticeId : undefined}
+          onFocus={() => {
+            setEnabled(true);
+            combo.inputProps.onFocus();
+          }}
           value={q}
           onChange={(e) => {
+            setEnabled(true);
             setQ(e.target.value);
-            setOpen(true);
-            setActive(-1);
-          }}
-          onFocus={() => {
-            if (skipNextOpen.current) skipNextOpen.current = false;
-            else setOpen(true);
-          }}
-          onClick={() => setOpen(true)}
-          onBlur={(e) => closeUnlessInside(e.relatedTarget)}
-          onKeyDown={(e) => {
-            if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-              e.preventDefault();
-              setOpen(true);
-              if (pickable.length === 0) return;
-              const step = e.key === "ArrowDown" ? 1 : -1;
-              setActive((i) =>
-                i < 0 ? (step > 0 ? 0 : pickable.length - 1) : (i + step + pickable.length) % pickable.length,
-              );
-            } else if (e.key === "Enter" && activeRow >= 0) {
-              // Picks the suggestion instead of submitting the dialog's form.
-              e.preventDefault();
-              pick(pickable[activeRow].ref);
-            }
+            combo.typed();
           }}
           placeholder={kind === "user" ? "Search users…" : "Search groups…"}
-          autoComplete="off"
         />
-        {open ? (
+        {combo.open ? (
           <div
             className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md"
-            onBlur={(e) => closeUnlessInside(e.relatedTarget)}
+            {...combo.popupProps}
           >
-            {pickable.length > 0 ? (
-              <ul
-                id={listId}
-                role="listbox"
-                aria-multiselectable="true"
-                aria-label={`${label} ${kind} suggestions`}
-              >
-                {pickable.map(({ principal, ref }, i) => {
-                  const added = isAdded(ref);
-                  return (
-                    <li
-                      key={principal.name}
-                      id={`${listId}-${i}`}
-                      role="option"
-                      aria-selected={added}
-                      className={`flex w-full cursor-pointer items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent ${
-                        i === activeRow ? "bg-accent" : ""
-                      }`}
-                      // Keeps focus in the field, so the list stays open for the next pick.
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => pick(ref)}
-                      // Options never take focus (the field keeps it and handles the keys); this
-                      // only answers an assistive technology that sends Enter to the option itself.
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") pick(ref);
-                      }}
-                    >
-                      <span className="flex items-center gap-1.5">
-                        {added ? <Check aria-hidden className="h-3 w-3 shrink-0 text-primary" /> : null}
-                        {principal.label}
-                      </span>
-                      <span className="shrink-0 text-xs text-muted-foreground">
-                        {added ? `added, stored as ${ref}` : kind === "user" ? `stored as ${ref}` : null}
-                      </span>
-                    </li>
-                  );
-                })}
-              </ul>
-            ) : null}
+            <ul
+              id={combo.listId}
+              role="listbox"
+              aria-multiselectable="true"
+              aria-label={`${label} ${kind} suggestions`}
+            >
+              {pickable.map(({ principal, ref }, i) => {
+                const added = isAdded(ref);
+                return (
+                  <li
+                    key={principal.name}
+                    id={combo.optionId(i)}
+                    role="option"
+                    aria-selected={added}
+                    className={`flex w-full cursor-pointer items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent ${
+                      i === combo.activeRow ? "bg-accent" : ""
+                    }`}
+                    // Keeps focus in the field, so the list stays open for the next pick.
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => combo.pick(i)}
+                    // Options never take focus (the field keeps it and handles the keys); this
+                    // only answers an assistive technology that sends Enter to the option itself.
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") combo.pick(i);
+                    }}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      {added ? <Check aria-hidden className="h-3 w-3 shrink-0 text-primary" /> : null}
+                      {principal.label}
+                    </span>
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      {added ? `added, stored as ${ref}` : kind === "user" ? `stored as ${ref}` : null}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
             {unallocated.length > 0 ? (
               <ul role="list" aria-label="Users with no username yet" className={pickable.length > 0 ? "mt-1 border-t border-border pt-1" : ""}>
                 {unallocated.map((principal) => (
@@ -556,13 +515,13 @@ function PrincipalSearchField({
               </ul>
             ) : null}
             {rows.length === 0 ? (
-              <div id={listId} className="px-2 py-1.5 text-xs text-muted-foreground">
+              <p className="px-2 py-1.5 text-xs text-muted-foreground">
                 {suggestions.isFetching || q !== sent
                   ? "Searching…"
                   : suggestions.isError
                     ? "The list could not be loaded. Search again."
                     : "No matches."}
-              </div>
+              </p>
             ) : null}
           </div>
         ) : null}
@@ -607,7 +566,7 @@ function PrincipalSearchField({
           onCloseAutoFocus={(e) => {
             // Back to the field, with the list closed so the outcome under it is readable.
             e.preventDefault();
-            skipNextOpen.current = true;
+            combo.skipNextFocusOpen();
             inputRef.current?.focus();
           }}
         >

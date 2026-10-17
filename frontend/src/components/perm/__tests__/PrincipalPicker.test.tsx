@@ -7,12 +7,14 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
 vi.mock("@/api/generated/policy-admin/policy-admin");
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 vi.mock("@/api/generated/perm/perm", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/api/generated/perm/perm")>()),
   permListPeople: vi.fn(),
   permAllocateUsername: vi.fn(),
 }));
 
+import { toast } from "sonner";
 import { ApiError } from "@/api/client";
 import type { Me } from "@/api/hooks";
 import { permAllocateUsername, permListPeople } from "@/api/generated/perm/perm";
@@ -283,6 +285,8 @@ describe("PrincipalPicker", () => {
     expect(permAllocateUsername).toHaveBeenCalledTimes(1);
     expect(permAllocateUsername).toHaveBeenCalledWith("u-1");
     expect(await screen.findByText(/stored as brand-new/)).toBeInTheDocument();
+    // FE-ACTION-2: the dialog stays, so a toast confirms it as well as the line under the field.
+    expect(toast.success).toHaveBeenCalledWith("Brand New was allocated the username brand-new and added.");
     expect(screen.getByRole("button", { name: "Remove brand-new from include" })).toBeInTheDocument();
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["perm-principals"] });
@@ -365,6 +369,42 @@ describe("PrincipalPicker", () => {
     // With the list closed, Escape is the dialog's again.
     await user.keyboard("{Escape}");
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  // Task 13 review: the email→id lookup is GET /perm/people, which needs policy:read, not policy:update.
+  test("a 403 on the user lookup names policy:read, and nothing is allocated", async () => {
+    const user = userEvent.setup();
+    mockPrincipals([BRAND_NEW]);
+    vi.mocked(permListPeople).mockRejectedValue(new ApiError(403, "forbidden"));
+    const { onChange } = renderPicker({}, { me: viewer(["policy:update"]) });
+
+    await user.type(screen.getByRole("combobox", { name: "Include user search" }), "brand");
+    await user.click(await screen.findByRole("button", { name: "Allocate username and add Brand New" }));
+    await user.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Allocate and add" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("policy:read");
+    expect(screen.getByRole("alert")).not.toHaveTextContent("policy:update");
+    expect(permAllocateUsername).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  // Task 13 review: aria-controls names a listbox that exists whenever the list is open, status text outside it.
+  test("aria-controls names the rendered listbox while open, even when no row is pickable", async () => {
+    const user = userEvent.setup();
+    mockPrincipals([BRAND_NEW]);
+    renderPicker({}, { me: viewer(["policy:read"]) });
+    const field = screen.getByRole("combobox", { name: "Include user search" });
+    expect(field).not.toHaveAttribute("aria-controls");
+
+    await user.type(field, "brand");
+    expect(await screen.findByText("no allocated username yet")).toBeInTheDocument();
+    const list = screen.getByRole("listbox", { name: "Include user suggestions" });
+    expect(field).toHaveAttribute("aria-controls", list.id);
+    expect(within(list).queryAllByRole("option")).toHaveLength(0);
+    expect(list).not.toHaveTextContent("Brand New");
   });
 
   test("an allocation for a user People cannot find says so and adds nothing", async () => {
