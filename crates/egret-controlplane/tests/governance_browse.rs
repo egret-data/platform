@@ -1213,6 +1213,51 @@ async fn tags_lists_a_tables_and_its_columns_direct_tags_only() {
     );
 }
 
+/// Two egret catalogs are two warehouses: a tag on `sales.orders` in the
+/// second never shows on the first's `sales.orders`.
+#[tokio::test]
+async fn tags_are_read_from_the_catalogs_own_warehouse_only() {
+    let Some(f) = setup().await else { return };
+    let (first, _) = egret_catalog(&f).await;
+    let (second, _) = egret_catalog(&f).await;
+    let first_wh = warehouse_of(&f, first).await;
+    let second_wh = warehouse_of(&f, second).await;
+    assert_ne!(first_wh, second_wh);
+    let (mine, mine_key) = tag(&f).await;
+    let (theirs, theirs_key) = tag(&f).await;
+    tag_resource(&f, mine, first_wh, "sales", "orders", "").await;
+    tag_resource(&f, theirs, second_wh, "sales", "orders", "").await;
+    tag_resource(&f, theirs, second_wh, "sales", "orders", "amount").await;
+
+    let token = session(&f).await;
+    let keys = |j: &serde_json::Value| -> Vec<String> {
+        j["assignments"]
+            .as_array()
+            .unwrap_or_else(|| panic!("assignments: {j}"))
+            .iter()
+            .map(|a| s(a["tag"]["key"].as_str().unwrap()))
+            .collect()
+    };
+    let (status, j) = get(
+        app(&f, FakeLister::new(Answer::Levels)),
+        &format!("/governance/tags/{first}?schema=sales&table=orders"),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    assert_eq!(keys(&j), [mine_key], "body={j}");
+
+    // The second catalog's own tags are there: the exclusion is by warehouse.
+    let (status, j) = get(
+        app(&f, FakeLister::new(Answer::Levels)),
+        &format!("/governance/tags/{second}?schema=sales&table=orders"),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    assert_eq!(keys(&j), [theirs_key.clone(), theirs_key], "body={j}");
+}
+
 /// The shape is the one `…/resource-tags` returns (`ResourceTagDto`), pinned.
 #[tokio::test]
 async fn tags_carry_the_resource_tag_shape() {

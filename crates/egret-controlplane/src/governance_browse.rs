@@ -57,10 +57,14 @@ pub enum GovernanceCatalogSource {
 
 /// One registry catalog as the Governance Data tree sees it. Only names and
 /// kinds: never the catalog's config, URIs, credentials, warehouse location
-/// or properties. Nothing here is more than browse already reveals under the
-/// same permission (its `engines`, and the catalog it is asked about), except
-/// the workspaces it is assigned to, which `policy:read` already shows as
-/// workspace-assignment grants.
+/// or properties.
+///
+/// Two fields reach further than browse does, by decision (Task 6 of the DG
+/// frontend redesign): the workspaces the catalog is assigned to, and its
+/// warehouse's name. A `policy:read` viewer already sees the assignments as
+/// workspace-assignment grants; a viewer holding only `tag:read` sees both
+/// here and nowhere else, because the object page's Overview and Details
+/// show them to everyone who may open that page.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GovernanceCatalog {
