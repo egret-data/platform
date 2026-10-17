@@ -850,7 +850,10 @@ pub async fn membership_provenance_report(
 
 /// **The startup pass** (design R5): one `warn!` per row of
 /// [`membership_provenance_report`]. Returns the rows it logged. Logs ids,
-/// group names and counts — no email.
+/// group names and counts — no email. A group name is logged with `?`
+/// (Debug), not `%`: an OIDC group's name is IdP-supplied, and Debug escapes a
+/// newline that Display would write as a forged second log line
+/// (`tests/provenance_log_escapes.rs`).
 ///
 /// Best-effort by design, like
 /// `egret_perm_compile::principal_refs::warn_fail_open_principals`: the caller
@@ -863,7 +866,7 @@ pub async fn warn_unknown_membership_provenance(
     for r in &report.local_groups_with_oidc_members {
         tracing::warn!(
             group_id = %r.group_id,
-            group = %r.group_name,
+            group = ?r.group_name,
             oidc_members = r.oidc_members,
             "a local group has members who sign in through OIDC; their provenance is unknown: \
              a login before the OIDC-groups fix may have added them from an IdP claim. \
@@ -874,7 +877,7 @@ pub async fn warn_unknown_membership_provenance(
         tracing::warn!(
             user_id = %r.user_id,
             group_id = %r.group_id,
-            group = %r.group_name,
+            group = ?r.group_name,
             "a local user is a member of an OIDC-synced group; no login ever removes this \
              membership. Review it, and remove it if the identity provider did not intend it"
         );

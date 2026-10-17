@@ -61,3 +61,5 @@ reqwest.workspace = true
 # Reuses `generate_rsa_key`/`KeyMaterial` to mint a real RSA signing key for the
 # `verify_logout_token` tests (sign with the private key, verify against the JWKS).
 egret-machine-idp.workspace = true
+# Reads the startup provenance pass's `warn!` lines back (`tests/provenance_log_escapes.rs`).
+tracing-subscriber.workspace = true
