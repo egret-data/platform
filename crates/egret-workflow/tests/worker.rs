@@ -9927,6 +9927,7 @@ async fn a_script_task_without_timeout_gets_the_default(pool: sqlx::PgPool) {
     let reg = Budgets::default();
     let timing = WorkerTiming {
         container_default_timeout: default,
+        kill_poll: egret_workflow::worker::DEFAULT_KILL_POLL,
         ..WorkerTiming::default()
     };
     assert_eq!(
@@ -9959,6 +9960,7 @@ async fn a_script_task_without_timeout_gets_the_default(pool: sqlx::PgPool) {
     .expect("start slow");
     let timing = WorkerTiming {
         container_default_timeout: std::time::Duration::from_secs(1),
+        kill_poll: egret_workflow::worker::DEFAULT_KILL_POLL,
         ..WorkerTiming::default()
     };
     tick_with(&pool, 1, &reg, timing).await.expect("tick");

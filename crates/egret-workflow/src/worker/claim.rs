@@ -116,6 +116,12 @@ fn not_a_leaf_line(task_id: &str, type_id: &str) -> String {
     )
 }
 
+/// Whether `e` is a [`WorkerError::LeaseLost`], by downcast as
+/// [`no_handler_type`] does.
+fn is_lease_lost(e: &Error) -> bool {
+    matches!(e, Error::Internal(a) if matches!(a.downcast_ref::<WorkerError>(), Some(WorkerError::LeaseLost(_))))
+}
+
 /// The type a [`WorkerError::NoHandler`] names, if `e` is one. A downcast, as
 /// `oracle-exec/driver.rs`'s `corrupt` does: the error reaches here inside
 /// `Error::Internal(anyhow::Error)`, and `anyhow!` over a `std::error::Error`
@@ -188,9 +194,10 @@ pub struct Claimed {
     /// `tests/worker.rs::a_worker_whose_lease_was_reaped_cannot_commit`.
     ///
     /// **W4 Task 3's kill path does not close this, and the fence is still the
-    /// whole of the answer.** [`super::TaskHandler::cancel`] has a caller now,
-    /// but only one: the task-level budget expiring, inside the worker that
-    /// owns the run. [`super::reap`] is a bare `UPDATE` run by some other
+    /// whole of the answer.** [`super::TaskHandler::cancel`] has two callers
+    /// now, and both are inside the worker that owns the run: the task-level
+    /// budget expiring, and a kill found under the worker's own lease
+    /// (`finish_kill`). [`super::reap`] is a bare `UPDATE` run by some other
     /// process and a lease is a `timestamptz`, not a handle to a future, so
     /// nothing can reach across and stop the abandoned handler — it learns it
     /// was reaped when this fence refuses its write and not before.
@@ -1174,9 +1181,9 @@ pub async fn tick(pool: &PgPool, n: usize, reg: &dyn Registry) -> Result<usize> 
     tick_with(pool, n, reg, WorkerTiming::default()).await
 }
 
-/// The two durations a tick needs and a bare `tick(pool, n, reg)` cannot
-/// carry: how long a lease lives, and the budget of a script task with no
-/// `timeout:`.
+/// The durations a tick needs and a bare `tick(pool, n, reg)` cannot
+/// carry: how long a lease lives, the budget of a script task with no
+/// `timeout:`, and how often a running task is checked for a kill.
 ///
 /// A struct rather than two more positional `Duration`s on [`tick_with`],
 /// because two adjacent `Duration` parameters are the pair a caller swaps
@@ -1192,6 +1199,9 @@ pub struct WorkerTiming {
     /// The budget a script or container task gets when it declares no
     /// `timeout:`. See [`DEFAULT_CONTAINER_TIMEOUT`](super::DEFAULT_CONTAINER_TIMEOUT).
     pub container_default_timeout: std::time::Duration,
+    /// How often the worker checks a running task's row for a kill (workflow
+    /// kill spec §4.2). See [`DEFAULT_KILL_POLL`](super::DEFAULT_KILL_POLL).
+    pub kill_poll: std::time::Duration,
 }
 
 impl WorkerTiming {
@@ -1201,6 +1211,12 @@ impl WorkerTiming {
     pub fn renew_every(&self) -> std::time::Duration {
         (self.working_timeout / 3).max(std::time::Duration::from_millis(1))
     }
+
+    /// [`kill_poll`](Self::kill_poll), floored at 1 ms for `renew_every`'s
+    /// reason.
+    pub fn kill_poll_every(&self) -> std::time::Duration {
+        self.kill_poll.max(std::time::Duration::from_millis(1))
+    }
 }
 
 impl Default for WorkerTiming {
@@ -1208,6 +1224,7 @@ impl Default for WorkerTiming {
         Self {
             working_timeout: super::DEFAULT_WORKING_TIMEOUT,
             container_default_timeout: super::DEFAULT_CONTAINER_TIMEOUT,
+            kill_poll: super::DEFAULT_KILL_POLL,
         }
     }
 }
@@ -1352,40 +1369,40 @@ async fn run_one(
             other => cancel::guarded(reg, &input, other.duration()).await,
         }
     };
-    let (outcome, held, renewed_at) = match under_lease(
-        pool,
-        c,
-        timing.renew_every(),
-        timing.working_timeout,
-        leased_at,
-        handler,
-    )
-    .await
-    {
-        Leased::Kept {
-            out,
-            held,
-            renewed_at,
-        } => (out, held, renewed_at),
-        // **The fence moved: another worker holds this run now, and this one
-        // records NOTHING** — no outcome, and no failed-attempt line, because
-        // there is no failure to report: the task was not finished by anyone
-        // yet. Lines the handler already wrote stay (they were true when
-        // written), and `finish()` still runs so a withheld-lines summary is
-        // not lost. The handler future was dropped inside `under_lease`.
-        Leased::Lost => {
-            tracing::warn!(
-                execution = %c.execution_id,
-                run = %c.id,
-                task_id = %c.task_id,
-                "this worker no longer holds the run (the fence moved, or no renewal \
-                 succeeded for working_timeout); it stopped following the task and \
-                 records no outcome"
-            );
-            input.log.finish().await;
-            return Ok(Committed::LeaseLost);
-        }
-    };
+    let (outcome, held, renewed_at) =
+        match under_lease(pool, c, timing, Watch::Leaf, leased_at, handler).await {
+            Leased::Kept {
+                out,
+                held,
+                renewed_at,
+            } => (out, held, renewed_at),
+            // **The run was killed under this worker's lease** (workflow kill
+            // spec §4.2): the handler future has been dropped, and the kill
+            // path asks it to stop and records `KILLED`. Unlike `Lost`, the
+            // run is still this worker's, so stopping it is this worker's job.
+            Leased::Killed { held } => {
+                input.log.finish().await;
+                return finish_kill(pool, c, held, reg, &input).await;
+            }
+            // **The fence moved: another worker holds this run now, and this one
+            // records NOTHING** — no outcome, and no failed-attempt line, because
+            // there is no failure to report: the task was not finished by anyone
+            // yet. Lines the handler already wrote stay (they were true when
+            // written), and `finish()` still runs so a withheld-lines summary is
+            // not lost. The handler future was dropped inside `under_lease`.
+            Leased::Lost => {
+                tracing::warn!(
+                    execution = %c.execution_id,
+                    run = %c.id,
+                    task_id = %c.task_id,
+                    "this worker no longer holds the run (the fence moved, or no renewal \
+                     succeeded for working_timeout); it stopped following the task and \
+                     records no outcome"
+                );
+                input.log.finish().await;
+                return Ok(Committed::LeaseLost);
+            }
+        };
     // No-silent-stall spec §5: no handler for the type is not a refusal of the
     // tick any more. The run FAILS with a line that says it is the
     // deployment's fault, through the same failed-attempt line, commit, fence,
@@ -1472,6 +1489,9 @@ async fn run_one(
     // would let the reaper take it. A renewal that finds the fence moved
     // gives the run up exactly as during the handler.
     let mut lease = (held, renewed_at);
+    // Set when the run is found killed while the fetch below runs under the
+    // lease: the attempt gives up, and the kill path records `KILLED`.
+    let mut killed: Option<DateTime<Utc>> = None;
     let ended = transaction!(
         pool,
         Isolation::Default,
@@ -1486,11 +1506,11 @@ async fn run_one(
         },
         |pf| {
             let fetched = under_lease_with(
-                |h| renew_lease(pool, c.id, h),
+                |h| renew_lease(pool, c.id, h, RunState::Running),
+                |h| killing_under(pool, c.id, h),
                 c.id,
                 lease.0,
-                timing.renew_every(),
-                timing.working_timeout,
+                Clock::of(timing, Watch::Leaf),
                 lease.1,
                 pf.fetch_pending(),
             )
@@ -1505,10 +1525,31 @@ async fn run_one(
                     lease = (held, renewed_at);
                     Ok(Fetched::Again)
                 }
+                Leased::Killed { held } => {
+                    killed = Some(held);
+                    Ok(Fetched::GiveUp)
+                }
                 Leased::Lost => Ok(Fetched::GiveUp),
             }
         }
-    )?;
+    );
+    // **A kill that lands after the handler returned** (workflow kill spec
+    // §4.1): the outcome's fence refuses a `KILLING` run, so the commit fails
+    // as a lost lease although the lease is still this worker's. The row is
+    // read once, as after a refused renewal, and a run killed under the lease
+    // takes the kill path rather than waiting for the reaper.
+    let ended = match ended {
+        Err(e) if is_lease_lost(&e) => {
+            if killing_under(pool, c.id, lease.0).await.unwrap_or(false) {
+                return finish_kill(pool, c, lease.0, reg, &input).await;
+            }
+            return Err(e);
+        }
+        other => other?,
+    };
+    if let Some(held) = killed {
+        return finish_kill(pool, c, held, reg, &input).await;
+    }
     if let Ended::GaveUp = ended {
         tracing::warn!(
             execution = %c.execution_id,
@@ -1582,22 +1623,26 @@ async fn run_block_claim(
             Some(render) => working_dir::run_claim(pool, c, render).await,
         }
     };
-    let (done, held, _renewed_at) = match under_lease(
-        pool,
-        c,
-        timing.renew_every(),
-        timing.working_timeout,
-        leased_at,
-        done,
-    )
-    .await
+    // The lease is renewed while the block is in the state its claim expects
+    // -- `KILLING` for a discard-only finish, `RUNNING` otherwise, as the
+    // block fence below requires -- and a block claim is never killed: see
+    // [`Watch::Block`].
+    let expect = if discard_only {
+        RunState::Killing
+    } else {
+        RunState::Running
+    };
+    let watch = Watch::Block { expect };
+    let (done, held, _renewed_at) = match under_lease(pool, c, timing, watch, leased_at, done).await
     {
         Leased::Kept {
             out,
             held,
             renewed_at,
         } => (out, held, renewed_at),
-        Leased::Lost => {
+        // `Killed` cannot come back for a block's claim (`Watch::Block` never
+        // checks for one); it would mean the same as a lost lease here.
+        Leased::Lost | Leased::Killed { .. } => {
             tracing::warn!(
                 execution = %c.execution_id,
                 run = %c.id,
@@ -1745,6 +1790,60 @@ enum Leased<T> {
     },
     /// A renewal found the fence moved. The work was dropped unfinished.
     Lost,
+    /// **The run was found `KILLING` under this worker's lease `held`**
+    /// (workflow kill spec §4.2), by the kill poll or by a renewal the new
+    /// state fence refused. The work was dropped unfinished; unlike
+    /// [`Leased::Lost`] the run is still this worker's, and the caller stops
+    /// the handler and records `KILLED` ([`finish_kill`]).
+    Killed { held: DateTime<Utc> },
+}
+
+/// What a lease watches for, besides its own renewal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Watch {
+    /// A leaf's handler: the lease is renewed while the run is `RUNNING`, and
+    /// the run is checked for a kill every `kill_poll`.
+    Leaf,
+    /// **A `WorkingDirectory` block's own claim: renewed while the block is in
+    /// `expect`, and never killed.** `expect` is the state the block fence
+    /// (`apply_block_claim_on`) requires: `KILLING` for a discard-only finish,
+    /// whose row is `KILLING` by design while the claim holds it, and
+    /// `RUNNING` for every other claim.
+    ///
+    /// Not checked for a kill because a kill never reaches a block under a
+    /// claim: `executor::kill::advance_killing` leaves a block in `PREPARING`
+    /// or `FINISHING` `RUNNING` until its claim completes, so the claim
+    /// finishes under its own fence and the kill closes the block after it.
+    /// A discard-only claim's `KILLING` is the claim's own work, not a kill
+    /// of it. A non-discard claim that ever met a `KILLING` row would have its
+    /// renewal refused and be `Lost`, which records nothing -- the safe side.
+    Block { expect: RunState },
+}
+
+/// The three periods [`under_lease_with`] runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Clock {
+    /// Between renewals.
+    every: std::time::Duration,
+    /// How long without a successful renewal before the worker self-fences.
+    fence_after: std::time::Duration,
+    /// Between kill checks; `None` for a lease that is never killed
+    /// ([`Watch::Block`]), which then also reads nothing after a refused
+    /// renewal.
+    kill_poll: Option<std::time::Duration>,
+}
+
+impl Clock {
+    fn of(timing: WorkerTiming, watch: Watch) -> Self {
+        Clock {
+            every: timing.renew_every(),
+            fence_after: timing.working_timeout,
+            kill_poll: match watch {
+                Watch::Leaf => Some(timing.kill_poll_every()),
+                Watch::Block { .. } => None,
+            },
+        }
+    }
 }
 
 /// Run `work` while renewing `c`'s lease every `every` — **Kestra's worker
@@ -1815,45 +1914,87 @@ enum Leased<T> {
 /// new holder, which is what spec §6 asks (W5a Task 4/5 re-attach to it).
 /// [`super::TaskHandler::cancel`] is deliberately **not** called: the run is
 /// someone else's now.
+///
+/// # A killed run is not a lost one (workflow kill spec §4.2)
+///
+/// For a leaf ([`Watch::Leaf`]) a third wake-up sits beside the renewal and
+/// the deadline: every `kill_poll` the run's row is read, and a run that is
+/// `KILLING` under this worker's lease returns [`Leased::Killed`] with the work
+/// dropped. A renewal refused by its state fence (`AND state = 'RUNNING'`)
+/// reads the row once the same way, so a kill is never mistaken for a lost
+/// lease: a lost lease drops the handler with no cancel, on purpose, and a
+/// killed run is still this worker's to stop. The kill check is awaited like
+/// a renewal, so the work is not polled while it is in flight.
 async fn under_lease<T>(
     pool: &PgPool,
     c: &Claimed,
-    every: std::time::Duration,
-    fence_after: std::time::Duration,
+    timing: WorkerTiming,
+    watch: Watch,
     leased_at: tokio::time::Instant,
     work: impl std::future::Future<Output = T>,
 ) -> Leased<T> {
+    let expect = match watch {
+        Watch::Leaf => RunState::Running,
+        Watch::Block { expect } => expect,
+    };
     under_lease_with(
-        |held| renew_lease(pool, c.id, held),
+        |held| renew_lease(pool, c.id, held, expect),
+        |held| killing_under(pool, c.id, held),
         c.id,
         c.claimed_at,
-        every,
-        fence_after,
+        Clock::of(timing, watch),
         leased_at,
         work,
     )
     .await
 }
 
-/// [`under_lease`] over any renewal, so a test can make renewals fail.
-async fn under_lease_with<T, R, F>(
+/// [`under_lease`] over any renewal and any kill check, so a test can make
+/// either fail.
+async fn under_lease_with<T, R, F, K, G>(
     mut renew: R,
+    mut killed: K,
     run: Uuid,
     claimed_at: DateTime<Utc>,
-    every: std::time::Duration,
-    fence_after: std::time::Duration,
+    clock: Clock,
     leased_at: tokio::time::Instant,
     work: impl std::future::Future<Output = T>,
 ) -> Leased<T>
 where
     R: FnMut(DateTime<Utc>) -> F,
     F: std::future::Future<Output = Result<Option<DateTime<Utc>>>>,
+    K: FnMut(DateTime<Utc>) -> G,
+    G: std::future::Future<Output = Result<bool>>,
 {
+    /// Which wake-up fired.
+    enum Wake {
+        Renew,
+        Poll,
+    }
+    let Clock {
+        every,
+        fence_after,
+        kill_poll,
+    } = clock;
     let mut held = claimed_at;
     let mut last_ok = leased_at;
     let mut work = std::pin::pin!(work);
-    let mut renew_tick = tokio::time::interval(every);
+    // **The first renewal is made before the work is polled at all**, not
+    // left to the interval's first tick. That tick is "immediate" only to the
+    // timer's millisecond: measured in Kill Task 4, a block claim whose work
+    // finished within that millisecond (a `MemStore` discard) was never
+    // renewed, because a `biased` select found the work ready before the tick.
+    // The ticks then start one period in.
+    let mut first = true;
+    let mut renew_tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
     renew_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The first kill check is one period in, not immediate: the first renewal
+    // is immediate and already reads the state through its fence.
+    let mut poll_tick = kill_poll.map(|p| {
+        let mut t = tokio::time::interval_at(tokio::time::Instant::now() + p, p);
+        t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        t
+    });
     let self_fence = |why: &str| {
         tracing::warn!(
             run = %run,
@@ -1871,10 +2012,24 @@ where
         // work future is not polled while a renewal is in flight, so waiting
         // for an answer past the deadline is safe; it is the WORK that must
         // not run on past the deadline unproven.
-        tokio::select! {
+        //
+        // The kill check comes after both, and before the work: a kill that is
+        // due is acted on before the work is polled again.
+        let wake = if std::mem::take(&mut first) {
+            Wake::Renew
+        } else {
+            tokio::select! {
             biased;
-            _ = renew_tick.tick() => {}
-            _ = tokio::time::sleep_until(last_ok + fence_after) => {}
+            _ = renew_tick.tick() => Wake::Renew,
+            _ = tokio::time::sleep_until(last_ok + fence_after) => Wake::Renew,
+            _ = async {
+                match poll_tick.as_mut() {
+                    Some(t) => {
+                        t.tick().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            } => Wake::Poll,
             out = &mut work => {
                 return Leased::Kept {
                     out,
@@ -1882,21 +2037,48 @@ where
                     renewed_at: last_ok,
                 }
             }
-        }
+            }
+        };
         let sent = tokio::time::Instant::now();
         let limit = std::cmp::max(last_ok + fence_after, sent + every);
-        match tokio::time::timeout_at(limit, renew(held)).await {
-            Ok(Ok(Some(renewed))) => {
-                held = renewed;
-                last_ok = sent;
-            }
-            Ok(Ok(None)) => return Leased::Lost,
-            Ok(Err(e)) => tracing::warn!(
-                run = %run,
-                error = %e,
-                "could not renew the lease; retrying at the next renewal"
-            ),
-            Err(_) => tracing::warn!(run = %run, "a lease renewal went unanswered"),
+        match wake {
+            Wake::Renew => match tokio::time::timeout_at(limit, renew(held)).await {
+                Ok(Ok(Some(renewed))) => {
+                    held = renewed;
+                    last_ok = sent;
+                }
+                // The fence refused: the lease moved, or the run is no longer
+                // in the state the lease expects. One read tells a kill under
+                // this lease from a lost lease; a read that fails or does not
+                // answer is a lost lease, as before the kill existed.
+                Ok(Ok(None)) => {
+                    if kill_poll.is_some()
+                        && matches!(
+                            tokio::time::timeout_at(limit, killed(held)).await,
+                            Ok(Ok(true))
+                        )
+                    {
+                        return Leased::Killed { held };
+                    }
+                    return Leased::Lost;
+                }
+                Ok(Err(e)) => tracing::warn!(
+                    run = %run,
+                    error = %e,
+                    "could not renew the lease; retrying at the next renewal"
+                ),
+                Err(_) => tracing::warn!(run = %run, "a lease renewal went unanswered"),
+            },
+            Wake::Poll => match tokio::time::timeout_at(limit, killed(held)).await {
+                Ok(Ok(true)) => return Leased::Killed { held },
+                Ok(Ok(false)) => {}
+                Ok(Err(e)) => tracing::warn!(
+                    run = %run,
+                    error = %e,
+                    "could not check the run for a kill; checking again at the next poll"
+                ),
+                Err(_) => tracing::warn!(run = %run, "a kill check went unanswered"),
+            },
         }
         if tokio::time::Instant::now() >= last_ok + fence_after {
             return self_fence("the last renewal did not succeed");
@@ -1905,9 +2087,15 @@ where
 }
 
 /// Move `run`'s lease to `now()`, **if this worker still holds it** — the
-/// fence is `claimed_at = held`. `Some(new lease)` on success; `None` when the
-/// fence moved (reaped, or reaped and re-claimed), which means the run is no
-/// longer this worker's.
+/// fence is `claimed_at = held` — **and the run is still in `expect`**.
+/// `Some(new lease)` on success; `None` when the fence moved (reaped, or
+/// reaped and re-claimed), which means the run is no longer this worker's, or
+/// when the run left `expect`.
+///
+/// `expect` is `RUNNING` for a leaf (workflow kill spec §4.1: a `KILLING` run
+/// is not renewed, and [`under_lease_with`] reads it as a kill), and the block
+/// fence's own state for a block's claim ([`Watch::Block`]), so a discard-only
+/// finish, whose row is `KILLING` by design, keeps its lease.
 ///
 /// `RETURNING` the written value rather than reading `now()` separately, for
 /// [`Claimed::claimed_at`]'s reason: the token must be exactly what the row
@@ -1916,17 +2104,143 @@ async fn renew_lease(
     pool: &PgPool,
     run: Uuid,
     held: DateTime<Utc>,
+    expect: RunState,
 ) -> Result<Option<DateTime<Utc>>> {
     sqlx::query_scalar(
         "UPDATE workflow.task_runs SET claimed_at = now() \
-          WHERE id = $1 AND claimed_at = $2 \
+          WHERE id = $1 AND claimed_at = $2 AND state = $3 \
           RETURNING claimed_at",
     )
     .bind(run)
     .bind(held)
+    .bind(expect.wire())
     .fetch_optional(pool)
     .await
     .map_err(db_err)
+}
+
+/// **Whether `run` is `KILLING` under the lease `held`** -- the kill check
+/// (workflow kill spec §4.2). `false` for a run that is in any other state,
+/// or whose lease moved (that is a lost lease, not this worker's kill), or
+/// that no longer exists.
+async fn killing_under(pool: &PgPool, run: Uuid, held: DateTime<Utc>) -> Result<bool> {
+    let row: Option<(String, Option<DateTime<Utc>>)> =
+        sqlx::query_as("SELECT state, claimed_at FROM workflow.task_runs WHERE id = $1")
+            .bind(run)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?;
+    Ok(matches!(row, Some((state, Some(at))) if state == RunState::Killing.wire() && at == held))
+}
+
+/// **The kill path's end** (workflow kill spec §4.2): ask the handler to stop
+/// `task`, then record the run `KILLED` and settle its execution.
+///
+/// The stop is [`cancel::kill`], the call the budget's expiry makes
+/// ([`cancel::guarded`]), so each handler stops its work with the grace it
+/// already applies there -- `workflow.plugin_host.kill_grace_s` for a plugin
+/// task, the container grace for a container -- and no second grace exists.
+/// A handler that refuses (`handlers::sql`) is logged and the run is still
+/// recorded `KILLED`: the future was dropped, which is all egret can do, and
+/// the refusal is the operator's fact (the module doc of [`cancel`], fact 2).
+///
+/// It needs nothing of [`under_lease_with`]: a claim of a `KILLING` run whose
+/// previous worker died (Task 5) calls it with the lease it has just taken.
+async fn finish_kill(
+    pool: &PgPool,
+    claimed: &Claimed,
+    held: DateTime<Utc>,
+    reg: &dyn Registry,
+    task: &TaskInput,
+) -> Result<Committed> {
+    if let cancel::Killed::Refused(reason) = cancel::kill(reg, task).await {
+        tracing::warn!(
+            execution = %claimed.execution_id,
+            run = %claimed.id,
+            task_id = %claimed.task_id,
+            type_id = %claimed.type_id,
+            "the worker could not stop this task after it was killed, so its work may \
+             still be running: {reason}"
+        );
+    }
+    commit_kill(pool, claimed, held).await
+}
+
+/// Record a `KILLING` run `KILLED` under the lease `held`, and settle its
+/// execution in the same transaction: [`finish_kill`] without the handler.
+/// [`Committed::LeaseLost`] when the run is not `KILLING` under `held` any
+/// more, and then nothing is written.
+async fn commit_kill(pool: &PgPool, claimed: &Claimed, held: DateTime<Utc>) -> Result<Committed> {
+    let renewed = Claimed {
+        claimed_at: held,
+        ..claimed.clone()
+    };
+    let hit = transaction!(pool, |at| { commit_kill_with(at, &renewed).await })?;
+    Ok(if hit {
+        Committed::Yes
+    } else {
+        Committed::LeaseLost
+    })
+}
+
+/// The body of [`commit_kill`], in one attempt of `worker::txn`.
+///
+/// **The fence is read, then the row is written through `settle`, and that
+/// is one fence.** The run's row is taken `FOR UPDATE` only if it is
+/// `KILLING` under `claimed.claimed_at`, after the execution's own lock
+/// (`load`), so neither the reaper's bare `UPDATE` nor any settle can move it
+/// before this commits. The write is then `apply_outcome`'s: a
+/// `SetRunState { KILLED }`, which also closes the open attempt (`apply`
+/// pushes the state onto it, so it reads `… RUNNING KILLING KILLED` as a
+/// failed attempt reads `… RUNNING FAILED`), and a `settle` that persists the
+/// run through `RUN_STATE_UPDATE` -- `ended_at` stamped by `stamp_set!`, the
+/// attempt's end by `stamp_attempt_ends`, `claimed_at` cleared as the lease's
+/// release -- and runs `advance()`, which closes a `KILLING` execution whose
+/// last live run this was.
+async fn commit_kill_with(at: &mut Txn, claimed: &Claimed) -> Result<bool> {
+    let (conn, gate) = at.parts();
+    let (ctx, mut state, now) =
+        load(conn, claimed.execution_id, Stack::Fresh(gate.clone())).await?;
+    let fenced: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM workflow.task_runs \
+          WHERE id = $1 AND claimed_at = $2 AND state = 'KILLING' FOR UPDATE",
+    )
+    .bind(claimed.id)
+    .bind(claimed.claimed_at)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    if fenced.is_none() {
+        return Ok(false);
+    }
+    let before = state.clone();
+    let run = usize::try_from(claimed.run_ix).map_err(|_| {
+        worker_err(WorkerError::Corrupt(
+            claimed.id,
+            format!("negative run_ix {}", claimed.run_ix),
+        ))
+    })?;
+    apply(
+        &mut state,
+        &Command::SetRunState {
+            run,
+            state: RunState::Killed,
+        },
+    );
+    settle(
+        conn,
+        &ctx,
+        &before,
+        state,
+        now,
+        Some(Lease {
+            run_ix: claimed.run_ix,
+            run_id: claimed.id,
+            claimed_at: claimed.claimed_at,
+        }),
+    )
+    .await?;
+    Ok(true)
 }
 
 /// What one claimed run's handler is handed, render context included.
@@ -2096,9 +2410,14 @@ async fn apply_outcome_on(
     // is set on every outcome including a success, so a run that failed, was
     // retried and then succeeded does not keep the first attempt's reason
     // beside a `SUCCESS` state. See migration 0137.
+    //
+    // **And `AND state = 'RUNNING'`** (workflow kill spec §4.1): an outcome for
+    // a run the kill route moved to `KILLING` is refused as a lost lease and
+    // records nothing; the worker that holds it records `KILLED` instead
+    // (`finish_kill`).
     let hit = sqlx::query(
         "UPDATE workflow.task_runs SET outputs = $1, message = $4 \
-           WHERE id = $2 AND claimed_at = $3",
+           WHERE id = $2 AND claimed_at = $3 AND state = 'RUNNING'",
     )
     .bind(&outcome.outputs)
     .bind(claimed.id)
@@ -4372,6 +4691,17 @@ mod tests {
 
     const EVERY: std::time::Duration = std::time::Duration::from_millis(60);
     const FENCE: std::time::Duration = std::time::Duration::from_millis(200);
+    /// A leaf's clock with no kill poll: these tests are about the renewal.
+    const CLOCK: Clock = Clock {
+        every: EVERY,
+        fence_after: FENCE,
+        kill_poll: None,
+    };
+
+    /// A kill check that never finds a kill.
+    fn never_killed(_: DateTime<Utc>) -> std::future::Ready<Result<bool>> {
+        std::future::ready(Ok(false))
+    }
 
     fn now_utc() -> DateTime<Utc> {
         Utc::now()
@@ -4400,10 +4730,10 @@ mod tests {
                     n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     async { Err(Error::Internal(anyhow::anyhow!("database unreachable"))) }
                 },
+                never_killed,
                 Uuid::nil(),
                 now_utc(),
-                EVERY,
-                FENCE,
+                CLOCK,
                 started,
                 work,
             ),
@@ -4435,10 +4765,10 @@ mod tests {
             std::time::Duration::from_secs(5),
             under_lease_with(
                 |_held| std::future::pending::<Result<Option<DateTime<Utc>>>>(),
+                never_killed,
                 Uuid::nil(),
                 now_utc(),
-                EVERY,
-                FENCE,
+                CLOCK,
                 started,
                 std::future::pending::<()>(),
             ),
@@ -4457,10 +4787,10 @@ mod tests {
         let ok = |_held: DateTime<Utc>| async { Ok(Some(Utc::now())) };
         let out = under_lease_with(
             ok,
+            never_killed,
             Uuid::nil(),
             now_utc(),
-            EVERY,
-            FENCE,
+            CLOCK,
             tokio::time::Instant::now(),
             async {
                 tokio::time::sleep(FENCE * 3).await;
@@ -4484,10 +4814,10 @@ mod tests {
         };
         let out = under_lease_with(
             flaky,
+            never_killed,
             Uuid::nil(),
             now_utc(),
-            EVERY,
-            FENCE,
+            CLOCK,
             tokio::time::Instant::now(),
             async {
                 tokio::time::sleep(FENCE * 3).await;
@@ -4501,12 +4831,56 @@ mod tests {
         );
 
         let late = tokio::time::Instant::now() - FENCE * 2;
-        let out = under_lease_with(ok, Uuid::nil(), now_utc(), EVERY, FENCE, late, async {
-            tokio::time::sleep(EVERY).await;
-            9
-        })
+        let out = under_lease_with(
+            ok,
+            never_killed,
+            Uuid::nil(),
+            now_utc(),
+            CLOCK,
+            late,
+            async {
+                tokio::time::sleep(EVERY).await;
+                9
+            },
+        )
         .await;
         assert!(matches!(out, Leased::Kept { out: 9, .. }));
+    }
+
+    /// **The first renewal is made before the work is polled**, even for work
+    /// that is ready at once: the interval's own first tick can lose a
+    /// `biased` select to it within the timer's millisecond (Kill Task 4,
+    /// measured on a block claim's `MemStore` discard).
+    #[tokio::test]
+    async fn the_first_renewal_comes_before_the_work_is_polled() {
+        let n = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+        let (m, k, w) = (n.clone(), n.clone(), seen.clone());
+        let out = under_lease_with(
+            move |_held| {
+                m.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Ok(Some(Utc::now())) }
+            },
+            never_killed,
+            Uuid::nil(),
+            now_utc(),
+            CLOCK,
+            tokio::time::Instant::now(),
+            async move {
+                w.store(
+                    k.load(std::sync::atomic::Ordering::SeqCst),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                7
+            },
+        )
+        .await;
+        assert!(matches!(out, Leased::Kept { out: 7, .. }));
+        assert_eq!(
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the work first ran after exactly one renewal"
+        );
     }
 
     // ---- Kill Task 2 fix round 1: the block-claim fence ----------------------
@@ -4572,22 +4946,7 @@ mod tests {
             .await
             .expect("the block's prepare claim, leased");
             if killed {
-                sqlx::query(
-                    "UPDATE workflow.task_runs SET state = 'KILLING', \
-                        history = history || '[\"KILLING\"]'::jsonb WHERE id = $1",
-                )
-                .bind(c.id)
-                .execute(&mut *tx)
-                .await
-                .expect("block -> KILLING");
-                sqlx::query(
-                    "UPDATE workflow.executions SET state = 'KILLING', \
-                        history = history || '[\"KILLING\"]'::jsonb WHERE id = $1",
-                )
-                .bind(ex)
-                .execute(&mut *tx)
-                .await
-                .expect("execution -> KILLING");
+                plant(&mut tx, ex, kill_run(c.run_ix)).await;
             }
             tx.commit().await.expect("commit");
 
@@ -4674,29 +5033,33 @@ mod tests {
             .execute(&mut *tx)
             .await
             .expect("lock");
-        sqlx::query(
-            "UPDATE workflow.task_runs SET \
-                state = CASE WHEN claimed_at IS NULL THEN 'KILLED' ELSE 'KILLING' END, \
-                ended_at = CASE WHEN claimed_at IS NULL THEN now() END, \
-                history = history || CASE WHEN claimed_at IS NULL \
-                    THEN '[\"KILLED\"]'::jsonb ELSE '[\"KILLING\"]'::jsonb END \
+        let leaves: Vec<(i32, bool)> = sqlx::query_as(
+            "SELECT run_ix, claimed_at IS NOT NULL FROM workflow.task_runs \
               WHERE execution_id = $1 AND type_id IS NOT NULL \
                 AND NOT workflow.state_is_terminal(state)",
         )
         .bind(ex)
-        .execute(&mut *tx)
+        .fetch_all(&mut *tx)
         .await
-        .expect("kill the leaves");
-        sqlx::query(
-            "UPDATE workflow.executions SET state = 'KILLING', \
-                history = history || '[\"KILLING\"]'::jsonb WHERE id = $1",
-        )
-        .bind(ex)
-        .execute(&mut *tx)
-        .await
-        .expect("execution -> KILLING");
+        .expect("the live leaves");
+        let mut cmds: Vec<Command> = leaves
+            .into_iter()
+            .map(|(ix, leased)| Command::SetRunState {
+                run: ix as usize,
+                state: if leased {
+                    RunState::Killing
+                } else {
+                    RunState::Killed
+                },
+            })
+            .collect();
+        cmds.push(Command::SetExecutionState {
+            state: RunState::Killing,
+        });
+        // One settle: the route's write and its settle, as `resume` did after
+        // the route's own statements.
+        plant(&mut tx, ex, cmds).await;
         tx.commit().await.expect("commit the kill");
-        resume(pool, ex).await.expect("the route's settle");
     }
 
     /// Play the worker until the execution ends: run each block claim this
@@ -4730,21 +5093,31 @@ mod tests {
                 .expect("the block claim commits");
                 continue;
             }
-            let killed = sqlx::query(
-                // `claimed_at` is kept: if another test's `tick` holds the
-                // lease, its commit still passes its fence rather than failing
-                // that test's tick.
-                "UPDATE workflow.task_runs SET state = 'KILLED', \
-                    ended_at = now(), history = history || '[\"KILLED\"]'::jsonb \
-                  WHERE execution_id = $1 AND type_id IS NOT NULL AND state = 'KILLING'",
+            // The worker's half of the kill (Task 4): `commit_kill`, under the
+            // lease the leaf holds. There is no handler here to cancel. If
+            // another test's `tick` holds that lease, its own kill path
+            // records the same `KILLED`, and this one is `LeaseLost`.
+            let killing: Vec<Claimed> = sqlx::query_as(
+                "SELECT t.id, t.execution_id, e.workspace_id, t.run_ix, t.task_ix, t.task_id, \
+                        t.type_id, t.value, jsonb_array_length(t.attempts) AS attempt, \
+                        e.source, NULL::uuid AS principal_id, t.claimed_at, \
+                        NULL::text AS block_phase, NULL::uuid AS block_id, \
+                        NULL::text AS block_snapshot \
+                   FROM workflow.task_runs t JOIN workflow.executions e ON e.id = t.execution_id \
+                  WHERE t.execution_id = $1 AND t.type_id IS NOT NULL AND t.state = 'KILLING' \
+                    AND t.claimed_at IS NOT NULL",
             )
             .bind(ex)
-            .execute(&mut *conn)
+            .fetch_all(&mut *conn)
             .await
-            .expect("finish the KILLING leaves");
+            .expect("the KILLING leaves");
             drop(conn);
-            if killed.rows_affected() > 0 {
-                resume(pool, ex).await.expect("settle after the worker");
+            if !killing.is_empty() {
+                for c in &killing {
+                    commit_kill(pool, c, c.claimed_at)
+                        .await
+                        .expect("the kill commits");
+                }
                 continue;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -5016,27 +5389,7 @@ mod tests {
         for (done, block_state, commits) in cases {
             let (ex, c) = start_with_prepare_leased(&pool, ws, &wd_kill_flow("k2.fence")).await;
             // Turn the leased prepare into a leased finish, in the given state.
-            sqlx::query(
-                "UPDATE workflow.task_runs SET working_dir = 'FINISHING', state = $2, \
-                    history = CASE WHEN $2 = 'KILLING' \
-                        THEN history || '[\"KILLING\"]'::jsonb ELSE history END \
-                  WHERE id = $1",
-            )
-            .bind(c.id)
-            .bind(block_state)
-            .execute(&pool)
-            .await
-            .expect("plant the finish");
-            if block_state == "KILLING" {
-                sqlx::query(
-                    "UPDATE workflow.executions SET state = 'KILLING', \
-                        history = history || '[\"KILLING\"]'::jsonb WHERE id = $1",
-                )
-                .bind(ex)
-                .execute(&pool)
-                .await
-                .expect("execution -> KILLING");
-            }
+            plant_finish(&pool, ex, &c, block_state == "KILLING").await;
             let c = Claimed {
                 block_phase: Some("FINISHING".into()),
                 ..c
@@ -5062,5 +5415,577 @@ mod tests {
                 "{done:?} onto a {block_state} block"
             );
         }
+    }
+
+    // ---- Kill Task 4: the fences and the worker's kill path -------------------
+
+    /// **Move an execution through the executor's own write**, as the kill
+    /// route will (spec §3.2): `cmds` are applied to the loaded state (under
+    /// the execution's lock) and one `settle` persists them and advances.
+    /// Every state goes through `RUN_STATE_UPDATE`/`EXECUTION_STATE_UPDATE`,
+    /// so it is stamped (`tests/execution_timestamps.rs`'s
+    /// `every_state_write_stamps_the_timestamps`), and a run's attempt takes
+    /// the state as `apply` gives it. No lease is fenced or released.
+    async fn plant(conn: &mut PgConnection, ex: Uuid, cmds: Vec<Command>) {
+        let pf = Prefetch::new();
+        let (ctx, mut state, now) = load(conn, ex, Stack::Fresh(Gate::checked_by_caller(&pf)))
+            .await
+            .expect("load");
+        let before = state.clone();
+        for cmd in &cmds {
+            apply(&mut state, cmd);
+        }
+        settle(conn, &ctx, &before, state, now, None)
+            .await
+            .expect("settle the planted state");
+        assert!(!pf.has_pending(), "a planted state renders nothing");
+    }
+
+    /// The kill route's half for one leased run: it goes `KILLING`, and so
+    /// does its execution.
+    fn kill_run(run_ix: i32) -> Vec<Command> {
+        vec![
+            Command::SetRunState {
+                run: run_ix as usize,
+                state: RunState::Killing,
+            },
+            Command::SetExecutionState {
+                state: RunState::Killing,
+            },
+        ]
+    }
+
+    /// Turn a leased prepare into a leased finish; `killing` also moves the
+    /// block and its execution to `KILLING`, the discard-only finish's state.
+    async fn plant_finish(pool: &PgPool, ex: Uuid, c: &Claimed, killing: bool) {
+        let mut cmds = vec![Command::FinishWorkingDirectory {
+            run: c.run_ix as usize,
+        }];
+        if killing {
+            cmds.extend(kill_run(c.run_ix));
+        }
+        let mut tx = pool.begin().await.expect("begin");
+        plant(&mut tx, ex, cmds).await;
+        tx.commit().await.expect("commit");
+    }
+
+    async fn plant_kill_of(pool: &PgPool, ex: Uuid, run_ix: i32) {
+        let mut tx = pool.begin().await.expect("begin");
+        plant(&mut tx, ex, kill_run(run_ix)).await;
+        tx.commit().await.expect("commit the kill");
+    }
+
+    /// One leaf, of a type only the test registries below run.
+    const LEAF_FLOW: &str = "id: kill-leaf\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.debug.Return\n    format: a\n";
+
+    /// Start `src` with its running leaf leased by this test, in ONE
+    /// transaction, so no concurrent `tick` can take it.
+    async fn start_with_leaf_leased(pool: &PgPool, ws: Uuid, src: &str) -> (Uuid, Claimed) {
+        let mut tx = pool.begin().await.expect("begin");
+        let ex = start_execution_in(
+            &mut tx,
+            NewExecution {
+                workspace_id: ws,
+                flow_id: None,
+                source: src,
+                inputs: serde_json::json!({}),
+                trigger: None,
+                scheduled_date: None,
+                trigger_execution_id: None,
+                execution_depth: 0,
+                flow_trigger_event_id: None,
+                born_failed: false,
+                replayed_from_execution_id: None,
+                id: None,
+                input_files: Vec::new(),
+                labels: None,
+                backfill_id: None,
+            },
+        )
+        .await
+        .expect("start");
+        let c: Claimed = sqlx::query_as(
+            "WITH leased AS ( \
+               UPDATE workflow.task_runs SET claimed_at = now() \
+                WHERE execution_id = $1 AND type_id IS NOT NULL AND state = 'RUNNING' \
+                  AND claimed_at IS NULL \
+               RETURNING * ) \
+             SELECT t.id, t.execution_id, e.workspace_id, t.run_ix, t.task_ix, t.task_id, \
+                    t.type_id, t.value, jsonb_array_length(t.attempts) AS attempt, \
+                    e.source, NULL::uuid AS principal_id, t.claimed_at, \
+                    NULL::text AS block_phase, NULL::uuid AS block_id, \
+                    NULL::text AS block_snapshot \
+               FROM leased t JOIN workflow.executions e ON e.id = t.execution_id",
+        )
+        .bind(ex)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("the leaf, leased");
+        tx.commit().await.expect("commit");
+        (ex, c)
+    }
+
+    /// What a run's row says, for "nothing was recorded".
+    async fn run_row(
+        pool: &PgPool,
+        id: Uuid,
+    ) -> (
+        String,
+        Option<Value>,
+        Option<String>,
+        Option<DateTime<Utc>>,
+        Value,
+        Value,
+    ) {
+        sqlx::query_as(
+            "SELECT state, outputs, message, claimed_at, history, attempts \
+               FROM workflow.task_runs WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("read the run")
+    }
+
+    /// What the worker's handler does in these tests.
+    enum Mode {
+        /// Sleep for a minute: only a drop ends it in time.
+        Sleep,
+        /// Plant the kill of `run_ix`, then answer `SUCCESS` at once: a kill
+        /// that lands after the handler returned.
+        KillThenReturn { pool: PgPool, ex: Uuid, run_ix: i32 },
+    }
+
+    /// A registry that records every `cancel` and whether its handler future
+    /// was dropped.
+    struct KillSpy {
+        mode: Mode,
+        refuse: bool,
+        started: tokio::sync::Notify,
+        cancels: std::sync::Mutex<Vec<(Uuid, usize)>>,
+        dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl KillSpy {
+        fn new(mode: Mode, refuse: bool) -> Self {
+            KillSpy {
+                mode,
+                refuse,
+                started: tokio::sync::Notify::new(),
+                cancels: std::sync::Mutex::new(Vec::new()),
+                dropped: Default::default(),
+            }
+        }
+        fn cancels(&self) -> Vec<(Uuid, usize)> {
+            self.cancels.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Registry for KillSpy {
+        async fn run(&self, _task: &TaskInput) -> Result<Outcome> {
+            self.started.notify_one();
+            match &self.mode {
+                Mode::Sleep => {
+                    let _g = Dropped(self.dropped.clone());
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                }
+                Mode::KillThenReturn { pool, ex, run_ix } => {
+                    plant_kill_of(pool, *ex, *run_ix).await;
+                }
+            }
+            Ok(Outcome::success())
+        }
+        async fn cancel(&self, task: &TaskInput) -> Result<()> {
+            self.cancels
+                .lock()
+                .unwrap()
+                .push((task.run_id, task.attempt));
+            if self.refuse {
+                Err(Error::Internal(anyhow::anyhow!(
+                    "this handler cannot stop its work"
+                )))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Database, `MemStore` and the served-type gate every claim test needs.
+    async fn kill_fixture() -> (PgPool, Uuid) {
+        install_docker_served();
+        let pool = crate::storage::nsfiles::stage::testing::pool()
+            .await
+            .expect("the test database");
+        let _fs = crate::storage::install_mem_for_tests();
+        let ws = crate::storage::nsfiles::stage::testing::workspace(&pool).await;
+        (pool, ws)
+    }
+
+    /// Spec §4.1: **an outcome for a `KILLING` run is refused as a lost lease
+    /// and records nothing**, although the lease is the worker's own.
+    #[tokio::test]
+    async fn a_killing_run_refuses_the_workers_outcome() {
+        let (pool, ws) = kill_fixture().await;
+        let (ex, c) = start_with_leaf_leased(&pool, ws, LEAF_FLOW).await;
+        plant_kill_of(&pool, ex, c.run_ix).await;
+        let before = run_row(&pool, c.id).await;
+        assert_eq!(before.0, "KILLING");
+        assert_eq!(
+            before.3,
+            Some(c.claimed_at),
+            "the lease is still the worker's"
+        );
+
+        let mut tx = pool.begin().await.expect("begin");
+        let out = apply_outcome(
+            &mut tx,
+            &c,
+            &Outcome::succeeded_with(serde_json::json!({"v": 1})),
+        )
+        .await;
+        tx.rollback().await.expect("rollback");
+        assert!(
+            matches!(&out, Err(e) if is_lease_lost(e)),
+            "the outcome must be refused as LeaseLost: {out:?}"
+        );
+        assert_eq!(
+            run_row(&pool, c.id).await,
+            before,
+            "nothing of the outcome is recorded"
+        );
+    }
+
+    /// Spec §4.1: **a `KILLING` run's lease is not renewed**, and the lease
+    /// loop reads that as a kill under its lease, not as a lost lease.
+    #[tokio::test]
+    async fn a_killing_run_refuses_a_renewal() {
+        let (pool, ws) = kill_fixture().await;
+        let (ex, c) = start_with_leaf_leased(&pool, ws, LEAF_FLOW).await;
+        // The control: a RUNNING run's renewal succeeds.
+        let held = renew_lease(&pool, c.id, c.claimed_at, RunState::Running)
+            .await
+            .expect("renew")
+            .expect("a RUNNING run is renewed");
+        plant_kill_of(&pool, ex, c.run_ix).await;
+        assert_eq!(
+            renew_lease(&pool, c.id, held, RunState::Running)
+                .await
+                .expect("renew"),
+            None,
+            "a KILLING run is not renewed"
+        );
+        assert_eq!(
+            run_row(&pool, c.id).await.3,
+            Some(held),
+            "nor its lease moved"
+        );
+        let c = Claimed {
+            claimed_at: held,
+            ..c
+        };
+        let out = under_lease(
+            &pool,
+            &c,
+            WorkerTiming::default(),
+            Watch::Leaf,
+            tokio::time::Instant::now(),
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert!(
+            matches!(out, Leased::Killed { held: h } if h == held),
+            "the refused renewal is a kill under this lease"
+        );
+    }
+
+    /// The worker's half of a kill, driven by `run_one` with a handler that
+    /// would sleep for a minute. Returns when the kill committed and how long
+    /// after the kill that was.
+    async fn kill_a_sleeping_run(
+        refuse: bool,
+    ) -> (PgPool, Uuid, Claimed, KillSpy, std::time::Duration) {
+        let (pool, ws) = kill_fixture().await;
+        let (ex, c) = start_with_leaf_leased(&pool, ws, LEAF_FLOW).await;
+        let reg = KillSpy::new(Mode::Sleep, refuse);
+        let timing = WorkerTiming {
+            kill_poll: std::time::Duration::from_millis(100),
+            ..WorkerTiming::default()
+        };
+        let worker = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            run_one(&pool, &c, &reg, timing, tokio::time::Instant::now()),
+        );
+        let killer = async {
+            reg.started.notified().await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            plant_kill_of(&pool, ex, c.run_ix).await;
+            tokio::time::Instant::now()
+        };
+        let (out, killed_at) = tokio::join!(worker, killer);
+        let took = killed_at.elapsed();
+        let out = out.expect("the worker returns before its handler would have");
+        assert_eq!(out.expect("run_one"), Committed::Yes, "the kill committed");
+        (pool, ex, c, reg, took)
+    }
+
+    /// What the kill left on the run and its execution, asserted the same way
+    /// for a cancel that stopped and one that refused.
+    async fn assert_killed(pool: &PgPool, ex: Uuid, c: &Claimed) {
+        let (state, ended_at, claimed_at, attempts): (
+            String,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+            Value,
+        ) = sqlx::query_as(
+            "SELECT state, ended_at, claimed_at, attempts FROM workflow.task_runs WHERE id = $1",
+        )
+        .bind(c.id)
+        .fetch_one(pool)
+        .await
+        .expect("read the run");
+        assert_eq!(state, "KILLED");
+        assert!(ended_at.is_some(), "the run's ended_at is stamped");
+        assert_eq!(claimed_at, None, "the lease is released");
+        let last = attempts
+            .as_array()
+            .and_then(|a| a.last())
+            .expect("an attempt");
+        assert_eq!(
+            last["history"],
+            serde_json::json!(["CREATED", "RUNNING", "KILLING", "KILLED"]),
+            "the attempt is closed KILLED, as a failed one is closed FAILED: {attempts}"
+        );
+        assert!(
+            last.get("ended_at").is_some(),
+            "the attempt's end is stamped: {last}"
+        );
+        let (exec_state, exec_ended): (String, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT state, ended_at FROM workflow.executions WHERE id = $1")
+                .bind(ex)
+                .fetch_one(pool)
+                .await
+                .expect("read the execution");
+        assert_eq!(
+            exec_state, "KILLED",
+            "a KILLING execution with no other live run is closed by the same settle"
+        );
+        assert!(exec_ended.is_some());
+    }
+
+    /// Spec §4.2: **the worker polls, drops and cancels the handler, and
+    /// writes `KILLED`** -- within 2 s of a kill that lands 300 ms into a
+    /// handler that would run a minute, with `kill_poll = 100 ms` and no
+    /// renewal due (an hour's `working_timeout`), so it is the poll that
+    /// found it.
+    #[tokio::test]
+    async fn the_worker_cancels_and_writes_killed() {
+        let (pool, ex, c, reg, took) = kill_a_sleeping_run(false).await;
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "the kill took {took:?}"
+        );
+        assert_eq!(
+            reg.cancels(),
+            vec![(c.id, c.attempt as usize)],
+            "cancel is called once, for this run's attempt"
+        );
+        assert!(
+            reg.dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the handler future was dropped"
+        );
+        assert_eq!(reg.cancels.lock().unwrap().len(), 1, "no second cancel");
+        assert_killed(&pool, ex, &c).await;
+    }
+
+    /// Spec §4.2: **a cancel that errs still ends `KILLED`**; the refusal
+    /// goes to `tracing` only. And the kill's own fence: a second commit of
+    /// the same kill finds no `KILLING` run under the lease and writes nothing.
+    #[tokio::test]
+    async fn a_cancel_that_errs_still_ends_killed() {
+        let (pool, ex, c, reg, _) = kill_a_sleeping_run(true).await;
+        assert_eq!(reg.cancels().len(), 1, "the cancel was asked, and refused");
+        assert_killed(&pool, ex, &c).await;
+        let message: Option<String> =
+            sqlx::query_scalar("SELECT message FROM workflow.task_runs WHERE id = $1")
+                .bind(c.id)
+                .fetch_one(&pool)
+                .await
+                .expect("message");
+        assert_eq!(message, None, "the refusal is not the run's message");
+
+        let before = run_row(&pool, c.id).await;
+        assert_eq!(
+            commit_kill(&pool, &c, c.claimed_at)
+                .await
+                .expect("commit_kill"),
+            Committed::LeaseLost,
+            "no KILLING run under the lease: nothing to commit"
+        );
+        assert_eq!(run_row(&pool, c.id).await, before);
+    }
+
+    /// The W5a re-attach rule, kept (`under_lease`'s doc): **a fence moved by
+    /// another claim, with the run still `RUNNING`, is a lost lease, not a
+    /// kill** -- the handler is dropped and NOT cancelled, because the run is
+    /// someone else's.
+    #[tokio::test]
+    async fn a_reaped_run_is_still_lost_not_killed() {
+        let (pool, ws) = kill_fixture().await;
+        let (_ex, c) = start_with_leaf_leased(&pool, ws, LEAF_FLOW).await;
+        let reg = KillSpy::new(Mode::Sleep, false);
+        let timing = WorkerTiming {
+            working_timeout: std::time::Duration::from_millis(600),
+            container_default_timeout: super::super::DEFAULT_CONTAINER_TIMEOUT,
+            kill_poll: std::time::Duration::from_millis(100),
+        };
+        let worker = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            run_one(&pool, &c, &reg, timing, tokio::time::Instant::now()),
+        );
+        let other = async {
+            reg.started.notified().await;
+            // Reaped and claimed again: the row's lease is another worker's.
+            sqlx::query(
+                "UPDATE workflow.task_runs SET claimed_at = now() + interval '1 hour' \
+                  WHERE id = $1",
+            )
+            .bind(c.id)
+            .execute(&pool)
+            .await
+            .expect("move the fence");
+        };
+        let (out, ()) = tokio::join!(worker, other);
+        let out = out.expect("the worker gives the run up");
+        assert_eq!(out.expect("run_one"), Committed::LeaseLost);
+        assert!(
+            reg.cancels().is_empty(),
+            "a lost run's handler is NOT cancelled"
+        );
+        assert!(
+            reg.dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "it is dropped"
+        );
+        assert_eq!(
+            run_row(&pool, c.id).await.0,
+            "RUNNING",
+            "nothing is recorded"
+        );
+    }
+
+    /// Spec §4.1, the window after the handler: **a kill that lands after the
+    /// handler returned** has its outcome refused by the fence, and the
+    /// worker still takes the kill path -- it does not leave the run
+    /// `KILLING` under its lease for the reaper.
+    #[tokio::test]
+    async fn a_kill_after_the_handler_returned_still_ends_killed() {
+        let (pool, ws) = kill_fixture().await;
+        let (ex, c) = start_with_leaf_leased(&pool, ws, LEAF_FLOW).await;
+        let reg = KillSpy::new(
+            Mode::KillThenReturn {
+                pool: pool.clone(),
+                ex,
+                run_ix: c.run_ix,
+            },
+            false,
+        );
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            run_one(
+                &pool,
+                &c,
+                &reg,
+                WorkerTiming::default(),
+                tokio::time::Instant::now(),
+            ),
+        )
+        .await
+        .expect("run_one returns");
+        assert_eq!(out.expect("run_one"), Committed::Yes);
+        assert_eq!(reg.cancels(), vec![(c.id, c.attempt as usize)]);
+        assert_killed(&pool, ex, &c).await;
+        let outputs: Option<Value> =
+            sqlx::query_scalar("SELECT outputs FROM workflow.task_runs WHERE id = $1")
+                .bind(c.id)
+                .fetch_one(&pool)
+                .await
+                .expect("outputs");
+        assert_eq!(outputs, None, "the refused outcome wrote nothing");
+    }
+
+    /// Carry from Kill Task 2: **a discard-only block claim, whose row is
+    /// `KILLING` by design, keeps its lease through renewals and the poll**,
+    /// and is not taken for a kill. The same row under a leaf's watch is a
+    /// kill, which is what makes the block's answer a decision and not luck.
+    #[tokio::test]
+    async fn a_discard_only_block_claim_survives_renewal_and_the_poll() {
+        let (pool, ws) = kill_fixture().await;
+        let (ex, c) = start_with_prepare_leased(&pool, ws, &wd_kill_flow("k4.discard")).await;
+        plant_finish(&pool, ex, &c, true).await;
+        let c = Claimed {
+            block_phase: Some("FINISHING".into()),
+            ..c
+        };
+        assert_eq!(run_row(&pool, c.id).await.0, "KILLING");
+        // The renewal's state term: KILLING renews this claim, RUNNING does not.
+        let held = renew_lease(&pool, c.id, c.claimed_at, RunState::Killing)
+            .await
+            .expect("renew")
+            .expect("a discard-only claim is renewed");
+        assert_eq!(
+            renew_lease(&pool, c.id, held, RunState::Running)
+                .await
+                .expect("renew"),
+            None,
+            "the control: the RUNNING term refuses this row"
+        );
+        let c = Claimed {
+            claimed_at: held,
+            ..c
+        };
+        // Renewals every 50 ms and polls every 20 ms, for 400 ms of work.
+        let timing = WorkerTiming {
+            working_timeout: std::time::Duration::from_millis(150),
+            container_default_timeout: super::super::DEFAULT_CONTAINER_TIMEOUT,
+            kill_poll: std::time::Duration::from_millis(20),
+        };
+        let out = under_lease(
+            &pool,
+            &c,
+            timing,
+            Watch::Block {
+                expect: RunState::Killing,
+            },
+            tokio::time::Instant::now(),
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                7
+            },
+        )
+        .await;
+        let held = match out {
+            Leased::Kept { out: 7, held, .. } => held,
+            Leased::Kept { .. } => unreachable!(),
+            Leased::Lost => panic!("a discard-only claim lost its lease"),
+            Leased::Killed { .. } => panic!("a discard-only claim was taken for a kill"),
+        };
+        assert!(held > c.claimed_at, "it was renewed meanwhile");
+        let c = Claimed {
+            claimed_at: held,
+            ..c
+        };
+        let leaf = under_lease(
+            &pool,
+            &c,
+            timing,
+            Watch::Leaf,
+            tokio::time::Instant::now(),
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert!(
+            matches!(leaf, Leased::Killed { .. }),
+            "the contrast: under a leaf's watch the same row is a kill"
+        );
     }
 }

@@ -165,6 +165,12 @@ pub const DEFAULT_WORKING_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// configured value; `tests/runtime.rs` pins the two defaults together.
 pub const DEFAULT_CONTAINER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
 
+/// **How often a running task's worker checks whether its run was killed**
+/// (workflow kill spec §4.2): five seconds.
+/// `egret_config::WorkflowConfig::kill_poll_ms` carries the configured value;
+/// `tests/runtime.rs` pins the two defaults together.
+pub const DEFAULT_KILL_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// What a handler is handed.
 ///
 /// Deliberately a snapshot rather than a live handle: a handler must not be

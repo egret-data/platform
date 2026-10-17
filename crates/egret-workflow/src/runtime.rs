@@ -275,6 +275,10 @@ pub struct RuntimeConfig {
     /// `timeout:`. `egret_config::WorkflowConfig::container_default_timeout_s`;
     /// see [`DEFAULT_CONTAINER_TIMEOUT`](crate::worker::DEFAULT_CONTAINER_TIMEOUT).
     pub container_default_timeout: Duration,
+    /// Between a running task's checks for a kill (workflow kill spec §4.2).
+    /// `egret_config::WorkflowConfig::kill_poll_ms`; see
+    /// [`DEFAULT_KILL_POLL`](crate::worker::DEFAULT_KILL_POLL).
+    pub kill_poll: Duration,
     /// **The scheduler's own gate (W12), independent of [`enabled`](Self::enabled).**
     ///
     /// When true, [`spawn`] starts a third ticker that calls
@@ -590,6 +594,7 @@ fn spawn_worker(
     let timing = crate::worker::WorkerTiming {
         working_timeout: cfg.working_timeout,
         container_default_timeout: cfg.container_default_timeout,
+        kill_poll: cfg.kill_poll,
     };
     let claim_loop = {
         let pool = pool.clone();

@@ -182,6 +182,7 @@ fn fast(tick_ms: u64, batch: usize) -> RuntimeConfig {
         reaper_interval: Duration::from_secs(3600),
         working_timeout: Duration::from_secs(3600),
         container_default_timeout: Duration::from_secs(3600),
+        kill_poll: egret_workflow::worker::DEFAULT_KILL_POLL,
         scheduler_enabled: false,
         trigger_interval: Duration::from_millis(tick_ms),
         log_limits: egret_workflow::logs::LogLimits::default(),
@@ -331,6 +332,7 @@ async fn a_cancelled_token_stops_both_tickers(pool: sqlx::PgPool) {
         reaper_interval: Duration::from_millis(10),
         working_timeout: Duration::from_secs(1),
         container_default_timeout: Duration::from_secs(3600),
+        kill_poll: egret_workflow::worker::DEFAULT_KILL_POLL,
         scheduler_enabled: false,
         trigger_interval: Duration::from_secs(3600),
         log_limits: egret_workflow::logs::LogLimits::default(),
@@ -902,6 +904,7 @@ async fn two_tickers_reclaim_an_expired_lease_once_and_leave_a_live_one(pool: sq
         reaper_interval: Duration::from_millis(10),
         working_timeout: Duration::from_secs(3600),
         container_default_timeout: Duration::from_secs(3600),
+        kill_poll: egret_workflow::worker::DEFAULT_KILL_POLL,
         scheduler_enabled: false,
         trigger_interval: Duration::from_secs(3600),
         log_limits: egret_workflow::logs::LogLimits::default(),
@@ -2566,7 +2569,24 @@ fn the_config_default_container_timeout_equals_the_workers_own() {
         egret_workflow::worker::WorkerTiming {
             working_timeout: egret_workflow::worker::DEFAULT_WORKING_TIMEOUT,
             container_default_timeout: egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT,
+            kill_poll: egret_workflow::worker::DEFAULT_KILL_POLL,
         }
+    );
+}
+
+/// `WorkflowConfig::kill_poll_ms`'s 5000 is a second copy of
+/// [`DEFAULT_KILL_POLL`](egret_workflow::worker::DEFAULT_KILL_POLL), for
+/// [`the_config_default_working_timeout_equals_the_workers_own`]'s reason.
+#[test]
+fn the_config_default_kill_poll_equals_the_workers_own() {
+    let cfg = egret_config::Config::default().workflow;
+    assert_eq!(
+        Duration::from_millis(cfg.kill_poll_ms),
+        egret_workflow::worker::DEFAULT_KILL_POLL
+    );
+    assert_eq!(
+        egret_workflow::worker::WorkerTiming::default().kill_poll,
+        egret_workflow::worker::DEFAULT_KILL_POLL
     );
 }
 

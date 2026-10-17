@@ -29,17 +29,26 @@
 //! Three facts fall out of that disassembly and all three are load-bearing
 //! here:
 //!
-//! 1. **The budget's expiry is the only site.** `kill(null)` appears in
-//!    `callWithTimeout`'s catch block; the other callers of `kill(State.Type)`
-//!    pass a state, which is the execution-level kill W8 owns. So egret's kill
-//!    path hangs off [`timeout::Guarded::Expired`](super::timeout::Guarded) and
-//!    off nothing else. See *Where the kill path does NOT go* below.
+//! 1. **The budget's expiry is the only `kill(null)` site.** `kill(null)`
+//!    appears in `callWithTimeout`'s catch block; the other callers of
+//!    `kill(State.Type)` pass a state, which is the execution-level kill. So
+//!    this module's [`guarded`] hangs off
+//!    [`timeout::Guarded::Expired`](super::timeout::Guarded). **The
+//!    execution-level kill is the second site** (workflow kill spec §4.2,
+//!    2026-10-17): `claim::finish_kill` calls [`kill`] for a run the kill route
+//!    moved to `KILLING` under the worker's lease, after `claim::under_lease`
+//!    found it and dropped the handler. Both sites go through [`kill`], so a
+//!    handler stops with the one grace it applies (the plugin host's
+//!    `kill_grace_s`, the container grace) whichever site asked. See *Where
+//!    the kill path does NOT go* below.
 //! 2. **A kill that fails does not change the run.** The state comes from
 //!    `exceptionHandler(TimeoutExceededException)` — `FAILED`, carrying
 //!    `Timeout after HH:mm:ss.SSS` — and it is computed *after* `kill` has
 //!    already swallowed its own failure. So [`guarded`] returns the budget's
 //!    outcome untouched whether the cancel succeeded or refused, and the
-//!    refusal goes to `tracing` exactly as Kestra's goes to slf4j.
+//!    refusal goes to `tracing` exactly as Kestra's goes to slf4j. The second
+//!    site keeps the rule: a killed run is recorded `KILLED` whatever
+//!    `cancel` answered.
 //! 3. **egret is louder about a kill it cannot deliver, and that is the only
 //!    sense in which it does more.** `WorkerJobLifecycle.kill()` has an empty
 //!    default body, so a Kestra task that cannot stop itself is
