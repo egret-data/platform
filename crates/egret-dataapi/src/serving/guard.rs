@@ -123,8 +123,10 @@ pub const INGRESS_READ_TIMEOUT_SECS: u64 = 60;
 ///
 /// * **The handler future is dropped.** Cancellation is how the deadline is
 ///   enforced, so the in-flight query's HTTP connection to Trino/StarRocks
-///   closes; the *engine-side* query is not cancelled by that and keeps running
-///   until its own `timeout_seconds` expires.
+///   closes. On StarRocks 4.1.6 the engine cancels the statement after that
+///   (measured 2026-10-17, see `serving/router.rs`); on Trino the engine-side
+///   query is not cancelled by the drop and is bounded by its own
+///   `timeout_seconds`.
 /// * **It bounds the request only up to the response HEAD.** `tokio::time::timeout`
 ///   completes as soon as `next.run(req)` resolves, and that is the moment the
 ///   `Response` value exists — not the moment its body has been written. Today

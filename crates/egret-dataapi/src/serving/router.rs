@@ -46,7 +46,8 @@
 //!   DROPPING the connector future**, which drops the connection with it. That
 //!   wrapper is the whole wall clock on this path: neither
 //!   `Connector::execute_with_params` implementation reads `limits.timeout`
-//!   itself, and StarRocks sets no socket timeout at all.
+//!   itself. Dropping the future closes the connection, which StarRocks 4.1.6
+//!   answers by cancelling the statement (measured 2026-10-17).
 //! * On client disconnect axum drops this handler's future, which drops the
 //!   `execute_as` future, which drops the connector's — the same release path,
 //!   with no token threaded anywhere.

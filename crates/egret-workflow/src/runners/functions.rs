@@ -64,7 +64,8 @@
 //! # A refusal is a feature
 //!
 //! The eight that are refused (twelve until W9a Task 4) say so in a sentence
-//! naming the function, what it needs and the package that will implement it. **The oracle cannot check
+//! naming the function, what it needs and the package that will implement it
+//! (`secret`, Confined, and `http`, Unsupported, name no package). **The oracle cannot check
 //! any of that**: their corpus entries are `compare: "error-class"`, which any
 //! failure satisfies — including `unknown function: secret is unknown`, which
 //! is what egret said before this task. See [`not_implemented`] and
@@ -203,7 +204,9 @@ pub(super) fn register(env: &mut Environment<'static>) {
             move |_args: Rest<MjValue>| -> Result<MjValue, MjError> {
                 Err(match refusal {
                     Refusal::NotYet { needs, package } => not_implemented(name, needs, package),
-                    Refusal::Confined(reason) => pebble_error(*reason),
+                    Refusal::Confined(reason) | Refusal::Unsupported(reason) => {
+                        pebble_error(*reason)
+                    }
                 })
             },
         );
@@ -221,7 +224,20 @@ enum Refusal {
     /// egret provides it in ONE place and refuses it everywhere else, on
     /// purpose. The message is the whole sentence.
     Confined(&'static str),
+    /// egret does not provide it and will not: the reason is where it would
+    /// run, not a missing package. The message is the whole sentence.
+    Unsupported(&'static str),
 }
+
+/// `http()`'s refusal (2026-10-17, spec `2026-10-17-workflow-starrocks-timeout-and-http`
+/// §2). Not "not yet": an expression renders inside the egret server, so a
+/// request from it would leave from the control plane's network, which is a
+/// server-side request forgery for any flow author. A script task makes the
+/// same request from its own container.
+pub(crate) const HTTP_REFUSAL: &str = "The 'http' function is not supported: an expression \
+     renders inside egret's control plane, so a request made from it would leave from \
+     egret's own network. Make the request in a script task, which runs in the task's \
+     container.";
 
 /// `secret()`'s refusal on the shared environment (W5b Task 4, spec §6).
 ///
@@ -270,8 +286,7 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
 /// **Updated 2026-10-01 (W9a Task 4): eight names now.** `read`, `fileSize`,
 /// `fileExists` and `isFileEmpty` are implemented ([`file_function`]) over
 /// the render's file scope; W9 split, so `fileURI` names W9b (namespace
-/// files) and `kv` W9c (the KV store). `http` is left naming W9: it is still
-/// in no package's contents (the programme spec's §9 note).
+/// files) and `kv` W9c (the KV store).
 ///
 /// **Updated 2026-10-05 (W9b Task 4): seven names now.** `fileURI` is
 /// implemented ([`file_function`]) over namespace files, beside the four,
@@ -279,10 +294,12 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
 ///
 /// **Updated 2026-10-07 (W9c Task 4): six names now.** `kv` is implemented
 /// ([`kv_function`]) over the KV store.
+///
+/// **Updated 2026-10-17: `http` is `Unsupported`, not waiting for a package.**
 const REFUSED: &[(&str, Refusal)] = &[
     // Registered with a null backing on the built engine.
     ("secret", Refusal::Confined(SECRET_REFUSAL)),
-    ("http", not_yet("an outbound HTTP client", "W9")),
+    ("http", Refusal::Unsupported(HTTP_REFUSAL)),
     // Not registered at all on the built engine: `@Inject @Nullable`, guarded.
     (
         "render",
@@ -3568,16 +3585,14 @@ mod tests {
         }
         assert_eq!(REFUSED.len(), 6);
         let expected = [
-            ("http", "an outbound HTTP client", "W9"),
             ("render", "an execution context to render against", "W3"),
             ("renderOnce", "an execution context to render against", "W3"),
             ("errorLogs", "the running execution's logs", "W11"),
             ("subflow", "subflow execution", "W6"),
         ];
-        // `secret` is the one `Refusal::Confined` row (W5b Task 4); its
-        // sentence is asserted beside the others below.
+        // `secret` (Confined) and `http` (Unsupported) are checked by their sentences below.
         assert_eq!(
-            expected.len() + 1,
+            expected.len() + 2,
             REFUSED.len(),
             "a name was added or dropped"
         );
@@ -3591,7 +3606,10 @@ mod tests {
                 ),
             )
         });
-        for (name, want) in not_yet.chain([("secret", SECRET_REFUSAL.to_string())]) {
+        for (name, want) in not_yet.chain([
+            ("secret", SECRET_REFUSAL.to_string()),
+            ("http", HTTP_REFUSAL.to_string()),
+        ]) {
             // Three argument shapes: none, one named, one positional. A
             // refusal that only fired for one of them would still satisfy the
             // corpus entry.
@@ -3610,6 +3628,12 @@ mod tests {
                 );
             }
         }
+
+        let message = err("{{ http('https://example.com') }}");
+        assert!(
+            !message.contains("not implemented yet") && !message.contains("W9"),
+            "http names no package that would provide it: {message}"
+        );
 
         // `kv` is a function now: with a scope it answers the stored value,
         // and without one it is refused by its own sentence (the corpus's

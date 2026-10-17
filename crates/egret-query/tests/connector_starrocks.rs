@@ -582,3 +582,149 @@ async fn execute_as_survives_a_connection_reset_which_is_why_starrocks_is_not_po
 
     let _ = conn.disconnect().await;
 }
+
+/// A fresh raw connection to read the engine's own view of what is running.
+async fn probe_conn(h: &str, p: i32) -> mysql_async::Conn {
+    let opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname(h.to_string())
+        .tcp_port(p as u16)
+        .user(Some("root"))
+        .prefer_socket(false);
+    mysql_async::Conn::new(opts)
+        .await
+        .expect("probe connection")
+}
+
+/// Whether a statement whose text contains `needle` is running, ignoring the
+/// `SHOW FULL PROCESSLIST` that asks.
+async fn running(probe: &mut mysql_async::Conn, needle: &str) -> bool {
+    use mysql_async::prelude::Queryable;
+    let rows: Vec<mysql_async::Row> = probe.query("SHOW FULL PROCESSLIST").await.unwrap();
+    rows.iter().any(|r| {
+        let info: Option<String> = r.get_opt("Info").and_then(|v| v.ok()).flatten();
+        info.is_some_and(|i| i.contains(needle) && !i.contains("SHOW FULL PROCESSLIST"))
+    })
+}
+
+/// Drop `fut` after 3 s, as `port_impl::run_bounded` does at `limits.timeout`,
+/// having seen the statement running; then assert the engine ended it.
+async fn assert_dropped_statement_stops<F>(h: &str, p: i32, needle: &str, fut: F)
+where
+    F: std::future::Future,
+{
+    let mut probe = probe_conn(h, p).await;
+    let watch = async {
+        let mut seen = false;
+        for _ in 0..25 {
+            if running(&mut probe, needle).await {
+                seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        seen
+    };
+    let (outer, seen) = tokio::join!(tokio::time::timeout(Duration::from_secs(3), fut), watch);
+    assert!(
+        outer.is_err(),
+        "the statement must outlive the 3 s outer timeout"
+    );
+    assert!(
+        seen,
+        "the probe never saw `{needle}` running, so it cannot see it stop"
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while running(&mut probe, needle).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "`{needle}` still runs on StarRocks 10 s after egret dropped it"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    eprintln!("ran: `{needle}` seen running (seen={seen}), stopped after the drop");
+}
+
+/// Spec 2026-10-17 §1.2: dropping the future at the deadline closes the
+/// connection, and StarRocks 4.1.6 cancels the statement on its own. This pins
+/// that, so an upgrade that changes it goes red instead of making the docs in
+/// `handlers/sql.rs` and `routes.rs` false again.
+#[tokio::test]
+async fn starrocks_cancels_a_select_when_egret_drops_it() {
+    let Some((h, p)) = parse() else {
+        eprintln!("skip");
+        return;
+    };
+    let c = build_connector(&spec(&h, p));
+    let limits = Limits {
+        max_rows: 10,
+        timeout: Duration::from_secs(3),
+    };
+    let sql = "SELECT count(*) AS n, 'egret-deadline-probe' AS marker \
+               FROM TABLE(generate_series(1, 100000000000))";
+    assert_dropped_statement_stops(
+        &h,
+        p,
+        "egret-deadline-probe",
+        c.execute(sql, &limits, CancellationToken::new()),
+    )
+    .await;
+}
+
+/// The same for an `INSERT … SELECT`, which StarRocks bounds by
+/// `insert_timeout` (default 14400 s), not `query_timeout` (spec §1.2).
+#[tokio::test]
+async fn starrocks_cancels_an_insert_when_egret_drops_it() {
+    let Some((h, p)) = parse() else {
+        eprintln!("skip");
+        return;
+    };
+    let c = build_connector(&spec(&h, p));
+    let limits = Limits {
+        max_rows: 10,
+        timeout: Duration::from_secs(30),
+    };
+    for ddl in [
+        "CREATE DATABASE IF NOT EXISTS egret_drop_probe",
+        "CREATE TABLE IF NOT EXISTS egret_drop_probe.t (n BIGINT) \
+         DISTRIBUTED BY HASH(n) BUCKETS 1 PROPERTIES('replication_num'='1')",
+    ] {
+        c.execute(ddl, &limits, CancellationToken::new())
+            .await
+            .unwrap();
+    }
+    let sql = "INSERT INTO egret_drop_probe.t \
+               SELECT count(*) FROM TABLE(generate_series(1, 100000000000))";
+    assert_dropped_statement_stops(
+        &h,
+        p,
+        "INSERT INTO egret_drop_probe.t",
+        c.execute(sql, &limits, CancellationToken::new()),
+    )
+    .await;
+}
+
+/// The prepared-statement (binary protocol) path, which the Data API serving
+/// path uses. Its processlist `Info` must still carry the SQL text, or the
+/// probe's `seen` assertion fails loudly.
+#[tokio::test]
+async fn starrocks_cancels_a_parameterised_select_when_egret_drops_it() {
+    let Some((h, p)) = parse() else {
+        eprintln!("skip");
+        return;
+    };
+    let c = build_connector(&spec(&h, p));
+    let limits = Limits {
+        max_rows: 10,
+        timeout: Duration::from_secs(3),
+    };
+    let sql = "SELECT count(*) AS n, 'egret-params-deadline-probe' AS marker \
+               FROM TABLE(generate_series(1, 100000000000)) WHERE ? = 1";
+    assert_dropped_statement_stops(
+        &h,
+        p,
+        "egret-params-deadline-probe",
+        c.execute_with_params(sql, &[Param::I64(1)], &limits, CancellationToken::new()),
+    )
+    .await;
+}

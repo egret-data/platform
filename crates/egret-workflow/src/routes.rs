@@ -2224,11 +2224,12 @@ async fn get_execution_logs(
 // 7. **At least one shipped handler cannot be cancelled at all.**
 //    `handlers::sql::cancel` returns `Err` by construction — *"`QueryExecPort`
 //    has no cancellation verb, so the statement continues on the engine after
-//    the run is abandoned … on StarRocks that connector does not read
-//    `Limits::timeout` at all, so it is not bounded by anything"* — and
+//    the run is abandoned … on StarRocks it ends when the connection is
+//    dropped at that budget"* — and
 //    `cancel_refuses_rather_than_claiming_to_have_stopped_the_statement` holds
-//    it to that. So even a complete kill mechanism would leave a statement
-//    running on StarRocks with nothing to stop it.
+//    it to that. So a kill still cannot reach `egret.sql` before its budget,
+//    because the handler has no way to stop its statement early; an abandoned
+//    statement does not keep running on StarRocks 4.1.6 (measured 2026-10-17).
 //
 // Reported rather than improvised. An understated cost invites someone to try
 // it in an afternoon and ship half of it.
