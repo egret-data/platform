@@ -81,6 +81,26 @@ async fn an_idp_group_name_with_a_newline_cannot_forge_a_log_line() {
     drop(guard);
 
     let log = String::from_utf8(capture.0.lock().expect("log lock").clone()).expect("utf8");
+
+    // Remove what this test seeded before asserting, so a failure leaves
+    // nothing behind in the shared test DB either: every later provenance pass
+    // there would otherwise keep logging this membership.
+    sqlx::query("DELETE FROM user_groups WHERE user_id = $1 AND group_id = $2")
+        .bind(user.0)
+        .bind(gid)
+        .execute(&db.pool)
+        .await
+        .expect("delete membership");
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user.0)
+        .execute(&db.pool)
+        .await
+        .expect("delete user");
+    sqlx::query("DELETE FROM groups WHERE id = $1")
+        .bind(gid)
+        .execute(&db.pool)
+        .await
+        .expect("delete group");
     let line = log
         .lines()
         .find(|l| l.contains(&gid.to_string()))

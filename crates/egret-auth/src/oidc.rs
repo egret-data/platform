@@ -61,7 +61,9 @@ pub async fn provision_and_sync(
             for (name, member) in local {
                 tracing::warn!(
                     user_id = %user_id.0,
-                    group = %name,
+                    // Debug, not Display: the name comes from the IdP claim,
+                    // and a newline in it would forge a log line.
+                    group = ?name,
                     already_member = member,
                     "OIDC groups claim names a local group; membership not managed by the IdP; \
                      if it was added by a login before this fix, review it"

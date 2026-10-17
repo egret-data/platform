@@ -781,11 +781,13 @@ pub struct LocalGroupWithOidcMembers {
     pub oidc_members: i64,
 }
 
-/// A `provider = 'local'` user's membership in an OIDC-sourced group — report
-/// (b) of [`membership_provenance_report`].
+/// A non-OIDC user's (`provider` `'local'` or `'service'`) membership in an
+/// OIDC-sourced group — report (b) of [`membership_provenance_report`].
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
-pub struct LocalUserInOidcGroup {
+pub struct NonOidcUserInOidcGroup {
     pub user_id: Uuid,
+    /// `'local'` or `'service'`.
+    pub provider: String,
     pub group_id: Uuid,
     pub group_name: String,
 }
@@ -794,7 +796,7 @@ pub struct LocalUserInOidcGroup {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MembershipProvenanceReport {
     pub local_groups_with_oidc_members: Vec<LocalGroupWithOidcMembers>,
-    pub local_users_in_oidc_groups: Vec<LocalUserInOidcGroup>,
+    pub non_oidc_users_in_oidc_groups: Vec<NonOidcUserInOidcGroup>,
 }
 
 /// **The memberships whose provenance is unknown** (design R5), read in one
@@ -807,9 +809,14 @@ pub struct MembershipProvenanceReport {
 ///   their IdP claim carried, local ones included, so such a row may be the
 ///   IdP's doing and not an admin's — and it survives R1, which only stops new
 ///   ones (the sync never touches a local row).
-/// - **(b)** Each membership of a `provider = 'local'` user in an OIDC group:
-///   an admin add from before R4. No login ever reaches a local user, so
-///   nothing ever removes it.
+/// - **(b)** Each membership of a non-OIDC user (`provider <> 'oidc'`: a local
+///   user or a service account) in an OIDC group: an admin add from before R4.
+///   No login ever reaches such a user — a service account cannot log in at
+///   all (migration 0119) — so nothing ever removes the row, and the user keeps
+///   expanding as a member of every policy and role the group reaches. The
+///   predicate is `<> 'oidc'`, not `= 'local'`, so a provider added later is
+///   reported rather than silently missed (final review I1: `= 'local'` missed
+///   service accounts).
 ///
 /// Returns rows and logs nothing, so the rows are testable;
 /// [`warn_unknown_membership_provenance`] is the startup wrapper.
@@ -831,11 +838,11 @@ pub async fn membership_provenance_report(
     .fetch_all(&mut *tx)
     .await
     .map_err(db_err)?;
-    let local_users_in_oidc_groups = sqlx::query_as(
-        "SELECT u.id AS user_id, g.id AS group_id, g.name AS group_name \
+    let non_oidc_users_in_oidc_groups = sqlx::query_as(
+        "SELECT u.id AS user_id, u.provider, g.id AS group_id, g.name AS group_name \
          FROM groups g JOIN user_groups ug ON ug.group_id = g.id \
          JOIN users u ON u.id = ug.user_id \
-         WHERE g.source = 'oidc' AND u.provider = 'local' \
+         WHERE g.source = 'oidc' AND u.provider <> 'oidc' \
          ORDER BY g.name, u.id",
     )
     .fetch_all(&mut *tx)
@@ -844,7 +851,7 @@ pub async fn membership_provenance_report(
     tx.rollback().await.map_err(db_err)?;
     Ok(MembershipProvenanceReport {
         local_groups_with_oidc_members,
-        local_users_in_oidc_groups,
+        non_oidc_users_in_oidc_groups,
     })
 }
 
@@ -873,12 +880,13 @@ pub async fn warn_unknown_membership_provenance(
              Review the group's members"
         );
     }
-    for r in &report.local_users_in_oidc_groups {
+    for r in &report.non_oidc_users_in_oidc_groups {
         tracing::warn!(
             user_id = %r.user_id,
             group_id = %r.group_id,
             group = ?r.group_name,
-            "a local user is a member of an OIDC-synced group; no login ever removes this \
+            provider = %r.provider,
+            "a non-OIDC user is a member of an OIDC-synced group; no login ever removes this \
              membership. Review it, and remove it if the identity provider did not intend it"
         );
     }
