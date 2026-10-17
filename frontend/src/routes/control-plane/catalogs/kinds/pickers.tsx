@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { listSecrets, listStorage } from "@/api/controlPlane";
+import { CATALOG_KIND_LABELS } from "@/lib/catalogKinds";
 import {
   Select,
   SelectContent,
@@ -50,28 +51,28 @@ export const KIND_OPTIONS: { kind: string; label: string; blurb: string }[] = [
   },
   {
     kind: "iceberg",
-    label: "Iceberg",
+    label: CATALOG_KIND_LABELS.iceberg,
     blurb: "An existing Iceberg catalog — REST, Hive Metastore or AWS Glue.",
   },
-  { kind: "hive", label: "Hive", blurb: "Hive tables through a Hive Metastore or Glue." },
+  { kind: "hive", label: CATALOG_KIND_LABELS.hive, blurb: "Hive tables through a Hive Metastore or Glue." },
   {
     kind: "delta_lake",
-    label: "Delta Lake",
+    label: CATALOG_KIND_LABELS.delta_lake,
     blurb: "Delta tables through a Hive Metastore or Glue.",
   },
-  { kind: "hudi", label: "Hudi", blurb: "Hudi tables through a Hive Metastore." },
+  { kind: "hudi", label: CATALOG_KIND_LABELS.hudi, blurb: "Hudi tables through a Hive Metastore." },
   {
     kind: "jdbc",
-    label: "JDBC",
+    label: CATALOG_KIND_LABELS.jdbc,
     blurb:
       "A relational database: PostgreSQL, MySQL, MariaDB, Oracle, SQL Server or ClickHouse.",
   },
-  { kind: "elasticsearch", label: "Elasticsearch", blurb: "Elasticsearch indices as tables." },
-  { kind: "tpch", label: "TPC-H", blurb: "Generated benchmark data. No external system." },
-  { kind: "tpcds", label: "TPC-DS", blurb: "Generated benchmark data. No external system." },
+  { kind: "elasticsearch", label: CATALOG_KIND_LABELS.elasticsearch, blurb: "Elasticsearch indices as tables." },
+  { kind: "tpch", label: CATALOG_KIND_LABELS.tpch, blurb: "Generated benchmark data. No external system." },
+  { kind: "tpcds", label: CATALOG_KIND_LABELS.tpcds, blurb: "Generated benchmark data. No external system." },
   {
     kind: "generic",
-    label: "Generic",
+    label: CATALOG_KIND_LABELS.generic,
     blurb: "Engine properties written by hand, for a connector egret has no typed form for.",
   },
 ];

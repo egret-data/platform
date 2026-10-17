@@ -12,6 +12,13 @@
  * while matching, then restores it), so `urlToPath` reads params as they come.
  * The one name this cannot carry is one that literally spells `%2F`: the
  * router turns it into `/` on the way back.
+ *
+ * A name that is only dots (`.`, `..`) would be a dot-segment: react-router's
+ * `resolvePath` and the browser's own URL parser (which also reads `%2E` as a
+ * dot) both collapse it, and the URL would name the parent instead. Such a
+ * segment is written with each dot as `%252E`, which neither touches; the
+ * router hands it back as `%2E`, and `urlToPath` turns that back into dots. So
+ * a name that literally spells only `%2E`s is read back as dots.
  */
 export type ObjectPath = { catalog: string; schema?: string; object?: string; column?: string };
 
@@ -28,14 +35,26 @@ export function pathToUrl(p: ObjectPath, tab?: string): string {
   if (p.schema !== undefined && p.object !== undefined && p.column !== undefined) search.set("column", p.column);
   if (tab) search.set("tab", tab);
   const query = search.toString();
-  return `${DATA_BASE}/${segments.map(encodeURIComponent).join("/")}${query ? `?${query}` : ""}`;
+  return `${DATA_BASE}/${segments.map(encodeSegment).join("/")}${query ? `?${query}` : ""}`;
+}
+
+const DOTS_ONLY = /^\.+$/;
+const ENCODED_DOTS_ONLY = /^(%2E)+$/i;
+
+function encodeSegment(name: string): string {
+  return DOTS_ONLY.test(name) ? name.replace(/\./g, "%252E") : encodeURIComponent(name);
+}
+
+/** A segment as the router hands it back, with a dot-only name restored. */
+function decodeSegment(param: string): string {
+  return ENCODED_DOTS_ONLY.test(param) ? ".".repeat(param.length / 3) : param;
 }
 
 /** The object a Data URL names, from the router's params and the search. */
 export function urlToPath(params: Record<string, string | undefined>, search: URLSearchParams): ObjectPath {
-  const p: ObjectPath = { catalog: params.catalog ?? "" };
-  if (params.schema !== undefined) p.schema = params.schema;
-  if (params.object !== undefined) p.object = params.object;
+  const p: ObjectPath = { catalog: decodeSegment(params.catalog ?? "") };
+  if (params.schema !== undefined) p.schema = decodeSegment(params.schema);
+  if (params.object !== undefined) p.object = decodeSegment(params.object);
   const column = search.get("column");
   if (p.object !== undefined && column !== null) p.column = column;
   return p;

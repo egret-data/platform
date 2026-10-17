@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { MemoryRouter, Route, Routes, useParams, useSearchParams } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { parseDottedPath, pathToUrl, urlToPath, type ObjectPath } from "@/routes/governance/data/objectPath";
 
 /**
@@ -62,6 +62,39 @@ describe("objectPath", () => {
     ["a dotted nested schema", { catalog: "ice", schema: "a.b", object: "t" }, undefined],
   ])("round-trips a %s through the router", (_label, p, tab) => {
     expect(roundTrip(p, tab)).toEqual(p);
+  });
+
+  it.each<[string, ObjectPath]>([
+    ["a dot", { catalog: ".", schema: "s", object: "t" }],
+    ["two dots", { catalog: "c", schema: "..", object: "t" }],
+    ["three dots", { catalog: "c", schema: "s", object: "..." }],
+  ])("keeps a name that is only %s, through the browser's URL parser and the router", (_label, p) => {
+    const url = pathToUrl(p);
+    // The browser's own parser drops a `.` or `..` segment, and `%2E` with it.
+    expect(new URL(url, "http://egret.local").pathname).toBe(url);
+    expect(roundTrip(p)).toEqual(p);
+  });
+
+  it("keeps a dot-only name through navigate(), whose resolvePath drops dot-segments", async () => {
+    const p: ObjectPath = { catalog: "c", schema: "..", object: "t" };
+    function Go() {
+      const navigate = useNavigate();
+      return (
+        <button type="button" onClick={() => navigate(pathToUrl(p))}>
+          go
+        </button>
+      );
+    }
+    render(
+      <MemoryRouter initialEntries={["/start"]}>
+        <Routes>
+          <Route path="/start" element={<Go />} />
+          <Route path="/governance/data/:catalog/:schema/:object" element={<Probe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    screen.getByRole("button", { name: "go" }).click();
+    expect(JSON.parse((await screen.findByTestId("path")).textContent ?? "null")).toEqual(p);
   });
 
   it("reads the tab back from the search", () => {

@@ -189,6 +189,87 @@ describe("CatalogTree", () => {
     expect(shownPaths()).toContain("pg");
   });
 
+  it("keeps a matching node's not-listed reason and Go to path under a filter", async () => {
+    serveData(fixture());
+    const user = userEvent.setup();
+    renderData();
+    await waitFor(() => expect(shownPaths()).toContain("pg"));
+    await user.click(within(row("pg")).getByRole("button", { name: "Expand pg" }));
+    await within(tree()).findByText("The engine trino-1 is not running.");
+    await user.type(screen.getByRole("searchbox", { name: "Filter loaded items" }), "pg");
+    expect(shownPaths()).toEqual(["pg"]);
+    const reason = within(tree()).getByText("The engine trino-1 is not running.");
+    expect(within(reason.closest("tr")!).getByRole("button", { name: "Go to path" })).toBeInTheDocument();
+  });
+
+  it("keeps a matching node's failed level, and its loaded children, under a filter", async () => {
+    serveData(fixture({ browse: { ...fixture().browse, "c-ice|hr": { status: 500, body: { error: "boom" } } } }));
+    const user = userEvent.setup();
+    renderData();
+    await waitFor(() => expect(shownPaths()).toContain("ice"));
+    await user.click(within(row("ice")).getByRole("button", { name: "Expand ice" }));
+    await waitFor(() => expect(shownPaths()).toContain("ice.hr"));
+    await user.click(within(row("ice.hr")).getByRole("button", { name: "Expand ice.hr" }));
+    await within(tree()).findByText(/could not be listed/);
+    await user.type(screen.getByRole("searchbox", { name: "Filter loaded items" }), "hr");
+    expect(shownPaths()).toEqual(["ice", "ice.hr"]);
+    expect(within(tree()).getByText(/could not be listed/)).toBeInTheDocument();
+    // A catalog that matches keeps everything loaded under it, never an empty open branch.
+    await user.clear(screen.getByRole("searchbox", { name: "Filter loaded items" }));
+    await user.type(screen.getByRole("searchbox", { name: "Filter loaded items" }), "ice");
+    expect(shownPaths()).toEqual(["ice", "ice.hr", "ice.sales"]);
+  });
+
+  it("retries a level that failed, and lists it when the retry answers", async () => {
+    const { browseCalls } = serveData(
+      fixture({
+        browse: {
+          ...fixture().browse,
+          "c-ice": [{ status: 500, body: { error: "boom" } }, { status: 200, body: ICE_SCHEMAS }],
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderData();
+    await waitFor(() => expect(shownPaths()).toContain("ice"));
+    await user.click(within(row("ice")).getByRole("button", { name: "Expand ice" }));
+    const failed = await within(tree()).findByText(/could not be listed/);
+    await user.click(within(failed.closest("tr")!).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(shownPaths()).toEqual(["ice", "ice.hr", "ice.sales", "pg"]));
+    expect(browseCalls).toEqual(["c-ice", "c-ice"]);
+  });
+
+  it("retries a failed level, and opens the path box from a not-listed one, with Enter", async () => {
+    serveData(
+      fixture({
+        browse: {
+          ...fixture().browse,
+          "c-ice": [{ status: 500, body: { error: "boom" } }, { status: 200, body: ICE_SCHEMAS }],
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderData();
+    await waitFor(() => expect(shownPaths()).toContain("ice"));
+    row("ice").focus();
+    await user.keyboard("{ArrowRight}");
+    const failed = await within(tree()).findByText(/could not be listed/);
+    await user.keyboard("{ArrowDown}");
+    expect(failed.closest("tr")).toHaveFocus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(shownPaths()).toContain("ice.sales"));
+
+    row("pg").focus();
+    await user.keyboard("{ArrowRight}");
+    const reason = await within(tree()).findByText("The engine trino-1 is not running.");
+    await user.keyboard("{ArrowDown}");
+    expect(reason.closest("tr")).toHaveFocus();
+    await user.keyboard("{Enter}");
+    const box = screen.getByRole("textbox", { name: "Go to path" });
+    expect(box).toHaveValue("pg.");
+    expect(box).toHaveFocus();
+  });
+
   it("goes to a typed path, and opens the tree down to it", async () => {
     const { browseCalls } = serveData(fixture());
     const user = userEvent.setup();

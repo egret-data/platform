@@ -28,7 +28,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
-import { KIND_OPTIONS } from "@/routes/control-plane/catalogs/kinds/pickers";
+import { catalogKindLabel } from "@/lib/catalogKinds";
 import { parseDottedPath, pathToUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
 
 /**
@@ -94,8 +94,7 @@ export function dottedPath(p: ObjectPath): string {
  */
 export function sourceLabel(c: GovernanceCatalog): string {
   if (c.source === "egret") return "Iceberg · egret";
-  const kind = KIND_OPTIONS.find((k) => k.kind === c.connectorType)?.label ?? c.connectorType;
-  return `${kind} · via engine`;
+  return `${catalogKindLabel(c.connectorType)} · via engine`;
 }
 
 const byName = <T extends { name: string }>(a: T, b: T) => a.name.localeCompare(b.name);
@@ -399,8 +398,11 @@ export function CatalogTree({ selected }: { selected: ObjectPath | null }) {
 
 /**
  * The visible rows, in tree order. With a filter, a node shows when its name
- * matches or a shown node below it does; the status rows (loading, empty, not
- * listed) are not items and drop out.
+ * matches or a shown node below it does. A node shown because it matches
+ * keeps its whole loaded subtree, status rows included (loading, failed, not
+ * listed, empty), so an expanded row is never shown with nothing under it
+ * (spec §2.2: never an empty branch). A node kept only as a match's parent
+ * shows just the path down to that match.
  */
 function buildLines(
   catalogs: GovernanceCatalog[],
@@ -435,18 +437,19 @@ function buildLines(
   };
 
   const out: Line[] = [];
-  /** Pushes the shown lines of `nodes`; returns whether any node was shown. */
-  const walk = (nodes: TreeNode[], depth: number, parent: string | null): boolean => {
+  /** Pushes the shown lines of `nodes` under `filter`; returns whether any node was shown. */
+  const walk = (nodes: TreeNode[], depth: number, parent: string | null, filter: string): boolean => {
     const shownHere: { node: TreeNode; below: Line[] }[] = [];
     for (const node of nodes) {
       const below: Line[] = [];
       const kids = childrenOf(node);
+      const matches = !filter || node.name.toLocaleLowerCase().includes(filter);
       let childShown = false;
       if (kids && "nodes" in kids) {
         const save = out.length;
-        childShown = walk(kids.nodes, depth + 1, node.key);
+        childShown = walk(kids.nodes, depth + 1, node.key, matches ? "" : filter);
         below.push(...out.splice(save));
-      } else if (kids && !needle) {
+      } else if (kids) {
         below.push({
           type: "status",
           key: `${node.key}#status`,
@@ -457,7 +460,6 @@ function buildLines(
           parent: node.key,
         });
       }
-      const matches = !needle || node.name.toLocaleLowerCase().includes(needle);
       if (matches || childShown) shownHere.push({ node, below });
     }
     shownHere.forEach(({ node, below }, i) => {
@@ -477,6 +479,7 @@ function buildLines(
     })),
     0,
     null,
+    needle,
   );
   return out;
 }

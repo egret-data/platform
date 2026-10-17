@@ -28,8 +28,11 @@ type Answer = { status: number; body: unknown } | "never";
 
 export interface FakeData {
   catalogs: Answer;
-  /** Keyed `catalogId` or `catalogId|schema`. A key with no answer is a 404. */
-  browse: Record<string, Answer>;
+  /**
+   * Keyed `catalogId` or `catalogId|schema`. A key with no answer is a 404.
+   * A list is answered in order, its last answer repeating.
+   */
+  browse: Record<string, Answer | Answer[]>;
 }
 
 const json = (status: number, body: unknown) =>
@@ -52,8 +55,10 @@ export function serveData(data: FakeData): { browseCalls: string[] } {
         const id = decodeURIComponent(m[1]);
         const schema = url.searchParams.get("schema");
         const key = schema === null ? id : `${id}|${schema}`;
+        const asked = browseCalls.filter((k) => k === key).length;
         browseCalls.push(key);
-        return reply(data.browse[key]);
+        const a = data.browse[key];
+        return reply(Array.isArray(a) ? a[Math.min(asked, a.length - 1)] : a);
       }
       return Promise.reject(new Error(`no fake for ${url.pathname}`));
     }),
