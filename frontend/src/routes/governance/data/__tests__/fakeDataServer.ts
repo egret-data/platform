@@ -1,26 +1,15 @@
 import { vi } from "vitest";
-import type { BrowseResponse, RegistryCatalogDto } from "@/api/generated/model";
+import type { BrowseResponse, GovernanceCatalog } from "@/api/generated/model";
 
 /**
- * A fake of the two endpoints the Data tree reads: the registry's catalog
- * list and `GET …/governance/browse/{catalog_id}?schema=&table=`. Answers go
+ * A fake of the two endpoints the Data tree reads: `GET …/governance/catalogs`
+ * and `GET …/governance/browse/{catalog_id}?schema=&table=`. Answers go
  * through the real generated client and `apiFetch`, so a test sees exactly
  * what the page sees, including a 403 as an `ApiError`.
  */
 
-export function catalog(id: string, name: string, kind: string, warehouse = false): RegistryCatalogDto {
-  return {
-    id,
-    name,
-    kind,
-    config: {} as RegistryCatalogDto["config"],
-    advanced: {} as RegistryCatalogDto["advanced"],
-    warehouseId: warehouse ? `wh-${id}` : null,
-    engines: [],
-    workspaceIds: [],
-    createdAt: "2026-10-01T00:00:00Z",
-    updatedAt: "2026-10-01T00:00:00Z",
-  };
+export function catalog(id: string, name: string, connectorType: string, egret = false): GovernanceCatalog {
+  return { id, name, source: egret ? "egret" : "engine", connectorType, engines: [] };
 }
 
 export const browseItems = (items: BrowseResponse["items"], source: BrowseResponse["source"] = { kind: "egret" }): BrowseResponse => ({
@@ -57,7 +46,7 @@ export function serveData(data: FakeData): { browseCalls: string[] } {
         a === "never"
           ? new Promise<Response>(() => {})
           : Promise.resolve(a ? json(a.status, a.body) : json(404, { error: "not found" }));
-      if (url.pathname === "/api/control-plane/catalogs") return reply(data.catalogs);
+      if (url.pathname === "/api/control-plane/governance/catalogs") return reply(data.catalogs);
       const m = /^\/api\/control-plane\/governance\/browse\/([^/]+)$/.exec(url.pathname);
       if (m) {
         const id = decodeURIComponent(m[1]);

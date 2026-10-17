@@ -245,10 +245,11 @@ describe("CatalogTree", () => {
     expect(where()).toBe("/governance/data/pg");
   });
 
-  it("says when listing catalogs needs a permission the user lacks", async () => {
-    serveData(fixture({ catalogs: { status: 403, body: { error: "forbidden" } } }));
+  it("says the catalogs could not be loaded, never that there are none", async () => {
+    serveData(fixture({ catalogs: { status: 500, body: { error: "boom" } } }));
     renderData();
-    expect(await screen.findByText(/needs the catalog_registry:read permission/)).toBeInTheDocument();
+    expect(await screen.findByText("The catalogs could not be loaded. Reload the page to try again.")).toBeInTheDocument();
+    expect(screen.queryByText("No catalogs")).not.toBeInTheDocument();
   });
 
   it("says the registry is empty when it is", async () => {

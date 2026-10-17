@@ -21,8 +21,8 @@ import { entryChunkName, entryPreloadNames } from "./dist-entry.mjs";
 const DIST = "dist";
 const ASSETS = join(DIST, "assets");
 const MARKERS = [
-  // `CATALOGS_FORBIDDEN`.
-  ["src/routes/governance/data/CatalogTree.tsx", "Listing catalogs needs the catalog_registry:read permission."],
+  // `LEVEL_FAILED`.
+  ["src/routes/governance/data/CatalogTree.tsx", "This level could not be listed. Retry, or reload the page."],
   // `DataIndex`'s description.
   ["src/routes/governance/data/DataPage.tsx", "Open a catalog, schema or table from the tree"],
 ];

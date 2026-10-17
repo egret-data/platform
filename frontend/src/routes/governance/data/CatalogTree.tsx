@@ -14,14 +14,13 @@ import {
   Search,
   Table2,
 } from "lucide-react";
-import { ApiError } from "@/api/client";
-import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import {
   getControlPlaneGovernanceBrowseQueryOptions,
+  useControlPlaneGovernanceListCatalogs,
   type ControlPlaneGovernanceBrowseQueryError,
   type ControlPlaneGovernanceBrowseQueryResult,
 } from "@/api/generated/control-plane-governance/control-plane-governance";
-import type { BrowseKind, BrowseResponse, RegistryCatalogDto } from "@/api/generated/model";
+import type { BrowseKind, BrowseResponse, GovernanceCatalog } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
@@ -33,11 +32,10 @@ import { KIND_OPTIONS } from "@/routes/control-plane/catalogs/kinds/pickers";
 import { parseDottedPath, pathToUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
 
 /**
- * What a forbidden catalog list says. Also this module's bundle marker
- * (`scripts/assert-governance-data-lazy.mjs`).
+ * What a level that browse could not answer says. Also this module's bundle
+ * marker (`scripts/assert-governance-data-lazy.mjs`).
  */
-export const CATALOGS_FORBIDDEN =
-  "Listing catalogs needs the catalog_registry:read permission. Ask an administrator for it, or open a known path with Go to path.";
+export const LEVEL_FAILED = "This level could not be listed. Retry, or reload the page.";
 
 type NodeKind = "catalog" | BrowseKind;
 
@@ -94,9 +92,9 @@ export function dottedPath(p: ObjectPath): string {
  * whether one can be asked at all, is browse's answer per level; the tree says
  * only how the catalog is reached.
  */
-export function sourceLabel(c: RegistryCatalogDto): string {
-  if (c.warehouseId != null) return "Iceberg · egret";
-  const kind = KIND_OPTIONS.find((k) => k.kind === c.kind)?.label ?? c.kind;
+export function sourceLabel(c: GovernanceCatalog): string {
+  if (c.source === "egret") return "Iceberg · egret";
+  const kind = KIND_OPTIONS.find((k) => k.kind === c.connectorType)?.label ?? c.connectorType;
   return `${kind} · via engine`;
 }
 
@@ -123,7 +121,9 @@ const byName = <T extends { name: string }>(a: T, b: T) => a.name.localeCompare(
  * it retries).
  */
 export function CatalogTree({ selected }: { selected: ObjectPath | null }) {
-  const catalogsQ = useControlPlaneCatalogRegistryListRegistryCatalogs(undefined, { query: { retry: false } });
+  // The Governance catalog list, not the registry's: it is readable under the
+  // same permissions as this area (`policy:read` or `tag:read`).
+  const catalogsQ = useControlPlaneGovernanceListCatalogs({ query: { retry: false } });
   const catalogs = useMemo(
     () => (catalogsQ.data?.status === 200 ? [...catalogsQ.data.data].sort(byName) : undefined),
     [catalogsQ.data],
@@ -230,7 +230,7 @@ export function CatalogTree({ selected }: { selected: ObjectPath | null }) {
       setGoError("Enter a path such as catalog.schema.table.");
       return;
     }
-    // With no catalog list (a 403), the name cannot be checked here; the page it opens says what it finds.
+    // Before the list arrives the name cannot be checked here; the page it opens says what it finds.
     if (catalogs && !idByName.has(p.catalog)) {
       setGoError(`No catalog is named “${p.catalog}”.`);
       return;
@@ -332,9 +332,7 @@ export function CatalogTree({ selected }: { selected: ObjectPath | null }) {
 
       {catalogsQ.isError ? (
         <p role="alert" className="text-sm text-destructive">
-          {catalogsQ.error instanceof ApiError && catalogsQ.error.status === 403
-            ? CATALOGS_FORBIDDEN
-            : "The catalogs could not be loaded. Reload the page to try again."}
+          The catalogs could not be loaded. Reload the page to try again.
         </p>
       ) : catalogsQ.isLoading || !catalogs ? (
         <div className="space-y-2" aria-busy="true" aria-label="Loading catalogs">
@@ -405,7 +403,7 @@ export function CatalogTree({ selected }: { selected: ObjectPath | null }) {
  * listed) are not items and drop out.
  */
 function buildLines(
-  catalogs: RegistryCatalogDto[],
+  catalogs: GovernanceCatalog[],
   expanded: ReadonlySet<string>,
   results: Map<string, BrowseResult>,
   needle: string,
@@ -415,7 +413,7 @@ function buildLines(
     const r = results.get(node.key);
     if (!r || r.isError) {
       return r
-        ? { status: "error", text: "This level could not be listed. Retry, or reload the page." }
+        ? { status: "error", text: LEVEL_FAILED }
         : { status: "loading", text: "Loading" };
     }
     if (r.isPending || r.data?.status !== 200) return { status: "loading", text: "Loading" };
