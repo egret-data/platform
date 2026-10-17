@@ -6,7 +6,7 @@ import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { TabError } from "@/routes/governance/data/tabs/TabStates";
+import { TabError } from "@/routes/governance/tabParts";
 
 const KIND: Record<string, string> = {
   user: "user",

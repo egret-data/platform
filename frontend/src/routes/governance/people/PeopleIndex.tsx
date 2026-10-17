@@ -13,7 +13,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { TabError } from "@/routes/governance/data/tabs/TabStates";
+import { TabError } from "@/routes/governance/tabParts";
 import { principalUrl } from "@/routes/governance/people/peopleUrl";
 import { UnmatchedNames } from "@/routes/governance/people/UnmatchedNames";
 

@@ -2,7 +2,7 @@ import { Link, Navigate, useParams, useSearchParams } from "react-router-dom";
 import { usePermListPeople } from "@/api/generated/perm/perm";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { TabError } from "@/routes/governance/data/tabs/TabStates";
+import { TabError } from "@/routes/governance/tabParts";
 import { PEOPLE_BASE, principalParam, principalUrl } from "@/routes/governance/people/peopleUrl";
 
 /**

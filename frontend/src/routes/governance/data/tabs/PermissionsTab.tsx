@@ -19,7 +19,8 @@ import { KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
 import { grantCoverage, insideGroup, insideName, patternLevels, type PatternLevel } from "@/routes/governance/data/coverage";
 import type { CatalogState } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
-import { ACTIONS_CELL, CatalogGate, EgretGrantsOnlyNote, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
+import { ACTIONS_CELL, CatalogGate, EgretGrantsOnlyNote } from "@/routes/governance/data/tabs/TabStates";
+import { Section, TabError } from "@/routes/governance/tabParts";
 
 /**
  * What a viewer without `policy:read` reads instead of the grants. Also this

@@ -27,7 +27,8 @@ import {
 } from "@/routes/governance/data/coverage";
 import { scopeOf, tagReach, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
-import { ACTIONS_CELL, CatalogGate, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
+import { ACTIONS_CELL, CatalogGate } from "@/routes/governance/data/tabs/TabStates";
+import { Section, TabError } from "@/routes/governance/tabParts";
 
 /**
  * What a viewer without `policy:read` reads instead of the rules. Also this
