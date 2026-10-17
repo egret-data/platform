@@ -14,9 +14,9 @@
  * present in some other chunk (a marker found nowhere is stale and would let
  * this pass on any bundle). `PeopleRoutes.tsx` has no literal of its own; it
  * imports `PeopleIndex.tsx`, so a static import of it is caught through
- * PeopleIndex's marker. `PrincipalPage.tsx` is still a frame with no literal of
- * its own; the page built on it adds its marker here. `peopleUrl.ts` is NOT
- * guarded: pages outside the area link into it through it.
+ * PeopleIndex's marker; `principalData.ts` has none either, and PrincipalPage's
+ * marker catches it. `peopleUrl.ts` is NOT guarded: pages outside the area
+ * link into the area through it.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -31,6 +31,12 @@ const MARKERS = [
   ["src/routes/governance/people/UnmatchedNames.tsx", "Every grant principal and rule exemption names someone egret knows."],
   // What a username nobody has says.
   ["src/routes/governance/people/ByNameRedirect.tsx", "No user has the username "],
+  // `Missing`: a group or role no one has.
+  ["src/routes/governance/people/PrincipalPage.tsx", ". Grants naming it match nobody; see "],
+  // `NO_USERNAME_SENTENCE`.
+  ["src/routes/governance/people/PrincipalHeader.tsx", "egret allocates one at their first query, notebook or engine token"],
+  // A group member with no username.
+  ["src/routes/governance/people/tabs/OverviewTab.tsx", "a grant naming this group allocates one at compile"],
 ];
 
 const entry = entryChunkName(DIST);

@@ -1,24 +1,123 @@
-import { Link, useParams } from "react-router-dom";
+import type { ReactNode } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { TabError } from "@/routes/governance/tabParts";
+import { PrincipalHeader } from "@/routes/governance/people/PrincipalHeader";
+import { usePrincipal, type PageKind, type Principal } from "@/routes/governance/people/principalData";
 import { PEOPLE_BASE, principalParam } from "@/routes/governance/people/peopleUrl";
+import { OverviewTab } from "@/routes/governance/people/tabs/OverviewTab";
 
-export type PrincipalKindOfPage = "user" | "group" | "role";
+export type PrincipalTab = "overview" | "permissions" | "masks" | "clearances" | "check";
 
-const KIND_LABEL: Record<PrincipalKindOfPage, string> = { user: "User", group: "Group", role: "Role" };
+const LABELS: Record<PrincipalTab, string> = {
+  overview: "Overview",
+  permissions: "Permissions",
+  masks: "Masks & filters",
+  clearances: "Clearances",
+  check: "Check access",
+};
 
 /**
- * A user's, group's or role's page. This is the frame only: the header and
- * tabs of spec §2 are built on it (plan Task 7).
+ * The tabs of each kind, in order (spec §2's table). `public` has no members,
+ * so no Overview, Clearances or Check access.
  */
-export default function PrincipalPage({ kind }: { kind: PrincipalKindOfPage }) {
+export const TABS_BY_KIND: Record<PageKind | "public", readonly PrincipalTab[]> = {
+  user: ["overview", "permissions", "masks", "clearances", "check"],
+  group: ["overview", "permissions", "masks", "clearances", "check"],
+  role: ["overview", "permissions", "clearances", "check"],
+  public: ["permissions", "masks"],
+};
+
+/** `No group named x. Grants naming it match nobody; see Unmatched names.` and the user and role equivalents. */
+function Missing({ kind, name }: { kind: PageKind; name: string }) {
+  if (kind === "user") {
+    return (
+      <Alert>
+        <AlertDescription>{`No user has the id ${name}.`}</AlertDescription>
+      </Alert>
+    );
+  }
+  return (
+    <Alert>
+      <AlertDescription>
+        <p>
+          {`No ${kind} named ${name}. Grants naming it match nobody; see `}
+          <Link to={`${PEOPLE_BASE}?kind=unmatched`} className="text-primary underline">
+            Unmatched names
+          </Link>
+          .
+        </p>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+/** A tab whose content a later change of this sub-project builds (plan Tasks 8–10). */
+function NotBuilt() {
+  return <p className="text-sm text-muted-foreground">This tab is not built yet.</p>;
+}
+
+/**
+ * A user's, group's or role's page (spec §2): the header, then Radix tabs.
+ * The selected tab is `?tab=` (FE-PAGE-2); the kind's first tab is the
+ * absence of the parameter, and a tab the kind does not have shows the first.
+ * The header renders from the URL while the principal loads or fails, so its
+ * links keep working; only the tabs wait for the read.
+ */
+export default function PrincipalPage({ kind }: { kind: PageKind }) {
   const params = useParams();
   const key = principalParam(kind === "user" ? params.userId : params.name);
+  const state = usePrincipal(kind, key);
+  const principal = state.status === "ok" ? state.principal : null;
+
+  let body: ReactNode;
+  if (state.status === "missing") body = <Missing kind={kind} name={key} />;
+  else if (state.status === "error") body = <TabError what={kind} onRetry={state.retry} />;
+  else if (state.status === "loading") body = <ListSkeleton rows={4} cols={3} />;
+  else body = <PrincipalTabs principal={state.principal} />;
+
   return (
-    <div className="space-y-1 p-4">
-      <Link to={PEOPLE_BASE} className="text-sm text-muted-foreground hover:underline">
-        People & groups
-      </Link>
-      <p className="text-xs uppercase text-muted-foreground">{KIND_LABEL[kind]}</p>
-      <h1 className="break-all text-lg font-semibold">{key}</h1>
+    <div className="space-y-6 p-4">
+      <PrincipalHeader kind={kind} keyName={key} principal={principal} />
+      {body}
     </div>
+  );
+}
+
+function PrincipalTabs({ principal }: { principal: Principal }) {
+  const [search, setSearch] = useSearchParams();
+  const isPublic = principal.kind === "group" && principal.data.isPublic;
+  const tabs = TABS_BY_KIND[isPublic ? "public" : principal.kind];
+  const asked = search.get("tab");
+  const value = tabs.find((t) => t === asked) ?? tabs[0];
+
+  const select = (next: string) =>
+    setSearch((prev) => {
+      const params = new URLSearchParams(prev);
+      if (next === tabs[0]) params.delete("tab");
+      else params.set("tab", next);
+      return params;
+    });
+
+  const panel = (t: PrincipalTab): ReactNode => (t === "overview" ? <OverviewTab principal={principal} /> : <NotBuilt />);
+
+  return (
+    <Tabs value={value} onValueChange={select} className="min-w-0">
+      {/* Wraps, so every tab is in view at 390 px. */}
+      <TabsList className="h-auto max-w-full flex-wrap justify-start">
+        {tabs.map((t) => (
+          <TabsTrigger key={t} value={t}>
+            {LABELS[t]}
+          </TabsTrigger>
+        ))}
+      </TabsList>
+      {tabs.map((t) => (
+        <TabsContent key={t} value={t} className="mt-4">
+          {t === value ? panel(t) : null}
+        </TabsContent>
+      ))}
+    </Tabs>
   );
 }
