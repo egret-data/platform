@@ -266,3 +266,5 @@ jobs:
       # Asserts the Governance Data area (the catalog tree and object pages) is still a lazy
       # chunk, out of the entry and its preloads. Same reason: only a production build splits.
       - run: npm run test:bundle:governance-data
+      # The same for the Governance People area (the People & groups index and principal pages).
+      - run: npm run test:bundle:governance-people

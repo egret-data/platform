@@ -86,6 +86,12 @@ const GOVERNANCE_GROUPS: NavGroup[] = [
     heading: "Data",
     items: [{ label: "Data", icon: Database, perm: ["policy:read", "tag:read"], to: "data" }],
   },
+  // DG redesign #2: people, groups and roles, directly after Data. Gated
+  // `policy:read` only, as its route is (spec P2).
+  {
+    heading: "People & groups",
+    items: [{ label: "People & groups", icon: UsersRound, perm: "policy:read", to: "people" }],
+  },
   // SP4b-2: data-plane permission UI, steward-facing first, then admin-facing —
   // "Data permissions" alone (not "Permissions") is deliberate: Control Plane →
   // Access → Permissions already names the RBAC permission *catalog*, and these

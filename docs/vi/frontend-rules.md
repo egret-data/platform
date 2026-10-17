@@ -144,7 +144,7 @@ Route được khai báo trong `frontend/src/App.tsx`, hoặc trong module của
 
 #### FE-ROUTE-2 — Khu vực tính năng mới được lazy-load · PHẢI
 Mọi khu vực tính năng mới, bắt đầu từ Workflow, được tách code bằng `React.lazy` và `Suspense`, với fallback là skeleton.
-**Làm thế này:** một khu vực route: `workflows/*` trong `frontend/src/App.tsx` (`lazy(() => import("@/routes/workflows/WorkflowsRoutes"))` bên trong `LazyRouteArea`, `frontend/src/components/layout/LazyRouteArea.tsx`: `Suspense` với fallback là skeleton, dưới một error boundary để một chunk tải hỏng hiện nút tải lại thay vì cả app trắng trơn); một component: `frontend/src/components/monaco/MonacoEditor.tsx`. **Kiểm bằng:** test: mỗi khu vực lazy một bundle test, `npm run test:bundle:workflows` (`frontend/scripts/assert-workflows-lazy.mjs`) cho các module Workflows mà nó liệt kê, mỗi module một marker, `npm run test:bundle:governance-data` (`frontend/scripts/assert-governance-data-lazy.mjs`) cho khu vực Data của Governance, và `npm run test:bundle:monaco` (`frontend/scripts/assert-monaco-lazy.mjs`) cho Monaco.
+**Làm thế này:** một khu vực route: `workflows/*` trong `frontend/src/App.tsx` (`lazy(() => import("@/routes/workflows/WorkflowsRoutes"))` bên trong `LazyRouteArea`, `frontend/src/components/layout/LazyRouteArea.tsx`: `Suspense` với fallback là skeleton, dưới một error boundary để một chunk tải hỏng hiện nút tải lại thay vì cả app trắng trơn); một component: `frontend/src/components/monaco/MonacoEditor.tsx`. **Kiểm bằng:** test: mỗi khu vực lazy một bundle test, `npm run test:bundle:workflows` (`frontend/scripts/assert-workflows-lazy.mjs`) cho các module Workflows mà nó liệt kê, mỗi module một marker, `npm run test:bundle:governance-data` (`frontend/scripts/assert-governance-data-lazy.mjs`) cho khu vực Data của Governance, `npm run test:bundle:governance-people` (`frontend/scripts/assert-governance-people-lazy.mjs`) cho khu vực People của Governance, và `npm run test:bundle:monaco` (`frontend/scripts/assert-monaco-lazy.mjs`) cho Monaco.
 
 #### FE-ROUTE-3 — URL kebab-case, thuộc workspace · PHẢI
 URL viết kebab-case và thuộc workspace, dưới `/explore/:workspace/…`.
@@ -230,7 +230,7 @@ Mọi thay đổi frontend qua được, chạy từ `frontend/`:
 - `npx tsc -b`
 - `npm run test`
 - `npm run build`
-- các bundle test mà thay đổi chạm tới (`npm run test:bundle`, `test:bundle:xlsx`, `test:bundle:csp`, `test:bundle:monaco`, `test:bundle:workflows`, `test:bundle:governance-data`)
+- các bundle test mà thay đổi chạm tới (`npm run test:bundle`, `test:bundle:xlsx`, `test:bundle:csp`, `test:bundle:monaco`, `test:bundle:workflows`, `test:bundle:governance-data`, `test:bundle:governance-people`)
 
 **Làm thế này:** các script trong `frontend/package.json`. **Kiểm bằng:** review: reviewer xác nhận cổng kiểm đã chạy.
 

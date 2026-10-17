@@ -142,7 +142,7 @@ Routes are declared in `frontend/src/App.tsx`, or in a lazy area module that `Ap
 
 #### FE-ROUTE-2 — New feature areas are lazy · MUST
 Every new feature area, starting with Workflow, is code-split with `React.lazy` and `Suspense`, with a skeleton fallback.
-**Do this:** a route area: `workflows/*` in `frontend/src/App.tsx` (`lazy(() => import("@/routes/workflows/WorkflowsRoutes"))` inside `LazyRouteArea`, `frontend/src/components/layout/LazyRouteArea.tsx`: `Suspense` with a skeleton fallback, under an error boundary so a chunk that fails to load shows a reload instead of a blank app); a component: `frontend/src/components/monaco/MonacoEditor.tsx`. **Checked by:** test: a bundle test per lazy area, `npm run test:bundle:workflows` (`frontend/scripts/assert-workflows-lazy.mjs`) for the Workflows modules it lists, one marker per module, `npm run test:bundle:governance-data` (`frontend/scripts/assert-governance-data-lazy.mjs`) for the Governance Data area, and `npm run test:bundle:monaco` (`frontend/scripts/assert-monaco-lazy.mjs`) for Monaco.
+**Do this:** a route area: `workflows/*` in `frontend/src/App.tsx` (`lazy(() => import("@/routes/workflows/WorkflowsRoutes"))` inside `LazyRouteArea`, `frontend/src/components/layout/LazyRouteArea.tsx`: `Suspense` with a skeleton fallback, under an error boundary so a chunk that fails to load shows a reload instead of a blank app); a component: `frontend/src/components/monaco/MonacoEditor.tsx`. **Checked by:** test: a bundle test per lazy area, `npm run test:bundle:workflows` (`frontend/scripts/assert-workflows-lazy.mjs`) for the Workflows modules it lists, one marker per module, `npm run test:bundle:governance-data` (`frontend/scripts/assert-governance-data-lazy.mjs`) for the Governance Data area, `npm run test:bundle:governance-people` (`frontend/scripts/assert-governance-people-lazy.mjs`) for the Governance People area, and `npm run test:bundle:monaco` (`frontend/scripts/assert-monaco-lazy.mjs`) for Monaco.
 
 #### FE-ROUTE-3 — Kebab-case, workspace-scoped URLs · MUST
 URLs are kebab-case and workspace-scoped under `/explore/:workspace/…`.
@@ -228,7 +228,7 @@ Every frontend change passes, from `frontend/`:
 - `npx tsc -b`
 - `npm run test`
 - `npm run build`
-- the bundle tests the change touches (`npm run test:bundle`, `test:bundle:xlsx`, `test:bundle:csp`, `test:bundle:monaco`, `test:bundle:workflows`, `test:bundle:governance-data`)
+- the bundle tests the change touches (`npm run test:bundle`, `test:bundle:xlsx`, `test:bundle:csp`, `test:bundle:monaco`, `test:bundle:workflows`, `test:bundle:governance-data`, `test:bundle:governance-people`)
 
 **Do this:** the scripts in `frontend/package.json`. **Checked by:** review: the reviewer confirms the gate ran.
 

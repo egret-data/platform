@@ -51,6 +51,24 @@ const WorkflowsRoutes = lazy(() => import("@/routes/workflows/WorkflowsRoutes"))
  */
 const DataRoutes = lazy(() => import("@/routes/governance/data/DataRoutes"));
 
+/**
+ * The Governance People area (DG redesign #2): the People & groups index and
+ * the principal pages, code-split like Data (FE-ROUTE-2). Nothing under
+ * `routes/governance/people/` may be imported statically from the entry graph,
+ * except `peopleUrl.ts`, which pages outside the area link through;
+ * `npm run test:bundle:governance-people` checks it.
+ */
+const PeopleRoutes = lazy(() => import("@/routes/governance/people/PeopleRoutes"));
+
+/** What the People area shows while its chunk loads: a list skeleton in the page frame. */
+function PeopleFallback() {
+  return (
+    <div className="p-4" data-testid="governance-people-loading">
+      <ListSkeleton cols={3} />
+    </div>
+  );
+}
+
 /** What the Data area shows while its chunk loads: a skeleton in the page frame. */
 function DataFallback() {
   return (
@@ -521,6 +539,18 @@ function GovernanceRoutes() {
               <RequirePermission perm={["policy:read", "tag:read"]}>
                 <LazyRouteArea area="Data" fallback={<DataFallback />}>
                   <DataRoutes />
+                </LazyRouteArea>
+              </RequirePermission>
+            }
+          />
+          {/* DG redesign #2 (spec P1, P2): people, groups and roles, gated
+              `policy:read`; a steward holding only `tag:read` is refused. */}
+          <Route
+            path="people/*"
+            element={
+              <RequirePermission perm="policy:read">
+                <LazyRouteArea area="People & groups" fallback={<PeopleFallback />}>
+                  <PeopleRoutes />
                 </LazyRouteArea>
               </RequirePermission>
             }
