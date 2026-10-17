@@ -6,6 +6,9 @@ use egret_auth::roles::RoleRepo;
 use egret_auth::users::UserRepo;
 use egret_metastore::Db;
 
+#[path = "support/recorder.rs"]
+mod recorder;
+
 async fn connect() -> Option<Db> {
     let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
@@ -247,7 +250,10 @@ async fn platform_admin_user_ids_expands_group_granted_admins() {
         .await
         .unwrap();
     let group_id = groups.create_local(&uniq("admins-grp")).await.unwrap();
-    groups.add_member(group_id, user_id).await.unwrap();
+    groups
+        .add_member(group_id, user_id, &crate::recorder::Recorder::default())
+        .await
+        .unwrap();
     let admin_role = roles
         .list()
         .await

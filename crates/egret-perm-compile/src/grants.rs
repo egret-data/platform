@@ -29,17 +29,30 @@
 //!   NO canonicalisation. It emits `r#ref` byte-for-byte and refuses
 //!   (`CompileError::UnusableUserRef`) a `User` ref that's empty or
 //!   contains `@`, since either one is a sign the value reaching this
-//!   function was never resolved to `users.username` in the first place. A
-//!   later, I/O-capable task (username resolution belongs at the authoring
-//!   boundary, where `users.username` is readable) owns turning an email
-//!   into the real, collision-resolved username.
+//!   function was never resolved to `users.username` in the first place. The
+//!   I/O-capable half lives at the authoring boundary, where `users.username`
+//!   is readable: `crate::principal_refs` (J-F3) checks every ref of every
+//!   kind before a write is stored, rewrites a username to its stored
+//!   spelling, and refuses an email or a user id with the username to use —
+//!   it never silently rewrites one into the other.
 //!
-//! **Groups still compile through**, unchanged, even though D7
-//! (`docs/en/plans/2026-09-24-permission-model-sp4a-d7-result.md`) found
-//! groups never reach the engine (no group provider on Trino, no usersync in
-//! egret) — egret is not the only possible Ranger consumer, and the
-//! situation may change. No claim of enforcement is implied or tested here;
-//! see D7 §2-3 and `model::PrincipalKind`'s doc comment.
+//! **Groups no longer reach this file either, except `public` (J-F3 Task 1b,
+//! design R8).** Until R8 a group compiled straight into Ranger's `groups`
+//! bucket, on the reasoning that egret is not the only possible Ranger
+//! consumer. D7 (`docs/en/plans/2026-09-24-permission-model-sp4a-d7-result.md`)
+//! had measured that groups never reach any engine egret provisions (no group
+//! provider on Trino, no usersync in egret), so that bucket matched nobody: an
+//! allow on a group granted nobody while `explain` said it did, and a group in
+//! a deny include or an exclude failed OPEN. A group's membership is knowable
+//! from `user_groups`, so `crate::members::expand_enumerated_principals` now
+//! expands every non-`public` group into its members' usernames before this
+//! file sees it, and every writer of `user_groups` recompiles
+//! (`crate::group_membership`). `PrincipalKind::Group` below therefore only
+//! ever carries `public`, which every engine resolves. It is deliberately NOT
+//! refused the way an unexpanded `Role` is: [`compile_grant`] is also the
+//! function the migration grammar's differential exercises directly on
+//! hand-written bodies (`egret-ranger-eval/tests/differential.rs`), where a
+//! group is the input being compared, not an expansion that went missing.
 //!
 //! **ROLES DO NOT, and that changed in SP4c Task 2b.** Round 1 bucketed a
 //! `PrincipalKind::Role` into Ranger's `roles` alongside groups, on the same
@@ -50,8 +63,8 @@
 //! `lastKnownRoleVersion` never leaves `-1`, and the plugin passes `userRoles`
 //! as a hardcoded `null` — while `egret_perm::eval::matches_principal` matches
 //! a role happily, so `explain` reported an access the engine did not grant.
-//! Unlike the group case that divergence is now fixable, because
-//! `access_grants` knows who holds a role: a `role` principal is expanded into
+//! That divergence is fixable, because `access_grants` knows who holds a
+//! role: a `role` principal is expanded into
 //! its holders' usernames before this file ever sees it
 //! (`crate::members::expand_enumerated_principals`), and reaching
 //! `principal_item` with one unexpanded is refused exactly as
@@ -153,6 +166,7 @@ fn principal_item(
                 validate_user_ref(&p.r#ref)?;
                 users.push(p.r#ref.clone());
             }
+            // After expansion only `public` reaches here (module doc).
             PrincipalKind::Group => groups.push(p.r#ref.clone()),
             // Legal to author, expanded before any compile sees it.
             PrincipalKind::Role if expansion == Expansion::NotYet => {}

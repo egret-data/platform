@@ -49,16 +49,20 @@ describe("PrincipalPicker", () => {
     expect(screen.queryByRole("option", { name: "workspace_members" })).not.toBeInTheDocument();
   });
 
-  test("choosing group shows the not-enforced warning at the point of choice", async () => {
+  // J-F3 Task 1b: a group compiles to its members, so the point-of-choice notice
+  // says the grant follows the membership — and the old "not enforced" warning,
+  // now false, is gone.
+  test("choosing group says it applies to the group's current members", async () => {
     const user = userEvent.setup();
     renderPicker();
 
-    expect(screen.queryByText(/Not enforced yet/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/current members/)).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("combobox", { name: "Include kind" }));
     await user.click(await screen.findByRole("option", { name: "group" }));
 
-    expect(await screen.findByText(/Not enforced yet/)).toBeInTheDocument();
+    expect(await screen.findByText(/current members/)).toBeInTheDocument();
+    expect(screen.queryByText(/Not enforced yet/)).not.toBeInTheDocument();
   });
 
   test("exempt mode renders no Exclude section, and Include offers no role kind", async () => {

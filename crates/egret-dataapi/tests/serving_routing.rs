@@ -338,6 +338,7 @@ fn build_state(db: &Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
         // This file is about serving-path routing, not Activity — a fixed
         // retention is enough to satisfy the field.
         activity: egret_dataapi::ActivityStore::new(db.clone(), Some(90)),
+        group_recompiler: std::sync::Arc::new(egret_perm_compile::PermGroupRecompiler),
     }
 }
 

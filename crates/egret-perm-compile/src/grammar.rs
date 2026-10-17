@@ -841,8 +841,17 @@ fn access_set(it: &PolicyItem) -> BTreeSet<&str> {
     it.accesses.iter().map(|a| a.access_type.as_str()).collect()
 }
 
-/// Users and groups verbatim (the compiler emits them byte-for-byte); roles
-/// refused (module doc).
+/// Users and groups verbatim; roles refused (module doc).
+///
+/// **A non-`public` group is no longer emitted byte-for-byte (J-F3 Task 1b).**
+/// `compile_grant` still buckets one verbatim, which is what the grammar
+/// differential compares, but the recompile a migration runs first expands it
+/// into the group's members (`crate::members`). The hand-written group item
+/// matched nobody on the engine (D7) and the compiled one names real people,
+/// so the migration's equivalence gate (`crate::equivalence`, whose synthetic
+/// `egret-probe-member-of-*` user carries the group) sees the two differ and
+/// refuses the migration. That refusal is correct — it is not equivalent — but
+/// it arrives as a probe divergence rather than a named blocker.
 fn principals(it: &PolicyItem, b: &mut Vec<Blocker>) -> Vec<Principal> {
     if it.users.is_empty() && it.groups.is_empty() && it.roles.is_empty() {
         b.push(Blocker::NoPrincipals);

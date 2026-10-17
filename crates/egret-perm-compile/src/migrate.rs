@@ -949,6 +949,20 @@ pub(crate) async fn migrate_in_tx(
     // Review I-4: a first recompile writes into each member's TAG service, and
     // every engine-bound profile naming that tag service downloads the result.
     affected = with_tag_service_sharers(tx, &affected).await?;
+    // J-F3 Task 1b, fix round 1: the per-group lock for every group the
+    // migrated grants and rules name, BEFORE the profile locks below. Each
+    // `write_grant`/`write_rule` takes it again (re-entrant), but by then this
+    // transaction already holds profile locks, and taking a group lock after a
+    // profile lock is the inverted order `egret_auth::groups`' module doc
+    // forbids.
+    let mut named: Vec<&egret_perm::PrincipalSet> = Vec::new();
+    for (_, _, c) in &plan {
+        match c {
+            Candidates::Grants(gs) => named.extend(gs.iter().map(|g| &g.principals)),
+            Candidates::Rules(rs) => named.extend(rs.iter().map(|r| &r.exempt)),
+        }
+    }
+    crate::routes::lock_named_groups(tx, named).await?;
     lock_services_in_tx(tx, &merge_service_ids(&affected, &[service_id])).await?;
     // Review M-1: the first check ran before the lock; a concurrent migration
     // that created one of these names has committed by now if it shares a
@@ -1047,7 +1061,9 @@ pub(crate) async fn migrate_in_tx(
         match cands {
             Candidates::Grants(gs) => {
                 for g in gs {
-                    let out = write_grant(tx, None, new_grant(g), p).await?;
+                    let out = write_grant(tx, None, new_grant(g), p)
+                        .await
+                        .map_err(|e| naming_the_policy(e, *policy_id, policy_name))?;
                     migrated.grant_ids.push(out.id);
                     recompiled = merge_service_ids(&recompiled, &out.services);
                     summaries.extend(out.summaries);
@@ -1055,7 +1071,9 @@ pub(crate) async fn migrate_in_tx(
             }
             Candidates::Rules(rs) => {
                 for r in rs {
-                    let out = write_rule(tx, None, new_rule(r), p).await?;
+                    let out = write_rule(tx, None, new_rule(r), p)
+                        .await
+                        .map_err(|e| naming_the_policy(e, *policy_id, policy_name))?;
                     migrated.rule_ids.push(out.id);
                     recompiled = merge_service_ids(&recompiled, &out.services);
                     summaries.extend(out.summaries);
@@ -1502,6 +1520,20 @@ pub(crate) async fn undo_in_tx(
         compile: CompileResponse::from_summaries(affected, &summaries),
         notices: vec![UNDO_GENERATED_NOTICE.to_string()],
     })
+}
+
+/// A 400 from the one write implementation, prefixed with the hand-written
+/// policy the migrated grant or rule came from. The refusal names a position
+/// inside the DERIVED body (`principals.include[0]`, J-F3's unknown-ref
+/// refusal above all) that the author never wrote; the policy is the thing they
+/// can find and fix. Other errors pass through untouched.
+fn naming_the_policy(e: PermHttpError, policy_id: i64, policy_name: &str) -> PermHttpError {
+    match e {
+        PermHttpError::BadRequest(msg) => PermHttpError::BadRequest(format!(
+            "migrating policy {policy_name:?} (id {policy_id}): {msg}"
+        )),
+        other => other,
+    }
 }
 
 #[cfg(test)]

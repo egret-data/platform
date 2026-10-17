@@ -114,6 +114,19 @@ async fn env() -> Option<Env> {
             .await
             .expect("build CedarPdp"),
     );
+    // The bare usernames the grants and exemptions below name. Since J-F3 a
+    // write naming a username no `users` row carries is refused
+    // (`egret_perm_compile::principal_refs`), so they must exist; idempotent and
+    // shared across the database, and whoever already holds the name serves.
+    sqlx::query(
+        "INSERT INTO users (provider, email, username) \
+         SELECT 'local', n || '@perm-overlap-fixture.egret.local', n \
+           FROM unnest(ARRAY['alice', 'analyst']) n \
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("fixture usernames");
     let uid = UserRepo::new(db.clone())
         .insert_local(
             &format!("overlap_{}@egret.local", Uuid::new_v4().simple()),

@@ -142,6 +142,7 @@ async fn setup() -> Option<Fixture> {
             .await
             .expect("build CedarPdp"),
     );
+    ensure_fixture_usernames(&pool).await;
     let users = UserRepo::new(db.clone());
     let uid = users
         .insert_local(
@@ -184,6 +185,33 @@ async fn setup() -> Option<Fixture> {
         warehouse_id,
         dsn,
     })
+}
+
+/// Every bare username the hand-written policies below name — `alice`, `bob`,
+/// `mallory`, and the `user{i}`/`migrant{i}` the size tests mint.
+///
+/// **A migration writes through `write_grant`/`write_rule`, so since J-F3 every
+/// user it migrates must be a real `users.username`** (`egret_perm_compile::
+/// principal_refs`): a migrated deny or exclude naming nobody would fail open
+/// exactly as an authored one does. Idempotent and shared across the database
+/// (`ON CONFLICT DO NOTHING`, on the username as much as the email: whoever
+/// already holds the name serves, because only the name has to resolve).
+async fn ensure_fixture_usernames(pool: &sqlx::PgPool) {
+    let mut names: Vec<String> = ["alice", "bob", "mallory"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    names.extend((0..40).map(|i| format!("user{i}")));
+    names.extend((0..20).map(|i| format!("migrant{i}")));
+    sqlx::query(
+        "INSERT INTO users (provider, email, username) \
+         SELECT 'local', n || '@perm-migrate-fixture.egret.local', n FROM unnest($1::text[]) n \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&names)
+    .execute(pool)
+    .await
+    .expect("fixture usernames");
 }
 
 fn level(values: &[&str]) -> Value {
@@ -510,6 +538,47 @@ async fn a_migration_the_gate_cannot_prove_is_returned_with_its_disagreements_an
     );
     assert!(enabled(&f, id).await, "the original is still on");
     assert!(downloaded_names(&f, f.p).await.contains(&name));
+}
+
+/// **J-F3 Task 1b: a hand-written GROUP item does not migrate, and the gate is
+/// what says so.** The grammar still carries a group through verbatim, but the
+/// recompile the migration runs expands it into the group's members (design
+/// R8). The hand-written item matched nobody on the engine (D7: no group
+/// provider, no usersync) and the compiled one names `alice` — not the same
+/// policy — so the equivalence gate must refuse it, with nothing written. A
+/// migration that went through would START granting the members access the
+/// original never gave them on any engine.
+#[tokio::test]
+async fn a_group_policy_does_not_migrate_because_the_compiled_grant_names_its_members() {
+    let Some(f) = setup().await else { return };
+    let group = unique("analysts");
+    let gid: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(&group)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("group");
+    sqlx::query(
+        "INSERT INTO user_groups (user_id, group_id) \
+         SELECT id, $1 FROM users WHERE username = 'alice'",
+    )
+    .bind(gid)
+    .execute(&f.db.pool)
+    .await
+    .expect("alice joins");
+
+    let name = unique("analysts read orders");
+    let mut body = access_policy(&f.catalog, "sales", "unused");
+    body["policyItems"][0]["users"] = json!([]);
+    body["policyItems"][0]["groups"] = json!([group]);
+    let id = insert(&f, f.p, &name, "operator", body).await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["equivalent"], false, "{body}");
+    assert_eq!(body["committed"], false, "{body}");
+    assert_eq!(grants_on_catalog(&f).await, 0, "no grant left behind");
+    assert!(provenance(&f, f.p).await.is_empty());
+    assert!(enabled(&f, id).await, "the original is still on");
 }
 
 // ── 4. a second migration is 409 ─────────────────────────────────────────
@@ -1727,5 +1796,35 @@ async fn a_provisioned_trino_on_a_floating_image_refuses_the_migration_with_the_
         "{refusal}"
     );
     assert_eq!(grants_on_catalog(&f).await, 0, "nothing is written");
+    assert!(enabled(&f, id).await, "the original stays on");
+}
+
+/// J-F3 fix round 1: a migration writes through `write_grant`, so a hand-written
+/// policy naming a user egret does not know is refused like an authored grant —
+/// and the refusal names the POLICY, because the position it also names
+/// (`principals.include[0]`) belongs to a derived body the author never wrote.
+#[tokio::test]
+async fn a_migration_refused_for_an_unknown_principal_names_the_policy() {
+    let Some(f) = setup().await else { return };
+    let ghost = unique("jf3_ghost");
+    let name = unique("ghost reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", &ghost),
+    )
+    .await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains(&format!("migrating policy {name:?} (id {id})")),
+        "names the source policy; got {msg:?}"
+    );
+    assert!(msg.contains(&ghost), "and the ref; got {msg:?}");
+    assert_eq!(grants_on_catalog(&f).await, 0, "nothing written");
     assert!(enabled(&f, id).await, "the original stays on");
 }

@@ -21,18 +21,21 @@
 //!   comparable by `covers` in that direction. Callers must evaluate at the
 //!   leaf level actually being read (the column, if a column is being read)
 //!   rather than at a coarser level and expect a finer-grained deny to apply.
-//! - **Group principals are structurally invisible to the real engine.**
-//!   Task 1 measured, on the live cluster, that Trino has no group provider
-//!   and egret never pushes one (no usersync), so a Ranger policy item
-//!   naming a group matches no one on any engine egret provisions today —
-//!   see `docs/en/plans/2026-09-24-permission-model-sp4a-d7-result.md`. This
-//!   evaluator has no way to know that: a `Group` principal is matched
-//!   against `Subject.groups` exactly like `User`/`Role`, so `evaluate` will
-//!   report `AllowedByGrant` for a group grant that the real engine denies.
-//!   Because a later task checks the compiler against this same evaluator as
-//!   its oracle, the compiler will agree — the oracle is blind to this whole
-//!   class of dead grant, and nothing downstream of `evaluate` alone can
-//!   catch it.
+//! - **Group principals were structurally invisible to the real engine, and
+//!   are NOT any more (J-F3 Task 1b, design R8).** Task 1 measured, on the
+//!   live cluster, that Trino has no group provider and egret never pushes one
+//!   (no usersync), so a Ranger policy item naming a group matches no one on
+//!   any engine egret provisions — see
+//!   `docs/en/plans/2026-09-24-permission-model-sp4a-d7-result.md`. Until R8
+//!   the compiler named the group anyway, so this function reported an allow
+//!   the engine refused (it grew a separate `AllowedByGroupOnly` class to say
+//!   so) and a deny the engine did not enforce. A group's membership IS
+//!   knowable from `user_groups`, so the compiler now expands a non-`public`
+//!   group into its members' usernames (`egret_perm_compile::members`) and
+//!   every writer of `user_groups` recompiles. This function is unchanged —
+//!   matching `Subject::groups` by name is the right oracle semantics — and the
+//!   `AllowedByGroupOnly` class is gone, because the access it warned about is
+//!   now the enforceable kind.
 //! - **`Role` principals were in that same bound, and are NOT any more (SP4c
 //!   Task 2b).** SP4c's D0 measured that a Ranger item naming a role matches
 //!   nobody either, for its own reason (the plugin downloads roles from a route
@@ -114,32 +117,6 @@ pub struct ClearanceGate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
     AllowedByGrant {
-        grant_id: Uuid,
-    },
-    /// The grant matched, but ONLY through a `group` principal — so the model
-    /// allows it and **no engine will**.
-    ///
-    /// **Its own class, because the prose warning was not machine-readable
-    /// (SP4c review).** egret runs no usersync and writes no
-    /// `group-provider.properties`, so `getGroups(user)` is empty on every
-    /// engine egret provisions (D7, measured live): a Ranger policy item naming
-    /// a group matches nobody. A subject who reaches a grant only by group
-    /// membership is therefore allowed here and refused there. Reporting that
-    /// as [`Reason::AllowedByGrant`] gave it the SAME wire string as an
-    /// enforceable allow, so a caller parsing `kind` — the deliverable of this
-    /// whole mechanism — could not tell the two apart, whatever the page said in
-    /// prose beside it.
-    ///
-    /// `allowed` stays `true`: the stored model does allow it, and Cedar
-    /// enforces exactly this on control-plane object access. What is different
-    /// is the DATA PLANE, and that is what the class says.
-    ///
-    /// **The mirror case is NOT covered and is a known gap**: a `deny` that
-    /// matches only through a group is reported as [`Reason::ExplicitDeny`]
-    /// while the engine allows the access — wrong in the restrictive direction.
-    /// It is a different fix (a deny has no "allowed anyway" state to report)
-    /// and is recorded here rather than left to be rediscovered.
-    AllowedByGroupOnly {
         grant_id: Uuid,
     },
     ExplicitDeny {
@@ -232,15 +209,10 @@ pub fn evaluate(
         };
     };
 
-    // Which principal actually let the subject in decides WHICH allow class
-    // this is: a match reached only through a `group` is unenforceable in every
-    // engine egret provisions (D7), and says so in its own reason class rather
-    // than borrowing the enforceable one's wire string.
-    let mut reasons = vec![if matched_only_via_group(subject, &a.principals) {
-        Reason::AllowedByGroupOnly { grant_id: a.id }
-    } else {
-        Reason::AllowedByGrant { grant_id: a.id }
-    }];
+    // One allow class, however the subject matched: since J-F3 Task 1b a
+    // `group` compiles to its members' usernames exactly as a `role` does, so a
+    // group-matched allow is as enforceable as any other (module doc).
+    let mut reasons = vec![Reason::AllowedByGrant { grant_id: a.id }];
     for r in rules {
         if !selector_hits(&r.selector, target, tags_on) {
             continue;
@@ -272,31 +244,14 @@ pub fn evaluate(
 /// Ranger's built-in "everybody" group, the ONE group name that resolves with
 /// no group provider and no usersync.
 ///
-/// It is the reason [`matched_only_via_group`] is not simply "every matching
-/// principal is a group": a grant naming `public` IS enforceable — SP4c's own
-/// clearance compiler puts this literal on the deny side of a tag policy to
-/// mean everybody, because D0 measured that it is the half of Ranger's
-/// deny/deny-exception pair that works. `egret_perm_compile::rules` aliases
-/// this constant rather than re-spelling it; two copies would drift, and a
-/// drift here would either report an enforceable allow as unenforceable or
-/// hide a real one.
+/// It is the one group the compiler does NOT expand into members
+/// (`egret_perm_compile::members`, J-F3 Task 1b): SP4c's own clearance compiler
+/// puts this literal on the deny side of a tag policy to mean everybody,
+/// because D0 measured that it is the half of Ranger's deny/deny-exception pair
+/// that works. `egret_perm_compile::rules` aliases this constant rather than
+/// re-spelling it; two copies would drift, and a drift here would expand
+/// "everyone" into whoever happens to have a row in a group of that name.
 pub const PUBLIC_GROUP: &str = "public";
-
-/// Whether EVERY `include` principal that matched `s` is a `group` OTHER than
-/// [`PUBLIC_GROUP`].
-///
-/// Called only after [`matches_set`] has already said yes, so at least one
-/// include principal matches and `all` is never vacuously true on an empty
-/// iterator. A grant naming both a group and the subject's own username is NOT
-/// group-only: the username item is what the engine will match, so the access
-/// is enforceable and reporting it as unenforceable would be the same class of
-/// lie in the other direction.
-fn matched_only_via_group(s: &Subject, set: &PrincipalSet) -> bool {
-    set.include
-        .iter()
-        .filter(|p| matches_principal(s, p))
-        .all(|p| p.kind == PrincipalKind::Group && p.r#ref != PUBLIC_GROUP)
-}
 
 /// `include` minus `exclude` — the operator that lets egret drop Ranger's
 /// allow-exception and deny-exception blocks from the authoring surface

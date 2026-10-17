@@ -1060,7 +1060,7 @@ async fn deleting_a_publisher_keeps_their_versions_with_publisher_null() {
     assert_eq!(v.published_by, Some(publisher));
 
     let deleted = egret_auth::users::UserRepo::new(fx.db.clone())
-        .hard_delete(UserId(publisher))
+        .hard_delete(UserId(publisher), &NoGroupPolicies)
         .await
         .expect("a publisher can be deleted");
     assert!(deleted.is_some(), "the user row was deleted");
@@ -1271,5 +1271,30 @@ async fn saving_with_no_layout_clears_a_previously_saved_one() {
             fx.mem_store().get(&fx.draft_layout_key(app, rev)).await,
             Err(StorageError::NotFound(_))
         ));
+    }
+}
+
+/// The group-membership recompile port `UserRepo::hard_delete` requires (J-F3
+/// Task 1b). The publisher above is in no group, so nothing is locked or
+/// recompiled either way; this crate does not depend on `egret-perm-compile`,
+/// whose `PermGroupRecompiler` is the production implementation.
+struct NoGroupPolicies;
+
+#[async_trait::async_trait]
+impl egret_auth::groups::GroupMembershipRecompiler for NoGroupPolicies {
+    async fn lock_affected_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        _group_names: &[String],
+    ) -> egret_core::Result<Vec<i64>> {
+        Ok(Vec::new())
+    }
+
+    async fn recompile_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        _service_ids: &[i64],
+    ) -> egret_core::Result<()> {
+        Ok(())
     }
 }

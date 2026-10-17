@@ -234,6 +234,14 @@ pub struct DataApiState {
     pub rate_limits: std::sync::Arc<dyn crate::serving::RateLimitStore>,
     /// The Activity tab's store (P5 §4) — call statistics from `dataapi.access_log`.
     pub activity: ActivityStore,
+    /// Recompiles the engine policies a service account's group memberships
+    /// reach when the account is deleted (J-F3 Task 1b): a group compiles to
+    /// its members' usernames, and `UserRepo::hard_delete` removes the account
+    /// from every group. A PORT, like [`Self::query`], so this crate never
+    /// depends on `egret-perm-compile`; `egret-bin` wires
+    /// `egret_perm_compile::PermGroupRecompiler`. Not optional — see
+    /// `egret_auth::groups`' module doc.
+    pub group_recompiler: Arc<dyn egret_auth::groups::GroupMembershipRecompiler>,
 }
 
 impl FromRef<DataApiState> for SessionService {
@@ -665,7 +673,14 @@ async fn delete_service_account(
     // principal type that is nearly always granted before it is deleted.
     // `hard_delete` sweeps grants, sessions and group memberships in one
     // transaction and maps a 23503 to a 409.
-    let deleted = st.users.hard_delete(UserId(sa)).await?;
+    //
+    // It also removes the account from every group, and since J-F3 Task 1b a
+    // group compiles to its members — so the policies those groups reach are
+    // recompiled in the same transaction, through `group_recompiler`.
+    let deleted = st
+        .users
+        .hard_delete(UserId(sa), &*st.group_recompiler)
+        .await?;
     // Deleting the `users` row cascades through `dataapi.service_accounts` into
     // `dataapi.clients` (migration 0119), so no client outlives its account.
     //

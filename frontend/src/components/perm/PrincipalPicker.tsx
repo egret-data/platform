@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, X } from "lucide-react";
+import { Users, X } from "lucide-react";
 
 import { policyAdminListPrincipals } from "@/api/generated/policy-admin/policy-admin";
 import type { PermPrincipal, Principal, PrincipalSet } from "@/api/generated/model";
@@ -281,19 +281,21 @@ function PrincipalListEditor({
           </div>
 
           {effectiveKind === "group" && (
-            // Hardcoded fact 2/5 (design spec D3, SP4a D7 measured live): Trino
-            // has no group provider, egret writes none, and there is no
-            // usersync, so a Ranger policy item naming a group matches nobody.
-            // Rendered at the point of choice, not a distant help panel.
-            // REMOVE THIS WARNING once egret ships a group provider — that is
-            // the only thing that would make it stale.
+            // J-F3 Task 1b (design R8). SP4a D7 measured that no engine egret
+            // provisions sees a group (no group provider, no usersync), so this
+            // used to warn "not enforced". The compiler now names the group's
+            // MEMBERS in the engine policy instead, and every membership change
+            // recompiles — so the fact to show at the point of choice is that
+            // the grant follows the membership, not that it does nothing.
+            // (`public`, the one group engines resolve themselves, stays a
+            // group; the sentence is still true of it in effect.)
             <Badge
-              variant="warning"
+              variant="outline"
               className="w-fit items-start gap-1.5 whitespace-normal text-left font-normal"
             >
-              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-              Not enforced yet: no group provider or usersync, so this won&apos;t match
-              inside the engine.
+              <Users className="mt-0.5 h-3 w-3 shrink-0" />
+              Applies to the group&apos;s current members: engines see no groups, so each member
+              is named in the policy, and adding or removing a member updates it.
             </Badge>
           )}
         </div>

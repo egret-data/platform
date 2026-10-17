@@ -1394,6 +1394,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             cookie_key,
             impersonations: impersonations.clone(),
             audit: audit_sink.clone(),
+            // J-F3 Task 1b: every login's group sync recompiles the policies
+            // the groups it moved reach (`egret_auth::groups`' module doc).
+            group_recompiler: std::sync::Arc::new(egret_perm_compile::PermGroupRecompiler),
         }),
         _ => None,
     };
@@ -2173,6 +2176,20 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         pdp: pdp.clone(),
     });
+    // J-F3 Task 2 (design R5): one `warn!` per stored grant principal or rule
+    // exemption whose ref matches nobody where that fails OPEN. Off the boot
+    // path and best-effort: the rows are served either way, and
+    // `GET /perm/unresolved-principals` is where an operator acts on them.
+    {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                egret_perm_compile::principal_refs::warn_fail_open_principals(&pool).await
+            {
+                tracing::warn!(error = %e, "the stored principal-ref check did not run");
+            }
+        });
+    }
 
     // Engine-mgmt seam: owns the engine domain (HTTP router + provisioning).
     let engine_mgmt = Some(egret_engine_mgmt::EngineMgmtState {
@@ -2391,6 +2408,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             db.clone(),
             egret_dataapi::serving::scheduled_retention(config.data_api.access_log_retention_days),
         ),
+        // J-F3 Task 1b: a service-account delete leaves every group it was in.
+        group_recompiler: std::sync::Arc::new(egret_perm_compile::PermGroupRecompiler),
     });
 
     // Workflow management surface (W1 Task 7). `refs` is the real

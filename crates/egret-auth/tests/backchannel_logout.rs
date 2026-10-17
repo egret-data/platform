@@ -14,6 +14,9 @@ use egret_metastore::Db;
 use jsonwebtoken::{encode, jwk::JwkSet, EncodingKey, Header};
 use serde_json::json;
 
+#[path = "support/recorder.rs"]
+mod recorder;
+
 const ISSUER: &str = "https://keycloak.example.com/realms/egret";
 const AUDIENCE: &str = "egret-backend";
 
@@ -217,6 +220,7 @@ async fn handler_returns_400_no_store_on_malformed_token() {
         cookie_key: axum_extra::extract::cookie::Key::generate(),
         impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
         audit: egret_audit::AuditSink::new(16).0,
+        group_recompiler: std::sync::Arc::new(crate::recorder::Recorder::default()),
     };
     let app = egret_auth::oidc_routes::oidc_router().with_state(state);
 

@@ -71,7 +71,7 @@ async fn minted_token_carries_user_groups_from_db(pool: sqlx::PgPool) {
         .await
         .expect("create local group");
     groups
-        .add_member(group_id, user_id)
+        .add_member(group_id, user_id, &egret_perm_compile::PermGroupRecompiler)
         .await
         .expect("add member");
 

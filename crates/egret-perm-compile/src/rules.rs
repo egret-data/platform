@@ -700,7 +700,11 @@ fn invalid_custom_mask(rule_name: &str, expr: &str) -> CompileError {
 pub(crate) const PUBLIC_GROUP: &str = egret_perm::PUBLIC_GROUP;
 
 /// Bucket a rule's exempt principals into (users, groups) for a
-/// masking/row-filter item. Those Ranger item shapes
+/// masking/row-filter item. A non-`public` exempt `Group` has already been
+/// expanded into its members' usernames by
+/// `crate::members::expand_enumerated_principals` on every recompile (J-F3
+/// Task 1b), so on that path `groups` comes back empty; the arm stays for the
+/// grammar differential, which compiles hand-written bodies directly. Those Ranger item shapes
 /// (`MaskItemInput`/`RowFilterItemInput`, `ranger_json.rs`) carry neither a
 /// `roles` bucket (unlike `AccessItemInput`) nor an exception/subtract block
 /// the way access-policy items do (`allowExceptions`/`denyExceptions`) — so

@@ -46,6 +46,10 @@ tracing.workspace = true
 axum.workspace = true
 egret-auth.workspace = true
 egret-core.workspace = true
+# J-F3 Task 1b: `group_membership::PermGroupRecompiler` answers through
+# `egret_auth`'s port, whose error is `egret_core::Error`, and its `Internal`
+# arm carries an `anyhow::Error`.
+anyhow.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 utoipa.workspace = true

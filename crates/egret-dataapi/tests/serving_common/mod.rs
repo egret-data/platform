@@ -874,6 +874,7 @@ pub async fn fixture() -> Option<Fixture> {
         // A fixed, sensible retention rather than a config read — nothing in
         // this fixture boots `egret-config`.
         activity: ActivityStore::new(db.clone(), Some(90)),
+        group_recompiler: std::sync::Arc::new(egret_perm_compile::PermGroupRecompiler),
     };
 
     let session = st

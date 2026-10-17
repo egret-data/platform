@@ -3344,6 +3344,7 @@ dependencies = [
  "egret-events",
  "egret-machine-idp",
  "egret-metastore",
+ "egret-perm-compile",
  "egret-query",
  "egret-query-api",
  "egret-secrets",
@@ -3521,6 +3522,7 @@ dependencies = [
 name = "egret-perm-compile"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "axum",
  "chrono",

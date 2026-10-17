@@ -22,10 +22,15 @@ pub struct OidcLogin {
 
 /// JIT-provision the user (match by `sub`) and sync their OIDC group memberships.
 /// Returns the local user id. Roles resolve via the existing group→role path.
+///
+/// The sync recompiles every engine policy a MOVED group reaches, through
+/// `recompiler` (`crate::groups`' module doc) — the per-login writer of
+/// `user_groups`, and the reason the recompile is a port.
 pub async fn provision_and_sync(
     users: &UserRepo,
     groups: &GroupRepo,
     claims: &OidcClaims,
+    recompiler: &dyn crate::groups::GroupMembershipRecompiler,
 ) -> Result<UserId> {
     let user_id = match users.find_by_external_subject(&claims.subject).await? {
         Some(u) => {
@@ -45,7 +50,7 @@ pub async fn provision_and_sync(
         groups.upsert_oidc_group(g).await?;
     }
     groups
-        .sync_user_oidc_groups(user_id, &claims.groups)
+        .sync_user_oidc_groups(user_id, &claims.groups, recompiler)
         .await?;
     Ok(user_id)
 }

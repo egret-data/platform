@@ -214,6 +214,7 @@ fn dataapi_state(keys: Arc<dyn SigningKeyStore>) -> DataApiState {
         cache: std::sync::Arc::new(egret_dataapi::serving::ResponseCache::new()),
         rate_limits: Arc::new(egret_dataapi::serving::TokenBucket::new()),
         activity: egret_dataapi::ActivityStore::new(db.clone(), Some(90)),
+        group_recompiler: std::sync::Arc::new(egret_perm_compile::PermGroupRecompiler),
     }
 }
 

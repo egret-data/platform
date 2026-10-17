@@ -41,7 +41,8 @@ import type {
   RuleView,
   StoredOverlap,
   UndoRequest,
-  UndoResponse
+  UndoResponse,
+  UnresolvedPrincipal
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -2029,3 +2030,138 @@ export const usePermPatchRule = <TError = ErrorBody,
       > => {
       return useMutation(getPermPatchRuleMutationOptions(options), queryClient);
     }
+    export type permListUnresolvedPrincipalsResponse200 = {
+  data: UnresolvedPrincipal[]
+  status: 200
+}
+
+export type permListUnresolvedPrincipalsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permListUnresolvedPrincipalsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permListUnresolvedPrincipalsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permListUnresolvedPrincipalsResponseSuccess = (permListUnresolvedPrincipalsResponse200) & {
+  headers: Headers;
+};
+export type permListUnresolvedPrincipalsResponseError = (permListUnresolvedPrincipalsResponse401 | permListUnresolvedPrincipalsResponse403 | permListUnresolvedPrincipalsResponse500) & {
+  headers: Headers;
+};
+
+export type permListUnresolvedPrincipalsResponse = (permListUnresolvedPrincipalsResponseSuccess | permListUnresolvedPrincipalsResponseError)
+
+export const getPermListUnresolvedPrincipalsUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/unresolved-principals`
+}
+
+/**
+ * @summary Every stored grant principal and rule exemption whose ref matches nobody
+(J-F3 Task 2, design R5/R6). Writes refuse such a ref since J-F3 Task 1; a
+row stored before that, or naming a principal deleted since, is listed
+here, never rewritten.
+ */
+export const permListUnresolvedPrincipals = async ( options?: Parameters<typeof customInstance>[1]): Promise<permListUnresolvedPrincipalsResponse> => {
+
+  return customInstance<permListUnresolvedPrincipalsResponse>(getPermListUnresolvedPrincipalsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermListUnresolvedPrincipalsQueryKey = () => {
+    return [
+    `/api/control-plane/perm/unresolved-principals`
+    ] as const;
+    }
+
+
+export const getPermListUnresolvedPrincipalsQueryOptions = <TData = Awaited<ReturnType<typeof permListUnresolvedPrincipals>>, TError = ErrorBody>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListUnresolvedPrincipals>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermListUnresolvedPrincipalsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permListUnresolvedPrincipals>>> = ({ signal }) => permListUnresolvedPrincipals({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permListUnresolvedPrincipals>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermListUnresolvedPrincipalsQueryResult = NonNullable<Awaited<ReturnType<typeof permListUnresolvedPrincipals>>>
+export type PermListUnresolvedPrincipalsQueryError = ErrorBody
+
+
+export function usePermListUnresolvedPrincipals<TData = Awaited<ReturnType<typeof permListUnresolvedPrincipals>>, TError = ErrorBody>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListUnresolvedPrincipals>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permListUnresolvedPrincipals>>,
+          TError,
+          Awaited<ReturnType<typeof permListUnresolvedPrincipals>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermListUnresolvedPrincipals<TData = Awaited<ReturnType<typeof permListUnresolvedPrincipals>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListUnresolvedPrincipals>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permListUnresolvedPrincipals>>,
+          TError,
+          Awaited<ReturnType<typeof permListUnresolvedPrincipals>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermListUnresolvedPrincipals<TData = Awaited<ReturnType<typeof permListUnresolvedPrincipals>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListUnresolvedPrincipals>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Every stored grant principal and rule exemption whose ref matches nobody
+(J-F3 Task 2, design R5/R6). Writes refuse such a ref since J-F3 Task 1; a
+row stored before that, or naming a principal deleted since, is listed
+here, never rewritten.
+ */
+
+export function usePermListUnresolvedPrincipals<TData = Awaited<ReturnType<typeof permListUnresolvedPrincipals>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListUnresolvedPrincipals>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermListUnresolvedPrincipalsQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+

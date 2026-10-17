@@ -5,6 +5,10 @@ use egret_auth::groups::GroupRepo;
 use egret_auth::users::UserRepo;
 use egret_metastore::Db;
 
+#[path = "support/recorder.rs"]
+mod recorder;
+use recorder::{Call, Recorder};
+
 async fn connect() -> Option<Db> {
     let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
@@ -24,6 +28,7 @@ async fn group_local_crud_and_membership() {
     };
     let groups = GroupRepo::new(db.clone());
     let users = UserRepo::new(db.clone());
+    let rc = Recorder::default();
 
     // Create a local group.
     let name = uniq("t_group");
@@ -41,10 +46,10 @@ async fn group_local_crud_and_membership() {
         .insert_local(&format!("{}@test.local", uniq("u2")), "U2", "x")
         .await
         .unwrap();
-    groups.add_member(group_id, u1).await.unwrap();
-    groups.add_member(group_id, u2).await.unwrap();
+    groups.add_member(group_id, u1, &rc).await.unwrap();
+    groups.add_member(group_id, u2, &rc).await.unwrap();
     // Idempotent: re-adding does not error or duplicate.
-    groups.add_member(group_id, u1).await.unwrap();
+    groups.add_member(group_id, u1, &rc).await.unwrap();
 
     let mut members = groups.members_of(group_id).await.unwrap();
     members.sort();
@@ -63,7 +68,7 @@ async fn group_local_crud_and_membership() {
     assert_eq!(*count, 2);
 
     // Remove one member -> count drops to 1.
-    groups.remove_member(group_id, u1).await.unwrap();
+    groups.remove_member(group_id, u1, &rc).await.unwrap();
     assert_eq!(groups.members_of(group_id).await.unwrap(), vec![u2.0]);
     let with_meta = groups.list_with_meta().await.unwrap();
     let (_, count) = with_meta
@@ -74,11 +79,11 @@ async fn group_local_crud_and_membership() {
 
     // Rename the local group.
     let new_name = uniq("t_group_renamed");
-    let rows = groups.rename(group_id, &new_name).await.unwrap();
+    let rows = groups.rename(group_id, &new_name, &rc).await.unwrap();
     assert_eq!(rows, 1);
 
     // Delete the local group.
-    let rows = groups.delete_local(group_id).await.unwrap();
+    let rows = groups.delete_local(group_id, &rc).await.unwrap();
     assert_eq!(rows, 1);
     assert!(groups
         .list_with_meta()
@@ -105,13 +110,19 @@ async fn rename_and_delete_are_noop_on_oidc_group() {
         return;
     };
     let groups = GroupRepo::new(db.clone());
+    let rc = Recorder::default();
 
     let name = uniq("t_oidc_group");
     let group_id = groups.upsert_oidc_group(&name).await.unwrap();
 
     // Neither rename nor delete affects an oidc-sourced group.
-    assert_eq!(groups.rename(group_id, "renamed").await.unwrap(), 0);
-    assert_eq!(groups.delete_local(group_id).await.unwrap(), 0);
+    assert_eq!(groups.rename(group_id, "renamed", &rc).await.unwrap(), 0);
+    assert_eq!(groups.delete_local(group_id, &rc).await.unwrap(), 0);
+    assert_eq!(
+        rc.take(),
+        Vec::<Call>::new(),
+        "a write that changes nothing locks and compiles nothing"
+    );
 }
 
 #[tokio::test]
@@ -130,8 +141,80 @@ async fn groups_of_user_returns_membership() {
         .insert_local(&format!("{}@test.local", uniq("gn_user")), "GnUser", "x")
         .await
         .unwrap();
-    groups.add_member(group_id, user_id).await.unwrap();
+    groups
+        .add_member(group_id, user_id, &Recorder::default())
+        .await
+        .unwrap();
 
     let names = groups.groups_of_user(user_id).await.unwrap();
     assert_eq!(names, vec![name]);
+}
+
+/// J-F3 Task 1b: every `GroupRepo` writer of `user_groups` calls the recompile
+/// port — locking the affected group names BEFORE its write, recompiling
+/// after — and a write that changes no row recompiles nothing. A REMOVE that
+/// skipped the port would leave the ex-member named in every policy the group
+/// reaches; the compiled effect is asserted in
+/// `egret-perm-compile/tests/group_grants.rs`, this pins the call.
+#[tokio::test]
+async fn every_membership_writer_calls_the_recompile_port() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let groups = GroupRepo::new(db.clone());
+    let users = UserRepo::new(db.clone());
+    let rc = Recorder::default();
+
+    let name = uniq("t_port_group");
+    let gid = groups.create_local(&name).await.unwrap();
+    let uid = users
+        .insert_local(&format!("{}@test.local", uniq("port")), "P", "x")
+        .await
+        .unwrap();
+    assert_eq!(
+        rc.take(),
+        Vec::<Call>::new(),
+        "creating a group moves no member"
+    );
+
+    groups.add_member(gid, uid, &rc).await.unwrap();
+    assert_eq!(
+        rc.take(),
+        vec![Call::Lock(vec![name.clone()]), Call::Recompile]
+    );
+    groups.add_member(gid, uid, &rc).await.unwrap();
+    assert_eq!(
+        rc.take(),
+        vec![Call::Lock(vec![name.clone()])],
+        "an idempotent re-add writes no row, so nothing is recompiled"
+    );
+
+    groups.remove_member(gid, uid, &rc).await.unwrap();
+    assert_eq!(
+        rc.take(),
+        vec![Call::Lock(vec![name.clone()]), Call::Recompile]
+    );
+
+    groups.add_member(gid, uid, &rc).await.unwrap();
+    rc.take();
+    let renamed = uniq("t_port_renamed");
+    assert_eq!(groups.rename(gid, &renamed, &rc).await.unwrap(), 1);
+    let mut both = vec![name.clone(), renamed.clone()];
+    both.sort();
+    assert_eq!(
+        rc.take(),
+        vec![Call::Lock(both), Call::Recompile],
+        "a rename moves the members off the old name AND onto the new one"
+    );
+
+    users.hard_delete(uid, &rc).await.unwrap();
+    assert_eq!(
+        rc.take(),
+        vec![Call::Lock(vec![renamed.clone()]), Call::Recompile],
+        "deleting a user removes them from every group they were in"
+    );
+
+    assert_eq!(groups.delete_local(gid, &rc).await.unwrap(), 1);
+    assert_eq!(rc.take(), vec![Call::Lock(vec![renamed]), Call::Recompile]);
 }

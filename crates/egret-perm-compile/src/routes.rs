@@ -80,6 +80,7 @@ use sqlx::{Postgres, Transaction};
 use crate::attribution::{attribute_policy_name, PolicyAttribution};
 use crate::explain_wire::{WireDecision, WireEngineType, WireMaskDecision};
 use crate::grants::{resource_level_names, validate_grant_shape};
+use crate::principal_refs::resolve_principal_refs;
 use crate::rules::validate_rule_shape;
 use crate::trigger::{
     affected_services_for_grant, affected_services_for_rule, engine_type_for, lock_services_in_tx,
@@ -124,6 +125,10 @@ pub fn perm_router() -> Router<PermState> {
             axum::routing::patch(patch_rule).delete(delete_rule),
         )
         .route("/perm/overlaps", get(list_overlaps))
+        .route(
+            "/perm/unresolved-principals",
+            get(list_unresolved_principals),
+        )
         .route("/perm/preview", post(preview))
         .route("/perm/explain", post(explain))
         .route("/perm/compile/{service_id}", post(compile))
@@ -165,6 +170,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         patch_rule,
         delete_rule,
         list_overlaps,
+        list_unresolved_principals,
         preview,
         explain,
         compile,
@@ -176,6 +182,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     components(schemas(
         crate::overlap::StoredOverlap,
         crate::overlap::StoredMember,
+        crate::principal_refs::UnresolvedPrincipal,
         NewGrant,
         NewRule,
         PreviewRequest,
@@ -955,6 +962,28 @@ impl WriteOutcome {
     }
 }
 
+/// Take `egret_auth::groups`' per-group membership lock for every non-`public`
+/// group named in `sets` (include and exclude), sorted — J-F3 Task 1b, fix
+/// round 1. Called by every model write that can newly name a group (grant and
+/// rule create, patch, preview, and the migration) BEFORE its profile locks, so
+/// the lock order is the one `egret_auth::groups`' module doc fixes: group
+/// locks, then profile locks ascending. `public` is never expanded, so no
+/// membership write ever depends on it and it is not locked.
+pub(crate) async fn lock_named_groups<'a>(
+    conn: &mut sqlx::PgConnection,
+    sets: impl IntoIterator<Item = &'a PrincipalSet>,
+) -> Result<(), PermHttpError> {
+    let names: Vec<String> = sets
+        .into_iter()
+        .flat_map(|s| s.include.iter().chain(s.exclude.iter()))
+        .filter(|p| p.kind == PrincipalKind::Group && p.r#ref != egret_perm::PUBLIC_GROUP)
+        .map(|p| p.r#ref.clone())
+        .collect();
+    egret_auth::groups::lock_group_names_via(conn, &names)
+        .await
+        .map_err(PermHttpError::db)
+}
+
 /// Create (`id: None`) or patch in place (`id: Some(_)`) one grant on the
 /// caller's open transaction, recompiling every profile the write can change.
 /// Neither begins nor commits: the caller owns both, which is what lets the
@@ -1016,7 +1045,7 @@ pub(crate) async fn write_grant(
     // The OLD affected set, and the origin the patched row keeps. Read from
     // the stored row BEFORE anything is written — after the UPDATE the old
     // catalog is gone and the profiles it reached are unrecoverable.
-    let (old_services, origin) = match id {
+    let (old_services, origin, old_principals) = match id {
         Some(id) => {
             let Some(old) = get_grant_via(tx, id).await? else {
                 return Err(PermHttpError::NotFound);
@@ -1038,19 +1067,48 @@ pub(crate) async fn write_grant(
                         .into(),
                 ));
             }
-            (affected_services_for_grant(tx, &old).await?, old.origin)
+            // The R6 skip below holds only while the EFFECT is unchanged: a
+            // stored ref that matches nobody fails closed on an allow include
+            // and OPEN on a deny include, so flipping allow -> deny around it
+            // turns a harmless row into a fail-open one. A patch that changes
+            // the effect re-checks every principal.
+            let effect_unchanged = old.effect == body.effect;
+            (
+                affected_services_for_grant(tx, &old).await?,
+                old.origin,
+                effect_unchanged.then_some(old.principals),
+            )
         }
         // The database mints the id on a create; `GrantOrigin::Explicit` is the
         // only origin this surface may write — see `NewGrant`'s doc comment.
-        None => (Vec::new(), GrantOrigin::Explicit),
+        None => (Vec::new(), GrantOrigin::Explicit, None),
     };
+
+    // **Every ref must name someone egret knows** (J-F3) — include AND exclude,
+    // on create, patch and preview alike, since all three are this function. A
+    // ref naming nobody fails closed on an allow include (and on a deny's
+    // exclude, a deny exception) but OPEN on a deny include or an allow's
+    // exclude: the deny or the subtract evaporates and the
+    // compiled policy allows more than the model states, with nothing reporting
+    // it. Before the shape check, because it also rewrites a username to its
+    // stored spelling and the shape check should see what will be stored. See
+    // `crate::principal_refs` for the source of truth per kind.
+    //
+    // **A patch passes the STORED set, and a ref it already holds is not
+    // re-checked** (design R6). PATCH takes the whole body, so every edit
+    // re-sends every principal; without this, a grant that validly excludes
+    // `bob` becomes un-editable — even an actions-only change is a 400 — the
+    // moment `bob` is deleted, though the exclude still denies everyone who
+    // carries the name (nobody). Only while the effect is unchanged (above).
+    let mut principals = body.principals;
+    resolve_principal_refs(tx, "principals", &mut principals, old_principals.as_ref()).await?;
 
     let g = Grant {
         id: id.unwrap_or_else(Uuid::nil),
         effect: body.effect,
         actions: body.actions,
         scope: body.scope,
-        principals: body.principals,
+        principals,
         origin,
     };
     // The recompile below refuses a grant that cannot compile — but only for
@@ -1065,6 +1123,21 @@ pub(crate) async fn write_grant(
 
     let new_services = affected_services_for_grant(tx, &g).await?;
     let services = merge_service_ids(&old_services, &new_services);
+
+    // **J-F3 Task 1b, fix round 1: the per-group lock, before any profile
+    // lock.** A group compiles to its members, and a membership write decides
+    // which profiles to recompile by reading which grants name the group. If
+    // this grant newly names `G` while a REMOVE from `G` is in flight, that
+    // REMOVE may have read "nothing names G" and will recompile nothing, while
+    // this write compiles with the leaver still a member: they stay granted.
+    // Taking `G`'s lock here makes the two serialise — see
+    // `egret_auth::groups`' module doc, "Two concurrent writers", for the
+    // lock order (group locks, then profile locks) this keeps.
+    lock_named_groups(
+        tx,
+        [&g.principals].into_iter().chain(old_principals.as_ref()),
+    )
+    .await?;
 
     // The affected set is derived from the grant's own catalog, so it can be
     // resolved (and locked) before the row is written — and it MUST be, or
@@ -1174,7 +1247,7 @@ pub(crate) async fn write_rule(
         ));
     }
 
-    let old_services = match id {
+    let (old_services, old_exempt) = match id {
         Some(id) => {
             let Some(old) = get_rule_via(tx, id).await? else {
                 return Err(PermHttpError::NotFound);
@@ -1182,17 +1255,27 @@ pub(crate) async fn write_rule(
             // The patch's other end — a rule can be moved between selectors, so
             // see the twin comment in `write_grant`.
             confine_rule_selector(tx, p, &old.selector).await?;
-            affected_services_for_rule(tx, &old).await?
+            (
+                affected_services_for_rule(tx, &old).await?,
+                Some(old.exempt),
+            )
         }
-        None => Vec::new(),
+        None => (Vec::new(), None),
     };
+
+    // Same check, same position and same reason as [`write_grant`]'s: an
+    // `exempt.include` naming nobody masks someone the author meant to exempt,
+    // and an `exempt.exclude` naming nobody would subtract nobody. A patch
+    // passes the stored exemptions for the same R6 reason.
+    let mut exempt = body.exempt;
+    resolve_principal_refs(tx, "exempt", &mut exempt, old_exempt.as_ref()).await?;
 
     let r = Rule {
         id: id.unwrap_or_else(Uuid::nil),
         name: body.name,
         kind: body.kind,
         selector: body.selector,
-        exempt: body.exempt,
+        exempt,
     };
     // Same reason as the grant path: an empty affected set validates nothing.
     validate_rule_shape(&r)?;
@@ -1232,6 +1315,9 @@ pub(crate) async fn write_rule(
     let new_services = affected_services_for_rule(tx, &r).await?;
     let services = merge_service_ids(&old_services, &new_services);
 
+    // The per-group lock, for the same reason and in the same position as in
+    // `write_grant`: an exemption naming a group compiles to its members.
+    lock_named_groups(tx, [&r.exempt].into_iter().chain(old_exempt.as_ref())).await?;
     lock_services_in_tx(tx, &services).await?;
     let id = match id {
         Some(id) => {
@@ -1481,6 +1567,37 @@ async fn list_overlaps(
         .await
         .map_err(PermHttpError::db)?;
     let report = crate::overlap::stored_overlaps_via(&mut tx).await?;
+    tx.rollback().await.map_err(PermHttpError::db)?;
+    Ok(Json(report))
+}
+
+/// Every stored grant principal and rule exemption whose ref matches nobody
+/// (J-F3 Task 2, design R5/R6). Writes refuse such a ref since J-F3 Task 1; a
+/// row stored before that, or naming a principal deleted since, is listed
+/// here, never rewritten.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/unresolved-principals",
+    tag = "perm",
+    responses(
+        (status = 200, description = "Every stored grant principal and rule exemption whose ref matches nobody, ordered by source, id, position, kind and ref. `failsOpen` marks the ones where matching nobody makes the compiled policy allow more than the model states (a deny grant's include, an allow grant's exclude, a rule exemption's exclude; a deny grant's exclude is a deny exception, and naming nobody denies more); an existing group with no members is listed with status `empty` and never fails open", body = Vec<crate::principal_refs::UnresolvedPrincipal>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_unresolved_principals(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+) -> Result<Json<Vec<crate::principal_refs::UnresolvedPrincipal>>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    // One read-only snapshot, as `list_overlaps`.
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(PermHttpError::db)?;
+    let report = crate::principal_refs::unresolved_principals_via(&mut tx).await?;
     tx.rollback().await.map_err(PermHttpError::db)?;
     Ok(Json(report))
 }

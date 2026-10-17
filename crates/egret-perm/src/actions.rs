@@ -236,6 +236,13 @@ pub enum CompileError {
     /// distinct humans onto one engine principal — see the sibling crate
     /// `egret-perm-compile`'s `grants` module doc). Refusing is the only safe move
     /// left to a function that cannot look the real username up.
+    ///
+    /// **The authoring boundary now does the resolution this message asks for**
+    /// (J-F3, `egret-perm-compile`'s `principal_refs` module): every write checks
+    /// each ref against `users.username` and refuses an id or an email naming the
+    /// username to use. This variant stays as defence in depth — a stored row
+    /// written before that check, or a direct caller of the pure compiler, still
+    /// reaches it.
     // The format string can't spell the field name directly — `r#ref` is a
     // raw identifier, and Rust's format-string captures don't support those
     // — so the placeholder is bound explicitly to the field below.

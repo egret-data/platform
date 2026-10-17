@@ -7,6 +7,9 @@ use egret_auth::users::UserRepo;
 use egret_core::{UserId, WorkspaceId};
 use egret_metastore::Db;
 
+#[path = "support/recorder.rs"]
+mod recorder;
+
 async fn connect() -> Option<Db> {
     let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
@@ -1465,6 +1468,7 @@ mod http {
             cookie_key: axum_extra::extract::cookie::Key::generate(),
             impersonations: ImpersonationRepo::new(db.clone()),
             audit: egret_audit::AuditSink::new(16).0,
+            group_recompiler: std::sync::Arc::new(crate::recorder::Recorder::default()),
         }
     }
 

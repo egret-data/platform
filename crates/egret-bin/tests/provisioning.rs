@@ -48,7 +48,11 @@ async fn grant_group_binds_workspace_perms() {
     let groups = GroupRepo::new(db.clone());
     groups.upsert_oidc_group(&group).await.unwrap();
     groups
-        .sync_user_oidc_groups(member_id, std::slice::from_ref(&group))
+        .sync_user_oidc_groups(
+            member_id,
+            std::slice::from_ref(&group),
+            &egret_perm_compile::PermGroupRecompiler,
+        )
         .await
         .unwrap();
 

@@ -365,7 +365,13 @@ async fn delete_user(
         .await?
         .ok_or(CpError::NotFound)?;
     guard_not_last_admin(&st, &p, user_id).await?;
-    st.users.hard_delete(user_id).await?;
+    // J-F3 Task 1b: deleting a user removes them from every group (FK cascade),
+    // and a group compiles to its members — so the policies their groups reach
+    // are recompiled in the delete's own transaction
+    // (`egret_auth::groups`' module doc).
+    st.users
+        .hard_delete(user_id, &egret_perm_compile::PermGroupRecompiler)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -638,7 +644,12 @@ async fn rename_group(
     Json(body): Json<RenameGroupInput>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "group:update").await?;
-    let rows = st.groups.rename(id, &body.name).await?;
+    // J-F3 Task 1b: principals name a group by NAME, so a rename moves its
+    // members from the old name's policies to the new one's — recompiled here.
+    let rows = st
+        .groups
+        .rename(id, &body.name, &egret_perm_compile::PermGroupRecompiler)
+        .await?;
     if rows == 0 {
         return Err(CpError::Conflict(
             "Cannot rename an OIDC-synced group".to_string(),
@@ -666,7 +677,11 @@ async fn delete_group(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "group:delete").await?;
-    let rows = st.groups.delete_local(id).await?;
+    // J-F3 Task 1b: the delete cascades every membership away — recompiled.
+    let rows = st
+        .groups
+        .delete_local(id, &egret_perm_compile::PermGroupRecompiler)
+        .await?;
     if rows == 0 {
         return Err(CpError::Conflict(
             "Cannot delete an OIDC-synced group".to_string(),
@@ -733,7 +748,16 @@ async fn add_group_member(
     Json(body): Json<AddMemberInput>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "group:manage_members").await?;
-    st.groups.add_member(id, UserId(body.user_id)).await?;
+    // J-F3 Task 1b: a group compiles to its members' usernames, so the write
+    // and the recompile of every policy the group reaches share one transaction
+    // (`egret_perm_compile::group_membership`).
+    st.groups
+        .add_member(
+            id,
+            UserId(body.user_id),
+            &egret_perm_compile::PermGroupRecompiler,
+        )
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -758,7 +782,16 @@ async fn remove_group_member(
     Path((id, user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "group:manage_members").await?;
-    st.groups.remove_member(id, UserId(user_id)).await?;
+    // J-F3 Task 1b: the REMOVE direction, the one that fails OPEN when its
+    // recompile is missed — the ex-member stays named in every policy the
+    // group reaches.
+    st.groups
+        .remove_member(
+            id,
+            UserId(user_id),
+            &egret_perm_compile::PermGroupRecompiler,
+        )
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -525,6 +525,7 @@ export * from './undonePolicy';
 export * from './undoRequest';
 export * from './undoResponse';
 export * from './undropBody';
+export * from './unresolvedPrincipal';
 export * from './updateChart';
 export * from './updateColumnBody';
 export * from './updateColumnBodySemanticType';
