@@ -12,8 +12,8 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
  * data to browse.
  */
 vi.mock("@/api/generated/perm/perm");
-// The dialog reads the catalog registry itself now (review M-6).
-vi.mock("@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry");
+// The dialog reads the Governance catalog list itself (review M-6; `policy:read`, not `catalog_registry:read`).
+vi.mock("@/api/generated/control-plane-governance/control-plane-governance");
 vi.mock("@/api/tags");
 vi.mock("@/components/perm/ScopePicker", () => ({
   ScopePicker: ({
@@ -46,24 +46,22 @@ vi.mock("@/components/perm/ScopePicker", () => ({
 }));
 
 import * as permApi from "@/api/generated/perm/perm";
-import * as registry from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
+import * as governance from "@/api/generated/control-plane-governance/control-plane-governance";
 import * as tagsApi from "@/api/tags";
 import { ApiError } from "@/api/client";
-import type { RegistryCatalogDto, Rule } from "@/api/generated/model";
+import type { GovernanceCatalog, Rule } from "@/api/generated/model";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
 
-const CATALOG = {
+const CATALOG: GovernanceCatalog = {
   id: "cat-1",
   name: "wh",
-  kind: "iceberg",
-  config: {},
-  advanced: {},
-  warehouseId: "wh-1",
+  source: "egret",
+  connectorType: "iceberg",
   engines: [],
-  workspaceIds: [],
-  createdAt: "2026-09-01T00:00:00Z",
-  updatedAt: "2026-09-01T00:00:00Z",
-} as unknown as RegistryCatalogDto;
+  warehouseId: "wh-1",
+  warehouseName: "wh",
+  workspaces: [],
+};
 
 const TAGS = [
   {
@@ -115,11 +113,11 @@ function renderDialog(props: Partial<React.ComponentProps<typeof RuleDialog>> = 
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue({
+  vi.mocked(governance.useControlPlaneGovernanceListCatalogs).mockReturnValue({
     data: { status: 200, data: [CATALOG] },
     isLoading: false,
     isError: false,
-  } as unknown as ReturnType<typeof registry.useControlPlaneCatalogRegistryListRegistryCatalogs>);
+  } as unknown as ReturnType<typeof governance.useControlPlaneGovernanceListCatalogs>);
   vi.mocked(tagsApi.useTags).mockReturnValue({ data: TAGS } as unknown as ReturnType<typeof tagsApi.useTags>);
   previewMutateAsync = vi.fn().mockResolvedValue(OK_PREVIEW_ONE);
   createMutateAsync = vi.fn().mockResolvedValue({ status: 201, data: undefined });
@@ -419,8 +417,8 @@ describe("RuleDialog — the fan-out's skip list (SP4b-2 finding 4)", () => {
 
 describe("RuleDialog — it resolves the catalog's name itself (review M-6)", () => {
   /** The path-selector summary must name the catalog, for the same reason
-   *  `GrantDialog`'s preview line must: this is the one place on the surface
-   *  that still needs the registry, so its resolution needs an assertion. */
+   *  `GrantDialog`'s preview line must: the name comes from the Governance
+   *  catalog list, so its resolution needs an assertion. */
   test("the path selector's summary names the catalog, not its uuid", async () => {
     const user = userEvent.setup();
     renderDialog();

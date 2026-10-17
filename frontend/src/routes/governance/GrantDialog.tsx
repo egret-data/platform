@@ -8,7 +8,7 @@ import {
   usePermPatchGrant,
   usePermPreview,
 } from "@/api/generated/perm/perm";
-import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
+import { useControlPlaneGovernanceListCatalogs } from "@/api/generated/control-plane-governance/control-plane-governance";
 import type { Action, Effect, Grant, NewGrant, PreviewResponse, PrincipalSet, Scope } from "@/api/generated/model";
 import { ApiError } from "@/api/client";
 import { PrincipalPicker } from "@/components/perm/PrincipalPicker";
@@ -51,15 +51,18 @@ export function GrantDialog({
   open,
   onOpenChange,
   existing,
+  initialScope,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   existing?: Grant | null;
+  /** Where a NEW grant starts (the object page's Grant access); ignored when `existing` is set. */
+  initialScope?: Scope;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
-        {open && <GrantForm existing={existing} onOpenChange={onOpenChange} />}
+        {open && <GrantForm existing={existing} initialScope={initialScope} onOpenChange={onOpenChange} />}
       </DialogContent>
     </Dialog>
   );
@@ -67,26 +70,26 @@ export function GrantDialog({
 
 function GrantForm({
   existing,
+  initialScope,
   onOpenChange,
 }: {
   existing?: Grant | null;
+  initialScope?: Scope;
   onOpenChange: (open: boolean) => void;
 }) {
-  // The catalog registry is read HERE, not passed down from the list page
+  // The catalog list is read HERE, not passed down from the list page
   // (review M-6): only this dialog needs it — the list's sentence comes off
-  // `GrantView.catalog_name` — and a `policy:read` reader who can never open
-  // this dialog should not eat a guaranteed 403 on every page load.
-  // `ScopePicker` below issues the same query, which react-query de-duplicates
-  // by key, so this costs no extra request.
-  const catalogsQ = useControlPlaneCatalogRegistryListRegistryCatalogs(undefined, {
-    query: { retry: false },
-  });
+  // `GrantView.catalog_name`. It is the Governance list (`policy:read` or
+  // `tag:read`), not the registry's (`catalog_registry:read`), so a steward
+  // can name a catalog. `ScopePicker` below issues the same query, which
+  // react-query de-duplicates by key, so this costs no extra request.
+  const catalogsQ = useControlPlaneGovernanceListCatalogs({ query: { retry: false } });
   const catalogs = catalogsQ.data?.status === 200 ? catalogsQ.data.data : [];
   const catalogName = (id: string) => catalogs.find((c) => c.id === id)?.name ?? id;
 
   const [effect, setEffect] = useState<Effect>(existing?.effect ?? "allow");
   const [actions, setActions] = useState<Action[]>(existing?.actions ?? ["read"]);
-  const [scope, setScope] = useState<Scope>(existing?.scope ?? EMPTY_SCOPE);
+  const [scope, setScope] = useState<Scope>(existing ? existing.scope : (initialScope ?? EMPTY_SCOPE));
   const [principals, setPrincipals] = useState<PrincipalSet>(existing?.principals ?? EMPTY_PRINCIPALS);
 
   const [preview, setPreview] = useState<PreviewResponse | null>(null);

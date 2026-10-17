@@ -1,17 +1,21 @@
+import { useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   useControlPlaneGovernanceBrowse,
   useControlPlaneGovernanceListCatalogs,
   useControlPlaneGovernanceObjectTags,
 } from "@/api/generated/control-plane-governance/control-plane-governance";
+import type { GrantView, Scope } from "@/api/generated/model";
+import { GrantDialog } from "@/routes/governance/GrantDialog";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import type { NodeKind } from "@/routes/governance/data/CatalogTree";
-import { ObjectHeader, type HeaderTags } from "@/routes/governance/data/ObjectHeader";
+import { ObjectHeader, type HeaderKind, type HeaderTags } from "@/routes/governance/data/ObjectHeader";
 import { ObjectTabs, type ObjectLevel } from "@/routes/governance/data/ObjectTabs";
 import { assignmentsOf, enginesOf, type CatalogState, type ObjectKind, type TagsResult } from "@/routes/governance/data/objectData";
-import { urlToPath } from "@/routes/governance/data/objectPath";
+import { urlToPath, type ObjectPath } from "@/routes/governance/data/objectPath";
 import { DetailsTab } from "@/routes/governance/data/tabs/DetailsTab";
 import { OverviewTab } from "@/routes/governance/data/tabs/OverviewTab";
+import { PermissionsTab } from "@/routes/governance/data/tabs/PermissionsTab";
 
 const OBJECT_KINDS: readonly string[] = ["table", "view", "materialized_view"] satisfies ObjectKind[];
 
@@ -28,7 +32,11 @@ const OBJECT_KINDS: readonly string[] = ["table", "view", "materialized_view"] s
  * the Governance catalog list (the catalog's id, warehouse, workspaces and
  * engine names); browse at this level (the engines' details, and what the
  * Overview lists); browse at the parent schema, for an object, which is
- * where its kind comes from; and, for an object, its tags.
+ * where its kind comes from; and, for an object in an egret catalog, its
+ * tags (no other catalog can carry them, F9, so none is asked).
+ *
+ * The page owns the one `GrantDialog`: the header's Grant access opens it on
+ * this object's scope, the Permissions tab's Edit on an existing grant.
  */
 export default function ObjectPage() {
   const [search] = useSearchParams();
@@ -64,7 +72,7 @@ export default function ObjectPage() {
   const tags = useControlPlaneGovernanceObjectTags(
     catalogId,
     { schema: path.schema ?? "", table: path.object ?? "" },
-    { query: { enabled: !!found && level === "object", retry: false } },
+    { query: { enabled: !!found && found.warehouseId != null && level === "object", retry: false } },
   );
 
   let kind: NodeKind | null = level === "object" ? null : level;
@@ -72,28 +80,69 @@ export default function ObjectPage() {
     const item = parent.data.data.items?.find((i) => i.name === path.object);
     if (item && OBJECT_KINDS.includes(item.kind)) kind = item.kind;
   }
+  // An object's kind is "loading" only while something that can still tell it is on its way.
+  const headerKind: HeaderKind =
+    kind ??
+    (catalog.status === "error" || catalog.status === "missing" || parent.isError || parent.data?.status === 200
+      ? "unknown"
+      : "loading");
+
+  const [grantDialog, setGrantDialog] = useState<{ existing: GrantView | null } | null>(null);
+  const onGrant = found ? () => setGrantDialog({ existing: null }) : undefined;
 
   return (
     <div className="space-y-4">
-      <ObjectHeader path={path} kind={kind} engines={enginesOf(catalog, browse)} tags={headerTags(level, catalog, tags)} />
+      <ObjectHeader
+        path={path}
+        kind={headerKind}
+        engines={enginesOf(catalog, browse)}
+        tags={headerTags(level, catalog, tags)}
+        onGrant={onGrant}
+      />
       <ObjectTabs
         level={level}
         panels={{
           overview: <OverviewTab path={path} kind={kind} catalog={catalog} browse={browse} tags={tags} />,
-          permissions: <ElsewhereNote what="grants" to="/governance/data-permissions" page="Data permissions" />,
+          permissions: (
+            <PermissionsTab
+              path={path}
+              kind={kind}
+              catalog={catalog}
+              onEdit={(existing) => setGrantDialog({ existing })}
+            />
+          ),
           masks: <ElsewhereNote what="mask and row-filter rules" to="/governance/mask-filter-rules" page="Mask & filter rules" />,
           lineage: <p className="text-sm text-muted-foreground">Lineage is not shown on this page yet.</p>,
           details: <DetailsTab path={path} catalog={catalog} />,
         }}
       />
+      <GrantDialog
+        open={grantDialog !== null}
+        onOpenChange={(open) => {
+          if (!open) setGrantDialog(null);
+        }}
+        existing={grantDialog?.existing ?? null}
+        initialScope={found ? scopeOf(path, found.id) : undefined}
+      />
     </div>
   );
+}
+
+/** The grant scope that names exactly this object (never its column). */
+function scopeOf(path: ObjectPath, catalogId: string): Scope {
+  const scope: Scope = { catalog_id: catalogId };
+  if (path.schema !== undefined) {
+    scope.schema = path.schema;
+    if (path.object !== undefined) scope.table = path.object;
+  }
+  return scope;
 }
 
 /** The header's tag section: only an object in an egret catalog has one (tags are table and column only). */
 function headerTags(level: ObjectLevel, catalog: CatalogState, tags: TagsResult): HeaderTags {
   if (level !== "object") return null;
   if (catalog.status === "error" || catalog.status === "missing") return null;
+  if (catalog.status === "ok" && catalog.catalog.warehouseId == null) return null;
   if (tags.isError) return { state: "error" };
   const assignments = assignmentsOf(tags);
   if (assignments === null) return null;

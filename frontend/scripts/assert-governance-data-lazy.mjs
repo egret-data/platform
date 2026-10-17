@@ -35,6 +35,8 @@ const MARKERS = [
   ["src/routes/governance/data/tabs/OverviewTab.tsx", "egret has no security mode or lineage recorded for this object."],
   // A catalog with no warehouse.
   ["src/routes/governance/data/tabs/DetailsTab.tsx", "None: not an egret catalog"],
+  // `GRANTS_NEED_POLICY_READ`.
+  ["src/routes/governance/data/tabs/PermissionsTab.tsx", "Reading grants needs the policy:read permission"],
 ];
 
 const entry = entryChunkName(DIST);

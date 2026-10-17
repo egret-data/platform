@@ -9,7 +9,7 @@ import {
   usePermPreview,
 } from "@/api/generated/perm/perm";
 import type { NewRule, PreviewResponse, PrincipalSet, Rule, RuleKind, Scope, Selector } from "@/api/generated/model";
-import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
+import { useControlPlaneGovernanceListCatalogs } from "@/api/generated/control-plane-governance/control-plane-governance";
 import { ApiError } from "@/api/client";
 import { type Tag, useTags } from "@/api/tags";
 import { PrincipalPicker } from "@/components/perm/PrincipalPicker";
@@ -193,9 +193,7 @@ function RuleForm({
 }) {
   // Read here rather than passed down — see the same note in `GrantDialog`
   // (review M-6).
-  const catalogsQ = useControlPlaneCatalogRegistryListRegistryCatalogs(undefined, {
-    query: { retry: false },
-  });
+  const catalogsQ = useControlPlaneGovernanceListCatalogs({ query: { retry: false } });
   const catalogs = catalogsQ.data?.status === 200 ? catalogsQ.data.data : [];
   const catalogName = (id: string) => catalogs.find((c) => c.id === id)?.name ?? id;
 

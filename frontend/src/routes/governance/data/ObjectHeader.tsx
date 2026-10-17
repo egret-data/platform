@@ -17,13 +17,25 @@ export type HeaderTags = null | { state: "loading" } | { state: "error" } | { st
  */
 export const TAGS_FAILED = "Tags could not be loaded.";
 
+/** The kind of an object its schema's listing could not tell. */
+export const KIND_UNKNOWN = "Kind unknown";
+
 /**
- * Each action, the permission its own route requires, and its label. Add tag
+ * The header's kind: an object's comes from its schema's listing, so it is
+ * `"loading"` until that answers and `"unknown"` when it cannot (the listing
+ * failed, was not listed, or does not name the object).
+ */
+export type HeaderKind = NodeKind | "loading" | "unknown";
+
+/**
+ * Each action, the permission its own route requires, and its label. Grant
+ * access writes `POST /perm/grants`, gated on `policy:update`
+ * (`crates/egret-perm-compile/src/routes.rs`, `create_grant`). Add tag
  * writes `PUT …/resource-tags`, gated on `catalog_registry:update`
  * (`crates/egret-bi/src/catalog_tags.rs`, `WAREHOUSE_WRITE`).
  */
 const ACTIONS = [
-  { key: "onGrant", permission: "policy:create", label: "Grant access", icon: KeyRound },
+  { key: "onGrant", permission: "policy:update", label: "Grant access", icon: KeyRound },
   { key: "onAddTag", permission: "catalog_registry:update", label: "Add tag", icon: TagIcon },
   { key: "onWhoCanRead", permission: "policy:read", label: "Who can read?", icon: UserSearch },
 ] as const;
@@ -53,8 +65,7 @@ export function ObjectHeader({
   onWhoCanRead,
 }: {
   path: ObjectPath;
-  /** `null` while the kind is not known (the parent level is loading or could not be listed). */
-  kind: NodeKind | null;
+  kind: HeaderKind;
   engines: EngineInfo[];
   tags: HeaderTags;
   onGrant?: () => void;
@@ -65,7 +76,7 @@ export function ObjectHeader({
   const handlers = { onGrant, onAddTag, onWhoCanRead };
   const actions = ACTIONS.filter((a) => handlers[a.key] && can(a.permission));
   const name = path.object ?? path.schema ?? path.catalog;
-  const kindMeta = kind ? KIND_ICON[kind] : null;
+  const kindMeta = kind === "loading" || kind === "unknown" ? null : KIND_ICON[kind];
 
   return (
     <section aria-label="Object" className="space-y-3 border-b border-border pb-4">
@@ -78,7 +89,14 @@ export function ObjectHeader({
                 <kindMeta.icon aria-hidden className="size-4" />
                 {kindMeta.label}
               </span>
-            ) : null}
+            ) : kind === "loading" ? (
+              <>
+                <Skeleton className="h-4 w-16" />
+                <span className="sr-only">Loading kind</span>
+              </>
+            ) : (
+              <span>{KIND_UNKNOWN}</span>
+            )}
             <span className="font-mono text-xs break-all">{dottedPath(path)}</span>
           </div>
         </div>

@@ -5,7 +5,8 @@ import type { BrowseResponse, GovernanceCatalog } from "@/api/generated/model";
  * A fake of the endpoints the Data area reads: `GET …/governance/catalogs`,
  * `GET …/governance/browse/{catalog_id}?schema=&table=`, and an object's
  * `…/governance/tags/{catalog_id}` and `…/governance/lineage/{catalog_id}`
- * (both `?schema=&table=`). Answers go
+ * (both `?schema=&table=`), and the perm routes the Permissions tab and
+ * `GrantDialog` call (`…/perm/grants`, `…/perm/grants/{id}`, `…/perm/preview`). Answers go
  * through the real generated client and `apiFetch`, so a test sees exactly
  * what the page sees, including a 403 as an `ApiError`.
  */
@@ -48,6 +49,12 @@ export interface FakeData {
   tags?: Record<string, Answer>;
   /** Keyed `catalogId|schema|table`. A key with no answer is a 404. */
   lineage?: Record<string, Answer>;
+  /** `GET …/perm/grants`. A list is answered in order, its last answer repeating; none is a 404. */
+  grants?: Answer | Answer[];
+  /** `POST …/perm/preview`; none is a 404. */
+  preview?: Answer;
+  /** Every grant write (`POST …/perm/grants`, `PATCH`/`DELETE …/perm/grants/{id}`); default 200 `{}`. */
+  grantWrite?: Answer;
 }
 
 /** What the fake was asked, as keys of {@link FakeData}. */
@@ -55,6 +62,8 @@ export interface DataCalls {
   browseCalls: string[];
   tagCalls: string[];
   lineageCalls: string[];
+  /** `METHOD /perm/...`, with each body that was sent. */
+  permCalls: { call: string; body?: unknown }[];
 }
 
 const json = (status: number, body: unknown) =>
@@ -65,9 +74,10 @@ export function serveData(data: FakeData): DataCalls {
   const browseCalls: string[] = [];
   const tagCalls: string[] = [];
   const lineageCalls: string[] = [];
+  const permCalls: DataCalls["permCalls"] = [];
   vi.stubGlobal(
     "fetch",
-    vi.fn((input: RequestInfo | URL) => {
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), "http://localhost");
       const reply = (a: Answer | undefined) =>
         a === "never"
@@ -95,8 +105,23 @@ export function serveData(data: FakeData): DataCalls {
         lineageCalls.push(key);
         return reply(data.lineage?.[key]);
       }
+      const perm = /^\/api\/control-plane(\/perm\/.+)$/.exec(url.pathname);
+      if (perm) {
+        const method = (init?.method ?? "GET").toUpperCase();
+        const call = `${method} ${perm[1]}`;
+        permCalls.push({ call, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined });
+        if (call === "GET /perm/grants") {
+          const asked = permCalls.filter((c) => c.call === call).length - 1;
+          const a = data.grants;
+          return reply(Array.isArray(a) ? a[Math.min(asked, a.length - 1)] : a);
+        }
+        if (call === "POST /perm/preview") return reply(data.preview);
+        if (/^(POST \/perm\/grants|(PATCH|DELETE) \/perm\/grants\/[^/]+)$/.test(call)) {
+          return reply(data.grantWrite ?? { status: 200, body: {} });
+        }
+      }
       return Promise.reject(new Error(`no fake for ${url.pathname}`));
     }),
   );
-  return { browseCalls, tagCalls, lineageCalls };
+  return { browseCalls, tagCalls, lineageCalls, permCalls };
 }

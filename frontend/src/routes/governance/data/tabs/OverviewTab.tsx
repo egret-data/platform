@@ -61,7 +61,7 @@ export function OverviewTab({
             ) : null}
             <Section title="Columns">
               <Level browse={browse} what="columns">
-                {(body) => <Columns columns={body.columns ?? []} tags={tags} />}
+                {(body) => <Columns columns={body.columns ?? []} tags={tags} taggable={c.warehouseId != null} />}
               </Level>
             </Section>
           </div>
@@ -219,17 +219,26 @@ function ObjectList({ path, items }: { path: ObjectPath; items: NonNullable<Brow
  * A table's columns in the order the source returns them. The Tags column
  * shows each column's own tags, then the tags on its table marked "from
  * table" (a column inherits its table's tags). It is left out when the
- * catalog cannot carry tags, and says so when the tags could not be read.
+ * catalog cannot carry tags (`taggable` false: not an egret catalog, whose
+ * tags the page never asks for), and says so when the tags could not be read.
  */
-function Columns({ columns, tags }: { columns: NonNullable<BrowseResponse["columns"]>; tags: TagsResult }) {
+function Columns({
+  columns,
+  tags,
+  taggable,
+}: {
+  columns: NonNullable<BrowseResponse["columns"]>;
+  tags: TagsResult;
+  taggable: boolean;
+}) {
   if (columns.length === 0) return <EmptyState icon={Columns3} title="No columns returned" />;
   const assignments = assignmentsOf(tags);
-  const showTags = assignments !== null;
+  const showTags = taggable && assignments !== null;
   const onTable = (assignments ?? []).filter((a) => a.column === "");
   const onColumn = (name: string) => (assignments ?? []).filter((a) => a.column === name);
   return (
     <div className="space-y-2">
-      {tags.isError ? <TabError what="tags" onRetry={() => void tags.refetch()} /> : null}
+      {showTags && tags.isError ? <TabError what="tags" onRetry={() => void tags.refetch()} /> : null}
       <Table aria-label="Columns">
         <TableHeader>
           <TableRow>

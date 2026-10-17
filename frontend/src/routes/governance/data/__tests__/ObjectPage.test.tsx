@@ -4,12 +4,15 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Me } from "@/api/hooks";
-import type { BrowseResponse, ObjectLineage, ObjectTags } from "@/api/generated/model";
+import type { BrowseResponse, GrantView, ObjectLineage, ObjectTags, Scope } from "@/api/generated/model";
 import { AuthContext } from "@/auth/useAuth";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import DataRoutes from "@/routes/governance/data/DataRoutes";
 import { ObjectHeader } from "@/routes/governance/data/ObjectHeader";
 import { browseItems, browseNotListed, catalog, serveData, type FakeData } from "./fakeDataServer";
+
+const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
+vi.mock("sonner", () => ({ toast }));
 
 const ICE = {
   ...catalog("c-ice", "ice", "iceberg", true),
@@ -187,18 +190,48 @@ describe("ObjectHeader", () => {
     expect(tagCalls).toEqual([]);
   });
 
-  it("shows no tag section for an object in a catalog that is not egret's", async () => {
-    serveData(
+  it("shows no tag section for an object in a catalog that is not egret's, and never asks for its tags", async () => {
+    const { tagCalls } = serveData(
       fixture({
         browse: { "c-pg|s": ok(withEngines(browseItems([{ name: "t", kind: "table" }]))), "c-pg|s|t": ok(ORDERS_COLUMNS) },
-        tags: { "c-pg|s|t": ok({ supported: false, assignments: null }) },
       }),
     );
     renderPage("/governance/data/pg/s/t");
     expect(await within(header()).findByText("Table")).toBeInTheDocument();
     await screen.findByRole("cell", { name: "amount" });
     expect(within(header()).queryByRole("list", { name: "Tags" })).not.toBeInTheDocument();
-    expect(within(header()).queryByText(/no tags/i)).not.toBeInTheDocument();
+    expect(within(header()).queryByText(/tag/i)).not.toBeInTheDocument();
+    // The Overview's columns carry no Tags column either, and nothing says "loading".
+    const columns = within(panel()).getByRole("table", { name: "Columns" });
+    expect(within(columns).queryByRole("columnheader", { name: "Tags" })).not.toBeInTheDocument();
+    expect(within(panel()).queryByText("Loading tags")).not.toBeInTheDocument();
+    expect(tagCalls).toEqual([]);
+  });
+
+  it("says the kind is unknown when the schema cannot be listed, and asks for no view facts", async () => {
+    for (const answer of [
+      boom,
+      ok(browseNotListed("engine_error", "The engine refused the listing.")),
+      ok(withEngines(browseItems([{ name: "orders", kind: "table" }]))),
+    ]) {
+      const { lineageCalls } = serveData(fixture({ browse: { ...fixture().browse, "c-ice|sales": answer } }));
+      const { unmount } = renderPage("/governance/data/ice/sales/v_orders");
+      expect(await within(header()).findByText("Kind unknown")).toBeInTheDocument();
+      // The columns still load; the view's facts are never asked for.
+      await within(panel()).findByRole("table", { name: "Columns" });
+      expect(within(header()).queryByText("View")).not.toBeInTheDocument();
+      expect(within(panel()).queryByText("Security and lineage")).not.toBeInTheDocument();
+      expect(lineageCalls).toEqual([]);
+      unmount();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("shows a skeleton for the kind while the schema is being listed", async () => {
+    serveData(fixture({ browse: { ...fixture().browse, "c-ice|sales": "never" } }));
+    renderPage("/governance/data/ice/sales/orders");
+    expect(await within(header()).findByText("Loading kind")).toBeInTheDocument();
+    expect(within(header()).queryByText("Kind unknown")).not.toBeInTheDocument();
   });
 
   it("says when the tags could not be loaded, and keeps the rest of the header", async () => {
@@ -235,8 +268,14 @@ describe("ObjectHeader", () => {
     const buttons = () => screen.queryAllByRole("button").map((b) => b.textContent);
 
     it("shows each action only with its permission", () => {
-      renderHeader({ ...STEWARD, permissions: ["policy:create", "catalog_registry:update", "policy:read"] }, all);
+      renderHeader({ ...STEWARD, permissions: ["policy:update", "catalog_registry:update", "policy:read"] }, all);
       expect(buttons()).toEqual(["Grant access", "Add tag", "Who can read?"]);
+    });
+
+    // `POST /perm/grants` requires `policy:update`, not `policy:create`.
+    it("gates Grant access on policy:update, the permission its route requires", () => {
+      renderHeader({ ...STEWARD, permissions: ["policy:create", "policy:read"] }, all);
+      expect(buttons()).toEqual(["Who can read?"]);
     });
 
     it("hides an action the viewer lacks the permission for", () => {
@@ -245,7 +284,7 @@ describe("ObjectHeader", () => {
     });
 
     it("hides Add tag without catalog_registry:update, even with tag permissions", () => {
-      renderHeader({ ...STEWARD, permissions: ["policy:create", "tag:read", "tag:manage"] }, all);
+      renderHeader({ ...STEWARD, permissions: ["policy:update", "tag:read", "tag:manage"] }, all);
       expect(buttons()).toEqual(["Grant access"]);
     });
 
@@ -261,7 +300,7 @@ describe("ObjectHeader", () => {
 
     it("calls the action's handler", async () => {
       const onGrant = vi.fn();
-      renderHeader({ ...STEWARD, permissions: ["policy:create"] }, { onGrant });
+      renderHeader({ ...STEWARD, permissions: ["policy:update"] }, { onGrant });
       await userEvent.setup().click(screen.getByRole("button", { name: "Grant access" }));
       expect(onGrant).toHaveBeenCalledTimes(1);
     });
@@ -482,5 +521,199 @@ describe("DetailsTab", () => {
     serveData(fixture());
     renderPage("/governance/data/nope?tab=details");
     expect(await screen.findAllByText("No catalog is named “nope”.")).not.toHaveLength(0);
+  });
+});
+
+describe("PermissionsTab", () => {
+  const EDITOR: Me = { ...STEWARD, permissions: ["policy:read", "policy:update"] };
+
+  function g(id: string, scope: Omit<Scope, "catalog_id">, over: Partial<GrantView> = {}, catalogId = "c-ice"): GrantView {
+    return {
+      id,
+      effect: "allow",
+      actions: ["read"],
+      scope: { catalog_id: catalogId, ...scope },
+      principals: { include: [{ kind: "role", ref: "analyst" }], exclude: [] },
+      origin: { type: "explicit" },
+      catalog_name: catalogId === "c-ice" ? "ice" : "pg",
+      ...over,
+    };
+  }
+
+  const ON_CATALOG = g("g-cat", {});
+  const BY_ASSIGNMENT = g(
+    "g-ws",
+    {},
+    { principals: { include: [{ kind: "workspace_members", ref: "w1" }], exclude: [] }, origin: { type: "workspace_assignment", workspace_id: "w1" } },
+  );
+  const ON_SCHEMA = g("g-schema", { schema: "sales" }, { effect: "deny", principals: { include: [{ kind: "group", ref: "contractors" }], exclude: [] } });
+  const ON_TABLE = g("g-table", { schema: "sales", table: "orders" }, { actions: ["read", "write"], principals: { include: [{ kind: "user", ref: "alice" }], exclude: [] } });
+  const ON_COLUMN = g("g-col", { schema: "sales", table: "orders", column: "email" }, { effect: "deny" });
+  const UNRELATED = [
+    g("u-schema", { schema: "hr" }),
+    g("u-table", { schema: "sales", table: "customers" }),
+    g("u-col", { schema: "sales", table: "customers", column: "email" }),
+    g("u-catalog", { schema: "sales", table: "orders" }, {}, "c-pg"),
+  ];
+  const ALL = [ON_COLUMN, ON_TABLE, ...UNRELATED, ON_SCHEMA, BY_ASSIGNMENT, ON_CATALOG];
+
+  const rowsOf = (name: string) =>
+    within(within(panel()).getByRole("table", { name }))
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) => within(r).getAllByRole("cell").map((c) => c.textContent));
+
+  it("lists the grants that reach a table: here, inherited with their level, and on its columns, deny marked", async () => {
+    const { permCalls } = serveData(fixture({ grants: ok(ALL) }));
+    renderPage("/governance/data/ice/sales/orders?tab=permissions", EDITOR);
+    await within(panel()).findByRole("table", { name: "Here" });
+
+    expect(within(panel()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual([
+      "Here",
+      "Inherited",
+      "On columns",
+    ]);
+    expect(rowsOf("Here")).toEqual([["user alice can read and write ice.sales.orders", "Allow", ""]]);
+    // Catalog before schema; the assignment grant names its workspace.
+    expect(rowsOf("Inherited")).toEqual([
+      ["role analyst can read ice.*", "Catalog", "Allow", ""],
+      ["workspace_members w1 can read ice.*Set by workspace assignment · Finance", "Catalog", "Allow", ""],
+      ["group contractors cannot read ice.sales.*", "Schema", "Deny", ""],
+    ]);
+    expect(rowsOf("On columns")).toEqual([["role analyst cannot read ice.sales.orders.email", "email", "Deny", ""]]);
+    // Nothing unrelated, and nothing from another catalog.
+    expect(within(panel()).queryByText(/customers|hr\./)).not.toBeInTheDocument();
+    expect(within(panel()).queryByText(/^role analyst can read pg/)).not.toBeInTheDocument();
+    expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/grants"]);
+  });
+
+  it("gives an explicit grant Edit and Delete, and a workspace-assignment grant neither", async () => {
+    serveData(fixture({ grants: ok([ON_CATALOG, BY_ASSIGNMENT]) }));
+    renderPage("/governance/data/ice?tab=permissions", EDITOR);
+    await within(panel()).findByRole("table", { name: "Here" });
+    expect(within(panel()).getByRole("button", { name: "Edit role analyst can read ice.*" })).toBeInTheDocument();
+    expect(within(panel()).getByRole("button", { name: "Delete role analyst can read ice.*" })).toBeInTheDocument();
+    expect(within(panel()).queryByRole("button", { name: /workspace_members/ })).not.toBeInTheDocument();
+    expect(within(panel()).getByText("Set by workspace assignment · Finance")).toBeInTheDocument();
+  });
+
+  it("offers no Edit or Delete without policy:update", async () => {
+    serveData(fixture({ grants: ok([ON_CATALOG]) }));
+    renderPage("/governance/data/ice?tab=permissions");
+    await within(panel()).findByRole("table", { name: "Here" });
+    expect(within(panel()).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("lists only the grants on a catalog itself, never those below it", async () => {
+    serveData(fixture({ grants: ok(ALL) }));
+    renderPage("/governance/data/ice?tab=permissions", EDITOR);
+    await within(panel()).findByRole("table", { name: "Here" });
+    expect(rowsOf("Here").map((r) => r[0])).toEqual([
+      "role analyst can read ice.*",
+      "workspace_members w1 can read ice.*Set by workspace assignment · Finance",
+    ]);
+    expect(within(panel()).queryByRole("table", { name: "Inherited" })).not.toBeInTheDocument();
+    expect(within(panel()).queryByRole("table", { name: "On columns" })).not.toBeInTheDocument();
+  });
+
+  it("says no grant reaches the object", async () => {
+    serveData(fixture({ grants: ok(UNRELATED) }));
+    renderPage("/governance/data/ice/sales/orders?tab=permissions");
+    expect(await within(panel()).findByText("No grant reaches this table")).toBeInTheDocument();
+  });
+
+  it("says the grants could not be loaded, never that there are none", async () => {
+    serveData(fixture({ grants: boom }));
+    renderPage("/governance/data/ice/sales/orders?tab=permissions");
+    expect(await within(panel()).findByText("The grants could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
+    expect(within(panel()).queryByText(/No grant reaches/)).not.toBeInTheDocument();
+  });
+
+  it("tells a viewer without policy:read why, and never asks for the grants", async () => {
+    const { permCalls } = serveData(fixture({ grants: ok(ALL) }));
+    renderPage("/governance/data/ice/sales/orders?tab=permissions", { ...STEWARD, permissions: ["tag:read"] });
+    expect(
+      await within(panel()).findByText("Reading grants needs the policy:read permission, which this account does not have."),
+    ).toBeInTheDocument();
+    expect(permCalls).toEqual([]);
+  });
+
+  it("opens Grant access on this object's scope", async () => {
+    serveData(fixture({ grants: ok([]) }));
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    await user.click(await within(header()).findByRole("button", { name: "Grant access" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("heading", { name: "New grant" })).toBeInTheDocument();
+    // The picker names the catalog from the Governance list, which policy:read can read.
+    await waitFor(() => expect(within(dialog).getByRole("combobox", { name: "Catalog" })).toHaveTextContent("ice"));
+    expect(within(dialog).getByLabelText("Schema")).toHaveValue("sales");
+    expect(within(dialog).getByLabelText("Table")).toHaveValue("orders");
+    expect(within(dialog).getByLabelText("Column")).toHaveValue("");
+    expect(within(dialog).getByText(/Preview: read on ice\.sales\.orders/)).toBeInTheDocument();
+  });
+
+  it("opens Grant access on a catalog with only the catalog set", async () => {
+    serveData(fixture({ grants: ok([]) }));
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice", EDITOR);
+    await user.click(await within(header()).findByRole("button", { name: "Grant access" }));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => expect(within(dialog).getByRole("combobox", { name: "Catalog" })).toHaveTextContent("ice"));
+    expect(within(dialog).getByLabelText("Schema")).toHaveValue("");
+  });
+
+  it("shows no Grant access until the catalog is known", async () => {
+    serveData(fixture({ catalogs: "never" }));
+    renderPage("/governance/data/ice/sales/orders", EDITOR);
+    expect(within(header()).queryByRole("button", { name: "Grant access" })).not.toBeInTheDocument();
+  });
+
+  it("edits an explicit grant in GrantDialog, then refetches the tab and confirms", async () => {
+    const edited = { ...ON_TABLE, effect: "deny" as const };
+    const { permCalls } = serveData(
+      fixture({
+        grants: [ok([ON_TABLE]), ok([edited])],
+        preview: ok({ affected: [], compile: { services: [], created: 0, updated: 0, deleted: 0, unchanged: 0, skipped: [] } }),
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?tab=permissions", EDITOR);
+    await user.click(await within(panel()).findByRole("button", { name: "Edit user alice can read and write ice.sales.orders" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("heading", { name: "Edit grant" })).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Table")).toHaveValue("orders");
+    await user.click(within(dialog).getByRole("button", { name: "Preview" }));
+    const save = within(dialog).getByRole("button", { name: "Save changes" });
+    await waitFor(() => expect(save).toBeEnabled());
+    await user.click(save);
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(permCalls.find((c) => c.call === "PATCH /perm/grants/g-table")?.body).toEqual({
+      effect: "allow",
+      actions: ["read", "write"],
+      scope: ON_TABLE.scope,
+      principals: ON_TABLE.principals,
+    });
+    expect(toast.success).toHaveBeenCalledWith("Grant updated.");
+    // The tab read the grants again and shows what the server now holds.
+    expect(await within(panel()).findByText("Deny")).toBeInTheDocument();
+    expect(permCalls.filter((c) => c.call === "GET /perm/grants")).toHaveLength(2);
+  });
+
+  it("deletes an explicit grant after confirmation, then refetches the tab and confirms", async () => {
+    const { permCalls } = serveData(fixture({ grants: [ok([ON_TABLE]), ok([])] }));
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?tab=permissions", EDITOR);
+    await user.click(await within(panel()).findByRole("button", { name: "Delete user alice can read and write ice.sales.orders" }));
+
+    const dialog = await screen.findByRole("alertdialog");
+    await user.type(within(dialog).getByRole("textbox"), "delete");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    expect(await within(panel()).findByText("No grant reaches this table")).toBeInTheDocument();
+    expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/grants", "DELETE /perm/grants/g-table", "GET /perm/grants"]);
+    expect(toast.success).toHaveBeenCalledWith("Grant deleted.");
   });
 });

@@ -4,38 +4,39 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 /**
- * The picker reads the GENERATED registry client directly (no hand-written
- * wrapper — see `Catalogs.test.tsx`, the newest list page, for the same
- * pattern), so that is what is mocked here.
+ * The picker reads the GENERATED Governance catalog list directly
+ * (`GET /governance/catalogs`, `policy:read` or `tag:read`), so that is what
+ * is mocked here. The registry list is mocked too, only to prove it is never
+ * read: it needs `catalog_registry:read`, which a steward does not hold.
  */
+vi.mock("@/api/generated/control-plane-governance/control-plane-governance");
 vi.mock("@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry");
 
+import * as governance from "@/api/generated/control-plane-governance/control-plane-governance";
 import * as registry from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
-import type { RegistryCatalogDto, Scope } from "@/api/generated/model";
+import type { GovernanceCatalog, Scope } from "@/api/generated/model";
 import { ApiError } from "@/api/client";
 import { ScopePicker } from "@/components/perm/ScopePicker";
 
-const CATALOGS: RegistryCatalogDto[] = [
+const CATALOGS: GovernanceCatalog[] = [
   {
     id: "11111111-1111-1111-1111-111111111111",
     name: "analytics",
-    kind: "iceberg",
-    config: {} as RegistryCatalogDto["config"],
-    advanced: {} as RegistryCatalogDto["advanced"],
-    warehouseId: "wh-1",
+    source: "egret",
+    connectorType: "iceberg",
     engines: [],
-    workspaceIds: [],
-    createdAt: "2026-09-01T00:00:00Z",
-    updatedAt: "2026-09-01T00:00:00Z",
+    warehouseId: "wh-1",
+    warehouseName: "analytics_wh",
+    workspaces: [],
   },
 ];
 
-function mockCatalogs(rows: RegistryCatalogDto[] = CATALOGS) {
-  vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue({
+function mockCatalogs(rows: GovernanceCatalog[] = CATALOGS) {
+  vi.mocked(governance.useControlPlaneGovernanceListCatalogs).mockReturnValue({
     data: { status: 200, data: rows },
     isLoading: false,
     isError: false,
-  } as unknown as ReturnType<typeof registry.useControlPlaneCatalogRegistryListRegistryCatalogs>);
+  } as unknown as ReturnType<typeof governance.useControlPlaneGovernanceListCatalogs>);
 }
 
 function renderPicker(props: Partial<React.ComponentProps<typeof ScopePicker>> = {}) {
@@ -53,6 +54,12 @@ function renderPicker(props: Partial<React.ComponentProps<typeof ScopePicker>> =
 describe("ScopePicker", () => {
   beforeEach(() => {
     mockCatalogs();
+  });
+
+  test("lists catalogs from the Governance list, never the catalog registry", () => {
+    renderPicker();
+    expect(governance.useControlPlaneGovernanceListCatalogs).toHaveBeenCalled();
+    expect(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).not.toHaveBeenCalled();
   });
 
   test("resolves catalog_id to the catalog's name, not the raw uuid", async () => {
@@ -120,16 +127,18 @@ describe("ScopePicker — a picker that cannot be operated says why (SP4b-2 find
    * "empty" alone tells an administrator nothing about what to fix.
    */
   test("names the missing permission when the catalog list is forbidden", () => {
-    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue({
+    vi.mocked(governance.useControlPlaneGovernanceListCatalogs).mockReturnValue({
       data: undefined,
       isLoading: false,
       isError: true,
       error: new ApiError(403, "forbidden"),
-    } as unknown as ReturnType<typeof registry.useControlPlaneCatalogRegistryListRegistryCatalogs>);
+    } as unknown as ReturnType<typeof governance.useControlPlaneGovernanceListCatalogs>);
     renderPicker();
 
     const note = screen.getByRole("alert");
-    expect(note).toHaveTextContent(/catalog_registry:read/);
+    expect(note).toHaveTextContent(/policy:read/);
+    expect(note).toHaveTextContent(/tag:read/);
+    expect(note).not.toHaveTextContent(/catalog_registry:read/);
     expect(screen.getByLabelText("Catalog")).toHaveAttribute(
       "aria-describedby",
       "scope-catalog-unavailable",
@@ -147,7 +156,7 @@ describe("ScopePicker — a picker that cannot be operated says why (SP4b-2 find
 
     const note = screen.getByRole("alert");
     expect(note).toHaveTextContent(/No catalogs are registered yet/);
-    expect(note).not.toHaveTextContent(/catalog_registry:read/);
+    expect(note).not.toHaveTextContent(/policy:read/);
   });
 
   test("with catalogs to pick, no such note is rendered", () => {
