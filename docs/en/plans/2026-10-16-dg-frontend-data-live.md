@@ -298,3 +298,105 @@ during the run.
   and keystore, cookie jar.
 - **Untouched:** DB `egret`, every `egret-dev-*` container, `egret-w7*-postgres`, ports 5173, 5000 and 8080.
   Free disk at the end: 46 GiB. No product code changed.
+
+## 2. The live browser check of the Data area (Task 12)
+
+Measurement only: defects are recorded here and fixed in a later fix round.
+
+### 2.0 Predictions (committed before anything was observed)
+
+Written from the code at `8d9e4fa8` and §1, before any container of this run was started. A wrong prediction is a
+finding. Nothing in this subsection is edited after observing.
+
+**Setup the predictions are about.** §1.2's stack, rebuilt from `8d9e4fa8` (image `egret-backend:vg-dgfe12`, DB
+`egret_dgfe_live`, containers `vg-*` on `vg-net`). The frontend is this branch's vite dev server on a free port,
+proxying `/api`, `/catalog` and `/oauth` to the `vg-egret` container. The browser is Playwright, logged in once as
+`admin@egret.local`.
+- Engines: `vgtr` (Trino 483, JWT, one coordinator), `vgsr` (StarRocks 4.1.6, Ranger), `vgti` (a Trino row in
+  impersonate mode; no container is needed, because it is never dialled).
+- Catalogs:
+  - `ice` (egret Iceberg): `s.pii(id, ssn, name)`, `s.pub(id, v)`, `s.t(id, v)` and a view `s.v_t`, written as
+    StarRocks `root` before Trino was attached. Attached to `vgtr` and `vgsr`.
+  - `ext` (jdbc/postgresql, database `extdb` on `vg-pg`): attached to `vgtr` and `vgsr`, so browse lists it **on
+    Trino** (Trino is chosen first).
+  - `exsr` (the same database, a second registry catalog): attached to `vgsr` only, so browse lists it **on
+    StarRocks as `root`**.
+  - `exti` (the same database): attached to `vgti` only.
+- `extdb` holds §1's `sales` (`orders`, `v_orders`, `mv_orders`) and `empty_s`. It also holds a schema `system`
+  with a table `t_sys`, and six odd-name schemas, each with one table:
+  `q"s`/`t"q`, ``b`s``/``t`b``, `d.s`/`t.d`, `bs\s`/`t\b`, `MixS`/`MixT`, `sp s`/`t s`.
+- Users: `vcplain` and `vccleared` (member of platform role `vg_clear`, the clearance of tag `vgsecret`), and
+  `vcsteward` (platform role `vg_steward`: `policy:read`, `policy:update`, `tag:read`; no `catalog_registry:*`, not
+  a platform admin). StarRocks users of the same names exist.
+
+**P1. Odd names (review item 1).**
+
+| id | where | prediction |
+|---|---|---|
+| P1a | `ext` on Trino, catalog level | `b`s`, `bs\s`, `d.s`, `empty_s`, `pg_catalog`, `public`, `q"s`, `sales`, `sp s`, and `mixs` (**lowercased** by Trino's JDBC connector, not `MixS`). `system` and `information_schema` are absent |
+| P1b | `ext` on Trino, each odd schema expanded | its one table listed; DESCRIBE answers the columns. Not confident about `bs\s` |
+| P1c | `ext.mixs` on Trino | `notListed` `engine_error` (Trino cannot map the lowercased name back), never an empty branch. Not confident: it may instead list `mixt` |
+| P1d | `exsr` on StarRocks (`root`) | the names exactly as Postgres stores them, `MixS` in mixed case, plus `system`. Each table and its columns list. Not confident about the backtick and the backslash names, which StarRocks passes through its JDBC metadata calls |
+| P1e | URLs | each odd name opens its object page from the tree and survives a reload: the page shows the same name, kind and columns. A name containing `.` cannot be typed in Go to path, because the box splits on dots. `d.s.t.d` opens schema `d`, object `t.d`, or no page, never the right object |
+| P1f | header path | the dotted path `ext.d.s.t.d` is printed as is, with no quoting, so it is ambiguous (display only) |
+
+**P2. `system` in a Postgres catalog (item 2).** Trino `ext`: `system` is **hidden**, a known limit. Go to path
+`ext.system.t_sys` opens the table, and its columns list. StarRocks `exsr`: `system` is listed.
+
+**P3. Impersonate alone (item 3).** Expanding `exti` shows the reason as text, `vgti runs in impersonate mode; egret
+has no identity there that can list catalogs`, with a Go to path link. It is not an empty branch and not an error
+row. The object page's Overview says the same.
+
+**P4. 390 px and dark mode (item 4).**
+- At 390 px the tree is folded behind "Show catalogs" and closes when an object is opened.
+- The header wraps: name, then kind and path, then actions. The tab list scrolls sideways inside itself.
+- The page itself never scrolls sideways, on any tab, in the column panel (a right sheet at most `max-w-md`), in
+  Who can read? or in Add tag.
+- Not confident: a long explain result in Who can read? may push its own table wider than the dialog. The dialog
+  should scroll, not the page.
+- Dark mode: every surface uses tokens, so text stays readable. No white panel appears.
+- Screenshots: 390 px wide (× DPR), never a 16 or 32 px icon crop.
+
+**P5. Keyboard only (item 5).**
+- Tab reaches Go to path, then the filter, then exactly one tree row.
+- Down and Up move between rows. Right expands, or enters an expanded row. Left collapses, or goes to the parent.
+  Enter opens the object. Enter on a `notListed` row puts `catalog.` in Go to path and focuses it.
+- Tabs follow Radix: Left and Right move and select, and the URL's `?tab=` follows.
+- Escape closes the column panel and removes `?column=`. Focus goes back to the column link that opened it. When
+  the panel was opened by URL there is no trigger, so focus goes to the body (not confident).
+
+**P6. `readersIncomplete` (item 6).** `ice.s.v_t` was written before Trino was attached, so egret recorded no lineage
+for it. So the global unknown-lineage count is ≥ 1, and **every** table's Lineage tab shows "This list may be
+incomplete" in every catalog, including tables no view reads.
+
+**P7. Writes from the page against real engines (item 7, spec §2.7).**
+- **Grant.** Grant access on `ice.s.pub`, `read` for `vcplain`. A toast appears, and the Permissions tab shows the
+  grant as "here". Within one poll (5 s), `SELECT * FROM ice.s.pub` as `vcplain` goes from refused to rows on
+  Trino (`Access Denied` → rows) and on StarRocks (`5204` → rows).
+- **Tag.** Add tag `vgsecret` on column `ice.s.pii.ssn` (from the column panel). It appears on the column's row in
+  Overview and in the panel. It does not appear in the header, which shows table tags only. Add tag on the table
+  `ice.s.pub` puts the tag in the header.
+- **Mask.** From Masks & filters on `ice.s.pii`, add a `MASK` rule on column `name` for everyone. A real
+  `SELECT name` as `vcplain` returns masked values (`xxxx`-shaped) on both engines within one poll.
+- **Who can read? on `ice.s.pii` column `ssn`** (`vcplain` and `vccleared` hold `read` on `pii`):
+
+  | user | explain, Trino profile | Trino query | explain, StarRocks profile | StarRocks query |
+  |---|---|---|---|---|
+  | `vccleared` | allowed | real values | allowed | real values |
+  | `vcplain` | denied (the clearance deny) | `Access Denied … [ssn]` | `MASK_NULL`, "returns NULL" (C2) | `NULL` ×N, no error |
+
+**P8. Steward (item 8)**, `vcsteward` with no `catalog_registry:read`.
+- The tree lists all four catalogs from `GET /governance/catalogs`, and the Permissions tab works.
+- Grant access is shown, and GrantDialog's catalog picker lists the four catalogs.
+- Add tag is hidden: it needs `catalog_registry:update`. Who can read? is shown.
+- Data permissions and Mask & filter rules render with Open in Data links.
+
+**P9. Open in Data (item 9).**
+- The `pub` grant's link opens `/governance/data/ice/s/pub?tab=permissions`.
+- The `name` mask rule's link opens `/governance/data/ice/s/pii?column=name&tab=masks`: the Masks tab with the
+  panel open on `name`.
+- A grant on `ice.s.*` stops at the schema.
+
+**P10. Brief steps.** Browsing `ice` lists `s` and its four objects from the warehouse. `v_t` is a View, and its
+Overview shows a security mode and an unknown lineage state. `ext.sales.v_orders` and `mv_orders` show as
+**Table** (§1.1 fact 1). Opening a column opens the panel with its tags, rules, grants and Who can read.
