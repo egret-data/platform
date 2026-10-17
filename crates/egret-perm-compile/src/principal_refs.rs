@@ -566,6 +566,65 @@ fn dedup_keeping_first(list: &mut Vec<Principal>) {
     list.retain(|p| seen.insert((p.kind.as_str(), p.r#ref.clone())));
 }
 
+// ---------------------------------------------------------------------------
+// Stored `user` refs naming a username (People & groups Task 5, spec §4.4)
+// ---------------------------------------------------------------------------
+
+/// One stored grant principal or rule exemption that names a username as a
+/// `user` ref.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+pub struct StoredUserRef {
+    /// `"grant"` or `"rule"`.
+    pub source: String,
+    /// The grant's or the rule's id.
+    pub id: Uuid,
+    /// `"include"` or `"exclude"` (of the grant's `principals`, or of the
+    /// rule's `exempt`).
+    pub position: String,
+    /// The ref as stored, byte for byte.
+    pub r#ref: String,
+}
+
+/// **Every stored grant principal and rule exemption whose `user` ref names
+/// `username`, compared case-insensitively**, ordered by source, id, position
+/// and ref.
+///
+/// Case-insensitively because that is how egret resolves a user ref:
+/// `users.username` is `citext UNIQUE` and [`lookup_user`] matches a ref
+/// through it, so to egret a stored `Bob` names whoever holds `bob` — the next
+/// edit of the row that re-sends it in another position would be canonicalised
+/// to that person. That the compiled policy names the ref byte for byte (and so
+/// `Bob` reaches no engine today) makes it a stale ref, which is exactly what
+/// the caller is looking for.
+pub(crate) async fn stored_user_refs_naming_via(
+    conn: &mut PgConnection,
+    username: &str,
+) -> Result<Vec<StoredUserRef>, PermHttpError> {
+    let rows: Vec<(String, Uuid, String, String)> = sqlx::query_as(
+        "SELECT 'grant' AS source, grant_id AS id, mode::text AS position, ref \
+           FROM perm.grant_principals \
+          WHERE kind = 'user' AND ref::citext = $1::citext \
+         UNION ALL \
+         SELECT 'rule', rule_id, mode::text, ref \
+           FROM perm.rule_exemptions \
+          WHERE kind = 'user' AND ref::citext = $1::citext \
+         ORDER BY source, id, position, ref",
+    )
+    .bind(username)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(PermHttpError::db)?;
+    Ok(rows
+        .into_iter()
+        .map(|(source, id, position, r#ref)| StoredUserRef {
+            source,
+            id,
+            position,
+            r#ref,
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

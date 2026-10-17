@@ -25,24 +25,33 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AllocatedUsername,
   ClassifiedPolicy,
   CompileResponse,
   ErrorBody,
+  ExplainPrincipalRequest,
+  ExplainPrincipalResponse,
   ExplainRequest,
   ExplainResponse,
   GrantView,
+  GroupPrincipal,
   MigrateRequest,
   MigrateResponse,
   NewGrant,
   NewRule,
+  PeoplePage,
+  PermListPeopleParams,
   PreviewRequest,
   PreviewResponse,
   ProfileWarnings,
+  RolePrincipal,
   RuleView,
+  StaleUserRefsConflict,
   StoredOverlap,
   UndoRequest,
   UndoResponse,
-  UnresolvedPrincipal
+  UnresolvedPrincipal,
+  UserPrincipal
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -333,6 +342,104 @@ export const usePermExplain = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getPermExplainMutationOptions(options), queryClient);
+    }
+    export type permExplainPrincipalResponse200 = {
+  data: ExplainPrincipalResponse
+  status: 200
+}
+
+export type permExplainPrincipalResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type permExplainPrincipalResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permExplainPrincipalResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permExplainPrincipalResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permExplainPrincipalResponseSuccess = (permExplainPrincipalResponse200) & {
+  headers: Headers;
+};
+export type permExplainPrincipalResponseError = (permExplainPrincipalResponse400 | permExplainPrincipalResponse401 | permExplainPrincipalResponse403 | permExplainPrincipalResponse500) & {
+  headers: Headers;
+};
+
+export type permExplainPrincipalResponse = (permExplainPrincipalResponseSuccess | permExplainPrincipalResponseError)
+
+export const getPermExplainPrincipalUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/explain/principal`
+}
+
+export const permExplainPrincipal = async (explainPrincipalRequest: ExplainPrincipalRequest, options?: Parameters<typeof customInstance>[1]): Promise<permExplainPrincipalResponse> => {
+
+  return customInstance<permExplainPrincipalResponse>(getPermExplainPrincipalUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(explainPrincipalRequest)
+  }
+);}
+
+
+
+
+
+export const getPermExplainPrincipalMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permExplainPrincipal>>, TError,{data: ExplainPrincipalRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permExplainPrincipal>>, TError,{data: ExplainPrincipalRequest}, TContext> => {
+
+const mutationKey = ['permExplainPrincipal'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permExplainPrincipal>>, {data: ExplainPrincipalRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  permExplainPrincipal(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermExplainPrincipalMutationResult = NonNullable<Awaited<ReturnType<typeof permExplainPrincipal>>>
+    export type PermExplainPrincipalMutationBody = ExplainPrincipalRequest
+    export type PermExplainPrincipalMutationError = ErrorBody
+
+    export const usePermExplainPrincipal = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permExplainPrincipal>>, TError,{data: ExplainPrincipalRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permExplainPrincipal>>,
+        TError,
+        {data: ExplainPrincipalRequest},
+        TContext
+      > => {
+      return useMutation(getPermExplainPrincipalMutationOptions(options), queryClient);
     }
     export type permListGrantsResponse200 = {
   data: GrantView[]
@@ -922,7 +1029,629 @@ export function usePermListOverlaps<TData = Awaited<ReturnType<typeof permListOv
 
 
 
-export type permClassifyServicePoliciesResponse200 = {
+export type permListPeopleResponse200 = {
+  data: PeoplePage
+  status: 200
+}
+
+export type permListPeopleResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type permListPeopleResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permListPeopleResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permListPeopleResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permListPeopleResponseSuccess = (permListPeopleResponse200) & {
+  headers: Headers;
+};
+export type permListPeopleResponseError = (permListPeopleResponse400 | permListPeopleResponse401 | permListPeopleResponse403 | permListPeopleResponse500) & {
+  headers: Headers;
+};
+
+export type permListPeopleResponse = (permListPeopleResponseSuccess | permListPeopleResponseError)
+
+export const getPermListPeopleUrl = (params?: PermListPeopleParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/control-plane/perm/people?${stringifiedParams}` : `/api/control-plane/perm/people`
+}
+
+export const permListPeople = async (params?: PermListPeopleParams, options?: Parameters<typeof customInstance>[1]): Promise<permListPeopleResponse> => {
+
+  return customInstance<permListPeopleResponse>(getPermListPeopleUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermListPeopleQueryKey = (params?: PermListPeopleParams,) => {
+    return [
+    `/api/control-plane/perm/people`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getPermListPeopleQueryOptions = <TData = Awaited<ReturnType<typeof permListPeople>>, TError = ErrorBody>(params?: PermListPeopleParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListPeople>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermListPeopleQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permListPeople>>> = ({ signal }) => permListPeople(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permListPeople>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermListPeopleQueryResult = NonNullable<Awaited<ReturnType<typeof permListPeople>>>
+export type PermListPeopleQueryError = ErrorBody
+
+
+export function usePermListPeople<TData = Awaited<ReturnType<typeof permListPeople>>, TError = ErrorBody>(
+ params: undefined |  PermListPeopleParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListPeople>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permListPeople>>,
+          TError,
+          Awaited<ReturnType<typeof permListPeople>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermListPeople<TData = Awaited<ReturnType<typeof permListPeople>>, TError = ErrorBody>(
+ params?: PermListPeopleParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListPeople>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permListPeople>>,
+          TError,
+          Awaited<ReturnType<typeof permListPeople>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermListPeople<TData = Awaited<ReturnType<typeof permListPeople>>, TError = ErrorBody>(
+ params?: PermListPeopleParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListPeople>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function usePermListPeople<TData = Awaited<ReturnType<typeof permListPeople>>, TError = ErrorBody>(
+ params?: PermListPeopleParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permListPeople>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermListPeopleQueryOptions(params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permReadGroupResponse200 = {
+  data: GroupPrincipal
+  status: 200
+}
+
+export type permReadGroupResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permReadGroupResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permReadGroupResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permReadGroupResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permReadGroupResponseSuccess = (permReadGroupResponse200) & {
+  headers: Headers;
+};
+export type permReadGroupResponseError = (permReadGroupResponse401 | permReadGroupResponse403 | permReadGroupResponse404 | permReadGroupResponse500) & {
+  headers: Headers;
+};
+
+export type permReadGroupResponse = (permReadGroupResponseSuccess | permReadGroupResponseError)
+
+export const getPermReadGroupUrl = (name: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/people/groups/${encodeURIComponent(name)}`
+}
+
+export const permReadGroup = async (name: string, options?: Parameters<typeof customInstance>[1]): Promise<permReadGroupResponse> => {
+
+  return customInstance<permReadGroupResponse>(getPermReadGroupUrl(name),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermReadGroupQueryKey = (name: string,) => {
+    return [
+    `/api/control-plane/perm/people/groups/${encodeURIComponent(name)}`
+    ] as const;
+    }
+
+
+export const getPermReadGroupQueryOptions = <TData = Awaited<ReturnType<typeof permReadGroup>>, TError = ErrorBody>(name: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permReadGroup>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermReadGroupQueryKey(name);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permReadGroup>>> = ({ signal }) => permReadGroup(name, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: name !== null && name !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permReadGroup>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermReadGroupQueryResult = NonNullable<Awaited<ReturnType<typeof permReadGroup>>>
+export type PermReadGroupQueryError = ErrorBody
+
+
+export function usePermReadGroup<TData = Awaited<ReturnType<typeof permReadGroup>>, TError = ErrorBody>(
+ name: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permReadGroup>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permReadGroup>>,
+          TError,
+          Awaited<ReturnType<typeof permReadGroup>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermReadGroup<TData = Awaited<ReturnType<typeof permReadGroup>>, TError = ErrorBody>(
+ name: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permReadGroup>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permReadGroup>>,
+          TError,
+          Awaited<ReturnType<typeof permReadGroup>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermReadGroup<TData = Awaited<ReturnType<typeof permReadGroup>>, TError = ErrorBody>(
+ name: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permReadGroup>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function usePermReadGroup<TData = Awaited<ReturnType<typeof permReadGroup>>, TError = ErrorBody>(
+ name: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permReadGroup>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermReadGroupQueryOptions(name,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permReadRoleResponse200 = {
+  data: RolePrincipal
+  status: 200
+}
+
+export type permReadRoleResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permReadRoleResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permReadRoleResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permReadRoleResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permReadRoleResponseSuccess = (permReadRoleResponse200) & {
+  headers: Headers;
+};
+export type permReadRoleResponseError = (permReadRoleResponse401 | permReadRoleResponse403 | permReadRoleResponse404 | permReadRoleResponse500) & {
+  headers: Headers;
+};
+
+export type permReadRoleResponse = (permReadRoleResponseSuccess | permReadRoleResponseError)
+
+export const getPermReadRoleUrl = (name: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/people/roles/${encodeURIComponent(name)}`
+}
+
+export const permReadRole = async (name: string, options?: Parameters<typeof customInstance>[1]): Promise<permReadRoleResponse> => {
+
+  return customInstance<permReadRoleResponse>(getPermReadRoleUrl(name),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermReadRoleQueryKey = (name: string,) => {
+    return [
+    `/api/control-plane/perm/people/roles/${encodeURIComponent(name)}`
+    ] as const;
+    }
+
+
+export const getPermReadRoleQueryOptions = <TData = Awaited<ReturnType<typeof permReadRole>>, TError = ErrorBody>(name: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permReadRole>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermReadRoleQueryKey(name);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permReadRole>>> = ({ signal }) => permReadRole(name, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: name !== null && name !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permReadRole>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermReadRoleQueryResult = NonNullable<Awaited<ReturnType<typeof permReadRole>>>
+export type PermReadRoleQueryError = ErrorBody
+
+
+export function usePermReadRole<TData = Awaited<ReturnType<typeof permReadRole>>, TError = ErrorBody>(
+ name: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permReadRole>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permReadRole>>,
+          TError,
+          Awaited<ReturnType<typeof permReadRole>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermReadRole<TData = Awaited<ReturnType<typeof permReadRole>>, TError = ErrorBody>(
+ name: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permReadRole>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permReadRole>>,
+          TError,
+          Awaited<ReturnType<typeof permReadRole>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermReadRole<TData = Awaited<ReturnType<typeof permReadRole>>, TError = ErrorBody>(
+ name: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permReadRole>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function usePermReadRole<TData = Awaited<ReturnType<typeof permReadRole>>, TError = ErrorBody>(
+ name: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permReadRole>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermReadRoleQueryOptions(name,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permReadUserResponse200 = {
+  data: UserPrincipal
+  status: 200
+}
+
+export type permReadUserResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permReadUserResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permReadUserResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permReadUserResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permReadUserResponseSuccess = (permReadUserResponse200) & {
+  headers: Headers;
+};
+export type permReadUserResponseError = (permReadUserResponse401 | permReadUserResponse403 | permReadUserResponse404 | permReadUserResponse500) & {
+  headers: Headers;
+};
+
+export type permReadUserResponse = (permReadUserResponseSuccess | permReadUserResponseError)
+
+export const getPermReadUserUrl = (userId: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/people/users/${encodeURIComponent(userId)}`
+}
+
+export const permReadUser = async (userId: string, options?: Parameters<typeof customInstance>[1]): Promise<permReadUserResponse> => {
+
+  return customInstance<permReadUserResponse>(getPermReadUserUrl(userId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermReadUserQueryKey = (userId: string,) => {
+    return [
+    `/api/control-plane/perm/people/users/${encodeURIComponent(userId)}`
+    ] as const;
+    }
+
+
+export const getPermReadUserQueryOptions = <TData = Awaited<ReturnType<typeof permReadUser>>, TError = ErrorBody>(userId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permReadUser>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermReadUserQueryKey(userId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permReadUser>>> = ({ signal }) => permReadUser(userId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: userId !== null && userId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permReadUser>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermReadUserQueryResult = NonNullable<Awaited<ReturnType<typeof permReadUser>>>
+export type PermReadUserQueryError = ErrorBody
+
+
+export function usePermReadUser<TData = Awaited<ReturnType<typeof permReadUser>>, TError = ErrorBody>(
+ userId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permReadUser>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permReadUser>>,
+          TError,
+          Awaited<ReturnType<typeof permReadUser>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermReadUser<TData = Awaited<ReturnType<typeof permReadUser>>, TError = ErrorBody>(
+ userId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permReadUser>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permReadUser>>,
+          TError,
+          Awaited<ReturnType<typeof permReadUser>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermReadUser<TData = Awaited<ReturnType<typeof permReadUser>>, TError = ErrorBody>(
+ userId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permReadUser>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function usePermReadUser<TData = Awaited<ReturnType<typeof permReadUser>>, TError = ErrorBody>(
+ userId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permReadUser>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermReadUserQueryOptions(userId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permAllocateUsernameResponse200 = {
+  data: AllocatedUsername
+  status: 200
+}
+
+export type permAllocateUsernameResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permAllocateUsernameResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permAllocateUsernameResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permAllocateUsernameResponse409 = {
+  data: StaleUserRefsConflict
+  status: 409
+}
+
+export type permAllocateUsernameResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permAllocateUsernameResponseSuccess = (permAllocateUsernameResponse200) & {
+  headers: Headers;
+};
+export type permAllocateUsernameResponseError = (permAllocateUsernameResponse401 | permAllocateUsernameResponse403 | permAllocateUsernameResponse404 | permAllocateUsernameResponse409 | permAllocateUsernameResponse500) & {
+  headers: Headers;
+};
+
+export type permAllocateUsernameResponse = (permAllocateUsernameResponseSuccess | permAllocateUsernameResponseError)
+
+export const getPermAllocateUsernameUrl = (userId: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/people/users/${encodeURIComponent(userId)}/username`
+}
+
+export const permAllocateUsername = async (userId: string, options?: Parameters<typeof customInstance>[1]): Promise<permAllocateUsernameResponse> => {
+
+  return customInstance<permAllocateUsernameResponse>(getPermAllocateUsernameUrl(userId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermAllocateUsernameMutationOptions = <TError = ErrorBody | StaleUserRefsConflict,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permAllocateUsername>>, TError,{userId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permAllocateUsername>>, TError,{userId: string}, TContext> => {
+
+const mutationKey = ['permAllocateUsername'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permAllocateUsername>>, {userId: string}> = (props) => {
+          const {userId} = props ?? {};
+
+          return  permAllocateUsername(userId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermAllocateUsernameMutationResult = NonNullable<Awaited<ReturnType<typeof permAllocateUsername>>>
+
+    export type PermAllocateUsernameMutationError = ErrorBody | StaleUserRefsConflict
+
+    export const usePermAllocateUsername = <TError = ErrorBody | StaleUserRefsConflict,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permAllocateUsername>>, TError,{userId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permAllocateUsername>>,
+        TError,
+        {userId: string},
+        TContext
+      > => {
+      return useMutation(getPermAllocateUsernameMutationOptions(options), queryClient);
+    }
+    export type permClassifyServicePoliciesResponse200 = {
   data: ClassifiedPolicy[]
   status: 200
 }

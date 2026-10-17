@@ -7167,6 +7167,76 @@
         }
       }
     },
+    "/api/control-plane/perm/explain/principal": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "explain_principal",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplainPrincipalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Each member of the group or role (as the compiler reads them) evaluated as a user over the artifacts each engine downloads, exactly as `/perm/explain` answers for that user. At most 200 are evaluated, sorted by username; members with no username are listed as not evaluated. There is no overall verdict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplainPrincipalResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The principal is `public`, a workspace, a user (ask `/perm/explain`), or a group or role no one has; or the target is refused as `/perm/explain` refuses it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission, or a workspace-scoped impersonation overlay asking about a catalog that workspace is not assigned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/grants": {
       "get": {
         "tags": [
@@ -7505,6 +7575,420 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/people": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "list_people",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "`user` | `group` | `role`. Required.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring of a user's name, email or username, or of\na group's or role's name. `%` and `_` are literal.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "username",
+            "in": "query",
+            "description": "Exact, case-insensitive username lookup. `kind=user` only. Finds a\nservice account whatever `includeServiceAccounts` says.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "includeServiceAccounts",
+            "in": "query",
+            "description": "`kind=user` only: list service accounts too. Default false.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size; default 50, at most 200 (a larger value is capped).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Rows to skip; default 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Users, groups or roles, filtered and paged. Users exclude service accounts unless `includeServiceAccounts=true` or `username` is given (a service account row is marked `serviceAccount`), and are sorted by label; groups and roles by name. A role is one row per name, whatever scopes define it. Group member and role holder counts are the compiler's own membership reads",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeoplePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`kind` missing or not `user`, `group` or `role`; `username` or `includeServiceAccounts` with a kind other than `user`; or a negative `limit` or `offset`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/people/groups/{name}": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "read_group",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "The group's name, as a grant principal stores it; `public` for everyone",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The group: source, direct members (as the compiler reads them; service accounts included), the roles and workspaces it holds (egret only), `standsFor` and clearances. `public` answers `isPublic: true` with no members",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupPrincipal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No group has this name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/people/roles/{name}": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "read_role",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "The role's name, across every scope defining it",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The role: scopes, live holders that are users (as the compiler reads them; service accounts included), groups holding it (egret only), `standsFor` and clearances",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RolePrincipal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No role has this name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/people/users/{user_id}": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "read_user",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "The user's id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user: identity, memberships (groups, roles and workspaces, direct and through a group, expired ones included and marked), `standsFor` (every grant principal that reaches the user, and whether engines apply it) and a clearance answer per gated tag, for engines and for egret. A service account is read like any user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserPrincipal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No user has this id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/people/users/{user_id}/username": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "allocate_username",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "The user's id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user's engine username. A user who has none is allocated the name egret would allocate at their first query (`allocated: true`); one who has one is answered it unchanged (`allocated: false`). A service account is allocated like any user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AllocatedUsername"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No user has this id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A stored grant principal or rule exemption already names the username that would be allocated as a `user` ref (compared case-insensitively, as egret resolves user refs). It matches nobody today and would start applying to this person, so nothing is allocated; `refs` lists every such row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaleUserRefsConflict"
                 }
               }
             }
@@ -35866,6 +36350,23 @@
           }
         }
       },
+      "AllocatedUsername": {
+        "type": "object",
+        "description": "The user's engine username, and whether this request allocated it.",
+        "required": [
+          "username",
+          "allocated"
+        ],
+        "properties": {
+          "username": {
+            "type": "string"
+          },
+          "allocated": {
+            "type": "boolean",
+            "description": "`true` only for the one request that allocated it; every other call\n(before or concurrently) answers `false`."
+          }
+        }
+      },
       "AppCapabilities": {
         "type": "object",
         "description": "What the caller may do in this workspace that no single app can answer for.\n\nThe per-row `can_write` / `can_manage` say what the caller may do TO an app.\nCreating one -- and creating, renaming or deleting an app folder, which\negret-bi's folder routes gate on the same action -- is a workspace question:\nan empty list has no row to read it from, and a collaborator holding a write\nshare on one app has a writable row and still may not create.",
@@ -37561,6 +38062,50 @@
               "$ref": "#/components/schemas/PolicyWarning"
             },
             "description": "SP4d-4 Task 11: what this policy's resource levels mean to Ranger,\nindependent of migration — a policy that stops above `column` and\nallows `select` grants no column read, and one with a gap decides\nnothing. Empty for every row that is neither a hand-written\n(`operator`) policy of a resource profile nor affected. **Flagged,\nnever rewritten**: nothing here edits a stored row."
+          }
+        }
+      },
+      "ClearanceFact": {
+        "type": "object",
+        "description": "One gated tag and both answers.",
+        "required": [
+          "tagId",
+          "tagKey",
+          "tagName",
+          "requiredRoles",
+          "requiredGroups",
+          "engines",
+          "egret"
+        ],
+        "properties": {
+          "tagId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tagKey": {
+            "type": "string"
+          },
+          "tagName": {
+            "type": "string"
+          },
+          "requiredRoles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "requiredGroups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Group NAMES (a gate stores ids; an id no group has any more is shown\nas the id)."
+          },
+          "engines": {
+            "$ref": "#/components/schemas/EngineClearance"
+          },
+          "egret": {
+            "$ref": "#/components/schemas/EgretClearance"
           }
         }
       },
@@ -40477,6 +41022,54 @@
           }
         }
       },
+      "EgretClearance": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "`scope` is the clearing role grant's: a workspace role clears only that\nworkspace's objects, an object role only that object. Null for a group\nmembership or the principal itself.",
+            "required": [
+              "via",
+              "kind"
+            ],
+            "properties": {
+              "via": {
+                "$ref": "#/components/schemas/Via"
+              },
+              "scope": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MembershipScope"
+                  }
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "cleared"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "not_cleared"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Whether egret's own object-access check clears a principal for a gated\ntag (`crates/egret-auth/src/pdp/templates.rs:82-106`): a required role\nheld directly or through a group (`crates/egret-auth/src/grants.rs:47-60`),\nmembership in a required group, or the platform-admin exemption."
+      },
       "EnabledBody": {
         "type": "object",
         "required": [
@@ -40569,6 +41162,70 @@
           "trino",
           "starrocks"
         ]
+      },
+      "EngineClearance": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Directly holds `role`, unexpired, and has a username: the compiled\ndeny excepts them (`clearance.rs:33-58`, `members.rs:146-160`).",
+            "required": [
+              "role",
+              "kind"
+            ],
+            "properties": {
+              "role": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "cleared"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Not excepted; `because` says why when they hold a required role in a\nway engines do not apply, or are in a required group (whose half of\nthe gate engines never enforce).",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "because": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/EngineNotClearedReason"
+                  }
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "not_cleared"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The gate names only groups, so nothing is compiled for it\n(`clearance.rs:266-276`; measured, live doc §1.1 C6).",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "not_enforced_groups_only"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Whether engines clear a principal for a gated tag."
       },
       "EngineConflictBody": {
         "type": "object",
@@ -40763,6 +41420,16 @@
             "description": "Why it was not asked: `external` (egret never connects to an engine it\ndoes not run, and holds no credential for it) or `not running: <status>`\n(`provisioning`, `failed` or `deleting`)."
           }
         }
+      },
+      "EngineNotClearedReason": {
+        "type": "string",
+        "description": "Why engines do not clear a principal egret may clear.",
+        "enum": [
+          "held_through_group",
+          "expired",
+          "no_username",
+          "groups_not_enforced"
+        ]
       },
       "EnginePodDto": {
         "type": "object",
@@ -41336,6 +42003,83 @@
           "per_profile",
           "no_profile_serves_the_catalog"
         ]
+      },
+      "ExplainPrincipalRef": {
+        "type": "object",
+        "description": "A group or a role, as a grant principal stores it.",
+        "required": [
+          "kind",
+          "ref"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/PrincipalKind"
+          },
+          "ref": {
+            "type": "string"
+          }
+        }
+      },
+      "ExplainPrincipalRequest": {
+        "type": "object",
+        "description": "\"Can this group or role do `action` on `target`?\", answered as its\nmembers' answers. **Nothing about membership is caller-supplied**: the\nmembers are read by the server, as `ExplainSubject` reads nothing but a\nuser name.",
+        "required": [
+          "principal",
+          "action",
+          "target"
+        ],
+        "properties": {
+          "principal": {
+            "$ref": "#/components/schemas/ExplainPrincipalRef"
+          },
+          "action": {
+            "$ref": "#/components/schemas/Action"
+          },
+          "target": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        }
+      },
+      "ExplainPrincipalResponse": {
+        "type": "object",
+        "description": "The members' answers. There is no overall verdict (P5): a group's access\nis its members' access, and they can differ.",
+        "required": [
+          "membersTotal",
+          "limit",
+          "truncated",
+          "evaluated",
+          "notEvaluated"
+        ],
+        "properties": {
+          "membersTotal": {
+            "type": "integer",
+            "description": "Every member, with or without a username.",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "description": "[`EXPLAIN_MEMBER_LIMIT`].",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "More members with a username than `limit`: the rest were not evaluated\n(`membersTotal - evaluated - notEvaluated` of them)."
+          },
+          "evaluated": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemberVerdict"
+            },
+            "description": "Sorted by username; the first `limit` members with one."
+          },
+          "notEvaluated": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemberNotEvaluated"
+            },
+            "description": "Every member with no username, sorted by label."
+          }
+        }
       },
       "ExplainProfile": {
         "type": "object",
@@ -42360,6 +43104,86 @@
           }
         }
       },
+      "GroupPrincipal": {
+        "type": "object",
+        "required": [
+          "name",
+          "isPublic",
+          "members",
+          "serviceAccounts",
+          "roles",
+          "workspaces",
+          "standsFor",
+          "clearances"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`local` or `oidc`; null for `public`."
+          },
+          "isPublic": {
+            "type": "boolean"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemberRef"
+            },
+            "description": "Direct members, as the compiler reads them; empty for `public`."
+          },
+          "serviceAccounts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many of `members` are service accounts."
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Membership"
+            }
+          },
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Membership"
+            }
+          },
+          "standsFor": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StandsFor"
+            }
+          },
+          "clearances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClearanceFact"
+            }
+          }
+        }
+      },
+      "GroupRef": {
+        "type": "object",
+        "description": "A group holding a role (egret only).",
+        "required": [
+          "name",
+          "source"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        }
+      },
       "ImpersonationDto": {
         "type": "object",
         "description": "The active impersonation as surfaced by `/me`: who is being acted-as\n(`target`), the admin behind it (`impersonator`), and the overlay's bounds.",
@@ -43094,6 +43918,217 @@
             "type": "boolean"
           }
         }
+      },
+      "MemberNotEvaluated": {
+        "type": "object",
+        "required": [
+          "userId",
+          "label",
+          "reason"
+        ],
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/NotEvaluatedReason"
+          }
+        }
+      },
+      "MemberRef": {
+        "type": "object",
+        "description": "A group member or a role holder.",
+        "required": [
+          "userId",
+          "label",
+          "serviceAccount",
+          "onEngines"
+        ],
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": "string",
+            "description": "Name, else email."
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serviceAccount": {
+            "type": "boolean",
+            "description": "A Data API service account (migration `0119`). Listed like anyone:\na grant can name it and engines enforce on it."
+          },
+          "onEngines": {
+            "type": "boolean",
+            "description": "False only for a person with no username (`noUsername`)."
+          },
+          "notOnEngines": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NotOnEngines"
+              }
+            ]
+          }
+        }
+      },
+      "MemberVerdict": {
+        "type": "object",
+        "description": "One evaluated member: exactly `POST /perm/explain`'s answer for them.",
+        "required": [
+          "userId",
+          "label",
+          "username",
+          "result"
+        ],
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/ExplainResponse"
+          }
+        }
+      },
+      "Membership": {
+        "type": "object",
+        "description": "One membership: a group, a role grant, or a workspace grant.",
+        "required": [
+          "via",
+          "expired",
+          "onEngines"
+        ],
+        "properties": {
+          "via": {
+            "$ref": "#/components/schemas/Via"
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The role of a role or workspace grant; null for a group membership."
+          },
+          "scope": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MembershipScope",
+                "description": "The grant's scope; null for a group membership (it has none)."
+              }
+            ]
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "expired": {
+            "type": "boolean"
+          },
+          "onEngines": {
+            "type": "boolean"
+          },
+          "notOnEngines": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NotOnEngines"
+              }
+            ]
+          }
+        }
+      },
+      "MembershipScope": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "platform"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "workspace"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "objectType": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "object"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "The scope of an `access_grants` row."
       },
       "MetaContract": {
         "oneOf": [
@@ -43863,6 +44898,13 @@
           }
         }
       },
+      "NotEvaluatedReason": {
+        "type": "string",
+        "description": "Why a member was not evaluated.",
+        "enum": [
+          "no_username"
+        ]
+      },
       "NotListed": {
         "type": "object",
         "required": [
@@ -43888,6 +44930,15 @@
           "engine_not_running",
           "timeout",
           "engine_error"
+        ]
+      },
+      "NotOnEngines": {
+        "type": "string",
+        "description": "Why engines do not apply a membership.",
+        "enum": [
+          "held_through_group",
+          "expired",
+          "no_username"
         ]
       },
       "NsFileRevisionDto": {
@@ -44459,6 +45510,26 @@
           }
         }
       },
+      "PeoplePage": {
+        "type": "object",
+        "description": "A page of the People index and how many rows match in all.",
+        "required": [
+          "items",
+          "total"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonRow"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "PermPrincipal": {
         "type": "object",
         "description": "One principal reference. `r#ref` is the bare identifier egret's D7\nmeasurement settled on for users (a username, never an email) — the store\nwrites it through unchanged for every kind.\n\n**The OpenAPI name is `PermPrincipal`, not `Principal`, and that is a\nbug fix** (SP4a Task 10, finding 2). `egret-policy`'s admin surface\nalready exports a DIFFERENT `Principal` — the policy picker's\n`{kind, name, label}` row (`egret-policy/src/admin/mod.rs`). Two distinct\nRust types deriving `ToSchema` under one schema name collapse into one\nentry in the merged document, and the picker's won: every `$ref` from\n`PrincipalSet` — and so every `NewGrant.principals` — resolved to\n`{kind, name, label}`, a shape this type cannot deserialize. A client\ngenerated from the committed `openapi.json` could not construct a grant at\nall. The two names are now distinct, and each DTO refs its own.",
@@ -44534,6 +45605,72 @@
             "items": {
               "$ref": "#/components/schemas/PermissionDto"
             }
+          }
+        }
+      },
+      "PersonKind": {
+        "type": "string",
+        "description": "Which kind of principal a row is.",
+        "enum": [
+          "user",
+          "group",
+          "role"
+        ]
+      },
+      "PersonRow": {
+        "type": "object",
+        "description": "One user, group or role on the People index.",
+        "required": [
+          "kind",
+          "key",
+          "label",
+          "serviceAccount"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/PersonKind"
+          },
+          "key": {
+            "type": "string",
+            "description": "User id, group name or role name: the key of the principal's page."
+          },
+          "label": {
+            "type": "string",
+            "description": "User: name, else email. Group or role: its name."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "User: email, or `service account` for a service account. Group:\n`local` or `oidc`. Role: every scope defining the\nname, sorted and joined with \", \" (`platform, workspace`)."
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The user's stored engine username, or null when none is allocated yet.\nAlways null for a group or role."
+          },
+          "memberCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Group: direct members. Role: live allow holders that are users (a group\nholding the role is not counted; engines do not apply it). Null for a\nuser. The same reads the compiler expands these principals with."
+          },
+          "withoutUsername": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Group or role: how many of `memberCount` have no username yet. A role\nholder without one is not named on any engine. A group member without\none is named only once a grant naming the group is compiled (which\nallocates it). Null for a user."
+          },
+          "serviceAccount": {
+            "type": "boolean",
+            "description": "Whether the row is a Data API service account (users only; false\notherwise). Engines enforce grants on it like on any user."
           }
         }
       },
@@ -46062,6 +47199,61 @@
               "type": "string"
             },
             "description": "Effective-minus-own permissions, for read-only display. Populated on the\nsingle-role GET; empty on the list endpoint."
+          }
+        }
+      },
+      "RolePrincipal": {
+        "type": "object",
+        "required": [
+          "name",
+          "scopes",
+          "holders",
+          "serviceAccounts",
+          "holderGroups",
+          "standsFor",
+          "clearances"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every scope defining the name, sorted."
+          },
+          "holders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemberRef"
+            },
+            "description": "Live allow holders that are users, as the compiler reads them."
+          },
+          "serviceAccounts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many of `holders` are service accounts."
+          },
+          "holderGroups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GroupRef"
+            },
+            "description": "Groups holding the role, unexpired (egret only)."
+          },
+          "standsFor": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StandsFor"
+            }
+          },
+          "clearances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClearanceFact"
+            }
           }
         }
       },
@@ -47742,6 +48934,59 @@
           }
         }
       },
+      "StaleUserRefsConflict": {
+        "type": "object",
+        "description": "The 409 body: the stored refs that would start applying to this person.",
+        "required": [
+          "error",
+          "refs"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StoredUserRef"
+            }
+          }
+        }
+      },
+      "StandsFor": {
+        "type": "object",
+        "description": "A principal, `(kind, ref)` exactly as a grant or rule stores it, that\nstands for the principal being read (spec P4). The client lists a grant or\nrule when one of its principals equals an entry byte for byte — except a\n`workspace_members` ref, which is compared as a parsed UUID: writes store\nthe canonical form (`crate::principal_refs`), but a non-canonical ref stored\nbefore that is kept as written and still applies on engines.",
+        "required": [
+          "kind",
+          "ref",
+          "via",
+          "onEngines"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/PrincipalKind"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "via": {
+            "$ref": "#/components/schemas/Via"
+          },
+          "onEngines": {
+            "type": "boolean"
+          },
+          "notOnEngines": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NotOnEngines"
+              }
+            ]
+          }
+        }
+      },
       "StarRocksConfigBody": {
         "type": "object",
         "description": "Wire shape for `CreateEngineBody.starrocks`: FE/CN image + replicas +\noptional per-role resources. Mirrors the `resources{cpuRequest,cpuLimit,\nmemRequest,memLimit}` shape [`parse_resources`] already understands.",
@@ -48242,6 +49487,35 @@
           },
           "howToFix": {
             "type": "string"
+          }
+        }
+      },
+      "StoredUserRef": {
+        "type": "object",
+        "description": "One stored grant principal or rule exemption that names a username as a\n`user` ref.",
+        "required": [
+          "source",
+          "id",
+          "position",
+          "ref"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "description": "`\"grant\"` or `\"rule\"`."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The grant's or the rule's id."
+          },
+          "position": {
+            "type": "string",
+            "description": "`\"include\"` or `\"exclude\"` (of the grant's `principals`, or of the\nrule's `exempt`)."
+          },
+          "ref": {
+            "type": "string",
+            "description": "The ref as stored, byte for byte."
           }
         }
       },
@@ -50059,6 +51333,78 @@
           }
         }
       },
+      "UserPrincipal": {
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "name",
+          "status",
+          "serviceAccount",
+          "groups",
+          "roles",
+          "workspaces",
+          "standsFor",
+          "clearances"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "email": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "`active` or `disabled`."
+          },
+          "serviceAccount": {
+            "type": "boolean"
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Membership"
+            }
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Membership"
+            },
+            "description": "Role grants, direct and through a group."
+          },
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Membership"
+            },
+            "description": "Workspace-scoped grants, direct and through a group."
+          },
+          "standsFor": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StandsFor"
+            }
+          },
+          "clearances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClearanceFact"
+            }
+          }
+        }
+      },
       "UserRef": {
         "type": "object",
         "description": "A minimal user reference (id + email) for the impersonation state on `/me`.",
@@ -50116,6 +51462,154 @@
           "not_null",
           "operator"
         ]
+      },
+      "Via": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The principal itself (`user:<username>`, `group:<name>`, `role:<name>`).",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "itself"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A group the user is a direct member of.",
+            "required": [
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "group"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A role held directly (a user's or, on a group's page, the group's).",
+            "required": [
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "role"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A workspace held directly. `name` is the workspace's name, or its id\nwhen no workspace has that id any more.",
+            "required": [
+              "id",
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "workspace"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "`group:public`: everyone.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "public"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A role held by one of the user's groups (egret only).",
+            "required": [
+              "group",
+              "role",
+              "kind"
+            ],
+            "properties": {
+              "group": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "group_role"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A workspace held by one of the user's groups (egret only).",
+            "required": [
+              "group",
+              "id",
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "group": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "group_workspace"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "How a principal comes to stand for another (spec §4.2)."
       },
       "ViewExposureDto": {
         "type": "object",

@@ -475,3 +475,104 @@ pub(super) async fn explain_principal(
         not_evaluated,
     }))
 }
+
+// ---------------------------------------------------------------------------
+// POST /perm/people/users/{user_id}/username (Task 5, spec §4.4, Q1)
+// ---------------------------------------------------------------------------
+
+/// The user's engine username, and whether this request allocated it.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AllocatedUsername {
+    pub username: String,
+    /// `true` only for the one request that allocated it; every other call
+    /// (before or concurrently) answers `false`.
+    pub allocated: bool,
+}
+
+/// The 409 body: the stored refs that would start applying to this person.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct StaleUserRefsConflict {
+    pub error: String,
+    pub refs: Vec<crate::principal_refs::StoredUserRef>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/people/users/{user_id}/username",
+    tag = "perm",
+    params(("user_id" = Uuid, Path, description = "The user's id")),
+    responses(
+        (status = 200, description = "The user's engine username. A user who has none is allocated the name egret would allocate at their first query (`allocated: true`); one who has one is answered it unchanged (`allocated: false`). A service account is allocated like any user", body = AllocatedUsername),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 404, description = "No user has this id", body = ErrorBody),
+        (status = 409, description = "A stored grant principal or rule exemption already names the username that would be allocated as a `user` ref (compared case-insensitively, as egret resolves user refs). It matches nobody today and would start applying to this person, so nothing is allocated; `refs` lists every such row", body = StaleUserRefsConflict),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+pub(super) async fn allocate_username(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(user_id): Path<Uuid>,
+) -> Result<Json<AllocatedUsername>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    // `FOR UPDATE` holds the user's row until this transaction ends, so this
+    // read is the one that decides: no other allocation of THIS user (another
+    // steward, a first query, a compile minting a group member) can set the
+    // username in between, and a concurrent call waits here and then reads
+    // the name this one committed (`allocated: false`). It is the only lock
+    // taken: the guard below is a plain read, and a new grant or rule write
+    // cannot add a ref to the allocated name concurrently, because the write
+    // path refuses a `user` ref no committed `users.username` carries
+    // (`crate::principal_refs`), and the name is not committed until the
+    // guard has passed.
+    let existing: Option<Option<String>> =
+        sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(PermHttpError::db)?;
+    match existing {
+        None => return Err(PermHttpError::Missing("No user has this id.".to_string())),
+        Some(Some(username)) => {
+            tx.rollback().await.map_err(PermHttpError::db)?;
+            return Ok(Json(AllocatedUsername {
+                username,
+                allocated: false,
+            }));
+        }
+        Some(None) => {}
+    }
+    // On this transaction's connection, so its writes (in its own savepoints)
+    // roll back with a refusal below.
+    let username = egret_auth::users::ensure_username_via(&mut tx, egret_core::UserId(user_id))
+        .await
+        .map_err(PermHttpError::from)?;
+    let stale = crate::principal_refs::stored_user_refs_naming_via(&mut tx, &username).await?;
+    if !stale.is_empty() {
+        tx.rollback().await.map_err(PermHttpError::db)?;
+        let body = StaleUserRefsConflict {
+            error: format!(
+                "{} stored grant principal(s) or rule exemption(s) already name {username:?} \
+                 as a user; they match nobody today and would start applying to this person. \
+                 Remove or change them, then allocate again",
+                stale.len()
+            ),
+            refs: stale,
+        };
+        return Err(PermHttpError::StaleUserRefs {
+            body: serde_json::to_value(body).map_err(PermHttpError::db)?,
+        });
+    }
+    tx.commit().await.map_err(PermHttpError::db)?;
+    tracing::info!(
+        %user_id,
+        username = %username,
+        "allocated a username from Governance so a grant or rule can name them"
+    );
+    Ok(Json(AllocatedUsername {
+        username,
+        allocated: true,
+    }))
+}

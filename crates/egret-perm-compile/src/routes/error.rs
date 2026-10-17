@@ -37,6 +37,12 @@ pub enum PermHttpError {
     /// coordinate, kind}` — served as is.
     #[error("rule overlap: {body}")]
     Overlap { body: serde_json::Value },
+    /// **Allocating a username would make a stale stored ref apply to this
+    /// person** (People & groups Task 5, spec §4.4). A 409: the request is
+    /// well-formed and conflicts with grant principals or rule exemptions
+    /// already stored. `body` is `{error, refs}`, served as is.
+    #[error("stale user refs: {body}")]
+    StaleUserRefs { body: serde_json::Value },
     #[error("internal error")]
     Internal,
 }
@@ -148,6 +154,7 @@ impl IntoResponse for PermHttpError {
             PermHttpError::Conflict(_) => (StatusCode::CONFLICT, error_body(&msg)),
             // The structured body, served as is: its `error` is the sentence.
             PermHttpError::Overlap { body } => (StatusCode::CONFLICT, body),
+            PermHttpError::StaleUserRefs { body } => (StatusCode::CONFLICT, body),
             PermHttpError::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 error_body("internal error"),

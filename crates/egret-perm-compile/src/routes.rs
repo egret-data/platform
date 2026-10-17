@@ -136,6 +136,10 @@ pub fn perm_router() -> Router<PermState> {
         )
         .route("/perm/people", get(people::list_people))
         .route("/perm/people/users/{user_id}", get(people::read_user))
+        .route(
+            "/perm/people/users/{user_id}/username",
+            post(people::allocate_username),
+        )
         .route("/perm/people/groups/{name}", get(people::read_group))
         .route("/perm/people/roles/{name}", get(people::read_role))
         .route("/perm/preview", post(preview))
@@ -183,6 +187,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         list_unresolved_principals,
         people::list_people,
         people::read_user,
+        people::allocate_username,
         people::read_group,
         people::read_role,
         people::explain_principal,
@@ -198,6 +203,9 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::overlap::StoredOverlap,
         crate::overlap::StoredMember,
         crate::principal_refs::UnresolvedPrincipal,
+        crate::principal_refs::StoredUserRef,
+        people::AllocatedUsername,
+        people::StaleUserRefsConflict,
         PeoplePage,
         PersonRow,
         PersonKind,
