@@ -336,9 +336,9 @@ impl GroupRepo {
     /// row itself: while it iterates `claimed` it is redundant (a mutation
     /// dropping it alone survives every test), but if the loop is ever fed
     /// the raw claim again it still cannot write a local membership. A local
-    /// membership the user already holds is never touched
-    /// either way: the DELETE below is scoped to OIDC groups, and the local
-    /// rows are carried into the "after" set unchanged.
+    /// membership the user already holds is never touched either way: the
+    /// DELETE below is scoped to OIDC groups, and the local rows are carried
+    /// into the "after" set unchanged.
     /// [`crate::oidc::provision_and_sync`] logs a warning for each claimed local
     /// name (R2), since a row such a claim added before R1 is still there.
     ///
@@ -346,8 +346,9 @@ impl GroupRepo {
     /// CHANGED.** The groups the user would hold after the write are computed
     /// before it (the local ones they keep, plus every claimed name that names
     /// an OIDC group — the INSERT below joins `groups` by name and source, so a
-    /// claimed name with no OIDC row is not a membership), and only the symmetric difference with the
-    /// groups they hold now is handed to `recompiler`. A login whose claim did
+    /// claimed name with no OIDC row is not a membership), and only the
+    /// symmetric difference with the groups they hold now is handed to
+    /// `recompiler`. A login whose claim did
     /// not move — the common case — takes no profile lock and compiles nothing;
     /// one that did recompiles only the profiles whose policies name one of
     /// the moved groups. Recompiling on every login would make every login an

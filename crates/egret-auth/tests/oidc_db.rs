@@ -508,13 +508,14 @@ async fn provision_and_sync_leaves_a_claimed_local_group_local_and_unjoined() {
     };
     let users = UserRepo::new(db.clone());
     let groups = GroupRepo::new(db.clone());
+    let rc = Recorder::default();
     let (local, local_gid) = local_group(&groups, "local-grp").await;
 
     let user_id = provision_and_sync(
         &users,
         &groups,
         &claims(&uniq("sub"), &format!("{}@idp.local", uniq("u")), &[&local]),
-        &Recorder::default(),
+        &rc,
     )
     .await
     .unwrap();
@@ -532,6 +533,11 @@ async fn provision_and_sync_leaves_a_claimed_local_group_local_and_unjoined() {
         names_of(&db, user_id).await,
         Vec::<String>::new(),
         "and must not make the user a member"
+    );
+    assert_eq!(
+        rc.take(),
+        Vec::<Call>::new(),
+        "nothing moved, so nothing is locked or recompiled"
     );
 }
 

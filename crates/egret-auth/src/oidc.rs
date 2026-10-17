@@ -54,15 +54,25 @@ pub async fn provision_and_sync(
     // source alone. Say so, once per name: before R1 such a claim joined the
     // user to the local group, and any row it added is still there,
     // indistinguishable from one an admin added (`already_member`). The login
-    // is not refused.
-    for (name, member) in groups.claimed_local_groups(user_id, &claims.groups).await? {
-        tracing::warn!(
+    // is not refused — not even when this read fails: it only feeds a log
+    // line, so its error is logged and the sync goes ahead.
+    match groups.claimed_local_groups(user_id, &claims.groups).await {
+        Ok(local) => {
+            for (name, member) in local {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    group = %name,
+                    already_member = member,
+                    "OIDC groups claim names a local group; membership not managed by the IdP; \
+                     if it was added by a login before this fix, review it"
+                );
+            }
+        }
+        Err(e) => tracing::warn!(
             user_id = %user_id.0,
-            group = %name,
-            already_member = member,
-            "OIDC groups claim names a local group; membership not managed by the IdP; \
-             if it was added by a login before this fix, review it"
-        );
+            error = %e,
+            "could not check the OIDC groups claim for local group names; login continues"
+        ),
     }
     groups
         .sync_user_oidc_groups(user_id, &claims.groups, recompiler)
