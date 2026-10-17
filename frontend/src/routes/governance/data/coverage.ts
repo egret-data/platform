@@ -172,17 +172,8 @@ export function insideGroup(p: ObjectPath): { title: string; head: string } {
   return { title: "On columns", head: "Column" };
 }
 
-export type PatternLevel = { level: "schema" | "table" | "column"; value: string };
-
-/** The levels of `scope` set to a pattern (`*`, `ord*`, `order?`): each names every value it matches. */
-export function patternLevels(scope: Scope): PatternLevel[] {
-  const levels: PatternLevel[] = [];
-  for (const level of ["schema", "table", "column"] as const) {
-    const value = scope[level];
-    if (value && isPattern(value)) levels.push({ level, value });
-  }
-  return levels;
-}
+// Defined in `permFormat.ts`, beside `isPattern`, so pages outside this area can use them.
+export { patternLevels, type PatternLevel } from "@/routes/governance/permFormat";
 
 /** The levels up to the first unset one. */
 function prefix(levels: (string | null | undefined)[]): string[] {

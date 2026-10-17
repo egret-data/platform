@@ -13,12 +13,19 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AssignmentBadge } from "@/routes/governance/GrantDialog";
-import { grantSentence, type WorkspaceNames } from "@/routes/governance/permFormat";
+import { grantDeleteDescription, grantSentence, type WorkspaceNames } from "@/routes/governance/permFormat";
 import { GrantSentenceText } from "@/routes/governance/PrincipalNames";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { ACTIONS_CELL, EgretGrantsOnlyNote, Section, TabError } from "@/routes/governance/tabParts";
 import { principalTitle, workspaceNamesOf, type Principal } from "@/routes/governance/people/principalData";
-import { REACH_GROUPS, reachGroup, setReach, type Reach, type ReachGroup } from "@/routes/governance/people/reach";
+import {
+  REACH_GROUPS,
+  reachesAtAll,
+  reachGroup,
+  setReach,
+  type Reach,
+  type ReachGroup,
+} from "@/routes/governance/people/reach";
 import { appliedText } from "@/routes/governance/people/tabs/OverviewTab";
 
 const GROUP_TITLE: Record<ReachGroup, string> = {
@@ -29,6 +36,7 @@ const GROUP_TITLE: Record<ReachGroup, string> = {
   public: "Everyone",
   excluded: "Excluded",
   egret_only: "egret only",
+  not_on_engines: "Not applied on engines",
 };
 
 /** How one path reaches the principal, in words. */
@@ -54,11 +62,17 @@ function howText(via: Via): string {
 /** `Through group g · applied on engines`, or the reason engines do not apply the path; an exclude says so first. */
 export function reachText(r: Reach): string {
   const how = howText(r.via);
-  const lead = r.position === "exclude" ? `Excluded: ${how.charAt(0).toLowerCase()}${how.slice(1)}` : how;
-  return `${lead} · ${r.onEngines ? "applied on engines" : appliedText(r)}`;
+  const lower = `${how.charAt(0).toLowerCase()}${how.slice(1)}`;
+  if (r.position === "exclude") {
+    // An exclude engines do not apply leaves nobody out on engines (`reachGroup`).
+    return r.onEngines ? `Excluded: ${lower} · applied on engines` : `Excluded in egret only — not on engines: ${lower}`;
+  }
+  return `${how} · ${r.onEngines ? "applied on engines" : appliedText(r)}`;
 }
 
 type Row = { grant: GrantView; reach: Reach[] };
+
+export const NO_USERNAME_NOTE = "No engine knows this user until they have a username; nothing below applies on engines.";
 
 /**
  * A principal's Permissions tab (spec §2): every egret grant one of whose
@@ -78,7 +92,8 @@ export function PermissionsTab({ principal, onEdit }: { principal: Principal; on
   const action = search.get("action") ?? "";
   const workspaceName = workspaceNamesOf(principal);
   const name = principalTitle(principal, principal.data.name);
-
+  const isPublic = principal.kind === "group" && principal.data.isPublic;
+  const noUsername = principal.kind === "user" && !principal.data.username;
 
   const queryClient = useQueryClient();
   const [deleting, setDeleting] = useState<GrantView | null>(null);
@@ -107,10 +122,19 @@ export function PermissionsTab({ principal, onEdit }: { principal: Principal; on
   const reaching: Row[] = [];
   for (const g of grantsQ.data.data) {
     const reach = setReach(g.principals, principal.data.standsFor);
-    if (reach.length > 0) reaching.push({ grant: g, reach });
+    if (reachesAtAll(reach)) reaching.push({ grant: g, reach });
   }
   // Relative: this page, on its Check access tab.
-  const note = <EgretGrantsOnlyNote explainLabel="Check access" explainTo="?tab=check" />;
+  // `public` has no Check access tab (spec §2), so its note names none.
+  const note = (
+    <div className="space-y-1">
+      <EgretGrantsOnlyNote
+        explainLabel={isPublic ? null : "Check access"}
+        explainTo={isPublic ? undefined : "?tab=check"}
+      />
+      {noUsername ? <p className="text-sm">{NO_USERNAME_NOTE}</p> : null}
+    </div>
+  );
 
   if (reaching.length === 0) {
     return (
@@ -195,7 +219,7 @@ export function PermissionsTab({ principal, onEdit }: { principal: Principal; on
           if (!open) setDeleting(null);
         }}
         title={deleting ? `Delete "${sentenceOf(deleting)}"?` : "Delete grant?"}
-        description="This grant is permanently removed and every profile it reaches recompiles."
+        description={grantDeleteDescription(deleting)}
         onConfirm={() => {
           if (deleting) deleteGrant.mutate({ id: deleting.id });
           setDeleting(null);

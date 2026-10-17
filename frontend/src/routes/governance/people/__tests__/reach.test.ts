@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PrincipalSet, StandsFor } from "@/api/generated/model";
-import { reachGroup, setReach, type Reach } from "@/routes/governance/people/reach";
+import { reachesAtAll, reachGroup, setReach, type Reach } from "@/routes/governance/people/reach";
 
 const WS = "6f1c2a90-0000-4000-8000-00000000000a";
 
@@ -83,14 +83,36 @@ describe("reachGroup", () => {
     expect(reachGroup(r)).toBe(group);
   });
 
-  it("an exclude beats an include, as Ranger's exclude does", () => {
+  it("an exclude that applies on engines beats an include, as Ranger's exclude does", () => {
     expect(reachGroup([reach({}), reach({ position: "exclude", via: { kind: "group", name: "g" } })])).toBe("excluded");
   });
 
-  it("is egret only when no reach applies on engines", () => {
-    const egretOnly = reach({ via: { kind: "group_role", group: "g", role: "r" }, onEngines: false, notOnEngines: "held_through_group" });
+  const heldThroughGroup = { onEngines: false, notOnEngines: "held_through_group" as const };
+
+  it("an exclude engines do not apply excludes nobody: the includes decide", () => {
+    // `… except role r`, r held only through group g: Ranger does not exclude the user.
+    const egretExclude = reach({ position: "exclude", via: { kind: "group_role", group: "g", role: "r" }, ...heldThroughGroup });
+    expect(reachGroup([reach({}), egretExclude])).toBe("direct");
+    expect(reachGroup([reach({ via: { kind: "group", name: "g" } }), egretExclude])).toBe("group");
+    expect(reachGroup([reach({ via: { kind: "group_role", group: "g", role: "x" }, ...heldThroughGroup }), egretExclude])).toBe("egret_only");
+  });
+
+  it("is egret only when no include applies on engines and one is held through a group", () => {
+    const egretOnly = reach({ via: { kind: "group_role", group: "g", role: "r" }, ...heldThroughGroup });
     expect(reachGroup([egretOnly])).toBe("egret_only");
     expect(reachGroup([egretOnly, reach({ via: { kind: "group", name: "g" } })])).toBe("group");
+  });
+
+  it.each(["expired", "no_username"] as const)("is not applied on engines when every include is %s", (why) => {
+    expect(reachGroup([reach({ onEngines: false, notOnEngines: why })])).toBe("not_on_engines");
+    expect(reachGroup([reach({ via: { kind: "role", name: "r" }, onEngines: false, notOnEngines: why })])).toBe("not_on_engines");
+  });
+
+  it("a grant concerns the principal through an include, or an exclude engines apply", () => {
+    expect(reachesAtAll([reach({})])).toBe(true);
+    expect(reachesAtAll([reach({ position: "exclude" })])).toBe(true);
+    expect(reachesAtAll([reach({ position: "exclude", via: { kind: "group_role", group: "g", role: "r" }, ...heldThroughGroup })])).toBe(false);
+    expect(reachesAtAll([])).toBe(false);
   });
 
   it("the most direct path that applies on engines names the group", () => {

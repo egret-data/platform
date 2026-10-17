@@ -181,6 +181,84 @@ describe("a principal's Permissions tab", () => {
     expect(tab().textContent).not.toMatch(/bob|user Ana /);
   });
 
+  it("a deny excepting a role held only through a group is listed by its include: engines still deny", async () => {
+    const DENY = grant("g-deny", {
+      effect: "deny",
+      principals: { include: [{ kind: "group", ref: "analysts" }], exclude: [{ kind: "role", ref: "reader" }] },
+    });
+    // An exclude engines do not apply, with no include, concerns nobody: not listed.
+    const NOTHING = grant("g-nothing", { principals: { include: [{ kind: "user", ref: "bob" }], exclude: [{ kind: "role", ref: "reader" }] } });
+    serve({ "users/u-ana": ok(ANA) }, ok([DENY, NOTHING]));
+    open("/governance/people/users/u-ana?tab=permissions");
+    await within(await screen.findByRole("tabpanel")).findByRole("table", { name: "Through a group" });
+    expect(within(tab()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual(["Through a group"]);
+    expect(rowsOf("Through a group")).toEqual([
+      [
+        "group analysts cannot read ice.sales.* except role reader",
+        "Through group analysts · applied on enginesExcluded in egret only — not on engines: through role reader, held by group analysts",
+        "Deny",
+      ],
+    ]);
+  });
+
+  it("a user with no username: grants that would reach them are not applied on engines, and the page says why", async () => {
+    const NO_NAME: UserPrincipal = {
+      ...ANA,
+      username: null,
+      standsFor: [
+        { kind: "group", ref: "analysts", via: { kind: "group", name: "analysts" }, onEngines: false, notOnEngines: "no_username" },
+        { kind: "role", ref: "reader", via: { kind: "group_role", group: "analysts", role: "reader" }, onEngines: false, notOnEngines: "held_through_group" },
+      ],
+    };
+    serve({ "users/u-ana": ok(NO_NAME) }, ok(GRANTS));
+    open("/governance/people/users/u-ana?tab=permissions");
+    const panel = await screen.findByRole("tabpanel");
+    expect(
+      await within(panel).findByText("No engine knows this user until they have a username; nothing below applies on engines."),
+    ).toBeInTheDocument();
+    expect(within(panel).getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual([
+      "egret only",
+      "Not applied on engines",
+    ]);
+    expect(rowsOf("Not applied on engines")).toEqual([
+      ["group analysts can read ice.hr.* except user ana", "Through group analysts · No: no username yet", "Allow"],
+      ["group analysts cannot read ice.sales.salaries", "Through group analysts · No: no username yet", "Deny"],
+    ]);
+  });
+
+  it("public's note names no Check access, which public does not have", async () => {
+    const PUBLIC: GroupPrincipal = {
+      name: "public",
+      source: null,
+      isPublic: true,
+      members: [],
+      serviceAccounts: 0,
+      roles: [],
+      workspaces: [],
+      standsFor: [{ kind: "group", ref: "public", via: { kind: "public" }, onEngines: true }],
+      clearances: [],
+    };
+    serve({ "groups/public": ok(PUBLIC) }, ok(GRANTS));
+    open("/governance/people/groups/public");
+    const note = await within(await screen.findByRole("tabpanel")).findByText(/Lists egret grants\./);
+    expect(note).toHaveTextContent("Lists egret grants. Hand-written and egret-seeded engine policies are not listed here.");
+    expect(within(note).queryByRole("link")).not.toBeInTheDocument();
+  });
+
+  it("deleting a pattern grant says how far it reaches", async () => {
+    const PATTERN = grant("g-pat", { principals: inc("user", "ana"), scope: { catalog_id: "c-ice", schema: "sales", table: "ord*" } });
+    serve({ "users/u-ana": ok(ANA) }, ok([PATTERN]));
+    open("/governance/people/users/u-ana?tab=permissions", EDITOR);
+    await userEvent.click(
+      await within(await screen.findByRole("tabpanel")).findByRole("button", { name: "Delete user ana can read ice.sales.“ord*”" }),
+    );
+    expect(
+      within(await screen.findByRole("alertdialog")).getByText(
+        "This grant covers every table matching “ord*”, not one object. It is permanently removed and every profile it reaches recompiles.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("says grants are egret's only, with a link to Check access (P10)", async () => {
     serve({ "users/u-ana": ok(ANA) }, ok(GRANTS));
     open("/governance/people/users/u-ana?tab=permissions");

@@ -61,6 +61,27 @@ export function isPattern(value: string): boolean {
   return /[*?]/.test(value);
 }
 
+export type PatternLevel = { level: "schema" | "table" | "column"; value: string };
+
+/** The levels of `scope` set to a pattern (`*`, `ord*`, `order?`): each names every value it matches. */
+export function patternLevels(scope: Scope): PatternLevel[] {
+  const levels: PatternLevel[] = [];
+  for (const level of ["schema", "table", "column"] as const) {
+    const value = scope[level];
+    if (value && isPattern(value)) levels.push({ level, value });
+  }
+  return levels;
+}
+
+/** A grant's delete confirmation text; a pattern grant says how far it reaches. */
+export function grantDeleteDescription(g: GrantView | null): string {
+  const removed = "It is permanently removed and every profile it reaches recompiles.";
+  const patterns = g ? patternLevels(g.scope) : [];
+  if (patterns.length === 0) return "This grant is permanently removed and every profile it reaches recompiles.";
+  const reach = patterns.map((p) => `every ${p.level} matching “${p.value}”`).join(" and ");
+  return `This grant covers ${reach}, not one object. ${removed}`;
+}
+
 /**
  * A named level as the sentence prints it. A pattern is quoted, so a grant
  * whose table is the value `*` (`wh.sales.“*”`) never reads the same as one

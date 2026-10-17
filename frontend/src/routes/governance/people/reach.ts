@@ -45,10 +45,27 @@ export function setReach(set: PrincipalSet, standsFor: StandsFor[]): Reach[] {
   return out;
 }
 
-export type ReachGroup = "direct" | "group" | "role" | "workspace" | "public" | "excluded" | "egret_only";
+export type ReachGroup =
+  | "direct"
+  | "group"
+  | "role"
+  | "workspace"
+  | "public"
+  | "excluded"
+  | "egret_only"
+  | "not_on_engines";
 
 /** The order a page lists the groups in, the most direct first. */
-export const REACH_GROUPS: readonly ReachGroup[] = ["direct", "group", "role", "workspace", "public", "excluded", "egret_only"];
+export const REACH_GROUPS: readonly ReachGroup[] = [
+  "direct",
+  "group",
+  "role",
+  "workspace",
+  "public",
+  "excluded",
+  "egret_only",
+  "not_on_engines",
+];
 
 const BY_VIA: Partial<Record<Via["kind"], ReachGroup>> = {
   itself: "direct",
@@ -59,13 +76,31 @@ const BY_VIA: Partial<Record<Via["kind"], ReachGroup>> = {
 };
 
 /**
- * Which group a grant is listed under. An exclude wins over any include, as
- * Ranger's exclude does. Otherwise the most direct path that applies on
- * engines names it; when none does, it is `egret_only`.
+ * Which group a grant is listed under.
+ *
+ * - `excluded`: an exclude path that applies on engines. Ranger's exclude wins
+ *   over any include, so the engines leave the principal out.
+ * - An exclude path engines do not apply (a role held through a group, say)
+ *   excludes nobody on engines, so it does not decide the group: the includes
+ *   do, and the page says the exclude is egret's only.
+ * - Otherwise the most direct include that applies on engines names the group.
+ * - No include applies on engines: `egret_only` when one is held through a
+ *   group (egret's own checks count it, the compiler does not), else
+ *   `not_on_engines` (expired, or no username yet).
  */
 export function reachGroup(r: Reach[]): ReachGroup {
-  if (r.some((x) => x.position === "exclude")) return "excluded";
-  const groups = r.filter((x) => x.onEngines).map((x) => BY_VIA[x.via.kind] ?? "egret_only");
-  for (const g of REACH_GROUPS) if (groups.includes(g)) return g;
-  return "egret_only";
+  if (r.some((x) => x.position === "exclude" && x.onEngines)) return "excluded";
+  const includes = r.filter((x) => x.position === "include");
+  const onEngines = includes.filter((x) => x.onEngines).map((x) => BY_VIA[x.via.kind] ?? "egret_only");
+  for (const g of REACH_GROUPS) if (onEngines.includes(g)) return g;
+  return includes.some((x) => x.notOnEngines === "held_through_group") ? "egret_only" : "not_on_engines";
+}
+
+/**
+ * Whether a grant concerns the principal at all: some include reaches it, or
+ * an exclude that applies on engines leaves it out. An exclude engines do not
+ * apply, with no include, changes nothing for the principal anywhere.
+ */
+export function reachesAtAll(r: Reach[]): boolean {
+  return r.some((x) => x.position === "include" || x.onEngines);
 }
