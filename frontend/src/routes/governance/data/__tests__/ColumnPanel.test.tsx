@@ -277,6 +277,46 @@ describe("ColumnPanel", () => {
     expect(where()).toBe("/governance/data/ice/sales/orders?tab=permissions");
   });
 
+  it("says a column the table does not have is not there, and offers nothing for it", async () => {
+    serveData(fixture());
+    renderPage("/governance/data/ice/sales/orders?column=nope", TAGGER);
+    const panel = await screen.findByRole("dialog", { name: "nope" });
+    expect(await within(panel).findByText("No column named “nope” in ice.sales.orders.")).toBeInTheDocument();
+    expect(within(panel).getAllByRole("button").map((b) => b.textContent)).toEqual(["Close"]);
+    expect(within(panel).queryByText(/No tag|No masking rule|No grant/)).not.toBeInTheDocument();
+  });
+
+  it("says the column could not be checked when the table's columns cannot be listed, and claims nothing", async () => {
+    for (const answer of [boom, ok({ source: null, engines: [], notListed: { reason: "engine_error", detail: "The engine refused." } })]) {
+      serveData(fixture({ browse: { ...fixture().browse, "c-ice|sales|orders": answer } }));
+      const { unmount } = renderPage("/governance/data/ice/sales/orders?column=email", TAGGER);
+      const panel = await screen.findByRole("dialog", { name: "email" });
+      expect(
+        await within(panel).findByText("“email” could not be checked: the columns of ice.sales.orders could not be listed."),
+      ).toBeInTheDocument();
+      expect(within(panel).queryByRole("button", { name: "Add tag" })).not.toBeInTheDocument();
+      expect(within(panel).queryByRole("button", { name: "Who can read this column?" })).not.toBeInTheDocument();
+      expect(within(panel).queryByText(/No tag|No masking rule|No grant/)).not.toBeInTheDocument();
+      unmount();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("names the column as the source spells it, whatever case the URL uses", async () => {
+    const { tagWrites } = serveData(fixture());
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?column=EMAIL", TAGGER);
+    const panel = await screen.findByRole("dialog", { name: "email" });
+    expect(within(panel).getByText("ice.sales.orders.email")).toBeInTheDocument();
+    await user.click(await within(panel).findByRole("button", { name: "Add tag" }));
+    const dialog = await screen.findByRole("dialog", { name: "Add tag" });
+    await user.click(within(dialog).getByRole("combobox", { name: "Tag" }));
+    await user.click(await screen.findByRole("option", { name: "SECRET" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add tag" }));
+    await waitFor(() => expect(tagWrites).toHaveLength(1));
+    expect(tagWrites[0].body).toEqual({ schema: "sales", table: "orders", column: "email", tag_id: "t-secret" });
+  });
+
   it("opens no panel above the object level", async () => {
     serveData(fixture());
     renderPage("/governance/data/ice/sales?column=email");
@@ -350,6 +390,30 @@ describe("Who can read?", () => {
     expect(within(dialog).getByLabelText("User")).toHaveValue("alice");
   });
 
+  it("never shows an answer, or a refusal, under a user it was not asked for", async () => {
+    let answer: (a: { status: number; body: unknown }) => void = () => {};
+    serveData(fixture({ explain: () => new Promise((resolve) => (answer = resolve)) }));
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders");
+    await user.click(await screen.findByRole("button", { name: "Who can read?" }));
+    const dialog = await screen.findByRole("dialog", { name: "Who can read?" });
+    const field = within(dialog).getByLabelText("User");
+    await user.type(field, "alice");
+    await user.click(within(dialog).getByRole("button", { name: "Explain" }));
+    // The answer for alice arrives after the field names someone else.
+    await user.type(field, "2");
+    answer(ok(EXPLAIN));
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Explain" })).toBeEnabled());
+    expect(within(dialog).queryByTestId("explain-result")).not.toBeInTheDocument();
+
+    // A refusal for one user is gone once the field names another.
+    await user.click(within(dialog).getByRole("button", { name: "Explain" }));
+    answer({ status: 500, body: { error: "The policy artifact could not be built." } });
+    expect(await within(dialog).findByText("The policy artifact could not be built.")).toBeInTheDocument();
+    await user.type(field, "3");
+    expect(within(dialog).queryByText("The policy artifact could not be built.")).not.toBeInTheDocument();
+  });
+
   it("is not offered without policy:read", async () => {
     serveData(fixture());
     renderPage("/governance/data/ice/sales/orders?column=email", { ...STEWARD, permissions: ["catalog_registry:update"] });
@@ -367,6 +431,8 @@ describe("Add tag", () => {
     await user.click(await within(panel).findByRole("button", { name: "Add tag" }));
     const dialog = await screen.findByRole("dialog", { name: "Add tag" });
     expect(within(dialog).getByText("ice.sales.orders.email")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Add tag" })).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "Add tag" })).toHaveAccessibleDescription("Pick a tag to add.");
     await user.click(within(dialog).getByRole("combobox", { name: "Tag" }));
     // PII is already on the column; the table's tag is not the column's own.
     expect((await screen.findAllByRole("option")).map((o) => o.textContent)).toEqual(["CONFIDENTIAL", "FINANCE", "SECRET"]);

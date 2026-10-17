@@ -155,8 +155,17 @@ function AddTagForm({ target, onDone }: { target: TagTarget; onDone: () => void 
         </DialogDescription>
       </DialogHeader>
       {picker}
-      <DialogFooter>
-        <Button type="submit" disabled={!tagId || assign.isPending}>
+      <DialogFooter className="items-center">
+        {offered && offered.length > 0 && !tagId ? (
+          <p id="add-tag-needs" className="text-xs text-muted-foreground">
+            Pick a tag to add.
+          </p>
+        ) : null}
+        <Button
+          type="submit"
+          disabled={!tagId || assign.isPending}
+          aria-describedby={offered && offered.length > 0 && !tagId ? "add-tag-needs" : undefined}
+        >
           {assign.isPending ? <Loader2 aria-hidden className="animate-spin" /> : <TagIcon aria-hidden />}
           Add tag
         </Button>

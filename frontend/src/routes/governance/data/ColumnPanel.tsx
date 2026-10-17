@@ -3,6 +3,7 @@ import { Tag as TagIcon, UserSearch } from "lucide-react";
 import { usePermListGrants, usePermListRules } from "@/api/generated/perm/perm";
 import type { GovernanceCatalog, GrantView, ResourceTagDto, RuleView } from "@/api/generated/model";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -55,8 +56,36 @@ export function ColumnPanel({
   tags: TagsResult;
   onClose: () => void;
 }) {
-  const column = path.column ?? "";
-  const type = browse.data?.status === 200 ? browse.data.data.columns?.find((c) => sameName(c.name, column))?.type : undefined;
+  const asked = path.column ?? "";
+  const check = checkColumn(browse, asked);
+  // The source's own spelling once it is known: the URL may differ in case.
+  const column = check.status === "found" ? check.name : asked;
+  const objectPath: ObjectPath = { catalog: path.catalog, schema: path.schema, object: path.object };
+  let body: ReactNode = null;
+  if (path.schema !== undefined && path.object !== undefined && path.column !== undefined) {
+    if (check.status === "loading") body = <ListSkeleton rows={4} cols={2} />;
+    else if (check.status === "unchecked") {
+      body = (
+        <Alert>
+          <AlertDescription>{`“${asked}” could not be checked: the columns of ${fullPath(objectPath)} could not be listed.`}</AlertDescription>
+        </Alert>
+      );
+    } else if (check.status === "missing") {
+      body = (
+        <Alert>
+          <AlertDescription>{`No column named “${asked}” in ${fullPath(objectPath)}.`}</AlertDescription>
+        </Alert>
+      );
+    } else {
+      const schema = path.schema;
+      const object = path.object;
+      body = (
+        <CatalogGate catalog={catalog}>
+          {(c) => <PanelBody path={{ ...path, schema, object, column }} catalog={c} tags={tags} />}
+        </CatalogGate>
+      );
+    }
+  }
   return (
     <Sheet
       open={path.object !== undefined && path.column !== undefined}
@@ -68,20 +97,36 @@ export function ColumnPanel({
         <SheetHeader>
           <SheetTitle className="break-all">{column}</SheetTitle>
           <SheetDescription className="flex flex-wrap gap-x-3">
-            <span className="font-mono text-xs break-all">{fullPath(path)}</span>
-            {type ? <span className="font-mono text-xs">{type}</span> : null}
+            <span className="font-mono text-xs break-all">{fullPath({ ...path, column })}</span>
+            {check.status === "found" ? <span className="font-mono text-xs">{check.type}</span> : null}
           </SheetDescription>
         </SheetHeader>
-        <div className="min-h-0 flex-1 overflow-auto">
-          {path.schema !== undefined && path.object !== undefined && path.column !== undefined ? (
-            <CatalogGate catalog={catalog}>
-              {(c) => <PanelBody path={{ ...path, schema: path.schema!, object: path.object!, column }} catalog={c} tags={tags} />}
-            </CatalogGate>
-          ) : null}
-        </div>
+        <div className="min-h-0 flex-1 overflow-auto">{body}</div>
       </SheetContent>
     </Sheet>
   );
+}
+
+type ColumnCheck =
+  | { status: "loading" }
+  | { status: "unchecked" }
+  | { status: "missing" }
+  | { status: "found"; name: string; type: string };
+
+/**
+ * Whether the table's listing has the column `?column=` names, compared
+ * without regard to case. A column the listing does not have gets no panel
+ * (a tag written for it would be stored on nothing); one that cannot be
+ * checked (the listing failed or was not listed) says so rather than claim it
+ * carries nothing.
+ */
+function checkColumn(browse: BrowseResult, asked: string): ColumnCheck {
+  if (browse.isError) return { status: "unchecked" };
+  if (browse.data?.status !== 200) return { status: "loading" };
+  const columns = browse.data.data.columns;
+  if (browse.data.data.notListed || !columns) return { status: "unchecked" };
+  const col = columns.find((c) => sameName(c.name, asked));
+  return col ? { status: "found", name: col.name, type: col.type } : { status: "missing" };
 }
 
 function PanelBody({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceCatalog; tags: TagsResult }) {

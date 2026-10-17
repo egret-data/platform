@@ -61,14 +61,18 @@ export function WhoCanReadDialog({
 
 function WhoCanReadForm({ path, catalogId }: { path: ObjectPath; catalogId: string }) {
   const [user, setUser] = useState("");
-  const [result, setResult] = useState<ExplainResponse | null>(null);
+  // Each answer keeps the user it was asked for, and shows only while the field still names that user:
+  // an answer still on its way when the field changes must not appear under the new name.
+  const [result, setResult] = useState<{ user: string; response: ExplainResponse } | null>(null);
   const explain = usePermExplain<ApiError>({
     mutation: {
-      onSuccess: (res) => setResult(res.status === 200 ? res.data : null),
+      onSuccess: (res, vars) => setResult(res.status === 200 ? { user: vars.data.subject.user, response: res.data } : null),
       onError: () => setResult(null),
     },
   });
-  const ready = user.trim().length > 0;
+  const asked = user.trim();
+  const ready = asked.length > 0;
+  const failed = explain.isError && explain.variables?.data.subject.user === asked ? explain.error : null;
 
   return (
     <>
@@ -91,8 +95,8 @@ function WhoCanReadForm({ path, catalogId }: { path: ObjectPath; catalogId: stri
             value={user}
             onChange={(next) => {
               setUser(next);
-              // An answer is about the user it was asked for.
               setResult(null);
+              explain.reset();
             }}
           />
         </div>
@@ -106,16 +110,16 @@ function WhoCanReadForm({ path, catalogId }: { path: ObjectPath; catalogId: stri
           </p>
         )}
       </form>
-      {explain.isError ? (
+      {failed ? (
         <Alert variant="destructive">
           <AlertDescription>
-            {explain.error.status === 403
+            {failed.status === 403
               ? "Explaining access needs the policy:read permission."
-              : explain.error.message || "Access could not be explained. Try again."}
+              : failed.message || "Access could not be explained. Try again."}
           </AlertDescription>
         </Alert>
       ) : null}
-      {result ? <ExplainResultView result={result} /> : null}
+      {result && result.user === asked ? <ExplainResultView result={result.response} /> : null}
     </>
   );
 }

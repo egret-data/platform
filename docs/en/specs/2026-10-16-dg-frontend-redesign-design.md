@@ -92,8 +92,8 @@ to. Actions, each shown only with its permission: **Grant access**, **Add tag** 
 - **Details.** Full path, warehouse, workspaces, engines.
 - **Column panel** (right sheet, from a column row or `?column=`): its tags, masking rules, grants on that column, and
   "Who can read this column?".
-- **Who can read?** A dialog to pick a user, group or role; the answer is `/perm/explain` for exactly this object
-  (and column).
+- **Who can read?** A dialog to pick a user; the answer is `/perm/explain` for exactly this object (and column).
+  Explain's subject is a user only (`ExplainSubject`), so group and role subjects are a follow-up for sub-project #2.
 
 ### 2.3 Backend
 

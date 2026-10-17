@@ -62,8 +62,8 @@ export interface FakeData {
   rules?: Answer | Answer[];
   /** Every rule write (`POST …/perm/rules`, `PATCH`/`DELETE …/perm/rules/{id}`); default 200 `{}`. */
   ruleWrite?: Answer;
-  /** `POST …/perm/explain`; none is a 404. */
-  explain?: Answer;
+  /** `POST …/perm/explain`; none is a 404. A function answers each call when the promise it returns settles. */
+  explain?: Answer | (() => Promise<Answer>);
   /** `GET …/principals`; default 200 `[]`. */
   principals?: Answer;
   /** `GET …/tags`, the tag catalogue; none is a 404. */
@@ -146,7 +146,10 @@ export function serveData(data: FakeData): DataCalls {
           return reply(Array.isArray(a) ? a[Math.min(asked, a.length - 1)] : a);
         }
         if (call === "POST /perm/preview") return reply(data.preview);
-        if (call === "POST /perm/explain") return reply(data.explain);
+        if (call === "POST /perm/explain") {
+          const e = data.explain;
+          return typeof e === "function" ? e().then(reply) : reply(e);
+        }
         if (/^(POST \/perm\/rules|(PATCH|DELETE) \/perm\/rules\/[^/]+)$/.test(call)) {
           return reply(data.ruleWrite ?? { status: 200, body: {} });
         }
