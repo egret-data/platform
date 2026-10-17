@@ -37,6 +37,8 @@ egret-perm.workspace = true
 egret-perm-compile.workspace = true
 egret-secrets.workspace = true
 egret-query.workspace = true
+# `catalog_listing::CatalogLevel`, the shape both Governance catalog listers answer in.
+egret-query-api.workspace = true
 egret-bi.workspace = true
 egret-automation.workspace = true
 egret-analytics-api.workspace = true

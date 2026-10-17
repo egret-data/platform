@@ -94,14 +94,21 @@ pub enum Listing {
 }
 
 /// Lists one level of a catalog on one engine. A trait so the route test
-/// needs no live engine; the real Trino and StarRocks listers are wired in
-/// `egret-bin`.
+/// needs no live engine; the real Trino and StarRocks listers
+/// (`egret_query::execution::catalog_listing`,
+/// `egret_engine_mgmt::list_catalog_level`) are wired in `egret-bin`.
 #[async_trait::async_trait]
 pub trait CatalogLister: Send + Sync {
     /// List one level of `catalog` (its name as the ENGINE knows it) on
     /// `engine`: its schemas when `schema` is `None`, the schema's tables
     /// when `table` is `None`, the table's columns otherwise. `Err` is the
     /// reason, logged and never shown.
+    ///
+    /// `schema` and `table` are the caller's raw query values: UNTRUSTED. The
+    /// route guarantees only that neither is empty and that `table` comes with
+    /// `schema`; an implementation quotes them as identifiers (or escapes them
+    /// as literals) before they reach a statement. A schema or table the engine
+    /// does not have is an `Err`, never an empty listing.
     async fn list(
         &self,
         engine: &ListingEngine,
@@ -111,9 +118,9 @@ pub trait CatalogLister: Send + Sync {
     ) -> Result<Listing, String>;
 }
 
-/// The lister `egret-bin` holds until the real Trino and StarRocks listers
-/// are wired: every listing fails, so the page shows `engine_error` rather
-/// than an empty catalog.
+/// A lister that fails every listing, so the page shows `engine_error` rather
+/// than an empty catalog — for a state with no engine to list on (the tests).
+/// `egret-bin` wires the real Trino and StarRocks listers.
 pub struct UnwiredCatalogLister;
 
 #[async_trait::async_trait]
@@ -225,7 +232,7 @@ pub(crate) async fn require_governance_read(
     ),
     responses(
         (status = 200, description = "One level of the catalog, or why it was not listed", body = BrowseResponse),
-        (status = 400, description = "`table` without `schema`", body = ErrorBody),
+        (status = 400, description = "`table` without `schema`, or an empty `schema` or `table`", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read and tag:read permission", body = ErrorBody),
         (status = 404, description = "No such catalog, or (egret catalog) no such schema or table", body = ErrorBody),
@@ -241,6 +248,11 @@ async fn browse(
     require_governance_read(&st, &p).await?;
     if q.table.is_some() && q.schema.is_none() {
         return Err(CpError::BadRequest("`table` needs `schema`".to_string()));
+    }
+    if q.schema.as_deref() == Some("") || q.table.as_deref() == Some("") {
+        return Err(CpError::BadRequest(
+            "`schema` and `table` must not be empty".to_string(),
+        ));
     }
     let catalog = load_catalog(&st, catalog_id)
         .await?

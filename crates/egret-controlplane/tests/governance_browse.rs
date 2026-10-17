@@ -943,3 +943,24 @@ async fn an_unknown_catalog_is_404_and_a_table_needs_its_schema() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
     assert!(lister.calls().is_empty());
 }
+
+/// An empty `schema` or `table` names nothing: it is refused, not passed to an
+/// engine (where it would become a quoted empty identifier) or read as "no
+/// level given".
+#[tokio::test]
+async fn an_empty_schema_or_table_is_refused() {
+    let Some(f) = setup().await else { return };
+    let token = session(&f).await;
+    let (cat, _) = external_catalog(&f).await;
+    let lister = FakeLister::new(Answer::Levels);
+    for query in ["schema=", "schema=&table=orders", "schema=sales&table="] {
+        let (status, j) = get(
+            app(&f, lister.clone()),
+            &format!("/governance/browse/{cat}?{query}"),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: body={j}");
+    }
+    assert!(lister.calls().is_empty(), "{:?}", lister.calls());
+}

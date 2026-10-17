@@ -29,7 +29,9 @@ use uuid::Uuid;
 pub use egret_core::{ColumnMeta, TabularResult};
 
 pub mod dialect;
-pub use dialect::quote_string;
+pub use dialect::{quote_ident, quote_string};
+
+pub mod catalog_listing;
 
 pub mod port;
 pub use port::QueryExecPort;

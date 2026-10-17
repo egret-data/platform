@@ -1,5 +1,6 @@
 //! Dialect-aware SQL literal escaping — the only place in the workspace where a
-//! string value becomes a SQL literal.
+//! string value becomes a SQL literal — and, beside it, identifier quoting
+//! ([`quote_ident`]).
 //!
 //! Trino does not process backslash escapes inside standard string literals, so
 //! doubling `'` is sufficient and doubling `\` would corrupt the value. StarRocks
@@ -25,6 +26,55 @@ pub fn quote_string(engine: Engine, value: &str) -> String {
             let escaped = value.replace('\\', "\\\\").replace('\'', "''");
             format!("'{escaped}'")
         }
+    }
+}
+
+/// Quote `ident` as a delimited identifier for `engine`: Trino `"…"` with an
+/// embedded `"` doubled, StarRocks `` `…` `` with an embedded backtick doubled.
+///
+/// Neither delimited form processes backslash escapes (both grammars define the
+/// quoted identifier as "anything but the delimiter, or the delimiter
+/// doubled"), so a backslash, a `.` or the other engine's delimiter is an
+/// ordinary character inside it. That is the difference from [`quote_string`],
+/// where a StarRocks backslash IS an escape and must be doubled (#504).
+pub fn quote_ident(engine: Engine, ident: &str) -> String {
+    match engine {
+        Engine::Trino => format!("\"{}\"", ident.replace('"', "\"\"")),
+        Engine::StarRocks => format!("`{}`", ident.replace('`', "``")),
+    }
+}
+
+#[cfg(test)]
+mod ident_tests {
+    use super::quote_ident;
+    use crate::Engine;
+
+    #[test]
+    fn each_engine_doubles_only_its_own_delimiter() {
+        let name = r#"a"b`c.d\e"#;
+        assert_eq!(quote_ident(Engine::Trino, name), r#""a""b`c.d\e""#);
+        assert_eq!(quote_ident(Engine::StarRocks, name), r#"`a"b``c.d\e`"#);
+    }
+
+    /// A trailing backslash would escape a StarRocks string literal's closing
+    /// quote (#504); inside a delimited identifier it is just a character, so
+    /// it is never doubled — doubling it would name a different object.
+    #[test]
+    fn a_trailing_backslash_stays_single() {
+        assert_eq!(quote_ident(Engine::Trino, r"s\"), r#""s\""#);
+        assert_eq!(quote_ident(Engine::StarRocks, r"s\"), r"`s\`");
+    }
+
+    #[test]
+    fn case_and_a_dot_stay_inside_one_identifier() {
+        assert_eq!(quote_ident(Engine::Trino, "Sales.EU"), r#""Sales.EU""#);
+        assert_eq!(quote_ident(Engine::StarRocks, "Sales.EU"), "`Sales.EU`");
+    }
+
+    #[test]
+    fn a_name_made_of_delimiters_cannot_close_the_identifier() {
+        assert_eq!(quote_ident(Engine::Trino, "\""), "\"\"\"\"");
+        assert_eq!(quote_ident(Engine::StarRocks, "`"), "````");
     }
 }
 
