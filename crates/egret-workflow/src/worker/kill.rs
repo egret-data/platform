@@ -46,9 +46,18 @@
 //!
 //! A **loop iteration** (`parent_execution_id` set and `parent_run_ix` set)
 //! and a **`Subflow` child** (`trigger_execution_id` set and `trigger_run_ix`
-//! set, migration 0138), recursively. Not a replay, which has
-//! `parent_execution_id` and no `parent_run_ix`, and not an execution a Flow
-//! trigger fired, which has `trigger_execution_id` and no `trigger_run_ix`.
+//! set, migration 0138), recursively. Not a replay of the execution being
+//! killed, which has `parent_execution_id` and no `parent_run_ix`, and not an
+//! execution a Flow trigger fired, which has `trigger_execution_id` and no
+//! `trigger_run_ix`.
+//!
+//! **A replay of a descendant IS one** (final review M2, 2026-10-18): a
+//! subflow child or loop iteration retried with `CREATE_NEW_EXECUTION` ends
+//! `RETRIED` and continues in a replacement linked the replay's way
+//! (`worker::replay`'s table). That replacement is the child's work going on,
+//! so the cascade follows the replay link from depth 1 down, never from the
+//! root. (A loop iteration is not replayable today, `replay::spawn_due`; the
+//! arm does not depend on that.)
 //!
 //! **egret's `Subflow` child is not found through `execution_trigger`**:
 //! `subflow::spawn_one` writes the two link columns and leaves
@@ -218,6 +227,13 @@ async fn descendants(
 /// The live descendants of `$1`, through both links, in lock order. Through
 /// terminal executions too: a `wait: false` child, or an iteration of a loop
 /// that ended on its first failure, can be terminal over a live child.
+///
+/// **And through a descendant's replay** (final review M2): the third arm
+/// follows `parent_execution_id` with no `parent_run_ix` -- a
+/// `CREATE_NEW_EXECUTION` replacement (`worker::replay`) -- from depth 1 down
+/// only. A subflow child that ended `RETRIED` continues in its replacement,
+/// which is part of the tree being killed; the root's own replay is not
+/// (module doc, "Which executions are children").
 const DESCENDANTS: &str = "WITH RECURSIVE tree (id, depth) AS ( \
        SELECT $1::uuid, 0 \
      UNION ALL \
@@ -226,6 +242,7 @@ const DESCENDANTS: &str = "WITH RECURSIVE tree (id, depth) AS ( \
          JOIN tree t \
            ON (e.parent_execution_id = t.id AND e.parent_run_ix IS NOT NULL) \
            OR (e.trigger_execution_id = t.id AND e.trigger_run_ix IS NOT NULL) \
+           OR (t.depth > 0 AND e.parent_execution_id = t.id AND e.parent_run_ix IS NULL) \
      ) \
      SELECT t.id FROM tree t JOIN workflow.executions e ON e.id = t.id \
       WHERE t.depth > 0 AND NOT workflow.state_is_terminal(e.state) \
@@ -260,7 +277,9 @@ fn db_err(e: sqlx::Error) -> Error {
 }
 
 /// Postgres's `deadlock_detected` (`40P01`), anywhere in the error's chain.
-fn is_deadlock(e: &Error) -> bool {
+/// Also `claim::run_one`'s and `claim::commit_kill`'s, for the same deadlock
+/// seen from the worker's side.
+pub(super) fn is_deadlock(e: &Error) -> bool {
     let Error::Internal(e) = e else {
         return false;
     };

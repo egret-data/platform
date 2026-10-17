@@ -115,31 +115,60 @@ pub(super) enum Killed {
     Refused(String),
 }
 
+/// **How far the budget's own cancel got** (final review T4), for a kill found
+/// afterwards: not asked, asked and still in flight, or returned.
+///
+/// A flag set before the cancel was awaited could not tell the second from
+/// the third, and the second is not "stopped": when the kill poll finds the
+/// run `KILLING` while this cancel is running, `claim::under_lease` drops the
+/// handler future, and the cancel inside it with it. The kill path must then
+/// ask again; only a cancel that returned is not repeated (a second one is
+/// not reliably harmless, `claim::run_one`'s commit-time comment).
+#[derive(Debug, Default)]
+pub(super) struct Asked(std::sync::atomic::AtomicU8);
+
+impl Asked {
+    const IN_FLIGHT: u8 = 1;
+    const DONE: u8 = 2;
+
+    fn set(&self, to: u8) {
+        self.0.store(to, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the kill path has to ask the handler to stop: unless the
+    /// budget's cancel has already returned.
+    pub(super) fn kill_must_cancel(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst) != Self::DONE
+    }
+}
+
 /// Run `task` under `budget`, and kill the handler if the budget expires.
 ///
 /// This is [`timeout::guard`] plus the artifact's `kill(null)`. The outcome is
 /// the budget's, unaltered — see the module doc's fact 2 for why a refused
 /// kill does not change it.
 ///
-/// `asked` is set before the handler is asked to stop, so a caller whose run
-/// is then found killed (`claim::run_one`'s commit-time kill) does not ask the
-/// same handler to stop a second time.
+/// `asked` records the cancel as in flight before it is awaited and as done
+/// once it returns ([`Asked`]), so a caller whose run is then found killed
+/// (`claim::run_one`) asks again only if this cancel did not finish.
 pub(super) async fn guarded(
     reg: &dyn Registry,
     task: &TaskInput,
     budget: Option<std::time::Duration>,
-    asked: &std::sync::atomic::AtomicBool,
+    asked: &Asked,
 ) -> Result<Outcome> {
     let guarded = timeout::guard(budget, reg.run(task)).await?;
     if matches!(guarded, Guarded::Expired(_)) {
-        asked.store(true, std::sync::atomic::Ordering::SeqCst);
+        asked.set(Asked::IN_FLIGHT);
         // **The value is read here, which is the whole reason it is a value.**
         // Fix round 1: `kill` used to log and this line used to discard what it
         // returned, so [`Killed`]'s own doc — "a value rather than a `Result`
         // swallowed at the call site" — described nothing. The log is the
         // caller's decision (the artifact makes it in `WorkerTaskCallable.kill`,
         // the caller of `task.kill()`), so it lives here and `kill` reports.
-        match kill(reg, task).await {
+        let killed = kill(reg, task).await;
+        asked.set(Asked::DONE);
+        match killed {
             Killed::Stopped => {}
             Killed::Refused(reason) => {
                 tracing::warn!(

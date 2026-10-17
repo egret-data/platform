@@ -678,6 +678,154 @@ async fn cascade_does_not_reach_a_replay_or_a_flow_trigger_execution(pool: sqlx:
     assert_eq!(exec_state(&pool, fired).await, "RUNNING");
 }
 
+/// **Final review M2: the replacement of a DESCENDANT is killed, the root's
+/// own replay is not.** A `CREATE_NEW_EXECUTION` retry of a subflow child
+/// starts a replacement linked `parent_execution_id = <child>` with no
+/// `parent_run_ix` (`worker::replay`); it is the child's continuation, so a
+/// cascade over the parent must reach it. A replay of the execution being
+/// killed is a separate execution the operator did not name, and the cascade
+/// still leaves it alone.
+#[sqlx::test(migrations = "../../migrations")]
+async fn cascade_kills_a_descendants_replacement_and_not_the_roots_replay(pool: sqlx::PgPool) {
+    let (db, ws, user, app) = setup(&pool).await;
+    file_flow(&db, ws, user, &one_log("child")).await;
+    let source = "id: tree\nnamespace: t\ntasks:\n  - id: sub\n    type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    flowId: child\n";
+    let parent = start(&pool, ws, source).await;
+    let child = subflow_child(&pool, parent).await;
+    let replacement = start(&pool, ws, &one_log("replacement")).await;
+    let root_replay = start(&pool, ws, &one_log("root-replay")).await;
+    for (of, link) in [(child, replacement), (parent, root_replay)] {
+        sqlx::query("UPDATE workflow.executions SET parent_execution_id = $1 WHERE id = $2")
+            .bind(of)
+            .bind(link)
+            .execute(&pool)
+            .await
+            .expect("link the replay");
+    }
+    // Leased, so the tick below does not run it; a kill would still reach it.
+    lease(&pool, root_replay, "a").await;
+
+    assert_eq!(
+        kill(&app, ws, parent, "?cascade=true", user).await.status(),
+        202
+    );
+    assert_eq!(exec_state(&pool, replacement).await, "KILLING");
+    assert_eq!(run_row(&pool, replacement, "a").await.0, "KILLING");
+    finish_kills(&pool).await;
+    for ex in [parent, child, replacement] {
+        assert_eq!(exec_state(&pool, ex).await, "KILLED", "{ex}");
+    }
+    assert_eq!(exec_state(&pool, root_replay).await, "RUNNING");
+    assert_eq!(run_row(&pool, root_replay, "a").await.0, "RUNNING");
+}
+
+/// **Final review M1: a worker that loses a deadlock to a cascading kill
+/// still finishes the kill.** A child's last run commits: the worker holds
+/// the child (its execution row and its run row) and, as the child ends,
+/// reports to the parent -- child, then parent. A cascading kill holds the
+/// parent and wants the child -- the reverse. Here a test transaction plays
+/// the kill: it holds the parent, then writes the child and its run
+/// `KILLING`, which closes the cycle. Its `deadlock_timeout` is raised so
+/// Postgres's detector fires on the worker's side, which is the case under
+/// test: the worker is the `40P01` victim. Until the fix the worker returned
+/// that error and the run stayed `KILLING` under the dead lease until the
+/// reaper; now the outcome commit is run once more, its fence finds the run
+/// `KILLING`, and the worker takes the kill path: one cancel, `KILLED`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_worker_that_loses_a_deadlock_to_a_kill_still_finishes_it(pool: sqlx::PgPool) {
+    let (db, ws, user, _app) = setup(&pool).await;
+    file_flow(&db, ws, user, &one_log("child")).await;
+    let source = "id: deadlocked\nnamespace: t\ntasks:\n  - id: sub\n    type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    flowId: child\n";
+    let parent = start(&pool, ws, source).await;
+    let child = subflow_child(&pool, parent).await;
+
+    // The "kill": hold the parent first.
+    let mut kill_tx = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL deadlock_timeout = '60s'")
+        .execute(&mut *kill_tx)
+        .await
+        .unwrap();
+    let kill_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *kill_tx)
+        .await
+        .unwrap();
+    sqlx::query("SELECT 1 FROM workflow.executions WHERE id = $1 FOR UPDATE")
+        .bind(parent)
+        .execute(&mut *kill_tx)
+        .await
+        .unwrap();
+
+    // The worker runs the child's task and, committing, blocks on the parent.
+    let reg = std::sync::Arc::new(CancelRecorder::default());
+    let worker = {
+        let (pool, reg) = (pool.clone(), reg.clone());
+        tokio::spawn(async move { egret_workflow::worker::tick(&pool, 10, &*reg).await })
+    };
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let blocked: Option<i32> = sqlx::query_scalar(
+                "SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+            )
+            .bind(kill_pid)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+            if blocked.is_some() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        waited.is_ok(),
+        "the worker's commit never waited on the parent"
+    );
+
+    // The "kill" now writes the child, which the worker holds: a deadlock,
+    // and the worker is its victim.
+    sqlx::query(
+        "UPDATE workflow.executions SET state = 'KILLING', \
+                history = history || '[\"KILLING\"]'::jsonb WHERE id = $1",
+    )
+    .bind(child)
+    .execute(&mut *kill_tx)
+    .await
+    .expect("the kill's write goes through once the worker is aborted");
+    sqlx::query(
+        "UPDATE workflow.task_runs SET state = 'KILLING', \
+                history = history || '[\"KILLING\"]'::jsonb, \
+                attempts = jsonb_set(attempts, \
+                    ARRAY[(jsonb_array_length(attempts) - 1)::text, 'history'], \
+                    (attempts -> -1 -> 'history') || '[\"KILLING\"]'::jsonb) \
+          WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(child)
+    .execute(&mut *kill_tx)
+    .await
+    .unwrap();
+    kill_tx.commit().await.unwrap();
+
+    let ticked = tokio::time::timeout(std::time::Duration::from_secs(30), worker)
+        .await
+        .expect("the worker returns")
+        .expect("the worker task");
+    assert!(
+        ticked.is_ok(),
+        "the deadlock victim must not give up the kill: {ticked:?}"
+    );
+    let (state, claimed_at, ended_at, _) = run_row(&pool, child, "a").await;
+    assert_eq!(state, "KILLED");
+    assert_eq!(claimed_at, None);
+    assert!(ended_at.is_some());
+    assert_eq!(
+        reg.cancels().len(),
+        1,
+        "the kill path cancelled the task once"
+    );
+    assert_eq!(exec_state(&pool, child).await, "KILLED");
+}
+
 // ── The invariant (decision 4) ──────────────────────────────────────────────
 
 /// **After the route returns, no live run of any execution in the killed tree

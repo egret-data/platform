@@ -1392,9 +1392,10 @@ async fn run_one(
             let _ = store.store.delete(&wd.carry_to).await;
         }
     }
-    // Set once the budget's expiry has asked the handler to stop, so a kill
-    // found afterwards does not ask it again (`end_kill`).
-    let asked = std::sync::atomic::AtomicBool::new(false);
+    // How far the budget's expiry got in asking the handler to stop, so a
+    // kill found afterwards asks again only if that cancel did not return
+    // (`cancel::Asked`, final review T4).
+    let asked = cancel::Asked::default();
     let handler = async {
         match budget {
             Budget::Refused(message) => Ok(Outcome::failed_with(message)),
@@ -1419,15 +1420,7 @@ async fn run_one(
             // run is still this worker's, so stopping it is this worker's job.
             Leased::Killed { held } => {
                 input.log.finish().await;
-                return end_kill(
-                    pool,
-                    c,
-                    held,
-                    reg,
-                    &input,
-                    !asked.load(std::sync::atomic::Ordering::SeqCst),
-                )
-                .await;
+                return end_kill(pool, c, held, reg, &input, asked.kill_must_cancel()).await;
             }
             // **The fence moved: another worker holds this run now, and this one
             // records NOTHING** — no outcome, and no failed-attempt line, because
@@ -1537,47 +1530,74 @@ async fn run_one(
     // Set when the run is found killed while the fetch below runs under the
     // lease: the attempt gives up, and the kill path records `KILLED`.
     let mut killed: Option<DateTime<Utc>> = None;
-    let ended = transaction!(
-        pool,
-        Isolation::Default,
-        |at| {
-            let renewed = Claimed {
-                claimed_at: lease.0,
-                ..c.clone()
-            };
-            apply_outcome_with(at, &renewed, &outcome, carried.as_deref())
-                .await
-                .map(Finish::Commit)
-        },
-        |pf| {
-            let fetched = under_lease_with(
-                |h| renew_lease(pool, c.id, h, RunState::Running),
-                |h| killing_under(pool, c.id, h),
-                c.id,
-                lease.0,
-                Clock::of(timing, Watch::Leaf),
-                lease.1,
-                pf.fetch_pending(),
-            )
-            .await;
-            match fetched {
-                Leased::Kept {
-                    out,
-                    held,
-                    renewed_at,
-                } => {
-                    out?;
-                    lease = (held, renewed_at);
-                    Ok(Fetched::Again)
+    // **A deadlock's victim runs the commit once more** (final review M1).
+    // A child's last commit locks the child, then its parent (the report); a
+    // cascading kill locks the parent, then the child. When Postgres aborts
+    // this side (`40P01`) the transaction wrote nothing, and running it again
+    // is what tells the two endings apart: its first statements wait on the
+    // rows the kill holds until the kill commits, so the fence then finds the
+    // run `KILLING` and the `is_lease_lost` arm below takes the kill path --
+    // or, for a deadlock with anything else, the outcome commits. Reading the
+    // row at once instead (`killing_under`) can see it before the winner has
+    // committed, answer "not killed", and leave the run `KILLING` under this
+    // dead lease until the reaper. Once: a second deadlock is returned as
+    // before.
+    let mut deadlocked = false;
+    let ended = loop {
+        let ended = transaction!(
+            pool,
+            Isolation::Default,
+            |at| {
+                let renewed = Claimed {
+                    claimed_at: lease.0,
+                    ..c.clone()
+                };
+                apply_outcome_with(at, &renewed, &outcome, carried.as_deref())
+                    .await
+                    .map(Finish::Commit)
+            },
+            |pf| {
+                let fetched = under_lease_with(
+                    |h| renew_lease(pool, c.id, h, RunState::Running),
+                    |h| killing_under(pool, c.id, h),
+                    c.id,
+                    lease.0,
+                    Clock::of(timing, Watch::Leaf),
+                    lease.1,
+                    pf.fetch_pending(),
+                )
+                .await;
+                match fetched {
+                    Leased::Kept {
+                        out,
+                        held,
+                        renewed_at,
+                    } => {
+                        out?;
+                        lease = (held, renewed_at);
+                        Ok(Fetched::Again)
+                    }
+                    Leased::Killed { held } => {
+                        killed = Some(held);
+                        Ok(Fetched::GiveUp)
+                    }
+                    Leased::Lost => Ok(Fetched::GiveUp),
                 }
-                Leased::Killed { held } => {
-                    killed = Some(held);
-                    Ok(Fetched::GiveUp)
-                }
-                Leased::Lost => Ok(Fetched::GiveUp),
             }
+        );
+        match ended {
+            Err(e) if !deadlocked && super::kill::is_deadlock(&e) => {
+                deadlocked = true;
+                tracing::info!(
+                    execution = %c.execution_id,
+                    run = %c.id,
+                    task_id = %c.task_id,
+                    "the run's outcome commit was a deadlock's victim; running it once more"
+                );
+            }
+            other => break other,
         }
-    );
+    };
     // **A kill that lands after the handler returned** (workflow kill spec
     // §4.1): the outcome's fence refuses a `KILLING` run, so the commit fails
     // as a lost lease although the lease is still this worker's. The row is
@@ -1591,7 +1611,9 @@ async fn run_one(
     // answers `Err`, which would log "could not stop this task" about a task
     // that was stopped. A first cancel that was REFUSED is not retried either:
     // a handler that cannot stop its work (`handlers::sql`) cannot on a second
-    // asking.
+    // asking. Only a cancel that RETURNED counts (`cancel::Asked`): one still
+    // in flight when `under_lease` found the kill was dropped with the
+    // handler future, and the kill path asks again (final review T4).
     let ended = match ended {
         Err(e) if is_lease_lost(&e) => {
             let killed_here = match killing_under(pool, c.id, lease.0).await {
@@ -1609,30 +1631,14 @@ async fn run_one(
                 }
             };
             if killed_here {
-                return end_kill(
-                    pool,
-                    c,
-                    lease.0,
-                    reg,
-                    &input,
-                    !asked.load(std::sync::atomic::Ordering::SeqCst),
-                )
-                .await;
+                return end_kill(pool, c, lease.0, reg, &input, asked.kill_must_cancel()).await;
             }
             return Err(e);
         }
         other => other?,
     };
     if let Some(held) = killed {
-        return end_kill(
-            pool,
-            c,
-            held,
-            reg,
-            &input,
-            !asked.load(std::sync::atomic::Ordering::SeqCst),
-        )
-        .await;
+        return end_kill(pool, c, held, reg, &input, asked.kill_must_cancel()).await;
     }
     if let Ended::GaveUp = ended {
         tracing::warn!(
@@ -2405,7 +2411,21 @@ async fn commit_kill(pool: &PgPool, claimed: &Claimed, held: DateTime<Utc>) -> R
         claimed_at: held,
         ..claimed.clone()
     };
-    let hit = transaction!(pool, |at| { commit_kill_with(at, &renewed).await })?;
+    // A deadlock's victim runs once more, for `run_one`'s reason (final
+    // review M1): this commit locks the child, then (the report) its parent,
+    // the reverse of a cascading kill, and the run is still `KILLING` under
+    // this lease after the kill commits.
+    let hit = match transaction!(pool, |at| { commit_kill_with(at, &renewed).await }) {
+        Err(e) if super::kill::is_deadlock(&e) => {
+            tracing::info!(
+                execution = %claimed.execution_id,
+                run = %claimed.id,
+                "the run's KILLED commit was a deadlock's victim; running it once more"
+            );
+            transaction!(pool, |at| { commit_kill_with(at, &renewed).await })?
+        }
+        other => other?,
+    };
     Ok(if hit {
         Committed::Yes
     } else {
@@ -5844,6 +5864,11 @@ mod tests {
         /// own budget expires before any kill check, and its cancel comes
         /// first.
         KillThenSleep { pool: PgPool, ex: Uuid, run_ix: i32 },
+        /// Sleep for a minute; the task's budget expires first, and its
+        /// cancel plants the kill of `run_ix` and then hangs, so the kill is
+        /// found while the budget's cancel is still in flight (final review
+        /// T4). A later cancel answers at once.
+        KillInCancel { pool: PgPool, ex: Uuid, run_ix: i32 },
     }
 
     /// A registry that records every `cancel` and whether its handler future
@@ -5892,14 +5917,22 @@ mod tests {
                     plant_kill_of(pool, *ex, *run_ix).await;
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 }
+                Mode::KillInCancel { .. } => {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                }
             }
             Ok(Outcome::success())
         }
         async fn cancel(&self, task: &TaskInput) -> Result<()> {
-            self.cancels
-                .lock()
-                .unwrap()
-                .push((task.run_id, task.attempt));
+            let first = {
+                let mut cancels = self.cancels.lock().unwrap();
+                cancels.push((task.run_id, task.attempt));
+                cancels.len() == 1
+            };
+            if let (Mode::KillInCancel { pool, ex, run_ix }, true) = (&self.mode, first) {
+                plant_kill_of(pool, *ex, *run_ix).await;
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
             if self.refuse {
                 Err(Error::Internal(anyhow::anyhow!(
                     "this handler cannot stop its work"
@@ -6276,6 +6309,46 @@ mod tests {
             reg.cancels(),
             vec![(c.id, c.attempt as usize)],
             "the budget's cancel, and no second one from the kill path"
+        );
+        assert_eq!(reg.releases(), vec![(c.id, c.attempt as usize)]);
+        assert_killed(&pool, ex, &c).await;
+    }
+
+    /// Final review T4: **a budget-expiry cancel still in flight when the
+    /// kill is found is aborted with the handler future, so the kill path
+    /// asks again.** The budget expires, its cancel starts (and plants the
+    /// kill) and does not return; the kill poll finds `KILLING`, the handler
+    /// future -- the cancel inside it -- is dropped, and the kill path must
+    /// not read "already asked" as "already stopped": a second cancel, then
+    /// `KILLED`.
+    #[tokio::test]
+    async fn a_budget_cancel_in_flight_when_the_kill_lands_is_asked_again() {
+        let (pool, ws) = kill_fixture().await;
+        let src = "id: kill-in-cancel\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.debug.Return\n    format: a\n    timeout: PT0.3S\n";
+        let (ex, c) = start_with_leaf_leased(&pool, ws, src).await;
+        let reg = KillSpy::new(
+            Mode::KillInCancel {
+                pool: pool.clone(),
+                ex,
+                run_ix: c.run_ix,
+            },
+            false,
+        );
+        let timing = WorkerTiming {
+            kill_poll: std::time::Duration::from_millis(100),
+            ..WorkerTiming::default()
+        };
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            run_one(&pool, &c, &reg, timing, tokio::time::Instant::now()),
+        )
+        .await
+        .expect("the kill poll ends the hung cancel");
+        assert_eq!(out.expect("run_one"), Committed::Yes);
+        assert_eq!(
+            reg.cancels(),
+            vec![(c.id, c.attempt as usize), (c.id, c.attempt as usize)],
+            "the budget's cancel, aborted, and the kill path's"
         );
         assert_eq!(reg.releases(), vec![(c.id, c.attempt as usize)]);
         assert_killed(&pool, ex, &c).await;
