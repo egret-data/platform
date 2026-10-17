@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Tag as TagIcon, UserSearch } from "lucide-react";
 import { usePermListGrants, usePermListRules } from "@/api/generated/perm/perm";
 import type { GovernanceCatalog, GrantView, ResourceTagDto, RuleView } from "@/api/generated/model";
@@ -7,6 +7,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { useWorkspaceNames } from "@/routes/governance/openInData";
 import { formatPrincipals, formatRuleKind, grantSentence } from "@/routes/governance/permFormat";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { AddTagDialog, TAGS_EGRET_ONLY, type TagTarget } from "@/routes/governance/data/AddTagDialog";
@@ -30,6 +31,13 @@ type ColumnPath = ObjectPath & { schema: string; object: string; column: string 
  * a column's name in the Overview or a link. It is a Radix dialog, so focus is
  * trapped in it and Escape closes it; closing removes `?column=` and keeps the
  * rest of the search.
+ *
+ * It opens from a link, not a Radix trigger, so Radix has nowhere to return
+ * focus on close and would leave it on `<body>` (D6). The panel remembers
+ * what held focus when it opened (the column's link) and returns focus there
+ * on close, however focus moved inside the panel meanwhile; when it opened
+ * from the URL, focus goes to the Overview's link for the column, else to the
+ * page's heading.
  *
  * It lists, for this one column:
  * - **Tags**: its own, then its table's marked "from table" (a table's tag
@@ -61,6 +69,29 @@ export function ColumnPanel({
   // The source's own spelling once it is known: the URL may differ in case.
   const column = check.status === "found" ? check.name : asked;
   const objectPath: ObjectPath = { catalog: path.catalog, schema: path.schema, object: path.object };
+  const open = path.object !== undefined && path.column !== undefined;
+  // The last column shown: by the time the panel closes, `?column=` is gone from the URL.
+  const [lastColumn, setLastColumn] = useState(asked);
+  if (asked !== "" && asked !== lastColumn) setLastColumn(asked);
+  // What held focus when the panel opened, read before the sheet mounts and
+  // its focus scope moves focus inside; only on opening.
+  const opener = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const active = document.activeElement;
+    opener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+  }, [open]);
+  const returnFocus = (e: Event) => {
+    e.preventDefault();
+    const element = opener.current?.isConnected ? opener.current : null;
+    opener.current = null;
+    const target =
+      element ??
+      [...document.querySelectorAll<HTMLElement>("[data-column-link]")].find((a) => sameName(a.dataset.columnLink ?? "", lastColumn)) ??
+      document.querySelector<HTMLElement>("h1");
+    target?.focus();
+  };
+
   let body: ReactNode = null;
   if (path.schema !== undefined && path.object !== undefined && path.column !== undefined) {
     if (check.status === "loading") body = <ListSkeleton rows={4} cols={2} />;
@@ -88,12 +119,12 @@ export function ColumnPanel({
   }
   return (
     <Sheet
-      open={path.object !== undefined && path.column !== undefined}
+      open={open}
       onOpenChange={(open) => {
         if (!open) onClose();
       }}
     >
-      <SheetContent className="max-w-md">
+      <SheetContent className="max-w-md" onCloseAutoFocus={returnFocus}>
         <SheetHeader>
           <SheetTitle className="break-all">{column}</SheetTitle>
           <SheetDescription className="flex flex-wrap gap-x-3">
@@ -290,11 +321,13 @@ function Masks({ path, catalog, tags }: { path: ColumnPath; catalog: GovernanceC
 /** The grants set on the column: by its name, or by a pattern that matches it (marked). */
 function Grants({ path, catalogId }: { path: ColumnPath; catalogId: string }) {
   const grantsQ = usePermListGrants({ query: { retry: false } });
+  const workspaceName = useWorkspaceNames();
+  const sentenceOf = (g: GrantView) => grantSentence(g, workspaceName);
   if (grantsQ.isError) return <TabError what="grants" onRetry={() => void grantsQ.refetch()} />;
   if (grantsQ.data?.status !== 200) return <ListSkeleton rows={2} cols={2} />;
   const onColumn = grantsQ.data.data
     .filter((g) => grantCoverage(g, path, catalogId) === "here")
-    .sort((a, b) => grantSentence(a).localeCompare(grantSentence(b)));
+    .sort((a, b) => sentenceOf(a).localeCompare(sentenceOf(b)));
   const note = (
     <p className="text-xs text-muted-foreground">Grants on the table and above reach this column too. See Permissions.</p>
   );
@@ -310,7 +343,7 @@ function Grants({ path, catalogId }: { path: ColumnPath; catalogId: string }) {
     <div className="space-y-2">
       <ul aria-label={`Grants on ${path.column}`} className="space-y-1">
         {onColumn.map((g) => (
-          <GrantItem key={g.id} grant={g} />
+          <GrantItem key={g.id} grant={g} sentence={sentenceOf(g)} />
         ))}
       </ul>
       {note}
@@ -318,7 +351,7 @@ function Grants({ path, catalogId }: { path: ColumnPath; catalogId: string }) {
   );
 }
 
-function GrantItem({ grant }: { grant: GrantView }) {
+function GrantItem({ grant, sentence }: { grant: GrantView; sentence: string }) {
   const patterns = patternLevels(grant.scope);
   let pattern: ReactNode = null;
   if (patterns.length > 0) {
@@ -328,7 +361,7 @@ function GrantItem({ grant }: { grant: GrantView }) {
   }
   return (
     <li className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm break-words">
-      <span>{grantSentence(grant)}</span>
+      <span>{sentence}</span>
       <span>
         {grant.effect === "deny" ? <Badge variant="destructive">Deny</Badge> : <Badge variant="outline">Allow</Badge>}
         {pattern}

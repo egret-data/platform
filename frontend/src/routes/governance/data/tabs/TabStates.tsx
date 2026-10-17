@@ -6,6 +6,13 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import type { CatalogState } from "@/routes/governance/data/objectData";
 
+/**
+ * A table's Edit and Delete column, pinned to the right edge of the table's
+ * own scroll container: on a narrow screen the other columns scroll under it
+ * and the actions stay in view (D10). The page itself never scrolls sideways.
+ */
+export const ACTIONS_CELL = "sticky right-0 w-24 bg-background";
+
 /** `The <what> could not be loaded. Retry, or reload the page.` */
 export function failedText(what: string): string {
   return `The ${what} could not be loaded. Retry, or reload the page.`;

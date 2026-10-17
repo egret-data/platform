@@ -46,7 +46,8 @@ export function ObjectTabs({ level, panels }: { level: ObjectLevel; panels: Reco
 
   return (
     <Tabs value={value} onValueChange={select} className="min-w-0">
-      <TabsList className="max-w-full justify-start overflow-x-auto">
+      {/* Wraps, so every tab is in view at 390 px (D10); a scrolled list hid Lineage and Details. */}
+      <TabsList className="h-auto max-w-full flex-wrap justify-start">
         {tabs.map((t) => (
           <TabsTrigger key={t} value={t}>
             {LABELS[t]}

@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { formatPrincipals, formatRuleKind } from "@/routes/governance/permFormat";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
-import { KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
+import { emptyLevel, KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
 import { ruleSelects, sameName, tagNamesOn } from "@/routes/governance/data/coverage";
 import {
   assignmentsOf,
@@ -58,7 +58,7 @@ export function OverviewTab({
           <CatalogOverview catalog={c} catalogState={catalog} browse={browse} />
         ) : path.object === undefined ? (
           <Level browse={browse} what="tables and views">
-            {(body) => <ObjectList path={path} items={body.items ?? []} />}
+            {(body) => <ObjectList path={path} items={body.items ?? []} source={body.source} />}
           </Level>
         ) : (
           <div className="space-y-6">
@@ -72,6 +72,7 @@ export function OverviewTab({
                     path={path}
                     catalog={c}
                     columns={body.columns ?? []}
+                    source={body.source}
                     tags={tags}
                     taggable={c.warehouseId != null}
                   />
@@ -125,7 +126,10 @@ function CatalogOverview({
         <Level browse={browse} what="schemas">
           {(body) => {
             const schemas = [...(body.items ?? [])].sort(byName);
-            if (schemas.length === 0) return <EmptyState icon={Folder} title="No schemas" />;
+            if (schemas.length === 0) {
+              const empty = emptyLevel(body.source, "schemas");
+              return <EmptyState icon={Folder} title={empty.title} description={empty.detail} />;
+            }
             return (
               <ul aria-label="Schemas" className="flex flex-wrap gap-2">
                 {schemas.map((s) => (
@@ -191,9 +195,20 @@ function CatalogOverview({
   );
 }
 
-function ObjectList({ path, items }: { path: ObjectPath; items: NonNullable<BrowseResponse["items"]> }) {
+function ObjectList({
+  path,
+  items,
+  source,
+}: {
+  path: ObjectPath;
+  items: NonNullable<BrowseResponse["items"]>;
+  source: BrowseResponse["source"];
+}) {
   const objects = [...items].sort(byName);
-  if (objects.length === 0) return <EmptyState icon={Table2} title="No tables or views" />;
+  if (objects.length === 0) {
+    const empty = emptyLevel(source, "tables or views");
+    return <EmptyState icon={Table2} title={empty.title} description={empty.detail} />;
+  }
   return (
     <Table aria-label="Tables and views">
       <TableHeader>
@@ -248,18 +263,23 @@ function Columns({
   path,
   catalog,
   columns,
+  source,
   tags,
   taggable,
 }: {
   path: ObjectPath;
   catalog: GovernanceCatalog;
   columns: NonNullable<BrowseResponse["columns"]>;
+  source: BrowseResponse["source"];
   tags: TagsResult;
   taggable: boolean;
 }) {
   const canReadRules = usePolicyPermissions()("policy:read");
   const rulesQ = usePermListRules({ query: { enabled: canReadRules, retry: false } });
-  if (columns.length === 0) return <EmptyState icon={Columns3} title="No columns returned" />;
+  if (columns.length === 0) {
+    const empty = emptyLevel(source, "columns");
+    return <EmptyState icon={Columns3} title={empty.detail ? empty.title : "No columns returned"} description={empty.detail} />;
+  }
   const assignments = assignmentsOf(tags);
   const showTags = taggable && assignments !== null;
   const onTable = (assignments ?? []).filter((a) => a.column === "");
@@ -289,6 +309,7 @@ function Columns({
               <TableCell>
                 <Link
                   to={pathToUrl({ ...path, column: col.name })}
+                  data-column-link={col.name}
                   className="rounded-sm font-medium hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
                 >
                   {col.name}

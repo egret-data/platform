@@ -164,12 +164,15 @@ describe("Lineage tab", () => {
       fixture({
         "c-ice|sales|v_orders": ok({
           readers: [],
-          view: { securityMode: "invoker", lineageState: "failed", lineageDetail: "Could not parse.", bases: [] },
+          view: { securityMode: "invoker", lineageState: "failed", lineageDetail: "the view version carries no Trino SQL", bases: [] },
         }),
       }),
     );
     open(VIEW);
-    expect(await within(panel()).findByText(/Failed: egret could not work out what this view reads/)).toHaveTextContent("Could not parse.");
+    // D11: the backend's lowercase detail starts a sentence after the full stop.
+    expect(await within(panel()).findByText(/Failed: egret could not work out what this view reads/)).toHaveTextContent(
+      "Failed: egret could not work out what this view reads. The view version carries no Trino SQL",
+    );
     expect(within(panel()).queryByText(/No base tables/)).not.toBeInTheDocument();
   });
 

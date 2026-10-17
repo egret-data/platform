@@ -39,6 +39,27 @@ export const LEVEL_FAILED = "This level could not be listed. Retry, or reload th
 
 export type NodeKind = "catalog" | BrowseKind;
 
+/**
+ * Why an empty level read through an engine is not a plain fact (D1, D2): an
+ * engine can answer an empty list for a name it cannot match, the same answer
+ * it gives for a level that holds nothing, so egret cannot tell the two apart.
+ * Measured: Trino lists a mixed-case Postgres schema `MixS` as `mixs` and
+ * then lists nothing in it; StarRocks lists nothing in a schema whose name
+ * holds a backslash.
+ */
+export const ENGINE_EMPTY_DETAIL =
+  "An engine can return an empty list for names it cannot match (for example mixed-case names in Trino JDBC catalogs).";
+
+/**
+ * What an empty level says: `No <what>` when egret listed it, and
+ * `<engine> listed no <what>` with {@link ENGINE_EMPTY_DETAIL} when an engine
+ * did (spec §2.5: a listing that may have failed says so).
+ */
+export function emptyLevel(source: BrowseResponse["source"], what: string): { title: string; detail?: string } {
+  if (source?.kind === "engine") return { title: `${source.name} listed no ${what}`, detail: ENGINE_EMPTY_DETAIL };
+  return { title: `No ${what}` };
+}
+
 type BrowseResult = UseQueryResult<ControlPlaneGovernanceBrowseQueryResult, ControlPlaneGovernanceBrowseQueryError>;
 
 /** Each kind's icon and name, as the tree and an object's header show it. */
@@ -424,7 +445,8 @@ function buildLines(
     if (body.notListed) return { status: "notListed", text: body.notListed.detail };
     const items = [...(body.items ?? [])].sort(byName);
     if (items.length === 0) {
-      return { status: "empty", text: node.kind === "catalog" ? "No schemas" : "No tables or views" };
+      const empty = emptyLevel(body.source, node.kind === "catalog" ? "schemas" : "tables or views");
+      return { status: "empty", text: empty.detail ? `${empty.title}. ${empty.detail}` : empty.title };
     }
     return {
       nodes: items.map((item) => {

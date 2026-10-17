@@ -92,7 +92,10 @@ export function ObjectHeader({
     <section aria-label="Object" className="space-y-3 border-b border-border pb-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
-          <h1 className="text-2xl font-semibold break-all">{name}</h1>
+          {/* Takes focus when the page opens from the folded tree, or the column panel closes with no opener (D6, D7). */}
+          <h1 tabIndex={-1} className="text-2xl font-semibold break-all outline-none">
+            {name}
+          </h1>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
             {kindMeta ? (
               <span className="inline-flex items-center gap-1">

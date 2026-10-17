@@ -277,6 +277,47 @@ describe("ColumnPanel", () => {
     expect(where()).toBe("/governance/data/ice/sales/orders?tab=permissions");
   });
 
+  // Live check D6: Escape left focus on <body>, not on the link that opened the panel.
+  it("returns focus to the column's link on Escape, even after focus moved inside the panel", async () => {
+    serveData(fixture());
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders");
+    const link = await screen.findByRole("link", { name: "email" });
+    link.focus();
+    await user.keyboard("{Enter}");
+    const panel = await screen.findByRole("dialog", { name: "email" });
+    await waitFor(() => expect(panel.contains(document.activeElement)).toBe(true));
+    await user.click(await within(panel).findByRole("button", { name: "Who can read this column?" }));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.getAllByRole("dialog")).toHaveLength(1));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByRole("link", { name: "email" })).toHaveFocus();
+  });
+
+  it("returns focus to the column's link on Escape when the panel opened from the URL", async () => {
+    serveData(fixture());
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?column=email");
+    const panel = await screen.findByRole("dialog", { name: "email" });
+    await screen.findByRole("link", { name: "email", hidden: true });
+    await waitFor(() => expect(panel.contains(document.activeElement)).toBe(true));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByRole("link", { name: "email" })).toHaveFocus();
+  });
+
+  it("returns focus to the page's heading on Escape when no tab lists the column", async () => {
+    serveData(fixture());
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales/orders?tab=permissions&column=email");
+    const panel = await screen.findByRole("dialog", { name: "email" });
+    await waitFor(() => expect(panel.contains(document.activeElement)).toBe(true));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByRole("heading", { level: 1, name: "orders" })).toHaveFocus();
+  });
+
   it("says a column the table does not have is not there, and offers nothing for it", async () => {
     serveData(fixture());
     renderPage("/governance/data/ice/sales/orders?column=nope", TAGGER);

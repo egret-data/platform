@@ -9,6 +9,7 @@ import { AuthContext } from "@/auth/useAuth";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import DataRoutes from "@/routes/governance/data/DataRoutes";
 import { ObjectHeader } from "@/routes/governance/data/ObjectHeader";
+import { scopeToDataLink } from "@/routes/governance/openInData";
 import { browseItems, browseNotListed, catalog, serveData, type FakeData } from "./fakeDataServer";
 
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
@@ -574,6 +575,34 @@ describe("OverviewTab", () => {
     expect(await within(panel()).findByText("No tables or views")).toBeInTheDocument();
   });
 
+  // Live check D1/D2: an engine answers an empty list for a name it cannot match.
+  it("says an engine listed an empty level, never that it is empty, and keeps the bare fact for egret's listings", async () => {
+    const viaEngine = { kind: "engine", name: "trino-2" } as const;
+    serveData(
+      fixture({
+        browse: {
+          ...fixture().browse,
+          "c-pg": ok(browseItems([], viaEngine)),
+          "c-pg|mixs": ok(browseItems([], viaEngine)),
+          "c-pg|s": ok(browseItems([{ name: "t", kind: "table" }], viaEngine)),
+          "c-pg|s|t": ok({ source: viaEngine, engines: [], columns: [] }),
+        },
+      }),
+    );
+    const caveat = "An engine can return an empty list for names it cannot match (for example mixed-case names in Trino JDBC catalogs).";
+    const first = renderPage("/governance/data/pg/mixs");
+    expect(await within(panel()).findByText("trino-2 listed no tables or views")).toBeInTheDocument();
+    expect(within(panel()).getByText(caveat)).toBeInTheDocument();
+    first.unmount();
+    const second = renderPage("/governance/data/pg");
+    expect(await within(panel()).findByText("trino-2 listed no schemas")).toBeInTheDocument();
+    expect(within(panel()).getByText(caveat)).toBeInTheDocument();
+    second.unmount();
+    renderPage("/governance/data/pg/s/t");
+    expect(await within(panel()).findByText("trino-2 listed no columns")).toBeInTheDocument();
+    expect(within(panel()).getByText(caveat)).toBeInTheDocument();
+  });
+
   it("shows a skeleton while the level loads", async () => {
     serveData(fixture({ browse: { ...fixture().browse, "c-ice|sales|orders": "never" } }));
     renderPage("/governance/data/ice/sales/orders");
@@ -692,10 +721,10 @@ describe("PermissionsTab", () => {
       "On columns",
     ]);
     expect(rowsOf("Here")).toEqual([["user alice can read and write ice.sales.orders", "Allow", ""]]);
-    // Catalog before schema; the assignment grant names its workspace.
+    // Catalog before schema; the assignment grant names its workspace, in its sentence too (live check D5).
     expect(rowsOf("Inherited")).toEqual([
+      ["members of workspace Finance can read ice.*Set by workspace assignment · Finance", "Catalog", "Allow", ""],
       ["role analyst can read ice.*", "Catalog", "Allow", ""],
-      ["workspace_members w1 can read ice.*Set by workspace assignment · Finance", "Catalog", "Allow", ""],
       ["group contractors cannot read ice.sales.*", "Schema", "Deny", ""],
     ]);
     expect(rowsOf("On columns")).toEqual([["role analyst cannot read ice.sales.orders.email", "email", "Deny", ""]]);
@@ -722,16 +751,59 @@ describe("PermissionsTab", () => {
     expect(within(panel()).queryByRole("button")).not.toBeInTheDocument();
   });
 
-  it("lists only the grants on a catalog itself, never those below it", async () => {
+  it("lists the grants on a catalog, then those on its schemas, tables and columns, each named", async () => {
     serveData(fixture({ grants: ok(ALL) }));
     renderPage("/governance/data/ice?tab=permissions", EDITOR);
     await within(panel()).findByRole("table", { name: "Here" });
     expect(rowsOf("Here").map((r) => r[0])).toEqual([
+      "members of workspace Finance can read ice.*Set by workspace assignment · Finance",
       "role analyst can read ice.*",
-      "workspace_members w1 can read ice.*Set by workspace assignment · Finance",
     ]);
     expect(within(panel()).queryByRole("table", { name: "Inherited" })).not.toBeInTheDocument();
-    expect(within(panel()).queryByRole("table", { name: "On columns" })).not.toBeInTheDocument();
+    // Below the catalog, by what each is on; nothing from another catalog.
+    expect(rowsOf("Inside this catalog").map((r) => [r[0], r[1]])).toEqual([
+      ["role analyst can read ice.hr.*", "hr"],
+      ["group contractors cannot read ice.sales.*", "sales"],
+      ["role analyst can read ice.sales.customers", "sales.customers"],
+      ["role analyst can read ice.sales.customers.email", "sales.customers.email"],
+      ["user alice can read and write ice.sales.orders", "sales.orders"],
+      ["role analyst cannot read ice.sales.orders.email", "sales.orders.email"],
+    ]);
+  });
+
+  // Live check D4: a grant made from a schema's page on a table, or on `table = "*"`, was listed nowhere on it.
+  it("lists on a schema the grants on its tables and columns, and on a table pattern below it", async () => {
+    const star = g("g-star", { schema: "sales", table: "*" });
+    serveData(fixture({ grants: ok([...ALL, star]) }));
+    renderPage("/governance/data/ice/sales?tab=permissions", EDITOR);
+    await within(panel()).findByRole("table", { name: "Here" });
+    expect(within(panel()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual([
+      "Here",
+      "Inherited",
+      "Inside this schema",
+      "Matching a pattern",
+    ]);
+    expect(rowsOf("Here").map((r) => r[0])).toEqual(["group contractors cannot read ice.sales.*"]);
+    expect(rowsOf("Inside this schema").map((r) => [r[0], r[1]])).toEqual([
+      ["role analyst can read ice.sales.customers", "customers"],
+      ["role analyst can read ice.sales.customers.email", "customers.email"],
+      ["user alice can read and write ice.sales.orders", "orders"],
+      ["role analyst cannot read ice.sales.orders.email", "orders.email"],
+    ]);
+    expect(rowsOf("Matching a pattern")).toEqual([["role analyst can read ice.sales.“*”", "table “*”", "Allow", ""]]);
+    // The pattern grant can be edited and deleted where it is listed.
+    expect(within(panel()).getByRole("button", { name: "Delete role analyst can read ice.sales.“*”" })).toBeInTheDocument();
+    expect(within(panel()).queryByText(/ice\.hr/)).not.toBeInTheDocument();
+  });
+
+  it("lists a pattern grant on the page its Open in Data link opens", async () => {
+    const star = g("g-star", { schema: "sales", table: "*" });
+    const link = scopeToDataLink(star.scope, new Map([["c-ice", "ice"]]), "permissions");
+    expect(link).toEqual({ to: "/governance/data/ice/sales?tab=permissions", stoppedAtPattern: true });
+    serveData(fixture({ grants: ok([star]) }));
+    renderPage(link!.to);
+    expect(await within(panel()).findByRole("table", { name: "Matching a pattern" })).toBeInTheDocument();
+    expect(rowsOf("Matching a pattern").map((r) => r[0])).toEqual(["role analyst can read ice.sales.“*”"]);
   });
 
   it("says no grant reaches the object", async () => {
@@ -976,13 +1048,37 @@ describe("MasksFiltersTab", () => {
     expect(within(panel()).queryByRole("table", { name: "By tag" })).not.toBeInTheDocument();
   });
 
-  it("lists only the rules on a catalog itself, and no tag rule", async () => {
+  it("lists the rules on a catalog, then those inside it and on a pattern below it, and no tag rule", async () => {
     const { tagCalls } = serveData(fixture({ rules: ok(ALL_RULES) }));
     renderPage("/governance/data/ice?tab=masks", EDITOR);
     await within(panel()).findByRole("table", { name: "Here" });
     expect(rowsOf("Here").map((r) => r[0])).toEqual(["ice_filterice.*"]);
-    expect(within(panel()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual(["Here"]);
+    expect(within(panel()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual([
+      "Here",
+      "Inside this catalog",
+      "Matching a pattern",
+    ]);
+    // Masks before row filters, then by what each is on.
+    expect(rowsOf("Inside this catalog").map((r) => [r[0], r[2]])).toEqual([
+      ["null_salesice.sales.*", "sales"],
+      ["hash_customersice.sales.customers.email", "sales.customers.email"],
+      ["hash_emailice.sales.orders.email", "sales.orders.email"],
+      ["us_onlyice.sales.orders", "sales.orders"],
+    ]);
+    expect(rowsOf("Matching a pattern").map((r) => r[0])).toEqual(["star_ordersice.sales.“ord*”"]);
+    expect(within(panel()).queryByText(/pg_mask|redact_/)).not.toBeInTheDocument();
     expect(tagCalls).toEqual([]);
+  });
+
+  it("lists on a schema the rules on its tables and columns", async () => {
+    serveData(fixture({ rules: ok(ALL_RULES) }));
+    renderPage("/governance/data/ice/sales?tab=masks", EDITOR);
+    await within(panel()).findByRole("table", { name: "Inside this schema" });
+    expect(rowsOf("Inside this schema").map((r) => [r[0], r[2]])).toEqual([
+      ["hash_customersice.sales.customers.email", "customers.email"],
+      ["hash_emailice.sales.orders.email", "orders.email"],
+      ["us_onlyice.sales.orders", "orders"],
+    ]);
   });
 
   it("lists no tag rule on a table of a catalog that is not egret's, and never asks for its tags", async () => {

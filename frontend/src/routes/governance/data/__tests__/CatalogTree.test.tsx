@@ -145,6 +145,40 @@ describe("CatalogTree", () => {
     expect(await within(tree()).findByText("No tables or views")).toBeInTheDocument();
   });
 
+  // Live check D1/D2: Trino lists nothing in a mixed-case JDBC schema, StarRocks in one whose name holds a backslash.
+  it("never says a level an engine listed empty is empty as a fact", async () => {
+    serveData(
+      fixture({
+        browse: {
+          ...fixture().browse,
+          "c-pg": { status: 200, body: browseItems([{ name: "mixs", kind: "schema" }], { kind: "engine", name: "trino-1" }) },
+          "c-pg|mixs": { status: 200, body: browseItems([], { kind: "engine", name: "trino-1" }) },
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderData();
+    await waitFor(() => expect(shownPaths()).toContain("pg"));
+    await user.click(within(row("pg")).getByRole("button", { name: "Expand pg" }));
+    await waitFor(() => expect(shownPaths()).toContain("pg.mixs"));
+    await user.click(within(row("pg.mixs")).getByRole("button", { name: "Expand pg.mixs" }));
+    expect(
+      await within(tree()).findByText(
+        "trino-1 listed no tables or views. An engine can return an empty list for names it cannot match (for example mixed-case names in Trino JDBC catalogs).",
+      ),
+    ).toBeInTheDocument();
+    expect(within(tree()).queryByText("No tables or views")).not.toBeInTheDocument();
+  });
+
+  it("says an engine listed no schemas in a catalog, with the same caveat", async () => {
+    serveData(fixture({ browse: { ...fixture().browse, "c-pg": { status: 200, body: browseItems([], { kind: "engine", name: "sr-1" }) } } }));
+    const user = userEvent.setup();
+    renderData();
+    await waitFor(() => expect(shownPaths()).toContain("pg"));
+    await user.click(within(row("pg")).getByRole("button", { name: "Expand pg" }));
+    expect(await within(tree()).findByText(/^sr-1 listed no schemas\. An engine can return an empty list/)).toBeInTheDocument();
+  });
+
   it("shows why a level was not listed, and a Go to path control, never an empty branch", async () => {
     serveData(fixture());
     const user = userEvent.setup();
@@ -356,6 +390,33 @@ describe("DataPage", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     await user.click(toggle);
     expect(screen.getByRole("button", { name: "Hide catalogs" })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  // Live check D7: Enter on a row folded the tree and left focus on <body>.
+  it("moves focus to the opened page's heading when opening from the folded tree", async () => {
+    serveData(fixture());
+    const user = userEvent.setup();
+    renderData();
+    await user.click(screen.getByRole("button", { name: "Show catalogs" }));
+    await waitFor(() => expect(shownPaths()).toContain("ice"));
+    row("ice").focus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(where()).toBe("/governance/data/ice"));
+    expect(screen.getByRole("button", { name: "Show catalogs" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("heading", { level: 1, name: "ice" })).toHaveFocus();
+  });
+
+  it("leaves focus in the tree on a wide screen, where the tree stays shown", async () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({ matches: query === "(min-width: 768px)", media: query }));
+    serveData(fixture());
+    const user = userEvent.setup();
+    renderData();
+    await user.click(screen.getByRole("button", { name: "Show catalogs" }));
+    await waitFor(() => expect(shownPaths()).toContain("ice"));
+    row("ice").focus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(where()).toBe("/governance/data/ice"));
+    expect(row("ice")).toHaveFocus();
   });
 
   it("opens an object's page from its URL, with the tree open down to it", async () => {

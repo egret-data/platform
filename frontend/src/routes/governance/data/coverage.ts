@@ -2,7 +2,7 @@ import type { Grant, ResourceTagDto, RuleView, Scope } from "@/api/generated/mod
 import { isPattern } from "@/routes/governance/permFormat";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
 
-/** How a grant reaches an object: set on it, set on an ancestor, or set on one of its columns. */
+/** How a grant reaches an object: set on it, set on an ancestor, or set on something inside it (a column of a table; any table or column of a schema or catalog). */
 export type GrantCoverage = "here" | { inheritedFrom: "catalog" | "schema" | "table" } | "child" | null;
 
 const ANCESTORS = ["catalog", "schema", "table"] as const;
@@ -13,9 +13,11 @@ const ANCESTORS = ["catalog", "schema", "table"] as const;
  * A grant reaches `p` when its catalog is `p`'s and each level it sets
  * matches `p`'s at that level (an unset level is every value). It is "here"
  * when it is set at `p`'s own level, inherited when it is set higher up, and
- * "child" when it is set on a column of the table `p` (a table, view or
- * materialized view). A grant set deeper than that (a table, for a schema's
- * page) does not reach `p` and is `null`.
+ * "child" when it is set deeper, on something inside `p`: a column of the
+ * table `p` (a table, view or materialized view), or a table or column of the
+ * schema or catalog `p`. A "child" grant does not reach `p` itself; a page
+ * lists it so that a grant made on something inside `p`, or on a pattern
+ * below it, is seen where it was made and where "Open in Data" lands.
  *
  * A level matches as egret's own evaluator matches it: by glob (`*` any run of
  * characters, `?` one), not by equality (`crates/egret-perm/src/eval.rs`,
@@ -48,8 +50,8 @@ export function scopeCoverage(scope: Scope, p: ObjectPath, catalogId: string): G
   }
   if (granted.length === target.length) return "here";
   if (granted.length < target.length) return { inheritedFrom: ANCESTORS[granted.length] };
-  // Deeper than `p`: only a column of the table `p` is listed.
-  return target.length === 2 && granted.length === 3 ? "child" : null;
+  // Deeper than `p`: on something inside it.
+  return "child";
 }
 
 /**
@@ -139,6 +141,27 @@ export function tagNamesOn(assignments: ResourceTagDto[], p: ObjectPath): string
 /** Schema, table and column names compare without regard to case, as egret resolves tags and the engines match columns. */
 export function sameName(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
+}
+
+/**
+ * What a "child" scope ({@link scopeCoverage}) is set on, named from `p`
+ * down: `email` on the table `orders`, `orders.email` on the schema `sales`,
+ * `sales.orders` on the catalog. A level set to a pattern is quoted, as the
+ * grant's sentence quotes it.
+ */
+export function insideName(scope: Scope, p: ObjectPath): string {
+  const depth = p.schema === undefined ? 0 : p.object === undefined ? 1 : 2;
+  return prefix([scope.schema, scope.table, scope.column])
+    .slice(depth)
+    .map((v) => (isPattern(v) ? `“${v}”` : v))
+    .join(".");
+}
+
+/** The heading and the name column of the group that lists the "child" scopes of `p`'s page. */
+export function insideGroup(p: ObjectPath): { title: string; head: string } {
+  if (p.schema === undefined) return { title: "Inside this catalog", head: "Object" };
+  if (p.object === undefined) return { title: "Inside this schema", head: "Object" };
+  return { title: "On columns", head: "Column" };
 }
 
 export type PatternLevel = { level: "schema" | "table" | "column"; value: string };

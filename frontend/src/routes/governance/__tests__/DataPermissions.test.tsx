@@ -88,7 +88,7 @@ function renderPage(me: Me | null = ADMIN) {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(govApi.useControlPlaneGovernanceListCatalogs).mockReturnValue({
-    data: { status: 200, data: [{ id: "cat-1", name: "wh" }] },
+    data: { status: 200, data: [{ id: "cat-1", name: "wh", workspaces: [{ id: "ws9", name: "Analytics", slug: "analytics" }] }] },
   } as unknown as ReturnType<typeof govApi.useControlPlaneGovernanceListCatalogs>);
   vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue({
     data: { status: 200, data: [CATALOG] },
@@ -149,6 +149,31 @@ describe("DataPermissions — the sentence is the primary column (D5)", () => {
     expect(screen.getByText(/Engineering/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Edit /i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Delete /i })).not.toBeInTheDocument();
+  });
+
+  // Live check D5: the sentence read `workspace_members 220f80e1-… can read ice.*`.
+  test("a workspace's members read by the workspace's name, and by its id only when it is unknown", () => {
+    vi.mocked(permApi.usePermListGrants).mockReturnValue(
+      listResult([
+        grant({
+          id: "g5",
+          scope: { catalog_id: "cat-1" },
+          principals: { include: [{ kind: "workspace_members", ref: "ws9" }], exclude: [] },
+          origin: { type: "workspace_assignment", workspace_id: "ws9" },
+        }),
+        grant({
+          id: "g6",
+          scope: { catalog_id: "cat-1" },
+          principals: { include: [{ kind: "workspace_members", ref: "ws-gone" }], exclude: [] },
+          origin: { type: "workspace_assignment", workspace_id: "ws-gone" },
+        }),
+      ]),
+    );
+    renderPage();
+    expect(screen.getByText("members of workspace Analytics can read wh.*")).toBeInTheDocument();
+    expect(screen.getByText("Set by workspace assignment · Analytics")).toBeInTheDocument();
+    expect(screen.getByText("members of workspace ws-gone can read wh.*")).toBeInTheDocument();
+    expect(screen.queryByText(/ws9/)).not.toBeInTheDocument();
   });
 
   test("an explicit grant DOES offer Edit and Delete to a platform_admin", () => {

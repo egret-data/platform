@@ -70,15 +70,28 @@ function level(value: string): string {
   return isPattern(value) ? `“${value}”` : value;
 }
 
-function principalWord(p: PermPrincipal): string {
+/**
+ * A workspace's name by its id, or `undefined` when it is not known. The
+ * Governance catalog list carries the workspaces each catalog is assigned to
+ * (`useWorkspaceNames` in `openInData.tsx`).
+ */
+export type WorkspaceNames = (id: string) => string | undefined;
+
+/**
+ * One principal. A `workspace_members` principal's ref is the workspace's id
+ * (the assignment sync writes it), so it reads by the workspace's name when
+ * `workspaceName` knows it, and by the id only when it does not.
+ */
+function principalWord(p: PermPrincipal, workspaceName?: WorkspaceNames): string {
+  if (p.kind === "workspace_members") return `members of workspace ${workspaceName?.(p.ref) ?? p.ref}`;
   return `${p.kind} ${p.ref}`;
 }
 
 /** A `PermPrincipal[]` — a `PrincipalSet`'s `include` or `exclude` — joined
  * for reading inline. Empty reads as "nobody" rather than a blank. */
-export function formatPrincipals(list: PermPrincipal[]): string {
+export function formatPrincipals(list: PermPrincipal[], workspaceName?: WorkspaceNames): string {
   if (list.length === 0) return "nobody";
-  return list.map(principalWord).join(", ");
+  return list.map((p) => principalWord(p, workspaceName)).join(", ");
 }
 
 /**
@@ -89,13 +102,13 @@ export function formatPrincipals(list: PermPrincipal[]): string {
  * entirely when there is nothing excluded, rather than printed as "except
  * nobody".
  */
-export function grantSentence(g: GrantView): string {
-  const who = formatPrincipals(g.principals.include);
+export function grantSentence(g: GrantView, workspaceName?: WorkspaceNames): string {
+  const who = formatPrincipals(g.principals.include, workspaceName);
   const verb = g.effect === "allow" ? "can" : "cannot";
   const actions = formatActions(g.actions);
   const scope = formatScope(g.scope, g.catalog_name);
   const exclude =
-    g.principals.exclude.length > 0 ? ` except ${formatPrincipals(g.principals.exclude)}` : "";
+    g.principals.exclude.length > 0 ? ` except ${formatPrincipals(g.principals.exclude, workspaceName)}` : "";
   return `${who} ${verb} ${actions} ${scope}${exclude}`;
 }
 

@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Outlet, useLocation, useParams, useSearchParams } from "react-router-dom";
 import { Database, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { EmptyState } from "@/components/explore/EmptyState";
@@ -14,6 +14,10 @@ import { urlToPath } from "@/routes/governance/data/objectPath";
  * Below 768 px (`md`) the two cannot sit side by side, so the tree folds away
  * under a "Show catalogs" toggle and closes again when the user opens an
  * object from it. At `md` and up it is always shown and the toggle is gone.
+ *
+ * Folding the tree hides the row that held focus, which would drop focus to
+ * `<body>` (D7); so the opened page's heading takes it (FE-A11Y: focus is
+ * never lost).
  */
 export default function DataPage() {
   // A layout route sees its child route's params: react-router hands every
@@ -26,10 +30,22 @@ export default function DataPage() {
   const [treeOpen, setTreeOpen] = useState(false);
   const { pathname } = useLocation();
   const [treeOpenedAt, setTreeOpenedAt] = useState(pathname);
+  // Counts the folds that opened a page, so each one moves focus once.
+  const [folds, setFolds] = useState(0);
   if (treeOpenedAt !== pathname) {
     setTreeOpenedAt(pathname);
-    setTreeOpen(false);
+    if (treeOpen) {
+      setTreeOpen(false);
+      setFolds((n) => n + 1);
+    }
   }
+  const pageRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (folds === 0) return;
+    // At `md` and up the tree stays shown, and focus stays in it.
+    if (typeof window.matchMedia === "function" && window.matchMedia("(min-width: 768px)").matches) return;
+    pageRef.current?.querySelector<HTMLElement>("h1")?.focus();
+  }, [folds]);
   const treeId = useId();
   const Toggle = treeOpen ? PanelLeftClose : PanelLeftOpen;
 
@@ -54,7 +70,7 @@ export default function DataPage() {
       >
         <CatalogTree selected={selected} />
       </aside>
-      <section className="min-w-0">
+      <section ref={pageRef} className="min-w-0">
         <Outlet />
       </section>
     </div>
@@ -65,7 +81,9 @@ export default function DataPage() {
 export function DataIndex() {
   return (
     <div className="space-y-4">
-      <h1 className="text-2xl font-semibold">Data</h1>
+      <h1 tabIndex={-1} className="text-2xl font-semibold outline-none">
+        Data
+      </h1>
       <EmptyState
         icon={Database}
         title="Pick a catalog"

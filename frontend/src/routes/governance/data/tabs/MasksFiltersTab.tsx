@@ -14,10 +14,19 @@ import { RuleDialog } from "@/routes/governance/RuleDialog";
 import { formatPrincipals, formatRuleKind, formatSelector } from "@/routes/governance/permFormat";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
-import { patternLevels, ruleSelects, scopeCoverage, tagNamesOn, tagUnresolved, type PatternLevel } from "@/routes/governance/data/coverage";
+import {
+  insideGroup,
+  insideName,
+  patternLevels,
+  ruleSelects,
+  scopeCoverage,
+  tagNamesOn,
+  tagUnresolved,
+  type PatternLevel,
+} from "@/routes/governance/data/coverage";
 import { scopeOf, tagReach, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
-import { CatalogGate, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
+import { ACTIONS_CELL, CatalogGate, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
 
 /**
  * What a viewer without `policy:read` reads instead of the rules. Also this
@@ -27,7 +36,7 @@ export const RULES_NEED_POLICY_READ = "Reading rules needs the policy:read permi
 
 const LEVEL_LABEL = { catalog: "Catalog", schema: "Schema", table: "Table" } as const;
 
-type Group = "here" | "inherited" | "columns" | "tag" | "pattern";
+type Group = "here" | "inherited" | "inside" | "tag" | "pattern";
 
 /** One listed rule: its group, and what the group's extra column says of it. */
 type Row = { rule: RuleView; group: Group; extra: string; order: number };
@@ -35,7 +44,8 @@ type Row = { rule: RuleView; group: Group; extra: string; order: number };
 const GROUPS: { id: Group; title: string; head?: string; mono?: boolean }[] = [
   { id: "here", title: "Here" },
   { id: "inherited", title: "Inherited", head: "From" },
-  { id: "columns", title: "On columns", head: "Column", mono: true },
+  // Titled for the page's level by `insideGroup`.
+  { id: "inside", title: "On columns", head: "Column", mono: true },
   { id: "tag", title: "By tag", head: "Tagged" },
   { id: "pattern", title: "Matching a pattern", head: "Pattern" },
 ];
@@ -43,8 +53,12 @@ const GROUPS: { id: Group; title: string; head?: string; mono?: boolean }[] = [
 /**
  * An object's Masks & filters tab (spec §2.2): the mask and row-filter rules
  * that select the object, grouped by how they reach it: set here, inherited
- * from an ancestor (the level named), set on one of a table's columns, by a
- * tag the object (or one of its columns) carries, or matching a pattern.
+ * from an ancestor (the level named), set on something inside it (a table's
+ * columns; a schema's or a catalog's tables and columns, each named), by a
+ * tag the object (or one of its columns) carries, or matching a pattern
+ * (including a pattern below a schema or catalog, such as `table = "*"`).
+ * A tag rule is listed on a table only: a schema or catalog page does not
+ * read the tags of the tables inside it.
  *
  * F10: this lists the rules that select the object; it never says who sees
  * what. Only explain evaluates (an exemption, a clearance, a second rule).
@@ -169,12 +183,13 @@ function Rules({
                   a.rule.name.localeCompare(b.rule.name),
               );
             if (inGroup.length === 0) return null;
+            const { title, head } = g.id === "inside" ? insideGroup(target) : g;
             return (
-              <Section key={g.id} title={g.title}>
+              <Section key={g.id} title={title}>
                 <RuleTable
-                  label={g.title}
+                  label={title}
                   rows={inGroup}
-                  extra={g.head ? { head: g.head, mono: g.mono } : undefined}
+                  extra={head ? { head, mono: g.mono } : undefined}
                   canWrite={canWrite}
                   onEdit={(rule) => setDialog({ existing: rule })}
                   onDelete={setDeleting}
@@ -253,7 +268,7 @@ function rowOf(r: RuleView, p: ObjectPath, catalogId: string, assignments: Resou
   const patterns = patternLevels(r.selector);
   if (patterns.length > 0) return { rule: r, group: "pattern", extra: patterns.map(patternText).join(", "), order: 0 };
   if (reach === "here") return { rule: r, group: "here", extra: "", order: 0 };
-  if (reach === "child") return { rule: r, group: "columns", extra: r.selector.column ?? "", order: 0 };
+  if (reach === "child") return { rule: r, group: "inside", extra: insideName(r.selector, p), order: 0 };
   const order = Object.keys(LEVEL_LABEL).indexOf(reach.inheritedFrom);
   return { rule: r, group: "inherited", extra: LEVEL_LABEL[reach.inheritedFrom], order };
 }
@@ -304,7 +319,7 @@ function RuleTable({
           {extra ? <TableHead>{extra.head}</TableHead> : null}
           <TableHead>Exempt</TableHead>
           {canWrite ? (
-            <TableHead className="w-24">
+            <TableHead className={ACTIONS_CELL}>
               <span className="sr-only">Actions</span>
             </TableHead>
           ) : null}
@@ -329,7 +344,7 @@ function RuleTable({
               )}
             </TableCell>
             {canWrite ? (
-              <TableCell className="text-right">
+              <TableCell className={`${ACTIONS_CELL} text-right`}>
                 <div className="flex justify-end gap-1">
                   <Button variant="ghost" size="icon" aria-label={`Edit ${rule.name}`} onClick={() => onEdit(rule)}>
                     <Pencil aria-hidden className="size-4" />

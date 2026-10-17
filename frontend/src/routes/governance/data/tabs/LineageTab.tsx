@@ -11,7 +11,7 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { KIND_ICON } from "@/routes/governance/data/CatalogTree";
-import type { CatalogState } from "@/routes/governance/data/objectData";
+import { capitalise, type CatalogState } from "@/routes/governance/data/objectData";
 import { pathToUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
 import { CatalogGate, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
 
@@ -215,7 +215,8 @@ function Facts({ view }: { view: ViewLineageInfo }) {
   if (view.lineageState === "computed") state = "Recorded: egret read the view's definition and recorded the tables it reads.";
   else if (view.lineageState === "missing") state = "Not recorded: egret has no lineage for this view yet.";
   else {
-    state = `Failed: egret could not work out what this view reads.${view.lineageDetail ? ` ${view.lineageDetail}` : ""}`;
+    // The detail is the backend's text, which may start lowercase; it follows a full stop here.
+    state = `Failed: egret could not work out what this view reads.${view.lineageDetail ? ` ${capitalise(view.lineageDetail)}` : ""}`;
   }
   return (
     <dl aria-label="View facts" className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-6 gap-y-2 text-sm">

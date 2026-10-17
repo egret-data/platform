@@ -5,7 +5,7 @@ import { ExternalLink } from "lucide-react";
 import { useControlPlaneGovernanceListCatalogs } from "@/api/generated/control-plane-governance/control-plane-governance";
 import type { Scope } from "@/api/generated/model";
 import { pathToUrl, type ObjectPath } from "@/routes/governance/data/objectPath";
-import { isPattern } from "./permFormat";
+import { isPattern, type WorkspaceNames } from "./permFormat";
 
 /** Which tab of the Data area a link opens: a grant's, or a rule's. */
 export type DataTab = "permissions" | "masks";
@@ -52,6 +52,20 @@ export function useCatalogNameById(): ReadonlyMap<string, string> {
     () => new Map(q.data?.status === 200 ? q.data.data.map((c) => [c.id, c.name] as const) : []),
     [q.data],
   );
+}
+
+/**
+ * A workspace's name by its id, from the workspaces the Governance catalog
+ * list names (each catalog's assignments; one shared query). A workspace no
+ * catalog is assigned to is not known (`undefined`).
+ */
+export function useWorkspaceNames(): WorkspaceNames {
+  const q = useControlPlaneGovernanceListCatalogs({ query: { retry: false } });
+  return useMemo(() => {
+    const names = new Map<string, string>();
+    if (q.data?.status === 200) for (const c of q.data.data) for (const w of c.workspaces) names.set(w.id, w.name);
+    return (id: string) => names.get(id);
+  }, [q.data]);
 }
 
 /** A quiet text link to a page; `title` says more when the link lands higher than the row's scope. */

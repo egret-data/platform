@@ -12,13 +12,14 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AssignmentBadge } from "@/routes/governance/GrantDialog";
-import { grantSentence } from "@/routes/governance/permFormat";
+import { useWorkspaceNames } from "@/routes/governance/openInData";
+import { grantSentence, type WorkspaceNames } from "@/routes/governance/permFormat";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
-import { grantCoverage, patternLevels, type PatternLevel } from "@/routes/governance/data/coverage";
+import { grantCoverage, insideGroup, insideName, patternLevels, type PatternLevel } from "@/routes/governance/data/coverage";
 import type { CatalogState } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
-import { CatalogGate, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
+import { ACTIONS_CELL, CatalogGate, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
 
 /**
  * What a viewer without `policy:read` reads instead of the grants. Also this
@@ -33,8 +34,11 @@ type Inherited = { grant: GrantView; from: keyof typeof LEVEL_LABEL };
 /**
  * An object's Permissions tab (spec §2.2): every grant that reaches the
  * object, grouped by how it reaches it: set here, inherited from an ancestor
- * (the level named), set on one of a table's columns, or matching a pattern.
- * A deny grant is marked.
+ * (the level named), or matching a pattern; and the grants set on something
+ * inside it (a table's columns; a schema's or a catalog's tables and
+ * columns), each naming what it is on, so a grant made from a schema's page
+ * on a table below it, or on a pattern such as `table = "*"`, is listed where
+ * it was made and where its "Open in Data" link lands. A deny grant is marked.
  *
  * A grant that names a level by pattern (`table = "*"`, `ord*`) reaches every
  * value it matches, not this object alone, so it is never listed as "Here"
@@ -80,6 +84,10 @@ function Grants({
   const canRead = can("policy:read");
   const canWrite = can("policy:update");
   const grantsQ = usePermListGrants({ query: { enabled: canRead, retry: false } });
+  const knownWorkspace = useWorkspaceNames();
+  // This catalog's own workspaces first: they are known as soon as the page is.
+  const workspaceName: WorkspaceNames = (id) => catalog.workspaces.find((w) => w.id === id)?.name ?? knownWorkspace(id);
+  const sentenceOf = (g: GrantView) => grantSentence(g, workspaceName);
 
   const queryClient = useQueryClient();
   const [deleting, setDeleting] = useState<GrantView | null>(null);
@@ -107,39 +115,40 @@ function Grants({
   const target: ObjectPath = { catalog: path.catalog, schema: path.schema, object: path.object };
   const here: GrantView[] = [];
   const inherited: Inherited[] = [];
-  const onColumns: GrantView[] = [];
+  const inside: GrantView[] = [];
   const byPattern: GrantView[] = [];
   for (const g of grantsQ.data.data) {
     const reach = grantCoverage(g, target, catalog.id);
     if (reach !== null && patternLevels(g.scope).length > 0) byPattern.push(g);
     else if (reach === "here") here.push(g);
-    else if (reach === "child") onColumns.push(g);
+    else if (reach === "child") inside.push(g);
     else if (reach) inherited.push({ grant: g, from: reach.inheritedFrom });
   }
-  const bySentence = (a: GrantView, b: GrantView) => grantSentence(a).localeCompare(grantSentence(b));
+  const bySentence = (a: GrantView, b: GrantView) => sentenceOf(a).localeCompare(sentenceOf(b));
   here.sort(bySentence);
   byPattern.sort(bySentence);
-  onColumns.sort((a, b) => (a.scope.column ?? "").localeCompare(b.scope.column ?? "") || bySentence(a, b));
+  inside.sort((a, b) => insideName(a.scope, target).localeCompare(insideName(b.scope, target)) || bySentence(a, b));
   const order = Object.keys(LEVEL_LABEL);
   inherited.sort((a, b) => order.indexOf(a.from) - order.indexOf(b.from) || bySentence(a.grant, b.grant));
 
-  if (here.length + inherited.length + onColumns.length + byPattern.length === 0) {
+  if (here.length + inherited.length + inside.length + byPattern.length === 0) {
     const noun = kind ? KIND_ICON[kind].label.toLowerCase() : "object";
     return <EmptyState icon={KeyRound} title={`No grant reaches this ${noun}`} />;
   }
 
-  const workspaceName = (id: string) => catalog.workspaces.find((w) => w.id === id)?.name ?? id;
   const table = (label: string, rows: GrantView[], extra?: { head: string; cell: (g: GrantView) => string; mono?: boolean }) => (
     <GrantTable
       label={label}
       rows={rows}
       extra={extra}
       canWrite={canWrite}
-      workspaceName={workspaceName}
+      workspaceLabel={(id) => workspaceName(id) ?? id}
+      sentenceOf={sentenceOf}
       onEdit={onEdit}
       onDelete={setDeleting}
     />
   );
+  const insideTitle = insideGroup(target);
   const fromOf = new Map(inherited.map((i) => [i.grant, LEVEL_LABEL[i.from]]));
 
   return (
@@ -154,9 +163,9 @@ function Grants({
           )}
         </Section>
       ) : null}
-      {onColumns.length > 0 ? (
-        <Section title="On columns">
-          {table("On columns", onColumns, { head: "Column", cell: (g) => g.scope.column ?? "", mono: true })}
+      {inside.length > 0 ? (
+        <Section title={insideTitle.title}>
+          {table(insideTitle.title, inside, { head: insideTitle.head, cell: (g) => insideName(g.scope, target), mono: true })}
         </Section>
       ) : null}
       {byPattern.length > 0 ? (
@@ -173,7 +182,7 @@ function Grants({
         onOpenChange={(open) => {
           if (!open) setDeleting(null);
         }}
-        title={deleting ? `Delete "${grantSentence(deleting)}"?` : "Delete grant?"}
+        title={deleting ? `Delete "${sentenceOf(deleting)}"?` : "Delete grant?"}
         description={deleteDescription(deleting)}
         onConfirm={() => {
           if (deleting) deleteGrant.mutate({ id: deleting.id });
@@ -203,7 +212,8 @@ function GrantTable({
   rows,
   extra,
   canWrite,
-  workspaceName,
+  workspaceLabel,
+  sentenceOf,
   onEdit,
   onDelete,
 }: {
@@ -211,7 +221,8 @@ function GrantTable({
   rows: GrantView[];
   extra?: { head: string; cell: (g: GrantView) => string; mono?: boolean };
   canWrite: boolean;
-  workspaceName: (id: string) => string;
+  workspaceLabel: (id: string) => string;
+  sentenceOf: (g: GrantView) => string;
   onEdit: (g: GrantView) => void;
   onDelete: (g: GrantView) => void;
 }) {
@@ -223,7 +234,7 @@ function GrantTable({
           {extra ? <TableHead>{extra.head}</TableHead> : null}
           <TableHead>Effect</TableHead>
           {canWrite ? (
-            <TableHead className="w-24">
+            <TableHead className={ACTIONS_CELL}>
               <span className="sr-only">Actions</span>
             </TableHead>
           ) : null}
@@ -231,14 +242,14 @@ function GrantTable({
       </TableHeader>
       <TableBody>
         {rows.map((g) => {
-          const sentence = grantSentence(g);
+          const sentence = sentenceOf(g);
           return (
             <TableRow key={g.id}>
               <TableCell className="whitespace-normal">
                 <div className="space-y-1">
                   <p className="text-sm break-words">{sentence}</p>
                   {g.origin.type === "workspace_assignment" ? (
-                    <AssignmentBadge workspaceLabel={workspaceName(g.origin.workspace_id)} />
+                    <AssignmentBadge workspaceLabel={workspaceLabel(g.origin.workspace_id)} />
                   ) : null}
                 </div>
               </TableCell>
@@ -247,7 +258,7 @@ function GrantTable({
                 {g.effect === "deny" ? <Badge variant="destructive">Deny</Badge> : <Badge variant="outline">Allow</Badge>}
               </TableCell>
               {canWrite ? (
-                <TableCell className="text-right">
+                <TableCell className={`${ACTIONS_CELL} text-right`}>
                   {g.origin.type === "explicit" ? (
                     <div className="flex justify-end gap-1">
                       <Button variant="ghost" size="icon" aria-label={`Edit ${sentence}`} onClick={() => onEdit(g)}>

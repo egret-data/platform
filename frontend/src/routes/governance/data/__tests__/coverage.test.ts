@@ -31,14 +31,14 @@ describe("grantCoverage", () => {
   it.each([
     // p = catalog
     ["catalog", ON_CATALOG, CATALOG, "here"],
-    ["schema", ON_SCHEMA, CATALOG, null],
-    ["table", ON_TABLE, CATALOG, null],
-    ["column", ON_COLUMN, CATALOG, null],
+    ["schema", ON_SCHEMA, CATALOG, "child"],
+    ["table", ON_TABLE, CATALOG, "child"],
+    ["column", ON_COLUMN, CATALOG, "child"],
     // p = schema
     ["catalog", ON_CATALOG, SCHEMA, { inheritedFrom: "catalog" }],
     ["schema", ON_SCHEMA, SCHEMA, "here"],
-    ["table", ON_TABLE, SCHEMA, null],
-    ["column", ON_COLUMN, SCHEMA, null],
+    ["table", ON_TABLE, SCHEMA, "child"],
+    ["column", ON_COLUMN, SCHEMA, "child"],
     // p = table
     ["catalog", ON_CATALOG, TABLE, { inheritedFrom: "catalog" }],
     ["schema", ON_SCHEMA, TABLE, { inheritedFrom: "schema" }],
@@ -86,6 +86,14 @@ describe("grantCoverage", () => {
     expect(grantCoverage(grant({ schema: "sales", table: "order?" }), TABLE, CAT)).toBe("here");
     expect(grantCoverage(grant({ schema: "sales", table: "cust*" }), TABLE, CAT)).toBeNull();
     expect(grantCoverage(grant({ schema: "sales", table: "orders", column: "*" }), TABLE, CAT)).toBe("child");
+  });
+
+  // D4: a grant on a pattern below a schema is listed on that schema's page.
+  it("puts a grant on a table pattern, or on a table, inside its schema and its catalog", () => {
+    expect(grantCoverage(grant({ schema: "sales", table: "*" }), SCHEMA, CAT)).toBe("child");
+    expect(grantCoverage(grant({ schema: "sales", table: "*" }), CATALOG, CAT)).toBe("child");
+    expect(grantCoverage(grant({ schema: "sa*", table: "orders" }), SCHEMA, CAT)).toBe("child");
+    expect(grantCoverage(grant({ schema: "hr", table: "*" }), SCHEMA, CAT)).toBeNull();
   });
 });
 
