@@ -501,7 +501,8 @@ impl TaskHandler for Sql {
     ///
     /// **So Kestra's own SQL task stops the remote statement, and `egret.sql`
     /// does not.** A `timeout: PT10S` on a one-hour query is cancelled at ten
-    /// seconds there and runs the full hour here on StarRocks. Whatever
+    /// seconds there; here Trino stops it at its own budget and StarRocks when
+    /// the worker's drop closes the connection (measured 2026-10-17). Whatever
     /// justifies this refusal, it cannot be *"the artifact has no better
     /// answer"* — it has one, and it is `Statement.cancel()`.
     ///
@@ -554,15 +555,14 @@ impl TaskHandler for Sql {
     ///   session property (`connector/trino.rs`), so the coordinator kills the
     ///   statement at the same budget the worker used. The abandoned statement
     ///   costs at most one budget of engine time.
-    /// * **StarRocks** — `limits.timeout` is **unread** by that connector, which
-    ///   says so in its own doc: it *"relies entirely on an outer caller … to
-    ///   enforce `limits.timeout` by dropping the future"*. The worker's drop is
-    ///   that outer caller, and dropping a future tells MySQL-protocol nothing.
-    ///   A timed-out `egret.sql` on StarRocks runs to completion on the engine.
-    ///   The cheapest real fix is a `query_timeout` session variable set the way
-    ///   `connector/trino.rs` already sets `query_max_run_time`; it is not done
-    ///   here because that connector is shared with the Data API serving path
-    ///   and would begin failing queries that succeed today.
+    /// * **StarRocks** — `limits.timeout` is unread by that connector, but an
+    ///   abandoned statement does not keep running: the worker's drop closes the
+    ///   connection and StarRocks 4.1.6 cancels the statement itself (measured
+    ///   2026-10-17, pinned by `starrocks_cancels_a_select_when_egret_drops_it`
+    ///   and `starrocks_cancels_an_insert_when_egret_drops_it` in
+    ///   `egret-query`). What this handler still cannot do is stop a statement
+    ///   **before** its budget; that needs a port verb and `KILL QUERY`
+    ///   (group B).
     ///
     /// **This divergence is not in the oracle's runtime over-acceptance
     /// register and cannot be.** That register is keyed by corpus id and derived
@@ -578,8 +578,7 @@ impl TaskHandler for Sql {
             "{TYPE_ID}: task {} cannot be cancelled — `QueryExecPort` has no cancellation \
              verb, so the statement continues on the engine after the run is abandoned. \
              On Trino it is still bounded by the `query_max_run_time` this task sent with \
-             it; on StarRocks that connector does not read `Limits::timeout` at all, so it \
-             is not bounded by anything",
+             it; on StarRocks it ends when the connection is dropped at that budget",
             task.task_id
         )))
     }

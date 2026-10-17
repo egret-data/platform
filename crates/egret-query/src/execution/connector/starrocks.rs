@@ -297,12 +297,15 @@ impl Connector for StarRocksConnector {
     /// connection (a later `SELECT 1` on it fails with "Connection to the
     /// server is closed"), so those two counts must never be able to disagree.
     ///
-    /// **Not yet timeout-bound.** Like `execute`, this relies entirely on an
-    /// outer caller (the JobManager) to enforce `limits.timeout` by dropping
-    /// the future — `limits.timeout` itself is unread here. There is no
-    /// production caller of this method yet; whoever wires the Data API's
-    /// serving path to it MUST supply that outer timeout wrapper, or a slow
-    /// StarRocks query hangs the request indefinitely.
+    /// **Not timeout-bound here.** Like `execute`, this relies entirely on an
+    /// outer caller to enforce `limits.timeout` by dropping the future —
+    /// `limits.timeout` itself is unread here. Whoever calls this MUST supply
+    /// that outer `tokio::time::timeout` wrapper, or a slow StarRocks query
+    /// hangs the request indefinitely. Dropping the future closes the
+    /// connection, and StarRocks 4.1.6 cancels the statement on its own
+    /// (measured 2026-10-17, pinned by
+    /// `starrocks_cancels_a_select_when_egret_drops_it` and
+    /// `starrocks_cancels_a_parameterised_select_when_egret_drops_it`).
     async fn execute_with_params(
         &self,
         sql: &str,
