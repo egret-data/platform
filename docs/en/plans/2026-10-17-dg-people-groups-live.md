@@ -88,20 +88,24 @@ the code says), not a stop.
 All 14 predicted cells matched, on Trino 483 and on StarRocks 4.1.6.
 - **A group grant reaches its members.** G1 (`group g1`) compiled to users `[ua, ub]` on both profiles. Both read
   `ice.s.t` on both engines; `uc`, outside the group, was refused on both.
-- **A member with no username gets one at compile** (C2). Creating G1 minted `ub` (log line at 11:34:32.81). `ub`
+- **A member with no username gets one at compile** (C2). `ub` had no username before G1 and has `ub` after it;
+  no SQL touched `ub`. A `minted a username` line was logged at 11:34:32.81, the time G1 was created. `ub`
   then read on both engines.
 - **A role grant reaches its direct holders only** (C3, C4).
   - G2 (`role r1`) compiled to `[ud]`.
   - `ue`, who holds `r1` only through group `g2`, is not named and is refused on both engines.
-  - `uf`, who holds `r1` directly but has no username, is not named either. Every recompile logs the warning
-    (10 times, once per profile per compile). `uf`'s `users.username` stayed NULL to the end.
+  - `uf`, who holds `r1` directly but has no username, is not named either. The warning was logged 10 times,
+    inferred to be once per profile for each of the 5 compiles that referenced `r1`. `uf`'s `users.username` stayed NULL to the end.
 - **Removing a member reaches the engines within one poll** (C5). `DELETE /groups/g1/members/ua` answered 204 in
   0.12 s. `/perm/explain` said denied 0.07 s later. Trino refused `ua` 2.3 s later, and StarRocks 3.8 s later.
   `ub` kept reading.
-- **A gate that names only groups is not enforced on engines** (C6). `PUT /tags/{id}/access-policy` answered 200
-  and returned the clearance in `skipped`, with the D7 reason. The tag itself did reach Trino's tag download. `uc`
-  read the tagged column `secret` on both engines.
-- **`/perm/explain` agreed with the engine in every cell** (C7): 15 explain calls, two profiles each.
+- **A gate that names only groups is not enforced on engines** (C6, one tag on one column, one grant).
+  `PUT /tags/{id}/access-policy` answered 200 and returned the clearance in `skipped`, with the D7 reason. `uc` read
+  the tagged column `secret` on both engines.
+- **`/perm/explain` agreed with the engine in every cell** (C7): 10 recorded explain calls, two profiles each.
+
+**Scope.** Group expansion was measured for `read` (`select`) only, on exactly one group (two members) and one role
+(one direct holder with a username, one without, one holder through a group).
 
 **What this decides for the People pages (P3, P15).** These statements are true as measured, and the UI may make
 them:
@@ -183,24 +187,26 @@ them:
 Trino's cache also holds the three `{USER}` baseline policies and the lineage transform. Neither `ue` nor `uf`
 appears in any policy.
 
-**Queries** (`SELECT * FROM ice.s.t ORDER BY id`) and `/perm/explain` (`read`, target `ice.s.t`). "denied
-(`no_policy_matched`)" is explain's `decision.kind = denied` with `reason = no_policy_matched` on both profiles.
+**Queries** (`SELECT * FROM ice.s.t ORDER BY id`) and `/perm/explain` (`read`, target `ice.s.t`). The battery
+recorded each explain verdict as `select=<kind>` and, for an allow, the matched policy and grant id. "denied" is
+`select=denied`; the reason was not recorded. "G1"/"G2"/"G3" in the explain column means the attribution's grant id
+equals that grant's id.
 
 | id | user | Trino | StarRocks | explain vgtr / vgsr | verdict |
 |---|---|---|---|---|---|
-| C1a | `ua` | rows `[1,x],[2,y]` (11:35:13) | rows | allowed / allowed, policy and attribution G1 | match |
-| C1b | `uc` | `Access Denied: Cannot access catalog ice` (`PERMISSION_DENIED`) | `ERROR 5204 … SELECT privilege(s) on COLUMN v` | denied (`no_policy_matched`) / same | match |
-| C2a | `ub` username | `users.username` NULL before G1, `ub` after. Log at 11:34:32.81: `minted a username for a workspace or group member … user_id=9b52e7f3… username=ub` | — | — | match |
+| C1a | `ua` | rows `[1,x],[2,y]` (11:35:13) | rows | allowed / allowed, grant id G1 | match |
+| C1b | `uc` | `Access Denied: Cannot access catalog ice` (`PERMISSION_DENIED`) | `ERROR 5204 … SELECT privilege(s) on COLUMN v` | denied / denied | match |
+| C2a | `ub` username | `users.username` NULL before G1 (observed at 11:34, output not saved), `ub` at the end (`users-final.txt`); no SQL touched `ub` (§1.2 DEV-3). A `minted a username for a workspace or group member` line was logged at 11:34:32.81, when G1 was created; the saved excerpt is cut before `user_id`/`username`, so the line itself does not show `ub`. The two earlier mint lines (11:32:30.26 and 11:32:31.16) fall in the StarRocks attach (11:32:30–31), whose recompile named the workspace-assignment grant's only member, `admin`; `admin` had a username by 11:34. That attribution is by timing, the saved lines are cut too | — | — | match |
 | C2b | `ub` | rows | rows | allowed / allowed, G1 | match |
 | C3a | `ud` | rows | rows | allowed / allowed, G2 | match |
-| C3b | `ue` (`r1` only through `g2`) | `Access Denied: Cannot access catalog ice` | `ERROR 5204 … COLUMN v` | denied (`no_policy_matched`) / same | match |
+| C3b | `ue` (`r1` only through `g2`) | `Access Denied: Cannot access catalog ice` | `ERROR 5204 … COLUMN v` | denied / denied | match |
 | C4a | `uf` in the policy | not named (G2 = `[ud]`). Log: `a holder of this role has no users.username yet … user_id=8deceb61… role=r1`, 10 times (each compile, each profile). `users.username` NULL at the end | same | — | match |
-| C4b | `uf` | `Access Denied: Cannot access catalog ice` | `ERROR 5204 … COLUMN v` | denied (`no_policy_matched`) / same | match |
+| C4b | `uf` | `Access Denied: Cannot access catalog ice` | `ERROR 5204 … COLUMN v` | denied / denied | match |
 | control | `admin` | rows | rows | allowed / allowed, workspace-assignment grant | — |
 | C5 | remove `ua` from `g1` | `DELETE` → 204 at 11:35:46 (0.12 s). `ua`: OK at +0.40 s and +1.44 s, **refused at +2.26 s** (`Cannot access catalog ice`). Trino log `Switched policy engine to [9]` at 11:35:47.77 | OK at +0.60, +1.65, +2.46 and +3.16 s, **refused at +3.83 s** (`5204`) | `ua` denied / denied at +0.07 s; `ub` allowed / allowed (G1) at +0.12 s. `ub` still read on both engines afterwards | match |
-| C6a | group-only gate | `PUT /tags/{vggroup}/access-policy {"required_roles":[],"required_groups":["<g1 id>"]}` → 200, `skipped: [{source_kind: clearance, reason: "the tag's clearance names only required_groups, and D7 measured … the gate stays enforced on object access (Cedar) only"}]`. No policy in `vgtr`, `vgtr-tag` or `vgsr` names the tag. Trino's `trino_vgtr_tag.json` (tagVersion 2) carries `vggroup` on `ice.s.c6.secret` | — | — | match |
-| C6b | `uc` reads `ice.s.c6.secret` (G3 grants `uc` read on `c6`) | rows `[1,s1],[2,s2]` | rows | allowed / allowed, policy and attribution G3. `tags: []` with `tag_policies_in_download: 0`, as the field's doc says | match |
-| C7 | explain and engine | 15 explain calls, every profile verdict equal to the engine's answer | | | match |
+| C6a | group-only gate | `PUT /tags/{vggroup}/access-policy {"required_roles":[],"required_groups":["<g1 id>"]}` → 200, `skipped: [{source_kind: clearance, reason: "the tag's clearance names only required_groups, and D7 measured … the gate stays enforced on object access (Cedar) only"}]`. No policy in `vgtr`, `vgtr-tag` or `vgsr` names the tag. Trino's tag cache was seen carrying `vggroup` on `ice.s.c6.secret` (observed, output not saved) | — | — | match |
+| C6b | `uc` reads `ice.s.c6.secret` (G3 grants `uc` read on `c6`) | rows `[1,s1],[2,s2]` | rows | allowed / allowed, grant id G3, `tags=[]` | match |
+| C7 | explain and engine | 10 recorded explain calls, every profile verdict equal to the engine's answer | | | match |
 
 Battery outputs are in the scratchpad `dgpg/`: `battery-main.txt`, `c5.txt`, `c6.txt`, `compiled-*.txt`,
 `*-cache-1.txt` and `egret-mint-log.txt`.
