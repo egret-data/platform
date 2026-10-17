@@ -297,8 +297,16 @@ const KESTRA_FLOW_CONTROL: &[&str] = &[
 /// of them fails. Latent until then: every `WorkingDirectory` child in the
 /// corpus is a `WorkingDirectoryTest$LocalFiles`, so **no golden entry can
 /// show it** and the ratchet cannot judge this line either way.
+///
+/// **An `Exit` is a `Leaf` and is refused anyway** (kill-and-exit Task 3 fix
+/// round 1, 2026-10-17). It is an `ExecutionUpdatableTask` in Kestra
+/// (`Exit.java:71`), not a `RunnableTask`, so Kestra's
+/// `WorkingDirectoryTaskValidator` refuses it; and egret runs it in
+/// `advance()` (`executor::TaskKind::Exit`), which would bypass the block's
+/// finish claim. Every executor-level registered type is refused the same way
+/// (`spec::registry::EXECUTOR_LEVEL`).
 fn is_runnable_child(task: &Task) -> bool {
-    matches!(task.kind, TaskKind::Leaf { .. })
+    matches!(task.kind, TaskKind::Leaf { .. }) && !registry::executor_level(&task.r#type)
 }
 
 /// Which of `NOT_YET_ENFORCED`'s features this flow actually declares.
@@ -1723,9 +1731,15 @@ fn walk_task(
                         code: "working_directory_child_not_runnable",
                         message: format!(
                             "task '{}': only runnable tasks are allowed as children of a \
-                             workingDirectory, and '{}' has type '{}', which is a \
-                             control-flow task",
-                            task.id, child.id, child.r#type
+                             workingDirectory, and '{}' has type '{}', which is {}",
+                            task.id,
+                            child.id,
+                            child.r#type,
+                            if registry::executor_level(&child.r#type) {
+                                "a task the executor runs on the execution itself"
+                            } else {
+                                "a control-flow task"
+                            }
                         ),
                         path: format!("{path}.tasks.{}", child.id),
                     });
@@ -2229,6 +2243,37 @@ mod tests {
                  `WorkingDirectory` child: {r:?}"
             );
         }
+    }
+
+    /// Kill-and-exit Task 3 fix round 1: an `Exit` child of a
+    /// `WorkingDirectory` is refused, as Kestra refuses it (only a
+    /// `RunnableTask` may be a block child), and a `Log` beside it is not.
+    #[test]
+    fn an_exit_child_of_a_working_directory_is_refused() {
+        let flow = |ty: &str, extra: &str| {
+            parse(&format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: wd\n    type: core.workingdirectory\n    \
+                 tasks:\n      - id: child\n        type: {ty}\n{extra}"
+            ))
+            .unwrap_or_else(|e| panic!("{ty}: {e:?}"))
+        };
+        let refused = |f: &crate::models::Flow| {
+            validate(f)
+                .errors
+                .into_iter()
+                .find(|e| e.code == "working_directory_child_not_runnable")
+        };
+        let exit = flow(
+            "io.kestra.plugin.core.execution.Exit",
+            "        state: KILLED\n",
+        );
+        let finding = refused(&exit).expect("an Exit child is refused");
+        assert_eq!(finding.path, "tasks.wd.tasks.child", "{finding:?}");
+        let log = flow("io.kestra.plugin.core.log.Log", "        message: hi\n");
+        assert!(
+            refused(&log).is_none(),
+            "the control: a Log child is runnable"
+        );
     }
 
     /// The subtree a `Leaf`-typed `WaitFor` used to hide.

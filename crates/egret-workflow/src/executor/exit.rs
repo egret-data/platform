@@ -32,10 +32,22 @@
 //! writes no leaf (`kill.rs`'s "A leaf is never written here"): the kill route
 //! does that half (spec §3.2 steps 1-2). An `Exit` is a kill nobody routed, so
 //! this module does the route's two leaf steps itself, for this execution:
-//! a running `Runnable` becomes `KILLING` (its worker stops it, spec §4), and
-//! every other live leaf — not started, retrying, a `Subflow` — becomes
-//! `KILLED`. Flowables are left to `advance_killing`, exactly as the route
-//! leaves them.
+//! a `Runnable` the pure state calls running (`RUNNING` or `SUBMITTED`)
+//! becomes `KILLING`, and every other live leaf — not started, retrying, a
+//! `Subflow` — becomes `KILLED`. Flowables are left to `advance_killing`,
+//! exactly as the route leaves them.
+//!
+//! **`advance()` cannot see a lease, so "running" here includes a run no
+//! worker holds yet** (`RUNNING` with `claimed_at IS NULL`, waiting to be
+//! claimed). Both cases end the same way, by two different doors: if a worker
+//! holds the run, that worker sees `KILLING` and stops it (spec §4.2, plan
+//! Task 4); if nobody holds it, the next claim takes the `KILLING` row,
+//! cancels and writes `KILLED` (spec §4.3, plan Task 5). **Until Task 5
+//! lands, an unclaimed sibling is not finished and the execution stays
+//! `KILLING`**: the claim does not yet take `KILLING` rows, and
+//! `advance_killing` never writes a leaf. That is the spec's path for an
+//! unclaimed `KILLING` run, not a separate one, so no DB behaviour is added
+//! here (kill-and-exit Task 3 fix round 1, the coordinator's ruling).
 //!
 //! # Any other state leaves the siblings alone (D5)
 //!
@@ -174,6 +186,11 @@ fn end_with(state: &ExecutionState, run: RunIx, s: RunState) -> Vec<Command> {
 /// `KILLED`: see the module doc. The run and its ancestors are `KILLED`; every
 /// other live leaf gets the kill route's leaf step; the execution is `KILLED`
 /// when nothing else is live and `KILLING` otherwise.
+///
+/// A sibling `Runnable` this state calls running becomes `KILLING` whether or
+/// not a worker holds it: a holder stops it (plan Task 4), and an unheld one
+/// is finished by the next claim (plan Task 5). Until Task 5 lands, the
+/// unheld case leaves the execution `KILLING`.
 fn kill(plan: &Plan, state: &ExecutionState, run: RunIx) -> Vec<Command> {
     let line = line(state, run);
     let mut cmds: Vec<Command> = line
@@ -203,7 +220,8 @@ fn kill(plan: &Plan, state: &ExecutionState, run: RunIx) -> Vec<Command> {
             // killed is its worker's.
             live = true;
         } else if held {
-            // Step 1: a worker may hold it; it stops it (spec §4).
+            // Step 1: a worker may hold it (it stops it, spec §4.2) or it may
+            // be waiting for one (the next claim finishes it, spec §4.3).
             cmds.push(Command::SetRunState {
                 run: ix,
                 state: RunState::Killing,

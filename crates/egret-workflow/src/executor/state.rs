@@ -633,7 +633,8 @@ pub enum RunState {
     /// `valids/sla-execution-condition` and
     /// `valids/flow-concurrency-sla-assert-cancel`. The third,
     /// `valids/exit-cancelled`, is an `Exit` — `oracle-exec/README.md`'s
-    /// `ExecutionUpdatableTask` row — and stays baselined.
+    /// `ExecutionUpdatableTask` row — and stayed baselined until kill-and-exit
+    /// Task 3 (2026-10-17) implemented `Exit` (`executor::exit`) and banked it.
     Cancelled,
 }
 

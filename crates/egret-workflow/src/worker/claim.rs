@@ -926,7 +926,11 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// "13 rows ... 9 of 13" until W5a Task 6: W5a folded
 /// `egret.container`/`egret.script.python` into aliases and added the four
 /// script FQCNs; it read "15 rows ... 7 of 15" until Data Apps P6 removed
-/// `egret.python`, the notebook-kernel task.)* [`reap`] then
+/// `egret.python`, the notebook-kernel task.)* *(2026-10-17, kill-and-exit
+/// Task 3 fix round 1: `TASK_TYPES` is 34 rows now, and the "23" above was
+/// already stale. The newest row, `Exit`, has no handler and is never claimed:
+/// it is executor-level (`spec::registry::EXECUTOR_LEVEL`), so it is not one of
+/// the types this paragraph is about.)* [`reap`] then
 /// clears `claimed_at` and **nothing else** — its statement is
 /// `SET claimed_at = NULL, updated_at = now()`, so the state stays `RUNNING` and
 /// the attempt stays open — and `claim`'s own predicate is

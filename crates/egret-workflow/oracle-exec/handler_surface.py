@@ -513,12 +513,19 @@ W3A_FLOWABLES = {
     # bounds -- so the coarser key costs nothing today.
     "io.kestra.plugin.core.flow.LoopUntil",
     "io.kestra.plugin.core.flow.WaitFor",
-    # Kill-and-exit Task 3: Kestra's one `ExecutionUpdatableTask` egret runs.
-    # `build_plan` gives it a `TaskKind::Exit` and `advance()` decides it (the
-    # run, its ancestors and the execution), so no worker claims it -- the
-    # same shape as `Pause`, though it is not a flowable in Kestra.
+}
+
+# Kill-and-exit Task 3: types `advance()` runs itself that are NOT flowables in
+# Kestra. `Exit` is an `ExecutionUpdatableTask`; `build_plan` gives it a
+# `TaskKind::Exit` and `advance()` decides it (the run, its ancestors and the
+# execution), so no worker claims it. Kept apart from `W3A_FLOWABLES` so that
+# set keeps meaning what its name says; every reader takes the union
+# (`EXECUTOR_DRIVEN`).
+W3A_EXECUTOR_LEVEL = {
     "io.kestra.plugin.core.execution.Exit",
 }
+
+EXECUTOR_DRIVEN = W3A_FLOWABLES | W3A_EXECUTOR_LEVEL
 
 # `executor::RunState::ALL`, which is 12 of the golden's 13 states.  A trace
 # carrying anything else cannot be represented, whatever the handler does.
@@ -621,7 +628,7 @@ def run_blockers(entry, flows, kinds):
             out.add(("construct", "a run of a task declared in ANOTHER flow"))
             continue
         ty, path = info
-        if ty not in W3B_HANDLERS and ty not in W3A_FLOWABLES:
+        if ty not in W3B_HANDLERS and ty not in EXECUTOR_DRIVEN:
             kind = kinds.get(ty, {}).get("kind", "unresolved")
             out.add(("handler" if kind == "RunnableTask" else "construct", ty))
         if "finally" in path and unported_finally(flows[fid]["doc"]):
@@ -648,7 +655,7 @@ def declared_blockers(entry, flows, kinds):
     flow = flows[fid]
     doc, keys, raw = flow["doc"], flow["keys"], flow["raw"]
     for _tid, ty, _path in flow["tasks"]:
-        if ty in W3B_HANDLERS or ty in W3A_FLOWABLES:
+        if ty in W3B_HANDLERS or ty in EXECUTOR_DRIVEN:
             continue
         kind = kinds.get(ty, {}).get("kind", "unresolved")
         out.add(("handler" if kind == "RunnableTask" else "construct", ty))

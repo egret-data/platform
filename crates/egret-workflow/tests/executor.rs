@@ -5713,8 +5713,9 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
          **W8 Task 6's `CANCELLED` buys the last 3 (263 -> 266), which is the \
          whole `CANCELLED` population, and TWO of the three bank in that \
          commit** -- the two `sla:` entries. The third, \
-         `valids/exit-cancelled`, is held by an `Exit`, an \
-         `ExecutionUpdatableTask` this crate does not implement"
+         `valids/exit-cancelled`, was held by an `Exit`, an \
+         `ExecutionUpdatableTask` this crate did not implement until \
+         kill-and-exit Task 3 (2026-10-17), which banked it"
     );
     assert_eq!(
         missing,

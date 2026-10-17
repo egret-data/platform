@@ -81,7 +81,10 @@ pub struct TaskTypeSpec {
 /// the `egret.container`/`egret.script.python` rows with four script-task
 /// FQCNs that carry them as aliases, W9a Task 11 added the four core
 /// storage tasks, two of them in `with_core_tasks`, and Task 12 the five
-/// whole-file ones, all in it). The
+/// whole-file ones, all in it). *(2026-10-17, kill-and-exit Task 3 fix round 1:
+/// those counts were already stale; counted then, the table is 34 rows, the
+/// last added being `io.kestra.plugin.core.execution.Exit`, a row with no
+/// handler on purpose -- see [`EXECUTOR_LEVEL`].)* The
 /// asymmetry is deliberate, `main.rs` documents the shipping set, and what a
 /// flow using an unwired type gets is the per-deployment refusal above, not a
 /// startup panic.

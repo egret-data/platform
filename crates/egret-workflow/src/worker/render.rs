@@ -1257,16 +1257,18 @@ pub(super) fn render_expressions(
             // Kill-and-exit Task 3 (spec §6): an `Exit`'s `state:` that is not
             // one of the five is a run failure NAMING the value, which only
             // this pass can write (`advance()` carries no message).
-            Ok(value)
-                if matches!(plan.tasks[state.runs[ix].task].kind, TaskKind::Exit { .. })
-                    && crate::executor::exit::parse_state(&value).is_err() =>
-            {
-                let why = crate::executor::exit::parse_state(&value)
-                    .expect_err("matched on is_err above");
-                fail(state, ix);
-                side.failures.push((ix, why));
+            Ok(value) => {
+                let refused = matches!(plan.tasks[state.runs[ix].task].kind, TaskKind::Exit { .. })
+                    .then(|| crate::executor::exit::parse_state(&value).err())
+                    .flatten();
+                match refused {
+                    Some(why) => {
+                        fail(state, ix);
+                        side.failures.push((ix, why));
+                    }
+                    None => state.runs[ix].rendered = Some(value),
+                }
             }
-            Ok(value) => state.runs[ix].rendered = Some(value),
             Err(_) => failed_on_a_limit(state, ix, limit, side),
         }
     }
