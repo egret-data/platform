@@ -218,6 +218,18 @@ pub struct Claimed {
     /// (spec §5.2). A child whose block has run no prepare claim has none,
     /// and is refused as corrupt rather than started on an empty directory.
     pub block_snapshot: Option<String>,
+    /// **A claim taken only to finish a kill** (workflow kill spec §4.3): a
+    /// leaf run that is `KILLING` with no lease -- its worker died or gave
+    /// its lease up, or the Exit task reached it before any worker did. Its
+    /// handler is never run; [`run_one`] cancels it and records `KILLED`
+    /// (`finish_kill`).
+    ///
+    /// **Leaf-only by construction**: the claim computes it as
+    /// `type_id IS NOT NULL AND state = 'KILLING'`, so a `WorkingDirectory`
+    /// block's discard-only finish (also `KILLING`) is `false` here and is
+    /// told apart by [`block_phase`](Self::block_phase) and its own state
+    /// read in [`run_block_claim`].
+    pub kill_only: bool,
 }
 
 impl Claimed {
@@ -485,6 +497,21 @@ fn leaf<'a>(flow: &'a crate::models::Flow, task_id: &str) -> Option<Leaf<'a>> {
 /// `FINISHING` whose state is `KILLING` is taken: that is the discard-only
 /// finish `executor::kill` asks for (the user's ruling of 2026-10-17), which
 /// [`run_block_claim`] tells apart by that state.
+///
+/// # A `KILLING` leaf nobody holds is claimable too (kill Task 5, spec §4.3)
+///
+/// A leaf (`type_id IS NOT NULL`, no `working_dir`) that is `KILLING` with no
+/// lease is taken **only to finish the kill**: its worker died or gave the
+/// lease up (the reaper freed it), or the Exit task turned it `KILLING`
+/// before any worker claimed it. [`Claimed::kill_only`] marks it, and
+/// [`run_one`] cancels it and records `KILLED` without running its handler.
+///
+/// The three arms are disjoint on `type_id`, so no row is taken as two
+/// kinds: a block (`type_id IS NULL`) is never a leaf's kill, and a
+/// `KILLING` block is claimable only in `FINISHING` (its discard-only
+/// finish). A block killed in `PREPARING` stays `RUNNING`
+/// (`executor::kill::advance_killing` waits for its claim) and is taken by
+/// the first arm, as before. The order is the same total order for all three.
 pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Claimed>> {
     sqlx::query_as(
         "WITH taken AS ( \
@@ -496,6 +523,8 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
                        OR working_dir IN ('PREPARING', 'FINISHING')) \
                       AND state = 'RUNNING' \
                       OR (type_id IS NULL AND working_dir = 'FINISHING' \
+                          AND state = 'KILLING') \
+                      OR (type_id IS NOT NULL AND working_dir IS NULL \
                           AND state = 'KILLING')) \
                  AND claimed_at IS NULL \
                ORDER BY created_at, execution_id, run_ix \
@@ -503,14 +532,15 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
                LIMIT $1 \
             ) \
             RETURNING id, execution_id, run_ix, task_ix, task_id, type_id, value, \
-                      created_at, claimed_at, parent_ix, working_dir, \
+                      created_at, claimed_at, parent_ix, working_dir, state, \
                       jsonb_array_length(attempts) AS attempt \
          ) \
          SELECT t.id, t.execution_id, e.workspace_id, t.run_ix, t.task_ix, t.task_id, \
                 COALESCE(t.type_id, '') AS type_id, t.value, t.attempt, e.source, \
                 f.created_by AS principal_id, t.claimed_at, \
                 CASE WHEN t.type_id IS NULL THEN t.working_dir END AS block_phase, \
-                b.id AS block_id, b.working_dir_snapshot AS block_snapshot \
+                b.id AS block_id, b.working_dir_snapshot AS block_snapshot, \
+                (t.type_id IS NOT NULL AND t.state = 'KILLING') AS kill_only \
            FROM taken t \
            JOIN workflow.executions e ON e.id = t.execution_id \
            LEFT JOIN workflow.flows f ON f.id = e.flow_id \
@@ -1349,6 +1379,9 @@ async fn run_one(
     if c.block_phase.is_some() {
         return run_block_claim(pool, c, timing, leased_at).await;
     }
+    if c.kill_only {
+        return finish_claimed_kill(pool, c, reg, timing).await;
+    }
     let (input, budget) = input_for(pool, c, reg, timing.container_default_timeout).await?;
     // A child's copy-out is the object named by its run, so an object left by
     // an earlier attempt would make a failed copy look like a success. It is
@@ -1621,6 +1654,34 @@ async fn run_one(
         );
     }
     Ok(Committed::Yes)
+}
+
+/// **A claim of a `KILLING` leaf** ([`Claimed::kill_only`], workflow kill spec
+/// §4.3): the kill its previous holder did not finish, or one no worker had
+/// started. The handler is built from the registry and **never run**; it is
+/// asked to stop (`finish_kill` -> [`cancel::kill`]) and the run is recorded
+/// `KILLED` under the lease this claim has just taken, then released.
+///
+/// **The attempt cancelled is the attempt that was running.** A claim opens no
+/// attempt -- [`Claimed::attempt`] is `jsonb_array_length(attempts)`, which
+/// only `advance()` changes -- so the handler is told the same `(run, attempt)`
+/// its predecessor was, and a container named by run and attempt (W5a) is the
+/// one the dead worker started. `commit_kill` closes that same attempt
+/// `KILLED`.
+///
+/// No lease renewal runs here: `cancel` is bounded by the handler's own grace
+/// (`workflow.plugin_host.kill_grace_s`, the container grace), well inside a
+/// third of `working_timeout`. A cancel that takes longer still only costs a
+/// `LeaseLost` commit, and the next holder repeats the kill.
+async fn finish_claimed_kill(
+    pool: &PgPool,
+    c: &Claimed,
+    reg: &dyn Registry,
+    timing: WorkerTiming,
+) -> Result<Committed> {
+    let (input, _budget) = input_for(pool, c, reg, timing.container_default_timeout).await?;
+    input.log.finish().await;
+    finish_kill(pool, c, c.claimed_at, reg, &input).await
 }
 
 /// Complete a `WorkingDirectory` block's own claim (spec §5.1): the prepare
@@ -2219,16 +2280,14 @@ async fn killing_under(pool: &PgPool, run: Uuid, held: DateTime<Utc>) -> Result<
 /// the refusal is the operator's fact (the module doc of [`cancel`], fact 2).
 ///
 /// It needs nothing of [`under_lease_with`]: a claim of a `KILLING` run whose
-/// previous worker died (Task 5) calls it with the lease it has just taken.
+/// previous worker died calls it with the lease it has just taken
+/// (`finish_claimed_kill`, spec §4.3).
 ///
 /// **What the run held is released once `KILLED` has committed**, as after any
 /// committed outcome (`run_one`'s "released AFTER the commit"): `cancel` only
 /// stops a script task's container or pod, and [`Registry::release`] is what
 /// deletes it -- or keeps it, for `taskRunner.delete: false`. A kill whose
 /// commit is `LeaseLost` releases nothing: the run is someone else's.
-// Called in production by Task 5's claim of a `KILLING` run whose worker
-// died; until then only the tests below call it directly.
-#[cfg_attr(not(test), allow(dead_code))]
 async fn finish_kill(
     pool: &PgPool,
     claimed: &Claimed,
@@ -5049,7 +5108,8 @@ mod tests {
                         '' AS type_id, t.value, jsonb_array_length(t.attempts) AS attempt, \
                         e.source, NULL::uuid AS principal_id, t.claimed_at, \
                         t.working_dir AS block_phase, NULL::uuid AS block_id, \
-                        NULL::text AS block_snapshot \
+                        NULL::text AS block_snapshot, \
+                    (t.type_id IS NOT NULL AND t.state = 'KILLING') AS kill_only \
                    FROM leased t JOIN workflow.executions e ON e.id = t.execution_id",
             )
             .bind(ex)
@@ -5124,7 +5184,8 @@ mod tests {
                     t.task_id, '' AS type_id, t.value, jsonb_array_length(t.attempts) AS attempt, \
                     e.source, NULL::uuid AS principal_id, t.claimed_at, \
                     t.working_dir AS block_phase, NULL::uuid AS block_id, \
-                    NULL::text AS block_snapshot \
+                    NULL::text AS block_snapshot, \
+                    (t.type_id IS NOT NULL AND t.state = 'KILLING') AS kill_only \
                FROM leased t JOIN workflow.executions e ON e.id = t.execution_id",
         )
         .bind(ex)
@@ -5213,7 +5274,8 @@ mod tests {
                         t.type_id, t.value, jsonb_array_length(t.attempts) AS attempt, \
                         e.source, NULL::uuid AS principal_id, t.claimed_at, \
                         NULL::text AS block_phase, NULL::uuid AS block_id, \
-                        NULL::text AS block_snapshot \
+                        NULL::text AS block_snapshot, \
+                    (t.type_id IS NOT NULL AND t.state = 'KILLING') AS kill_only \
                    FROM workflow.task_runs t JOIN workflow.executions e ON e.id = t.execution_id \
                   WHERE t.execution_id = $1 AND t.type_id IS NOT NULL AND t.state = 'KILLING' \
                     AND t.claimed_at IS NOT NULL",
@@ -5625,7 +5687,8 @@ mod tests {
                     t.type_id, t.value, jsonb_array_length(t.attempts) AS attempt, \
                     e.source, NULL::uuid AS principal_id, t.claimed_at, \
                     NULL::text AS block_phase, NULL::uuid AS block_id, \
-                    NULL::text AS block_snapshot \
+                    NULL::text AS block_snapshot, \
+                    (t.type_id IS NOT NULL AND t.state = 'KILLING') AS kill_only \
                FROM leased t JOIN workflow.executions e ON e.id = t.execution_id",
         )
         .bind(ex)
