@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Grant, ResourceTagDto, RuleView, Scope } from "@/api/generated/model";
-import { globMatch, grantCoverage, patternLevels, ruleSelects, tagNamesOn, tagUnresolved } from "@/routes/governance/data/coverage";
+import { grantCoverage, patternLevels, ruleSelects, tagNamesOn } from "@/routes/governance/data/coverage";
+import { tagUnresolved } from "@/routes/governance/ruleMatch";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
 
 const CAT = "c-ice";
@@ -105,26 +106,6 @@ describe("grantCoverage", () => {
     expect(grantCoverage(grant({ schema: "sales", table: "*" }), CATALOG, CAT)).toBe("child");
     expect(grantCoverage(grant({ schema: "sa*", table: "orders" }), SCHEMA, CAT)).toBe("child");
     expect(grantCoverage(grant({ schema: "hr", table: "*" }), SCHEMA, CAT)).toBeNull();
-  });
-});
-
-describe("globMatch", () => {
-  it.each([
-    ["orders", "orders", true],
-    ["orders", "order", false],
-    ["*", "", true],
-    ["*", "anything", true],
-    ["**", "x", true],
-    ["ord*", "orders", true],
-    ["*ers", "orders", true],
-    ["o*d*s", "orders", true],
-    ["o*x", "orders", false],
-    ["?rders", "orders", true],
-    ["?", "", false],
-    // One `?` is one code point, as Rust's `chars()` counts.
-    ["?", "😀", true],
-  ])("%j against %j is %s", (pattern, value, expected) => {
-    expect(globMatch(pattern, value)).toBe(expected);
   });
 });
 

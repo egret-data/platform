@@ -16,6 +16,9 @@ vi.mock("@/auth/useAuth");
 vi.mock("@/routes/governance/ViewExposureSection", () => ({
   default: ({ tagId }: { tagId: string }) => <div data-testid="view-exposure">{tagId}</div>,
 }));
+vi.mock("@/routes/governance/TagRulesSection", () => ({
+  default: ({ tag }: { tag: { key: string } }) => <div data-testid="tag-rules">{`rules for ${tag.key}`}</div>,
+}));
 vi.mock("react-router-dom", async () => {
   const actual = await vi.importActual<typeof import("react-router-dom")>("react-router-dom");
   return { ...actual, useParams: () => ({ id: "t1" }), useNavigate: () => vi.fn() };
@@ -310,5 +313,25 @@ describe("TagDetail", () => {
       ).toBeInTheDocument();
       expect(screen.getByText(/has no usable .?tagService/i)).toBeInTheDocument();
     });
+  });
+
+  // DG redesign #2, P9: the rules that reach this tag, for a policy:read holder only.
+  test("lists the tag's mask and filter rules to a policy:read holder", async () => {
+    vi.mocked(useAuth).mockReturnValue({
+      me: { user_id: "2", email: "s@example.com", platform_roles: [], permissions: ["tag:read", "policy:read"] } as unknown as Me,
+      isLoading: false,
+    } as ReturnType<typeof useAuth>);
+    renderPage();
+    expect(await screen.findByTestId("tag-rules")).toHaveTextContent("rules for pii");
+  });
+
+  test("hides the rules from a tag:read steward without policy:read", async () => {
+    vi.mocked(useAuth).mockReturnValue({
+      me: { user_id: "3", email: "t@example.com", platform_roles: [], permissions: ["tag:read"] } as unknown as Me,
+      isLoading: false,
+    } as ReturnType<typeof useAuth>);
+    renderPage();
+    await screen.findByRole("heading", { name: "PII" });
+    expect(screen.queryByTestId("tag-rules")).not.toBeInTheDocument();
   });
 });

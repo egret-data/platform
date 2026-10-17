@@ -32,6 +32,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { errorStatus } from "@/lib/httpStatus";
+import OrphanRulesCallout from "@/routes/governance/OrphanRulesCallout";
+import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 
 const groupsQueryKey = ["control-plane", "access", "groups"] as const;
 
@@ -71,6 +73,7 @@ export default function Classifications() {
   const isAdmin =
     (me?.platform_roles.includes("platform_admin") ?? false) ||
     (me?.permissions?.includes("tag:manage") ?? false);
+  const canReadRules = usePolicyPermissions()("policy:read");
 
   const tags = useTags();
   const rows = tags.data ?? [];
@@ -220,6 +223,9 @@ export default function Classifications() {
           </Button>
         )}
       </div>
+
+      {/* DG redesign #2, P9 and §5: rules a deleted tag left behind. Rules are read with policy:read. */}
+      {canReadRules && <OrphanRulesCallout tagKeys={tags.data ? new Set(tags.data.map((t) => t.key)) : null} />}
 
       <div className="space-y-4">
         {tags.isLoading ? (

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -9,10 +9,13 @@ import * as tagsApi from "@/api/tags";
 import * as accessApi from "@/api/access";
 import { useAuth } from "@/auth/useAuth";
 import type { Me } from "@/api/hooks";
+import * as permApi from "@/api/generated/perm/perm";
+import type { RuleView } from "@/api/generated/model";
 
 vi.mock("@/api/tags");
 vi.mock("@/api/access");
 vi.mock("@/auth/useAuth");
+vi.mock("@/api/generated/perm/perm");
 
 const ADMIN_ME: Me = {
   user_id: "1",
@@ -142,6 +145,12 @@ describe("Classifications", () => {
   beforeEach(() => {
     mockUseAuth();
     mockTagsQuery();
+    vi.mocked(permApi.usePermListRules).mockReturnValue({
+      data: { status: 200, data: [] },
+      isLoading: false,
+      isError: false,
+      error: null,
+    } as unknown as ReturnType<typeof permApi.usePermListRules>);
     vi.mocked(tagsApi.useCreateTag).mockReturnValue({
       mutateAsync: vi.fn().mockResolvedValue(TAGS[0]),
       isPending: false,
@@ -366,4 +375,88 @@ describe("Classifications", () => {
     expect(badge.getAttribute("title")).toContain("Security Team");
   });
 
+});
+
+/**
+ * DG redesign #2, P9 and §5: deleting a tag leaves its rules behind
+ * (`delete_tag` deletes the tag only). Classifications lists them, to a
+ * `policy:read` holder, so no rule ends up listed nowhere.
+ */
+describe("Classifications — rules whose tag is gone", () => {
+  const orphan = (id: string, key: string, tagName: string | null): RuleView => ({
+    id,
+    name: `rule ${id}`,
+    kind: { type: "mask", mask_type: "MASK_NULL" },
+    selector: { type: "tag", key },
+    exempt: { include: [], exclude: [] },
+    tag_name: tagName,
+  });
+
+  function serveRules(rows: RuleView[]) {
+    vi.mocked(permApi.usePermListRules).mockReturnValue({
+      data: { status: 200, data: rows },
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof permApi.usePermListRules>);
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockUseAuth({ user_id: "2", email: "s@example.com", platform_roles: [], permissions: ["tag:read", "policy:read"] });
+    vi.mocked(tagsApi.useTags).mockReturnValue({
+      data: TAGS,
+      isLoading: false,
+      isError: false,
+      error: null,
+    } as unknown as ReturnType<typeof tagsApi.useTags>);
+    vi.mocked(tagsApi.useCreateTag).mockReturnValue({ mutate: vi.fn(), isPending: false } as never);
+    vi.mocked(tagsApi.useDeleteTag).mockReturnValue({ mutate: vi.fn(), isPending: false } as never);
+    vi.mocked(accessApi.listGroups).mockResolvedValue(GROUPS);
+  });
+
+  test("a callout lists each rule whose tag no longer exists, linked to its rule page", async () => {
+    serveRules([orphan("r-gone", "old_pii", null), orphan("r-unlisted", "legacy", "Legacy"), orphan("r-ok", "pii", "PII")]);
+    renderPage();
+    const callout = await screen.findByRole("region", { name: "2 rules select a tag that no longer exists" });
+    expect(within(callout).getByRole("link", { name: "rule r-gone" })).toHaveAttribute("href", "/governance/rules/r-gone");
+    expect(within(callout).getByRole("link", { name: "rule r-unlisted" })).toHaveAttribute("href", "/governance/rules/r-unlisted");
+    expect(callout).toHaveTextContent("old_pii");
+    expect(within(callout).queryByRole("link", { name: "rule r-ok" })).not.toBeInTheDocument();
+  });
+
+  test("one such rule reads in the singular", async () => {
+    serveRules([orphan("r-gone", "old_pii", null)]);
+    renderPage();
+    expect(await screen.findByRole("region", { name: "1 rule selects a tag that no longer exists" })).toBeInTheDocument();
+  });
+
+  test("no callout when every rule's tag exists", async () => {
+    serveRules([orphan("r-ok", "pii", "PII")]);
+    renderPage();
+    await screen.findByText("PII");
+    expect(screen.queryByRole("region", { name: /no longer exists/ })).not.toBeInTheDocument();
+  });
+
+  test("no callout, and no rules read, without policy:read", async () => {
+    mockUseAuth({ user_id: "3", email: "t@example.com", platform_roles: [], permissions: ["tag:read"] });
+    serveRules([orphan("r-gone", "old_pii", null)]);
+    renderPage();
+    await screen.findByText("PII");
+    expect(screen.queryByRole("region", { name: /no longer exists/ })).not.toBeInTheDocument();
+    expect(permApi.usePermListRules).not.toHaveBeenCalled();
+  });
+
+  test("a failed read says the check could not be made, rather than showing nothing", async () => {
+    vi.mocked(permApi.usePermListRules).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: new Error("boom"),
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof permApi.usePermListRules>);
+    renderPage();
+    expect(await screen.findByText("The rules could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
+  });
 });

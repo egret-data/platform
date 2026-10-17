@@ -1,5 +1,6 @@
 import type { Grant, ResourceTagDto, RuleView, Scope } from "@/api/generated/model";
 import { isPattern } from "@/routes/governance/permFormat";
+import { globMatch } from "@/routes/governance/ruleMatch";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
 
 /** How a grant reaches an object: set on it, set on an ancestor, or set on something inside it (a column of a table; any table or column of a schema or catalog). */
@@ -105,11 +106,6 @@ export function ruleSelects(r: RuleView, p: ObjectPath, catalogId: string, tagNa
   return reach === "here" || (reach !== null && reach !== "child") ? "path" : null;
 }
 
-/** Whether `r` selects by a tag whose name did not resolve (see {@link ruleSelects}). */
-export function tagUnresolved(r: RuleView): boolean {
-  return r.selector.type === "tag" && !r.tag_name;
-}
-
 /**
  * The tag names (`tags.name`, what the engine matches; see
  * {@link ruleSelects}) that reach `p`, from its table's tag assignments,
@@ -179,38 +175,4 @@ export { patternLevels, type PatternLevel } from "@/routes/governance/permFormat
 function prefix(levels: (string | null | undefined)[]): string[] {
   const end = levels.findIndex((l) => l === null || l === undefined);
   return (end === -1 ? levels : levels.slice(0, end)) as string[];
-}
-
-/**
- * Ranger's resource glob: `*` matches any run of characters (none included),
- * `?` exactly one. A port of `glob_match` in `crates/egret-perm/src/eval.rs`,
- * over code points as Rust's `chars()` walks them. It compares case-sensitively,
- * as Ranger's tag matcher does (`ignoreCase: false`); {@link scopeCoverage}
- * lower-cases both sides first for resource levels, which ignore case.
- */
-export function globMatch(patternText: string, valueText: string): boolean {
-  const pattern = Array.from(patternText);
-  const value = Array.from(valueText);
-  let pi = 0;
-  let vi = 0;
-  let star = -1;
-  let starVi = 0;
-  while (vi < value.length) {
-    if (pi < pattern.length && (pattern[pi] === "?" || pattern[pi] === value[vi])) {
-      pi++;
-      vi++;
-    } else if (pi < pattern.length && pattern[pi] === "*") {
-      star = pi;
-      starVi = vi;
-      pi++;
-    } else if (star !== -1) {
-      pi = star + 1;
-      starVi++;
-      vi = starVi;
-    } else {
-      return false;
-    }
-  }
-  while (pi < pattern.length && pattern[pi] === "*") pi++;
-  return pi === pattern.length;
 }
