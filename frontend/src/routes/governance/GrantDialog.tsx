@@ -52,17 +52,27 @@ export function GrantDialog({
   onOpenChange,
   existing,
   initialScope,
+  initialPrincipals,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   existing?: Grant | null;
   /** Where a NEW grant starts (the object page's Grant access); ignored when `existing` is set. */
   initialScope?: Scope;
+  /** Who a NEW grant starts with (a People page's Grant access); ignored when `existing` is set. */
+  initialPrincipals?: PrincipalSet;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
-        {open && <GrantForm existing={existing} initialScope={initialScope} onOpenChange={onOpenChange} />}
+        {open && (
+          <GrantForm
+            existing={existing}
+            initialScope={initialScope}
+            initialPrincipals={initialPrincipals}
+            onOpenChange={onOpenChange}
+          />
+        )}
       </DialogContent>
     </Dialog>
   );
@@ -71,10 +81,12 @@ export function GrantDialog({
 function GrantForm({
   existing,
   initialScope,
+  initialPrincipals,
   onOpenChange,
 }: {
   existing?: Grant | null;
   initialScope?: Scope;
+  initialPrincipals?: PrincipalSet;
   onOpenChange: (open: boolean) => void;
 }) {
   // The catalog list is read HERE, not passed down from the list page
@@ -90,7 +102,9 @@ function GrantForm({
   const [effect, setEffect] = useState<Effect>(existing?.effect ?? "allow");
   const [actions, setActions] = useState<Action[]>(existing?.actions ?? ["read"]);
   const [scope, setScope] = useState<Scope>(existing ? existing.scope : (initialScope ?? EMPTY_SCOPE));
-  const [principals, setPrincipals] = useState<PrincipalSet>(existing?.principals ?? EMPTY_PRINCIPALS);
+  const [principals, setPrincipals] = useState<PrincipalSet>(
+    existing ? existing.principals : (initialPrincipals ?? EMPTY_PRINCIPALS),
+  );
 
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);

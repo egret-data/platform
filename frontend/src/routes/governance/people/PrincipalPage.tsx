@@ -1,4 +1,6 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
+import type { GrantView, PrincipalSet } from "@/api/generated/model";
+import { GrantDialog } from "@/routes/governance/GrantDialog";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -8,6 +10,7 @@ import { PrincipalHeader } from "@/routes/governance/people/PrincipalHeader";
 import { usePrincipal, type PageKind, type Principal } from "@/routes/governance/people/principalData";
 import { PEOPLE_BASE, principalParam } from "@/routes/governance/people/peopleUrl";
 import { OverviewTab } from "@/routes/governance/people/tabs/OverviewTab";
+import { PermissionsTab } from "@/routes/governance/people/tabs/PermissionsTab";
 
 export type PrincipalTab = "overview" | "permissions" | "masks" | "clearances" | "check";
 
@@ -71,22 +74,51 @@ export default function PrincipalPage({ kind }: { kind: PageKind }) {
   const key = principalParam(kind === "user" ? params.userId : params.name);
   const state = usePrincipal(kind, key);
   const principal = state.status === "ok" ? state.principal : null;
+  // The page's one GrantDialog: Grant access opens it new, with this principal
+  // in include; the Permissions tab's Edit opens it on a grant.
+  const [grantDialog, setGrantDialog] = useState<{ existing: GrantView | null } | null>(null);
+  const include = principal ? includeOf(principal) : null;
 
   let body: ReactNode;
   if (state.status === "missing") body = <Missing kind={kind} name={key} />;
   else if (state.status === "error") body = <TabError what={kind} onRetry={state.retry} />;
   else if (state.status === "loading") body = <ListSkeleton rows={4} cols={3} />;
-  else body = <PrincipalTabs principal={state.principal} />;
+  else body = <PrincipalTabs principal={state.principal} onEdit={(existing) => setGrantDialog({ existing })} />;
 
   return (
     <div className="space-y-6 p-4">
-      <PrincipalHeader kind={kind} keyName={key} principal={principal} />
+      <PrincipalHeader
+        kind={kind}
+        keyName={key}
+        principal={principal}
+        onGrant={principal ? () => setGrantDialog({ existing: null }) : undefined}
+        grantBlocked={principal && !include ? GRANT_NEEDS_USERNAME : undefined}
+      />
       {body}
+      <GrantDialog
+        open={grantDialog !== null}
+        onOpenChange={(open) => {
+          if (!open) setGrantDialog(null);
+        }}
+        existing={grantDialog?.existing ?? null}
+        initialPrincipals={include ?? undefined}
+      />
     </div>
   );
 }
 
-function PrincipalTabs({ principal }: { principal: Principal }) {
+export const GRANT_NEEDS_USERNAME = "A grant names a user by username, and this user has none yet.";
+
+/** The principal as a grant's include names it: a user by username (none without one), a group or role by name. */
+function includeOf(principal: Principal): PrincipalSet | null {
+  if (principal.kind === "user") {
+    const username = principal.data.username;
+    return username ? { include: [{ kind: "user", ref: username }], exclude: [] } : null;
+  }
+  return { include: [{ kind: principal.kind, ref: principal.data.name }], exclude: [] };
+}
+
+function PrincipalTabs({ principal, onEdit }: { principal: Principal; onEdit: (grant: GrantView) => void }) {
   const [search, setSearch] = useSearchParams();
   const isPublic = principal.kind === "group" && principal.data.isPublic;
   const tabs = TABS_BY_KIND[isPublic ? "public" : principal.kind];
@@ -101,7 +133,11 @@ function PrincipalTabs({ principal }: { principal: Principal }) {
       return params;
     });
 
-  const panel = (t: PrincipalTab): ReactNode => (t === "overview" ? <OverviewTab principal={principal} /> : <NotBuilt />);
+  const panel = (t: PrincipalTab): ReactNode => {
+    if (t === "overview") return <OverviewTab principal={principal} />;
+    if (t === "permissions") return <PermissionsTab principal={principal} onEdit={onEdit} />;
+    return <NotBuilt />;
+  };
 
   return (
     <Tabs value={value} onValueChange={select} className="min-w-0">

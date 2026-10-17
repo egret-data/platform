@@ -13,14 +13,15 @@ import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AssignmentBadge } from "@/routes/governance/GrantDialog";
 import { useWorkspaceNames } from "@/routes/governance/openInData";
-import { grantSentence } from "@/routes/governance/permFormat";
+import { grantSentence, type WorkspaceNames } from "@/routes/governance/permFormat";
+import { GrantSentenceText } from "@/routes/governance/PrincipalNames";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
 import { grantCoverage, insideGroup, insideName, patternLevels, type PatternLevel } from "@/routes/governance/data/coverage";
 import type { CatalogState } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
-import { ACTIONS_CELL, CatalogGate, EgretGrantsOnlyNote } from "@/routes/governance/data/tabs/TabStates";
-import { Section, TabError } from "@/routes/governance/tabParts";
+import { CatalogGate } from "@/routes/governance/data/tabs/TabStates";
+import { ACTIONS_CELL, EgretGrantsOnlyNote, Section, TabError } from "@/routes/governance/tabParts";
 
 /**
  * What a viewer without `policy:read` reads instead of the grants. Also this
@@ -148,7 +149,7 @@ function Grants({
       rows={rows}
       extra={extra}
       canWrite={canWrite}
-      workspaceLabel={(id) => workspaceName(id) ?? id}
+      workspaceName={workspaceName}
       sentenceOf={sentenceOf}
       onEdit={onEdit}
       onDelete={setDeleting}
@@ -219,7 +220,7 @@ function GrantTable({
   rows,
   extra,
   canWrite,
-  workspaceLabel,
+  workspaceName,
   sentenceOf,
   onEdit,
   onDelete,
@@ -228,7 +229,7 @@ function GrantTable({
   rows: GrantView[];
   extra?: { head: string; cell: (g: GrantView) => string; mono?: boolean };
   canWrite: boolean;
-  workspaceLabel: (id: string) => string;
+  workspaceName: WorkspaceNames;
   sentenceOf: (g: GrantView) => string;
   onEdit: (g: GrantView) => void;
   onDelete: (g: GrantView) => void;
@@ -254,9 +255,11 @@ function GrantTable({
             <TableRow key={g.id}>
               <TableCell className="whitespace-normal">
                 <div className="space-y-1">
-                  <p className="text-sm break-words">{sentence}</p>
+                  <p className="text-sm break-words">
+                    <GrantSentenceText grant={g} workspaceName={workspaceName} />
+                  </p>
                   {g.origin.type === "workspace_assignment" ? (
-                    <AssignmentBadge workspaceLabel={workspaceLabel(g.origin.workspace_id)} />
+                    <AssignmentBadge workspaceLabel={workspaceName(g.origin.workspace_id) ?? g.origin.workspace_id} />
                   ) : null}
                 </div>
               </TableCell>

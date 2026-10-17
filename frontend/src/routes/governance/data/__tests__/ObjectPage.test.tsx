@@ -732,9 +732,25 @@ describe("PermissionsTab", () => {
     ]);
     expect(rowsOf("On columns")).toEqual([["role analyst cannot read ice.sales.orders.email", "email", "Deny", ""]]);
     // Nothing unrelated, and nothing from another catalog.
-    expect(within(panel()).queryByText(/customers|hr\./)).not.toBeInTheDocument();
-    expect(within(panel()).queryByText(/^role analyst can read pg/)).not.toBeInTheDocument();
+    // On text content, not `queryByText`: a sentence's principal names are links, so no one
+    // element carries the whole sentence and `queryByText` would pass whatever the panel lists.
+    expect(panel().textContent).not.toMatch(/customers|hr\./);
+    expect(panel().textContent).not.toMatch(/role analyst can read pg/);
     expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/grants"]);
+  });
+
+  it("links each principal name to its People page; a workspace's members stay text (spec P14)", async () => {
+    serveData(fixture({ grants: ok(ALL) }));
+    renderPage("/governance/data/ice/sales/orders?tab=permissions", EDITOR);
+    const here = await within(panel()).findByRole("table", { name: "Here" });
+    expect(within(here).getByRole("link", { name: "alice" })).toHaveAttribute("href", "/governance/people/users/by-name/alice");
+    const inherited = within(panel()).getByRole("table", { name: "Inherited" });
+    expect(within(inherited).getByRole("link", { name: "analyst" })).toHaveAttribute("href", "/governance/people/roles/analyst");
+    expect(within(inherited).getByRole("link", { name: "contractors" })).toHaveAttribute(
+      "href",
+      "/governance/people/groups/contractors",
+    );
+    expect(within(inherited).queryByRole("link", { name: /Finance/ })).not.toBeInTheDocument();
   });
 
   it("gives an explicit grant Edit and Delete, and a workspace-assignment grant neither", async () => {
@@ -1041,6 +1057,9 @@ describe("MasksFiltersTab", () => {
     ]);
     // Each row names its exemptions ("—" for none).
     expect(rowsOf("Here")).toEqual([["us_onlyice.sales.orders", "row filter · region = 'us'", "group auditors, user alice", ""]]);
+    const here = within(panel()).getByRole("table", { name: "Here" });
+    expect(within(here).getByRole("link", { name: "auditors" })).toHaveAttribute("href", "/governance/people/groups/auditors");
+    expect(within(here).getByRole("link", { name: "alice" })).toHaveAttribute("href", "/governance/people/users/by-name/alice");
     // Masks before row filters; then catalog before schema.
     expect(rowsOf("Inherited")).toEqual([
       ["null_salesice.sales.*", "mask · MASK_NULL", "Schema", "—", ""],
@@ -1114,6 +1133,7 @@ describe("MasksFiltersTab", () => {
     renderPage("/governance/data/ice/sales/orders?tab=masks");
     await within(panel()).findByRole("table", { name: "Here" });
     expect(rowsOf("Here")).toEqual([["us_onlyice.sales.orders", "row filter · region = 'us'", "members of workspace Finance"]]);
+    expect(within(within(panel()).getByRole("table", { name: "Here" })).queryByRole("link")).not.toBeInTheDocument();
     // A table page lists its tag rules itself, so it does not point elsewhere.
     expect(within(panel()).queryByText("Tag-based rules are listed on each table's page.")).not.toBeInTheDocument();
   });

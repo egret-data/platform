@@ -37,6 +37,10 @@ const MARKERS = [
   ["src/routes/governance/people/PrincipalHeader.tsx", "egret allocates one at their first query, notebook or engine token"],
   // A group member with no username.
   ["src/routes/governance/people/tabs/OverviewTab.tsx", "a grant naming this group allocates one at compile"],
+  // A role or workspace a group holds, in "How it reaches".
+  ["src/routes/governance/people/tabs/PermissionsTab.tsx", ", held by group "],
+  // The prefix a uuid ref may carry.
+  ["src/routes/governance/people/reach.ts", "urn:uuid:"],
 ];
 
 const entry = entryChunkName(DIST);

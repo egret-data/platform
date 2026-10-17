@@ -1,6 +1,6 @@
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, KeyRound } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
@@ -89,12 +89,19 @@ export function PrincipalHeader({
   kind,
   keyName,
   principal,
+  onGrant,
+  grantBlocked,
 }: {
   kind: PageKind;
   keyName: string;
   principal: Principal | null;
+  /** Grant access (P14); offered with `policy:update` once the principal is read. */
+  onGrant?: () => void;
+  /** Why Grant access is disabled, said beside it (FE-ACTION-4). */
+  grantBlocked?: string;
 }) {
   const can = usePolicyPermissions();
+  const blockedId = useId();
   const title = principal?.kind === "user" ? principal.data.name || principal.data.email || keyName : keyName;
   return (
     <header className="space-y-2">
@@ -108,14 +115,34 @@ export function PrincipalHeader({
             {title}
           </h1>
         </div>
-        {can(MANAGE_PERM[kind]) ? (
-          <Button variant="outline" size="sm" asChild>
-            <Link to={manageUrl(kind, keyName)}>
-              <ExternalLink aria-hidden />
-              Manage in Control Plane
-            </Link>
-          </Button>
-        ) : null}
+        <div className="flex flex-wrap items-center gap-2">
+          {onGrant && can("policy:update") ? (
+            <>
+              <Button
+                size="sm"
+                onClick={onGrant}
+                disabled={grantBlocked !== undefined}
+                aria-describedby={grantBlocked ? blockedId : undefined}
+              >
+                <KeyRound aria-hidden />
+                Grant access
+              </Button>
+              {grantBlocked ? (
+                <span id={blockedId} className="text-xs text-muted-foreground">
+                  {grantBlocked}
+                </span>
+              ) : null}
+            </>
+          ) : null}
+          {can(MANAGE_PERM[kind]) ? (
+            <Button variant="outline" size="sm" asChild>
+              <Link to={manageUrl(kind, keyName)}>
+                <ExternalLink aria-hidden />
+                Manage in Control Plane
+              </Link>
+            </Button>
+          ) : null}
+        </div>
       </div>
       {principal ? (
         <ul role="list" className="flex flex-wrap gap-x-4 gap-y-1 text-sm">

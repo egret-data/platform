@@ -77,16 +77,6 @@ function level(value: string): string {
  */
 export type WorkspaceNames = (id: string) => string | undefined;
 
-/**
- * One principal. A `workspace_members` principal's ref is the workspace's id
- * (the assignment sync writes it), so it reads by the workspace's name when
- * `workspaceName` knows it, and by the id only when it does not.
- */
-function principalWord(p: PermPrincipal, workspaceName?: WorkspaceNames): string {
-  if (p.kind === "workspace_members") return `members of workspace ${workspaceName?.(p.ref) ?? p.ref}`;
-  return `${p.kind} ${p.ref}`;
-}
-
 /** A `PermPrincipal[]` — a `PrincipalSet`'s `include` or `exclude` — joined
  * for reading inline. Empty reads as "nobody" rather than a blank. */
 export function formatPrincipals(list: PermPrincipal[], workspaceName?: WorkspaceNames): string {
@@ -104,12 +94,30 @@ export function formatPrincipals(list: PermPrincipal[], workspaceName?: Workspac
  */
 export function grantSentence(g: GrantView, workspaceName?: WorkspaceNames): string {
   const who = formatPrincipals(g.principals.include, workspaceName);
-  const verb = g.effect === "allow" ? "can" : "cannot";
-  const actions = formatActions(g.actions);
-  const scope = formatScope(g.scope, g.catalog_name);
   const exclude =
     g.principals.exclude.length > 0 ? ` except ${formatPrincipals(g.principals.exclude, workspaceName)}` : "";
-  return `${who} ${verb} ${actions} ${scope}${exclude}`;
+  return `${who} ${grantPredicate(g)}${exclude}`;
+}
+
+/**
+ * The middle of {@link grantSentence}, between who and who is excepted:
+ * `can read ice.sales.*`. `GrantSentenceText` puts linked principal names
+ * around it and so reads exactly as `grantSentence` does.
+ */
+export function grantPredicate(g: GrantView): string {
+  const verb = g.effect === "allow" ? "can" : "cannot";
+  return `${verb} ${formatActions(g.actions)} ${formatScope(g.scope, g.catalog_name)}`;
+}
+
+/**
+ * One principal, as {@link formatPrincipals} words it. A `workspace_members`
+ * principal's ref is the workspace's id (the assignment sync writes it), so it
+ * reads by the workspace's name when `workspaceName` knows it, and by the id
+ * only when it does not.
+ */
+export function principalWord(p: PermPrincipal, workspaceName?: WorkspaceNames): string {
+  if (p.kind === "workspace_members") return `members of workspace ${workspaceName?.(p.ref) ?? p.ref}`;
+  return `${p.kind} ${p.ref}`;
 }
 
 /**
