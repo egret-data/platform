@@ -95,3 +95,10 @@ export function scopeOf(path: ObjectPath, catalogId: string): Scope {
   }
   return scope;
 }
+
+/** `catalog.schema.object.column`, as far down as `path` goes. */
+export function fullPath(path: ObjectPath): string {
+  return [path.catalog, path.schema, path.object, path.object === undefined ? undefined : path.column]
+    .filter((s): s is string => s !== undefined)
+    .join(".");
+}

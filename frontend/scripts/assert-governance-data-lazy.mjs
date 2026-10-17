@@ -39,6 +39,12 @@ const MARKERS = [
   ["src/routes/governance/data/tabs/PermissionsTab.tsx", "Reading grants needs the policy:read permission"],
   // `RULES_NEED_POLICY_READ`.
   ["src/routes/governance/data/tabs/MasksFiltersTab.tsx", "Reading rules needs the policy:read permission"],
+  // `PANEL_NEEDS_POLICY_READ`.
+  ["src/routes/governance/data/ColumnPanel.tsx", "Reading grants and rules needs the policy:read permission."],
+  // `WHO_CAN_READ_INTRO`.
+  ["src/routes/governance/data/WhoCanReadDialog.tsx", "Whether one user can read this, per policy profile"],
+  // `TAGS_EGRET_ONLY`.
+  ["src/routes/governance/data/AddTagDialog.tsx", "Tags can be added to egret-managed catalogs only"],
 ];
 
 const entry = entryChunkName(DIST);

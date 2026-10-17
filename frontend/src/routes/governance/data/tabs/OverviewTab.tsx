@@ -230,7 +230,8 @@ function ObjectList({ path, items }: { path: ObjectPath; items: NonNullable<Brow
 }
 
 /**
- * A table's columns in the order the source returns them. The Tags column
+ * A table's columns in the order the source returns them; each name opens the
+ * column panel (`?column=`). The Tags column
  * shows each column's own tags, then the tags on its table marked "from
  * table" (a column inherits its table's tags). It is left out when the
  * catalog cannot carry tags (`taggable` false: not an egret catalog, whose
@@ -285,7 +286,14 @@ function Columns({
         <TableBody>
           {columns.map((col) => (
             <TableRow key={col.name}>
-              <TableCell className="font-medium">{col.name}</TableCell>
+              <TableCell>
+                <Link
+                  to={pathToUrl({ ...path, column: col.name })}
+                  className="rounded-sm font-medium hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                >
+                  {col.name}
+                </Link>
+              </TableCell>
               <TableCell className="font-mono text-xs">{col.type}</TableCell>
               {showTags ? (
                 <TableCell>

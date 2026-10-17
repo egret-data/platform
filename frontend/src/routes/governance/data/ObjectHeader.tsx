@@ -40,6 +40,8 @@ const ACTIONS = [
   { key: "onWhoCanRead", permission: "policy:read", label: "Who can read?", icon: UserSearch },
 ] as const;
 
+type ActionKey = (typeof ACTIONS)[number]["key"];
+
 /**
  * An object's header (spec §2.2): its name, kind and path, the engines its
  * catalog is attached to, its own tags, and its actions.
@@ -51,9 +53,10 @@ const ACTIONS = [
  * are on the column's row.
  *
  * **Actions.** Each shows only when its handler is wired AND the viewer holds
- * its permission. The dialogs they open belong to the Permissions tab (Grant
- * access), the column panel (Add tag) and the Who can read? dialog; a page
- * that does not pass a handler shows no button for it.
+ * its permission; one named in `disabledReasons` shows disabled, with the
+ * reason beside it. The page owns the dialogs they open (`GrantDialog`,
+ * `AddTagDialog`, `WhoCanReadDialog`); a page that does not pass a handler
+ * shows no button for it.
  */
 export function ObjectHeader({
   path,
@@ -63,6 +66,7 @@ export function ObjectHeader({
   onGrant,
   onAddTag,
   onWhoCanRead,
+  disabledReasons = {},
 }: {
   path: ObjectPath;
   kind: HeaderKind;
@@ -71,6 +75,12 @@ export function ObjectHeader({
   onGrant?: () => void;
   onAddTag?: () => void;
   onWhoCanRead?: () => void;
+  /**
+   * An action shown but disabled, with the reason said beside it
+   * (FE-ACTION-4): Add tag on an object outside egret's catalogs (F9). It
+   * still shows only with its handler and its permission.
+   */
+  disabledReasons?: Partial<Record<ActionKey, string>>;
 }) {
   const can = usePolicyPermissions();
   const handlers = { onGrant, onAddTag, onWhoCanRead };
@@ -101,13 +111,32 @@ export function ObjectHeader({
           </div>
         </div>
         {actions.length > 0 ? (
-          <div className="flex flex-wrap gap-2">
-            {actions.map((a) => (
-              <Button key={a.key} variant="outline" size="sm" onClick={handlers[a.key]}>
-                <a.icon aria-hidden />
-                {a.label}
-              </Button>
-            ))}
+          <div className="space-y-1">
+            <div className="flex flex-wrap gap-2">
+              {actions.map((a) => {
+                const reason = disabledReasons[a.key];
+                return (
+                  <Button
+                    key={a.key}
+                    variant="outline"
+                    size="sm"
+                    onClick={handlers[a.key]}
+                    disabled={reason !== undefined}
+                    aria-describedby={reason !== undefined ? `object-action-${a.key}-reason` : undefined}
+                  >
+                    <a.icon aria-hidden />
+                    {a.label}
+                  </Button>
+                );
+              })}
+            </div>
+            {actions.map((a) =>
+              disabledReasons[a.key] !== undefined ? (
+                <p key={a.key} id={`object-action-${a.key}-reason`} className="text-xs text-muted-foreground">
+                  {disabledReasons[a.key]}
+                </p>
+              ) : null,
+            )}
           </div>
         ) : null}
       </div>

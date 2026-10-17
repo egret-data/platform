@@ -398,11 +398,12 @@ describe("ObjectTabs", () => {
   it("puts the chosen tab in the URL, keeping the rest of the search", async () => {
     serveData(fixture());
     const user = userEvent.setup();
-    renderPage("/governance/data/ice/sales/orders?column=email");
+    // Not `?column=`: that opens the column panel, a modal over the tabs (its own test keeps `?tab=` on close).
+    renderPage("/governance/data/ice/sales/orders?from=tree");
     await user.click(screen.getByRole("tab", { name: "Details" }));
-    expect(where()).toBe("/governance/data/ice/sales/orders?column=email&tab=details");
+    expect(where()).toBe("/governance/data/ice/sales/orders?from=tree&tab=details");
     await user.click(screen.getByRole("tab", { name: "Overview" }));
-    expect(where()).toBe("/governance/data/ice/sales/orders?column=email");
+    expect(where()).toBe("/governance/data/ice/sales/orders?from=tree");
   });
 
   it("moves between tabs with the arrow keys", async () => {

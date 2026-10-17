@@ -7,7 +7,9 @@ import {
 } from "@/api/generated/control-plane-governance/control-plane-governance";
 import type { GrantView } from "@/api/generated/model";
 import { GrantDialog } from "@/routes/governance/GrantDialog";
+import { AddTagDialog, TAGS_EGRET_ONLY, type TagTarget } from "@/routes/governance/data/AddTagDialog";
 import type { NodeKind } from "@/routes/governance/data/CatalogTree";
+import { ColumnPanel } from "@/routes/governance/data/ColumnPanel";
 import { ObjectHeader, type HeaderKind, type HeaderTags } from "@/routes/governance/data/ObjectHeader";
 import { ObjectTabs, type ObjectLevel } from "@/routes/governance/data/ObjectTabs";
 import { assignmentsOf, enginesOf, scopeOf, type CatalogState, type ObjectKind, type TagsResult } from "@/routes/governance/data/objectData";
@@ -17,6 +19,7 @@ import { OverviewTab } from "@/routes/governance/data/tabs/OverviewTab";
 import { LineageTab } from "@/routes/governance/data/tabs/LineageTab";
 import { MasksFiltersTab } from "@/routes/governance/data/tabs/MasksFiltersTab";
 import { PermissionsTab } from "@/routes/governance/data/tabs/PermissionsTab";
+import { WhoCanReadDialog } from "@/routes/governance/data/WhoCanReadDialog";
 
 const OBJECT_KINDS: readonly string[] = ["table", "view", "materialized_view"] satisfies ObjectKind[];
 
@@ -37,10 +40,15 @@ const OBJECT_KINDS: readonly string[] = ["table", "view", "materialized_view"] s
  * tags (no other catalog can carry them, F9, so none is asked).
  *
  * The page owns the one `GrantDialog`: the header's Grant access opens it on
- * this object's scope, the Permissions tab's Edit on an existing grant.
+ * this object's scope, the Permissions tab's Edit on an existing grant. It
+ * also owns the header's Who can read? (`WhoCanReadDialog`, on this object)
+ * and Add tag (`AddTagDialog`, on a table, view or materialized view; on one
+ * outside egret's catalogs the button shows disabled with F9's reason), and
+ * the column panel `?column=` opens (`ColumnPanel`), whose own dialogs ask
+ * about the column.
  */
 export default function ObjectPage() {
-  const [search] = useSearchParams();
+  const [search, setSearch] = useSearchParams();
   const path = urlToPath(useParams(), search);
   const level: ObjectLevel = path.schema === undefined ? "catalog" : path.object === undefined ? "schema" : "object";
 
@@ -91,6 +99,34 @@ export default function ObjectPage() {
   const [grantDialog, setGrantDialog] = useState<{ existing: GrantView | null } | null>(null);
   const onGrant = found ? () => setGrantDialog({ existing: null }) : undefined;
 
+  const [whoCanRead, setWhoCanRead] = useState(false);
+  const onWhoCanRead = found ? () => setWhoCanRead(true) : undefined;
+
+  const [addTag, setAddTag] = useState<TagTarget | null>(null);
+  const onAddTag =
+    found && level === "object"
+      ? () => {
+          if (found.warehouseId == null || path.schema === undefined || path.object === undefined) return;
+          setAddTag({
+            catalog: found.name,
+            catalogId: found.id,
+            warehouseId: found.warehouseId,
+            schema: path.schema,
+            table: path.object,
+            assigned: (assignmentsOf(tags) ?? []).filter((a) => a.column === "").map((a) => a.tag.id),
+          });
+        }
+      : undefined;
+
+  const closeColumn = () =>
+    setSearch((prev) => {
+      const params = new URLSearchParams(prev);
+      params.delete("column");
+      return params;
+    });
+  // The header and its dialogs are about the object, never the column the panel shows.
+  const objectPath = { catalog: path.catalog, schema: path.schema, object: path.object };
+
   return (
     <div className="space-y-4">
       <ObjectHeader
@@ -99,6 +135,9 @@ export default function ObjectPage() {
         engines={enginesOf(catalog, browse)}
         tags={headerTags(level, catalog, tags)}
         onGrant={onGrant}
+        onAddTag={onAddTag}
+        onWhoCanRead={onWhoCanRead}
+        disabledReasons={found && found.warehouseId == null ? { onAddTag: TAGS_EGRET_ONLY } : undefined}
       />
       <ObjectTabs
         level={level}
@@ -125,6 +164,16 @@ export default function ObjectPage() {
         existing={grantDialog?.existing ?? null}
         initialScope={found ? scopeOf(path, found.id) : undefined}
       />
+      <WhoCanReadDialog open={whoCanRead} onOpenChange={setWhoCanRead} path={objectPath} catalogId={catalogId} />
+      <AddTagDialog
+        target={addTag}
+        onOpenChange={(open) => {
+          if (!open) setAddTag(null);
+        }}
+      />
+      {level === "object" ? (
+        <ColumnPanel path={path} catalog={catalog} browse={browse} tags={tags} onClose={closeColumn} />
+      ) : null}
     </div>
   );
 }

@@ -7,7 +7,9 @@ import type { BrowseResponse, GovernanceCatalog } from "@/api/generated/model";
  * `…/governance/tags/{catalog_id}` and `…/governance/lineage/{catalog_id}`
  * (both `?schema=&table=`), and the perm routes the Permissions tab and
  * `GrantDialog` call (`…/perm/grants`, `…/perm/grants/{id}`, `…/perm/preview`), and the rule
- * routes the Masks & filters tab and `RuleDialog` call (`…/perm/rules`, `…/perm/rules/{id}`). Answers go
+ * routes the Masks & filters tab and `RuleDialog` call (`…/perm/rules`, `…/perm/rules/{id}`), explain
+ * (`…/perm/explain`) and the principal search its user field calls (`…/principals`), the tag
+ * catalogue (`…/tags`) and the tag write (`PUT …/warehouses/{id}/resource-tags`). Answers go
  * through the real generated client and `apiFetch`, so a test sees exactly
  * what the page sees, including a 403 as an `ApiError`.
  */
@@ -60,6 +62,14 @@ export interface FakeData {
   rules?: Answer | Answer[];
   /** Every rule write (`POST …/perm/rules`, `PATCH`/`DELETE …/perm/rules/{id}`); default 200 `{}`. */
   ruleWrite?: Answer;
+  /** `POST …/perm/explain`; none is a 404. */
+  explain?: Answer;
+  /** `GET …/principals`; default 200 `[]`. */
+  principals?: Answer;
+  /** `GET …/tags`, the tag catalogue; none is a 404. */
+  tagCatalogue?: Answer;
+  /** `PUT …/warehouses/{id}/resource-tags`; default 200 `{}`. */
+  tagWrite?: Answer;
 }
 
 /** What the fake was asked, as keys of {@link FakeData}. */
@@ -69,6 +79,8 @@ export interface DataCalls {
   lineageCalls: string[];
   /** `METHOD /perm/...`, with each body that was sent. */
   permCalls: { call: string; body?: unknown }[];
+  /** Each tag write: the warehouse id from the path and the body. */
+  tagWrites: { warehouseId: string; body: unknown }[];
 }
 
 const json = (status: number, body: unknown) =>
@@ -80,6 +92,7 @@ export function serveData(data: FakeData): DataCalls {
   const tagCalls: string[] = [];
   const lineageCalls: string[] = [];
   const permCalls: DataCalls["permCalls"] = [];
+  const tagWrites: DataCalls["tagWrites"] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -89,6 +102,13 @@ export function serveData(data: FakeData): DataCalls {
           ? new Promise<Response>(() => {})
           : Promise.resolve(a ? json(a.status, a.body) : json(404, { error: "not found" }));
       if (url.pathname === "/api/control-plane/governance/catalogs") return reply(data.catalogs);
+      if (url.pathname === "/api/control-plane/principals") return reply(data.principals ?? { status: 200, body: [] });
+      if (url.pathname === "/api/control-plane/tags") return reply(data.tagCatalogue);
+      const w = /^\/api\/control-plane\/warehouses\/([^/]+)\/resource-tags$/.exec(url.pathname);
+      if (w && (init?.method ?? "GET").toUpperCase() === "PUT") {
+        tagWrites.push({ warehouseId: decodeURIComponent(w[1]), body: JSON.parse(String(init?.body)) });
+        return reply(data.tagWrite ?? { status: 200, body: {} });
+      }
       const m = /^\/api\/control-plane\/governance\/browse\/([^/]+)$/.exec(url.pathname);
       if (m) {
         const id = decodeURIComponent(m[1]);
@@ -126,6 +146,7 @@ export function serveData(data: FakeData): DataCalls {
           return reply(Array.isArray(a) ? a[Math.min(asked, a.length - 1)] : a);
         }
         if (call === "POST /perm/preview") return reply(data.preview);
+        if (call === "POST /perm/explain") return reply(data.explain);
         if (/^(POST \/perm\/rules|(PATCH|DELETE) \/perm\/rules\/[^/]+)$/.test(call)) {
           return reply(data.ruleWrite ?? { status: 200, body: {} });
         }
@@ -136,5 +157,5 @@ export function serveData(data: FakeData): DataCalls {
       return Promise.reject(new Error(`no fake for ${url.pathname}`));
     }),
   );
-  return { browseCalls, tagCalls, lineageCalls, permCalls };
+  return { browseCalls, tagCalls, lineageCalls, permCalls, tagWrites };
 }
