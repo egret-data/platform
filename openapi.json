@@ -41948,7 +41948,7 @@
       },
       "GovernanceCatalog": {
         "type": "object",
-        "description": "One registry catalog as the Governance Data tree sees it. Only names and\nkinds: never the catalog's config, URIs, credentials, warehouse location\nor properties. Nothing here is more than browse already reveals under the\nsame permission (its `engines`, and the catalog it is asked about), except\nthe workspaces it is assigned to, which `policy:read` already shows as\nworkspace-assignment grants.",
+        "description": "One registry catalog as the Governance Data tree sees it. Only names and\nkinds: never the catalog's config, URIs, credentials, warehouse location\nor properties.\n\nTwo fields reach further than browse does, by decision (Task 6 of the DG\nfrontend redesign): the workspaces the catalog is assigned to, and its\nwarehouse's name. A `policy:read` viewer already sees the assignments as\nworkspace-assignment grants; a viewer holding only `tag:read` sees both\nhere and nowhere else, because the object page's Overview and Details\nshow them to everyone who may open that page.",
         "required": [
           "id",
           "name",
