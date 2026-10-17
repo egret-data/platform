@@ -8,11 +8,17 @@
 //! lands decides which way it fails:
 //!
 //! - an **allow include** fails closed: the grant grants nobody;
-//! - a **deny include**, or **any exclude** (a grant's `principals.exclude`, a
-//!   rule's `exempt.exclude`), fails **OPEN**: the deny or the subtract silently
-//!   evaporates and the compiled policy allows more than the model states;
+//! - a **deny include**, an **allow grant's exclude**, or a **rule exemption's
+//!   exclude** fails **OPEN**: the deny or the subtract silently evaporates and
+//!   the compiled policy allows more than the model states;
+//! - a **deny grant's exclude** fails closed: it compiles to a
+//!   `denyExceptions` item (`crate::grants`, `compile_grant`), and an exception
+//!   naming nobody makes the deny WIDER than written, not narrower;
 //! - a rule's **`exempt.include`** fails closed the other way: the mask applies to
 //!   someone the author meant to exempt.
+//!
+//! Every one of these is refused at write time all the same: a carve-out or a
+//! target that matches nobody is never what the author meant.
 //!
 //! None of these is reported by anything: the policy compiles, deploys and is
 //! listed live. The case that surfaced it was `{kind: "user", ref: "<user
@@ -162,8 +168,8 @@ pub(crate) async fn resolve_principal_refs(
     }
     let mut msg = String::from(
         "these principal refs match nobody egret knows — a policy naming nobody grants \
-         nobody as an allow, and as a deny or an exclude it silently allows more than the \
-         model states:",
+         nobody as an allow and denies everyone as a deny's exception, and as a deny's \
+         target or an allow's exclude it silently allows more than the model states:",
     );
     for u in &unknown {
         let _ = write!(
@@ -335,11 +341,25 @@ pub struct UnresolvedPrincipal {
     /// Why it matches nobody, as a sentence an author can act on.
     pub reason: String,
     /// Matching nobody here makes the compiled policy allow MORE than the model
-    /// states: an unresolved ref in a deny grant's include, or in any exclude
-    /// (a grant's or a rule exemption's). An allow include or an exemption
-    /// include matching nobody fails closed, and an `empty` group never fails
-    /// open: nobody is in it, so matching nobody is exactly its meaning.
+    /// states: an unresolved ref in a deny grant's include, an allow grant's
+    /// exclude, or a rule exemption's exclude. An allow include, a deny grant's
+    /// exclude (a `denyExceptions` item: naming nobody makes the deny wider)
+    /// and an exemption include matching nobody fail closed, and an `empty`
+    /// group never fails open: nobody is in it, so matching nobody is exactly
+    /// its meaning.
     pub fails_open: bool,
+}
+
+/// One stored grant principal or rule exemption, as the report reads it.
+#[derive(sqlx::FromRow)]
+struct ReportRow {
+    source: String,
+    id: Uuid,
+    name: Option<String>,
+    kind: String,
+    r#ref: String,
+    position: String,
+    effect: Option<String>,
 }
 
 /// What one stored `(kind, ref)` resolves to, for the report.
@@ -372,17 +392,7 @@ enum Stored {
 pub async fn unresolved_principals_via(
     conn: &mut PgConnection,
 ) -> Result<Vec<UnresolvedPrincipal>, PermHttpError> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        source: String,
-        id: Uuid,
-        name: Option<String>,
-        kind: String,
-        r#ref: String,
-        position: String,
-        effect: Option<String>,
-    }
-    let rows: Vec<Row> = sqlx::query_as(
+    let rows: Vec<ReportRow> = sqlx::query_as(
         "SELECT 'grant' AS source, g.id, NULL::text AS name, gp.kind::text AS kind, gp.ref, \
                 gp.mode::text AS position, g.effect::text AS effect \
            FROM perm.grant_principals gp JOIN perm.grants g ON g.id = gp.grant_id \
@@ -427,8 +437,7 @@ pub async fn unresolved_principals_via(
             Stored::Empty => ("empty", "this group exists and has no members".to_string()),
             Stored::Unresolved(why) => ("unresolved", why),
         };
-        let fails_open = status == "unresolved"
-            && (row.position == "exclude" || row.effect.as_deref() == Some("deny"));
+        let fails_open = status == "unresolved" && widens_access_when_empty(&row);
         out.push(UnresolvedPrincipal {
             source: row.source,
             id: row.id,
@@ -443,6 +452,24 @@ pub async fn unresolved_principals_via(
         });
     }
     Ok(out)
+}
+
+/// Where a ref matching nobody makes the compiled policy allow MORE than the
+/// model states (the `failsOpen` doc). A deny grant's exclude is NOT one: it
+/// compiles to `denyExceptions`, and an exception naming nobody denies more.
+/// A rule's `exempt.exclude` cannot be written (`validate_rule_shape` refuses
+/// it) and is flagged conservatively should one be stored.
+fn widens_access_when_empty(row: &ReportRow) -> bool {
+    match (
+        row.source.as_str(),
+        row.effect.as_deref(),
+        row.position.as_str(),
+    ) {
+        ("grant", Some("deny"), "include") => true,
+        ("grant", Some("allow"), "exclude") => true,
+        ("rule", _, "exclude") => true,
+        _ => false,
+    }
 }
 
 async fn classify_stored(conn: &mut PgConnection, p: &Principal) -> Result<Stored, PermHttpError> {

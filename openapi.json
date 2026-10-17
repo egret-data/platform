@@ -7907,7 +7907,7 @@
         "operationId": "list_unresolved_principals",
         "responses": {
           "200": {
-            "description": "Every stored grant principal and rule exemption whose ref matches nobody, ordered by source, id, position, kind and ref. `failsOpen` marks the ones where matching nobody makes the compiled policy allow more than the model states (a deny grant's include, any exclude); an existing group with no members is listed with status `empty` and never fails open",
+            "description": "Every stored grant principal and rule exemption whose ref matches nobody, ordered by source, id, position, kind and ref. `failsOpen` marks the ones where matching nobody makes the compiled policy allow more than the model states (a deny grant's include, an allow grant's exclude, a rule exemption's exclude; a deny grant's exclude is a deny exception, and naming nobody denies more); an existing group with no members is listed with status `empty` and never fails open",
             "content": {
               "application/json": {
                 "schema": {
@@ -48472,7 +48472,7 @@
           },
           "failsOpen": {
             "type": "boolean",
-            "description": "Matching nobody here makes the compiled policy allow MORE than the model\nstates: an unresolved ref in a deny grant's include, or in any exclude\n(a grant's or a rule exemption's). An allow include or an exemption\ninclude matching nobody fails closed, and an `empty` group never fails\nopen: nobody is in it, so matching nobody is exactly its meaning."
+            "description": "Matching nobody here makes the compiled policy allow MORE than the model\nstates: an unresolved ref in a deny grant's include, an allow grant's\nexclude, or a rule exemption's exclude. An allow include, a deny grant's\nexclude (a `denyExceptions` item: naming nobody makes the deny wider)\nand an exemption include matching nobody fail closed, and an `empty`\ngroup never fails open: nobody is in it, so matching nobody is exactly\nits meaning."
           }
         }
       },

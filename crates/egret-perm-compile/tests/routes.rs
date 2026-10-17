@@ -7561,6 +7561,62 @@ async fn a_patch_keeping_a_since_deleted_principal_is_accepted() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {resp}");
 }
 
+/// **The R6 skip holds only while the effect is unchanged** (J-F3 final review
+/// M-a). A legacy allow grant whose include names a user by UUID fails closed
+/// (it grants nobody); PATCHing it to `deny` while keeping that ref would store
+/// a deny that denies nobody — fail OPEN. That patch re-checks every principal
+/// and is refused; an actions-only patch of the same row still passes.
+#[tokio::test]
+async fn a_patch_flipping_allow_to_deny_rechecks_a_stored_bad_ref() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let target = known_user(&f, unique("jf3_flip")).await;
+    let body = grant_with(
+        f.catalog_id,
+        "allow",
+        json!([{ "kind": "user", "ref": target }]),
+        json!([]),
+    );
+    let id = create_grant_returning_id(&f, &token, body).await;
+    // The legacy state: the ref stored as the user's id, behind the write path.
+    let uid: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(&target)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("user id");
+    sqlx::query("UPDATE perm.grant_principals SET ref = $1 WHERE grant_id = $2::uuid")
+        .bind(uid.to_string())
+        .bind(&id)
+        .execute(&f.db.pool)
+        .await
+        .expect("seed legacy ref");
+    let legacy = grant_with(
+        f.catalog_id,
+        "allow",
+        json!([{ "kind": "user", "ref": uid.to_string() }]),
+        json!([]),
+    );
+
+    let mut to_deny = legacy.clone();
+    to_deny["effect"] = json!("deny");
+    let (status, resp) = send(&f, "PATCH", &format!("/perm/grants/{id}"), &token, to_deny).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {resp}");
+    let msg = resp["error"].as_str().unwrap_or_default();
+    assert!(msg.contains(&uid.to_string()), "names the ref; got {msg:?}");
+
+    let mut actions_only = legacy;
+    actions_only["actions"] = json!(["read", "write"]);
+    let (status, resp) = send(
+        &f,
+        "PATCH",
+        &format!("/perm/grants/{id}"),
+        &token,
+        actions_only,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {resp}");
+}
+
 /// The rule twin: an exemption naming a since-deleted user does not block an
 /// edit that leaves it alone.
 #[tokio::test]

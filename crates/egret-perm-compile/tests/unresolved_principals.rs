@@ -313,9 +313,11 @@ async fn a_uuid_user_ref_on_a_deny_fails_open_and_a_valid_ref_is_not_listed() {
 }
 
 /// An allow include matching nobody fails CLOSED (grants nobody): listed, not
-/// flagged. Any exclude matching nobody fails OPEN, on an allow as on a deny.
+/// flagged. An allow's exclude matching nobody fails OPEN (the carve-out
+/// evaporates). A deny's exclude compiles to a `denyExceptions` item, so
+/// matching nobody makes the deny WIDER: listed, not flagged.
 #[tokio::test]
-async fn an_allow_include_fails_closed_and_any_exclude_fails_open() {
+async fn an_allow_exclude_fails_open_and_an_allow_include_or_deny_exclude_fails_closed() {
     let Some(e) = env().await else { return };
     let ghost_user = unique("ghost-user");
     let ghost_group = unique("ghost_group");
@@ -343,7 +345,7 @@ async fn an_allow_include_fails_closed_and_any_exclude_fails_open() {
     );
     assert_eq!(
         summary(&deny_rows),
-        vec![row("role", &ghost_role, "exclude", "unresolved", true)]
+        vec![row("role", &ghost_role, "exclude", "unresolved", false)]
     );
 }
 

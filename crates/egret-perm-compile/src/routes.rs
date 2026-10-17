@@ -1067,10 +1067,16 @@ pub(crate) async fn write_grant(
                         .into(),
                 ));
             }
+            // The R6 skip below holds only while the EFFECT is unchanged: a
+            // stored ref that matches nobody fails closed on an allow include
+            // and OPEN on a deny include, so flipping allow -> deny around it
+            // turns a harmless row into a fail-open one. A patch that changes
+            // the effect re-checks every principal.
+            let effect_unchanged = old.effect == body.effect;
             (
                 affected_services_for_grant(tx, &old).await?,
                 old.origin,
-                Some(old.principals),
+                effect_unchanged.then_some(old.principals),
             )
         }
         // The database mints the id on a create; `GrantOrigin::Explicit` is the
@@ -1080,8 +1086,9 @@ pub(crate) async fn write_grant(
 
     // **Every ref must name someone egret knows** (J-F3) — include AND exclude,
     // on create, patch and preview alike, since all three are this function. A
-    // ref naming nobody fails closed on an allow include but OPEN on a deny
-    // include or any exclude: the deny or the subtract evaporates and the
+    // ref naming nobody fails closed on an allow include (and on a deny's
+    // exclude, a deny exception) but OPEN on a deny include or an allow's
+    // exclude: the deny or the subtract evaporates and the
     // compiled policy allows more than the model states, with nothing reporting
     // it. Before the shape check, because it also rewrites a username to its
     // stored spelling and the shape check should see what will be stored. See
@@ -1092,7 +1099,7 @@ pub(crate) async fn write_grant(
     // re-sends every principal; without this, a grant that validly excludes
     // `bob` becomes un-editable — even an actions-only change is a 400 — the
     // moment `bob` is deleted, though the exclude still denies everyone who
-    // carries the name (nobody).
+    // carries the name (nobody). Only while the effect is unchanged (above).
     let mut principals = body.principals;
     resolve_principal_refs(tx, "principals", &mut principals, old_principals.as_ref()).await?;
 
@@ -1573,7 +1580,7 @@ async fn list_overlaps(
     path = "/api/control-plane/perm/unresolved-principals",
     tag = "perm",
     responses(
-        (status = 200, description = "Every stored grant principal and rule exemption whose ref matches nobody, ordered by source, id, position, kind and ref. `failsOpen` marks the ones where matching nobody makes the compiled policy allow more than the model states (a deny grant's include, any exclude); an existing group with no members is listed with status `empty` and never fails open", body = Vec<crate::principal_refs::UnresolvedPrincipal>),
+        (status = 200, description = "Every stored grant principal and rule exemption whose ref matches nobody, ordered by source, id, position, kind and ref. `failsOpen` marks the ones where matching nobody makes the compiled policy allow more than the model states (a deny grant's include, an allow grant's exclude, a rule exemption's exclude; a deny grant's exclude is a deny exception, and naming nobody denies more); an existing group with no members is listed with status `empty` and never fails open", body = Vec<crate::principal_refs::UnresolvedPrincipal>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),

@@ -42,10 +42,12 @@ export interface UnresolvedPrincipal {
   reason: string;
   /**
      * Matching nobody here makes the compiled policy allow MORE than the model
-     * states: an unresolved ref in a deny grant's include, or in any exclude
-     * (a grant's or a rule exemption's). An allow include or an exemption
-     * include matching nobody fails closed, and an `empty` group never fails
-     * open: nobody is in it, so matching nobody is exactly its meaning.
+     * states: an unresolved ref in a deny grant's include, an allow grant's
+     * exclude, or a rule exemption's exclude. An allow include, a deny grant's
+     * exclude (a `denyExceptions` item: naming nobody makes the deny wider)
+     * and an exemption include matching nobody fail closed, and an `empty`
+     * group never fails open: nobody is in it, so matching nobody is exactly
+     * its meaning.
      */
   failsOpen: boolean;
 }
