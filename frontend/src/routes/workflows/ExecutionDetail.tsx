@@ -2,10 +2,11 @@ import { lazy, useId, useMemo, useState, type ReactNode } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { History, Loader2, Play, RotateCw } from "lucide-react";
+import { CircleStop, History, Loader2, Play, RotateCw } from "lucide-react";
 import { ApiError } from "@/api/client";
 import {
   useWorkflowGetExecution,
+  useWorkflowKillExecution,
   useWorkflowReplayExecution,
   useWorkflowResumeExecution,
 } from "@/api/generated/workflow/workflow";
@@ -24,6 +25,8 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
@@ -35,7 +38,15 @@ import ExecutionLogsTab from "@/components/workflows/executions/logs/ExecutionLo
 import { LogView } from "@/components/workflows/executions/logs/LogView";
 import ExecutionOutputsTab from "@/components/workflows/executions/outputs/ExecutionOutputsTab";
 import { OutputsTree } from "@/components/workflows/executions/outputs/OutputsTree";
-import { canReplay, canResume, resumeFeedback, showsResume } from "@/components/workflows/executions/actions";
+import {
+  canKill,
+  canReplay,
+  canResume,
+  killFeedback,
+  resumeFeedback,
+  showsKill,
+  showsResume,
+} from "@/components/workflows/executions/actions";
 import { nextExecutionPollMs, staleNote, useNow } from "@/components/workflows/executions/polling";
 import {
   ESTIMATED_DURATION_TITLE,
@@ -315,26 +326,37 @@ function ExecutionHeader({ ws, execution, now }: { ws: string; execution: Execut
           ) : null}
         </dl>
       </div>
-      {/* Both actions need `workflow:manage`; a user without it does not see them (spec §5.2). */}
+      {/* Every action needs `workflow:manage`; a user without it does not see them (spec §5.2). */}
       {execution.can_manage ? <ExecutionActions ws={ws} execution={execution} /> : null}
     </header>
   );
 }
 
-type Pending = "resume" | "replay" | null;
+type Pending = "resume" | "replay" | "kill" | null;
 
-/** Resume and Replay (spec §5.2), each confirmed first (FE-ACTION-1), each saying why when disabled (FE-ACTION-4). */
+/** The kill route's 409 code: the execution ended before the kill reached it (workflow kill spec D3). */
+const EXECUTION_TERMINATED = "execution_terminated";
+
+/**
+ * Resume, Replay (spec §5.2) and Kill (workflow kill spec §7), each confirmed
+ * first (FE-ACTION-1), each saying why when disabled (FE-ACTION-4).
+ */
 function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionDto }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const resume = useWorkflowResumeExecution();
   const replay = useWorkflowReplayExecution();
+  const kill = useWorkflowKillExecution();
   const [open, setOpen] = useState<Pending>(null);
+  // "Also kill subflow executions": on by default, and on again each time the dialog opens.
+  const [cascade, setCascade] = useState(true);
   const reasonsId = useId();
 
   const resumeShown = showsResume(execution);
   const resumeState = canResume(execution);
   const replayState = canReplay(execution);
+  const killShown = showsKill(execution);
+  const killState = canKill(execution);
 
   const runResume = async () => {
     const res = await resume.mutateAsync({ workspace: ws, id: execution.id });
@@ -354,6 +376,30 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
     void queryClient.invalidateQueries({ queryKey: workflowsKeys.executions(ws) });
     // The new execution is the result: go there, no toast (FE-ACTION-2).
     navigate(`/explore/${ws}/workflows/executions/${encodeURIComponent(res.data.id)}/overview`);
+  };
+
+  const runKill = async () => {
+    const refresh = () => {
+      void queryClient.invalidateQueries({ queryKey: workflowsKeys.execution(execution.id) });
+      void queryClient.invalidateQueries({ queryKey: workflowsKeys.executions(ws) });
+    };
+    try {
+      const res = await kill.mutateAsync({ workspace: ws, id: execution.id, params: { cascade } });
+      if (res.status !== 202) throw new Error("The execution could not be killed. Try again.");
+      refresh();
+      // The page stays, so a toast confirms it (FE-ACTION-2), in terms of the state the route
+      // answered. `KILLING` is not terminal: the page keeps polling until it is `KILLED`.
+      toast.success(killFeedback(res.data.state));
+    } catch (e) {
+      if (e instanceof ApiError && e.code === EXECUTION_TERMINATED) {
+        // It ended first: read it again so the page shows how, and say so in the dialog.
+        refresh();
+        throw new Error("The execution has already ended, so there is nothing to kill. The page now shows its final state.", {
+          cause: e,
+        });
+      }
+      throw e;
+    }
   };
 
   const inputNames = Object.keys(execution.inputs ?? {});
@@ -376,11 +422,26 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
           <History aria-hidden />
           Replay
         </ReasonButton>
+        {killShown ? (
+          <ReasonButton
+            enablement={killState}
+            reasonId={`${reasonsId}-kill`}
+            variant="outline"
+            onClick={() => {
+              setCascade(true);
+              setOpen("kill");
+            }}
+          >
+            {killState.ok ? <CircleStop aria-hidden /> : <Loader2 aria-hidden className="animate-spin" />}
+            {killState.ok ? "Kill" : "Killing…"}
+          </ReasonButton>
+        ) : null}
       </div>
       <DisabledReasons
         actions={[
           ...(resumeShown ? [{ id: `${reasonsId}-resume`, label: "Resume", enablement: resumeState }] : []),
           { id: `${reasonsId}-replay`, label: "Replay", enablement: replayState },
+          ...(killShown ? [{ id: `${reasonsId}-kill`, label: "Kill", enablement: killState }] : []),
         ]}
       />
       <ConfirmAction
@@ -405,6 +466,32 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
           {inputNames.length === 0 ? "It has no inputs." : `Inputs: ${inputNames.join(", ")}.`}
         </p>
       </ConfirmAction>
+      <ConfirmAction
+        open={open === "kill"}
+        onOpenChange={(o) => setOpen(o ? "kill" : null)}
+        title="Kill this execution?"
+        description="Every running task is stopped, and every task that has not finished ends Killed. A killed execution cannot be resumed; replay it to run it again."
+        confirmLabel="Kill"
+        confirmVariant="destructive"
+        onConfirm={runKill}
+        fallbackError="The execution could not be killed. Try again."
+      >
+        <div className="flex items-start gap-2">
+          <Checkbox
+            id={`${reasonsId}-cascade`}
+            checked={cascade}
+            onCheckedChange={(v) => setCascade(v === true)}
+            aria-describedby={`${reasonsId}-cascade-help`}
+            className="mt-0.5"
+          />
+          <div className="grid gap-0.5">
+            <Label htmlFor={`${reasonsId}-cascade`}>Also kill subflow executions</Label>
+            <p id={`${reasonsId}-cascade-help`} className="text-sm text-muted-foreground">
+              Its loop iterations and subflow executions, and theirs. Cleared, they run on.
+            </p>
+          </div>
+        </div>
+      </ConfirmAction>
     </div>
   );
 }
@@ -420,6 +507,7 @@ function ConfirmAction({
   title,
   description,
   confirmLabel,
+  confirmVariant,
   onConfirm,
   fallbackError,
   children,
@@ -429,6 +517,7 @@ function ConfirmAction({
   title: string;
   description: string;
   confirmLabel: string;
+  confirmVariant?: "default" | "destructive";
   onConfirm: () => Promise<void>;
   fallbackError: string;
   children?: ReactNode;
@@ -471,7 +560,7 @@ function ConfirmAction({
         ) : null}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
-          <Button type="button" disabled={pending} onClick={() => void confirm()}>
+          <Button type="button" variant={confirmVariant} disabled={pending} onClick={() => void confirm()}>
             {pending ? <Loader2 aria-hidden className="animate-spin" /> : null}
             {confirmLabel}
           </Button>

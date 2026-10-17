@@ -3,10 +3,11 @@ import type { Enablement } from "@/components/workflows/draftState";
 import { isTerminalState } from "@/components/workflows/executionState";
 
 /**
- * WHEN RESUME AND REPLAY ARE OFFERED (W7b spec §5.2). Both need
- * `workflow:manage`, which the page reads from `ExecutionDto.can_manage` and
- * which hides them both; these rules decide, for a user who has it, whether
- * each is offered, and say why not (FE-ACTION-4).
+ * WHEN RESUME, REPLAY AND KILL ARE OFFERED (W7b spec §5.2; Kill: workflow kill
+ * spec §7). All need `workflow:manage`, which the page reads from
+ * `ExecutionDto.can_manage` and which hides them all; these rules decide,
+ * for a user who has it, whether each is offered, and say why not
+ * (FE-ACTION-4).
  */
 
 /** Spec §5.2, verbatim. Also this module's marker in `scripts/assert-workflows-lazy.mjs`. */
@@ -51,6 +52,31 @@ export function canResume(execution: Pick<ExecutionDto, "runs">): Enablement {
  */
 export function canReplay(execution: Pick<ExecutionDto, "state">): Enablement {
   return isTerminalState(execution.state) ? { ok: true } : { ok: false, reason: REPLAY_NOT_FINISHED_REASON };
+}
+
+/**
+ * Kill (workflow kill spec §7, D6): shown while the execution has not ended.
+ * `KILLING` is live, not terminal, so the button stays, disabled, until the
+ * worker has stopped the running task and the execution is `KILLED`.
+ */
+export function showsKill(execution: Pick<ExecutionDto, "state">): boolean {
+  return !isTerminalState(execution.state);
+}
+
+/** Why Kill is disabled while `KILLING`. */
+export const KILL_IN_PROGRESS_REASON = "The kill was sent; a worker is stopping the running task";
+
+/** Kill, for an execution that `showsKill`: every live state, `PAUSED` included, except one already being killed. */
+export function canKill(execution: Pick<ExecutionDto, "state">): Enablement {
+  return execution.state === "KILLING" ? { ok: false, reason: KILL_IN_PROGRESS_REASON } : { ok: true };
+}
+
+/**
+ * What the page says after a kill, from the state the route answered: `KILLED`
+ * when nothing was running, `KILLING` while a worker still stops a task.
+ */
+export function killFeedback(answeredState: string): string {
+  return answeredState === "KILLED" ? "Killed the execution" : "Killing the execution: the running task is being stopped";
 }
 
 /** `FAILED` → `Failed`, the state chip's own word. */
