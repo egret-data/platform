@@ -577,7 +577,7 @@ describe("ExecutionDetail: Kill (workflow kill spec §7)", () => {
     expect(within(dialog).getByRole("checkbox", { name: "Also kill subflow executions" })).toBeChecked();
   });
 
-  it("on a 409 execution_terminated, says so inline in the dialog, not in a toast, and reads the execution again", async () => {
+  it("on a 409 execution_terminated, says so inline in the dialog, not in a toast, reads the execution again, and turns the confirm off", async () => {
     const server = new Server(ok(execution("RUNNING")), ok(execution("SUCCESS")));
     server.kill = {
       status: 409,
@@ -596,6 +596,23 @@ describe("ExecutionDetail: Kill (workflow kill spec §7)", () => {
     expect(toast.success).not.toHaveBeenCalled();
     expect(toast.error).not.toHaveBeenCalled();
     expect(toast.warning).not.toHaveBeenCalled();
+    // Nothing is left to kill: the confirm is off, a second click sends nothing, and Cancel still closes.
+    const confirm = within(dialog).getByRole("button", { name: "Kill" });
+    expect(confirm).toBeDisabled();
+    await userEvent.click(confirm);
+    expect(killCalls(server)).toHaveLength(1);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+  });
+
+  it("shows the cascade help in plain words", async () => {
+    new Server(ok(execution("RUNNING")));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Kill" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Kill this execution?" });
+    expect(within(dialog).getByRole("checkbox", { name: "Also kill subflow executions" })).toHaveAccessibleDescription(
+      "Its loop iterations and subflow executions, and theirs. Unchecked, they keep running.",
+    );
   });
 
   it("keeps the dialog open with the server's message on any other refusal", async () => {

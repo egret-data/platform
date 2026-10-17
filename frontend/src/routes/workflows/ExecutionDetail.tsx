@@ -350,6 +350,8 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
   const [open, setOpen] = useState<Pending>(null);
   // "Also kill subflow executions": on by default, and on again each time the dialog opens.
   const [cascade, setCascade] = useState(true);
+  // Set by a 409 execution_terminated: the dialog stays open to say so, with nothing left to confirm.
+  const [killEnded, setKillEnded] = useState(false);
   const reasonsId = useId();
 
   const resumeShown = showsResume(execution);
@@ -393,6 +395,7 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
     } catch (e) {
       if (e instanceof ApiError && e.code === EXECUTION_TERMINATED) {
         // It ended first: read it again so the page shows how, and say so in the dialog.
+        setKillEnded(true);
         refresh();
         throw new Error("The execution has already ended, so there is nothing to kill. The page now shows its final state.", {
           cause: e,
@@ -429,6 +432,7 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
             variant="outline"
             onClick={() => {
               setCascade(true);
+              setKillEnded(false);
               setOpen("kill");
             }}
           >
@@ -473,6 +477,7 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
         description="Every running task is stopped, and every task that has not finished ends Killed. A killed execution cannot be resumed; replay it to run it again."
         confirmLabel="Kill"
         confirmVariant="destructive"
+        confirmDisabled={killEnded || !killShown}
         onConfirm={runKill}
         fallbackError="The execution could not be killed. Try again."
       >
@@ -487,7 +492,7 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
           <div className="grid gap-0.5">
             <Label htmlFor={`${reasonsId}-cascade`}>Also kill subflow executions</Label>
             <p id={`${reasonsId}-cascade-help`} className="text-sm text-muted-foreground">
-              Its loop iterations and subflow executions, and theirs. Cleared, they run on.
+              Its loop iterations and subflow executions, and theirs. Unchecked, they keep running.
             </p>
           </div>
         </div>
@@ -499,7 +504,9 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
 /**
  * A confirmation that stays open on failure with the server's message
  * (FE-ACTION-3) and closes on success. Not `AlertDialogAction`, which closes
- * on click whatever the outcome.
+ * on click whatever the outcome. `confirmDisabled` turns the confirm off when
+ * the failure left nothing to confirm (Kill's 409 execution_terminated); Cancel
+ * still closes it.
  */
 function ConfirmAction({
   open,
@@ -508,6 +515,7 @@ function ConfirmAction({
   description,
   confirmLabel,
   confirmVariant,
+  confirmDisabled = false,
   onConfirm,
   fallbackError,
   children,
@@ -518,6 +526,7 @@ function ConfirmAction({
   description: string;
   confirmLabel: string;
   confirmVariant?: "default" | "destructive";
+  confirmDisabled?: boolean;
   onConfirm: () => Promise<void>;
   fallbackError: string;
   children?: ReactNode;
@@ -560,7 +569,7 @@ function ConfirmAction({
         ) : null}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
-          <Button type="button" variant={confirmVariant} disabled={pending} onClick={() => void confirm()}>
+          <Button type="button" variant={confirmVariant} disabled={pending || confirmDisabled} onClick={() => void confirm()}>
             {pending ? <Loader2 aria-hidden className="animate-spin" /> : null}
             {confirmLabel}
           </Button>
