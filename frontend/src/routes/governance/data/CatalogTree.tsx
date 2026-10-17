@@ -37,11 +37,12 @@ import { parseDottedPath, pathToUrl, type ObjectPath } from "@/routes/governance
  */
 export const LEVEL_FAILED = "This level could not be listed. Retry, or reload the page.";
 
-type NodeKind = "catalog" | BrowseKind;
+export type NodeKind = "catalog" | BrowseKind;
 
 type BrowseResult = UseQueryResult<ControlPlaneGovernanceBrowseQueryResult, ControlPlaneGovernanceBrowseQueryError>;
 
-const KIND_ICON: Record<NodeKind, { icon: LucideIcon; label: string }> = {
+/** Each kind's icon and name, as the tree and an object's header show it. */
+export const KIND_ICON: Record<NodeKind, { icon: LucideIcon; label: string }> = {
   catalog: { icon: Database, label: "Catalog" },
   schema: { icon: Folder, label: "Schema" },
   table: { icon: Table2, label: "Table" },

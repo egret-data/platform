@@ -2,8 +2,10 @@ import { vi } from "vitest";
 import type { BrowseResponse, GovernanceCatalog } from "@/api/generated/model";
 
 /**
- * A fake of the two endpoints the Data tree reads: `GET …/governance/catalogs`
- * and `GET …/governance/browse/{catalog_id}?schema=&table=`. Answers go
+ * A fake of the endpoints the Data area reads: `GET …/governance/catalogs`,
+ * `GET …/governance/browse/{catalog_id}?schema=&table=`, and an object's
+ * `…/governance/tags/{catalog_id}` and `…/governance/lineage/{catalog_id}`
+ * (both `?schema=&table=`). Answers go
  * through the real generated client and `apiFetch`, so a test sees exactly
  * what the page sees, including a 403 as an `ApiError`.
  */
@@ -38,18 +40,31 @@ type Answer = { status: number; body: unknown } | "never";
 export interface FakeData {
   catalogs: Answer;
   /**
-   * Keyed `catalogId` or `catalogId|schema`. A key with no answer is a 404.
+   * Keyed `catalogId`, `catalogId|schema` or `catalogId|schema|table`. A key with no answer is a 404.
    * A list is answered in order, its last answer repeating.
    */
   browse: Record<string, Answer | Answer[]>;
+  /** Keyed `catalogId|schema|table`. A key with no answer is a 404. */
+  tags?: Record<string, Answer>;
+  /** Keyed `catalogId|schema|table`. A key with no answer is a 404. */
+  lineage?: Record<string, Answer>;
+}
+
+/** What the fake was asked, as keys of {@link FakeData}. */
+export interface DataCalls {
+  browseCalls: string[];
+  tagCalls: string[];
+  lineageCalls: string[];
 }
 
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
-/** Stubs `fetch`; returns the browse calls made, as `catalogId` or `catalogId|schema`. */
-export function serveData(data: FakeData): { browseCalls: string[] } {
+/** Stubs `fetch`; returns the calls made, keyed as {@link FakeData} keys them. */
+export function serveData(data: FakeData): DataCalls {
   const browseCalls: string[] = [];
+  const tagCalls: string[] = [];
+  const lineageCalls: string[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL) => {
@@ -63,14 +78,25 @@ export function serveData(data: FakeData): { browseCalls: string[] } {
       if (m) {
         const id = decodeURIComponent(m[1]);
         const schema = url.searchParams.get("schema");
-        const key = schema === null ? id : `${id}|${schema}`;
+        const table = url.searchParams.get("table");
+        const key = [id, schema, table].filter((k) => k !== null).join("|");
         const asked = browseCalls.filter((k) => k === key).length;
         browseCalls.push(key);
         const a = data.browse[key];
         return reply(Array.isArray(a) ? a[Math.min(asked, a.length - 1)] : a);
       }
+      const o = /^\/api\/control-plane\/governance\/(tags|lineage)\/([^/]+)$/.exec(url.pathname);
+      if (o) {
+        const key = `${decodeURIComponent(o[2])}|${url.searchParams.get("schema")}|${url.searchParams.get("table")}`;
+        if (o[1] === "tags") {
+          tagCalls.push(key);
+          return reply(data.tags?.[key]);
+        }
+        lineageCalls.push(key);
+        return reply(data.lineage?.[key]);
+      }
       return Promise.reject(new Error(`no fake for ${url.pathname}`));
     }),
   );
-  return { browseCalls };
+  return { browseCalls, tagCalls, lineageCalls };
 }

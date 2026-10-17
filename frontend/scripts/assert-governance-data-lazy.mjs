@@ -25,6 +25,16 @@ const MARKERS = [
   ["src/routes/governance/data/CatalogTree.tsx", "This level could not be listed. Retry, or reload the page."],
   // `DataIndex`'s description.
   ["src/routes/governance/data/DataPage.tsx", "Open a catalog, schema or table from the tree"],
+  // The Lineage tab's text until its tab lands.
+  ["src/routes/governance/data/ObjectPage.tsx", "Lineage is not shown on this page yet."],
+  // `TAGS_FAILED`.
+  ["src/routes/governance/data/ObjectHeader.tsx", "Tags could not be loaded."],
+  // The Masks & filters tab's label.
+  ["src/routes/governance/data/ObjectTabs.tsx", "Masks & filters"],
+  // What a view without recorded facts says.
+  ["src/routes/governance/data/tabs/OverviewTab.tsx", "egret has no security mode or lineage recorded for this object."],
+  // A catalog with no warehouse.
+  ["src/routes/governance/data/tabs/DetailsTab.tsx", "None: not an egret catalog"],
 ];
 
 const entry = entryChunkName(DIST);
