@@ -28,14 +28,24 @@
 //! # A `KILLED` exit kills its live siblings, and that is the kill route's step
 //!
 //! Kestra emits a kill event for the execution (`isOnKillCascade(true)`), so
-//! a sibling leaf that is running is killed by its worker. `advance_killing`
-//! writes no leaf (`kill.rs`'s "A leaf is never written here"): the kill route
-//! does that half (spec §3.2 steps 1-2). An `Exit` is a kill nobody routed, so
-//! this module does the route's two leaf steps itself, for this execution:
+//! a sibling leaf that is running is killed by its worker. The kill route
+//! writes the leaves (spec §3.2 steps 1-2). An `Exit` is a kill nobody routed,
+//! so this module does the route's two leaf steps itself, for this execution:
 //! a `Runnable` the pure state calls running (`RUNNING` or `SUBMITTED`)
 //! becomes `KILLING`, and every other live leaf — not started, retrying, a
 //! `Subflow` — becomes `KILLED`. Flowables are left to `advance_killing`,
-//! exactly as the route leaves them.
+//! exactly as the route leaves them. (`advance_killing` also kills any leaf
+//! still live and not `KILLING`, as a backstop: `kill.rs`'s "A leaf nobody
+//! killed is killed here".)
+//!
+//! **The kill is the whole round** (final review C1, 2026-10-18). The kill's
+//! leaf steps are computed from the state at the start of the round, but a
+//! `Parallel` collects every child's commands in one batch, so the same round
+//! could create a sibling branch's next run or start a `CREATED` sibling
+//! beside them. `advance()` therefore returns this module's commands alone
+//! when an `Exit` decides `KILLED` ([`killed_in`]), as Kestra runs the
+//! updating task before the flowables; the next round, under `KILLING`, is
+//! `advance_killing`'s.
 //!
 //! **`advance()` cannot see a lease, so "running" here includes a run no
 //! worker holds yet** (`RUNNING` with `claimed_at IS NULL`, waiting to be
@@ -43,8 +53,8 @@
 //! holds the run, that worker sees `KILLING` and stops it (spec §4.2, plan
 //! Task 4); if nobody holds it, the next claim takes the `KILLING` row,
 //! cancels and writes `KILLED` (spec §4.3, plan Task 5). The execution
-//! stays `KILLING` until that claim commits, because `advance_killing` never
-//! writes a leaf. That is the spec's path for an unclaimed `KILLING` run, not
+//! stays `KILLING` until that claim commits, because `advance_killing` waits
+//! for a `KILLING` leaf. That is the spec's path for an unclaimed `KILLING` run, not
 //! a separate one, so no DB behaviour is added here (kill-and-exit Task 3 fix
 //! round 1, the coordinator's ruling).
 //!
@@ -152,6 +162,27 @@ pub(crate) fn drive(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskI
     })
 }
 
+/// The `Exit` run this round's `work` decides `KILLED`, if any: the first
+/// `SetRunState { KILLED }` onto a still-`RUNNING` `Exit` run, which only
+/// [`kill`] emits (its first command is the `Exit` run's own). `advance()`
+/// then returns [`kill`]'s commands alone (final review C1).
+pub(crate) fn killed_in(plan: &Plan, state: &ExecutionState, work: &[Command]) -> Option<RunIx> {
+    work.iter().find_map(|c| match c {
+        Command::SetRunState {
+            run,
+            state: RunState::Killed,
+        } => state
+            .runs
+            .get(*run)
+            .filter(|r| {
+                matches!(plan.tasks[r.task].kind, TaskKind::Exit { .. })
+                    && r.history.last() == Some(&RunState::Running)
+            })
+            .map(|_| *run),
+        _ => None,
+    })
+}
+
 /// `run` and each of its ancestors, innermost first — Kestra's
 /// `parentTaskRunId` walk in `Exit.update` and `killParentTaskruns`. A
 /// terminal ancestor is skipped (none can be: it has a running child).
@@ -196,7 +227,11 @@ fn end_with(state: &ExecutionState, run: RunIx, s: RunState) -> Vec<Command> {
 /// is finished by the next claim, which takes a `KILLING` run only to cancel
 /// it and record `KILLED` (plan Task 5, `claim::finish_claimed_kill`). The
 /// execution stays `KILLING` until then.
-fn kill(plan: &Plan, state: &ExecutionState, run: RunIx) -> Vec<Command> {
+///
+/// **These commands are the whole round** (final review C1): `advance()`
+/// returns them alone ([`killed_in`]), so no sibling's create or start from
+/// the same batch lands beside a kill computed without it.
+pub(crate) fn kill(plan: &Plan, state: &ExecutionState, run: RunIx) -> Vec<Command> {
     let line = line(state, run);
     let mut cmds: Vec<Command> = line
         .iter()
@@ -582,6 +617,149 @@ mod tests {
         assert_eq!(s.runs[e].history, vec![Created, Running, Failed]);
         assert_eq!(s.runs[i].history, vec![Created, Running, Failed]);
         assert_eq!(s.history, vec![Created, Running, Failed]);
+    }
+
+    // ---- final review C1: nothing is started in the round an Exit kills ----
+
+    /// Every round until `advance` is quiet, with a worker's half for a
+    /// `KILLING` leaf (it writes `KILLED`, spec §4.2), so the only way this
+    /// stops short of a terminal execution is a run nobody will ever move.
+    fn settle_with_worker(plan: &Plan, s: &mut ExecutionState) {
+        for _ in 0..50 {
+            let mut cmds = advance(plan, s, T);
+            for (ix, r) in s.runs.iter().enumerate() {
+                if r.history.last() == Some(&Killing)
+                    && matches!(plan.tasks[r.task].kind, TaskKind::Runnable { .. })
+                {
+                    cmds.push(Command::SetRunState {
+                        run: ix,
+                        state: Killed,
+                    });
+                }
+            }
+            if cmds.is_empty() {
+                return;
+            }
+            for c in &cmds {
+                apply(s, c);
+            }
+        }
+        panic!("advance did not settle: {s:?}");
+    }
+
+    /// The execution ended `KILLED` and no run is left live: in particular no
+    /// run is `CREATED` (claim never takes one) or `RUNNING`/`SUBMITTED` (a
+    /// worker would claim it and run a killed execution's task).
+    fn assert_killed_and_nothing_live(p: &Plan, s: &ExecutionState, what: &str) {
+        assert_eq!(s.history.last(), Some(&Killed), "{what}: {:?}", s.history);
+        for r in &s.runs {
+            assert!(
+                r.history.last().is_some_and(|st| st.is_terminal()),
+                "{what}: {} is left {:?}",
+                p.tasks[r.task].id,
+                r.history
+            );
+        }
+    }
+
+    /// `Parallel{ exit(KILLED), seq: Sequential[log] }`, in both child orders:
+    /// the round the `Exit` decides in is the round `seq` would create `log`.
+    /// That `CreateRun` must not be applied: under a `KILLING` execution a
+    /// `CREATED` leaf is never claimed and the execution would wait for ever.
+    #[test]
+    fn a_killed_exit_creates_no_leaf_in_its_own_round_in_either_order() {
+        let exit = "      - id: exit\n        type: io.kestra.plugin.core.execution.Exit\n        state: KILLED\n";
+        let seq = "      - id: seq\n        type: io.kestra.plugin.core.flow.Sequential\n        tasks:\n          - id: log\n            type: io.kestra.plugin.core.log.Log\n            message: hi\n";
+        for (order, children) in [("exit first", [exit, seq]), ("seq first", [seq, exit])] {
+            let p = plan(&format!(
+                "id: e\nnamespace: t\ntasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n{}{}",
+                children[0], children[1]
+            ));
+            let mut s = fresh(&p);
+            // Up to the round where `exit` is RUNNING and undecided.
+            for _ in 0..10 {
+                let e = task(&p, "exit");
+                if s.runs
+                    .iter()
+                    .any(|r| r.task == e && r.history.last() == Some(&Running))
+                {
+                    break;
+                }
+                for c in &advance(&p, &s, T) {
+                    apply(&mut s, c);
+                }
+            }
+            assert_eq!(
+                s.runs[run_of(&p, &s, "seq")].history.last(),
+                Some(&Running),
+                "{order}: the fixture has seq live beside the exit"
+            );
+            let deciding = advance(&p, &s, T);
+            assert!(
+                !deciding
+                    .iter()
+                    .any(|c| matches!(c, Command::CreateRun { .. } | Command::StartRun { .. })),
+                "{order}: the Exit's round creates and starts nothing: {deciding:?}"
+            );
+            for c in &deciding {
+                apply(&mut s, c);
+            }
+            settle_with_worker(&p, &mut s);
+            assert_killed_and_nothing_live(&p, &s, order);
+        }
+    }
+
+    /// The `SUBMITTED`→`RUNNING` variant: a sibling leaf still `CREATED` when
+    /// the `Exit` decides is started by the same round. With the `Exit`
+    /// listed first, the kill's `KILLED` is applied before the start, which
+    /// would leave the run `RUNNING` and unleased under a killed execution.
+    #[test]
+    fn a_killed_exit_starts_no_sibling_in_its_own_round_in_either_order() {
+        let exit = "      - id: exit\n        type: io.kestra.plugin.core.execution.Exit\n        state: KILLED\n";
+        let sib =
+            "      - id: sib\n        type: io.kestra.plugin.core.log.Log\n        message: sib\n";
+        for (order, children) in [("exit first", [exit, sib]), ("sib first", [sib, exit])] {
+            let p = plan(&format!(
+                "id: e\nnamespace: t\ntasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n{}{}",
+                children[0], children[1]
+            ));
+            let mut s = fresh(&p);
+            for _ in 0..10 {
+                let e = task(&p, "exit");
+                if s.runs
+                    .iter()
+                    .any(|r| r.task == e && r.history.last() == Some(&Running))
+                {
+                    break;
+                }
+                for c in &advance(&p, &s, T) {
+                    apply(&mut s, c);
+                }
+            }
+            // `sib` has not been started yet (a `runIf:` rendered late, a
+            // `concurrent:` slot): the next round both decides the Exit and
+            // starts `sib`.
+            let sib_ix = run_of(&p, &s, "sib");
+            s.runs[sib_ix].history = vec![Created];
+            s.runs[sib_ix].attempts.clear();
+            let deciding = advance(&p, &s, T);
+            assert!(
+                !deciding.iter().any(|c| matches!(
+                    c,
+                    Command::StartRun { .. }
+                        | Command::SetRunState {
+                            state: Submitted | Running,
+                            ..
+                        }
+                )),
+                "{order}: the Exit's round starts nothing: {deciding:?}"
+            );
+            for c in &deciding {
+                apply(&mut s, c);
+            }
+            settle_with_worker(&p, &mut s);
+            assert_killed_and_nothing_live(&p, &s, order);
+        }
     }
 
     #[test]

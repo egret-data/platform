@@ -11,15 +11,23 @@
 //!   once every one of its child runs is terminal;
 //! * the execution becomes `KILLED` once every run is terminal.
 //!
-//! # A leaf is never written here
+//! # A leaf nobody killed is killed here (final review C1, 2026-10-18)
 //!
-//! A leaf (`Runnable`, `Executable`) that is still live under a `KILLING`
-//! execution is either `KILLING` — a worker holds it and will write its
-//! `KILLED` — or a row the route should have killed and did not. Either way
-//! this function writes nothing onto it: it does not invent the worker's half,
-//! and it does not resume, retry or start it. The execution then stays
-//! `KILLING` until something terminates that run, which is visible rather than
-//! a guess.
+//! A leaf (`Runnable`, `Executable`) that is `KILLING` is waited for: a worker
+//! holds it and writes its `KILLED`, or the kill-only claim does (spec §4.3).
+//! This function never invents that half.
+//!
+//! **Any other live leaf is a row nothing else will kill**, and until the
+//! final review this function left it, on the reading that the route had
+//! already killed every leaf. It had not always: an `Exit(KILLED)`'s round
+//! could create or start a sibling's run beside the kill (`exit::killed_in`
+//! now stops that at the source), and a `CREATED` leaf under a `KILLING`
+//! execution is never claimed, so the execution stayed `KILLING` for ever. So
+//! it is written as the route writes it (`leaf_kill`): a running `Runnable`
+//! (`RUNNING` or `SUBMITTED`) becomes `KILLING` -- its holder, or the
+//! kill-only claim, cancels it -- and every other live leaf becomes `KILLED`.
+//! It is not resumed, retried or started. A `WorkingDirectory` block is a
+//! flowable and keeps the rules below.
 //!
 //! # Why a `PAUSED` flowable IS written, and no `RESTARTED` follows
 //!
@@ -76,7 +84,19 @@ pub(crate) fn advance_killing(plan: &Plan, state: &ExecutionState) -> Vec<Comman
         let Some(&last) = run.history.last() else {
             continue;
         };
-        if last.is_terminal() || is_leaf(&plan.tasks[run.task].kind) {
+        if last.is_terminal() {
+            continue;
+        }
+        let kind = &plan.tasks[run.task].kind;
+        if is_leaf(kind) {
+            // The backstop (final review C1 (b)): see the module doc's
+            // "A leaf nobody killed is killed here".
+            if last != RunState::Killing {
+                cmds.push(Command::SetRunState {
+                    run: ix,
+                    state: leaf_kill(kind, last),
+                });
+            }
             continue;
         }
         // A `WorkingDirectory` block whose prepare or finish claim is out --
@@ -170,6 +190,23 @@ pub(crate) fn kill_leaves(
         });
     }
     cmds
+}
+
+/// What a live, not-yet-`KILLING` leaf becomes under a kill: a `Runnable`
+/// that is running (`RUNNING` or `SUBMITTED`) becomes `KILLING`, so whoever
+/// may still run it -- the worker that holds it (spec §4.2), or, with no
+/// lease, a container a reaped worker left (W5a re-attaches by run and
+/// attempt) -- is cancelled by the holder or by the kill-only claim
+/// (spec §4.3). Every other live leaf (`CREATED`, `RETRYING`, `PAUSED`, a
+/// `Subflow` run) has nothing running and is `KILLED`.
+fn leaf_kill(kind: &TaskKind, last: RunState) -> RunState {
+    if matches!(kind, TaskKind::Runnable { .. })
+        && matches!(last, RunState::Running | RunState::Submitted)
+    {
+        RunState::Killing
+    } else {
+        RunState::Killed
+    }
 }
 
 /// A task a worker (`Runnable`) or a child execution (`Executable`) ends, not
@@ -422,12 +459,15 @@ mod tests {
             !advance(&p, &live, LATE).is_empty(),
             "the control: a due retry under a RUNNING execution must be reopened"
         );
-        assert_eq!(advance(&p, &s, LATE), Vec::<Command>::new());
+        // Final review C1 (b): not reopened, and not left `RETRYING` either --
+        // the backstop closes it, and nothing else is asked for.
+        assert_eq!(advance(&p, &s, LATE), vec![set_run(0, Killed)]);
     }
 
-    // Item 2: a PAUSED leaf is not written, so nothing can read it as a resume.
+    // Item 2: a PAUSED leaf is never resumed, so nothing can read it as a
+    // resume; since final review C1 (b) the backstop closes it `KILLED`.
     #[test]
-    fn a_paused_leaf_is_left_alone_and_no_restarted_is_marked() {
+    fn a_paused_leaf_is_killed_and_no_restarted_is_marked() {
         let p = plan(LEAF);
         let mut r = run(task(&p, "a"), None, &[Created, Running, Paused]);
         r.not_before = Some(Tick(0));
@@ -435,8 +475,13 @@ mod tests {
             at: Tick(0),
             state: Success,
         });
-        let s = killing(vec![r]);
-        assert_eq!(advance(&p, &s, LATE), Vec::<Command>::new());
+        let mut s = killing(vec![r]);
+        assert_eq!(
+            rounds(&p, &mut s),
+            vec![vec![set_run(0, Killed)], vec![set_exec(Killed)]]
+        );
+        assert!(!s.history.contains(&RunState::Restarted));
+        assert_eq!(s.runs[0].history, vec![Created, Running, Paused, Killed]);
     }
 
     // Item 2, the flowable half: a PAUSED `Pause` is closed, never resumed,
@@ -473,12 +518,60 @@ mod tests {
         );
     }
 
-    // Robustness: a CREATED leaf the route missed is not started.
+    // Final review C1 (b), the backstop: a CREATED leaf nobody killed -- the
+    // route never saw it, or an `Exit`'s round created it -- is not started
+    // and is not left for ever: it is `KILLED`, then the execution.
     #[test]
-    fn a_created_leaf_is_not_started() {
+    fn a_created_leaf_under_a_killing_execution_ends_killed() {
         let p = plan(LEAF);
-        let s = killing(vec![run(task(&p, "a"), None, &[Created])]);
-        assert_eq!(advance(&p, &s, LATE), Vec::<Command>::new());
+        let mut s = killing(vec![run(task(&p, "a"), None, &[Created])]);
+        assert_eq!(
+            rounds(&p, &mut s),
+            vec![vec![set_run(0, Killed)], vec![set_exec(Killed)]]
+        );
+        assert_eq!(s.runs[0].history, vec![Created, Killed]);
+        assert_eq!(s.history, vec![Created, Running, Killing, Killed]);
+    }
+
+    // Final review C1 (b): a running `Runnable` nobody moved is `KILLING`, not
+    // `KILLED`: a worker may hold it (it stops it, spec §4.2) or the kill-only
+    // claim takes it and cancels it by run and attempt (spec §4.3). It is
+    // then waited for, and a `Subflow` run is `KILLED` at once.
+    #[test]
+    fn a_running_leaf_under_a_killing_execution_is_killing_and_a_subflow_killed() {
+        let p = plan(
+            "  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n\
+             \x20     - id: a\n        type: io.kestra.plugin.core.log.Log\n        message: a\n\
+             \x20     - id: b\n        type: io.kestra.plugin.core.log.Log\n        message: b\n\
+             \x20     - id: sub\n        type: io.kestra.plugin.core.flow.Subflow\n        namespace: t\n\
+             \x20       flowId: child\n",
+        );
+        let mut s = killing(vec![
+            run(task(&p, "par"), None, &[Created, Running]),
+            run(
+                task(&p, "a"),
+                Some(0),
+                &[Created, RunState::Submitted, Running],
+            ),
+            run(task(&p, "b"), Some(0), &[Created, RunState::Submitted]),
+            run(task(&p, "sub"), Some(0), &[Created, Running]),
+        ]);
+        assert_eq!(
+            rounds(&p, &mut s),
+            vec![vec![
+                set_run(0, Killing),
+                set_run(1, Killing),
+                set_run(2, Killing),
+                set_run(3, Killed),
+            ]]
+        );
+        // The worker's half, then the flowable and the execution close.
+        apply(&mut s, &set_run(1, Killed));
+        apply(&mut s, &set_run(2, Killed));
+        assert_eq!(
+            rounds(&p, &mut s),
+            vec![vec![set_run(0, Killed)], vec![set_exec(Killed)]]
+        );
     }
 
     // A KILLING execution with no run at all ends at once.

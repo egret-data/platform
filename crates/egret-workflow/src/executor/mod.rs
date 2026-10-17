@@ -226,6 +226,21 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
         Step::Done(state) => vec![Command::SetExecutionState { state }],
     };
 
+    // **An `Exit` that decided `KILLED` is the whole round** (final review C1).
+    // `parallel::drive_concurrent` collects every child's commands in one
+    // batch, so the round an `Exit` kills in can also create a sibling
+    // branch's next run or start a `CREATED` sibling. `exit::kill` read the
+    // state at the start of the round and cannot have killed those: applied,
+    // a `CREATED` leaf would wait under a `KILLING` execution for ever (no
+    // claim takes it), and a start applied after the kill's `KILLED` would
+    // leave a `RUNNING` run no worker should run. Kestra runs the updating
+    // task before the flowables (`ExecutorService.handleExecutionUpdatingTasks`),
+    // so the `Exit`'s commands are emitted alone, recomputed from the same
+    // state, and the next round -- under `KILLING` -- is `advance_killing`'s.
+    if let Some(run) = exit::killed_in(plan, state, &work) {
+        return exit::kill(plan, state, run);
+    }
+
     // `handleFlowableTasks`'s retry pass, which runs after `handleEnd` and is
     // therefore behind whatever state the execution just took. That order is
     // visible: `valids/retry-failed-task-attempts`'s execution reads
