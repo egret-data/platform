@@ -82,6 +82,7 @@ mod claim;
 pub mod commands;
 pub mod handlers;
 pub mod k8s;
+mod kill;
 mod reaper;
 mod registry;
 mod render;
@@ -129,6 +130,7 @@ pub fn stamps_entered(before: &[&str], after: &[&str]) -> (bool, bool) {
     let e = stamps::Entered::of(&parse(before), &parse(after), false);
     (e.running, e.terminal)
 }
+pub use kill::{kill_execution, KillOutcome};
 pub use reaper::reap;
 pub use registry::Handlers;
 pub use render::execution_render_context;

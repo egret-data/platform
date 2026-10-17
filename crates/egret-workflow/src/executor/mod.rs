@@ -45,7 +45,7 @@ pub(crate) mod allow_failure;
 mod command;
 pub mod exit;
 mod flowable;
-mod kill;
+pub(crate) mod kill;
 mod plan;
 mod retry;
 mod state;

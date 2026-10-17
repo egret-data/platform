@@ -75,6 +75,7 @@ import type {
   WorkflowGetFlowSchema200,
   WorkflowGetKvValueParams,
   WorkflowGraphUnsavedFlowParams,
+  WorkflowKillExecutionParams,
   WorkflowListExecutionsParams,
   WorkflowListFlowsParams,
   WorkflowListNamespaceDirectoryParams,
@@ -1031,7 +1032,136 @@ export function useWorkflowGetExecutionGraph<TData = Awaited<ReturnType<typeof w
 
 
 
-export type workflowGetExecutionLogsResponse200 = {
+export type workflowKillExecutionResponse202 = {
+  data: ExecutionDto
+  status: 202
+}
+
+export type workflowKillExecutionResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowKillExecutionResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowKillExecutionResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowKillExecutionResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowKillExecutionResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowKillExecutionResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowKillExecutionResponseSuccess = (workflowKillExecutionResponse202) & {
+  headers: Headers;
+};
+export type workflowKillExecutionResponseError = (workflowKillExecutionResponse400 | workflowKillExecutionResponse401 | workflowKillExecutionResponse403 | workflowKillExecutionResponse404 | workflowKillExecutionResponse409 | workflowKillExecutionResponse500) & {
+  headers: Headers;
+};
+
+export type workflowKillExecutionResponse = (workflowKillExecutionResponseSuccess | workflowKillExecutionResponseError)
+
+export const getWorkflowKillExecutionUrl = (workspace: string,
+    id: string,
+    params?: WorkflowKillExecutionParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/kill?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/kill`
+}
+
+/**
+ * The terminal check is made twice, as resume's is: here off the scoped
+ * read (so a foreign id never reaches the worker, and the common refusal is
+ * cheap), and again by [`worker::kill_execution`](crate::worker::kill_execution)
+ * under the execution's lock, which decides the race with a worker ending it.
+ * @summary Kill an execution (workflow kill spec §3).
+ */
+export const workflowKillExecution = async (workspace: string,
+    id: string,
+    params?: WorkflowKillExecutionParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowKillExecutionResponse> => {
+
+  return customInstance<workflowKillExecutionResponse>(getWorkflowKillExecutionUrl(workspace,id,params),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowKillExecutionMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowKillExecution>>, TError,{workspace: string;id: string;params?: WorkflowKillExecutionParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowKillExecution>>, TError,{workspace: string;id: string;params?: WorkflowKillExecutionParams}, TContext> => {
+
+const mutationKey = ['workflowKillExecution'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowKillExecution>>, {workspace: string;id: string;params?: WorkflowKillExecutionParams}> = (props) => {
+          const {workspace,id,params} = props ?? {};
+
+          return  workflowKillExecution(workspace,id,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowKillExecutionMutationResult = NonNullable<Awaited<ReturnType<typeof workflowKillExecution>>>
+
+    export type WorkflowKillExecutionMutationError = ErrorBody
+
+    /**
+ * @summary Kill an execution (workflow kill spec §3).
+ */
+export const useWorkflowKillExecution = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowKillExecution>>, TError,{workspace: string;id: string;params?: WorkflowKillExecutionParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowKillExecution>>,
+        TError,
+        {workspace: string;id: string;params?: WorkflowKillExecutionParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowKillExecutionMutationOptions(options), queryClient);
+    }
+    export type workflowGetExecutionLogsResponse200 = {
   data: LogPageDto
   status: 200
 }

@@ -2787,7 +2787,7 @@ pub(super) struct Lease {
 /// `state` is MOVED into the walk's top frame (re-review 3 n1): nothing is
 /// written back to the owner, and every owner returns this function's result
 /// directly, so no owner reads its state after the settle.
-async fn settle(
+pub(super) async fn settle(
     conn: &mut PgConnection,
     ctx: &ExecutionCtx,
     before: &ExecutionState,
@@ -2805,9 +2805,17 @@ async fn settle(
             release,
             jobs: VecDeque::new(),
             phase: Phase::Begin,
+            kill_children: false,
         },
     )
     .await
+}
+
+/// [`settle`] of a frame its caller built: the kill route's settle of each
+/// descendant it has loaded and killed (`worker::kill`), each at the top of
+/// its own walk, in lock order.
+pub(super) async fn run_frame(conn: &mut PgConnection, frame: Frame<'static>) -> Result<()> {
+    walk(conn, frame).await
 }
 
 /// The context a [`Frame`] settles: the owner's own, for the settle an owner
@@ -2854,6 +2862,11 @@ pub(super) struct Frame<'a> {
     /// Settles this one has started and not yet run, in order.
     jobs: VecDeque<Job>,
     phase: Phase,
+    /// This settle's own `advance()` moved the execution into `KILLING` or
+    /// `KILLED` -- an `Exit` with `state: KILLED`, never the kill route,
+    /// which applies `KILLING` before the settle -- so its live child
+    /// executions are killed too ([`Phase::Cascade`]).
+    kill_children: bool,
 }
 
 impl Frame<'static> {
@@ -2870,6 +2883,7 @@ impl Frame<'static> {
             release: None,
             jobs: VecDeque::new(),
             phase: Phase::Begin,
+            kill_children: false,
         }
     }
 
@@ -2889,6 +2903,7 @@ impl Frame<'static> {
             release: None,
             jobs: VecDeque::new(),
             phase: Phase::Begin,
+            kill_children: false,
         }
     }
 }
@@ -2923,6 +2938,10 @@ enum Phase {
         subflows: Vec<subflow::Requested>,
         next: usize,
     },
+    /// An `Exit`'s kill reaching the execution's children
+    /// (`worker::kill::cascade`), after the spawners so a child this settle
+    /// spawned is among them.
+    Cascade { surface: Surface },
     /// The execution-delay loop.
     Replay { surface: Surface },
     /// The Flow-trigger outbox, then the tail.
@@ -2975,8 +2994,9 @@ enum Step<'a> {
 ///
 /// An `Err` returns at once, as the `?` of the recursion did.
 ///
-/// Private, and called only by [`settle`]: no other function can run a
-/// settle, so nothing a settle calls can nest one.
+/// Private, and called only by [`settle`] and [`run_frame`], which only the
+/// transaction owners call: no other function can run a settle, so nothing a
+/// settle calls can nest one.
 async fn walk<'a>(conn: &mut PgConnection, top: Frame<'a>) -> Result<()> {
     let mut steps: Vec<Step<'a>> = vec![Step::Frame(Box::new(top))];
     while let Some(step) = steps.pop() {
@@ -3079,12 +3099,14 @@ async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result
         release,
         jobs,
         phase,
+        kill_children,
     } = frame;
     let ctx: &ExecutionCtx = ctx;
     match std::mem::replace(phase, Phase::Begin) {
         Phase::Begin => {
-            let (surface, spawns, subflows) =
+            let (surface, spawns, subflows, killed) =
                 begin(conn, ctx, before, state, *now, *release).await?;
+            *kill_children = killed;
             // Grouped by the loop run, because the index is per loop run and
             // two `Loop`s can be in flight in one execution.
             let mut runs = VecDeque::new();
@@ -3153,8 +3175,14 @@ async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result
                     next: next + 1,
                 };
             }
-            None => *phase = Phase::Replay { surface },
+            None => *phase = Phase::Cascade { surface },
         },
+        Phase::Cascade { surface } => {
+            if *kill_children {
+                jobs.extend(super::kill::cascade(conn, ctx).await?);
+            }
+            *phase = Phase::Replay { surface };
+        }
         // **The execution-delay loop, and it is a different loop in the
         // artifact too.** A `CREATE_NEW_EXECUTION` retry ends THIS execution
         // `RETRIED` and leaves an `ExecutionDelay` behind (`retry::scan`'s
@@ -3190,8 +3218,9 @@ async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result
 }
 
 /// Steps 1-2 of a settle: the render scope, the SLA, `drive`, `persist` and
-/// the render side. Starts no settle. Returns the surface and what `drive`
-/// asked to spawn.
+/// the render side. Starts no settle. Returns the surface, what `drive`
+/// asked to spawn, and whether `drive` itself killed the execution
+/// ([`Frame::kill_children`]).
 async fn begin(
     conn: &mut PgConnection,
     ctx: &ExecutionCtx,
@@ -3199,7 +3228,7 @@ async fn begin(
     state: &mut ExecutionState,
     now: Tick,
     release: Option<Lease>,
-) -> Result<(Surface, Vec<Requested>, Vec<subflow::Requested>)> {
+) -> Result<(Surface, Vec<Requested>, Vec<subflow::Requested>, bool)> {
     let mut surface = Surface::load(conn, ctx).await?;
     // W9a Task 4: the snapshot every render of this settle reads files
     // through -- `runIf`, the five tier-B expressions, the SLA, a subflow's
@@ -3263,7 +3292,10 @@ async fn begin(
     // failed WITH a message, and a file `Loop`'s values -- written after the
     // state `persist` writes and BEFORE `spawn::open_batch`, which reads the values.
     let mut side = render::RenderSide::default();
+    let killing = |s: Option<&RunState>| matches!(s, Some(RunState::Killing | RunState::Killed));
+    let was_killing = killing(state.history.last());
     let (spawns, subflows) = drive(ctx, &surface, state, now, &mut marks, &mut seq, &mut side)?;
+    let killed = !was_killing && killing(state.history.last());
     // W7b Task 1: the attempt ends this settle produced, stamped into the state
     // `persist` serialises, so they ride the same UPDATE as the terminal state.
     stamps::stamp_attempt_ends(before, state, now);
@@ -3276,7 +3308,7 @@ async fn begin(
         // overflowed with either.
         write_render_side(conn, ctx.id, side).await?;
     }
-    Ok((surface, spawns, subflows))
+    Ok((surface, spawns, subflows, killed))
 }
 
 /// The Flow-trigger outbox of one settle.

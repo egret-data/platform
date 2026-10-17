@@ -120,6 +120,58 @@ pub(crate) fn advance_killing(plan: &Plan, state: &ExecutionState) -> Vec<Comman
     cmds
 }
 
+/// **The kill route's leaf steps** (spec §3.2 steps 1, 2 and 4), as commands
+/// for the route to apply to a loaded execution before its `settle`:
+///
+/// 1. a `Runnable` that is running (`RUNNING` or `SUBMITTED`) **and** that a
+///    worker holds (`leased(run)`) becomes `KILLING`: its worker stops it and
+///    writes `KILLED` (spec §4.2);
+/// 2. every other live leaf -- a `Runnable` waiting for a worker, `CREATED`,
+///    `RETRYING`, and every `Subflow` (`Executable`) run -- becomes `KILLED`;
+/// 3. a flowable is left alone: `advance_killing` closes it (§5), and so is a
+///    leaf that is already `KILLING`;
+/// 4. the execution becomes `KILLING` unless it already is.
+///
+/// `leased` is the database's answer (`claimed_at IS NOT NULL`), which
+/// `advance()` cannot see; it is why this is not [`advance_killing`]'s and why
+/// `exit::kill`, which has no lease to read, calls every running `Runnable`
+/// held. A run waiting for a worker is therefore `KILLED` here at once rather
+/// than left `KILLING` for the claim to finish (spec §4.3): nothing is running
+/// it, and nothing will once this commits.
+pub(crate) fn kill_leaves(
+    plan: &Plan,
+    state: &ExecutionState,
+    leased: impl Fn(RunIx) -> bool,
+) -> Vec<Command> {
+    let mut cmds = Vec::new();
+    for (ix, run) in state.runs.iter().enumerate() {
+        let Some(&last) = run.history.last() else {
+            continue;
+        };
+        let kind = &plan.tasks[run.task].kind;
+        if last.is_terminal() || last == RunState::Killing || !is_leaf(kind) {
+            continue;
+        }
+        let held = matches!(kind, TaskKind::Runnable { .. })
+            && matches!(last, RunState::Running | RunState::Submitted)
+            && leased(ix);
+        cmds.push(Command::SetRunState {
+            run: ix,
+            state: if held {
+                RunState::Killing
+            } else {
+                RunState::Killed
+            },
+        });
+    }
+    if state.history.last() != Some(&RunState::Killing) {
+        cmds.push(Command::SetExecutionState {
+            state: RunState::Killing,
+        });
+    }
+    cmds
+}
+
 /// A task a worker (`Runnable`) or a child execution (`Executable`) ends, not
 /// the executor.
 fn is_leaf(kind: &TaskKind) -> bool {
@@ -613,5 +665,61 @@ mod tests {
             created_fin,
             "the control: a live AllowFailure runs its finally"
         );
+    }
+
+    /// **The route's leaf steps** (`kill_leaves`): a held running leaf is
+    /// `KILLING`, every other live leaf `KILLED` (waiting, `CREATED`,
+    /// `RETRYING`, a `Subflow`), a flowable and a terminal or `KILLING` run
+    /// untouched, and the execution `KILLING`.
+    #[test]
+    fn the_route_kills_each_live_leaf_by_whether_it_is_held() {
+        let p = plan(
+            "  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n\
+             \x20     - id: held\n        type: io.kestra.plugin.core.log.Log\n        message: h\n\
+             \x20     - id: waiting\n        type: io.kestra.plugin.core.log.Log\n        message: w\n\
+             \x20     - id: created\n        type: io.kestra.plugin.core.log.Log\n        message: c\n\
+             \x20     - id: retrying\n        type: io.kestra.plugin.core.log.Log\n        message: r\n\
+             \x20     - id: done\n        type: io.kestra.plugin.core.log.Log\n        message: d\n\
+             \x20     - id: dying\n        type: io.kestra.plugin.core.log.Log\n        message: k\n\
+             \x20     - id: sub\n        type: io.kestra.plugin.core.flow.Subflow\n        namespace: t\n\
+             \x20       flowId: child\n",
+        );
+        let mut s = ExecutionState {
+            runs: vec![
+                run(task(&p, "par"), None, &[Created, Running]),
+                run(task(&p, "held"), Some(0), &[Created, Running]),
+                run(task(&p, "waiting"), Some(0), &[Created, Running]),
+                run(task(&p, "created"), Some(0), &[Created]),
+                run(task(&p, "retrying"), Some(0), &[Created, Running, Retrying]),
+                run(task(&p, "done"), Some(0), &[Created, Running, Success]),
+                run(task(&p, "dying"), Some(0), &[Created, Running, Killing]),
+                run(task(&p, "sub"), Some(0), &[Created, Running]),
+            ],
+            history: vec![Created, Running],
+            metadata: ExecutionMeta::default(),
+        };
+        // `held`, and also `dying` and `par`: a lease on a row that is not a
+        // running leaf changes nothing.
+        let leased = |ix: RunIx| matches!(ix, 0 | 1 | 6);
+        let cmds = kill_leaves(&p, &s, leased);
+        assert_eq!(
+            cmds,
+            vec![
+                set_run(1, Killing),
+                set_run(2, Killed),
+                set_run(3, Killed),
+                set_run(4, Killed),
+                set_run(7, Killed),
+                set_exec(Killing),
+            ]
+        );
+        for c in &cmds {
+            apply(&mut s, c);
+        }
+        // Applied once, a second call adds nothing but the leaves it never
+        // owned: the execution is already `KILLING`.
+        assert_eq!(kill_leaves(&p, &s, leased), Vec::<Command>::new());
+        // And `advance` takes it from there: `par` waits on `held`.
+        assert_eq!(advance(&p, &s, LATE), vec![set_run(0, Killing)]);
     }
 }
