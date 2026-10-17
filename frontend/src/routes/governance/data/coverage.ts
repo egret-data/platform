@@ -25,11 +25,12 @@ const ANCESTORS = ["catalog", "schema", "table"] as const;
  * and column for both Trino and StarRocks
  * (`crates/egret-policy/src/service-defs/trino.json`, `starrocks.json`), and
  * Ranger folds both the policy value and the requested name
- * (`crates/egret-ranger-eval/src/resource.rs:303-312`), so a deny grant typed
- * on `sales.Orders` reaches the table `orders`. The Data surface follows the
- * engines; egret-perm's own evaluator (`crates/egret-perm/src/eval.rs`,
- * `covers` and `level_covers`) still compares case-sensitively, a known
- * divergence left as a follow-up. A grant with `table = "*"` is therefore
+ * (`fold` in `crates/egret-ranger-eval/src/resource.rs`), so a deny grant
+ * typed on `sales.Orders` reaches the table `orders`. The Data surface follows
+ * the engines, and so does egret-perm's own evaluator: `level_covers` matches
+ * through `resource_level_matches` (`crates/egret-perm/src/eval.rs`), the
+ * same whole-string lower-case on both sides, then a glob. A grant with
+ * `table = "*"` is therefore
  * "here" on every table of its schema; {@link patternLevels} tells such a
  * grant apart from one set on this object by name.
  *
