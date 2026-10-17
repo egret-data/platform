@@ -471,6 +471,13 @@ fn leaf<'a>(flow: &'a crate::models::Flow, task_id: &str) -> Option<Leaf<'a>> {
 /// tiebreak on the subquery alone the returned order was still
 /// `[3, 0, 4, 2, 5, 1]`. Driven both ways, and at both batch sizes, by
 /// `the_claim_takes_runs_in_run_ix_order_whatever_their_physical_order`.
+///
+/// # A `KILLING` block's finish is claimable too (kill Task 2 fix round 2)
+///
+/// Beside every `RUNNING` claimable run, a `WorkingDirectory` block in
+/// `FINISHING` whose state is `KILLING` is taken: that is the discard-only
+/// finish `executor::kill` asks for (the user's ruling of 2026-10-17), which
+/// [`run_block_claim`] tells apart by that state.
 pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Claimed>> {
     sqlx::query_as(
         "WITH taken AS ( \
@@ -478,9 +485,11 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
               SET claimed_at = now(), updated_at = now() \
             WHERE id IN ( \
               SELECT id FROM workflow.task_runs \
-               WHERE (type_id IS NOT NULL \
-                      OR working_dir IN ('PREPARING', 'FINISHING')) \
-                 AND state = 'RUNNING' \
+               WHERE ((type_id IS NOT NULL \
+                       OR working_dir IN ('PREPARING', 'FINISHING')) \
+                      AND state = 'RUNNING' \
+                      OR (type_id IS NULL AND working_dir = 'FINISHING' \
+                          AND state = 'KILLING')) \
                  AND claimed_at IS NULL \
                ORDER BY created_at, execution_id, run_ix \
                FOR UPDATE SKIP LOCKED \
@@ -1532,13 +1541,43 @@ async fn run_block_claim(
     timing: WorkerTiming,
     leased_at: tokio::time::Instant,
 ) -> Result<Committed> {
-    // The block's own render, the one its children render with (spec §5.1). A
-    // failure to read it is egret's outage, and the claim stays leased.
-    let render = {
-        let mut conn = pool.acquire().await.map_err(db_err)?;
-        render_context(&mut conn, c).await?
+    // Kill Task 2 fix round 2 (the user's ruling of 2026-10-17): the finish
+    // claim of a `KILLING` block is DISCARD-ONLY. `executor::kill` asks for it
+    // once the killed block's children are terminal, and `claim` takes a
+    // `FINISHING` block in `KILLING` for exactly this. The mode is read off the
+    // block's own state, so no phase value or column is added; the fence below
+    // requires the same state, so the two cannot disagree.
+    let discard_only = c.block_phase.as_deref() == Some("FINISHING") && {
+        let state: String =
+            sqlx::query_scalar("SELECT state FROM workflow.task_runs WHERE id = $1")
+                .bind(c.id)
+                .fetch_one(pool)
+                .await
+                .map_err(db_err)?;
+        state == RunState::Killing.wire()
     };
-    let done = working_dir::run_claim(pool, c, &render);
+    // The block's own render, the one its children render with (spec §5.1). A
+    // failure to read it is egret's outage, and the claim stays leased. A
+    // discard-only finish renders nothing.
+    let render = if discard_only {
+        None
+    } else {
+        let mut conn = pool.acquire().await.map_err(db_err)?;
+        Some(render_context(&mut conn, c).await?)
+    };
+    // The discard runs BEFORE the commit here, unlike a normal finish's: a
+    // discard-only claim has nothing that a re-claim would need the snapshots
+    // for, and `delete_prefix` is idempotent, so a commit that fails is
+    // re-claimed and discards again rather than leaving the prefix behind.
+    let done = async {
+        match &render {
+            None => {
+                working_dir::discard(c).await;
+                BlockDone::Discarded
+            }
+            Some(render) => working_dir::run_claim(pool, c, render).await,
+        }
+    };
     let (done, held, _renewed_at) = match under_lease(
         pool,
         c,
@@ -1614,28 +1653,38 @@ async fn apply_block_claim_on(
         BlockDone::Prepared { snapshot } => (None, Some(snapshot.as_str()), None, &[]),
         BlockDone::Finished { outputs, files } => (None, None, outputs.clone(), files),
         BlockDone::Failed(reason) => (Some(reason.as_str()), None, None, &[]),
+        BlockDone::Discarded => (None, None, None, &[]),
+    };
+    // The state the claim expects its block in: `KILLING` for a discard-only
+    // finish, `RUNNING` for every other claim (fix round 2).
+    let expected = match done {
+        BlockDone::Discarded => RunState::Killing,
+        _ => RunState::Running,
     };
     // The fence, on the block's own row, as an outcome's write is. The block's
     // `outputs` are written here too, for the finish claim (spec §5.5).
     //
-    // Kill Task 2 fix round 1: **and the block is still `RUNNING`.** A claim
-    // whose block was moved on (a kill, or anything else that ended it) under
-    // the lease commits nothing, so a late prepare cannot write a snapshot
-    // pointer onto a `KILLED` block. `executor::kill` leaves a block with a
-    // claim out `RUNNING`, so a kill alone never refuses a claim; this is the
-    // fence for a writer that did not wait. Task 4 adds the same term to a
-    // leaf outcome's fence.
+    // Kill Task 2 fix round 1: **and the block is still in the state the claim
+    // expects** -- `RUNNING`, or `KILLING` for a discard-only finish (fix
+    // round 2). A claim whose block was moved on under the lease commits
+    // nothing, so a late prepare cannot write a snapshot pointer onto a
+    // `KILLED` block, and a normal prepare or finish never commits onto a
+    // `KILLING` one. `executor::kill` leaves a block with a claim out
+    // `RUNNING`, so a kill alone never refuses a claim; this is the fence for a
+    // writer that did not wait. Task 4 adds the same term to a leaf outcome's
+    // fence.
     let hit = sqlx::query(
         "UPDATE workflow.task_runs \
             SET message = $1, working_dir_snapshot = COALESCE($2, working_dir_snapshot), \
                 outputs = COALESCE($5, outputs) \
-          WHERE id = $3 AND claimed_at = $4 AND state = 'RUNNING'",
+          WHERE id = $3 AND claimed_at = $4 AND state = $6",
     )
     .bind(message)
     .bind(snapshot)
     .bind(claimed.id)
     .bind(claimed.claimed_at)
     .bind(outputs.as_ref())
+    .bind(expected.wire())
     .execute(&mut *conn)
     .await
     .map_err(db_err)?;
@@ -1650,7 +1699,7 @@ async fn apply_block_claim_on(
             run,
             state: RunState::Failed,
         },
-        BlockDone::Prepared { .. } | BlockDone::Finished { .. } => {
+        BlockDone::Prepared { .. } | BlockDone::Finished { .. } | BlockDone::Discarded => {
             Command::CompleteWorkingDirectoryClaim { run }
         }
     };
@@ -4572,6 +4621,442 @@ mod tests {
                     "the control's prepare is recorded (state {state})"
                 );
             }
+        }
+    }
+
+    // ---- Kill Task 2 fix round 2: the discard-only finish ---------------------
+
+    /// One `WorkingDirectory` block over two `Return`s, with `inputFiles` (so
+    /// the prepare writes an archive), a `cache` and `outputFiles` -- the two
+    /// things a NORMAL finish writes and a discard-only one must not.
+    fn wd_kill_flow(ns: &str) -> String {
+        format!(
+            "id: wd-kill\nnamespace: {ns}\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    inputFiles:\n      cache/a.txt: one\n    outputFiles:\n      - cache/a.txt\n    cache:\n      patterns:\n        - \"cache/**\"\n      ttl: PT1H\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n      - id: b\n        type: io.kestra.plugin.core.debug.Return\n        format: b\n"
+        )
+    }
+
+    /// Lease the block's own claim by hand, if it is claimable -- the same
+    /// predicate `claim` uses for a block, on this execution only, so no other
+    /// test's runs are taken.
+    async fn lease_block(conn: &mut PgConnection, ex: Uuid) -> Option<Claimed> {
+        sqlx::query_as(
+            "WITH leased AS ( \
+               UPDATE workflow.task_runs SET claimed_at = now() \
+                WHERE execution_id = $1 AND type_id IS NULL AND claimed_at IS NULL \
+                  AND (working_dir IN ('PREPARING', 'FINISHING') AND state = 'RUNNING' \
+                       OR working_dir = 'FINISHING' AND state = 'KILLING') \
+               RETURNING * ) \
+             SELECT t.id, t.execution_id, e.workspace_id, t.run_ix, t.task_ix, \
+                    t.task_id, '' AS type_id, t.value, jsonb_array_length(t.attempts) AS attempt, \
+                    e.source, NULL::uuid AS principal_id, t.claimed_at, \
+                    t.working_dir AS block_phase, NULL::uuid AS block_id, \
+                    NULL::text AS block_snapshot \
+               FROM leased t JOIN workflow.executions e ON e.id = t.execution_id",
+        )
+        .bind(ex)
+        .fetch_optional(&mut *conn)
+        .await
+        .expect("lease the block's claim")
+    }
+
+    /// The kill route's half (spec §3.2), by hand, under the execution's lock:
+    /// a live leaf that is leased goes `KILLING`, one that is not goes
+    /// `KILLED`, flowables are left to `advance`, the execution goes
+    /// `KILLING`; then one settle.
+    async fn plant_kill(pool: &PgPool, ex: Uuid) {
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query("SELECT 1 FROM workflow.executions WHERE id = $1 FOR UPDATE")
+            .bind(ex)
+            .execute(&mut *tx)
+            .await
+            .expect("lock");
+        sqlx::query(
+            "UPDATE workflow.task_runs SET \
+                state = CASE WHEN claimed_at IS NULL THEN 'KILLED' ELSE 'KILLING' END, \
+                ended_at = CASE WHEN claimed_at IS NULL THEN now() END, \
+                history = history || CASE WHEN claimed_at IS NULL \
+                    THEN '[\"KILLED\"]'::jsonb ELSE '[\"KILLING\"]'::jsonb END \
+              WHERE execution_id = $1 AND type_id IS NOT NULL \
+                AND NOT workflow.state_is_terminal(state)",
+        )
+        .bind(ex)
+        .execute(&mut *tx)
+        .await
+        .expect("kill the leaves");
+        sqlx::query(
+            "UPDATE workflow.executions SET state = 'KILLING', \
+                history = history || '[\"KILLING\"]'::jsonb WHERE id = $1",
+        )
+        .bind(ex)
+        .execute(&mut *tx)
+        .await
+        .expect("execution -> KILLING");
+        tx.commit().await.expect("commit the kill");
+        resume(pool, ex).await.expect("the route's settle");
+    }
+
+    /// Play the worker until the execution ends: run each block claim this
+    /// test can lease through `run_block_claim`, and finish each `KILLING`
+    /// leaf as the kill path does (spec §4.2). Another test's `tick` may take
+    /// a claim first; the outcome is the same, so this only waits for it.
+    async fn drive_kill_to_the_end(pool: &PgPool, ex: Uuid) {
+        for _ in 0..200 {
+            let state: String =
+                sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
+                    .bind(ex)
+                    .fetch_one(pool)
+                    .await
+                    .expect("read the execution");
+            if RunState::ALL
+                .iter()
+                .any(|s| s.is_terminal() && s.wire() == state)
+            {
+                return;
+            }
+            let mut conn = pool.acquire().await.expect("conn");
+            if let Some(c) = lease_block(&mut conn, ex).await {
+                drop(conn);
+                run_block_claim(
+                    pool,
+                    &c,
+                    WorkerTiming::default(),
+                    tokio::time::Instant::now(),
+                )
+                .await
+                .expect("the block claim commits");
+                continue;
+            }
+            let killed = sqlx::query(
+                // `claimed_at` is kept: if another test's `tick` holds the
+                // lease, its commit still passes its fence rather than failing
+                // that test's tick.
+                "UPDATE workflow.task_runs SET state = 'KILLED', \
+                    ended_at = now(), history = history || '[\"KILLED\"]'::jsonb \
+                  WHERE execution_id = $1 AND type_id IS NOT NULL AND state = 'KILLING'",
+            )
+            .bind(ex)
+            .execute(&mut *conn)
+            .await
+            .expect("finish the KILLING leaves");
+            drop(conn);
+            if killed.rows_affected() > 0 {
+                resume(pool, ex).await.expect("settle after the worker");
+                continue;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("execution {ex} did not end");
+    }
+
+    /// What a killed block left: its state, its `outputs`, the objects under
+    /// its `_wd/` prefix and whether its cache object exists.
+    async fn killed_block(
+        pool: &PgPool,
+        fs: &crate::storage::FileStore,
+        ws: Uuid,
+        ex: Uuid,
+        ns: &str,
+    ) -> (String, Option<Value>, usize, bool) {
+        let (id, state, outputs): (Uuid, String, Option<Value>) = sqlx::query_as(
+            "SELECT id, state, outputs FROM workflow.task_runs \
+              WHERE execution_id = $1 AND task_id = 'block'",
+        )
+        .bind(ex)
+        .fetch_one(pool)
+        .await
+        .expect("read the block");
+        let left = fs
+            .store
+            .list(wd_key(&fs.working_dir_prefix(ws, ex, id)), None)
+            .await
+            .expect("list the prefix")
+            .objects
+            .len();
+        let cache = working_dir::cache_uri(fs, ws, ns, "wd-kill", "block", None);
+        let cached = fs.store.head(&cache).await.expect("head").is_some();
+        (state, outputs, left, cached)
+    }
+
+    /// `ObjectStore::list` takes a KEY prefix, without `s3://{bucket}/`.
+    fn wd_key(uri: &str) -> &str {
+        uri.strip_prefix("s3://")
+            .and_then(|r| r.split_once('/'))
+            .map(|(_, key)| key)
+            .expect("an s3:// URI")
+    }
+
+    async fn prepared_objects(
+        pool: &PgPool,
+        fs: &crate::storage::FileStore,
+        ws: Uuid,
+        ex: Uuid,
+    ) -> usize {
+        let id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'block'",
+        )
+        .bind(ex)
+        .fetch_one(pool)
+        .await
+        .expect("block id");
+        fs.store
+            .list(wd_key(&fs.working_dir_prefix(ws, ex, id)), None)
+            .await
+            .expect("list")
+            .objects
+            .len()
+    }
+
+    async fn execution_history(pool: &PgPool, ex: Uuid) -> Vec<String> {
+        let h: Value = sqlx::query_scalar("SELECT history FROM workflow.executions WHERE id = $1")
+            .bind(ex)
+            .fetch_one(pool)
+            .await
+            .expect("history");
+        serde_json::from_value(h).expect("a list")
+    }
+
+    /// Start the flow with its block's prepare claim leased by this test, in
+    /// ONE transaction, so nothing else can take the prepare.
+    async fn start_with_prepare_leased(pool: &PgPool, ws: Uuid, src: &str) -> (Uuid, Claimed) {
+        let mut tx = pool.begin().await.expect("begin");
+        let ex = start_execution_in(
+            &mut tx,
+            NewExecution {
+                workspace_id: ws,
+                flow_id: None,
+                source: src,
+                inputs: serde_json::json!({}),
+                trigger: None,
+                scheduled_date: None,
+                trigger_execution_id: None,
+                execution_depth: 0,
+                flow_trigger_event_id: None,
+                born_failed: false,
+                replayed_from_execution_id: None,
+                id: None,
+                input_files: Vec::new(),
+                labels: None,
+                backfill_id: None,
+            },
+        )
+        .await
+        .expect("start");
+        let c = lease_block(&mut tx, ex).await.expect("the prepare claim");
+        assert_eq!(c.block_phase.as_deref(), Some("PREPARING"));
+        tx.commit().await.expect("commit");
+        (ex, c)
+    }
+
+    fn install_docker_served() {
+        let mut cfg = egret_config::Config::default().workflow;
+        cfg.container_runner = egret_config::ContainerRunner::Docker;
+        crate::runtime::install_served_for_tests(crate::runtime::served_for(&cfg));
+    }
+
+    /// The four kill points of a block, end to end on the database and a
+    /// `MemStore` (never a shared bucket). Each ends with the execution and
+    /// the block `KILLED`, nothing left under `_wd/{block}/`, and no `outputs`
+    /// and no cache written -- which a normal finish of this flow writes
+    /// (`output_files_are_collected_from_the_directory_when_the_block_finishes`
+    /// and `a_cache_is_restored_and_saved_again_only_when_a_matched_file_changed`
+    /// are the guards that it still does).
+    #[tokio::test]
+    async fn a_killed_working_directory_runs_a_discard_only_finish_and_ends_killed() {
+        install_docker_served();
+        let pool = crate::storage::nsfiles::stage::testing::pool()
+            .await
+            .expect("the test database");
+        let fs = crate::storage::install_mem_for_tests();
+        let ws = crate::storage::nsfiles::stage::testing::workspace(&pool).await;
+
+        let mut checked = Vec::new();
+
+        // 1. Killed while the prepare claim is out (leased): the prepare
+        //    commits onto the still-RUNNING block, then the discard-only
+        //    finish deletes what it wrote.
+        let ns = "k2.prepare-out";
+        let (ex, c) = start_with_prepare_leased(&pool, ws, &wd_kill_flow(ns)).await;
+        plant_kill(&pool, ex).await;
+        run_block_claim(
+            &pool,
+            &c,
+            WorkerTiming::default(),
+            tokio::time::Instant::now(),
+        )
+        .await
+        .expect("the prepare commits onto a RUNNING block");
+        assert!(
+            prepared_objects(&pool, &fs, ws, ex).await > 0,
+            "the prepare wrote under the block's prefix, so 'nothing left' below means deleted"
+        );
+        drive_kill_to_the_end(&pool, ex).await;
+        checked.push(("prepare out", ns, ex));
+
+        // 2. Killed after prepare, while a child runs: the leased child goes
+        //    KILLING and is finished by the worker; then the discard-only finish.
+        let ns = "k2.child-runs";
+        let (ex, c) = start_with_prepare_leased(&pool, ws, &wd_kill_flow(ns)).await;
+        run_block_claim(
+            &pool,
+            &c,
+            WorkerTiming::default(),
+            tokio::time::Instant::now(),
+        )
+        .await
+        .expect("prepare");
+        assert!(prepared_objects(&pool, &fs, ws, ex).await > 0);
+        sqlx::query(
+            "UPDATE workflow.task_runs SET claimed_at = now() \
+              WHERE execution_id = $1 AND task_id = 'a' AND claimed_at IS NULL",
+        )
+        .bind(ex)
+        .execute(&pool)
+        .await
+        .expect("lease the running child");
+        plant_kill(&pool, ex).await;
+        drive_kill_to_the_end(&pool, ex).await;
+        checked.push(("a child runs", ns, ex));
+
+        // 3. Killed after prepare, with the child not yet claimed: the route
+        //    kills it directly; then the discard-only finish.
+        let ns = "k2.child-waits";
+        let (ex, c) = start_with_prepare_leased(&pool, ws, &wd_kill_flow(ns)).await;
+        run_block_claim(
+            &pool,
+            &c,
+            WorkerTiming::default(),
+            tokio::time::Instant::now(),
+        )
+        .await
+        .expect("prepare");
+        assert!(prepared_objects(&pool, &fs, ws, ex).await > 0);
+        plant_kill(&pool, ex).await;
+        drive_kill_to_the_end(&pool, ex).await;
+        checked.push(("after prepare, before finish", ns, ex));
+
+        // 4. Killed before the prepare was taken (claimable): a claimable
+        //    claim is waited for like a leased one, so the prepare runs, then
+        //    the discard-only finish. (A block with NO phase -- killed inside
+        //    the settle that started it -- is closed directly; that state is
+        //    never stored, and the pure test
+        //    `a_block_killed_before_its_prepare_is_closed_and_asks_for_no_claim`
+        //    covers it.)
+        let ns = "k2.prepare-claimable";
+        let (ex, c) = start_with_prepare_leased(&pool, ws, &wd_kill_flow(ns)).await;
+        sqlx::query("UPDATE workflow.task_runs SET claimed_at = NULL WHERE id = $1")
+            .bind(c.id)
+            .execute(&pool)
+            .await
+            .expect("unlease: claimable again");
+        plant_kill(&pool, ex).await;
+        drive_kill_to_the_end(&pool, ex).await;
+        checked.push(("prepare claimable", ns, ex));
+
+        for (label, ns, ex) in checked {
+            let h = execution_history(&pool, ex).await;
+            assert_eq!(
+                h.last().map(String::as_str),
+                Some("KILLED"),
+                "{label}: execution history {h:?}"
+            );
+            let (state, outputs, left, cached) = killed_block(&pool, &fs, ws, ex, ns).await;
+            assert_eq!(state, "KILLED", "{label}: the block");
+            assert_eq!(
+                outputs, None,
+                "{label}: a discard-only finish writes no outputs"
+            );
+            assert_eq!(
+                left, 0,
+                "{label}: every object under _wd/{{block}}/ is deleted"
+            );
+            assert!(!cached, "{label}: a discard-only finish saves no cache");
+            let phase: Option<String> = sqlx::query_scalar(
+                "SELECT working_dir FROM workflow.task_runs \
+                  WHERE execution_id = $1 AND task_id = 'block'",
+            )
+            .bind(ex)
+            .fetch_one(&pool)
+            .await
+            .expect("phase");
+            assert_eq!(
+                phase.as_deref(),
+                Some("FINISHED"),
+                "{label}: the finish claim ran"
+            );
+        }
+    }
+
+    /// The round-2 fence in its other direction: a discard-only finish
+    /// commits only onto a `KILLING` block, and a normal finish never does.
+    #[tokio::test]
+    async fn the_block_fence_matches_the_finish_mode_to_the_blocks_state() {
+        install_docker_served();
+        let pool = crate::storage::nsfiles::stage::testing::pool()
+            .await
+            .expect("the test database");
+        let _fs = crate::storage::install_mem_for_tests();
+        let ws = crate::storage::nsfiles::stage::testing::workspace(&pool).await;
+        // (done, block state, commits?)
+        let cases: [(BlockDone, &str, bool); 3] = [
+            (BlockDone::Discarded, "RUNNING", false),
+            (
+                BlockDone::Finished {
+                    outputs: None,
+                    files: Vec::new(),
+                },
+                "KILLING",
+                false,
+            ),
+            (BlockDone::Discarded, "KILLING", true),
+        ];
+        for (done, block_state, commits) in cases {
+            let (ex, c) = start_with_prepare_leased(&pool, ws, &wd_kill_flow("k2.fence")).await;
+            // Turn the leased prepare into a leased finish, in the given state.
+            sqlx::query(
+                "UPDATE workflow.task_runs SET working_dir = 'FINISHING', state = $2, \
+                    history = CASE WHEN $2 = 'KILLING' \
+                        THEN history || '[\"KILLING\"]'::jsonb ELSE history END \
+                  WHERE id = $1",
+            )
+            .bind(c.id)
+            .bind(block_state)
+            .execute(&pool)
+            .await
+            .expect("plant the finish");
+            if block_state == "KILLING" {
+                sqlx::query(
+                    "UPDATE workflow.executions SET state = 'KILLING', \
+                        history = history || '[\"KILLING\"]'::jsonb WHERE id = $1",
+                )
+                .bind(ex)
+                .execute(&pool)
+                .await
+                .expect("execution -> KILLING");
+            }
+            let c = Claimed {
+                block_phase: Some("FINISHING".into()),
+                ..c
+            };
+            let pool_ref = &pool;
+            let out: Result<()> = transaction!(pool_ref, |at| {
+                apply_block_claim_with(at, &c, &done).await
+            });
+            let phase: Option<String> =
+                sqlx::query_scalar("SELECT working_dir FROM workflow.task_runs WHERE id = $1")
+                    .bind(c.id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("phase");
+            assert_eq!(
+                out.is_ok(),
+                commits,
+                "{done:?} onto a {block_state} block: {out:?}"
+            );
+            assert_eq!(
+                phase.as_deref(),
+                Some(if commits { "FINISHED" } else { "FINISHING" }),
+                "{done:?} onto a {block_state} block"
+            );
         }
     }
 }

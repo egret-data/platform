@@ -18,6 +18,7 @@
 - D5. `Exit` với `SUCCESS`, `WARNING`, `FAILED` hoặc `CANCELLED` để các nhánh sibling đang chạy tiếp tục chạy, như Kestra ghi trong tài liệu (`core/…/plugin/core/execution/Exit.java`, *"only `KILLED` stops sibling tasks"*).
 - D6. UI có nút Kill trên trang chi tiết execution (W7b), hộp thoại xác nhận với tuỳ chọn cascade, và badge `KILLING`. Không kill theo từng task run, không kill hàng loạt.
 - D7. Phát hiện kill bằng cách poll state của run mỗi `workflow.kill_poll_ms` (mặc định 5000). Không chờ lease renewal, vốn chạy mỗi `working_timeout / 3` (`worker/claim.rs:1179-1181`), tức 20 phút với `working_timeout` mặc định 3600 s (`worker/mod.rs:153`).
+- D8 (quyết định cùng user, 2026-10-17). Block WorkingDirectory bị kill chạy finish claim của nó ở chế độ chỉ-xoá (discard-only): các object `_wd/{block}/` của nó bị xoá, không ghi outputs hay cache. Việc quét theo thời hạn lưu giữ cho block bị crash vẫn thuộc nhóm D.
 
 ## 1. Vì sao kill chưa được ship, và điều gì đã đổi
 

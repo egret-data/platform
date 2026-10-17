@@ -16,6 +16,7 @@
 - D5. `Exit` with `SUCCESS`, `WARNING`, `FAILED` or `CANCELLED` leaves running sibling branches running, as Kestra documents (`core/…/plugin/core/execution/Exit.java`, *"only `KILLED` stops sibling tasks"*).
 - D6. The UI gets a Kill button on the execution detail page (W7b), a confirmation dialog with the cascade option, and a `KILLING` badge. No per-task-run kill, no bulk kill.
 - D7. Kill detection polls the run's state every `workflow.kill_poll_ms` (default 5000). It does not wait for the lease renewal, which runs every `working_timeout / 3` (`worker/claim.rs:1179-1181`), 20 minutes at the default `working_timeout` of 3600 s (`worker/mod.rs:153`).
+- D8 (decided with the user, 2026-10-17). A killed WorkingDirectory block runs its finish claim in discard-only mode: its `_wd/{block}/` objects are deleted, no outputs or cache are written. A retention sweep for crashed blocks remains group D's.
 
 ## 1. Why kill was not shipped, and what changed
 

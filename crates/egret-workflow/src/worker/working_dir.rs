@@ -87,6 +87,13 @@ pub(crate) enum BlockDone {
     },
     /// The claim could not be completed; the block fails with this reason.
     Failed(String),
+    /// Kill Task 2 fix round 2 (the user's ruling of 2026-10-17): the finish
+    /// claim of a `KILLING` block, run in DISCARD-ONLY mode. Its snapshots
+    /// were deleted ([`discard`]); no `outputFiles` were collected, no cache
+    /// was saved and no `outputs` are written. It completes the claim
+    /// (`FINISHING` to `FINISHED`) and `executor::kill` then ends the block
+    /// `KILLED`.
+    Discarded,
 }
 
 /// The carry of a child of a `WorkingDirectory` block, or `Err` with the reason

@@ -36,10 +36,18 @@
 //! A block in `PREPARING` or `FINISHING` has a claim with the worker, or one
 //! a worker is about to take, and no live child. It is not written until the
 //! claim has completed: closing it under a leased claim let a late prepare
-//! commit onto a `KILLED` block. A block killed after its prepare and before
-//! its finish leaves its `_wd/{block}/` snapshots behind -- recorded in the
-//! Task 2 report as NEEDS_CONTEXT, because the only discard today is the
-//! finish claim's.
+//! commit onto a `KILLED` block.
+//!
+//! **A block that has prepared runs its finish claim in DISCARD-ONLY mode**
+//! (fix round 2, decided with the user 2026-10-17). Once it is `KILLING` and
+//! its children are terminal, a block in `PREPARED` is asked for
+//! [`Command::FinishWorkingDirectory`] instead of being closed; the worker
+//! takes a `FINISHING` block in `KILLING` (`claim::claim`), deletes its
+//! `_wd/{block}/` objects and writes no `outputFiles`, cache or `outputs`
+//! (`claim::run_block_claim`), and completes the claim to `FINISHED`. The
+//! next round closes it `KILLED`, as a normal finish leaves a block's terminal
+//! to the executor. A block that never prepared has nothing to delete and is
+//! closed at once.
 //!
 //! # The attempt ends `KILLED`
 //!
@@ -89,10 +97,19 @@ pub(crate) fn advance_killing(plan: &Plan, state: &ExecutionState) -> Vec<Comman
                 state: RunState::Killing,
             });
         } else if children_terminal(state, ix) {
-            cmds.push(Command::SetRunState {
-                run: ix,
-                state: RunState::Killed,
-            });
+            // A block that has prepared may have `_wd/{block}/` objects, and
+            // only its finish claim deletes them: it is asked for in
+            // discard-only mode (the claim reads the block's `KILLING`), and
+            // the block is closed once that claim has completed (`Finished`).
+            // Fix round 2, the user's ruling of 2026-10-17.
+            if run.working_dir == Some(WorkingDirPhase::Prepared) {
+                cmds.push(Command::FinishWorkingDirectory { run: ix });
+            } else {
+                cmds.push(Command::SetRunState {
+                    run: ix,
+                    state: RunState::Killed,
+                });
+            }
         }
     }
     if cmds.is_empty() && state.runs.iter().all(is_settled) {
@@ -430,14 +447,14 @@ mod tests {
         r
     }
 
-    /// No command in any round asks for a claim or a run.
+    /// No command in any round asks for a prepare or a run. (A finish is
+    /// asked for only as the discard-only claim, and each test asserts it.)
     fn no_claim_and_no_run(all: &[Vec<Command>]) {
         for c in all.iter().flatten() {
             assert!(
                 !matches!(
                     c,
                     Command::BeginWorkingDirectory { .. }
-                        | Command::FinishWorkingDirectory { .. }
                         | Command::CreateRun { .. }
                         | Command::StartRun { .. }
                 ),
@@ -466,9 +483,11 @@ mod tests {
 
     /// A prepare claim that is out is waited for, with the block left
     /// `RUNNING` (so the claim can be taken and its commit passes the fence);
-    /// once it completes, the block closes without starting a child.
+    /// once it completes, the block goes `KILLING`, asks for its discard-only
+    /// finish claim (round 2), waits for it, and only then closes. No child is
+    /// started.
     #[test]
-    fn a_block_whose_prepare_is_out_waits_for_it_then_closes() {
+    fn a_block_whose_prepare_is_out_waits_for_it_then_discards_and_closes() {
         let p = plan(WD);
         let mut s = killing(vec![block(
             &p,
@@ -478,22 +497,28 @@ mod tests {
         assert_eq!(advance(&p, &s, LATE), Vec::<Command>::new());
         // The worker's prepare commits.
         apply(&mut s, &Command::CompleteWorkingDirectoryClaim { run: 0 });
-        let all = rounds(&p, &mut s);
-        no_claim_and_no_run(&all);
+        let first = rounds(&p, &mut s);
+        no_claim_and_no_run(&first);
         assert_eq!(
-            all,
+            first,
             vec![
                 vec![set_run(0, Killing)],
-                vec![set_run(0, Killed)],
-                vec![set_exec(Killed)],
+                vec![Command::FinishWorkingDirectory { run: 0 }],
             ]
         );
+        assert_eq!(s.runs[0].working_dir, Some(WorkingDirPhase::Finishing));
+        // The worker's discard-only finish commits.
+        apply(&mut s, &Command::CompleteWorkingDirectoryClaim { run: 0 });
+        let rest = rounds(&p, &mut s);
+        no_claim_and_no_run(&rest);
+        assert_eq!(rest, vec![vec![set_run(0, Killed)], vec![set_exec(Killed)]]);
     }
 
     /// Children running: the block goes `KILLING`, waits for the killed child,
-    /// and closes without a finish claim and without the second child.
+    /// then asks for its discard-only finish, and closes after it, without
+    /// the second child.
     #[test]
-    fn a_block_killed_while_a_child_runs_closes_after_it_without_a_finish() {
+    fn a_block_killed_while_a_child_runs_discards_after_it_and_closes() {
         let p = plan(WD);
         let mut s = killing(vec![
             block(&p, &[Created, Running], Some(WorkingDirPhase::Prepared)),
@@ -502,9 +527,16 @@ mod tests {
         let first = rounds(&p, &mut s);
         assert_eq!(first, vec![vec![set_run(0, Killing)]]);
         apply(&mut s, &set_run(1, Killed));
+        let second = rounds(&p, &mut s);
+        assert_eq!(
+            second,
+            vec![vec![Command::FinishWorkingDirectory { run: 0 }]]
+        );
+        apply(&mut s, &Command::CompleteWorkingDirectoryClaim { run: 0 });
         let rest = rounds(&p, &mut s);
-        no_claim_and_no_run(&first);
-        no_claim_and_no_run(&rest);
+        for r in [&first, &second, &rest] {
+            no_claim_and_no_run(r);
+        }
         assert_eq!(rest, vec![vec![set_run(0, Killed)], vec![set_exec(Killed)]]);
         assert_eq!(s.runs.len(), 2, "b was never created");
     }
