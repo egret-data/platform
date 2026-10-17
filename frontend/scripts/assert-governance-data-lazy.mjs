@@ -25,8 +25,8 @@ const MARKERS = [
   ["src/routes/governance/data/CatalogTree.tsx", "This level could not be listed. Retry, or reload the page."],
   // `DataIndex`'s description.
   ["src/routes/governance/data/DataPage.tsx", "Open a catalog, schema or table from the tree"],
-  // The Lineage tab's text until its tab lands.
-  ["src/routes/governance/data/ObjectPage.tsx", "Lineage is not shown on this page yet."],
+  // `NO_READERS`.
+  ["src/routes/governance/data/tabs/LineageTab.tsx", "No view or materialized view reads this table"],
   // `TAGS_FAILED`.
   ["src/routes/governance/data/ObjectHeader.tsx", "Tags could not be loaded."],
   // The Masks & filters tab's label.

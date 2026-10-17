@@ -14,6 +14,7 @@ import { assignmentsOf, enginesOf, scopeOf, type CatalogState, type ObjectKind, 
 import { urlToPath } from "@/routes/governance/data/objectPath";
 import { DetailsTab } from "@/routes/governance/data/tabs/DetailsTab";
 import { OverviewTab } from "@/routes/governance/data/tabs/OverviewTab";
+import { LineageTab } from "@/routes/governance/data/tabs/LineageTab";
 import { MasksFiltersTab } from "@/routes/governance/data/tabs/MasksFiltersTab";
 import { PermissionsTab } from "@/routes/governance/data/tabs/PermissionsTab";
 
@@ -112,7 +113,7 @@ export default function ObjectPage() {
             />
           ),
           masks: <MasksFiltersTab path={path} kind={kind} catalog={catalog} tags={tags} />,
-          lineage: <p className="text-sm text-muted-foreground">Lineage is not shown on this page yet.</p>,
+          lineage: <LineageTab path={path} catalog={catalog} />,
           details: <DetailsTab path={path} catalog={catalog} />,
         }}
       />
