@@ -323,7 +323,7 @@ pub(crate) async fn load_catalog(st: &CpState, id: Uuid) -> Result<Option<Catalo
     .fetch_optional(&st.db.pool)
     .await
     .map_err(|e| {
-        tracing::error!(error = %e, "governance browse: read catalog");
+        tracing::error!(error = %e, "governance: read catalog");
         CpError::Internal
     })
 }
@@ -354,7 +354,7 @@ pub(crate) async fn attached_engines(
     .fetch_all(&st.db.pool)
     .await
     .map_err(|e| {
-        tracing::error!(error = %e, "governance browse: read attached engines");
+        tracing::error!(error = %e, "governance: read attached engines");
         CpError::Internal
     })
 }

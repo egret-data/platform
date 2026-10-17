@@ -36,6 +36,14 @@ pub enum CpError {
     RuleOverlap(serde_json::Value),
     #[error("internal error")]
     Internal,
+    /// A dependency egret itself runs (its warehouse) failed. 503; the
+    /// message is a sentence for the page, never the dependency's own text.
+    #[error("{0}")]
+    Unavailable(String),
+    /// A dependency egret itself runs did not answer within its deadline.
+    /// 504; the message names what and the deadline.
+    #[error("{0}")]
+    Timeout(String),
 }
 
 impl From<CatalogError> for CpError {
@@ -153,6 +161,8 @@ impl IntoResponse for CpError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal error".to_string(),
             ),
+            CpError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, self.to_string()),
+            CpError::Timeout(_) => (StatusCode::GATEWAY_TIMEOUT, self.to_string()),
             CpError::RuleOverlap(_) => unreachable!("answered above with its structured body"),
         };
         (status, Json(serde_json::json!({ "error": msg }))).into_response()

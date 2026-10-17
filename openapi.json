@@ -6117,7 +6117,27 @@
             }
           },
           "500": {
-            "description": "Internal error, or egret's warehouse did not answer",
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "(egret catalog) egret's warehouse could not be read to tell a table from a view",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "(egret catalog) egret's warehouse did not answer within the deadline",
             "content": {
               "application/json": {
                 "schema": {
@@ -43790,7 +43810,7 @@
               },
               {
                 "$ref": "#/components/schemas/ReadersIncomplete",
-                "description": "Set when `readers` may be missing some: a listing failed or was not\nmade, or the object is a view."
+                "description": "Set when `readers` may be missing some: a view of this egret catalog\nhas unknown lineage (failed or not yet computed), egret's views or an\nengine's materialized views could not be listed or were not asked, the\ncatalog is not egret's (its own views are not tracked), or the object\nis a view."
               }
             ]
           },

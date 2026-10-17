@@ -228,10 +228,20 @@ export type controlPlaneGovernanceObjectLineageResponse500 = {
   status: 500
 }
 
+export type controlPlaneGovernanceObjectLineageResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
+export type controlPlaneGovernanceObjectLineageResponse504 = {
+  data: ErrorBody
+  status: 504
+}
+
 export type controlPlaneGovernanceObjectLineageResponseSuccess = (controlPlaneGovernanceObjectLineageResponse200) & {
   headers: Headers;
 };
-export type controlPlaneGovernanceObjectLineageResponseError = (controlPlaneGovernanceObjectLineageResponse400 | controlPlaneGovernanceObjectLineageResponse401 | controlPlaneGovernanceObjectLineageResponse403 | controlPlaneGovernanceObjectLineageResponse404 | controlPlaneGovernanceObjectLineageResponse500) & {
+export type controlPlaneGovernanceObjectLineageResponseError = (controlPlaneGovernanceObjectLineageResponse400 | controlPlaneGovernanceObjectLineageResponse401 | controlPlaneGovernanceObjectLineageResponse403 | controlPlaneGovernanceObjectLineageResponse404 | controlPlaneGovernanceObjectLineageResponse500 | controlPlaneGovernanceObjectLineageResponse503 | controlPlaneGovernanceObjectLineageResponse504) & {
   headers: Headers;
 };
 

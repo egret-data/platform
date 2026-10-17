@@ -94,6 +94,20 @@ impl MaterializedViewLister for FakeMvs {
 struct FakeViews {
     owners: BTreeMap<String, Result<Option<String>, String>>,
     asked: Mutex<Vec<egret_catalog_engine::CatalogView>>,
+    /// What `list_views` answers.
+    listing: Listing,
+}
+
+/// What `FakeViews::list_views` answers.
+#[derive(Default)]
+enum Listing {
+    #[default]
+    Empty,
+    Views(Vec<egret_catalog_engine::CatalogView>),
+    /// A namespace could not be listed: the views are incomplete.
+    Partial,
+    Fail,
+    Hang,
 }
 
 impl FakeViews {
@@ -104,12 +118,41 @@ impl FakeViews {
         );
         self
     }
+    fn listing(mut self, l: Listing) -> Self {
+        self.listing = l;
+        self
+    }
+}
+
+/// A view of egret's catalog `catalog`, as `list_views` names it.
+fn listed(catalog: &str, name: &str) -> egret_catalog_engine::CatalogView {
+    egret_catalog_engine::CatalogView {
+        catalog: catalog.into(),
+        schema: "sales".into(),
+        name: name.into(),
+        prefix: "lk".into(),
+    }
 }
 
 #[async_trait::async_trait]
 impl egret_catalog_engine::ViewCatalog for FakeViews {
     async fn list_views(&self) -> Result<egret_catalog_engine::CatalogViews, String> {
-        panic!("the lineage route never lists every view")
+        match &self.listing {
+            Listing::Empty => Ok(Default::default()),
+            Listing::Views(v) => Ok(egret_catalog_engine::CatalogViews {
+                views: v.clone(),
+                failures: vec![],
+            }),
+            Listing::Partial => Ok(egret_catalog_engine::CatalogViews {
+                views: vec![],
+                failures: vec!["the views of x.sales could not be listed: boom".into()],
+            }),
+            Listing::Fail => Err("lakekeeper at 10.0.0.7 refused".into()),
+            Listing::Hang => {
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+        }
     }
     async fn run_as_owner(
         &self,
@@ -124,8 +167,14 @@ impl egret_catalog_engine::ViewCatalog for FakeViews {
 }
 
 /// A warehouse whose `sales` namespace holds the table `orders` and the
-/// views `v_orders`, `v_failed` and `v_new`.
-struct FakeWarehouse;
+/// views `v_orders`, `v_failed` and `v_new`; or one that fails or hangs.
+#[derive(Clone, Copy, Default)]
+enum FakeWarehouse {
+    #[default]
+    Answers,
+    Fails,
+    Hangs,
+}
 
 #[async_trait::async_trait]
 impl WarehouseBrowser for FakeWarehouse {
@@ -137,6 +186,18 @@ impl WarehouseBrowser for FakeWarehouse {
         _wh: &str,
         ns: &[String],
     ) -> Result<Vec<BrowseTabular>, CatalogEngineError> {
+        match self {
+            FakeWarehouse::Answers => {}
+            FakeWarehouse::Fails => {
+                return Err(CatalogEngineError::Internal(
+                    "lakekeeper at 10.0.0.8 said 500".into(),
+                ))
+            }
+            FakeWarehouse::Hangs => {
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+        }
         if ns != ["sales".to_string()] {
             return Err(CatalogEngineError::NotFound(format!("namespace {ns:?}")));
         }
@@ -258,6 +319,7 @@ struct Wiring {
     pdp: Arc<dyn egret_core::authz::Pdp>,
     mvs: Arc<FakeMvs>,
     views: Arc<FakeViews>,
+    warehouse: FakeWarehouse,
     timeout: std::time::Duration,
 }
 
@@ -267,6 +329,7 @@ impl Wiring {
             pdp: Arc::new(AllowOnly(&["policy:read"])),
             mvs: Arc::new(FakeMvs::default()),
             views: Arc::new(FakeViews::default()),
+            warehouse: FakeWarehouse::default(),
             timeout: std::time::Duration::from_secs(15),
         }
     }
@@ -287,7 +350,7 @@ fn app(f: &Fixture, w: &Wiring) -> axum::Router {
         access_resolver: egret_auth::effective::AccessResolver::new(f.db.clone()),
         secrets,
         sessions: f.sessions.clone(),
-        browser: Some(Arc::new(FakeWarehouse)),
+        browser: Some(Arc::new(w.warehouse)),
         pdp: w.pdp.clone(),
         audit: egret_audit::AuditSink::new(16).0,
         audit_store: egret_audit::AuditStore::new(f.db.clone()),
@@ -539,7 +602,10 @@ async fn a_table_read_by_two_views_lists_both_and_no_other() {
         ],
         "body={j}"
     );
-    assert!(j["readersIncomplete"].is_null(), "body={j}");
+    assert_eq!(
+        j["readersIncomplete"]["detail"], NOT_TRACKED,
+        "views defined in a catalog that is not egret's are never seen: {j}"
+    );
     assert!(j["view"].is_null(), "a table has no view half: {j}");
     assert!(w.mvs.asked().is_empty(), "no StarRocks is attached");
 }
@@ -553,6 +619,9 @@ async fn an_egret_table_lists_its_view_readers_and_the_starrocks_mvs_that_read_i
     attach(&f, sr, cat).await;
     let base = format!("{name}.sales.orders");
     let mut w = Wiring::new();
+    // Every view of the catalog has computed lineage: the list is complete.
+    w.views =
+        Arc::new(FakeViews::default().listing(Listing::Views(vec![listed(&name, "v_orders")])));
     w.mvs = Arc::new(FakeMvs::default().answer(
         &sr_name,
         MvAnswer::Rows(vec![
@@ -861,5 +930,183 @@ async fn it_needs_policy_read_or_tag_read() {
         status,
         StatusCode::OK,
         "policy:read alone reads lineage: {j}"
+    );
+}
+
+/// `readersIncomplete` for a table in a catalog that is not egret's.
+const NOT_TRACKED: &str =
+    "views defined in this catalog are not tracked by egret, so they are not listed here";
+
+/// A table of an egret catalog with a computed reader, plus `extra` setup.
+async fn egret_table_with_reader(f: &Fixture) -> (Uuid, String) {
+    let (cat, name, _) = egret_catalog(f).await;
+    computed(f, &name, "v_orders", &[(&name, "sales", "orders")]).await;
+    (cat, name)
+}
+
+fn incomplete(j: &serde_json::Value) -> String {
+    j["readersIncomplete"]["detail"]
+        .as_str()
+        .unwrap_or_else(|| panic!("readersIncomplete is set: {j}"))
+        .to_string()
+}
+
+#[tokio::test]
+async fn a_view_whose_lineage_failed_makes_the_readers_incomplete() {
+    let f = setup().await;
+    let (cat, name) = egret_table_with_reader(&f).await;
+    let mut conn = f.db.pool.acquire().await.unwrap();
+    egret_perm_compile::lineage::record_lineage_failure(
+        &mut conn,
+        &view_ref(&name, "sales", "v_failed"),
+        "EXPLAIN failed",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    let mut w = Wiring::new();
+    w.views = Arc::new(FakeViews::default().listing(Listing::Views(vec![
+        listed(&name, "v_orders"),
+        listed(&name, "v_failed"),
+    ])));
+
+    let j = lineage(&f, &w, cat, "sales", "orders").await;
+
+    let detail = incomplete(&j);
+    assert!(detail.starts_with("1 view in this catalog has"), "{detail}");
+    assert_eq!(
+        readers(&j),
+        vec![(s(&name), s("sales"), s("v_orders"), s("view"), None)]
+    );
+}
+
+#[tokio::test]
+async fn a_failed_view_counts_even_when_the_listing_does_not_show_it() {
+    let f = setup().await;
+    let (cat, name) = egret_table_with_reader(&f).await;
+    let mut conn = f.db.pool.acquire().await.unwrap();
+    egret_perm_compile::lineage::record_lineage_failure(
+        &mut conn,
+        &view_ref(&name, "sales", "v_failed"),
+        "EXPLAIN failed",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    let w = Wiring::new();
+
+    let j = lineage(&f, &w, cat, "sales", "orders").await;
+
+    assert!(
+        incomplete(&j).starts_with("1 view in this catalog has"),
+        "{j}"
+    );
+}
+
+#[tokio::test]
+async fn a_listed_view_with_no_lineage_makes_the_readers_incomplete() {
+    let f = setup().await;
+    let (cat, name) = egret_table_with_reader(&f).await;
+    let mut w = Wiring::new();
+    w.views = Arc::new(FakeViews::default().listing(Listing::Views(vec![
+        listed(&name, "v_orders"),
+        listed(&name, "v_new"),
+        listed(&name, "v_new2"),
+        // Another catalog's view: not this catalog's to count.
+        listed("some_other_catalog", "v_elsewhere"),
+    ])));
+
+    let j = lineage(&f, &w, cat, "sales", "orders").await;
+
+    let detail = incomplete(&j);
+    assert!(
+        detail.starts_with("2 views in this catalog have"),
+        "{detail}"
+    );
+}
+
+#[tokio::test]
+async fn egret_views_that_cannot_all_be_listed_make_the_readers_incomplete() {
+    let f = setup().await;
+    let (cat, _) = egret_table_with_reader(&f).await;
+    for listing in [Listing::Fail, Listing::Partial, Listing::Hang] {
+        let mut w = Wiring::new();
+        w.views = Arc::new(FakeViews::default().listing(listing));
+        w.timeout = std::time::Duration::from_millis(300);
+
+        let started = std::time::Instant::now();
+        let j = lineage(&f, &w, cat, "sales", "orders").await;
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let detail = incomplete(&j);
+        assert!(
+            detail.starts_with("egret's views could not all be listed"),
+            "{detail}"
+        );
+        assert!(
+            !detail.contains("10.0.0.7") && !detail.contains("boom"),
+            "{detail}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_non_egret_catalog_never_answers_complete_and_never_invents_a_view() {
+    let f = setup().await;
+    let (cat, name) = external_catalog(&f).await;
+    let (sr, sr_name) = starrocks(&f, "running", false).await;
+    attach(&f, sr, cat).await;
+    let mut w = Wiring::new();
+    w.mvs = Arc::new(FakeMvs::default().answer(&sr_name, MvAnswer::Fail("nope")));
+
+    // A name nothing records: answered as a table, flagged incomplete with
+    // both reasons.
+    let j = lineage(&f, &w, cat, "sales", "typo_d").await;
+    assert!(j["view"].is_null(), "no view half unless recorded: {j}");
+    let detail = incomplete(&j);
+    assert!(detail.contains(NOT_TRACKED), "{detail}");
+    assert!(detail.contains(&sr_name), "and the MV failure: {detail}");
+
+    // A view with recorded lineage is answered as a view.
+    let mut conn = f.db.pool.acquire().await.unwrap();
+    egret_perm_compile::lineage::record_lineage_failure(
+        &mut conn,
+        &view_ref(&name, "sales", "v_rec"),
+        "x",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    let j = lineage(&f, &w, cat, "sales", "v_rec").await;
+    assert_eq!(j["view"]["lineageState"], "failed", "{j}");
+    assert_eq!(j["view"]["securityMode"], "unknown");
+}
+
+#[tokio::test]
+async fn a_warehouse_that_fails_is_a_503_and_one_that_hangs_a_504() {
+    let f = setup().await;
+    let (cat, _, _) = egret_catalog(&f).await;
+    let uri = format!("/governance/lineage/{cat}?schema=sales&table=orders");
+
+    let mut w = Wiring::new();
+    w.warehouse = FakeWarehouse::Fails;
+    let (status, j) = get(&f, &w, &uri).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body={j}");
+    let msg = j["error"].as_str().unwrap_or_else(|| panic!("{j}"));
+    assert!(msg.contains("egret's warehouse"), "{msg}");
+    assert!(
+        !msg.contains("10.0.0.8"),
+        "the raw error stays in the log: {msg}"
+    );
+
+    let mut w = Wiring::new();
+    w.warehouse = FakeWarehouse::Hangs;
+    w.timeout = std::time::Duration::from_millis(300);
+    let (status, j) = get(&f, &w, &uri).await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "body={j}");
+    let msg = j["error"].as_str().unwrap_or_else(|| panic!("{j}"));
+    assert!(
+        msg.contains("egret's warehouse") && msg.contains("0.3 s"),
+        "names the warehouse and the deadline: {msg}"
     );
 }

@@ -23,9 +23,13 @@
 //! **A reader list is never presented as complete when it is not.** A
 //! listing that fails or misses the deadline, and an engine that was not
 //! asked, sets `readersIncomplete` with a sentence naming the engine; the
-//! engine's own text goes to the log only. For a VIEW the readers are always
-//! incomplete: recorded lineage names base tables only, so no view is ever
-//! recorded as reading a view.
+//! engine's own text goes to the log only. So does, fail closed as the
+//! DEFINER audit is, every view of an egret catalog whose lineage `failed` or
+//! is `missing` (listed through [`CpState::view_catalog`] under the same
+//! deadline): it may read this table. In a catalog that is not egret's,
+//! `readersIncomplete` is always set: views defined there are not tracked. For
+//! a VIEW the readers are always incomplete: recorded lineage names base
+//! tables only, so no view is ever recorded as reading a view.
 //!
 //! **For a view: its own lineage** — the recorded bases, the lineage state
 //! (`computed`, `failed` with why, or `missing`), the security mode and
@@ -33,6 +37,8 @@
 //! catalogs; `unknown` elsewhere and whenever the read fails), and whether the
 //! DEFINER owner is cleared for every classification the bases carry, as the
 //! classification page's DEFINER audit reports it.
+
+use std::collections::BTreeSet;
 
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
@@ -116,8 +122,11 @@ pub struct ObjectLineage {
     /// The views and materialized views that read this table. See
     /// `readers_incomplete`.
     pub readers: Vec<LineageReader>,
-    /// Set when `readers` may be missing some: a listing failed or was not
-    /// made, or the object is a view.
+    /// Set when `readers` may be missing some: a view of this egret catalog
+    /// has unknown lineage (failed or not yet computed), egret's views or an
+    /// engine's materialized views could not be listed or were not asked, the
+    /// catalog is not egret's (its own views are not tracked), or the object
+    /// is a view.
     pub readers_incomplete: Option<ReadersIncomplete>,
     /// Set exactly when the object is a view.
     pub view: Option<ViewLineageInfo>,
@@ -146,7 +155,9 @@ pub struct LineageQuery {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read and tag:read permission", body = ErrorBody),
         (status = 404, description = "No such catalog, or (egret catalog) no such table or view", body = ErrorBody),
-        (status = 500, description = "Internal error, or egret's warehouse did not answer", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+        (status = 503, description = "(egret catalog) egret's warehouse could not be read to tell a table from a view", body = ErrorBody),
+        (status = 504, description = "(egret catalog) egret's warehouse did not answer within the deadline", body = ErrorBody),
     ),
 )]
 async fn object_lineage(
@@ -201,9 +212,18 @@ async fn object_lineage(
         }));
     }
 
+    let mut incomplete = Vec::new();
+    if lakekeeper.is_some() {
+        incomplete.extend(unknown_lineage(&st, &catalog.name).await?);
+    } else {
+        // Only egret's view commits record lineage, so a view defined in
+        // this catalog is never seen, and this object may itself be one.
+        incomplete.push(VIEWS_NOT_TRACKED.to_string());
+    }
     let mut readers = view_readers(&st, &object).await?;
-    let (mvs, incomplete) = mv_readers(&st, catalog_id, &object).await?;
+    let (mvs, mv_incomplete) = mv_readers(&st, catalog_id, &object).await?;
     readers.extend(mvs);
+    incomplete.extend(mv_incomplete);
     Ok(Json(ObjectLineage {
         readers,
         readers_incomplete: (!incomplete.is_empty()).then(|| ReadersIncomplete {
@@ -217,6 +237,15 @@ async fn object_lineage(
 const VIEW_READERS_UNKNOWN: &str = "egret records a view's lineage down to its base tables, \
                                     so the views and materialized views that read this view \
                                     are listed on those tables, not here";
+
+/// `readersIncomplete` for a table in a catalog that is not egret's.
+const VIEWS_NOT_TRACKED: &str = "views defined in this catalog are not tracked by egret, so \
+                                 they are not listed here";
+
+/// `readersIncomplete` when egret's views could not all be listed.
+const VIEWS_UNLISTED: &str = "egret's views could not all be listed, so a view whose lineage \
+                              is not yet computed may read this table; the error is in the \
+                              server log";
 
 /// `securityModeError` when the view's metadata could not be read.
 const METADATA_UNREADABLE: &str =
@@ -247,7 +276,8 @@ async fn lakekeeper_id(st: &CpState, warehouse_id: Uuid) -> Result<String, CpErr
 
 /// Whether `schema.table` in the lakekeeper warehouse `lk` is a view, read
 /// under [`CpState::browse_timeout`]. Neither a table nor a view: 404. The
-/// warehouse failing or not answering is an internal error: it is egret's own.
+/// warehouse failing is a 503, missing the deadline a 504, each with a
+/// sentence; its own text goes to the log.
 async fn egret_object_is_view(
     st: &CpState,
     lk: &str,
@@ -264,13 +294,21 @@ async fn egret_object_is_view(
         Err(_) => {
             tracing::warn!(warehouse = %lk, timeout = ?st.browse_timeout,
                 "governance lineage: the warehouse did not answer before the deadline");
-            Err(CpError::Internal)
+            Err(CpError::Timeout(format!(
+                "egret's warehouse did not answer within {} s, so egret cannot tell whether \
+                 this is a table or a view",
+                seconds(st.browse_timeout)
+            )))
         }
         Ok(Err(egret_catalog_engine::CatalogEngineError::NotFound(_))) => Err(CpError::NotFound),
         Ok(Err(e)) => {
             tracing::warn!(warehouse = %lk, error = %e,
                 "governance lineage: the warehouse listing failed");
-            Err(CpError::Internal)
+            Err(CpError::Unavailable(
+                "egret's warehouse could not be read, so egret cannot tell whether this is a \
+                 table or a view; the error is in the server log"
+                    .to_string(),
+            ))
         }
         Ok(Ok(tabulars)) => tabulars
             .into_iter()
@@ -384,6 +422,83 @@ async fn security_mode(
             )
         }
     }
+}
+
+/// Why the views of the egret catalog `catalog` may hold readers that
+/// [`view_readers`] cannot see: views whose lineage `failed` (from
+/// `view_lineage_state`), and views egret's catalog lists that have no lineage
+/// recorded at all (`missing`). Fail closed, as the classification page's
+/// DEFINER audit lists such views: either may read this table. A listing that
+/// fails or misses [`CpState::browse_timeout`] is said too.
+///
+/// Scoped to this catalog's views: a view in another egret catalog that reads
+/// this table with unknown lineage is not counted.
+async fn unknown_lineage(st: &CpState, catalog: &str) -> Result<Vec<String>, CpError> {
+    let mut unknown: BTreeSet<(String, String)> = {
+        let mut conn = acquire(st).await?;
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT view_schema, view_name FROM view_lineage_state \
+              WHERE view_catalog = $1 AND state <> 'computed'",
+        )
+        .bind(catalog)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db("failed lineages"))?
+        .into_iter()
+        .collect()
+    };
+    let mut out = Vec::new();
+    match tokio::time::timeout(st.browse_timeout, st.view_catalog.list_views()).await {
+        Err(_) => {
+            tracing::warn!(timeout = ?st.browse_timeout,
+                "governance lineage: egret's views were not listed before the deadline");
+            out.push(VIEWS_UNLISTED.to_string());
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "governance lineage: listing egret's views");
+            out.push(VIEWS_UNLISTED.to_string());
+        }
+        Ok(Ok(listing)) => {
+            if !listing.failures.is_empty() {
+                tracing::warn!(failures = ?listing.failures,
+                    "governance lineage: listing egret's views");
+                out.push(VIEWS_UNLISTED.to_string());
+            }
+            let refs: Vec<ViewRef> = listing
+                .views
+                .into_iter()
+                .filter(|v| v.catalog == catalog)
+                .map(|v| ViewRef {
+                    catalog: v.catalog,
+                    schema: v.schema,
+                    name: v.name,
+                })
+                .collect();
+            let mut conn = acquire(st).await?;
+            let recorded = lineage::recorded_lineages(&mut conn, &refs)
+                .await
+                .map_err(db("recorded lineages"))?;
+            for (v, r) in refs.into_iter().zip(recorded) {
+                if !matches!(&r, RecordedLineage::Computed(t) if !t.is_empty()) {
+                    unknown.insert((v.schema, v.name));
+                }
+            }
+        }
+    }
+    if !unknown.is_empty() {
+        let n = unknown.len();
+        out.insert(
+            0,
+            format!(
+                "{n} {} in this catalog {} lineage egret does not know (failed or not yet \
+                 computed); {} may read this table",
+                if n == 1 { "view" } else { "views" },
+                if n == 1 { "has" } else { "have" },
+                if n == 1 { "it" } else { "they" },
+            ),
+        );
+    }
+    Ok(out)
 }
 
 /// The views whose computed lineage lists `table` as a base, sorted.
