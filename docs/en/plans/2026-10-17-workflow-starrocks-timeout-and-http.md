@@ -1,12 +1,12 @@
-# StarRocks server-side timeout and refusing `http()`: implementation plan
+# StarRocks timeout docs corrected and `http()` refused: implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Spec:** `docs/en/specs/2026-10-17-workflow-starrocks-timeout-and-http-design.md`. Read it first; this plan refers to its sections.
 
-**Goal:** a StarRocks statement egret has timed out stops on the engine at the same deadline, and `http()` is refused with a reason instead of "waiting for W9".
+**Goal:** every text that says a timed-out StarRocks statement keeps running on the engine states the measured behaviour instead (it is cancelled when egret drops the connection), a live test pins that behaviour, and `http()` is refused with a reason instead of "waiting for W9".
 
-**Architecture:** one private helper in the StarRocks connector sets `query_timeout` (and `insert_timeout` if Task 1 finds it) on each fresh connection before the statement. A new `Refusal::Unsupported` variant in the expression layer carries `http`'s permanent refusal.
+**Architecture:** no connector code changes (spec §1.3, decided with the user after Task 1's measurement): doc and message corrections plus two engine-gated tests in `crates/egret-query/tests/connector_starrocks.rs`. A new `Refusal::Unsupported` variant in the expression layer carries `http`'s permanent refusal.
 
 **Tech Stack:** Rust, `mysql_async`, `minijinja`, StarRocks 4.1.6 (`starrocks/allin1-ubuntu:4.1.6@sha256:5cbf09c4c788d2ca41a8e38599b650f04dbc6af0de51ebda0952770fb8333e5d`, already pulled locally).
 
@@ -15,9 +15,7 @@
 ## Global Constraints
 
 - No migration, no frontend, no new config key (spec §3).
-- `N = ceil(limits.timeout in seconds)`, minimum 1 (spec §1.3).
-- A failed `SET` returns `EngineError::Engine` and the statement is not sent; never fail open (spec §1.3).
-- `describe` / `describe_with_params` are not changed (spec §1.3).
+- No change to `crates/egret-query/src/execution/connector/starrocks.rs`'s behaviour: no `SET`, no session variable (spec §1.3). Only its doc comment changes.
 - The `http` sentence, verbatim: `The 'http' function is not supported: an expression renders inside egret's control plane, so a request made from it would leave from egret's own network. Make the request in a script task, which runs in the task's container.`
 - Never use the shared dev stack (`deploy/docker-compose.dev.yml`, `:9030`, `:5432`). StarRocks for this plan is a private container `egret-grpa-starrocks` on host port **9131**.
 - Run one cargo command at a time. Engine-gated tests skip silently without `EGRET_TEST_STARROCKS_URL`: every live run must show the test's own output, not `skip`.
@@ -88,48 +86,86 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 2: the connector sets the deadline on every statement
+### Task 2: correct the StarRocks docs and pin the measured behaviour
 
 **Files:**
-- Modify: `crates/egret-query/src/execution/connector/starrocks.rs` (helper near `switch_identity` at `:226`; calls in `execute` `:251` and `execute_with_params` `:306`; doc at `:300-305`; unit tests in the file's `mod tests`)
-- Modify: `crates/egret-query/tests/connector_starrocks.rs` (live test)
+- Modify: `crates/egret-query/tests/connector_starrocks.rs` (two live tests)
+- Modify: `crates/egret-query/src/execution/connector/starrocks.rs:300-305` (doc only)
 - Modify: `crates/egret-workflow/src/worker/handlers/sql.rs:553-583` (doc of `cancel()` and its error text)
-- Modify: `crates/egret-workflow/src/routes.rs:2225-2231` (the quoted sentence)
+- Modify: `crates/egret-workflow/src/routes.rs:2225-2231` (the kill finding's point 7)
 - Modify: `crates/egret-dataapi/src/serving/router.rs:45-49` (module doc)
 
 **Interfaces:**
-- Consumes from Task 1: `LONG_SQL`, whether `insert_timeout` exists.
-- Produces: `fn deadline_secs(timeout: std::time::Duration) -> u64` and `async fn bound_session(conn: &mut mysql_async::Conn, timeout: Duration) -> Result<(), EngineError>`, both private to `starrocks.rs`.
+- Consumes from Task 1 (spec §1.2): `LONG_SQL` = `SELECT count(*) AS n, 'egret-deadline-probe' AS marker FROM TABLE(generate_series(1, 100000000000))`; StarRocks strips `/* */` comments from `Info`, so match on SQL text; a raw `mysql_async` probe connection needs `prefer_socket(false)`; the private engine runs at `mysql://127.0.0.1:9131`.
+- Produces: nothing later tasks call.
 
-- [ ] **Step 1: write the failing unit test** in `starrocks.rs`'s `mod tests`:
+- [ ] **Step 1: write the two live tests** in `connector_starrocks.rs`, beside the existing ones, using the file's `parse()` / `spec()` helpers. Shared helpers in the same file:
 
 ```rust
-#[test]
-fn deadline_rounds_up_to_whole_seconds_and_never_below_one() {
-    use std::time::Duration;
-    assert_eq!(deadline_secs(Duration::from_millis(1200)), 2);
-    assert_eq!(deadline_secs(Duration::from_millis(200)), 1);
-    assert_eq!(deadline_secs(Duration::ZERO), 1);
-    assert_eq!(deadline_secs(Duration::from_secs(30)), 30);
+/// A fresh raw connection to read the engine's own view of what is running.
+async fn probe_conn(h: &str, p: i32) -> mysql_async::Conn {
+    let opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname(h.to_string())
+        .tcp_port(p as u16)
+        .user(Some("root"))
+        .prefer_socket(false);
+    mysql_async::Conn::new(opts).await.expect("probe connection")
+}
+
+/// Whether a statement whose text contains `needle` is running, ignoring the
+/// `SHOW FULL PROCESSLIST` that asks.
+async fn running(probe: &mut mysql_async::Conn, needle: &str) -> bool {
+    use mysql_async::prelude::Queryable;
+    let rows: Vec<mysql_async::Row> = probe.query("SHOW FULL PROCESSLIST").await.unwrap();
+    rows.iter().any(|r| {
+        let info: Option<String> = r.get_opt("Info").and_then(|v| v.ok()).flatten();
+        info.is_some_and(|i| i.contains(needle) && !i.contains("SHOW FULL PROCESSLIST"))
+    })
+}
+
+/// Drop `fut` after 3 s, as `port_impl::run_bounded` does at `limits.timeout`,
+/// having seen the statement running; then assert the engine ended it.
+async fn assert_dropped_statement_stops<F>(h: &str, p: i32, needle: &str, fut: F)
+where
+    F: std::future::Future,
+{
+    let mut probe = probe_conn(h, p).await;
+    let watch = async {
+        let mut seen = false;
+        for _ in 0..25 {
+            if running(&mut probe, needle).await {
+                seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        seen
+    };
+    let (outer, seen) = tokio::join!(tokio::time::timeout(Duration::from_secs(3), fut), watch);
+    assert!(outer.is_err(), "the statement must outlive the 3 s outer timeout");
+    assert!(seen, "the probe never saw `{needle}` running, so it cannot see it stop");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while running(&mut probe, needle).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "`{needle}` still runs on StarRocks 10 s after egret dropped it"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    eprintln!("ran: `{needle}` stopped after the drop");
 }
 ```
 
-- [ ] **Step 2: run it, expect a compile failure** (`cannot find function deadline_secs`).
-
-```bash
-cargo test -p egret-query --lib deadline_rounds_up
-```
-
-- [ ] **Step 3: write the failing live test** in `crates/egret-query/tests/connector_starrocks.rs`, using the file's `parse()` / `spec()` helpers. Put Task 1's `LONG_SQL` in the constant.
+The tests (spec §1.4):
 
 ```rust
-/// The engine, not egret's outer wrapper, ends a statement at `limits.timeout`.
-/// No `tokio::time::timeout` sits at the deadline here, so only the session
-/// variable can stop it; the 30 s guard exists so a regression fails instead
-/// of hanging.
+/// Spec 2026-10-17 §1.2: dropping the future at the deadline closes the
+/// connection, and StarRocks 4.1.6 cancels the statement on its own. This pins
+/// that, so an upgrade that changes it goes red instead of making the docs in
+/// `handlers/sql.rs` and `routes.rs` false again.
 #[tokio::test]
-async fn starrocks_stops_a_statement_at_limits_timeout() {
-    const LONG_SQL: &str = "<Task 1's LONG_SQL, containing 'egret-deadline-probe'>";
+async fn starrocks_cancels_a_select_when_egret_drops_it() {
     let Some((h, p)) = parse() else {
         eprintln!("skip");
         return;
@@ -137,108 +173,80 @@ async fn starrocks_stops_a_statement_at_limits_timeout() {
     let c = build_connector(&spec(&h, p));
     let limits = Limits {
         max_rows: 10,
-        timeout: Duration::from_secs(2),
+        timeout: Duration::from_secs(3),
     };
-    let started = std::time::Instant::now();
-    let out = tokio::time::timeout(
-        Duration::from_secs(30),
-        c.execute(LONG_SQL, &limits, CancellationToken::new()),
+    let sql = "SELECT count(*) AS n, 'egret-deadline-probe' AS marker \
+               FROM TABLE(generate_series(1, 100000000000))";
+    assert_dropped_statement_stops(
+        &h,
+        p,
+        "egret-deadline-probe",
+        c.execute(sql, &limits, CancellationToken::new()),
     )
-    .await
-    .expect("the engine must end the statement long before 30 s");
-    let err = out.expect_err("a statement over its deadline must fail");
-    assert!(
-        matches!(err, egret_query::execution::EngineError::Engine(_)),
-        "got {err:?}"
-    );
-    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    .await;
+}
 
-    // The engine's view: the probe is no longer running.
-    let url = format!("mysql://root@{h}:{p}");
-    let mut probe = mysql_async::Conn::new(mysql_async::Opts::from_url(&url).unwrap())
-        .await
-        .unwrap();
-    let infos: Vec<Option<String>> = mysql_async::prelude::Queryable::query_map(
-        &mut probe,
-        "SHOW FULL PROCESSLIST",
-        |row: mysql_async::Row| row.get_opt::<Option<String>, _>("Info").and_then(|r| r.ok()).flatten(),
+/// The same for an `INSERT … SELECT`, which StarRocks bounds by
+/// `insert_timeout` (default 14400 s), not `query_timeout` (spec §1.2).
+#[tokio::test]
+async fn starrocks_cancels_an_insert_when_egret_drops_it() {
+    let Some((h, p)) = parse() else {
+        eprintln!("skip");
+        return;
+    };
+    let c = build_connector(&spec(&h, p));
+    let limits = Limits {
+        max_rows: 10,
+        timeout: Duration::from_secs(30),
+    };
+    for ddl in [
+        "CREATE DATABASE IF NOT EXISTS egret_drop_probe",
+        "CREATE TABLE IF NOT EXISTS egret_drop_probe.t (n BIGINT) \
+         DISTRIBUTED BY HASH(n) BUCKETS 1 PROPERTIES('replication_num'='1')",
+    ] {
+        c.execute(ddl, &limits, CancellationToken::new()).await.unwrap();
+    }
+    let sql = "INSERT INTO egret_drop_probe.t \
+               SELECT count(*) FROM TABLE(generate_series(1, 100000000000))";
+    assert_dropped_statement_stops(
+        &h,
+        p,
+        "INSERT INTO egret_drop_probe.t",
+        c.execute(sql, &limits, CancellationToken::new()),
     )
-    .await
-    .unwrap();
-    assert!(
-        !infos.iter().flatten().any(|i| i.contains("egret-deadline-probe")
-            && !i.contains("SHOW FULL PROCESSLIST")),
-        "the probe is still running on the engine: {infos:?}"
-    );
-    eprintln!("ran: ended after {:?}", started.elapsed());
+    .await;
 }
 ```
 
-If the `query_map` closure does not compile against the pinned `mysql_async`, read `Info` with `row.get::<Option<String>, _>("Info")` inside a `query::<mysql_async::Row, _>` loop instead; the assertion stays the same.
+If `OptsBuilder`, `get_opt` or `query` do not compile against the pinned `mysql_async`, adapt the call shape in the helpers only; the assertions stay the same.
 
-- [ ] **Step 4: run it, expect FAIL** (the 30 s guard fires: `the engine must end the statement long before 30 s`).
+- [ ] **Step 2: run them, expect PASS** (the behaviour holds today), with `ran:` lines in the output for both.
 
 ```bash
-EGRET_TEST_STARROCKS_URL=mysql://127.0.0.1:9131 \
-  cargo test -p egret-query --test connector_starrocks starrocks_stops_a_statement -- --nocapture
-```
-
-Then `$SR -e "SHOW FULL PROCESSLIST"` and `KILL <id>` any leftover probe so the next run starts clean.
-
-- [ ] **Step 5: implement** in `starrocks.rs`, beside `switch_identity`:
-
-```rust
-/// `limits.timeout` as StarRocks' whole-second session deadline: rounded UP,
-/// so the engine never ends a statement before egret stops waiting for it,
-/// and never 0, which StarRocks does not accept as "no limit".
-fn deadline_secs(timeout: Duration) -> u64 {
-    let whole = timeout.as_secs();
-    let rounded = if timeout.subsec_nanos() > 0 { whole + 1 } else { whole };
-    rounded.max(1)
-}
-
-/// Tell the engine the deadline egret already enforces by dropping the
-/// future (spec 2026-10-17 §1). Dropping the MySQL connection tells
-/// StarRocks nothing, so without this a timed-out statement runs to
-/// completion. The connection is fresh per call and disconnected after
-/// it, so the variable reaches no other statement. A failure here fails
-/// the call: running without a deadline is the bug this closes.
-async fn bound_session(conn: &mut mysql_async::Conn, timeout: Duration) -> Result<(), EngineError> {
-    let n = deadline_secs(timeout);
-    conn.query_drop(format!("SET query_timeout = {n}, insert_timeout = {n}"))
-        .await
-        .map_err(|e| EngineError::Engine(e.to_string()))
-}
-```
-
-If Task 1 found no `insert_timeout`, the statement is `SET query_timeout = {n}` and the doc says why. In both `execute` and `execute_with_params`, after the `if let Some(u) = &self.execute_as { … }` block, add:
-
-```rust
-        bound_session(&mut conn, limits.timeout).await?;
-```
-
-Make sure `Duration` is imported (`use std::time::Duration;` is already used by `describe`; reuse it).
-
-- [ ] **Step 6: run both tests, expect PASS**; the live output must contain `ran: ended after`.
-
-```bash
-cargo test -p egret-query --lib deadline_rounds_up
 EGRET_TEST_STARROCKS_URL=mysql://127.0.0.1:9131 \
   cargo test -p egret-query --test connector_starrocks -- --nocapture
 ```
 
-The whole `connector_starrocks` file runs, so the existing tests (identity switch, `COM_RESET_CONNECTION`) prove the extra `SET` broke nothing.
+The whole file runs, so the existing tests still pass too.
 
-- [ ] **Step 7: mutation.** Comment out the `bound_session` call in `execute` only; rerun the live test; expect FAIL. Restore it; check `git diff` shows the call is back; rerun; expect PASS. Record both results for the report.
+- [ ] **Step 3: show the test can fail (probe mutation, spec §1.4).** In the SELECT test only, change the `needle` argument to `"egret-never-in-info"`; rerun; expect FAIL with `the probe never saw`. Restore it; check `git diff` on the test shows the original needle; rerun; expect PASS. Record both outputs for the report.
 
-- [ ] **Step 8: correct the docs that state the old behaviour.**
-  - `starrocks.rs:300-305`: replace the "**Not yet timeout-bound.**" paragraph with: the engine ends the statement at `limits.timeout` through `bound_session`; callers still wrap the future so egret stops waiting at the same instant.
-  - `handlers/sql.rs` `cancel()` doc, the StarRocks bullet (`:557-565`): StarRocks is bounded by `query_timeout` set from the same `Limits::timeout`, like Trino's `query_max_run_time`; a real cancel before the deadline still needs `KILL QUERY` (group B). Delete the sentence about the Data API path failing queries.
-  - `handlers/sql.rs:579-582` error text: `On Trino it is still bounded by the \`query_max_run_time\` this task sent with it, and on StarRocks by the \`query_timeout\` this task's connector set`. Keep `QueryExecPort` and `StarRocks` in the text: `cancel_refuses_rather_than_claiming_to_have_stopped_the_statement` (`:1428`) asserts both.
-  - `routes.rs:2225-2231`: update the quote to the new text and change the last sentence to: a complete kill mechanism would still leave a StarRocks statement running until its `query_timeout`.
-  - `serving/router.rs:45-49`: `neither … reads limits.timeout itself, and StarRocks sets no socket timeout at all` becomes: Trino sends `query_max_run_time` and StarRocks sets `query_timeout` from the same `limits.timeout`, so the engine also stops the statement; the wrapper is still what releases egret.
+- [ ] **Step 4: correct the texts** (spec §1.1 lists them; §1.3 says what they become). Each states what was measured, with the date and engine version, and points at the two tests by name:
+  - `starrocks.rs:300-305`: replace the "**Not yet timeout-bound.**" paragraph: `limits.timeout` is still unread here; the caller's outer `tokio::time::timeout` drops this future, which closes the connection, and StarRocks 4.1.6 cancels the statement on its own (measured 2026-10-17, pinned by `starrocks_cancels_a_select_when_egret_drops_it`). Keep the obligation that a caller MUST supply the outer wrapper.
+  - `handlers/sql.rs` `cancel()` doc, the StarRocks bullet (`:557-565`): StarRocks, like Trino, does not leave an abandoned statement running: the worker's drop closes the connection and the engine cancels it (measured 2026-10-17). What this handler still cannot do is stop a statement **before** its budget, which needs a port verb and `KILL QUERY` (group B). Delete the sentence that the session variable would fail Data API queries, and the claim that a timed-out statement runs to completion.
+  - `handlers/sql.rs:579-582` error text: replace `on StarRocks that connector does not read \`Limits::timeout\` at all, so it is not bounded by anything` with `on StarRocks it ends when the connection is dropped at that budget`. Keep `QueryExecPort` and `StarRocks` in the text: `cancel_refuses_rather_than_claiming_to_have_stopped_the_statement` (`:1428`) asserts both.
+  - `routes.rs:2225-2231`: update the quote to the new error text, and replace the last sentence (*"even a complete kill mechanism would leave a statement running on StarRocks with nothing to stop it"*) with: a kill still cannot reach `egret.sql` before its budget, because the handler has no way to stop its statement early; an abandoned statement does not keep running on StarRocks 4.1.6 (measured 2026-10-17).
+  - `serving/router.rs:45-49`: keep `neither … reads limits.timeout itself`, and replace `and StarRocks sets no socket timeout at all` with a sentence that dropping the future closes the connection, which StarRocks 4.1.6 answers by cancelling the statement (measured 2026-10-17); Trino additionally bounds the coordinator with `query_max_run_time` (the next bullet already says so).
 
-- [ ] **Step 9: format, lint, and run the crates whose text changed.**
+Then check nothing still states the old behaviour:
+
+```bash
+rg -n "not bounded by anything|runs to completion on the engine|run the full hour here on StarRocks|sets no socket timeout|with nothing to stop it" crates
+```
+
+Expected: no output. If a hit remains elsewhere (for example `handlers/sql.rs:503-504`, *"runs the full hour here on StarRocks"*), correct it the same way and list it in the report.
+
+- [ ] **Step 5: format, lint, run the crates whose text changed.**
 
 ```bash
 cargo fmt --all
@@ -246,21 +254,21 @@ cargo clippy -p egret-query -p egret-workflow -p egret-dataapi --all-targets -- 
 cargo test -p egret-workflow --lib handlers::sql
 ```
 
-- [ ] **Step 10: commit.**
+- [ ] **Step 6: commit.**
 
 ```bash
 git add crates/egret-query crates/egret-workflow/src/worker/handlers/sql.rs crates/egret-workflow/src/routes.rs crates/egret-dataapi/src/serving/router.rs
-git commit -m "fix(query): StarRocks stops a statement at limits.timeout
+git commit -m "fix(workflow): a timed-out StarRocks statement is cancelled, say so
 
-Each connection sets query_timeout (and insert_timeout) from the
-deadline every caller already enforces by dropping the future, so a
-statement egret has given up on no longer runs to completion on the
-engine.
+Measured on StarRocks 4.1.6: dropping the connector future at the
+deadline closes the connection and the engine cancels the statement.
+Correct the docs and the cancel() message that said it runs to
+completion, and pin the behaviour with two engine-gated tests.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-**Done when:** the live test passes with `ran:` in its output, fails with the call removed, and no doc still says StarRocks ignores `limits.timeout` (`rg -n "not bounded by anything|unread here|sets no socket timeout" crates` finds nothing).
+**Done when:** both live tests pass with `ran:` in the output, the probe mutation fails as expected, and the `rg` above finds nothing.
 
 ---
 
@@ -384,6 +392,6 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 - [ ] **Step 5: clean up the engine.** `docker rm -f egret-grpa-starrocks`.
-- [ ] **Step 6: push and open the PR** (title `fix(workflow): StarRocks honours limits.timeout; refuse http()`), body listing the measurements from Task 1, the mutation result from Task 2, the gate counts, and ending with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Merge follows the autonomy rules (admin-merge when the local gate is green).
+- [ ] **Step 6: push and open the PR** (title `fix(workflow): StarRocks cancels a dropped statement (docs + test); refuse http()`), body listing the measurements from Task 1, the probe-mutation result from Task 2, the gate counts, and ending with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Merge follows the autonomy rules (admin-merge when the local gate is green).
 
 **Done when:** the PR is open with a green local gate recorded in its body.
