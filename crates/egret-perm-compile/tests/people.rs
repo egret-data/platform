@@ -1114,10 +1114,12 @@ async fn clearances_answer_for_engines_and_for_egret_per_gate() {
         )
     );
     assert_eq!(both(&uc, b), (groups_only.clone(), not_cleared.clone()));
+    // Cleared in egret through a required group; engines enforce only the
+    // gate's role half, and say so.
     assert_eq!(
         both(&uc, c),
         (
-            engines_no(Value::Null),
+            engines_no(json!("groups_not_enforced")),
             json!({"kind": "cleared", "via": {"kind": "group", "name": o.n("g2")}, "scope": null})
         )
     );
@@ -1147,8 +1149,11 @@ async fn clearances_answer_for_engines_and_for_egret_per_gate() {
         )
     );
     assert_eq!(
-        both(&g2, c).1,
-        json!({"kind": "cleared", "via": {"kind": "itself"}, "scope": null})
+        both(&g2, c),
+        (
+            engines_no(json!("groups_not_enforced")),
+            json!({"kind": "cleared", "via": {"kind": "itself"}, "scope": null})
+        )
     );
     let r1 = principal(&e, &format!("/perm/people/roles/{}", o.n("r1"))).await;
     assert_eq!(
@@ -1279,4 +1284,72 @@ async fn principal_reads_are_gated_on_policy_read_and_reveal_only_identity_and_m
     ] {
         assert!(!text.contains(leak), "{leak} in a response");
     }
+}
+
+#[tokio::test]
+async fn platform_admin_clears_in_egret_only_when_held_at_platform_scope() {
+    let Some(e) = env().await else { return };
+    let o = org(&e).await;
+    let p = &e.db.pool;
+    let a = gate(p, &o.n("cladm"), &[o.n("r1")], &[]).await;
+    let admin_role: Uuid = sqlx::query_scalar(
+        "SELECT id FROM roles WHERE scope = 'platform' AND name = 'platform_admin'",
+    )
+    .fetch_one(p)
+    .await
+    .expect("platform_admin");
+    // A workspace-scope role that merely has the name, held in W: no bypass
+    // (`egret_auth::pdp`: `is_platform_admin` needs a platform-scoped grant).
+    let ws_admin: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (scope, name) VALUES ('workspace', 'platform_admin') \
+         ON CONFLICT (scope, name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+    )
+    .fetch_one(p)
+    .await
+    .expect("workspace platform_admin");
+
+    let boss = insert_user(
+        p,
+        &format!("boss_{}@egret.local", o.t),
+        "Boss",
+        Some(&o.n("boss")),
+    )
+    .await;
+    insert_grant(
+        p, "user", boss, admin_role, "platform", None, "allow", false,
+    )
+    .await;
+    let pretender = insert_user(
+        p,
+        &format!("pre_{}@egret.local", o.t),
+        "Pre",
+        Some(&o.n("pre")),
+    )
+    .await;
+    insert_grant(
+        p,
+        "user",
+        pretender,
+        ws_admin,
+        "workspace",
+        Some(o.ws),
+        "allow",
+        false,
+    )
+    .await;
+
+    let body = principal(&e, &format!("/perm/people/users/{boss}")).await;
+    let c = clearance(&body, a);
+    assert_eq!(
+        c["egret"],
+        json!({"kind": "cleared", "via": {"kind": "role", "name": "platform_admin"}, "scope": {"type": "platform"}})
+    );
+    assert_eq!(
+        c["engines"],
+        json!({"kind": "not_cleared", "because": null}),
+        "engines have no bypass"
+    );
+
+    let body = principal(&e, &format!("/perm/people/users/{pretender}")).await;
+    assert_eq!(clearance(&body, a)["egret"], json!({"kind": "not_cleared"}));
 }

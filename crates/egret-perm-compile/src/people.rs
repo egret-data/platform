@@ -353,7 +353,10 @@ pub enum MembershipScope {
 
 /// A principal, `(kind, ref)` exactly as a grant or rule stores it, that
 /// stands for the principal being read (spec P4). The client lists a grant or
-/// rule when one of its principals equals an entry byte for byte.
+/// rule when one of its principals equals an entry byte for byte — except a
+/// `workspace_members` ref, which is compared as a parsed UUID: writes store
+/// the canonical form (`crate::principal_refs`), but a non-canonical ref stored
+/// before that is kept as written and still applies on engines.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StandsFor {
@@ -411,11 +414,33 @@ pub enum EngineClearance {
     /// deny excepts them (`clearance.rs:33-58`, `members.rs:146-160`).
     Cleared { role: String },
     /// Not excepted; `because` says why when they hold a required role in a
+    /// way engines do not apply, or are in a required group (whose half of
+    /// the gate engines never enforce).
     /// way engines do not apply.
-    NotCleared { because: Option<NotOnEngines> },
+    NotCleared {
+        because: Option<EngineNotClearedReason>,
+    },
     /// The gate names only groups, so nothing is compiled for it
     /// (`clearance.rs:266-276`; measured, live doc §1.1 C6).
     NotEnforcedGroupsOnly,
+}
+
+/// Why engines do not clear a principal egret may clear.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineNotClearedReason {
+    /// A required role held through a group ([`NotOnEngines::HeldThroughGroup`]).
+    HeldThroughGroup,
+    /// A required role held directly but expired ([`NotOnEngines::Expired`]).
+    Expired,
+    /// A required role held directly, but no username ([`NotOnEngines::NoUsername`]).
+    NoUsername,
+    /// In a required group (or, on a group's page, the group itself is
+    /// required): the gate's group half compiles to nothing on engines
+    /// (`clearance.rs:61-70`; D7: a Ranger item naming a group matches nobody),
+    /// so only its roles are enforced there. Given only when no reason above
+    /// applies.
+    GroupsNotEnforced,
 }
 
 /// Whether egret's own object-access check clears a principal for a gated
@@ -1000,16 +1025,18 @@ pub async fn read_user_via(
                 match g.required_roles.iter().find(|r| holds.contains(*r)) {
                     Some(role) if has_username => EngineClearance::Cleared { role: role.clone() },
                     Some(_) => EngineClearance::NotCleared {
-                        because: Some(NotOnEngines::NoUsername),
+                        because: Some(EngineNotClearedReason::NoUsername),
                     },
                     None => EngineClearance::NotCleared {
                         because: if direct
                             .iter()
                             .any(|r| r.expired && g.required_roles.contains(&r.role_name))
                         {
-                            expired
+                            Some(EngineNotClearedReason::Expired)
                         } else if clearing_row(&through, &g.required_roles).is_some() {
-                            through_group
+                            Some(EngineNotClearedReason::HeldThroughGroup)
+                        } else if group_ids.iter().any(|gid| g.required_groups.contains(gid)) {
+                            Some(EngineNotClearedReason::GroupsNotEnforced)
                         } else {
                             None
                         },
@@ -1208,7 +1235,13 @@ pub async fn read_group_via(
                 EngineClearance::NotEnforcedGroupsOnly
             } else {
                 EngineClearance::NotCleared {
-                    because: held_role.map(|_| NotOnEngines::HeldThroughGroup),
+                    because: if held_role.is_some() {
+                        Some(EngineNotClearedReason::HeldThroughGroup)
+                    } else if g.required_groups.contains(&gid) {
+                        Some(EngineNotClearedReason::GroupsNotEnforced)
+                    } else {
+                        None
+                    },
                 }
             };
             let egret = if g.required_groups.contains(&gid) {

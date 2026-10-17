@@ -214,6 +214,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::people::ClearanceFact,
         crate::people::EngineClearance,
         crate::people::EgretClearance,
+        crate::people::EngineNotClearedReason,
         people::ExplainPrincipalRequest,
         people::ExplainPrincipalRef,
         people::ExplainPrincipalResponse,

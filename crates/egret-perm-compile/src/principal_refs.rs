@@ -70,6 +70,11 @@
 //!   not a uuid, or names no workspace, to nobody. (No authoring path may write
 //!   one today — `validate_grant_shape` refuses the kind — but a ref that names
 //!   nothing is still named as such, so the two refusals stay distinguishable.)
+//!   An accepted ref is rewritten to the canonical `Uuid` spelling, so it equals
+//!   what a People page's `standsFor` names byte for byte. A non-canonical ref
+//!   already STORED is not rewritten (R5) and survives a patch unchanged (R6):
+//!   it still applies on engines, and a client matching `standsFor` must compare
+//!   a `workspace_members` ref as a parsed UUID to find it.
 //!
 //! # What this does NOT do
 //!
@@ -190,8 +195,9 @@ pub(crate) async fn resolve_principal_refs(
 /// stored-row report ([`unresolved_principals_via`]) apply.
 enum Lookup {
     /// It names someone egret knows. `canonical` is the spelling to store: the
-    /// ref itself for every kind but `user`, whose stored username can differ
-    /// from the ref in case.
+    /// ref itself for `group` and `role`; a `user`'s stored username, which can
+    /// differ from the ref in case; a `workspace_members` id in its canonical
+    /// (lowercase, hyphenated) form.
     Found { canonical: String },
     /// It names nobody; the reason, as a sentence an author can act on.
     Unknown(String),
@@ -253,9 +259,20 @@ async fn lookup(conn: &mut PgConnection, p: &Principal) -> Result<Lookup, PermHt
                     .fetch_one(&mut *conn)
                     .await
                     .map_err(PermHttpError::db)?;
-            Ok(unknown_if(!found, p, || {
-                "no workspace has this id".to_string()
-            }))
+            // Canonical is `id.to_string()` — lowercase, hyphenated. `parse`
+            // accepts uppercase, unhyphenated, braced and `urn:uuid:` forms, and
+            // the compiler expands each of them, but a principal's People page
+            // (`crate::people`'s `standsFor`) names a workspace in the canonical
+            // form and a client matches refs byte for byte (spec P4). Stored
+            // verbatim, such a grant would apply on engines and be missing from
+            // the page.
+            if found {
+                Ok(Lookup::Found {
+                    canonical: id.to_string(),
+                })
+            } else {
+                Ok(Lookup::Unknown("no workspace has this id".to_string()))
+            }
         }
     }
 }
@@ -546,6 +563,65 @@ fn dedup_keeping_first(list: &mut Vec<Principal>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// People & groups Task 3 review: a workspace ref in any form `Uuid`
+    /// parses is stored canonical, so it matches `standsFor` byte for byte.
+    #[tokio::test]
+    async fn a_workspace_ref_is_stored_in_its_canonical_form() {
+        let Some(dsn) = egret_test_db::url().await else {
+            return;
+        };
+        let db = egret_metastore::Db::connect(&dsn, 2)
+            .await
+            .expect("connect");
+        db.migrate().await.expect("migrate");
+        let slug = format!("canon-{}", &Uuid::new_v4().simple().to_string()[..12]);
+        let ws: Uuid =
+            sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1, $1) RETURNING id")
+                .bind(&slug)
+                .fetch_one(&db.pool)
+                .await
+                .expect("workspace");
+        let mut conn = db.pool.acquire().await.expect("conn");
+        let forms = [
+            ws.to_string().to_uppercase(),
+            ws.simple().to_string(),
+            format!("{{{ws}}}"),
+            ws.urn().to_string(),
+            ws.to_string(),
+        ];
+        for form in forms {
+            let mut set = PrincipalSet {
+                include: vec![Principal {
+                    kind: PrincipalKind::WorkspaceMembers,
+                    r#ref: form.clone(),
+                }],
+                exclude: Vec::new(),
+            };
+            resolve_principal_refs(&mut conn, "principals", &mut set, None)
+                .await
+                .unwrap_or_else(|e| panic!("{form}: {e}"));
+            assert_eq!(set.include[0].r#ref, ws.to_string(), "{form}");
+        }
+        // Two spellings of one workspace collapse to one entry.
+        let mut set = PrincipalSet {
+            include: vec![
+                Principal {
+                    kind: PrincipalKind::WorkspaceMembers,
+                    r#ref: ws.simple().to_string(),
+                },
+                Principal {
+                    kind: PrincipalKind::WorkspaceMembers,
+                    r#ref: ws.to_string(),
+                },
+            ],
+            exclude: Vec::new(),
+        };
+        resolve_principal_refs(&mut conn, "principals", &mut set, None)
+            .await
+            .expect("resolve");
+        assert_eq!(set.include.len(), 1);
+    }
 
     fn user(r: &str) -> Principal {
         Principal {
