@@ -28,7 +28,7 @@ import {
 } from "@/routes/governance/people/reach";
 import { appliedText } from "@/routes/governance/people/tabs/OverviewTab";
 
-const GROUP_TITLE: Record<ReachGroup, string> = {
+export const GROUP_TITLE: Record<ReachGroup, string> = {
   direct: "Directly",
   group: "Through a group",
   role: "Through a role",

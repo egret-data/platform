@@ -39,6 +39,10 @@ const MARKERS = [
   ["src/routes/governance/people/tabs/OverviewTab.tsx", "a grant naming this group allocates one at compile"],
   // A role or workspace a group holds, in "How it reaches".
   ["src/routes/governance/people/tabs/PermissionsTab.tsx", ", held by group "],
+  // `otherRulesText`.
+  ["src/routes/governance/people/tabs/MasksFiltersTab.tsx", " other rules apply to everyone they do not exempt; "],
+  // `GROUPS_ONLY_GATE`.
+  ["src/routes/governance/people/tabs/ClearancesTab.tsx", "Engines do not enforce this gate (it names only groups)"],
   // The prefix a uuid ref may carry.
   ["src/routes/governance/people/reach.ts", "urn:uuid:"],
 ];

@@ -61,12 +61,15 @@ export const ACTIONS_CELL = "sticky right-0 w-24 bg-background";
 export function EgretGrantsOnlyNote({
   explainLabel,
   explainTo,
+  subject = "egret grants",
 }: {
   explainLabel: string | null;
   /** When set, `explainLabel` is a link there (a People page's Check access tab). */
   explainTo?: string;
+  /** What the list holds: `egret grants` (the default) or `egret rules` (P10). */
+  subject?: string;
 }) {
-  const lead = "Lists egret grants. Hand-written and egret-seeded engine policies are not listed here";
+  const lead = `Lists ${subject}. Hand-written and egret-seeded engine policies are not listed here`;
   if (!explainLabel) return <p className="text-xs text-muted-foreground">{`${lead}.`}</p>;
   return (
     <p className="text-xs text-muted-foreground">

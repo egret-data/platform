@@ -11,6 +11,8 @@ import { usePrincipal, type PageKind, type Principal } from "@/routes/governance
 import { PEOPLE_BASE, principalParam } from "@/routes/governance/people/peopleUrl";
 import { OverviewTab } from "@/routes/governance/people/tabs/OverviewTab";
 import { PermissionsTab } from "@/routes/governance/people/tabs/PermissionsTab";
+import { MasksFiltersTab } from "@/routes/governance/people/tabs/MasksFiltersTab";
+import { ClearancesTab } from "@/routes/governance/people/tabs/ClearancesTab";
 
 export type PrincipalTab = "overview" | "permissions" | "masks" | "clearances" | "check";
 
@@ -57,7 +59,7 @@ function Missing({ kind, name }: { kind: PageKind; name: string }) {
   );
 }
 
-/** A tab whose content a later change of this sub-project builds (plan Tasks 8–10). */
+/** A tab whose content a later change of this sub-project builds (plan Task 10). */
 function NotBuilt() {
   return <p className="text-sm text-muted-foreground">This tab is not built yet.</p>;
 }
@@ -136,6 +138,8 @@ function PrincipalTabs({ principal, onEdit }: { principal: Principal; onEdit: (g
   const panel = (t: PrincipalTab): ReactNode => {
     if (t === "overview") return <OverviewTab principal={principal} />;
     if (t === "permissions") return <PermissionsTab principal={principal} onEdit={onEdit} />;
+    if (t === "masks") return <MasksFiltersTab principal={principal} />;
+    if (t === "clearances") return <ClearancesTab principal={principal} />;
     return <NotBuilt />;
   };
 
