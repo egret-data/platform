@@ -89,7 +89,9 @@ use crate::trigger::{
 };
 
 mod error;
+mod people;
 pub use error::PermHttpError;
+pub use people::{PeoplePage, PeopleQuery, PersonKind, PersonRow};
 
 /// State for the `perm` router. Both stores must reach the SAME physical
 /// Postgres database — `perm.*` and `policy.*` are two schemas in it, and the
@@ -129,6 +131,7 @@ pub fn perm_router() -> Router<PermState> {
             "/perm/unresolved-principals",
             get(list_unresolved_principals),
         )
+        .route("/perm/people", get(people::list_people))
         .route("/perm/preview", post(preview))
         .route("/perm/explain", post(explain))
         .route("/perm/compile/{service_id}", post(compile))
@@ -171,6 +174,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         delete_rule,
         list_overlaps,
         list_unresolved_principals,
+        people::list_people,
         preview,
         explain,
         compile,
@@ -183,6 +187,9 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::overlap::StoredOverlap,
         crate::overlap::StoredMember,
         crate::principal_refs::UnresolvedPrincipal,
+        PeoplePage,
+        PersonRow,
+        PersonKind,
         NewGrant,
         NewRule,
         PreviewRequest,

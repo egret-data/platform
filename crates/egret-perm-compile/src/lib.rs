@@ -88,6 +88,7 @@ pub mod lineage;
 mod lineage_compile_tests;
 pub(crate) mod members;
 pub mod migrate;
+pub(crate) mod people;
 // SP4d-4 Task 3: overlapping mask/row-filter rules across the tag/resource
 // boundary, named by rule, answered 409 — see that module's own doc comment.
 pub mod overlap;

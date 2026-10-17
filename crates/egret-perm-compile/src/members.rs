@@ -172,24 +172,12 @@ pub(crate) async fn role_usernames(
     }
     let wanted: Vec<String> = out.keys().cloned().collect();
 
-    let holders: Vec<(String, Uuid)> = sqlx::query_as(
-        "SELECT r.name, ag.principal_id \
-           FROM access_grants ag \
-           JOIN roles r ON r.id = ag.role_id \
-          WHERE ag.principal_type = 'user' \
-            AND r.name = ANY($1) \
-            AND ag.effect = 'allow' \
-            AND (ag.expires_at IS NULL OR ag.expires_at > now())",
-    )
-    .bind(&wanted)
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(|e| CompileError::Db(e.to_string()))?;
+    let holders = role_holders_via(conn, &wanted).await?;
 
     let ids: Vec<Uuid> = {
         let mut set: BTreeSet<Uuid> = BTreeSet::new();
-        for (_, id) in &holders {
-            set.insert(*id);
+        for h in &holders {
+            set.insert(h.user_id);
         }
         set.into_iter().collect()
     };
@@ -197,7 +185,11 @@ pub(crate) async fn role_usernames(
         .await
         .map_err(|e| CompileError::Db(e.to_string()))?;
 
-    for (role, user_id) in &holders {
+    for RoleHolderRow {
+        role_name: role,
+        user_id,
+    } in &holders
+    {
         match names.get(user_id) {
             Some(name) => out.entry(role.clone()).or_default().push(name.clone()),
             None => tracing::warn!(
@@ -216,23 +208,125 @@ pub(crate) async fn role_usernames(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// The membership reads (People & groups, spec §4.1)
+// ---------------------------------------------------------------------------
+//
+// **One definition of membership.** These three reads are what the compiler
+// expands a `role`, a `workspace_members` and a non-`public` `group` principal
+// with, and they are the ONLY place that answers "who holds this role", "who
+// is a member of this workspace", "who is in this group" for anything that
+// claims to say what engines enforce: `crate::people` (Governance's People
+// pages) calls the same functions rather than a copy of their SQL, so a page
+// cannot list a member the compiled policy does not name, or miss one it does.
+// Change a predicate here and both move together.
+
+/// One role-holding row: which role by NAME (the key a `role` principal
+/// stores; one name can exist at platform AND workspace scope, and both count)
+/// and the holding user.
+#[derive(sqlx::FromRow)]
+pub(crate) struct RoleHolderRow {
+    pub(crate) role_name: String,
+    pub(crate) user_id: Uuid,
+}
+
 /// One workspace-membership row as read for expansion: who, and the username
 /// the engine will see (NULL until it is minted).
 #[derive(sqlx::FromRow)]
-struct MemberRow {
-    workspace_id: Uuid,
-    user_id: Uuid,
-    username: Option<String>,
+pub(crate) struct MemberRow {
+    pub(crate) workspace_id: Uuid,
+    pub(crate) user_id: Uuid,
+    pub(crate) username: Option<String>,
 }
 
 /// One group-membership row as read for expansion (J-F3 Task 1b): which group
 /// by NAME — the key a principal stores — who, and their username (NULL until
 /// minted).
 #[derive(sqlx::FromRow)]
-struct GroupMemberRow {
-    group_name: String,
-    user_id: Uuid,
-    username: Option<String>,
+pub(crate) struct GroupMemberRow {
+    pub(crate) group_name: String,
+    pub(crate) user_id: Uuid,
+    pub(crate) username: Option<String>,
+}
+
+/// The live holders of each role NAME in `roles`: users only (a group holding
+/// a role is not expanded — module doc, narrowing 1), `effect = 'allow'` only,
+/// not expired, at any scope ([`role_usernames`]' doc says why scope-free).
+/// One row per grant, so a user holding a role twice appears twice; callers
+/// deduplicate. A holder with no `users.username` is still a row here — it is
+/// [`role_usernames`] that leaves them unnamed, because naming needs one.
+pub(crate) async fn role_holders_via(
+    conn: &mut sqlx::PgConnection,
+    roles: &[String],
+) -> Result<Vec<RoleHolderRow>, CompileError> {
+    if roles.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(
+        "SELECT r.name AS role_name, ag.principal_id AS user_id \
+           FROM access_grants ag \
+           JOIN roles r ON r.id = ag.role_id \
+          WHERE ag.principal_type = 'user' \
+            AND r.name = ANY($1) \
+            AND ag.effect = 'allow' \
+            AND (ag.expires_at IS NULL OR ag.expires_at > now())",
+    )
+    .bind(roles)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(e.to_string()))
+}
+
+/// The direct user members of each workspace in `ids`: the membership
+/// predicate, mirroring `egret_auth::grants::AccessGrantStore::grants_for`'s
+/// workspace arm plus `egret_auth::effective`'s `effect = 'allow'` filter —
+/// minus the `user_groups` join (module doc, narrowing 1).
+pub(crate) async fn workspace_members_via(
+    conn: &mut sqlx::PgConnection,
+    ids: &[Uuid],
+) -> Result<Vec<MemberRow>, CompileError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(
+        "SELECT ag.scope_id AS workspace_id, ag.principal_id AS user_id, \
+            u.username::text AS username \
+       FROM access_grants ag \
+       JOIN users u ON u.id = ag.principal_id \
+      WHERE ag.principal_type = 'user' \
+        AND ag.scope_type = 'workspace' \
+        AND ag.scope_id = ANY($1) \
+        AND ag.effect = 'allow' \
+        AND (ag.expires_at IS NULL OR ag.expires_at > now())",
+    )
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(e.to_string()))
+}
+
+/// The direct members of each group NAME in `names` (J-F3 Task 1b):
+/// `user_groups` → `groups.name`, the key a principal stores and the one
+/// `crate::principal_refs` validates against. No expiry exists on
+/// `user_groups`, and a nested group does not exist in egret.
+pub(crate) async fn group_members_via(
+    conn: &mut sqlx::PgConnection,
+    names: &[String],
+) -> Result<Vec<GroupMemberRow>, CompileError> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(
+        "SELECT g.name AS group_name, ug.user_id, u.username::text AS username \
+       FROM user_groups ug \
+       JOIN groups g ON g.id = ug.group_id \
+       JOIN users u ON u.id = ug.user_id \
+      WHERE g.name = ANY($1)",
+    )
+    .bind(names)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(e.to_string()))
 }
 
 /// What a model references that has to be enumerated: workspace ids, role
@@ -347,51 +441,16 @@ pub(crate) async fn expand_enumerated_principals(
     }
     let ids: Vec<Uuid> = wanted.iter().copied().collect();
 
-    // The membership predicate, mirroring `egret_auth::grants::
-    // AccessGrantStore::grants_for`'s workspace arm plus
-    // `egret_auth::effective`'s `effect = 'allow'` filter — minus the
-    // `user_groups` join (module doc, narrowing 1).
-    let rows: Vec<MemberRow> = if ids.is_empty() {
-        Vec::new()
-    } else {
-        sqlx::query_as(
-            "SELECT ag.scope_id AS workspace_id, ag.principal_id AS user_id, \
-                u.username::text AS username \
-           FROM access_grants ag \
-           JOIN users u ON u.id = ag.principal_id \
-          WHERE ag.principal_type = 'user' \
-            AND ag.scope_type = 'workspace' \
-            AND ag.scope_id = ANY($1) \
-            AND ag.effect = 'allow' \
-            AND (ag.expires_at IS NULL OR ag.expires_at > now())",
-        )
-        .bind(&ids)
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?
-    };
+    // The direct user members of every referenced workspace
+    // ([`workspace_members_via`]).
+    let rows = workspace_members_via(conn, &ids).await?;
 
     // J-F3 Task 1b: the direct members of every referenced group, by group
-    // NAME (`user_groups` → `groups.name`, the key a principal stores and the
-    // one `crate::principal_refs` validates against). Read alongside the
-    // workspace members so both MINT before the role read below (this
-    // function's doc comment, "the ORDER").
+    // NAME ([`group_members_via`]). Read alongside the workspace members so
+    // both MINT before the role read below (this function's doc comment, "the
+    // ORDER").
     let group_names: Vec<String> = wanted_groups.into_iter().collect();
-    let group_rows: Vec<GroupMemberRow> = if group_names.is_empty() {
-        Vec::new()
-    } else {
-        sqlx::query_as(
-            "SELECT g.name AS group_name, ug.user_id, u.username::text AS username \
-           FROM user_groups ug \
-           JOIN groups g ON g.id = ug.group_id \
-           JOIN users u ON u.id = ug.user_id \
-          WHERE g.name = ANY($1)",
-        )
-        .bind(&group_names)
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?
-    };
+    let group_rows = group_members_via(conn, &group_names).await?;
 
     // Mint a username for anyone who has none, so the policy names the
     // principal the engine will actually see rather than silently omitting
