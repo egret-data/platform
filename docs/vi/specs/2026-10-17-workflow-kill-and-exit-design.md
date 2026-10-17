@@ -70,12 +70,22 @@ Các execution được khoá theo thứ tự: execution trước, rồi các de
 - *Thứ tự khoá.* Ban đầu mục này ghi "parent trước, rồi child theo thứ tự id". Thứ tự id thuần có thể deadlock: một lần kill parent có thể giữ một descendant id thấp của một child trong khi chờ chính child đó. Thứ tự và việc chạy lại ở trên là cái đã xây.
 - *Bước 2* cũng gồm mọi run `Subflow`: kill ghi nó `KILLED` mà không chờ worker; child execution của nó bị kill bởi cascade.
 
+*Ghi chú, 2026-10-18 (review cuối):*
+- *Bước 1 không đọc lease, và nhận `RUNNING` hoặc `SUBMITTED`.* Ban đầu bước 1 ghi "có lease (`claimed_at IS NOT NULL`, state `RUNNING`)", và bước 2 ghi "không có lease (đang chờ được claim, …) → `KILLED`". Như đã xây, bước 1 nhận `RUNNING` hoặc `SUBMITTED`. Từ review cuối (I1), nó cũng không đọc lease nữa: mọi `Runnable` đang chạy sang `KILLING`, có lease hay không. Một run có worker đã chết và đã bị reaper thu hồi là `RUNNING` với `claimed_at` NULL, nhưng container của nó có thể vẫn đang chạy, vì W5a gắn lại vào container đó ở lần claim kế tiếp. Ghi run đó `KILLED` thì không ai được yêu cầu dừng nó, và orphan sweep không bao giờ xoá container `taskRunner.delete: false`. Giờ claim chỉ-để-kill (§4.3) cancel nó theo run và attempt, rồi ghi `KILLED`.
+  - Vì vậy kill một task đang chạy luôn trả về `KILLING`. Execution thành `KILLED` sau tick kế tiếp của worker.
+  - Bước 2 vẫn giữ các run `CREATED`, `RETRYING`, `PAUSED` và `Subflow`, các run này thành `KILLED` ngay.
+  - Điều này thay thế quyết định "`RUNNING` không có lease → `KILLED`" của plan Task 6.
+- *Replay của một descendant là child (M2).* Một subflow child được retry bằng `CREATE_NEW_EXECUTION` kết thúc `RETRIED` và tiếp tục trong một execution thay thế, liên kết `parent_execution_id = <child>` với `parent_run_ix` NULL (`worker/replay.rs`). Cascade đi theo liên kết đó từ độ sâu 1 trở xuống, nên execution thay thế bị kill. Replay của chính root vẫn không phải child.
+- *Phía worker của deadlock (M1).* Khi Postgres huỷ commit của worker thay vì của kill, worker chạy lại commit đó một lần (`claim::run_one`, và `claim::commit_kill` theo cùng cách). Lần chạy lại chờ trên các dòng mà kill đang giữ, nên fence của nó khi đó thấy run là `KILLING`, và worker đi theo đường kill (§4.2) thay vì để run lại cho reaper.
+
 ## 4. Worker dừng handler
 
 ### 4.1 Fence
 
 - `renew_lease` (`worker/claim.rs:1845-1861`): `WHERE id = $1 AND claimed_at = $2` thêm `AND state = 'RUNNING'`.
 - Fence của `apply_outcome_with` (`worker/claim.rs:2031`): `WHERE id = $2 AND claimed_at = $3` thêm `AND state = 'RUNNING'`. Outcome cho một run `KILLING` bị từ chối là `LeaseLost` và không ghi gì.
+
+*Ghi chú, 2026-10-18 (review cuối, như đã xây):* có một fence thứ ba, và state của nó là một tham số. Claim của một block `WorkingDirectory` commit qua `claim::apply_block_claim_on`, với fence `WHERE id = $3 AND claimed_at = $4 AND state = $6`. `$6` là state mà claim chờ block ở đó: `KILLING` cho một finish chỉ-để-xoá (block bị kill sau khi đã prepare, D8, plan Task 2), và `RUNNING` cho mọi claim block khác. `renew_lease` nhận cùng state chờ đợi đó (`expect`): `RUNNING` cho leaf, state của fence block cho claim của block. Nhờ vậy finish chỉ-để-xoá, mà dòng của nó là `KILLING` theo thiết kế, giữ được lease, còn `KILLING` của một leaf vẫn từ chối renewal của nó.
 
 ### 4.2 Phát hiện và cancel
 
@@ -106,6 +116,8 @@ Renewal thất bại vì state không còn là `RUNNING` không phải mất lea
 - run flowable chưa terminal trở thành `KILLING`, rồi `KILLED` khi mọi child run đã terminal (Kestra `executor/…/ExecutorService.java:313-335`);
 - execution trở thành `KILLED` khi mọi run đã terminal.
 
+*Ghi chú, 2026-10-18 (review cuối C1):* ban đầu mục này để mọi leaf cho route, và `advance_killing` không ghi leaf nào. Điều đó để hở một chỗ: leaf không ai kill thì sống mãi. Một vòng của `Exit(KILLED)` có thể tạo hoặc start một leaf như vậy (ghi chú ở §6), và leaf `CREATED` dưới một execution `KILLING` không bao giờ được claim. Vì vậy giờ `advance_killing` cũng ghi mọi leaf đang sống mà chưa là `KILLING`, theo cách §3.2 làm: `Runnable` đang chạy (`RUNNING`, `SUBMITTED`) sang `KILLING` để holder hoặc claim chỉ-để-kill cancel nó, và mọi leaf đang sống khác sang `KILLED`. Block `WorkingDirectory` và các flowable khác giữ quy tắc ở trên (`executor/kill.rs`).
+
 ## 6. Task `Exit`
 
 `io.kestra.plugin.core.execution.Exit`, property `state` (mặc định `SUCCESS`; một trong `SUCCESS`, `WARNING`, `KILLED`, `FAILED`, `CANCELLED`). Trong Kestra nó là `ExecutionUpdatableTask` do executor chạy (`core/…/plugin/core/execution/Exit.java`). Trong egret nó cũng ở mức executor: đăng ký trong `spec::registry` không có worker handler, và `advance()` xử lý run của nó khi nó được tạo:
@@ -120,6 +132,8 @@ Việc từ chối `Exit` (`executor/mod.rs:4235-4250`, bốn mục `valids/exit
 - Khi có một sibling đang sống, run `Exit` và các tổ tiên của nó là `KILLED`, execution sang `KILLING`, và `Exit` tự làm các bước leaf của route kill, vì không có route nào chạy: một `Runnable` đang chạy sang `KILLING`, mọi leaf đang sống khác sang `KILLED`. Flowable được để cho §5.
 - `Exit(KILLED)` cũng kill các child execution của execution (child của subflow và của loop), như `isOnKillCascade(true)` của Kestra. `claim::exit_kills` nhận ra vòng nào đặt một run `Exit` sang `KILLED` và chạy cascade của route kill (`worker::kill::cascade`, plan Task 6).
 - `Exit` nằm trong `WorkingDirectory` bị từ chối lúc validate với `working_directory_child_not_runnable`.
+
+*Ghi chú, 2026-10-18 (review cuối C1):* một `Exit` quyết định `KILLED` là toàn bộ vòng đó. Các bước leaf của nó được tính từ state ở đầu vòng, nhưng một `Parallel` gom lệnh của mọi child trong một batch. Vì vậy cùng vòng đó có thể tạo run kế tiếp của một nhánh sibling, run này sau đó nằm `CREATED` dưới `KILLING` mãi mãi. Vòng đó cũng có thể start một sibling `CREATED` sau `KILLED` của kill, để lại một run `RUNNING` dưới một execution đã bị kill. Giờ `advance()` chỉ trả về lệnh của `Exit` cho vòng đó (`exit::killed_in`), như Kestra chạy updating task trước flowable. Vòng kế tiếp, dưới `KILLING`, thuộc về §5. Bốn mục `valids/exit*` vẫn được bank, và ratchet không đổi (100 mismatching / 100 baselined).
 
 ## 7. Frontend (trang execution của W7b)
 

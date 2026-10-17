@@ -159,8 +159,9 @@
 //!
 //! ## 4. [`reap`](crate::worker::reap) — safe by **re-evaluation under READ COMMITTED**
 //!
-//! One `UPDATE … SET claimed_at = NULL WHERE claimed_at IS NOT NULL AND state =
-//! 'RUNNING' AND claimed_at < now() - interval` (`worker/reaper.rs:39`). No
+//! One `UPDATE … SET claimed_at = NULL WHERE claimed_at IS NOT NULL AND state IN
+//! ('RUNNING', 'KILLING') AND claimed_at < now() - interval` (`worker/reaper.rs`;
+//! `KILLING` since the workflow kill, spec §4.3). No
 //! `SKIP LOCKED` and no explicit lock. Two reapers meeting on one row: the
 //! second blocks on the first's row-level write lock, and when the first commits
 //! Postgres **re-evaluates the `WHERE` clause against the committed version**

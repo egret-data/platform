@@ -68,12 +68,22 @@ Executions are locked the execution first, then its descendants by depth and the
 - *Lock order.* This section first said "parent first, then children in id order". Pure id order can deadlock: a kill of a parent could hold a low-id descendant of a child while waiting for that child. The order and the retry above are what was built.
 - *Step 2* also covers every `Subflow` run, which is `KILLED` by the kill and does not wait for a worker; its child execution is killed by the cascade.
 
+*Note, 2026-10-18 (final review):*
+- *Step 1 reads no lease, and takes `RUNNING` or `SUBMITTED`.* Step 1 first read "leased (`claimed_at IS NOT NULL`, state `RUNNING`)", and step 2 "not leased (waiting to be claimed, …) → `KILLED`". As built, step 1 took `RUNNING` or `SUBMITTED`. Since the final review (I1) it reads no lease either: every running `Runnable` becomes `KILLING`, leased or not. A run whose worker died and was reaped is `RUNNING` with `claimed_at` NULL, but its container may still be running, because W5a re-attaches to it on the next claim. Writing that run `KILLED` asked nobody to stop it, and the orphan sweep never removes a `taskRunner.delete: false` container. Now the kill-only claim (§4.3) cancels it by run and attempt, then writes `KILLED`.
+  - A kill of a running task therefore always answers `KILLING`. The execution is `KILLED` after the next worker tick.
+  - Step 2 keeps `CREATED`, `RETRYING`, `PAUSED` and `Subflow` runs, which are `KILLED` at once.
+  - This supersedes plan Task 6's "unleased `RUNNING` → `KILLED`".
+- *A descendant's replay is a child (M2).* A subflow child retried with `CREATE_NEW_EXECUTION` ends `RETRIED` and continues in a replacement linked `parent_execution_id = <child>` with `parent_run_ix` NULL (`worker/replay.rs`). The cascade follows that link from depth 1 down, so the replacement is killed. The root's own replay is still not a child.
+- *The worker's side of the deadlock (M1).* When Postgres aborts the worker's commit instead of the kill, the worker runs that commit once more (`claim::run_one`, and `claim::commit_kill` the same way). The retry waits on the rows the kill holds, so its fence then finds the run `KILLING`, and the worker takes the kill path (§4.2) instead of leaving the run to the reaper.
+
 ## 4. The worker stops the handler
 
 ### 4.1 Fences
 
 - `renew_lease` (`worker/claim.rs:1845-1861`): `WHERE id = $1 AND claimed_at = $2` gains `AND state = 'RUNNING'`.
 - `apply_outcome_with`'s fence (`worker/claim.rs:2031`): `WHERE id = $2 AND claimed_at = $3` gains `AND state = 'RUNNING'`. An outcome for a `KILLING` run is refused as `LeaseLost` and records nothing.
+
+*Note, 2026-10-18 (final review, as built):* there is a third fence, and its state is a parameter. A `WorkingDirectory` block's claim commits through `claim::apply_block_claim_on`, fenced `WHERE id = $3 AND claimed_at = $4 AND state = $6`. `$6` is the state the claim expects its block in: `KILLING` for a discard-only finish (a block killed after it prepared, D8, plan Task 2), and `RUNNING` for every other block claim. `renew_lease` takes the same expected state (`expect`): `RUNNING` for a leaf, the block fence's state for a block's claim. So a discard-only finish, whose row is `KILLING` by design, keeps its lease, while a leaf's `KILLING` still refuses its renewal.
 
 ### 4.2 Detection and cancel
 
@@ -104,6 +114,8 @@ A renewal that fails because the state is no longer `RUNNING` is not a lost leas
 - a flowable run that is not terminal becomes `KILLING`, then `KILLED` once every child run is terminal (Kestra `executor/…/ExecutorService.java:313-335`);
 - the execution becomes `KILLED` once every run is terminal.
 
+*Note, 2026-10-18 (final review C1):* this section first left every leaf to the route, and `advance_killing` wrote none. That left a gap: a leaf nobody killed stayed live for ever. An `Exit(KILLED)`'s round could create or start one (§6 note), and a `CREATED` leaf under a `KILLING` execution is never claimed. So `advance_killing` now also writes any live leaf that is not `KILLING`, the way §3.2 does: a running `Runnable` (`RUNNING`, `SUBMITTED`) becomes `KILLING` for its holder or the kill-only claim to cancel, and every other live leaf becomes `KILLED`. `WorkingDirectory` blocks and other flowables keep the rules above (`executor/kill.rs`).
+
 ## 6. The `Exit` task
 
 `io.kestra.plugin.core.execution.Exit`, property `state` (default `SUCCESS`; one of `SUCCESS`, `WARNING`, `KILLED`, `FAILED`, `CANCELLED`). In Kestra it is an `ExecutionUpdatableTask` run by the executor (`core/…/plugin/core/execution/Exit.java`). In egret it is executor-level too: registered in `spec::registry` with no worker handler, and `advance()` handles its run when it is created:
@@ -118,6 +130,8 @@ The refusal of `Exit` (`executor/mod.rs:4235-4250`, the four `valids/exit*` entr
 - With a live sibling, the `Exit` run and its ancestors are `KILLED`, the execution goes `KILLING`, and the `Exit` does the kill route's leaf steps itself, because no route ran: a running `Runnable` goes `KILLING`, every other live leaf goes `KILLED`. Flowables are left to §5.
 - `Exit(KILLED)` also kills the execution's child executions (subflow and loop children), as Kestra's `isOnKillCascade(true)` does. `claim::exit_kills` sees the round that set an `Exit` run `KILLED` and runs the kill route's cascade (`worker::kill::cascade`, plan Task 6).
 - An `Exit` inside a `WorkingDirectory` is refused at validate with `working_directory_child_not_runnable`.
+
+*Note, 2026-10-18 (final review C1):* an `Exit` that decides `KILLED` is the whole round. Its leaf steps are computed from the state at the start of the round, but a `Parallel` collects every child's commands in one batch. The same round could therefore create a sibling branch's next run, which then stayed `CREATED` under `KILLING` for ever. It could also start a `CREATED` sibling after the kill's `KILLED`, which left a `RUNNING` run under a killed execution. `advance()` now returns only the `Exit`'s commands for that round (`exit::killed_in`), as Kestra runs updating tasks before flowables. The next round, under `KILLING`, belongs to §5. The four `valids/exit*` entries stay banked, and the ratchet is unchanged (100 mismatching / 100 baselined).
 
 ## 7. Frontend (W7b's execution page)
 
