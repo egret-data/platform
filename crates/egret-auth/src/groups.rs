@@ -29,7 +29,8 @@
 //! moving the transaction into the compiler crate, which works because every
 //! role writer is an HTTP handler in a crate ABOVE the compiler. Groups cannot:
 //! one writer is the per-login OIDC sync ([`GroupRepo::sync_user_oidc_groups`],
-//! called from `crate::oidc_routes`, in this crate), and another is
+//! called from `crate::oidc_routes`, in this crate; it writes rows of
+//! OIDC-sourced groups only, design R1), and another is
 //! `UserRepo::hard_delete`, called from `egret-dataapi`, which does not depend
 //! on the compiler either. So the recompile is the [`GroupMembershipRecompiler`]
 //! port, the same dependency inversion `egret_policy::ProfileRecompiler` uses
@@ -296,14 +297,56 @@ impl GroupRepo {
         Ok(id)
     }
 
+    /// Which of `names` name a LOCAL (admin-managed) group, each paired with
+    /// whether `user_id` is a member of it now — the input to the login's R2
+    /// warning ([`crate::oidc::provision_and_sync`]). One read, no lock: it
+    /// only feeds a log line, and [`Self::sync_user_oidc_groups`] ignores
+    /// these names whatever it returns.
+    pub async fn claimed_local_groups(
+        &self,
+        user_id: UserId,
+        names: &[String],
+    ) -> Result<Vec<(String, bool)>> {
+        sqlx::query_as(
+            "SELECT g.name, EXISTS (SELECT 1 FROM user_groups ug \
+                 WHERE ug.group_id = g.id AND ug.user_id = $2) \
+             FROM groups g WHERE g.name = ANY($1) AND g.source = 'local' \
+             ORDER BY g.name",
+        )
+        .bind(names)
+        .bind(user_id.0)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
+
     /// Replace the user's OIDC-sourced group memberships with `names` (in one tx).
     /// Manual (source='local') memberships are left untouched.
     ///
+    /// **It manages memberships in OIDC-sourced groups ONLY (design R1,
+    /// 2026-10-17).** A claimed name that names a LOCAL group is ignored: the
+    /// user is not joined, nothing moves, nothing is recompiled. Before R1 the
+    /// claimed set matched any group by name, so an IdP group called `admins`
+    /// made its members members of the local group `admins` — and of every
+    /// role and policy an admin had attached to it — although the API, the UI
+    /// and the RBAC spec all say a local group's members are the admin's to
+    /// manage. The claimed-set read filters on `source = 'oidc'`, which keeps
+    /// a local name out of `moved` (no lock, no recompile) and out of the
+    /// INSERT loop. The INSERT repeats the filter as a second guard on the
+    /// row itself: while it iterates `claimed` it is redundant (a mutation
+    /// dropping it alone survives every test), but if the loop is ever fed
+    /// the raw claim again it still cannot write a local membership. A local
+    /// membership the user already holds is never touched
+    /// either way: the DELETE below is scoped to OIDC groups, and the local
+    /// rows are carried into the "after" set unchanged.
+    /// [`crate::oidc::provision_and_sync`] logs a warning for each claimed local
+    /// name (R2), since a row such a claim added before R1 is still there.
+    ///
     /// **Runs on every OIDC login, so it recompiles only what the login
     /// CHANGED.** The groups the user would hold after the write are computed
-    /// before it (the local ones they keep, plus every claimed name that names a
-    /// group — the INSERT below joins `groups` by name, so a claimed name with
-    /// no row is not a membership), and only the symmetric difference with the
+    /// before it (the local ones they keep, plus every claimed name that names
+    /// an OIDC group — the INSERT below joins `groups` by name and source, so a
+    /// claimed name with no OIDC row is not a membership), and only the symmetric difference with the
     /// groups they hold now is handed to `recompiler`. A login whose claim did
     /// not move — the common case — takes no profile lock and compiles nothing;
     /// one that did recompiles only the profiles whose policies name one of
@@ -340,12 +383,13 @@ impl GroupRepo {
             .fetch_all(&mut *tx)
             .await
             .map_err(db_err)?;
-            let claimed: Vec<String> =
-                sqlx::query_scalar("SELECT name FROM groups WHERE name = ANY($1)")
-                    .bind(names)
-                    .fetch_all(&mut *tx)
-                    .await
-                    .map_err(db_err)?;
+            let claimed: Vec<String> = sqlx::query_scalar(
+                "SELECT name FROM groups WHERE name = ANY($1) AND source = 'oidc'",
+            )
+            .bind(names)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(db_err)?;
             let before_set: std::collections::BTreeSet<String> =
                 before.iter().map(|(n, _)| n.clone()).collect();
             let after_set: std::collections::BTreeSet<String> = before
@@ -381,7 +425,7 @@ impl GroupRepo {
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
-        // Only the names the final pass resolved to a group (J-F3 final review
+        // Only the names the final pass resolved to an OIDC group (J-F3 final review
         // I2), never the raw claim: every one of them the user did not already
         // hold is in `moved`, so it is locked above and recompiled below. A
         // claimed name whose group was created after that read is not joined
@@ -391,7 +435,7 @@ impl GroupRepo {
         for name in &claimed {
             sqlx::query(
                 "INSERT INTO user_groups (user_id, group_id) \
-                 SELECT $1, id FROM groups WHERE name = $2 \
+                 SELECT $1, id FROM groups WHERE name = $2 AND source = 'oidc' \
                  ON CONFLICT DO NOTHING",
             )
             .bind(user_id.0)

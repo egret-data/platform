@@ -362,3 +362,212 @@ async fn a_group_created_mid_sync_is_not_joined_without_its_lock() {
         "{calls:?}"
     );
 }
+
+/// A `source = 'local'` group, created the way the console's create does.
+async fn local_group(groups: &GroupRepo, tag: &str) -> (String, uuid::Uuid) {
+    let name = uniq(tag);
+    let id = groups.create_local(&name).await.unwrap();
+    (name, id)
+}
+
+async fn names_of(db: &Db, user: egret_core::UserId) -> Vec<String> {
+    let mut names: Vec<String> = sqlx::query_scalar(
+        "SELECT g.name FROM user_groups ug JOIN groups g ON g.id = ug.group_id WHERE ug.user_id = $1",
+    )
+    .bind(user.0)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    names.sort();
+    names
+}
+
+/// R1: the sync manages memberships in OIDC-sourced groups only. An IdP claim
+/// that happens to name a LOCAL group must not make the user a member — the
+/// path by which an IdP group name used to reach a local group's roles — and,
+/// since nothing moved, must neither lock nor recompile anything.
+#[tokio::test]
+async fn a_claim_naming_a_local_group_joins_nothing() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let users = UserRepo::new(db.clone());
+    let groups = GroupRepo::new(db.clone());
+    let rc = Recorder::default();
+    let id = users
+        .insert_oidc(&uniq("sub"), &format!("{}@idp.local", uniq("u")), "T")
+        .await
+        .unwrap();
+    let (local, _) = local_group(&groups, "local-grp").await;
+
+    groups
+        .sync_user_oidc_groups(id, std::slice::from_ref(&local), &rc)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        names_of(&db, id).await,
+        Vec::<String>::new(),
+        "a claim naming a local group must not add a membership"
+    );
+    assert_eq!(
+        rc.take(),
+        Vec::<Call>::new(),
+        "nothing moved, so nothing is locked or recompiled"
+    );
+}
+
+/// R1, the other half: a local membership the user already holds is not the
+/// sync's to manage. Claiming it moves nothing, and a later login WITHOUT the
+/// claim keeps it — the sync never deletes a local row.
+#[tokio::test]
+async fn a_local_membership_survives_claiming_it_and_dropping_the_claim() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let users = UserRepo::new(db.clone());
+    let groups = GroupRepo::new(db.clone());
+    let rc = Recorder::default();
+    let id = users
+        .insert_oidc(&uniq("sub"), &format!("{}@idp.local", uniq("u")), "T")
+        .await
+        .unwrap();
+    let (local, local_gid) = local_group(&groups, "local-grp").await;
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(id.0)
+        .bind(local_gid)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    groups
+        .sync_user_oidc_groups(id, std::slice::from_ref(&local), &rc)
+        .await
+        .unwrap();
+    assert_eq!(names_of(&db, id).await, vec![local.clone()]);
+    assert_eq!(
+        rc.take(),
+        Vec::<Call>::new(),
+        "claiming a held local group moves nothing"
+    );
+
+    groups.sync_user_oidc_groups(id, &[], &rc).await.unwrap();
+    assert_eq!(
+        names_of(&db, id).await,
+        vec![local.clone()],
+        "dropping the claim must not remove a local membership"
+    );
+    assert_eq!(
+        rc.take(),
+        Vec::<Call>::new(),
+        "dropping it moves nothing either"
+    );
+}
+
+/// R1 + R3 on a mixed claim: the OIDC name is joined and is the only thing
+/// moved (so the only thing locked and recompiled); the local name is ignored.
+#[tokio::test]
+async fn a_mixed_claim_joins_and_moves_only_the_oidc_group() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let users = UserRepo::new(db.clone());
+    let groups = GroupRepo::new(db.clone());
+    let rc = Recorder::default();
+    let id = users
+        .insert_oidc(&uniq("sub"), &format!("{}@idp.local", uniq("u")), "T")
+        .await
+        .unwrap();
+    let oidc_a = uniq("g");
+    groups.upsert_oidc_group(&oidc_a).await.unwrap();
+    let (local_b, _) = local_group(&groups, "local-grp").await;
+
+    groups
+        .sync_user_oidc_groups(id, &[oidc_a.clone(), local_b.clone()], &rc)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        names_of(&db, id).await,
+        vec![oidc_a.clone()],
+        "only the OIDC group is joined"
+    );
+    assert_eq!(rc.take(), vec![Call::Lock(vec![oidc_a]), Call::Recompile]);
+}
+
+/// R2: `upsert_oidc_group` never flips a local group to `oidc`, so the login
+/// path end to end leaves a claimed local group local and un-joined.
+#[tokio::test]
+async fn provision_and_sync_leaves_a_claimed_local_group_local_and_unjoined() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let users = UserRepo::new(db.clone());
+    let groups = GroupRepo::new(db.clone());
+    let (local, local_gid) = local_group(&groups, "local-grp").await;
+
+    let user_id = provision_and_sync(
+        &users,
+        &groups,
+        &claims(&uniq("sub"), &format!("{}@idp.local", uniq("u")), &[&local]),
+        &Recorder::default(),
+    )
+    .await
+    .unwrap();
+
+    let source: String = sqlx::query_scalar("SELECT source FROM groups WHERE id = $1")
+        .bind(local_gid)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        source, "local",
+        "the login must not flip the group's source"
+    );
+    assert_eq!(
+        names_of(&db, user_id).await,
+        Vec::<String>::new(),
+        "and must not make the user a member"
+    );
+}
+
+/// R2's input: the login warns once per claimed LOCAL group and says whether
+/// the user already holds it. OIDC names and names with no group are not
+/// reported.
+#[tokio::test]
+async fn claimed_local_groups_reports_local_names_with_membership() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let users = UserRepo::new(db.clone());
+    let groups = GroupRepo::new(db.clone());
+    let id = users
+        .insert_oidc(&uniq("sub"), &format!("{}@idp.local", uniq("u")), "T")
+        .await
+        .unwrap();
+    let (held, held_gid) = local_group(&groups, "local-a").await;
+    let (not_held, _) = local_group(&groups, "local-b").await;
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(id.0)
+        .bind(held_gid)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let oidc = uniq("g");
+    groups.upsert_oidc_group(&oidc).await.unwrap();
+
+    let got = groups
+        .claimed_local_groups(
+            id,
+            &[oidc, held.clone(), not_held.clone(), uniq("no-such-group")],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(got, vec![(held, true), (not_held, false)]);
+}

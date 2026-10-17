@@ -49,6 +49,21 @@ pub async fn provision_and_sync(
     for g in &claims.groups {
         groups.upsert_oidc_group(g).await?;
     }
+    // Design R2: a claimed name that names a LOCAL group is ignored by the
+    // sync (R1) — `upsert_oidc_group` returned the local id above and left its
+    // source alone. Say so, once per name: before R1 such a claim joined the
+    // user to the local group, and any row it added is still there,
+    // indistinguishable from one an admin added (`already_member`). The login
+    // is not refused.
+    for (name, member) in groups.claimed_local_groups(user_id, &claims.groups).await? {
+        tracing::warn!(
+            user_id = %user_id.0,
+            group = %name,
+            already_member = member,
+            "OIDC groups claim names a local group; membership not managed by the IdP; \
+             if it was added by a login before this fix, review it"
+        );
+    }
     groups
         .sync_user_oidc_groups(user_id, &claims.groups, recompiler)
         .await?;
