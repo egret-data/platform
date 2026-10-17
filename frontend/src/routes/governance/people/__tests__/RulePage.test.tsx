@@ -101,7 +101,7 @@ const detail = (label: string) => screen.getByText(label, { selector: "dt" }).ne
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(govApi.useControlPlaneGovernanceListCatalogs).mockReturnValue({
-    data: { status: 200, data: [{ id: "cat-1", name: "wh", workspaces: [] }] },
+    data: { status: 200, data: [{ id: "cat-1", name: "wh", workspaces: [{ id: "ws9", name: "Analytics", slug: "analytics" }] }] },
   } as unknown as ReturnType<typeof govApi.useControlPlaneGovernanceListCatalogs>);
   vi.mocked(tagsApi.useTags).mockReturnValue({
     data: [{ id: "tag-9", key: "pii_v2", name: "PII Data" }],
@@ -134,6 +134,13 @@ describe("RulePage: what the rule is", () => {
       "/governance/people/groups/temps",
     );
     expect(screen.queryByText("filter-region")).not.toBeInTheDocument();
+  });
+
+  test("a workspace's members in an exemption read by the workspace's name", () => {
+    serveRules([maskRule({ exempt: { include: [{ kind: "workspace_members", ref: "ws9" }], exclude: [] } })]);
+    renderPage();
+    expect(detail("Exempt")).toHaveTextContent("members of workspace Analytics");
+    expect(screen.queryByText(/ws9/)).not.toBeInTheDocument();
   });
 
   test("a rule that exempts nobody says so", () => {
@@ -191,6 +198,13 @@ describe("RulePage: Open in Data, or the tag", () => {
     renderPage("r1", READER);
     expect(screen.queryByRole("link", { name: /Open classification/ })).not.toBeInTheDocument();
     expect(tagsApi.useTags).not.toHaveBeenCalled();
+  });
+
+  test("a tag rule whose key the tag list does not hold gets no link, never a broken one", () => {
+    serveRules([maskRule({ selector: { type: "tag", key: "gone" }, tag_name: "PII Data" })]);
+    renderPage("r1", TAG_READER);
+    expect(detail("Selects")).toHaveTextContent("tag PII Data");
+    expect(screen.queryByRole("link", { name: /Open classification/ })).not.toBeInTheDocument();
   });
 
   test("a tag rule whose tag no longer exists says so and links nowhere", () => {
@@ -261,5 +275,17 @@ describe("RulePage: states", () => {
     renderPage();
     expect(screen.getByText("The rules could not be loaded. Retry, or reload the page.")).toBeInTheDocument();
     expect(screen.queryByText(/No rule has this id/)).not.toBeInTheDocument();
+  });
+
+  test("loading shows a skeleton, not the missing state", () => {
+    vi.mocked(permApi.usePermListRules).mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      isError: false,
+      error: null,
+    } as unknown as ReturnType<typeof permApi.usePermListRules>);
+    renderPage();
+    expect(screen.queryByText(/No rule has this id/)).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Rule");
   });
 });

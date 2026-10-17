@@ -10,7 +10,7 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
-import { OpenInDataLink, scopeToDataLink, useCatalogNameById } from "@/routes/governance/openInData";
+import { OpenInDataLink, scopeToDataLink, useCatalogNameById, useWorkspaceNames } from "@/routes/governance/openInData";
 import { formatRuleKind, formatSelector } from "@/routes/governance/permFormat";
 import { PrincipalNames } from "@/routes/governance/PrincipalNames";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
@@ -85,6 +85,7 @@ export default function RulePage() {
 function RuleBody({ rule: r, onEdit, onDelete }: { rule: RuleView; onEdit: () => void; onDelete: () => void }) {
   const can = usePolicyPermissions();
   const catalogNameById = useCatalogNameById();
+  const workspaceName = useWorkspaceNames();
   const link = r.selector.type === "path" ? scopeToDataLink(r.selector, catalogNameById, "masks") : null;
 
   const actions = can("policy:update") ? (
@@ -126,11 +127,11 @@ function RuleBody({ rule: r, onEdit, onDelete }: { rule: RuleView; onEdit: () =>
           ) : null}
         </Detail>
         <Detail term="Exempt">
-          <PrincipalNames list={r.exempt.include} />
+          <PrincipalNames list={r.exempt.include} workspaceName={workspaceName} />
           {r.exempt.exclude.length > 0 ? (
             <>
               {" except "}
-              <PrincipalNames list={r.exempt.exclude} />
+              <PrincipalNames list={r.exempt.exclude} workspaceName={workspaceName} />
             </>
           ) : null}
         </Detail>

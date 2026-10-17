@@ -438,6 +438,8 @@ describe("the index's Check access dialog", () => {
     const dialog = await screen.findByRole("dialog", { name: "Check access" });
     expect(within(dialog).queryByLabelText("Groups")).not.toBeInTheDocument();
     expect(within(dialog).queryByLabelText("Roles")).not.toBeInTheDocument();
+    expect(within(dialog).queryByPlaceholderText(/add a group/i)).not.toBeInTheDocument();
+    expect(within(dialog).queryByPlaceholderText(/add a role/i)).not.toBeInTheDocument();
     await user.type(within(dialog).getByLabelText("User"), "alice-doe");
     await user.click(within(dialog).getByRole("button", { name: "set-scope" }));
     await user.click(within(dialog).getByRole("button", { name: "Explain" }));
