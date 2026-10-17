@@ -437,8 +437,9 @@ async fn compile_desired(
     let mut all_grants = list_grants_via(conn).await.map_err(db_err)?;
     let mut all_rules = list_rules_via(conn).await.map_err(db_err)?;
     // D3: turn every `workspace_members` principal — and, since SP4c Task 2b,
-    // every `role` principal — into the people it stands for BEFORE anything is
-    // compiled, so the pure compilers below never see one. See `crate::members`
+    // every `role` principal, and since J-F3 Task 1b every non-`public` `group`
+    // principal — into the people it stands for BEFORE anything is compiled,
+    // so the pure compilers below never see one. See `crate::members`
     // for what a member is, what it costs, and why a role name cannot be left
     // for Ranger to resolve.
     crate::members::expand_enumerated_principals(conn, &mut all_grants, &mut all_rules).await?;
@@ -457,7 +458,8 @@ async fn compile_desired(
             // the profile total. Recorded so "my workspace has no members yet"
             // is visible rather than inferred from a missing policy.
             let reason = "the grant's principals name no engine principal (an empty include, or \
-                          a workspace_members reference that expands to no member)"
+                          a workspace_members, role or group reference that expands to no \
+                          member)"
                 .to_string();
             tracing::warn!(
                 service_id,
@@ -1641,6 +1643,91 @@ pub async fn affected_services_for_workspace_members(
         .into_iter()
         .chain(rule_catalogs.into_iter().flatten())
     {
+        ids.extend(
+            services_for_catalog_via(conn, catalog_id)
+                .await
+                .map_err(db_err)?,
+        );
+    }
+    normalize_service_order(&mut ids);
+    Ok(ids)
+}
+
+/// The services a change to who belongs to any group in `group_names` can
+/// change the compiled output of — J-F3 Task 1b (design R8).
+///
+/// **Why a membership write changes compiled output at all.** D7 measured that
+/// a Ranger item naming a GROUP matches nobody on every engine egret
+/// provisions, so a non-`public` `group` principal compiles to its members'
+/// usernames, enumerated at compile time by [`crate::members`] — stale the
+/// moment someone joins or leaves. Same argument, same asymmetry as
+/// [`affected_services_for_role_membership`]: a missed leave keeps granting (or
+/// keeps exempting, or keeps subtracting from a deny) someone the model no
+/// longer names.
+///
+/// **ONE function, the UNION of every consumer of the group expansion.** There
+/// are exactly two, both reading the one `crate::members::group_usernames`:
+///
+/// - **Grants**, include or exclude: catalog-scoped, exactly like
+///   [`affected_services_for_grant`].
+/// - **Rule exemptions**: a PATH selector is catalog-scoped; a TAG selector
+///   reaches every compiler-targeted profile (this module's Task 9 section).
+///
+/// **There is deliberately no clearance arm.** A tag's `required_groups` is not
+/// expanded — a group-only gate still compiles to nothing and reports the skip
+/// (`crate::clearance`'s module doc) — so no clearance body names a group's
+/// members, and nothing there can go stale.
+///
+/// `public` contributes nothing: it is never expanded (every engine resolves
+/// it), so who "belongs" to a `groups` row that happens to carry that name
+/// changes no compiled body. Empty when nothing in the model names any of the
+/// groups, which is the common case for an OIDC-synced group: then a
+/// membership write costs two queries and compiles nothing.
+pub async fn affected_services_for_group_membership(
+    conn: &mut sqlx::PgConnection,
+    group_names: &[String],
+) -> Result<Vec<i64>, CompileError> {
+    let names: Vec<&str> = group_names
+        .iter()
+        .map(String::as_str)
+        .filter(|n| *n != crate::rules::PUBLIC_GROUP)
+        .collect();
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Grants (include or exclude) and PATH-selected rule exemptions: the
+    // catalog each names.
+    let catalogs: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT g.catalog_id FROM perm.grants g \
+           JOIN perm.grant_principals p ON p.grant_id = g.id \
+          WHERE p.kind = 'group'::perm.principal_kind AND p.ref = ANY($1) \
+         UNION \
+         SELECT r.catalog_id FROM perm.rules r \
+           JOIN perm.rule_exemptions e ON e.rule_id = r.id \
+          WHERE e.kind = 'group'::perm.principal_kind AND e.ref = ANY($1) \
+            AND r.selector_kind = 'path' AND r.catalog_id IS NOT NULL",
+    )
+    .bind(&names)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    let tag_rule_exempts: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM perm.rules r \
+           JOIN perm.rule_exemptions e ON e.rule_id = r.id \
+          WHERE e.kind = 'group'::perm.principal_kind AND e.ref = ANY($1) \
+            AND r.selector_kind = 'tag')",
+    )
+    .bind(&names)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+
+    let mut ids: Vec<i64> = Vec::new();
+    if tag_rule_exempts {
+        ids.extend(compiler_targeted_services_via(conn).await.map_err(db_err)?);
+    }
+    for catalog_id in catalogs {
         ids.extend(
             services_for_catalog_via(conn, catalog_id)
                 .await

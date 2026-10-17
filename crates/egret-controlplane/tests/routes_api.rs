@@ -2858,7 +2858,7 @@ async fn delete_user_route_enforces_guards() {
         .await
         .expect("create group");
     groups
-        .add_member(group_id, user_id)
+        .add_member(group_id, user_id, &egret_perm_compile::PermGroupRecompiler)
         .await
         .expect("add member");
     let issued = f

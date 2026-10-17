@@ -282,8 +282,28 @@ impl UserRepo {
     /// `fetch_one`, is what keeps that true; a caller that flipped this to
     /// `fetch_one` made a same-row-deleted-twice race in the control plane's
     /// user admin start failing loudly for a condition it used to shrug off.
-    pub async fn hard_delete(&self, target: UserId) -> Result<Option<(String, String)>> {
+    ///
+    /// **It is also a `user_groups` write, and recompiles like one (J-F3 Task
+    /// 1b).** A group principal compiles to its members' usernames
+    /// (`crate::groups`' module doc), so the deleted user is named in every
+    /// policy one of their groups reaches until those policies are recompiled —
+    /// and a username freed by this delete can be minted again for the NEXT
+    /// person whose email slugs to it, who would inherit every allow the stale
+    /// policy still grants. The groups are read before the delete, their
+    /// profiles locked first, and recompiled on this transaction after the user
+    /// row is gone, through `recompiler`.
+    pub async fn hard_delete(
+        &self,
+        target: UserId,
+        recompiler: &dyn crate::groups::GroupMembershipRecompiler,
+    ) -> Result<Option<(String, String)>> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        let groups = crate::groups::group_names_of_user_in_tx(&mut tx, target.0).await?;
+        let services = if groups.is_empty() {
+            Vec::new()
+        } else {
+            recompiler.lock_affected_in_tx(&mut tx, &groups).await?
+        };
         sqlx::query("DELETE FROM sessions WHERE user_id = $1")
             .bind(target.0)
             .execute(&mut *tx)
@@ -328,6 +348,9 @@ impl UserRepo {
                 return Err(db_err(e));
             }
         };
+        if !groups.is_empty() {
+            recompiler.recompile_in_tx(&mut tx, &services).await?;
+        }
         tx.commit().await.map_err(db_err)?;
         Ok(deleted)
     }
@@ -557,6 +580,31 @@ mod tests {
         assert_eq!(ub, "alice-2"); // collision suffix
     }
 
+    /// A recompile port that reaches no profile — this test is about the rows
+    /// `hard_delete` removes; what it recompiles is asserted in
+    /// `crates/egret-perm-compile/tests/group_grants.rs` and
+    /// `tests/groups_db.rs`.
+    struct NoProfiles;
+
+    #[async_trait::async_trait]
+    impl crate::groups::GroupMembershipRecompiler for NoProfiles {
+        async fn lock_affected_in_tx(
+            &self,
+            _tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+            _group_names: &[String],
+        ) -> Result<Vec<i64>> {
+            Ok(Vec::new())
+        }
+
+        async fn recompile_in_tx(
+            &self,
+            _tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+            _service_ids: &[i64],
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
     /// `hard_delete` removes the user row plus every dependent it's supposed to
     /// clean up in its transaction: live sessions, group memberships, and
     /// platform role/permission grants (`access_grants`) — leaving no orphaned
@@ -579,7 +627,7 @@ mod tests {
 
         // Group membership.
         let group_id = groups.create_local("hard-delete-test-group").await.unwrap();
-        groups.add_member(group_id, uid).await.unwrap();
+        groups.add_member(group_id, uid, &NoProfiles).await.unwrap();
         assert_eq!(
             groups.groups_of_user(uid).await.unwrap(),
             vec!["hard-delete-test-group".to_string()]
@@ -610,7 +658,7 @@ mod tests {
             .unwrap();
         assert!(sessions.validate(&issued.token).await.unwrap().is_some());
 
-        repo.hard_delete(uid).await.unwrap();
+        repo.hard_delete(uid, &NoProfiles).await.unwrap();
 
         assert!(
             repo.find_by_id(uid).await.unwrap().is_none(),

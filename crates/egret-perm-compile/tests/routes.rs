@@ -3065,33 +3065,47 @@ async fn explain_writes_nothing() {
     assert_eq!(f.compiled_policy_names().await, Vec::<String>::new());
 }
 
-/// **The meaning inverts, and that is the point (SP4d-2a Task 5).**
+/// **A group grant reaches its members, and `explain` agrees with the engine
+/// about both sides of it (J-F3 Task 1b, design R8).**
 ///
-/// A grant reachable only through a GROUP is allowed by the model and refused
-/// by every engine egret provisions: D7 measured no usersync and no group
-/// provider, so a Ranger item naming a group matches nobody. While `explain`
-/// answered with the model it had to report that allow under its own reason
-/// class (`allowed_by_group_only`) so a caller parsing JSON could see the
-/// warning the page printed. Measured against the artifact the answer is
-/// simply a REFUSAL — so the reason class disappears because the defect it
-/// existed to flag disappears with it.
+/// History, because this test inverted twice. Through SP4d-2a Task 5 the
+/// compiler put a group into the Ranger `groups` bucket, which no engine egret
+/// provisions resolves (D7: no usersync, no group provider) — so the model
+/// allowed a member and every engine refused them, and this test pinned the
+/// artifact's honest answer: a REFUSAL. R8 removed the divergence on the
+/// compiler's side instead, exactly as SP4c did for roles: a non-`public` group
+/// compiles to its members' stored usernames. So the same request is now an
+/// ALLOW for a member and a refusal for a non-member, and the group name
+/// appears nowhere in what the engine downloads.
 ///
-/// The compiled body is read as ground truth first, because the refusal has to
-/// come from the engine's inability to SEE a group and not from a policy that
-/// was never written: the compiler does emit `groups`, and this asserts it.
+/// The compiled body is read as ground truth first, so the verdicts below are
+/// about what the engine can MATCH and not about a policy that was or was not
+/// written. `explain` still receives no group for the subject (`ExplainSubject`
+/// has no `groups` field), which is now exactly right: the engine does not
+/// either, and the member is matched by username.
 #[tokio::test]
-async fn a_group_only_grant_is_refused_by_the_artifact_the_engine_downloads() {
+async fn a_group_grant_reaches_its_members_in_the_artifact_and_in_explain() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
 
     let group = unique("contractors");
-    // A real `groups` row (J-F3: a group ref must name one) — still one no
-    // engine can see, which is the point of this test.
-    sqlx::query("INSERT INTO groups (name) VALUES ($1)")
+    let group_id: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
         .bind(&group)
-        .execute(&f.db.pool)
+        .fetch_one(&f.db.pool)
         .await
         .expect("insert group");
+    let member = known_user(&f, unique("groupmember")).await;
+    let outsider = known_user(&f, unique("groupoutsider")).await;
+    sqlx::query(
+        "INSERT INTO user_groups (user_id, group_id) \
+         SELECT id, $2 FROM users WHERE username = $1",
+    )
+    .bind(&member)
+    .bind(group_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("membership");
+
     let mut grant = grant_body(f.catalog_id, "unused");
     grant["principals"] = json!({
         "include": [{ "kind": "group", "ref": group }],
@@ -3107,51 +3121,46 @@ async fn a_group_only_grant_is_refused_by_the_artifact_the_engine_downloads() {
     assert_eq!(status, StatusCode::CREATED, "body: {body}");
     let grant_id = body["id"].as_str().expect("grant id").to_string();
 
-    // Ground truth: the policy the engine downloads really does name the group,
-    // and names no user at all.
+    // Ground truth: the policy the engine downloads names the MEMBER, by
+    // username, and the group nowhere.
     let compiled = f
         .compiled_policy_body(&format!("{COMPILER_GRANT_PREFIX}{grant_id}"))
         .await;
     assert_eq!(
-        compiled["policyItems"][0]["groups"],
-        json!([group]),
-        "the compiler emits `groups`; the refusal below must be about what the \
-         engine can MATCH, not about a missing policy: {compiled:#}"
+        compiled["policyItems"][0]["users"],
+        json!([member]),
+        "a group compiles to its members' usernames: {compiled:#}"
     );
     assert_eq!(
-        compiled["policyItems"][0]["users"],
+        compiled["policyItems"][0]["groups"],
         json!([]),
-        "and no user: {compiled:#}"
+        "and names no group — no engine egret provisions resolves one: {compiled:#}"
+    );
+    assert!(
+        !compiled.to_string().contains(&group),
+        "the group name appears nowhere in the artifact: {compiled:#}"
     );
 
-    let subject = unique("grouponly");
-    let mut ask = explain_body(f.catalog_id, &subject);
-    // Named anyway, to prove naming it changes nothing — `ExplainSubject` has
-    // no `groups` field left and the evaluator receives an empty set.
-    ask["subject"]["groups"] = json!([group]);
-    let (status, body) = into_json(
-        f.app()
-            .oneshot(req("POST", "/perm/explain", &token, Some(ask)))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "body: {body}");
-    let verdict = access_for(profile_for(&body, "starrocks"), "select");
-    assert_eq!(
-        verdict["decision"]["kind"], "denied",
-        "the model allows this and no engine will, so the ARTIFACT's answer is a \
-         refusal — there is no longer an allow to warn about; body: {body}"
-    );
-    assert_eq!(
-        verdict["decision"]["reason"], "no_policy_matched",
-        "the group item matched nobody, which is `-` in Ranger's own audit; body: {body}"
-    );
-    assert_eq!(
-        verdict["attribution"],
-        Value::Null,
-        "nothing decided, so nothing to attribute; body: {body}"
-    );
+    for (subject, kind) in [(&member, "allowed"), (&outsider, "denied")] {
+        let (status, body) = into_json(
+            f.app()
+                .oneshot(req(
+                    "POST",
+                    "/perm/explain",
+                    &token,
+                    Some(explain_body(f.catalog_id, subject)),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let verdict = access_for(profile_for(&body, "starrocks"), "select");
+        assert_eq!(
+            verdict["decision"]["kind"], kind,
+            "{subject}: explain must answer what the engine enforces; body: {body}"
+        );
+    }
 }
 
 /// `explain` resolves the target's tags itself — it never made the caller

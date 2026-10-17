@@ -47,10 +47,11 @@
 //!   Ranger" to check against; `groups` is the one group store egret owns — the
 //!   one `user_groups` and the OIDC group sync write, and the one the authoring
 //!   picker searches (`crates/egret-policy/src/admin/mod.rs:1109-1123`,
-//!   `list_principals`). Checking against it is the most this boundary can read.
-//!   It does not make a named group enforceable on an engine — that is D7's
-//!   unchanged limitation, and `explain` reports such an access as unenforceable
-//!   (`egret_perm::eval`'s `matched_only_via_group`).
+//!   `list_principals`). It is also exactly what the compiler resolves a group
+//!   through since J-F3 Task 1b: a non-`public` group is expanded into its
+//!   members' usernames (`crate::members`, `user_groups` joined to
+//!   `groups.name`), so a name with no row expands to nobody — on an exclude,
+//!   the same fail open.
 //! - **`role`** — `roles.name`, in any scope (`migrations/0003_workspace_rbac.sql:21-27`).
 //!   A role is NOT free text: it is expanded at compile time into its holders'
 //!   usernames by `crate::members::role_usernames`, which joins `roles` by name

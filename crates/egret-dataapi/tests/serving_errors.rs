@@ -340,6 +340,7 @@ async fn fixture() -> Option<Fixture> {
         // This file is about serving-path error shapes, not Activity — a fixed
         // retention is enough to satisfy the field.
         activity: egret_dataapi::ActivityStore::new(db.clone(), Some(90)),
+        group_recompiler: std::sync::Arc::new(egret_perm_compile::PermGroupRecompiler),
     };
 
     let session = st

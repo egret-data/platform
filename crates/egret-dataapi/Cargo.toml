@@ -137,3 +137,10 @@ egret-query.workspace = true
 egret-storage.workspace = true
 egret-secrets.workspace = true
 egret-analytics-api.workspace = true
+# J-F3 Task 1b: `DataApiState::group_recompiler` is a port the binary fills with
+# `egret_perm_compile::PermGroupRecompiler`; the suites build the state with the
+# REAL implementation, not a stub, so a service-account delete in a test
+# recompiles exactly as it does in production. Dev-only, like `egret-query`
+# above: the library stays off the compiler, and there is no cycle
+# (`egret-perm-compile` does not depend on this crate).
+egret-perm-compile.workspace = true

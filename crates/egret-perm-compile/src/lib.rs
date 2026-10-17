@@ -77,6 +77,10 @@ pub mod grammar;
 // SP4d-3 Task 7: the migration transaction (re-classify, write, recompile,
 // switch off, provenance, re-gate every affected profile) and its undo.
 pub mod grants;
+// J-F3 Task 1b: a group expands to its members at compile time, so every
+// `user_groups` writer recompiles through this port implementation — see that
+// module's own doc comment for why it is a port and `role_membership` is not.
+pub mod group_membership;
 // View governance B1 (Task 7): a view's table-level lineage from Trino's
 // `EXPLAIN (TYPE IO, FORMAT JSON)`, and the tags it carries to the view.
 pub mod lineage;
@@ -102,6 +106,7 @@ pub mod view_tags;
 
 pub use attribution::{attribute_policy_name, PolicyAttribution};
 pub use grants::{compile_grant, validate_grant_shape};
+pub use group_membership::PermGroupRecompiler;
 pub use role_membership::{
     assign_platform_role_and_recompile, delete_platform_role_and_recompile,
     unassign_platform_role_and_recompile,
@@ -110,10 +115,10 @@ pub use routes::{openapi, perm_router, PermHttpError, PermState};
 pub use rules::{compile_rule, validate_rule_shape, ResolvedNames, TaggedColumn};
 pub use trigger::{
     affected_services_for_classification, affected_services_for_grant,
-    affected_services_for_role_membership, affected_services_for_rule,
-    affected_services_for_tag_rename, affected_services_for_workspace_members, lock_services_in_tx,
-    merge_service_ids, recompile_service, recompile_service_in_tx, recompile_services_in_tx,
-    CompileSummary, PermRecompiler, SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING,
-    PROFILE_EXPANSION_CEILING,
+    affected_services_for_group_membership, affected_services_for_role_membership,
+    affected_services_for_rule, affected_services_for_tag_rename,
+    affected_services_for_workspace_members, lock_services_in_tx, merge_service_ids,
+    recompile_service, recompile_service_in_tx, recompile_services_in_tx, CompileSummary,
+    PermRecompiler, SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING, PROFILE_EXPANSION_CEILING,
 };
 pub use view_tags::{dependent_view_warehouses, retag_view_in_tx, RetagSummary, ViewRetag};

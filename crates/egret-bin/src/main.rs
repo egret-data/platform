@@ -1394,6 +1394,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             cookie_key,
             impersonations: impersonations.clone(),
             audit: audit_sink.clone(),
+            // J-F3 Task 1b: every login's group sync recompiles the policies
+            // the groups it moved reach (`egret_auth::groups`' module doc).
+            group_recompiler: std::sync::Arc::new(egret_perm_compile::PermGroupRecompiler),
         }),
         _ => None,
     };
@@ -2391,6 +2394,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             db.clone(),
             egret_dataapi::serving::scheduled_retention(config.data_api.access_log_retention_days),
         ),
+        // J-F3 Task 1b: a service-account delete leaves every group it was in.
+        group_recompiler: std::sync::Arc::new(egret_perm_compile::PermGroupRecompiler),
     });
 
     // Workflow management surface (W1 Task 7). `refs` is the real

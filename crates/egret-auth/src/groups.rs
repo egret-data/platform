@@ -1,8 +1,106 @@
 //! Postgres-backed group upsert + per-user OIDC group synchronization.
+//!
+//! # Every write to `user_groups` recompiles the engine policies it changes
+//!
+//! **Since J-F3 Task 1b (design R8), a group's MEMBERSHIP is compiled into the
+//! engine policies.** D7 (`docs/en/plans/2026-09-24-permission-model-sp4a-d7-result.md`)
+//! measured that no engine egret provisions ever sees a group — no
+//! `group-provider.properties`, no usersync — so a Ranger item naming a group
+//! matched nobody: an allow on a group granted nobody while `explain` said it
+//! did, and a group in a deny include or an exclude failed OPEN. So
+//! `egret-perm-compile` now expands a non-`public` group principal into its
+//! members' stored usernames at compile time, exactly as SP4c did for roles —
+//! and that enumeration is stale the moment a row of `user_groups` changes.
+//!
+//! The staleness is not symmetric. A missed ADD denies a new member (annoying).
+//! A missed REMOVE leaves the removed member named in every policy their group
+//! reaches: still granted by an allow, still exempt from a mask, still SUBTRACTED
+//! from a deny — a breach that egret's own UI cannot show, because the
+//! `user_groups` row it reads was written correctly.
+//!
+//! # Why the recompile is a port and not a call
+//!
+//! `egret-perm-compile` depends on this crate (for `users.username`), so these
+//! writers cannot call it — the same constraint `egret_auth::roles::RoleRepo`
+//! has (`egret_perm_compile::role_membership`'s module doc). Roles solved it by
+//! moving the transaction into the compiler crate, which works because every
+//! role writer is an HTTP handler in a crate ABOVE the compiler. Groups cannot:
+//! one writer is the per-login OIDC sync ([`GroupRepo::sync_user_oidc_groups`],
+//! called from `crate::oidc_routes`, in this crate), and another is
+//! `UserRepo::hard_delete`, called from `egret-dataapi`, which does not depend
+//! on the compiler either. So the recompile is the [`GroupMembershipRecompiler`]
+//! port, the same dependency inversion `egret_policy::ProfileRecompiler` uses
+//! for the policy editor: the trait lives here, `egret-perm-compile` implements
+//! it, `egret-bin` wires it.
+//!
+//! **Every writer takes the port as an ARGUMENT, not as an optional field.** An
+//! `Option` that defaults to `None` is a recompile somebody forgets to wire,
+//! and a forgotten recompile is the breach above; a required argument is one
+//! the compiler refuses to let a new caller omit. There is deliberately no
+//! no-op implementation in this crate for the same reason.
+//!
+//! The order every writer follows is the one
+//! `egret_perm_compile::role_membership::with_recompile` documents: name the
+//! affected groups, take every profile lock ASCENDING
+//! ([`GroupMembershipRecompiler::lock_affected_in_tx`]), write, recompile on
+//! the same transaction ([`GroupMembershipRecompiler::recompile_in_tx`]), and
+//! commit only if the recompile succeeded — a committed membership change whose
+//! policies were never rewritten is worse than a refused one.
 
 use egret_core::{Result, UserId};
 use egret_metastore::Db;
+use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
+
+/// Recompiles the engine policies a change to a group's MEMBERSHIP can reach,
+/// on the caller's open transaction — the seam `egret-perm-compile` fills
+/// (`PermGroupRecompiler`), because this crate cannot depend on it (module
+/// doc).
+///
+/// Two calls rather than one because the profile locks must be taken BEFORE
+/// the membership write and the recompile must run AFTER it. A membership
+/// write takes row locks of its own (a user delete also nulls attribution
+/// columns such as `catalog_tag_assignments.assigned_by`), and a transaction
+/// that took those before reaching for a profile lock could deadlock against
+/// a concurrent recompile that holds the profile and wants the rows. Profiles
+/// first, ascending, then rows, is the global order
+/// `egret_perm_compile::lock_services_in_tx` documents.
+#[async_trait::async_trait]
+pub trait GroupMembershipRecompiler: Send + Sync {
+    /// The services whose compiled policies name a member of any group in
+    /// `group_names` (by group NAME — the key `perm.grant_principals` and
+    /// `perm.rule_exemptions` store), with every one of their locks taken,
+    /// ascending. Called BEFORE the membership write.
+    async fn lock_affected_in_tx(
+        &self,
+        tx: &mut Transaction<'static, Postgres>,
+        group_names: &[String],
+    ) -> Result<Vec<i64>>;
+
+    /// Recompile `service_ids` (as returned by
+    /// [`lock_affected_in_tx`](Self::lock_affected_in_tx)) on `tx`. An error
+    /// refuses the membership write, which rolls back with it.
+    async fn recompile_in_tx(
+        &self,
+        tx: &mut Transaction<'static, Postgres>,
+        service_ids: &[i64],
+    ) -> Result<()>;
+}
+
+/// The names of every group `user_id` directly belongs to, on `conn`.
+pub(crate) async fn group_names_of_user_in_tx(
+    conn: &mut sqlx::PgConnection,
+    user_id: Uuid,
+) -> Result<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT g.name FROM user_groups ug JOIN groups g ON g.id = ug.group_id \
+         WHERE ug.user_id = $1 ORDER BY g.name",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)
+}
 
 /// A stored group row (local or synced from OIDC).
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
@@ -61,8 +159,65 @@ impl GroupRepo {
 
     /// Replace the user's OIDC-sourced group memberships with `names` (in one tx).
     /// Manual (source='local') memberships are left untouched.
-    pub async fn sync_user_oidc_groups(&self, user_id: UserId, names: &[String]) -> Result<()> {
+    ///
+    /// **Runs on every OIDC login, so it recompiles only what the login
+    /// CHANGED.** The groups the user would hold after the write are computed
+    /// before it (the local ones they keep, plus every claimed name that names a
+    /// group — the INSERT below joins `groups` by name, so a claimed name with
+    /// no row is not a membership), and only the symmetric difference with the
+    /// groups they hold now is handed to `recompiler`. A login whose claim did
+    /// not move — the common case — takes no profile lock and compiles nothing;
+    /// one that did recompiles only the profiles whose policies name one of
+    /// the moved groups. Recompiling on every login would make every login an
+    /// installation-wide write, which is the cost `egret_perm_compile::members`
+    /// once cited for not expanding groups at all.
+    ///
+    /// A recompile failure refuses the sync and the login with it (the caller
+    /// answers 500): the membership stays as it was and so does every policy
+    /// computed from it, which is the consistent state. Committing the sync
+    /// without the recompile would be the inconsistent one — and on a REMOVE it
+    /// is the breach this module's doc describes.
+    pub async fn sync_user_oidc_groups(
+        &self,
+        user_id: UserId,
+        names: &[String],
+        recompiler: &dyn GroupMembershipRecompiler,
+    ) -> Result<()> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+
+        let before: Vec<(String, String)> = sqlx::query_as(
+            "SELECT g.name, g.source FROM user_groups ug JOIN groups g ON g.id = ug.group_id \
+             WHERE ug.user_id = $1",
+        )
+        .bind(user_id.0)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        let claimed: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM groups WHERE name = ANY($1)")
+                .bind(names)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(db_err)?;
+        let before_set: std::collections::BTreeSet<String> =
+            before.iter().map(|(n, _)| n.clone()).collect();
+        let after_set: std::collections::BTreeSet<String> = before
+            .iter()
+            .filter(|(_, source)| source != "oidc")
+            .map(|(n, _)| n.clone())
+            .chain(claimed)
+            .collect();
+        let moved: Vec<String> = before_set
+            .symmetric_difference(&after_set)
+            .cloned()
+            .collect();
+
+        let services = if moved.is_empty() {
+            Vec::new()
+        } else {
+            recompiler.lock_affected_in_tx(&mut tx, &moved).await?
+        };
+
         sqlx::query(
             "DELETE FROM user_groups WHERE user_id = $1 \
              AND group_id IN (SELECT id FROM groups WHERE source = 'oidc')",
@@ -82,6 +237,10 @@ impl GroupRepo {
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
+        }
+
+        if !moved.is_empty() {
+            recompiler.recompile_in_tx(&mut tx, &services).await?;
         }
         tx.commit().await.map_err(db_err)?;
         Ok(())
@@ -107,53 +266,153 @@ impl GroupRepo {
 
     /// Rename a local group. No-op (0 rows) if the group is oidc-sourced or
     /// does not exist; returns the number of rows affected.
-    pub async fn rename(&self, id: Uuid, name: &str) -> Result<u64> {
-        Ok(
-            sqlx::query("UPDATE groups SET name = $2 WHERE id = $1 AND source = 'local'")
+    ///
+    /// **A rename is a membership change for TWO names.** Grants and rule
+    /// exemptions name a group by NAME (`perm.grant_principals.ref`), with no FK
+    /// to `groups`, so after the rename every principal naming the OLD name
+    /// expands to nobody — a deny or exclude on it evaporates — and any naming
+    /// the NEW name starts expanding to these members. Both are recompiled.
+    pub async fn rename(
+        &self,
+        id: Uuid,
+        name: &str,
+        recompiler: &dyn GroupMembershipRecompiler,
+    ) -> Result<u64> {
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        let old: Option<String> =
+            sqlx::query_scalar("SELECT name FROM groups WHERE id = $1 AND source = 'local'")
                 .bind(id)
-                .bind(name)
-                .execute(&self.db.pool)
+                .fetch_optional(&mut *tx)
                 .await
-                .map_err(db_err)?
-                .rows_affected(),
-        )
+                .map_err(db_err)?;
+        let Some(old) = old else {
+            // Nothing to rename (oidc-sourced or absent): the UPDATE below would
+            // match no row, so there is nothing to lock or recompile.
+            return Ok(0);
+        };
+        let names = vec![old, name.to_string()];
+        let services = recompiler.lock_affected_in_tx(&mut tx, &names).await?;
+        let rows = sqlx::query("UPDATE groups SET name = $2 WHERE id = $1 AND source = 'local'")
+            .bind(id)
+            .bind(name)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?
+            .rows_affected();
+        if rows > 0 {
+            recompiler.recompile_in_tx(&mut tx, &services).await?;
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(rows)
     }
 
     /// Delete a local group. No-op (0 rows) if the group is oidc-sourced or
     /// does not exist, so callers can 409 on a synced group.
-    pub async fn delete_local(&self, id: Uuid) -> Result<u64> {
-        Ok(
-            sqlx::query("DELETE FROM groups WHERE id = $1 AND source = 'local'")
+    ///
+    /// `user_groups.group_id` is `ON DELETE CASCADE`
+    /// (`migrations/0002_identity.sql`), so this removes EVERY member at once —
+    /// the largest REMOVE there is — and is recompiled like one. The affected
+    /// set is read from the group's name before the row is gone; afterwards a
+    /// principal still naming it expands to nobody.
+    pub async fn delete_local(
+        &self,
+        id: Uuid,
+        recompiler: &dyn GroupMembershipRecompiler,
+    ) -> Result<u64> {
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        let name: Option<String> =
+            sqlx::query_scalar("SELECT name FROM groups WHERE id = $1 AND source = 'local'")
                 .bind(id)
-                .execute(&self.db.pool)
+                .fetch_optional(&mut *tx)
                 .await
-                .map_err(db_err)?
-                .rows_affected(),
-        )
+                .map_err(db_err)?;
+        let Some(name) = name else {
+            return Ok(0);
+        };
+        let services = recompiler
+            .lock_affected_in_tx(&mut tx, std::slice::from_ref(&name))
+            .await?;
+        let rows = sqlx::query("DELETE FROM groups WHERE id = $1 AND source = 'local'")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?
+            .rows_affected();
+        if rows > 0 {
+            recompiler.recompile_in_tx(&mut tx, &services).await?;
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(rows)
     }
 
-    /// Add a user to a group (idempotent).
-    pub async fn add_member(&self, group_id: Uuid, user_id: UserId) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2) \
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(user_id.0)
-        .bind(group_id)
-        .execute(&self.db.pool)
-        .await
-        .map_err(db_err)?;
-        Ok(())
+    /// Add a user to a group (idempotent), recompiling every policy the group
+    /// reaches in the same transaction (module doc).
+    pub async fn add_member(
+        &self,
+        group_id: Uuid,
+        user_id: UserId,
+        recompiler: &dyn GroupMembershipRecompiler,
+    ) -> Result<()> {
+        self.change_member(group_id, user_id, true, recompiler)
+            .await
     }
 
-    /// Remove a user from a group (idempotent).
-    pub async fn remove_member(&self, group_id: Uuid, user_id: UserId) -> Result<()> {
-        sqlx::query("DELETE FROM user_groups WHERE group_id = $1 AND user_id = $2")
+    /// Remove a user from a group (idempotent), recompiling in the same
+    /// transaction — the direction that fails OPEN when it is missed (module
+    /// doc).
+    pub async fn remove_member(
+        &self,
+        group_id: Uuid,
+        user_id: UserId,
+        recompiler: &dyn GroupMembershipRecompiler,
+    ) -> Result<()> {
+        self.change_member(group_id, user_id, false, recompiler)
+            .await
+    }
+
+    /// The one shape both directions share, so the order cannot drift between
+    /// them: name → lock → write → recompile (only if a row changed) → commit.
+    /// A group id that does not exist skips the lock and lets the write answer
+    /// (the INSERT's FK refuses it, the DELETE matches nothing), as
+    /// `egret_perm_compile::role_membership` treats an unresolvable role.
+    async fn change_member(
+        &self,
+        group_id: Uuid,
+        user_id: UserId,
+        add: bool,
+        recompiler: &dyn GroupMembershipRecompiler,
+    ) -> Result<()> {
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        let name: Option<String> = sqlx::query_scalar("SELECT name FROM groups WHERE id = $1")
             .bind(group_id)
-            .bind(user_id.0)
-            .execute(&self.db.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(db_err)?;
+        let services = match &name {
+            Some(n) => {
+                recompiler
+                    .lock_affected_in_tx(&mut tx, std::slice::from_ref(n))
+                    .await?
+            }
+            None => Vec::new(),
+        };
+        let sql = if add {
+            "INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2) \
+             ON CONFLICT DO NOTHING"
+        } else {
+            "DELETE FROM user_groups WHERE user_id = $1 AND group_id = $2"
+        };
+        let rows = sqlx::query(sql)
+            .bind(user_id.0)
+            .bind(group_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?
+            .rows_affected();
+        if name.is_some() && rows > 0 {
+            recompiler.recompile_in_tx(&mut tx, &services).await?;
+        }
+        tx.commit().await.map_err(db_err)?;
         Ok(())
     }
 

@@ -314,6 +314,7 @@ async fn live() -> Result<Live, String> {
         cache: std::sync::Arc::new(egret_dataapi::serving::ResponseCache::new()),
         rate_limits: Arc::new(egret_dataapi::serving::TokenBucket::new()),
         activity: ActivityStore::new(db.clone(), Some(90)),
+        group_recompiler: std::sync::Arc::new(egret_perm_compile::PermGroupRecompiler),
     };
 
     let session = st

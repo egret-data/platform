@@ -1,0 +1,759 @@
+//! J-F3 **Task 1b** (design R8): a `group` principal reaches the engine as its
+//! MEMBERS, and every write to `user_groups` recompiles.
+//!
+//! **The defect.** `grants.rs` put a `PrincipalKind::Group` straight into the
+//! Ranger `groups` bucket and `rules.rs` did the same for a rule exemption. D7
+//! (`docs/en/plans/2026-09-24-permission-model-sp4a-d7-result.md`) measured that
+//! no engine egret provisions ever sees a group — no `group-provider.properties`,
+//! no usersync — so that bucket matched nobody: an allow on a group granted
+//! nobody while `explain` said it did, and a group in a deny include or an
+//! exclude failed OPEN (the deny or the subtract silently evaporated).
+//!
+//! A group now compiles to its members' STORED usernames, minted when missing,
+//! the way SP4c compiled a role. The assertions are therefore about which
+//! USERNAMES each item names and that the group name appears nowhere in the
+//! body — a test that only asserted "the body has a `groups` bucket naming the
+//! group" passed against the defect, because the body was correct Ranger that
+//! named a principal nothing resolves.
+//!
+//! The second half is the triggers. An enumeration is stale the instant
+//! membership changes, and a missed REMOVE is a breach, so each writer of
+//! `user_groups` is driven here through its real API with the real
+//! `PermGroupRecompiler`, and the compiled policy is read back WITHOUT any
+//! explicit recompile: if a writer forgot the recompile, the policy still names
+//! the old membership and the test fails.
+//!
+//! Its own test binary, so `egret-test-db` gives it a private database.
+//!
+//! DB-gated; self-skips only under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS:
+//!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
+//!   env -u EGRET_ALLOW_DB_SKIP cargo test -p egret-perm-compile --test group_grants
+
+use egret_auth::groups::GroupRepo;
+use egret_auth::users::UserRepo;
+use egret_core::UserId;
+use egret_metastore::Db;
+use egret_perm::{
+    Action, Effect, Grant, GrantOrigin, PermStore, Principal, PrincipalKind, PrincipalSet, Rule,
+    RuleKind, Scope, Selector,
+};
+use egret_perm_compile::{recompile_service, PermGroupRecompiler};
+use egret_policy::{PolicyStore, COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX};
+use serde_json::Value;
+use uuid::Uuid;
+
+async fn test_db() -> Option<Db> {
+    let dsn = egret_test_db::url().await?;
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    Some(db)
+}
+
+fn unique(prefix: &str) -> String {
+    format!("{prefix}_{}", &Uuid::new_v4().simple().to_string()[..12])
+}
+
+struct Fixture {
+    db: Db,
+    perm: PermStore,
+    policy: PolicyStore,
+    groups: GroupRepo,
+    service_id: i64,
+    catalog_id: Uuid,
+}
+
+/// A StarRocks profile with one engine bound to it and one registry catalog
+/// attached — the same shape `tests/role_grants.rs` uses, StarRocks so nothing
+/// here needs a tag service.
+async fn seed(db: &Db) -> Fixture {
+    let pool = &db.pool;
+    let perm = PermStore::new(pool.clone());
+    let policy = PolicyStore::new(db.clone());
+
+    egret_policy::seed_starrocks(&policy)
+        .await
+        .expect("seed starrocks service-def");
+    let service = policy
+        .create_service(
+            &unique("sr_groupgrant"),
+            "starrocks",
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("create service");
+
+    let workspace_id: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$2) RETURNING id")
+            .bind(unique("groupgrant-ws"))
+            .bind("Group Grant WS")
+            .fetch_one(pool)
+            .await
+            .expect("workspace");
+    let sc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','egret-groupgrant-test','AKIATEST') RETURNING id",
+    )
+    .bind(unique("groupgrant-sc"))
+    .fetch_one(pool)
+    .await
+    .expect("storage connection");
+    let warehouse_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(unique("groupgrant_wh"))
+    .bind(workspace_id)
+    .bind(sc_id)
+    .fetch_one(pool)
+    .await
+    .expect("warehouse");
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'starrocks','egret','{}'::jsonb,$2) RETURNING id",
+    )
+    .bind(unique("groupgrant-eng"))
+    .bind(service.id)
+    .fetch_one(pool)
+    .await
+    .expect("engine");
+    let catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+         RETURNING id",
+    )
+    .bind(unique("groupgrant_cat"))
+    .bind(warehouse_id)
+    .fetch_one(pool)
+    .await
+    .expect("registry catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine_id)
+    .bind(catalog_id)
+    .execute(pool)
+    .await
+    .expect("attach catalog");
+
+    Fixture {
+        db: db.clone(),
+        perm,
+        policy,
+        groups: GroupRepo::new(db.clone()),
+        service_id: service.id,
+        catalog_id,
+    }
+}
+
+async fn new_user(db: &Db, email: &str, username: Option<&str>) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name, username) VALUES ('local',$1,$2,$3) RETURNING id",
+    )
+    .bind(email)
+    .bind("Test User")
+    .bind(username)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert user")
+}
+
+/// A user with a fresh unique username; returns `(id, username)`.
+async fn person(db: &Db, prefix: &str) -> (Uuid, String) {
+    let name = unique(prefix).replace('_', "-");
+    let id = new_user(db, &format!("{name}@egret.local"), Some(&name)).await;
+    (id, name)
+}
+
+async fn new_group(db: &Db, name: &str) -> Uuid {
+    sqlx::query_scalar("INSERT INTO groups (name, source) VALUES ($1, 'local') RETURNING id")
+        .bind(name)
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert group")
+}
+
+/// A membership row written behind every writer's back — for SEEDING only, so
+/// a test of a trigger never seeds through the trigger it is testing.
+async fn seed_member(db: &Db, group_id: Uuid, user_id: Uuid) {
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(group_id)
+        .execute(&db.pool)
+        .await
+        .expect("seed membership");
+}
+
+fn principal(kind: PrincipalKind, r: &str) -> Principal {
+    Principal {
+        kind,
+        r#ref: r.to_string(),
+    }
+}
+
+fn group(name: &str) -> Principal {
+    principal(PrincipalKind::Group, name)
+}
+
+fn user(name: &str) -> Principal {
+    principal(PrincipalKind::User, name)
+}
+
+/// A read grant on the fixture's whole catalog.
+fn grant(f: &Fixture, effect: Effect, include: Vec<Principal>, exclude: Vec<Principal>) -> Grant {
+    Grant {
+        id: Uuid::nil(),
+        effect,
+        actions: vec![Action::Read],
+        scope: Scope {
+            catalog_id: f.catalog_id,
+            schema: None,
+            table: None,
+            column: None,
+        },
+        principals: PrincipalSet { include, exclude },
+        origin: GrantOrigin::Explicit,
+    }
+}
+
+async fn create_and_compile(f: &Fixture, g: &Grant) -> Uuid {
+    let id = f.perm.create_grant(g).await.expect("create grant");
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+    id
+}
+
+async fn compiled(f: &Fixture, name: &str) -> Option<Value> {
+    sqlx::query_scalar(
+        "SELECT policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(f.service_id)
+    .bind(name)
+    .fetch_optional(&f.db.pool)
+    .await
+    .expect("policy read")
+}
+
+async fn grant_body(f: &Fixture, grant_id: Uuid) -> Option<Value> {
+    compiled(f, &format!("{COMPILER_GRANT_PREFIX}{grant_id}")).await
+}
+
+fn names(v: &Value, key: &str) -> Vec<String> {
+    v[key]
+        .as_array()
+        .unwrap_or_else(|| panic!("{key} in {v}"))
+        .iter()
+        .map(|s| s.as_str().expect("string").to_string())
+        .collect()
+}
+
+/// The users of the one item in `bucket` (`policyItems`, `denyPolicyItems`,
+/// `allowExceptions`, `denyExceptions`), asserting there is exactly one and that
+/// it names no group.
+fn only_item_users(body: &Value, bucket: &str) -> Vec<String> {
+    let items = body[bucket]
+        .as_array()
+        .unwrap_or_else(|| panic!("{bucket}: {body:#}"));
+    assert_eq!(items.len(), 1, "exactly one {bucket} item: {body:#}");
+    assert!(
+        names(&items[0], "groups").is_empty(),
+        "no {bucket} item may name a group — no engine egret provisions resolves one (D7): \
+         {body:#}"
+    );
+    let mut users = names(&items[0], "users");
+    users.sort();
+    users
+}
+
+fn sorted(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v
+}
+
+/// **The headline.** An allow on a group names its members by their STORED
+/// usernames — one of them with a collision-suffixed name a re-derivation from
+/// the email would get wrong, one with NO username yet, which is minted rather
+/// than skipped (`members.rs`' module doc: on a fresh install that is every
+/// member) — and never the group.
+#[tokio::test]
+async fn an_allow_on_a_group_names_its_members_and_never_the_group() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let local = unique("dupe").replace('_', "-");
+    let _first = new_user(&db, &format!("{local}@egret.local"), Some(&local)).await;
+    let suffixed = new_user(
+        &db,
+        &format!("{local}@other.local"),
+        Some(&format!("{local}-2")),
+    )
+    .await;
+    let unminted_local = unique("fresh").replace('_', "-");
+    let unminted = new_user(&db, &format!("{unminted_local}@egret.local"), None).await;
+    let (_, outsider) = person(&db, "outsider").await;
+
+    let group_name = unique("analysts");
+    let gid = new_group(&db, &group_name).await;
+    seed_member(&db, gid, suffixed).await;
+    seed_member(&db, gid, unminted).await;
+
+    let grant_id = create_and_compile(
+        &f,
+        &grant(&f, Effect::Allow, vec![group(&group_name)], vec![]),
+    )
+    .await;
+
+    let minted: Option<String> =
+        sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1")
+            .bind(unminted)
+            .fetch_one(&db.pool)
+            .await
+            .expect("read minted username");
+    let minted = minted.expect("compiling the group grant must mint the member's username");
+
+    let body = grant_body(&f, grant_id)
+        .await
+        .expect("a group grant with members compiles to a policy");
+    let users = only_item_users(&body, "policyItems");
+    assert_eq!(
+        users,
+        sorted(vec![format!("{local}-2"), minted]),
+        "the members, by STORED username (a re-derivation would name {local:?}, a different \
+         person) and the minted one: {body:#}"
+    );
+    assert!(!users.contains(&outsider), "a non-member is not named");
+    assert!(
+        !serde_json::to_string(&body).unwrap().contains(&group_name),
+        "the group NAME must appear nowhere in the compiled body: {body:#}"
+    );
+}
+
+/// A deny on a group is the direction that failed OPEN: a deny naming a group
+/// no engine resolves denied nobody. It must name the members.
+#[tokio::test]
+async fn a_deny_on_a_group_names_its_members_in_the_deny_item() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let (m1, n1) = person(&db, "deny-m1").await;
+    let (m2, n2) = person(&db, "deny-m2").await;
+    let group_name = unique("contractors");
+    let gid = new_group(&db, &group_name).await;
+    seed_member(&db, gid, m1).await;
+    seed_member(&db, gid, m2).await;
+
+    let grant_id = create_and_compile(
+        &f,
+        &grant(&f, Effect::Deny, vec![group(&group_name)], vec![]),
+    )
+    .await;
+    let body = grant_body(&f, grant_id).await.expect("deny policy");
+    assert_eq!(
+        only_item_users(&body, "denyPolicyItems"),
+        sorted(vec![n1, n2]),
+        "{body:#}"
+    );
+}
+
+/// An exclude on a group is the other fail-open: the subtract evaporated and
+/// the allow reached the people it was meant to spare. On an allow it is
+/// `allowExceptions`; on a deny, `denyExceptions`.
+#[tokio::test]
+async fn an_exclude_on_a_group_names_its_members_in_the_exception() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let (_, alice) = person(&db, "exc-alice").await;
+    let (bob_id, bob) = person(&db, "exc-bob").await;
+    let group_name = unique("temps");
+    let gid = new_group(&db, &group_name).await;
+    seed_member(&db, gid, bob_id).await;
+
+    let allow_id = create_and_compile(
+        &f,
+        &grant(
+            &f,
+            Effect::Allow,
+            vec![user(&alice), user(&bob)],
+            vec![group(&group_name)],
+        ),
+    )
+    .await;
+    let body = grant_body(&f, allow_id).await.expect("allow policy");
+    assert_eq!(only_item_users(&body, "allowExceptions"), vec![bob.clone()]);
+
+    let deny_id = create_and_compile(
+        &f,
+        &grant(
+            &f,
+            Effect::Deny,
+            vec![user(&alice), user(&bob)],
+            vec![group(&group_name)],
+        ),
+    )
+    .await;
+    let body = grant_body(&f, deny_id).await.expect("deny policy");
+    assert_eq!(only_item_users(&body, "denyExceptions"), vec![bob]);
+}
+
+/// A rule exemption naming a group exempts its members. Before, the exemption
+/// named the group, which no engine resolves, so the mask applied to the very
+/// people the author exempted.
+#[tokio::test]
+async fn a_group_in_a_rule_exemption_exempts_its_members() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let (mid, member) = person(&db, "exempt-m").await;
+    let group_name = unique("auditors");
+    let gid = new_group(&db, &group_name).await;
+    seed_member(&db, gid, mid).await;
+
+    let rule = Rule {
+        id: Uuid::nil(),
+        name: unique("group-exempt-mask"),
+        kind: RuleKind::Mask {
+            mask_type: "MASK".to_string(),
+            value_expr: None,
+        },
+        selector: Selector::Path(Scope {
+            catalog_id: f.catalog_id,
+            schema: Some("sales".into()),
+            table: Some("orders".into()),
+            column: Some("email".into()),
+        }),
+        exempt: PrincipalSet {
+            include: vec![group(&group_name)],
+            exclude: vec![],
+        },
+    };
+    let rule_id = f.perm.create_rule(&rule).await.expect("create rule");
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let body = compiled(&f, &format!("{COMPILER_RULE_PREFIX}{rule_id}"))
+        .await
+        .expect("rule policy");
+    let items = body["dataMaskPolicyItems"].as_array().expect("mask items");
+    assert_eq!(items.len(), 2, "an exempt item, then everyone: {body:#}");
+    assert_eq!(names(&items[0], "users"), vec![member], "{body:#}");
+    assert!(names(&items[0], "groups").is_empty(), "{body:#}");
+    assert_eq!(names(&items[1], "groups"), vec!["public".to_string()]);
+    assert!(
+        !serde_json::to_string(&body).unwrap().contains(&group_name),
+        "{body:#}"
+    );
+}
+
+/// `public` is the ONE group every engine resolves (Ranger's built-in), so it
+/// stays a group.
+#[tokio::test]
+async fn the_public_group_stays_a_group() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let grant_id =
+        create_and_compile(&f, &grant(&f, Effect::Allow, vec![group("public")], vec![])).await;
+    let body = grant_body(&f, grant_id).await.expect("public policy");
+    let item = &body["policyItems"][0];
+    assert_eq!(names(item, "groups"), vec!["public".to_string()]);
+    assert!(names(item, "users").is_empty(), "{body:#}");
+}
+
+/// A group with no members expands to nobody: an include compiles to no policy
+/// at all (fails closed — the same answer, said clearly), and an exclude
+/// subtracts nobody, which is right because nobody is in it.
+#[tokio::test]
+async fn an_empty_group_grants_nobody_and_subtracts_nobody() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let (_, alice) = person(&db, "empty-alice").await;
+    let group_name = unique("nobody");
+    new_group(&db, &group_name).await;
+
+    let include_id = create_and_compile(
+        &f,
+        &grant(&f, Effect::Allow, vec![group(&group_name)], vec![]),
+    )
+    .await;
+    assert_eq!(
+        grant_body(&f, include_id).await,
+        None,
+        "an include that expands to nobody compiles to no policy"
+    );
+
+    let exclude_id = create_and_compile(
+        &f,
+        &grant(
+            &f,
+            Effect::Allow,
+            vec![user(&alice)],
+            vec![group(&group_name)],
+        ),
+    )
+    .await;
+    let body = grant_body(&f, exclude_id).await.expect("policy");
+    assert_eq!(only_item_users(&body, "policyItems"), vec![alice]);
+    assert!(
+        body["allowExceptions"]
+            .as_array()
+            .expect("array")
+            .is_empty(),
+        "an exclude that expands to nobody emits no exception block: {body:#}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The triggers: every writer of `user_groups`, through its real API, with NO
+// explicit recompile afterwards.
+// ---------------------------------------------------------------------------
+
+/// `GroupRepo::add_member` and `remove_member` (the admin console's
+/// `POST/DELETE /groups/{id}/members`): the compiled policy follows each
+/// write in the same transaction. The REMOVE is asserted on a DENY's exception —
+/// the case where a missed recompile keeps exempting someone the model no
+/// longer exempts.
+#[tokio::test]
+async fn adding_and_removing_a_member_recompiles_in_the_same_transaction() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let (_, alice) = person(&db, "trg-alice").await;
+    let (bob_id, bob) = person(&db, "trg-bob").await;
+    let group_name = unique("trg-group");
+    let gid = new_group(&db, &group_name).await;
+
+    let allow_id = create_and_compile(
+        &f,
+        &grant(&f, Effect::Allow, vec![group(&group_name)], vec![]),
+    )
+    .await;
+    let deny_id = create_and_compile(
+        &f,
+        &grant(
+            &f,
+            Effect::Deny,
+            vec![user(&alice), user(&bob)],
+            vec![group(&group_name)],
+        ),
+    )
+    .await;
+    assert_eq!(grant_body(&f, allow_id).await, None, "empty group to start");
+
+    f.groups
+        .add_member(gid, UserId(bob_id), &PermGroupRecompiler)
+        .await
+        .expect("add member");
+    let allow = grant_body(&f, allow_id).await.expect("allow after ADD");
+    assert_eq!(only_item_users(&allow, "policyItems"), vec![bob.clone()]);
+    let deny = grant_body(&f, deny_id).await.expect("deny after ADD");
+    assert_eq!(only_item_users(&deny, "denyExceptions"), vec![bob.clone()]);
+
+    f.groups
+        .remove_member(gid, UserId(bob_id), &PermGroupRecompiler)
+        .await
+        .expect("remove member");
+    assert_eq!(
+        grant_body(&f, allow_id).await,
+        None,
+        "the removed member is no longer granted"
+    );
+    let deny = grant_body(&f, deny_id).await.expect("deny after REMOVE");
+    assert!(
+        deny["denyExceptions"].as_array().expect("array").is_empty(),
+        "the removed member is no longer exempt from the deny — a missed REMOVE recompile \
+         is exactly this exception surviving: {deny:#}"
+    );
+    assert_eq!(
+        only_item_users(&deny, "denyPolicyItems"),
+        sorted(vec![alice, bob])
+    );
+}
+
+/// `GroupRepo::sync_user_oidc_groups` (every OIDC login): a claim that drops a
+/// group removes the member from what that group compiles to, and one that adds
+/// a group adds them.
+#[tokio::test]
+async fn an_oidc_sync_that_moves_a_membership_recompiles() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let (uid, name) = person(&db, "sso").await;
+    let g_old = f
+        .groups
+        .upsert_oidc_group(&unique("sso-old"))
+        .await
+        .expect("group");
+    let g_new = f
+        .groups
+        .upsert_oidc_group(&unique("sso-new"))
+        .await
+        .expect("group");
+    let old_name: String = sqlx::query_scalar("SELECT name FROM groups WHERE id = $1")
+        .bind(g_old)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let new_name: String = sqlx::query_scalar("SELECT name FROM groups WHERE id = $1")
+        .bind(g_new)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    seed_member(&db, g_old, uid).await;
+
+    let old_id = create_and_compile(
+        &f,
+        &grant(&f, Effect::Allow, vec![group(&old_name)], vec![]),
+    )
+    .await;
+    let new_id = create_and_compile(
+        &f,
+        &grant(&f, Effect::Allow, vec![group(&new_name)], vec![]),
+    )
+    .await;
+    assert_eq!(
+        only_item_users(&grant_body(&f, old_id).await.expect("old"), "policyItems"),
+        vec![name.clone()]
+    );
+
+    f.groups
+        .sync_user_oidc_groups(
+            UserId(uid),
+            std::slice::from_ref(&new_name),
+            &PermGroupRecompiler,
+        )
+        .await
+        .expect("sync");
+    assert_eq!(
+        grant_body(&f, old_id).await,
+        None,
+        "the IdP dropped the group, so the login must drop the access it gave"
+    );
+    assert_eq!(
+        only_item_users(&grant_body(&f, new_id).await.expect("new"), "policyItems"),
+        vec![name]
+    );
+}
+
+/// `GroupRepo::delete_local` cascades every membership away; `rename` moves
+/// the members from the old name to the new one.
+#[tokio::test]
+async fn deleting_or_renaming_a_group_recompiles() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let (uid, name) = person(&db, "grp-life").await;
+    let old_name = unique("before");
+    let new_name = unique("after");
+    let gid = new_group(&db, &old_name).await;
+    seed_member(&db, gid, uid).await;
+
+    let old_id = create_and_compile(
+        &f,
+        &grant(&f, Effect::Allow, vec![group(&old_name)], vec![]),
+    )
+    .await;
+    // A grant on the NEW name, written before the rename makes it a real group.
+    // Stored by `PermStore` directly — the authoring boundary would refuse a
+    // name no group has, which is not what this test is about.
+    let new_id = create_and_compile(
+        &f,
+        &grant(&f, Effect::Allow, vec![group(&new_name)], vec![]),
+    )
+    .await;
+    assert!(grant_body(&f, old_id).await.is_some());
+    assert_eq!(grant_body(&f, new_id).await, None);
+
+    let rows = f
+        .groups
+        .rename(gid, &new_name, &PermGroupRecompiler)
+        .await
+        .expect("rename");
+    assert_eq!(rows, 1);
+    assert_eq!(
+        grant_body(&f, old_id).await,
+        None,
+        "the old name now names nobody"
+    );
+    assert_eq!(
+        only_item_users(&grant_body(&f, new_id).await.expect("new"), "policyItems"),
+        vec![name]
+    );
+
+    let rows = f
+        .groups
+        .delete_local(gid, &PermGroupRecompiler)
+        .await
+        .expect("delete");
+    assert_eq!(rows, 1);
+    assert_eq!(
+        grant_body(&f, new_id).await,
+        None,
+        "deleting the group removes every member it granted"
+    );
+}
+
+/// `UserRepo::hard_delete` (the control plane's `DELETE /users/{id}` and the
+/// Data API's service-account delete): the deleted user leaves every policy
+/// their groups reach.
+#[tokio::test]
+async fn hard_deleting_a_member_recompiles() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let (keep_id, keep) = person(&db, "hd-keep").await;
+    let (gone_id, gone) = person(&db, "hd-gone").await;
+    let group_name = unique("hd-group");
+    let gid = new_group(&db, &group_name).await;
+    seed_member(&db, gid, keep_id).await;
+    seed_member(&db, gid, gone_id).await;
+
+    let grant_id = create_and_compile(
+        &f,
+        &grant(&f, Effect::Allow, vec![group(&group_name)], vec![]),
+    )
+    .await;
+    assert_eq!(
+        only_item_users(&grant_body(&f, grant_id).await.expect("p"), "policyItems"),
+        sorted(vec![keep.clone(), gone])
+    );
+
+    UserRepo::new(db.clone())
+        .hard_delete(UserId(gone_id), &PermGroupRecompiler)
+        .await
+        .expect("hard delete");
+    assert_eq!(
+        only_item_users(&grant_body(&f, grant_id).await.expect("p"), "policyItems"),
+        vec![keep]
+    );
+}
+
+/// A write that reaches no profile — a group no grant or rule names — locks
+/// and compiles nothing, so an unrelated membership change cannot be refused by
+/// an unrelated profile's compile.
+#[tokio::test]
+async fn a_membership_change_nothing_references_changes_no_policy_version() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+    let (uid, _) = person(&db, "unref").await;
+    let gid = new_group(&db, &unique("unreferenced")).await;
+
+    let version = |db: Db, id: i64| async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT policy_version FROM policy.authz_services WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("version")
+    };
+    let before = version(db.clone(), f.service_id).await;
+    f.groups
+        .add_member(gid, UserId(uid), &PermGroupRecompiler)
+        .await
+        .expect("add");
+    assert_eq!(version(db.clone(), f.service_id).await, before);
+}

@@ -157,6 +157,7 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>, audit: AuditSink) -
         cache: std::sync::Arc::new(egret_dataapi::serving::ResponseCache::new()),
         rate_limits: std::sync::Arc::new(egret_dataapi::serving::TokenBucket::new()),
         activity: egret_dataapi::ActivityStore::new(db.clone(), Some(90)),
+        group_recompiler: std::sync::Arc::new(egret_perm_compile::PermGroupRecompiler),
     }
 }
 

@@ -540,6 +540,47 @@ async fn a_migration_the_gate_cannot_prove_is_returned_with_its_disagreements_an
     assert!(downloaded_names(&f, f.p).await.contains(&name));
 }
 
+/// **J-F3 Task 1b: a hand-written GROUP item does not migrate, and the gate is
+/// what says so.** The grammar still carries a group through verbatim, but the
+/// recompile the migration runs expands it into the group's members (design
+/// R8). The hand-written item matched nobody on the engine (D7: no group
+/// provider, no usersync) and the compiled one names `alice` — not the same
+/// policy — so the equivalence gate must refuse it, with nothing written. A
+/// migration that went through would START granting the members access the
+/// original never gave them on any engine.
+#[tokio::test]
+async fn a_group_policy_does_not_migrate_because_the_compiled_grant_names_its_members() {
+    let Some(f) = setup().await else { return };
+    let group = unique("analysts");
+    let gid: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(&group)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("group");
+    sqlx::query(
+        "INSERT INTO user_groups (user_id, group_id) \
+         SELECT id, $1 FROM users WHERE username = 'alice'",
+    )
+    .bind(gid)
+    .execute(&f.db.pool)
+    .await
+    .expect("alice joins");
+
+    let name = unique("analysts read orders");
+    let mut body = access_policy(&f.catalog, "sales", "unused");
+    body["policyItems"][0]["users"] = json!([]);
+    body["policyItems"][0]["groups"] = json!([group]);
+    let id = insert(&f, f.p, &name, "operator", body).await;
+
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["equivalent"], false, "{body}");
+    assert_eq!(body["committed"], false, "{body}");
+    assert_eq!(grants_on_catalog(&f).await, 0, "no grant left behind");
+    assert!(provenance(&f, f.p).await.is_empty());
+    assert!(enabled(&f, id).await, "the original is still on");
+}
+
 // ── 4. a second migration is 409 ─────────────────────────────────────────
 
 #[tokio::test]

@@ -534,14 +534,9 @@ fn a_subject_holding_any_required_role_is_cleared_and_grants_still_apply() {
         d.allowed,
         "a subject holding any required role is cleared: {d:?}"
     );
-    // WHICH allow class it is depends on this fixture's grant naming a GROUP
-    // (`AllowedByGroupOnly`), which is a different mechanism and not what this
-    // test is about; what must not appear is `ClearanceRequired`.
+    // What must not appear is `ClearanceRequired`.
     assert!(
-        matches!(
-            d.reasons.as_slice(),
-            [Reason::AllowedByGrant { .. } | Reason::AllowedByGroupOnly { .. }]
-        ),
+        matches!(d.reasons.as_slice(), [Reason::AllowedByGrant { .. }]),
         "the clearance must not be the reason for a subject who holds a required role: {d:?}"
     );
 }
@@ -577,21 +572,21 @@ fn a_clearance_gate_for_an_absent_tag_does_not_block() {
 }
 
 // ---------------------------------------------------------------------------
-// `allowed_by_group_only` — an allow the data plane will refuse
+// A group-matched allow is an ordinary allow (J-F3 Task 1b)
 // ---------------------------------------------------------------------------
 
-/// **SP4c review.** egret runs no usersync and writes no group provider, so a
-/// Ranger item naming a group matches NOBODY on any engine egret provisions
-/// (D7, measured live). A subject who reaches a grant only through a group is
-/// therefore allowed by the model and refused by both engines — and until this
-/// class existed that came back as `allowed_by_grant`, the SAME wire string an
-/// enforceable allow carries. The page said so in prose beside the answer; a
-/// caller parsing `kind` never saw it.
-///
-/// `allowed` stays TRUE: the model does allow it, and Cedar enforces exactly
-/// this on control-plane object access. The class is about the DATA plane.
+/// **SP4c review, retired by J-F3 Task 1b.** A Ranger item naming a group
+/// matches nobody on any engine egret provisions (D7), so a subject who
+/// reached a grant only through a group used to be allowed here and refused by
+/// both engines, and this evaluator reported it under its own class
+/// (`allowed_by_group_only`). Design R8 closed the divergence on the
+/// compiler's side: a non-`public` group now compiles to its members'
+/// usernames, so the engine allows exactly whom this function allows, and the
+/// warning class would now be the lie. `egret-perm-compile/tests/routes.rs`
+/// (`a_group_grant_reaches_its_members_in_the_artifact_and_in_explain`) asserts
+/// the engine side.
 #[test]
-fn a_grant_matched_only_through_a_group_gets_its_own_reason_class() {
+fn a_grant_matched_only_through_a_group_is_an_ordinary_allow() {
     let g = grant(
         Effect::Allow,
         &["contractors"],
@@ -607,23 +602,17 @@ fn a_grant_matched_only_through_a_group_gets_its_own_reason_class() {
         &[],
         &[],
     );
+    assert!(d.allowed, "{d:?}");
     assert!(
-        d.allowed,
-        "the MODEL allows it — Cedar enforces this: {d:?}"
-    );
-    assert!(
-        matches!(d.reasons.as_slice(), [Reason::AllowedByGroupOnly { .. }]),
-        "an allow reachable only through a group must not wear `AllowedByGrant`'s wire string, \
-         which is what a caller parsing the reason class reads: {d:?}"
+        matches!(d.reasons.as_slice(), [Reason::AllowedByGrant { .. }]),
+        "{d:?}"
     );
 }
 
-/// **The discriminating pair.** `public` is Ranger's built-in "everybody" and
-/// is the ONE group name that resolves with no group provider — SP4c's own
-/// clearance compiler puts it on the deny side of a tag policy for exactly that
-/// reason (D0). A grant naming it IS enforceable, so reporting it as
-/// group-only would be the same lie in the other direction, and a test that
-/// only checked the positive case above would pass against that.
+/// `public` — Ranger's built-in "everybody", the one group the compiler never
+/// expands — is matched like any group and is an ordinary allow. (Written as
+/// half of the discriminating pair for the retired `allowed_by_group_only`
+/// class; kept because it still pins how `public` is matched.)
 #[test]
 fn a_grant_naming_the_public_group_is_enforceable_and_not_group_only() {
     let g = grant(
@@ -644,15 +633,12 @@ fn a_grant_naming_the_public_group_is_enforceable_and_not_group_only() {
     assert!(d.allowed, "{d:?}");
     assert!(
         matches!(d.reasons.as_slice(), [Reason::AllowedByGrant { .. }]),
-        "`public` is resolved by every engine with no group provider, so this allow is real: {d:?}"
+        "{d:?}"
     );
 }
 
-/// A grant naming the subject's own USERNAME as well as a group is enforceable
-/// — the username item is what the engine matches. Reporting it as group-only
-/// would understate a real access, and an implementation that asked "does any
-/// matching principal happen to be a group" instead of "are they ALL groups"
-/// would fail exactly here.
+/// A grant naming the subject's own USERNAME as well as a group is an ordinary
+/// allow. (The other half of the retired class's discriminating pair.)
 #[test]
 fn a_grant_naming_the_user_as_well_as_a_group_is_not_group_only() {
     let mut g = grant(
@@ -679,6 +665,6 @@ fn a_grant_naming_the_user_as_well_as_a_group_is_not_group_only() {
     );
     assert!(
         matches!(d.reasons.as_slice(), [Reason::AllowedByGrant { .. }]),
-        "the username item is what the engine will match, so this access is enforceable: {d:?}"
+        "{d:?}"
     );
 }

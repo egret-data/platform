@@ -39,6 +39,10 @@ pub struct OidcRoutesState {
     /// Audit sink for the `impersonation.start` event emitted on a completed
     /// step-up.
     pub audit: AuditSink,
+    /// Recompiles the engine policies a login's group sync changes (J-F3 Task
+    /// 1b) — `egret_perm_compile::PermGroupRecompiler`, wired by `egret-bin`.
+    /// Not optional: see `crate::groups`' module doc.
+    pub group_recompiler: std::sync::Arc<dyn crate::groups::GroupMembershipRecompiler>,
 }
 
 impl FromRef<OidcRoutesState> for Key {
@@ -173,26 +177,28 @@ async fn oidc_callback(
                 .into_response()
         }
     };
-    let user_id = match provision_and_sync(&st.users, &st.groups, &login.claims).await {
-        Ok(id) => id,
-        Err(egret_core::Error::Conflict(_)) => {
-            return (
-                jar.remove(clear_state_cookie()),
-                (
-                    StatusCode::CONFLICT,
-                    "email already used by another account",
-                ),
-            )
-                .into_response()
-        }
-        Err(_) => {
-            return (
-                jar.remove(clear_state_cookie()),
-                (StatusCode::INTERNAL_SERVER_ERROR, "provisioning failed"),
-            )
-                .into_response()
-        }
-    };
+    let user_id =
+        match provision_and_sync(&st.users, &st.groups, &login.claims, &*st.group_recompiler).await
+        {
+            Ok(id) => id,
+            Err(egret_core::Error::Conflict(_)) => {
+                return (
+                    jar.remove(clear_state_cookie()),
+                    (
+                        StatusCode::CONFLICT,
+                        "email already used by another account",
+                    ),
+                )
+                    .into_response()
+            }
+            Err(_) => {
+                return (
+                    jar.remove(clear_state_cookie()),
+                    (StatusCode::INTERNAL_SERVER_ERROR, "provisioning failed"),
+                )
+                    .into_response()
+            }
+        };
 
     // Impersonation step-up (Task 8): this authorize round-trip carried an intent
     // sealed in the (authenticated-encryption) state cookie. Complete the overlay
