@@ -976,6 +976,7 @@ async fn rewrite_run(pool: &sqlx::PgPool, ex: Uuid, run_ix: i32, state: &str, ex
         .bind(row.resume_with)
         .bind(running)
         .bind(terminal)
+        .bind(None::<String>)
         .execute(pool)
         .await
         .expect("persist's run UPDATE");

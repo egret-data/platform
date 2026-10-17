@@ -111,7 +111,7 @@ pub(crate) fn open(
         value,
         parent_run: run,
     };
-    let mut cmds = start(plan, run, task, now);
+    let mut cmds = start(plan, state, run, task, now);
     match values {
         LoopValues::Listed(values) => cmds.extend(values.into_iter().take(limit).map(spawn)),
         // A file's values are not in the state (see [`rendered_from_file`]):

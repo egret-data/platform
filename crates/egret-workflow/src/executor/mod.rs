@@ -55,6 +55,7 @@ pub use plan::{
 };
 pub use state::{
     apply, Attempt, ExecutionMeta, ExecutionState, Resume, RunIx, RunState, TaskRun, Tick,
+    WorkingDirPhase,
 };
 
 /// Kestra's `FlowableUtils.resolveValues`, over a rendered `Loop.values`.
@@ -689,7 +690,8 @@ mod tests {
                     | TaskKind::Switch { .. }
                     | TaskKind::Loop { .. }
                     | TaskKind::LoopUntil { .. }
-                    | TaskKind::AllowFailure { .. } => {
+                    | TaskKind::AllowFailure { .. }
+                    | TaskKind::WorkingDirectory { .. } => {
                         flowables += 1;
                         assert_eq!(
                             wire(&run.history),
@@ -2757,12 +2759,15 @@ mod tests {
         }
         assert_eq!(
             (wide, narrow),
-            (78, 55),
-            "78 tasks are inside a loop by the shipped reading and 55 by the \
-             direct-children one (88 and 63 until no-silent-stall Task 1, which \
-             refuses four `Loop`-holding flows -- `valids/if-in-parallel`, \
-             `valids/working-directory-loop`, `valids/working-directory-taskrun` \
-             and `-taskrun-nested` -- so `build_plan` no longer plans them). The 23 between them are why this is a test: \
+            (85, 57),
+            "85 tasks are inside a loop by the shipped reading and 57 by the \
+             direct-children one. Plan Task 3 moved 78 and 55 by +7 and +2: \
+             `valids/working-directory-taskrun` (one `WorkingDirectory` child, one \
+             task inside it) and `-taskrun-nested` (five tasks inside its \
+             `WorkingDirectory`, one direct child of the `Loop`) plan now, where \
+             no-silent-stall had refused them. Before that, the same flows were \
+             the `Loop`-holding ones it refused (88 and 63 until no-silent-stall \
+             Task 1). The 28 between them are why this is a test: \
              `advance()` never calls `is_loop_body`, so nothing else in the crate \
              can tell the two apart. Both were one higher until the final \
              review implemented `disabled:`, which deletes \
@@ -2910,7 +2915,7 @@ mod tests {
     // ----------------------------------------------------------------------
 
     /// **`build_plan` never panics and never refuses a corpus flow it can
-    /// parse**, over all 345 of them.
+    /// parse**, over all 351 of them.
     ///
     /// A panic is not covered by the oracle's baseline, so a flow that crashes
     /// the builder fails the ratchet unconditionally; this finds that here,
@@ -2924,8 +2929,10 @@ mod tests {
         let flows = every_corpus_flow();
         assert_eq!(
             flows.len(),
-            345,
-            "the corpus is 345 flows (317 valids + 28 invalids); if that has moved, \
+            // 345 -> 351 at WorkingDirectory Task 8: the six `working-directory-real-*`
+            // flows (317 valids -> 323 valids + 28 invalids).
+            351,
+            "the corpus is 351 flows (323 valids + 28 invalids); if that has moved, \
              oracle-exec/README.md is stale"
         );
 
@@ -3389,29 +3396,21 @@ mod tests {
         // Task 4**, which gave them a `plan::TaskKind::LoopUntil` and flattened
         // their children. They are still driven below, by the classifier probe,
         // where they now declare the `LoopUntil` arm and the `Descends` tier.
+        // `WorkingDirectory` left this loop at plan Task 3, the same way
+        // `AllowFailure` did: it is planned as a flowable with its children in
+        // the plan, and its probe is in the classifier test below.
         let ty = "io.kestra.plugin.core.flow.WorkingDirectory";
         let flow = crate::spec::parse(&branch(ty)).unwrap_or_else(|e| panic!("{ty}: {e:?}"));
         let plan = plan::flatten_flow(&flow).unwrap_or_else(|e| panic!("{ty}: {e}"));
         assert_eq!(
             plan.tasks.len(),
-            1,
-            "{ty} is opaque, so `inner` must not be in the plan at all"
+            2,
+            "{ty} is a flowable, so its `inner` child is in the plan"
         );
-        // And refused, because no handler can run the opaque task.
-        let refused = build_plan(&branch(ty)).expect_err("an opaque flowable must not plan");
         assert!(
-            refused
-                .message
-                .starts_with("unsupported_working_directory:"),
-            "{ty}: {}",
-            refused.message
-        );
-        assert_eq!(
-            plan.tasks[0].kind,
-            TaskKind::Runnable {
-                type_id: ty.to_string()
-            },
-            "{ty} must be planned opaque"
+            matches!(plan.tasks[0].kind, TaskKind::WorkingDirectory { .. }),
+            "{ty} must plan as `TaskKind::WorkingDirectory`, got {:?}",
+            plan.tasks[0].kind
         );
 
         // The YAML for the typed flowables whose shape `branch` cannot
@@ -3543,7 +3542,8 @@ mod tests {
                 }
                 K::LoopUntil(_) => PlannedAs::Opaque,
                 K::AllowFailure(_) => PlannedAs::Descends,
-                K::WorkingDirectory(_) => PlannedAs::Opaque,
+                // Plan Task 3: the block is a flowable now, so it descends.
+                K::WorkingDirectory(_) => PlannedAs::Descends,
                 K::Leaf { .. } => PlannedAs::Opaque,
             }
         }
@@ -3565,7 +3565,8 @@ mod tests {
                 | TaskKind::Dag { .. }
                 | TaskKind::Loop { .. }
                 | TaskKind::LoopUntil { .. }
-                | TaskKind::AllowFailure { .. } => PlannedAs::Descends,
+                | TaskKind::AllowFailure { .. }
+                | TaskKind::WorkingDirectory { .. } => PlannedAs::Descends,
                 TaskKind::Pause { .. } => PlannedAs::Waits,
             }
         }
@@ -3944,11 +3945,6 @@ mod tests {
     /// a `Leaf` no handler serves) and every execution of it stalled.
     #[test]
     fn build_plan_refuses_every_static_refusal_by_its_code() {
-        let branch = |ty: &str| {
-            format!(
-                "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
-            )
-        };
         let gapped = |ty: &str| {
             format!(
                 "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n    condition: \"{{{{ true }}}}\"\n    checkFrequency:\n      interval: \"{{{{ inputs.i }}}}\"\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
@@ -3970,13 +3966,6 @@ mod tests {
                 "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n    retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 3\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
             );
             probes.push(("unsupported_allow_failure_retry", with_retry));
-        }
-        for ty in [
-            "io.kestra.plugin.core.flow.WorkingDirectory",
-            "core.workingdirectory",
-            "io.kestra.plugin.core.flow.workingdirectory",
-        ] {
-            probes.push(("unsupported_working_directory", branch(ty)));
         }
         for ty in [
             "io.kestra.plugin.core.flow.LoopUntil",
@@ -4081,10 +4070,9 @@ mod tests {
     /// serves its type is the per-deployment refusal of §4.
     ///
     /// The population is asserted, so the guard cannot pass by seeing
-    /// nothing: the corpus holds 6 `AllowFailure`, 13 `WorkingDirectory` and 3
-    /// gapped `Pause` tasks the builder reaches (measured at Task 1; a
-    /// `WorkingDirectory` inside an opaque `AllowFailure` is not reached,
-    /// because the builder does not descend into it), and no gapped
+    /// nothing: the corpus holds 3 gapped `Pause` tasks the builder reaches
+    /// (measured at Task 1; plan Task 3 made `AllowFailure` and
+    /// `WorkingDirectory` flowables, so neither is opaque any more), and no gapped
     /// `LoopUntil` (`every_corpus_loop_until_bound_is_a_literal`), so that one
     /// is driven by the synthetic flows below, under a flowable's `errors:`.
     #[test]
@@ -4142,13 +4130,11 @@ mod tests {
             by_type,
             BTreeMap::from([
                 ("pause".to_string(), 3),
-                // `allowfailure` left this map at spec §5.2: an AllowFailure is
-                // planned now, so it is no longer an opaque task. The 2 more
-                // `workingdirectory` are the two WorkingDirectory tasks nested
-                // in `valids/working-directory-namespace-files*`'s AllowFailure,
-                // which the opaque tier hid from this walk. Both are still
-                // refused, by `unsupported_working_directory`.
-                ("workingdirectory".to_string(), 15),
+                // `allowfailure` left this map at spec §5.2, and
+                // `workingdirectory` at plan Task 3 (spec §4.2): both are planned
+                // flowables now, so neither is an opaque task. The 15 that were
+                // here were refused by `unsupported_working_directory`, which
+                // plan Task 3 removed.
             ]),
             "the corpus population this guard judges; if it moves, re-measure \
              and say why"
@@ -4395,11 +4381,6 @@ mod tests {
             codes: &["unknown_task_type"],
         },
         PublishedButRefused {
-            id: "valids/task-runif-workingdirectory",
-            cause: "a `WorkingDirectory` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it hands its whole subtree to one worker. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_working_directory`: a deliberate refusal, not an over-refusal to close, until egret runs `WorkingDirectory`. Unclaimed",
-            codes: &["unsupported_working_directory"],
-        },
-        PublishedButRefused {
             id: "valids/task-runif",
             cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
@@ -4453,21 +4434,6 @@ mod tests {
             id: "valids/webhook-wait",
             cause: "a task of type `io.kestra.plugin.core.output.OutputValues`, which Kestra ships and egret has no `spec::registry` row or handler for. Until no-silent-stall Task 1 `unknown_task_type` was only a warning: publish already refused the flow (reference resolution, `unknown type`), but a saved draft could still be started, and that run stalled in `RUNNING` for ever (`NoHandler`, reaped, reclaimed). Task 1 made `unknown_task_type` an error: a deliberate refusal, not an over-refusal to close, until egret registers and runs the type. Unclaimed",
             codes: &["unknown_task_type"],
-        },
-        PublishedButRefused {
-            id: "valids/working-directory-invalid-runif",
-            cause: "a `WorkingDirectory` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it hands its whole subtree to one worker. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_working_directory`: a deliberate refusal, not an over-refusal to close, until egret runs `WorkingDirectory`. Unclaimed",
-            codes: &["unsupported_working_directory"],
-        },
-        PublishedButRefused {
-            id: "valids/working-directory-taskrun-nested",
-            cause: "a `WorkingDirectory` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it hands its whole subtree to one worker. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_working_directory`: a deliberate refusal, not an over-refusal to close, until egret runs `WorkingDirectory`. Unclaimed",
-            codes: &["unsupported_working_directory"],
-        },
-        PublishedButRefused {
-            id: "valids/working-directory-taskrun",
-            cause: "a `WorkingDirectory` flowable. Kestra runs it; egret does not: `build_plan` plans it an opaque runnable, because it hands its whole subtree to one worker. Until no-silent-stall Task 1 it published clean, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). Task 1 made it the validation error `unsupported_working_directory`: a deliberate refusal, not an over-refusal to close, until egret runs `WorkingDirectory`. Unclaimed",
-            codes: &["unsupported_working_directory"],
         },
     ];
 
@@ -4535,8 +4501,10 @@ mod tests {
             })
             .collect();
         assert_eq!(
+            // 295 -> 301 and 345 -> 351 at WorkingDirectory Task 8: the six
+            // `working-directory-real-*` flows publish (200) and are in the corpus.
             (published.len(), entries.len()),
-            (295, 345),
+            (301, 351),
             "the population, derived from corpus.json's own `publish_status`. \
              If it moves, the corpus or the harvest has changed and this \
              sweep's exception table must be re-measured"
@@ -4858,8 +4826,11 @@ mod tests {
         }
 
         assert_eq!(
+            // 2050 -> 2080 executions and 4215 -> 4300 taskruns at WorkingDirectory
+            // Task 8: the six harvested flows, one execution and 17 taskruns each in
+            // each of the five rounds (6 x 5 = 30; 17 x 5 = 85).
             (docs, runs),
-            (2050, 4215),
+            (2080, 4300),
             "the captured population: 2050 execution records holding 4215 \
              taskruns. 4215 is the same number `oracle-exec/README.md` quotes \
              for the happens-before endpoint measurement, by a different route"
@@ -5911,12 +5882,15 @@ tasks:
         }
         assert_eq!(
             (flows, wide),
-            (39, 78),
-            "the 39 corpus flows holding a `Loop` that `build_plan` plans and the \
-             78 tasks the wide reading names inside one -- the same 78 \
+            (41, 85),
+            "the 41 corpus flows holding a `Loop` that `build_plan` plans and the \
+             85 tasks the wide reading names inside one -- the same 85 \
              `the_two_readings_of_inside_a_loop_differ_by_a_measured_amount` \
-             derives (43 and 88 until no-silent-stall Task 1 refused four of \
-             those flows). 39 flows and not 38: the flow count is over the YAML and \
+             derives. Plan Task 3 took the two `WorkingDirectory` flows \
+             `valids/working-directory-taskrun` and `-taskrun-nested` out of the \
+             refused set, so the count is 39 + 2 flows and 78 + 7 tasks (43 and 88 \
+             until no-silent-stall Task 1 refused four of those flows). 39 flows \
+             and not 38 before this: the flow count is over the YAML and \
              `disabled:` does not change it"
         );
         assert_eq!(
@@ -7278,7 +7252,9 @@ tasks:
         }
         println!("corpus flows declaring a runIf anywhere: {with_run_if}");
         assert_eq!(
-            with_run_if, 9,
+            // 9 -> 10 at WorkingDirectory Task 8: `working-directory-real-runif-false`.
+            with_run_if,
+            10,
             "the population this is a statement about; if it moves, re-derive \
              the `runIf:` numbers in oracle-exec/README.md in the same commit"
         );
@@ -7478,7 +7454,9 @@ tasks:
             }
         }
         assert_eq!(
-            with_run_if, 9,
+            // 9 -> 10 at WorkingDirectory Task 8: `working-directory-real-runif-false`.
+            with_run_if,
+            10,
             "the control: this must find the flows that declare a `runIf:` at all"
         );
         assert_eq!(
@@ -9620,6 +9598,7 @@ tasks:
             attempts: Vec::new(),
             not_before: Some(Tick(5)),
             resume_with: None,
+            working_dir: None,
         });
         nested.runs.push(crate::executor::TaskRun {
             task: 1,
@@ -9631,6 +9610,7 @@ tasks:
             attempts: Vec::new(),
             not_before: None,
             resume_with: None,
+            working_dir: None,
         });
         assert_eq!(crate::executor::loop_iteration(&nested, 0), 2);
         apply(&mut nested, &Command::RestartLoop { run: 0 });

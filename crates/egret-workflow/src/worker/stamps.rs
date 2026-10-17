@@ -210,6 +210,7 @@ mod tests {
             attempts,
             not_before: None,
             resume_with: None,
+            working_dir: None,
         }
     }
 

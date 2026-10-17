@@ -152,6 +152,48 @@ pub struct TaskRun {
     /// [`Command::RestartLoop`](super::Command::RestartLoop), which is the one
     /// command that takes a run out of `PAUSED` without terminating it.
     pub resume_with: Option<Resume>,
+    /// Where a `WorkingDirectory` block's own prepare and finish claims stand
+    /// (spec §5.1). `None` on every run that is not such a block. A claim is
+    /// work the worker does for the block, not a run of its own, so the
+    /// history stays Kestra's and this field is outside it.
+    pub working_dir: Option<WorkingDirPhase>,
+}
+
+/// Where a `WorkingDirectory` block's claims stand (spec §5.1, §5.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkingDirPhase {
+    /// The prepare claim is with the worker, and no child may start.
+    Preparing,
+    /// Prepared: the children run in order.
+    Prepared,
+    /// The finish claim is with the worker.
+    Finishing,
+    /// Finished: the block's terminal state is the children's aggregate.
+    Finished,
+}
+
+impl WorkingDirPhase {
+    /// The column's spelling in `workflow.task_runs.working_dir`.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Preparing => "PREPARING",
+            Self::Prepared => "PREPARED",
+            Self::Finishing => "FINISHING",
+            Self::Finished => "FINISHED",
+        }
+    }
+
+    /// The inverse of [`WorkingDirPhase::wire`]; `None` for any other spelling,
+    /// which the column's CHECK already refuses.
+    pub fn parse(wire: &str) -> Option<Self> {
+        Some(match wire {
+            "PREPARING" => Self::Preparing,
+            "PREPARED" => Self::Prepared,
+            "FINISHING" => Self::Finishing,
+            "FINISHED" => Self::Finished,
+            _ => return None,
+        })
+    }
 }
 
 /// **How a `PAUSED` run leaves `PAUSED`.** W8 Task 4 fix round 2.
@@ -844,6 +886,7 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
             attempts: Vec::new(),
             not_before: None,
             resume_with: None,
+            working_dir: None,
         }),
         Command::StartRun { run, at } => {
             let r = &mut state.runs[*run];
@@ -989,6 +1032,23 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
         // `flowable::start` emits it BESIDE the `StartRun` rather than instead
         // of one.
         Command::SpawnSubflow { .. } => {}
+        Command::BeginWorkingDirectory { run } => {
+            state.runs[*run].working_dir = Some(WorkingDirPhase::Preparing);
+        }
+        Command::FinishWorkingDirectory { run } => {
+            state.runs[*run].working_dir = Some(WorkingDirPhase::Finishing);
+        }
+        // A claim that completed moves the block on. The phase it is in says
+        // which claim it was, so the worker needs to name no phase of its own;
+        // a completion that arrives in any other phase changes nothing.
+        Command::CompleteWorkingDirectoryClaim { run } => {
+            let r = &mut state.runs[*run];
+            r.working_dir = match r.working_dir {
+                Some(WorkingDirPhase::Preparing) => Some(WorkingDirPhase::Prepared),
+                Some(WorkingDirPhase::Finishing) => Some(WorkingDirPhase::Finished),
+                other => other,
+            };
+        }
     }
 }
 

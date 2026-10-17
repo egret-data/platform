@@ -386,26 +386,32 @@
     "why": "no alternative input is documented for this flow"
   },
   "valids/pause-behavior": {
-    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/PauseTest.java:111 -> Pause.Behavior.RESUME",
-    "alt_inputs": {
-      "behavior": "RESUME"
-    },
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/PauseTest.java:111 -> Pause.Behavior.RESUME; core/src/test/java/io/kestra/plugin/core/flow/PauseTest.java:123 -> Pause.Behavior.WARN; core/src/test/java/io/kestra/plugin/core/flow/PauseTest.java:129 -> Pause.Behavior.CANCEL",
+    "alt_inputs": [
+      {
+        "behavior": "RESUME"
+      },
+      {
+        "behavior": "WARN"
+      },
+      {
+        "behavior": "CANCEL"
+      }
+    ],
     "alt_observed": {
-      "state": "SUCCESS",
+      "state": "FAILED",
       "task_ids": [
-        "pause",
-        "last"
+        "pause"
       ],
       "task_states": {
-        "pause": "SUCCESS",
-        "last": "SUCCESS"
+        "pause": "FAILED"
       },
-      "taskruns": 2
+      "taskruns": 1
     },
     "basis": "observed",
-    "differs": true,
+    "differs": false,
     "probed": true,
-    "why": "state SUCCESS != FAILED; taskruns 2 != 1  CORRECTED by W8 Task 3 fix rounds 2-3 -- this row previously read differs=false with \"all four documented behaviours produce the identical execution (FAILED, 1 task run)\", and that is FALSE. The reading was contaminated by FLOW-ID REUSE: publishing a different source under the same ns/flow_id leaves `execution.inputs` reading the posted value, so \"the input landed\" does not establish WHICH SOURCE RAN. Re-measured on the same pinned digest with a FRESH, never-reused flow id for every single execution, 3 runs each: FAIL -> FAILED/1, RESUME -> SUCCESS/2, WARN -> WARNING/2, CANCEL -> CANCELLED/1 -- four DIFFERENT executions, which is PauseTest.java:374-380's own semantics and not a drift. There is no Pebble-render failure: the artifact honours the value for every member of the Behavior enum, written literally or as an expression. OUTSIDE the enum it does not terminate at all -- `NOPE`, lower-case `fail` and an undefined `{{inputs.nosuch}}` each leave the execution RUNNING past 120s. The HARVEST is structurally immune to the contaminant: all 275 corpus flows that execute have a unique (namespace, flow_id) -- the 3 duplicate ids are 422-rejected and never run -- and stability.json's 5 rounds name 2 unstable traces, neither a Pause. So valids/pause-behavior's golden is reproducible and this row's basis was never the golden."
+    "why": "all 3 documented alternative(s) satisfy this row's assertions too: {\"behavior\": \"RESUME\"}, {\"behavior\": \"WARN\"}, {\"behavior\": \"CANCEL\"}"
   },
   "valids/pause-duration-from-input": {
     "probed": false,

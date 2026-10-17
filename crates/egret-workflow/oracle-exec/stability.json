@@ -90,18 +90,29 @@
   },
   "valids/dag": {
    "pairs_dropped_unmeasurable": 0,
-   "pairs_dropped_unstable": 1,
-   "pairs_kept": 20,
+   "pairs_dropped_unstable": 2,
+   "pairs_kept": 19,
    "rounds_differing_from_round_1": [],
    "unmeasurable": [],
    "unstable": [
     [
      "",
-     "5,6",
+     "4,5",
      [
       "before",
-      "before",
       "overlapping",
+      "overlapping",
+      "overlapping",
+      "overlapping"
+     ]
+    ],
+    [
+     "",
+     "5,6",
+     [
+      "overlapping",
+      "before",
+      "before",
       "before",
       "before"
      ]
@@ -278,11 +289,23 @@
   },
   "valids/finally-parallel": {
    "pairs_dropped_unmeasurable": 0,
-   "pairs_dropped_unstable": 0,
-   "pairs_kept": 45,
+   "pairs_dropped_unstable": 1,
+   "pairs_kept": 44,
    "rounds_differing_from_round_1": [],
    "unmeasurable": [],
-   "unstable": []
+   "unstable": [
+    [
+     "",
+     "1,5",
+     [
+      "overlapping",
+      "overlapping",
+      "overlapping",
+      "overlapping",
+      "before"
+     ]
+    ]
+   ]
   },
   "valids/finally-sequential": {
    "pairs_dropped_unmeasurable": 0,
@@ -718,20 +741,42 @@
   },
   "valids/if": {
    "pairs_dropped_unmeasurable": 0,
-   "pairs_dropped_unstable": 9,
-   "pairs_kept": 57,
+   "pairs_dropped_unstable": 10,
+   "pairs_kept": 56,
    "rounds_differing_from_round_1": [],
    "unmeasurable": [],
    "unstable": [
     [
      "",
-     "1,9",
+     "3,9",
+     [
+      "overlapping",
+      "overlapping",
+      "overlapping",
+      "before",
+      "before"
+     ]
+    ],
+    [
+     "",
+     "4,5",
+     [
+      "overlapping",
+      "overlapping",
+      "before",
+      "overlapping",
+      "overlapping"
+     ]
+    ],
+    [
+     "",
+     "4,6",
      [
       "before",
       "overlapping",
       "before",
-      "overlapping",
-      "before"
+      "before",
+      "overlapping"
      ]
     ],
     [
@@ -739,32 +784,10 @@
      "4,7",
      [
       "before",
-      "overlapping",
       "before",
-      "overlapping",
+      "before",
+      "before",
       "overlapping"
-     ]
-    ],
-    [
-     "",
-     "5,8",
-     [
-      "before",
-      "overlapping",
-      "overlapping",
-      "before",
-      "before"
-     ]
-    ],
-    [
-     "",
-     "6,8",
-     [
-      "overlapping",
-      "overlapping",
-      "overlapping",
-      "before",
-      "before"
      ]
     ],
     [
@@ -772,21 +795,10 @@
      "7,8",
      [
       "overlapping",
+      "before",
       "overlapping",
-      "overlapping",
       "before",
-      "overlapping"
-     ]
-    ],
-    [
-     "",
-     "7,9",
-     [
-      "before",
-      "before",
-      "before",
-      "before",
-      "overlapping"
+      "before"
      ]
     ],
     [
@@ -808,7 +820,7 @@
       "before",
       "before",
       "overlapping",
-      "before"
+      "overlapping"
      ]
     ],
     [
@@ -819,7 +831,29 @@
       "before",
       "before",
       "overlapping",
-      "before"
+      "overlapping"
+     ]
+    ],
+    [
+     "",
+     "9,10",
+     [
+      "before",
+      "overlapping",
+      "overlapping",
+      "overlapping",
+      "overlapping"
+     ]
+    ],
+    [
+     "",
+     "9,11",
+     [
+      "before",
+      "before",
+      "before",
+      "overlapping",
+      "overlapping"
      ]
     ]
    ]
@@ -1218,8 +1252,8 @@
   },
   "valids/parallel-nested": {
    "pairs_dropped_unmeasurable": 0,
-   "pairs_dropped_unstable": 3,
-   "pairs_kept": 52,
+   "pairs_dropped_unstable": 5,
+   "pairs_kept": 50,
    "rounds_differing_from_round_1": [],
    "unmeasurable": [],
    "unstable": [
@@ -1228,9 +1262,9 @@
      "1,8",
      [
       "before",
-      "before",
-      "before",
       "overlapping",
+      "before",
+      "before",
       "before"
      ]
     ],
@@ -1239,9 +1273,9 @@
      "2,8",
      [
       "before",
-      "before",
-      "before",
       "overlapping",
+      "before",
+      "before",
       "before"
      ]
     ],
@@ -1249,11 +1283,33 @@
      "",
      "4,8",
      [
+      "before",
       "overlapping",
       "before",
+      "before",
+      "before"
+     ]
+    ],
+    [
+     "",
+     "5,8",
+     [
+      "before",
+      "overlapping",
       "before",
       "overlapping",
       "before"
+     ]
+    ],
+    [
+     "",
+     "7,8",
+     [
+      "before",
+      "overlapping",
+      "overlapping",
+      "overlapping",
+      "overlapping"
      ]
     ]
    ]
@@ -1526,10 +1582,7 @@
    "pairs_dropped_unmeasurable": 0,
    "pairs_dropped_unstable": 0,
    "pairs_kept": 0,
-   "rounds_differing_from_round_1": [
-    3,
-    4
-   ],
+   "rounds_differing_from_round_1": [],
    "unmeasurable": [],
    "unstable": []
   },
@@ -2122,8 +2175,7 @@
    "pairs_dropped_unstable": 0,
    "pairs_kept": 1,
    "rounds_differing_from_round_1": [
-    2,
-    4
+    5
    ],
    "unmeasurable": [],
    "unstable": []
@@ -2280,6 +2332,54 @@
    "unmeasurable": [],
    "unstable": []
   },
+  "valids/working-directory-real-allowfail": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/working-directory-real-cache": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/working-directory-real-child-fails": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/working-directory-real-input-output-files": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/working-directory-real-runif-false": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 6,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/working-directory-real-shared-file": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
   "valids/working-directory-taskrun": {
    "pairs_dropped_unmeasurable": 0,
    "pairs_dropped_unstable": 0,
@@ -2297,10 +2397,9 @@
    "unstable": []
   }
  },
- "image": "kestra/kestra:v2.0.0-rc13",
+ "image": "kestra/kestra@sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd",
  "rounds": 5,
  "unstable_traces": [
-  "valids/retry-failed-task-duration",
   "valids/waitfor-max-duration"
  ]
 }

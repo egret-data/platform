@@ -1,0 +1,23 @@
+id: working-directory-real-shared-file
+namespace: io.kestra.tests
+
+tasks:
+  - id: wdir
+    type: io.kestra.plugin.core.flow.WorkingDirectory
+    tasks:
+      - id: writer
+        type: io.kestra.plugin.scripts.shell.Commands
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+        containerImage: alpine:3.20
+        commands:
+          - echo shared-content > shared.txt
+          - echo WRITER_DONE
+
+      - id: reader
+        type: io.kestra.plugin.scripts.shell.Commands
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+        containerImage: alpine:3.20
+        commands:
+          - echo READER_SAW=$(cat shared.txt)

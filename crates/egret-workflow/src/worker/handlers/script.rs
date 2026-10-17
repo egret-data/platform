@@ -591,7 +591,7 @@ struct Rendered {
 /// What makes an `inputFiles` value a file in internal storage rather than
 /// contents -- Kestra's own test (`value.startsWith("kestra://")`). A value
 /// with the scheme that does not parse is refused by the snapshot, naming it.
-const STORAGE_SCHEME: &str = "kestra://";
+pub(crate) const STORAGE_SCHEME: &str = "kestra://";
 
 /// The lines ahead of the commands, as the artifact writes them (module doc):
 /// `set -e` iff `fail_fast`, and a DEBUG bracket around `before` when there
@@ -671,6 +671,18 @@ impl TaskHandler for Script {
             .task_runner
             .clone()
             .unwrap_or_else(|| RunnerSpec::defaults(self.rt.runner_kind));
+        // **Spec §4.1, §8: no silent drop.** A child of a WorkingDirectory
+        // starts on its block's snapshot, and only the Docker runner copies
+        // one in and out (Kubernetes is deferred). Any other runner would run
+        // the child on an empty directory and say nothing, so it is refused
+        // here, by name, before the gate or any runner is called.
+        if task.working_dir.is_some() && spec.kind != RunnerKind::Docker {
+            return Ok(Outcome::failed_with(format!(
+                "{type_id}: a child of a WorkingDirectory runs on the Docker runner only, and \
+                 this task names the {} runner",
+                spec.kind.fqcn()
+            )));
+        }
         let feature_enabled = self
             .rt
             .features

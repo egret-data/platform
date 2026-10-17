@@ -64,6 +64,7 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result};
+use serde_json::Value;
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
@@ -75,13 +76,15 @@ use super::stamps::{self, stamp_columns, stamp_set, stamp_values};
 use super::subflow;
 use super::timeout::{self, Budget};
 use super::txn::{transaction, Ended, Fetched, Finish, Gate, InTxn, Isolation, Txn};
+use super::working_dir::{self, BlockDone};
 use super::{from_wire, Outcome, Registry, TaskInput, WorkerError, MAX_ROUNDS};
 use crate::executor::{
     advance, apply, build_plan, plan_stored, Attempt, Command, ExecutionMeta, ExecutionState, Plan,
-    Resume, RunIx, RunState, TaskKind, TaskRun, Tick,
+    Resume, RunIx, RunState, TaskKind, TaskRun, Tick, WorkingDirPhase,
 };
 #[cfg(any(test, feature = "test-util"))]
 use crate::storage::prefetch::Prefetch;
+use crate::storage::StoredFile;
 
 /// Keeps the `sqlx::Error` as the source rather than flattening it to text:
 /// the Display is unchanged, and `scheduler::fire` downcasts it to tell a
@@ -194,6 +197,20 @@ pub struct Claimed {
     /// `a_killed_handler_cannot_commit_over_the_worker_that_replaced_it` drives
     /// that through the shipping `tick`.
     pub claimed_at: chrono::DateTime<chrono::Utc>,
+    /// **The phase of a `WorkingDirectory` block's OWN claim** (spec §5.1):
+    /// `PREPARING` or `FINISHING`. Set only on a block run, which has no
+    /// `type_id` and no handler; `None` for every leaf. A block claim is
+    /// completed by [`run_block_claim`], not by a handler, and `type_id` is
+    /// the empty string for it.
+    pub block_phase: Option<String>,
+    /// **For a child of a `WorkingDirectory` block:** the block run's
+    /// surrogate key, which names the objects of its snapshots (spec §4.3).
+    /// `None` for every run that is not such a child.
+    pub block_id: Option<Uuid>,
+    /// **For a child:** the block's snapshot pointer as this claim read it
+    /// (spec §5.2). A child whose block has run no prepare claim has none,
+    /// and is refused as corrupt rather than started on an empty directory.
+    pub block_snapshot: Option<String>,
 }
 
 impl Claimed {
@@ -256,6 +273,13 @@ impl Claimed {
                 )
             }
         };
+        // A child of a WorkingDirectory block starts on its block's snapshot;
+        // one that cannot is failed by name, never started on an empty
+        // directory (spec §5.2).
+        let (working_dir, budget) = match super::working_dir::carry_of(self, &flow, &render) {
+            Ok(carry) => (carry, budget),
+            Err(message) => (None, Budget::Refused(message)),
+        };
         Ok((
             TaskInput {
                 workspace_id: self.workspace_id,
@@ -268,6 +292,7 @@ impl Claimed {
                 spec,
                 render,
                 timeout: budget.duration(),
+                working_dir,
                 principal: self.principal_id.map(egret_core::UserId),
                 claimed_at: self.claimed_at,
                 log: crate::logs::RunLog::new(
@@ -453,7 +478,8 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
               SET claimed_at = now(), updated_at = now() \
             WHERE id IN ( \
               SELECT id FROM workflow.task_runs \
-               WHERE type_id IS NOT NULL \
+               WHERE (type_id IS NOT NULL \
+                      OR working_dir IN ('PREPARING', 'FINISHING')) \
                  AND state = 'RUNNING' \
                  AND claimed_at IS NULL \
                ORDER BY created_at, execution_id, run_ix \
@@ -461,14 +487,20 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
                LIMIT $1 \
             ) \
             RETURNING id, execution_id, run_ix, task_ix, task_id, type_id, value, \
-                      created_at, claimed_at, jsonb_array_length(attempts) AS attempt \
+                      created_at, claimed_at, parent_ix, working_dir, \
+                      jsonb_array_length(attempts) AS attempt \
          ) \
          SELECT t.id, t.execution_id, e.workspace_id, t.run_ix, t.task_ix, t.task_id, \
-                t.type_id, t.value, t.attempt, e.source, f.created_by AS principal_id, \
-                t.claimed_at \
+                COALESCE(t.type_id, '') AS type_id, t.value, t.attempt, e.source, \
+                f.created_by AS principal_id, t.claimed_at, \
+                CASE WHEN t.type_id IS NULL THEN t.working_dir END AS block_phase, \
+                b.id AS block_id, b.working_dir_snapshot AS block_snapshot \
            FROM taken t \
            JOIN workflow.executions e ON e.id = t.execution_id \
            LEFT JOIN workflow.flows f ON f.id = e.flow_id \
+           LEFT JOIN workflow.task_runs b \
+             ON b.execution_id = t.execution_id AND b.run_ix = t.parent_ix \
+            AND b.working_dir IS NOT NULL \
           ORDER BY t.created_at, t.execution_id, t.run_ix",
     )
     .bind(limit)
@@ -1275,7 +1307,18 @@ async fn run_one(
     timing: WorkerTiming,
     leased_at: tokio::time::Instant,
 ) -> Result<Committed> {
+    if c.block_phase.is_some() {
+        return run_block_claim(pool, c, timing, leased_at).await;
+    }
     let (input, budget) = input_for(pool, c, reg, timing.container_default_timeout).await?;
+    // A child's copy-out is the object named by its run, so an object left by
+    // an earlier attempt would make a failed copy look like a success. It is
+    // removed before the handler runs (spec §5.2).
+    if let Some(wd) = &input.working_dir {
+        if let Some(store) = crate::storage::current() {
+            let _ = store.store.delete(&wd.carry_to).await;
+        }
+    }
     let handler = async {
         match budget {
             Budget::Refused(message) => Ok(Outcome::failed_with(message)),
@@ -1359,6 +1402,19 @@ async fn run_one(
             c.execution_id
         )));
     }
+    // A child's declared outputs are checked against the directory it left,
+    // before its outcome is recorded: a problem fails the child by name, and
+    // the block stops there (spec §5.3). A child that copied nothing out is
+    // not checked; it has already failed for that, or it has no block.
+    let outcome = match (outcome, &input.working_dir) {
+        (Ok(found), Some(wd)) if !wd.outputs.is_empty() => {
+            match super::working_dir::check_child_outputs(wd).await {
+                Ok(()) => Ok(found),
+                Err(problem) => Ok(Outcome::failed_with(problem)),
+            }
+        }
+        (other, _) => other,
+    };
     if let Ok(Outcome {
         state: RunState::Failed,
         message: Some(message),
@@ -1369,6 +1425,18 @@ async fn run_one(
     }
     input.log.finish().await;
     let outcome = outcome?;
+    // The snapshot this child left, if its copy-out was admitted: the object
+    // exists only if the copy-out finished, and a refused one removed it.
+    let carried = match &input.working_dir {
+        Some(wd) => match crate::storage::current() {
+            Some(store) => match store.store.head(&wd.carry_to).await {
+                Ok(Some(_)) => Some(wd.carry_to.clone()),
+                _ => None,
+            },
+            None => None,
+        },
+        None => None,
+    };
     // **The fence is the LATEST renewed lease, not the claim's.** Every
     // renewal moved `claimed_at`, so the claim's own value would match no row
     // and a live worker's outcome would be refused as `LeaseLost`.
@@ -1390,7 +1458,7 @@ async fn run_one(
                 claimed_at: lease.0,
                 ..c.clone()
             };
-            apply_outcome_with(at, &renewed, &outcome)
+            apply_outcome_with(at, &renewed, &outcome, carried.as_deref())
                 .await
                 .map(Finish::Commit)
         },
@@ -1440,6 +1508,149 @@ async fn run_one(
         );
     }
     Ok(Committed::Yes)
+}
+
+/// Complete a `WorkingDirectory` block's own claim (spec §5.1): the prepare
+/// or finish work of [`working_dir::run_claim`], under the same lease a leaf
+/// holds, and committed through the same fence and settle. Nothing is
+/// recorded for a claim whose fence moved (`Committed::LeaseLost`).
+///
+/// The finish claim's snapshots are removed only after the commit, so a claim
+/// that fails to commit is re-claimed with its snapshots still there.
+async fn run_block_claim(
+    pool: &PgPool,
+    c: &Claimed,
+    timing: WorkerTiming,
+    leased_at: tokio::time::Instant,
+) -> Result<Committed> {
+    // The block's own render, the one its children render with (spec §5.1). A
+    // failure to read it is egret's outage, and the claim stays leased.
+    let render = {
+        let mut conn = pool.acquire().await.map_err(db_err)?;
+        render_context(&mut conn, c).await?
+    };
+    let done = working_dir::run_claim(pool, c, &render);
+    let (done, held, _renewed_at) = match under_lease(
+        pool,
+        c,
+        timing.renew_every(),
+        timing.working_timeout,
+        leased_at,
+        done,
+    )
+    .await
+    {
+        Leased::Kept {
+            out,
+            held,
+            renewed_at,
+        } => (out, held, renewed_at),
+        Leased::Lost => {
+            tracing::warn!(
+                execution = %c.execution_id,
+                run = %c.id,
+                task_id = %c.task_id,
+                "this worker no longer holds the block's claim; it records nothing"
+            );
+            return Ok(Committed::LeaseLost);
+        }
+    };
+    transaction!(pool, |at| {
+        let renewed = Claimed {
+            claimed_at: held,
+            ..c.clone()
+        };
+        apply_block_claim_with(at, &renewed, &done).await
+    })?;
+    if matches!(done, BlockDone::Finished { .. }) {
+        working_dir::discard(c).await;
+    }
+    Ok(Committed::Yes)
+}
+
+/// [`apply_block_claim_on`] in a transaction of `worker::txn`.
+async fn apply_block_claim_with(at: &mut Txn, claimed: &Claimed, done: &BlockDone) -> Result<()> {
+    let (conn, gate) = at.parts();
+    apply_block_claim_on(conn, gate, claimed, done).await
+}
+
+/// Record a block claim's answer and complete the claim, under the fence.
+///
+/// A prepare claim writes the block's snapshot pointer; a failed claim writes
+/// its reason to `message` and ends the block `FAILED` with no child run
+/// (spec V3). Both finish the claim: `CompleteWorkingDirectoryClaim` moves the
+/// phase on (`PREPARING` to `PREPARED`, `FINISHING` to `FINISHED`), so the
+/// block is never claimed again in the same phase.
+async fn apply_block_claim_on(
+    conn: &mut PgConnection,
+    gate: &Gate,
+    claimed: &Claimed,
+    done: &BlockDone,
+) -> Result<()> {
+    let (ctx, mut state, now) =
+        load(conn, claimed.execution_id, Stack::Fresh(gate.clone())).await?;
+    let before = state.clone();
+    let run = usize::try_from(claimed.run_ix).map_err(|_| {
+        worker_err(WorkerError::Corrupt(
+            claimed.id,
+            format!("negative run_ix {}", claimed.run_ix),
+        ))
+    })?;
+    let (message, snapshot, outputs, files): (
+        Option<&str>,
+        Option<&str>,
+        Option<Value>,
+        &[StoredFile],
+    ) = match done {
+        BlockDone::Prepared { snapshot } => (None, Some(snapshot.as_str()), None, &[]),
+        BlockDone::Finished { outputs, files } => (None, None, outputs.clone(), files),
+        BlockDone::Failed(reason) => (Some(reason.as_str()), None, None, &[]),
+    };
+    // The fence, on the block's own row, as an outcome's write is. The block's
+    // `outputs` are written here too, for the finish claim (spec §5.5).
+    let hit = sqlx::query(
+        "UPDATE workflow.task_runs \
+            SET message = $1, working_dir_snapshot = COALESCE($2, working_dir_snapshot), \
+                outputs = COALESCE($5, outputs) \
+          WHERE id = $3 AND claimed_at = $4",
+    )
+    .bind(message)
+    .bind(snapshot)
+    .bind(claimed.id)
+    .bind(claimed.claimed_at)
+    .bind(outputs.as_ref())
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    if hit.rows_affected() == 0 {
+        return Err(worker_err(WorkerError::LeaseLost(claimed.id)));
+    }
+    // The block's stored files are indexed under the block run, behind the
+    // same fence (spec §4.3), as an outcome's files are.
+    crate::storage::index_task_files(conn, claimed.workspace_id, claimed.id, files).await?;
+    let cmd = match done {
+        BlockDone::Failed(_) => Command::SetRunState {
+            run,
+            state: RunState::Failed,
+        },
+        BlockDone::Prepared { .. } | BlockDone::Finished { .. } => {
+            Command::CompleteWorkingDirectoryClaim { run }
+        }
+    };
+    apply(&mut state, &cmd);
+    settle(
+        conn,
+        &ctx,
+        &before,
+        state,
+        now,
+        Some(Lease {
+            run_ix: claimed.run_ix,
+            run_id: claimed.id,
+            claimed_at: claimed.claimed_at,
+        }),
+    )
+    .await
 }
 
 /// What [`run_one`] did with a run that did not error.
@@ -1661,12 +1872,25 @@ async fn input_for(
     script_default: std::time::Duration,
 ) -> Result<(TaskInput, Budget)> {
     let mut conn = pool.acquire().await.map_err(db_err)?;
-    // A reader: no `settle` runs on this context. The handler's render below
-    // is LIVE (`scope_for`, which takes this POOL connection -- never a
-    // transaction): it runs after this connection is returned, outside any
-    // transaction.
-    let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No, Stack::Reader).await?;
-    let mut surface = Surface::load(&mut conn, &ctx).await?;
+    let render = render_context(&mut conn, c).await?;
+    c.input(render, reg.log_sink(), script_default)
+}
+
+/// The render context a claimed run's properties render with: the flow's
+/// variables and its outputs as the run's state has them, and the file scope
+/// the run may read (spec §5.1: a `WorkingDirectory`'s own properties render
+/// with the same context as its children's). Shared by a leaf's input and a
+/// block's claims, so the two cannot render the same text differently.
+///
+/// A reader: no `settle` runs on this context. The render is LIVE
+/// (`scope_for`, which takes a POOL connection -- never a transaction): it
+/// runs after `conn` is returned, outside any transaction.
+pub(super) async fn render_context(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    c: &Claimed,
+) -> Result<crate::runners::RenderContext> {
+    let (ctx, state, _now) = load_with(conn, c.execution_id, Lock::No, Stack::Reader).await?;
+    let mut surface = Surface::load(conn, &ctx).await?;
     // W9a Task 4: the claimed run's OWN execution -- an iteration's id inside
     // a `Loop` (spec §3), never the loop root -- reads through a snapshot of
     // every URI in its source and render context. `task_prefix` is this run's
@@ -1681,7 +1905,7 @@ async fn input_for(
         .chain(c.value.as_deref())
         .collect();
     let files = crate::storage::scope::scope_for(
-        &mut conn,
+        conn,
         crate::storage::current(),
         c.workspace_id,
         c.execution_id,
@@ -1698,11 +1922,7 @@ async fn input_for(
             format!("negative run_ix {}", c.run_ix),
         ))
     })?;
-    c.input(
-        surface.context(&ctx.plan, &state, Some(run)),
-        reg.log_sink(),
-        script_default,
-    )
+    Ok(surface.context(&ctx.plan, &state, Some(run)))
 }
 
 /// Record one handler's result, drive `advance()` to a fixed point, and write
@@ -1737,7 +1957,8 @@ pub async fn apply_outcome(
     outcome: &Outcome,
 ) -> Result<()> {
     let pf = Prefetch::new();
-    let applied = apply_outcome_on(conn, &Gate::checked_by_caller(&pf), claimed, outcome).await;
+    let applied =
+        apply_outcome_on(conn, &Gate::checked_by_caller(&pf), claimed, outcome, None).await;
     if pf.has_pending() {
         return Err(prefetch_miss());
     }
@@ -1751,16 +1972,21 @@ pub async fn apply_outcome(
 /// For a caller that holds an outcome but no handler -- a test, a driver.
 pub async fn commit_outcome(pool: &PgPool, claimed: &Claimed, outcome: &Outcome) -> Result<()> {
     transaction!(pool, |at| {
-        apply_outcome_with(at, claimed, outcome).await
+        apply_outcome_with(at, claimed, outcome, None).await
     })
 }
 
 /// [`apply_outcome`] in an attempt of `worker::txn`, reading through its
 /// gate's cache: the only production entry, so an outcome is applied only
 /// where a miss is caught before the commit.
-async fn apply_outcome_with(at: &mut Txn, claimed: &Claimed, outcome: &Outcome) -> Result<()> {
+async fn apply_outcome_with(
+    at: &mut Txn,
+    claimed: &Claimed,
+    outcome: &Outcome,
+    carried: Option<&str>,
+) -> Result<()> {
     let (conn, gate) = at.parts();
-    apply_outcome_on(conn, gate, claimed, outcome).await
+    apply_outcome_on(conn, gate, claimed, outcome, carried).await
 }
 
 /// The body of [`apply_outcome_with`] (and of the test-only
@@ -1771,6 +1997,7 @@ async fn apply_outcome_on(
     gate: &Gate,
     claimed: &Claimed,
     outcome: &Outcome,
+    carried: Option<&str>,
 ) -> Result<()> {
     let (ctx, mut state, now) =
         load(conn, claimed.execution_id, Stack::Fresh(gate.clone())).await?;
@@ -1828,6 +2055,19 @@ async fn apply_outcome_on(
     // normally identical; nothing here can make them so.
     crate::storage::index_task_files(conn, claimed.workspace_id, claimed.id, &outcome.files)
         .await?;
+
+    // **Spec §5.2: a child's copy-out becomes its block's snapshot pointer.**
+    // It is written here, after the fence above, so a stale worker returns
+    // before it moves the pointer; the block's row carries no lease of its
+    // own, so the child's fence is the one that guards it.
+    if let (Some(block), Some(uri)) = (claimed.block_id, carried) {
+        sqlx::query("UPDATE workflow.task_runs SET working_dir_snapshot = $1 WHERE id = $2")
+            .bind(uri)
+            .bind(block)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    }
 
     let run = usize::try_from(claimed.run_ix).map_err(|_| {
         worker_err(WorkerError::Corrupt(
@@ -3168,7 +3408,7 @@ pub(super) async fn load_with(
 
     let rows = sqlx::query(
         "SELECT id, run_ix, task_ix, parent_ix, value, rendered, rendered_run_if, \
-                history, attempts, not_before_ms, resume_with \
+                history, attempts, not_before_ms, resume_with, working_dir \
            FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix",
     )
     .bind(execution_id)
@@ -3208,6 +3448,10 @@ pub(super) async fn load_with(
                 id,
                 r.get::<Option<String>, _>("resume_with").as_deref(),
                 r.get::<Option<i64>, _>("not_before_ms").map(Tick),
+            )?,
+            working_dir: parse_working_dir(
+                id,
+                r.get::<Option<String>, _>("working_dir").as_deref(),
             )?,
         });
     }
@@ -3620,7 +3864,7 @@ pub const RUN_STATE_UPDATE: &str = concat!(
             claimed_at = CASE WHEN $7 THEN NULL ELSE claimed_at END, \
             ended_seq = $10, \
             created_seq = COALESCE($12, created_seq), \
-            resume_with = $13, ",
+            resume_with = $13, working_dir = $16, ",
     stamp_set!("$1", "$2", "$14", "$15"),
     ", updated_at = now() \
       WHERE execution_id = $8 AND run_ix = $9 \
@@ -3740,6 +3984,7 @@ async fn persist(
                 .bind(run.resume_with.as_ref().map(Resume::wire))
                 .bind(entered.running)
                 .bind(entered.terminal)
+                .bind(run.working_dir.map(WorkingDirPhase::wire))
                 .execute(&mut *conn)
                 .await
                 .map_err(db_err)?;
@@ -3772,9 +4017,9 @@ async fn persist(
                 "INSERT INTO workflow.task_runs \
                    (execution_id, run_ix, task_ix, task_id, type_id, parent_ix, value, \
                     rendered, rendered_run_if, state, history, attempts, not_before_ms, \
-                    created_seq, ended_seq, resume_with, ",
+                    created_seq, ended_seq, resume_with, working_dir, ",
                 stamp_columns!(),
-                ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, ",
+                ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, ",
                 stamp_values!("$10", "$11"),
                 ")",
             ))
@@ -3798,6 +4043,7 @@ async fn persist(
             // this writer never mentions is a column the next author has to
             // discover.
             .bind(run.resume_with.as_ref().map(Resume::wire))
+            .bind(run.working_dir.map(WorkingDirPhase::wire))
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;
@@ -3874,6 +4120,18 @@ fn attempts_json(attempts: &[Attempt]) -> serde_json::Value {
 /// being wrong -- which is `WorkerError::Corrupt`'s whole class, and the one
 /// class `oracle-exec/driver.rs` reports as `Broken` rather than swallowing as
 /// an ordinary divergence.
+fn parse_working_dir(owner: Uuid, wire: Option<&str>) -> Result<Option<WorkingDirPhase>> {
+    match wire {
+        None => Ok(None),
+        Some(w) => WorkingDirPhase::parse(w).map(Some).ok_or_else(|| {
+            worker_err(WorkerError::Corrupt(
+                owner,
+                format!("working_dir {w:?} is not a phase"),
+            ))
+        }),
+    }
+}
+
 fn parse_resume(owner: Uuid, wire: Option<&str>, at: Option<Tick>) -> Result<Option<Resume>> {
     let corrupt = |what: String| worker_err(WorkerError::Corrupt(owner, what));
     Ok(match (wire, at) {
@@ -3977,6 +4235,7 @@ mod tests {
             attempts: Vec::<_Attempt>::new(),
             not_before: None,
             resume_with: None,
+            working_dir: None,
         };
         let state = ExecutionState {
             runs: vec![

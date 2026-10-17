@@ -1,0 +1,29 @@
+id: working-directory-real-input-output-files
+namespace: io.kestra.tests
+
+tasks:
+  - id: wdir
+    type: io.kestra.plugin.core.flow.WorkingDirectory
+    inputFiles:
+      in.txt: hello
+    outputFiles:
+      - out.txt
+    tasks:
+      - id: first
+        type: io.kestra.plugin.scripts.shell.Commands
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+        containerImage: alpine:3.20
+        commands:
+          - cat in.txt > a.txt
+          - echo FIRST_READ_IN=$(cat in.txt)
+
+      - id: second
+        type: io.kestra.plugin.scripts.shell.Commands
+        taskRunner:
+          type: io.kestra.plugin.scripts.runner.docker.Docker
+        containerImage: alpine:3.20
+        commands:
+          - cat a.txt > out.txt
+          - echo second >> out.txt
+          - echo SECOND_READ_A=$(cat a.txt)

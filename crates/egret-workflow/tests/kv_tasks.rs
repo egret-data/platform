@@ -202,6 +202,7 @@ fn input(ws: Uuid, ns: &str, type_id: &str, spec: Value) -> TaskInput {
         spec,
         render: RenderContext::new().with_files(FileScope(Arc::new(FlowNs(ns.to_string())))),
         timeout: None,
+        working_dir: None,
         principal: None,
         claimed_at: chrono::Utc::now(),
         log: RunLog::discard(),

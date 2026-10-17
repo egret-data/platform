@@ -54,7 +54,7 @@
 //!    an opaque runnable no handler serves, and every execution that reached
 //!    it stalled in `RUNNING` for ever. So each is an ERROR, in
 //!    `validate_for_run`, which publish and every start path ask:
-//!    `unsupported_allow_failure`, `unsupported_working_directory`,
+//!    `unsupported_allow_failure`,
 //!    `unsupported_loop_until_property` (a bound `executor::loop_until_gap`
 //!    names), `unsupported_pause_property` (`executor::pause_gap`, W7b),
 //!    `unsupported_foreach` (W7b), `unsupported_flow_task` (a type spelled
@@ -1728,23 +1728,52 @@ fn walk_task(
                     });
                 }
             }
-            // no-silent-stall Task 1 (spec §3). `build_plan` plans it an
-            // opaque runnable -- it hands its whole subtree to one worker --
-            // and no handler runs that, so every execution of it stalled in
-            // `RUNNING`. An ERROR now, pushed LAST in this arm: the three checks
-            // above stay and keep their order, so a flow Kestra refuses for one
-            // of them is still refused by `build_plan` for that cause first
-            // (`invalids/workingdirectory-invalid`'s `RefusalGroup`).
-            report.errors.push(Finding {
-                code: "unsupported_working_directory",
-                message: format!(
-                    "task '{}' has type '{}', which egret does not run, so the flow cannot be \
-                     published or started. To share files between tasks, pass files between \
-                     script tasks with `outputFiles` and `inputFiles`",
-                    task.id, task.r#type
-                ),
-                path: path.clone(),
-            });
+            // The block runs (spec §4.2), but its properties run in steps: each
+            // is refused by name until its claim runs it (spec §8, no silent
+            // drop). `namespaceFiles` and `inputFiles` run in the prepare claim
+            // (spec §5.1), so neither is refused. Task 7 removes each remaining
+            // refusal when its property runs.
+            // `outputFiles` is collected by the finish claim (spec §5.5), and each
+            // name must be one `output_problem` accepts; a name it refuses fails the
+            // publish here, not the run.
+            if let Some(declared) = &w.output_files {
+                let names: Option<Vec<&str>> = match declared {
+                    serde_json::Value::Array(items) => items.iter().map(|v| v.as_str()).collect(),
+                    _ => None,
+                };
+                match names {
+                    None => report.errors.push(Finding {
+                        code: "working_directory_output_files_invalid",
+                        message: format!(
+                            "task '{}': 'outputFiles' is a list of file names",
+                            task.id
+                        ),
+                        path: format!("{path}.outputFiles"),
+                    }),
+                    Some(names) => {
+                        for name in names {
+                            if let Some(problem) = crate::worker::commands::output_problem(name) {
+                                report.errors.push(Finding {
+                                    code: "working_directory_output_files_invalid",
+                                    message: format!("task '{}': {problem}", task.id),
+                                    path: format!("{path}.outputFiles"),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            // `cache` is kept by the prepare and finish claims (spec §5.4); a cache
+            // egret cannot keep is refused here, by name.
+            if let Some(v) = &w.cache {
+                if let Err(problem) = crate::worker::working_dir::parse_cache(v) {
+                    report.errors.push(Finding {
+                        code: "working_directory_cache_invalid",
+                        message: format!("task '{}': {problem}", task.id),
+                        path: format!("{path}.cache"),
+                    });
+                }
+            }
         }
         // (Wherever this comment says "warns", read "is refused": both
         // findings below are ERRORS since no-silent-stall Task 1, spec §3.)
@@ -3716,18 +3745,16 @@ mod tests {
         );
     }
 
+    /// The block runs now (plan Task 3), so a block with children and none of
+    /// the properties that are not run yet draws nothing at all.
     #[test]
-    fn working_directory_tasks_present_draws_only_the_refusal() {
+    fn working_directory_tasks_present_is_valid() {
         let f = parse(
             "id: f\nnamespace: a.b\ntasks:\n  - id: w\n    type: core.workingdirectory\n    tasks:\n      - id: c\n        type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
-        // Since no-silent-stall Task 1 the construct itself is refused; the
-        // pair this test belongs to is about `tasks:`, so "silent" is now
-        // "the refusal and nothing else".
-        let codes: Vec<&str> = r.errors.iter().map(|e| e.code).collect();
-        assert_eq!(codes, ["unsupported_working_directory"], "{r:?}");
+        assert!(r.errors.is_empty() && r.warnings.is_empty(), "{r:?}");
     }
 
     /// Secondary item: `Loop::concurrency_limit` accepted absence (it has a
@@ -4680,17 +4707,6 @@ mod tests {
         hints: &'static [&'static str],
     }
 
-    fn branch_body(ty: &str) -> Vec<String> {
-        vec![
-            "id: c".into(),
-            format!("type: {ty}"),
-            "tasks:".into(),
-            "  - id: inner".into(),
-            "    type: core.log".into(),
-            "    message: hi".into(),
-        ]
-    }
-
     fn allow_failure_retry_body(ty: &str) -> Vec<String> {
         vec![
             "id: c".into(),
@@ -4736,18 +4752,6 @@ mod tests {
             body: allow_failure_retry_body,
             suffix: ".retry",
             hints: &["put `retry:` on the child task that should be retried"],
-        },
-        Refused {
-            code: "unsupported_working_directory",
-            spellings: &[
-                "io.kestra.plugin.core.flow.WorkingDirectory",
-                "core.workingdirectory",
-                "io.kestra.plugin.core.flow.workingDIRECTORY",
-                "core.WorkingDirectory",
-            ],
-            body: branch_body,
-            suffix: "",
-            hints: &["pass files between script tasks with `outputFiles` and `inputFiles`"],
         },
         Refused {
             code: "unsupported_loop_until_property",
@@ -4963,15 +4967,11 @@ mod tests {
         assert!(r.errors.is_empty() && r.warnings.is_empty(), "{r:?}");
     }
 
-    /// The paths that keep their errors (§3): a `WorkingDirectory` with no
-    /// `tasks:` draws its `*_tasks_required` AND the refusal.
+    /// A `WorkingDirectory` with no `tasks:` draws its `*_tasks_required` and
+    /// nothing else: the block is runnable now, so there is no refusal beside it.
     #[test]
-    fn an_empty_working_directory_keeps_its_old_error_too() {
-        let (ty, old, new) = (
-            "core.workingdirectory",
-            "working_directory_tasks_required",
-            "unsupported_working_directory",
-        );
+    fn an_empty_working_directory_draws_only_its_tasks_required() {
+        let ty = "core.workingdirectory";
         let r = validate(
             &parse(&format!(
                 "id: f\nnamespace: a.b\ntasks:\n  - id: c\n    type: {ty}\n"
@@ -4979,10 +4979,7 @@ mod tests {
             .unwrap(),
         );
         let codes: Vec<&str> = r.errors.iter().map(|e| e.code).collect();
-        assert!(
-            codes.contains(&old) && codes.contains(&new),
-            "{ty}: {codes:?}"
-        );
+        assert_eq!(codes, ["working_directory_tasks_required"], "{ty}: {r:?}");
     }
 
     /// A typo is reported ONCE, as an error, wherever it sits -- including

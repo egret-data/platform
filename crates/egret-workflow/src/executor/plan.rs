@@ -128,6 +128,7 @@ impl Plan {
             TaskKind::AllowFailure { tasks, finally } => {
                 tasks.iter().chain(finally).copied().collect()
             }
+            TaskKind::WorkingDirectory { tasks } => tasks.clone(),
             TaskKind::If { then_, else_, .. } => then_.iter().chain(else_).copied().collect(),
             TaskKind::Switch { cases, default, .. } => cases
                 .iter()
@@ -380,6 +381,14 @@ pub enum TaskKind {
     AllowFailure {
         tasks: Vec<TaskIx>,
         finally: Vec<TaskIx>,
+    },
+    /// `io.kestra.plugin.core.flow.WorkingDirectory`: its children run one
+    /// after another in one working directory, which the executor carries from
+    /// each child to the next as a snapshot (spec §4.2, §5.1). Its
+    /// `namespaceFiles`, `inputFiles`, `outputFiles` and `cache` belong to the
+    /// block's own prepare and finish claims, not to the list.
+    WorkingDirectory {
+        tasks: Vec<TaskIx>,
     },
     /// `io.kestra.plugin.core.flow.Parallel`.
     ///
@@ -749,6 +758,7 @@ pub(super) const MAX_TASK_DEPTH: usize = 8 * MEASURED_MAX_CORPUS_DEPTH;
 /// past the bound in each of the four and requires the refusal from every one.
 const SEQUENTIAL_TYPE: &str = "sequential";
 const ALLOW_FAILURE_TYPE: &str = "allowfailure";
+const WORKING_DIRECTORY_TYPE: &str = "workingdirectory";
 const PARALLEL_TYPE: &str = "parallel";
 const DAG_TYPE: &str = "dag";
 const IF_TYPE: &str = "if";
@@ -1240,6 +1250,10 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                 finally,
             };
         }
+        (ModelKind::WorkingDirectory(wd), Some(WORKING_DIRECTORY_TYPE)) => {
+            let children = flatten_list(out, &wd.tasks, depth + 1)?;
+            out[ix].kind = TaskKind::WorkingDirectory { tasks: children };
+        }
         (ModelKind::Parallel(par), Some(PARALLEL_TYPE)) => {
             let children = flatten_list(out, &par.tasks, depth + 1)?;
             out[ix].errors = flatten_list(out, &par.errors, depth + 1)?;
@@ -1654,6 +1668,36 @@ mod allow_failure_plan_tests {
         assert_eq!(finally.iter().map(id).collect::<Vec<_>>(), ["f"]);
         assert!(
             tasks.iter().chain(finally).all(|ix| *ix > block),
+            "pre-order: a child's index is greater than its parent's"
+        );
+    }
+}
+
+#[cfg(test)]
+mod working_directory_plan_tests {
+    use super::*;
+
+    /// A `WorkingDirectory` holding two children plans as the flowable it is:
+    /// its `tasks` are in the plan, in declaration order, and it is not an
+    /// opaque `Runnable` that hands them to one worker (spec §4.2).
+    #[test]
+    fn working_directory_plans_its_tasks_in_order() {
+        let flow = crate::spec::parse(
+            "id: wd\nnamespace: io.kestra.tests\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n      - id: b\n        type: io.kestra.plugin.core.debug.Return\n        format: b\n",
+        )
+        .expect("parses");
+        let plan = flatten_flow(&flow).expect("plans");
+        let block = plan.roots[0];
+        let TaskKind::WorkingDirectory { tasks } = &plan.tasks[block].kind else {
+            panic!(
+                "expected WorkingDirectory, got {:?}",
+                plan.tasks[block].kind
+            );
+        };
+        let id = |ix: &TaskIx| plan.tasks[*ix].id.as_str();
+        assert_eq!(tasks.iter().map(id).collect::<Vec<_>>(), ["a", "b"]);
+        assert!(
+            tasks.iter().all(|ix| *ix > block),
             "pre-order: a child's index is greater than its parent's"
         );
     }

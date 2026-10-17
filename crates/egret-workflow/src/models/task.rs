@@ -588,6 +588,23 @@ pub struct WorkingDirectory {
         skip_serializing_if = "Option::is_none"
     )]
     pub namespace_files: Option<serde_json::Value>,
+    /// Kept verbatim (spec §5.1, plan Task 2); staged by the block's prepare claim.
+    #[serde(
+        default,
+        rename = "inputFiles",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub input_files: Option<serde_json::Value>,
+    /// Kept verbatim (spec §5.1, plan Task 2); collected by the block's finish claim.
+    #[serde(
+        default,
+        rename = "outputFiles",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub output_files: Option<serde_json::Value>,
+    /// Kept verbatim (spec §5.1, plan Task 2); restored and saved by the block's claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<serde_json::Value>,
 }
 
 // Used only for the `#[serde(default = "...")]` case: the key is *absent*,
@@ -1280,6 +1297,29 @@ inputs:
         }
         let ids: Vec<&str> = t.children().iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["a"]);
+    }
+
+    /// Spec §5.1 / plan Task 2: `inputFiles`, `outputFiles` and `cache` are kept
+    /// at parse, not dropped (the W9b model dropped them silently).
+    #[test]
+    fn working_directory_keeps_inputs_outputs_and_cache_at_parse() {
+        let yaml = "id: wd\ntype: io.kestra.plugin.core.flow.WorkingDirectory\ninputFiles:\n  in.txt: hello\noutputFiles:\n  - out.txt\ncache:\n  patterns:\n    - cache/**\n  ttl: PT1H\ntasks:\n  - id: a\n    type: egret.sql\n    sql: SELECT 1\n";
+        let t: Task = serde_norway::from_str(yaml).unwrap();
+        match &t.kind {
+            TaskKind::WorkingDirectory(w) => {
+                assert_eq!(w.input_files, Some(serde_json::json!({"in.txt": "hello"})));
+                assert_eq!(w.output_files, Some(serde_json::json!(["out.txt"])));
+                assert_eq!(
+                    w.cache,
+                    Some(serde_json::json!({"patterns": ["cache/**"], "ttl": "PT1H"}))
+                );
+            }
+            other => panic!("expected WorkingDirectory, got {other:?}"),
+        }
+        let back = serde_json::to_value(&t).unwrap();
+        assert_eq!(back["inputFiles"], serde_json::json!({"in.txt": "hello"}));
+        assert_eq!(back["outputFiles"], serde_json::json!(["out.txt"]));
+        assert_eq!(back["cache"]["ttl"], serde_json::json!("PT1H"));
     }
 
     /// `AbstractRetry`'s three real `@JsonSubTypes` -- `constant`/

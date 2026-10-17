@@ -13200,3 +13200,67 @@ plus synthetic gapped `LoopUntil`/`WaitFor` under a flowable's `errors:`.
 Deleting the `unsupported_working_directory` push fails it naming
 `valids/task-runif-workingdirectory`, `-working-directory-invalid-runif`,
 `-working-directory-taskrun` and `-taskrun-nested`.
+
+## WorkingDirectory Task 8: six measured flows, the driver's script runtime, and a re-harvest
+
+**What changed in the oracle.** The six `working-directory-real-*` flows are live
+corpus entries (`corpus/valids/`), and `driver.rs` now registers the Docker script
+runtime and publishes through `publish_gated` with the oracle workspace's
+`workflow_containers` ON. Before this, a script task had no handler in the driver and
+FAILED by name (no-silent-stall), so every child of those flows was a fact about the
+driver. The census moved 345 → 351 corpus flows, 244 → 250 live, `VALIDATE_REFUSED`
+stays 26. `harvest.py` accepts a digest pin (`@sha256:`) for `image_tag()`.
+
+**What the re-harvest found.** `traces.json` holds five rounds of the 274 `runs`
+flows. Normalised, `golden.json` has 301 entries (273 `runs`, 28 `refused`): the
+seven new ones are the six real flows and `retry-failed-task-duration`, which was
+unstable at 58d21e5b's harvest and is stable in this one. `working-directory-real-runif-false`
+was excluded as unstable until `normalise.py` numbered runs by their CREATED instant
+(see below), which is the only normaliser change.
+
+**The mismatches the ratchet reported, and what each was.**
+
+- `working-directory-real-allowfail`: egret's block read FAILED. The cause was the
+  driver, not the block: with no script runtime the sibling FAILED, and so did the
+  block. With the runtime the block is WARNING, the child `fails` is WARNING with
+  attempt FAILED, as Kestra records it. No WorkingDirectory block-state mapping was
+  wrong.
+- SUBMITTED on a WorkingDirectory child: a real egret difference. Kestra's raw
+  captured trace has no `SUBMITTED` on any child of a block (`working-directory-real-child-fails`
+  `fails` is `CREATED RUNNING FAILED` in every round). `flowable::start` now skips
+  `SUBMITTED` for a `Runnable` whose parent is a `WorkingDirectory`. Pinned by
+  `a_working_directory_child_is_not_submitted_and_a_plain_runnable_is`.
+- `working-directory-real-runif-false` instability: Kestra creates the `SKIPPED` child
+  and its next sibling within about 200 µs, and the order of their `taskRunList`
+  entries flipped in rounds 4 and 5, while their `CREATED` instants stayed in the same
+  order in all five. Numbering runs by `CREATED` (ties by list position) makes all five
+  rounds one trace. For every other corpus flow the two orders agree, and the golden
+  entries not listed above are byte-identical after the change.
+- `retry-failed-task-duration` (4 attempts, Kestra 3): **pre-existing, now baselined.**
+  At 58d21e5b, with this same golden, egret also makes 4 attempts. Egret's retry clock
+  has no scheduler latency: a retry is due `now + interval`, and the driver's attempts
+  take no logical time, so the fourth attempt fits in `maxDuration`. Kestra's three
+  attempts take about 0.6 s of scheduling each. This is the class `retry-failed-flow-duration`
+  is already baselined for. The entry is baselined by the user's decision (option a) and
+  listed in `UNATTRIBUTED` in `tests/executor.rs` with this cause.
+- The four WorkingDirectory valids, each against its golden entry:
+  - `task-runif-workingdirectory`: still mismatches. The block FAILs because its child
+    `log_orders` FAILs at creation (no RUNNING, no attempt) where Kestra runs it. Not
+    isolated further; the `runIf:` render of a MULTISELECT input inside a block is the
+    suspect.
+  - `working-directory-invalid-runif`: still mismatches. Egret creates a FAILED run for
+    `s2`, whose `runIf: {{ outputs.failed }}` cannot render (the render context has no
+    `outputs`, as `valids/task-runif` says). Kestra creates no run for `s2` and fails
+    the block with no attempt. It is in `STILL_OVER_ACCEPTED_AT_RUNTIME`.
+  - `working-directory-taskrun`: MATCHES. Banked.
+  - `working-directory-taskrun-nested`: still mismatches. Its `log-taskrun` child is the
+    one the block stops at; the `{{ workerTaskrun }}` it renders is the render-context
+    gap to check first. Not isolated.
+
+**Census.** Every number that counts the corpus or the golden moved, each with its
+derivation in the assertion's comment in `tests/executor.rs`, `src/executor/mod.rs`
+and `handler_surface.py`. The deltas are explained by the seven new golden entries, the
+four entries whose unstable pairs the re-harvest changed (`dag`, `finally-parallel`,
+`if`, `parallel-nested`: 13 dropped pairs become 18), and the one banked baseline line.
+`handler_surface.py --self-test` is 13/13. `handler-surface.txt` is regenerated and
+`--check` is clean.

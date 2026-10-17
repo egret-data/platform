@@ -650,14 +650,20 @@ fn no_corpus_entry_can_exercise_the_egret_sql_handler() {
 
     assert_eq!(
         (corpus_total, corpus_egret, corpus_process, corpus_log),
-        (345, 0, 0, 108),
+        // 345 -> 351 and 0 -> 6 process tasks: the six `working-directory-real-*`
+        // flows (WorkingDirectory Task 8) each name `io.kestra.plugin.scripts.shell.Commands`;
+        // none names a `egret.*` type and none names `core.log.Log`, so 0 and 108 hold.
+        (351, 0, 6, 108),
         "every corpus flow, how many name an `egret.*` task type, how many name \
          a script/container/shell/command type of ANY vendor, and the control: \
          how many name `core.log.Log`"
     );
+    // golden 294 -> 301 at WorkingDirectory Task 8 (the six `working-directory-real-*`
+    // flows and `retry-failed-task-duration`): none names an `egret.*` type or
+    // `core.log.Log`, so the 0 and the 97 hold.
     assert_eq!(
         (golden_total, golden_egret, golden_log),
-        (294, 0, 97),
+        (301, 0, 97),
         "the same three over the population this file actually compares. The middle \
          number is what `oracle-exec/README.md`'s coverage statement rests on: the \
          ratchet being green says NOTHING about `worker::handlers::sql`, whose only \
@@ -672,7 +678,7 @@ fn no_corpus_entry_can_exercise_the_egret_sql_handler() {
 /// flow `serde_norway` refuses, which is silent: a flow that failed to parse
 /// *and* declared a trigger would shrink every census below and look exactly
 /// like a smaller corpus. This returns both halves so the caller can assert
-/// `parsed + unparsed == 345` and check what the unparsed ones contain.
+/// `parsed + unparsed == 351` and check what the unparsed ones contain.
 type ParsedCorpus = (
     Vec<(String, egret_workflow::models::Flow)>,
     Vec<(String, String)>,
@@ -749,7 +755,7 @@ fn declares_type(source: &str, ty: &str) -> bool {
 ///    generated and this oracle has never named a second). **No arm of
 ///    `descendants()` reads it.** Same verdict as (2), different mechanism:
 ///    here the link exists and is not walked; there there is no link to walk.
-/// 4. **backfill** — no population. **Zero** live declarations in 345 flows;
+/// 4. **backfill** — no population. **Zero** live declarations in 351 flows;
 ///    the only two occurrences are commented out, and they are named here so
 ///    the zero is a measurement and not a scanner that reads nothing.
 ///
@@ -779,8 +785,18 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
     let matching: BTreeSet<String> = ids.difference(&baselined).cloned().collect();
     assert_eq!(
         (golden.len(), matching.len(), baselined.len()),
-        (294, 190, 104),
-        "294 = matching + baselined, the total beside its parts. It read \
+        // 294 -> 301 golden, 104 -> 103 baselined (WorkingDirectory Task 8 banked
+        // `valids/working-directory-taskrun`). The non-baselined side is 190 -> 198:
+        // the 7 entries the harvest added (six `working-directory-real-*` and
+        // `retry-failed-task-duration`), plus the banked one. Of those 8, seven
+        // match and `retry-failed-task-duration` is the one regression that
+        // `executor_matches_golden` reports (a pre-existing timing mismatch, see
+        // the report); 103 + 198 = 301.
+        // 103 -> 104 baselined, 198 -> 197 matching at WorkingDirectory Task 9:
+        // `valids/retry-failed-task-duration` is baselined with its cause, so its
+        // mismatch is now attributed rather than reported; 104 + 197 = 301.
+        (301, 197, 104),
+        "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
          `allowFailure:`/`allowWarning:` entries, W8 Task 6 banked the two \
@@ -922,7 +938,8 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
     let (parsed, unparsed) = parsed_corpus();
     assert_eq!(
         parsed.len() + unparsed.len(),
-        345,
+        // 345 -> 351: the six `working-directory-real-*` flows (WorkingDirectory Task 8).
+        351,
         "every corpus flow is parsed or named, never skipped"
     );
     // W13b Task 2: exactly ONE flow that declares triggers no longer parses --
@@ -1001,7 +1018,8 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
     );
 
     // The fireOnce flow declares a flow trigger; it is counted here by hand,
-    // as promised above, so the figures below still describe all 345 flows.
+    // as promised above, so the figures below still describe all 351 flows
+    // (345 + the six `working-directory-real-*` flows of WorkingDirectory Task 8).
     declaring_flows.insert(FIRE_ONCE.to_string());
 
     let trigger_golden: BTreeSet<String> = declaring_flows.intersection(&ids).cloned().collect();
@@ -1145,7 +1163,7 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         harvest.contains("parent_id = :'root'"),
         "the one live discovery arm keys on `parent_id`, which Kestra leaves \
          NULL for a subflow child and for anything a trigger creates -- the \
-         predicate is evaluated on every settle poll of all 268 executed flows \
+         predicate is evaluated on every settle poll of all 274 executed flows \
          and structurally cannot select a trigger-fired execution"
     );
     let normalise = include_str!("../oracle-exec/normalise.py");
@@ -1328,7 +1346,8 @@ fn the_seeded_correlation_id_divergence_has_no_corpus_population() {
     let (parsed, unparsed) = parsed_corpus();
     assert_eq!(
         parsed.len() + unparsed.len(),
-        345,
+        // 345 -> 351: the six `working-directory-real-*` flows (WorkingDirectory Task 8).
+        351,
         "every corpus flow is parsed or named, never skipped"
     );
     let model_labels = parsed.iter().filter(|(_, f)| !f.labels.is_empty()).count();
@@ -2196,15 +2215,19 @@ fn the_golden_has_no_relation_for_exactly_these_pairs() {
     assert_eq!(
         dropped,
         BTreeMap::from([
-            ("valids/dag".to_string(), 1),
-            ("valids/if".to_string(), 9),
-            ("valids/parallel-nested".to_string(), 3),
+            ("valids/dag".to_string(), 2),
+            ("valids/finally-parallel".to_string(), 1),
+            ("valids/if".to_string(), 10),
+            ("valids/parallel-nested".to_string(), 5),
         ]),
-        "the whole population of pairs the golden declines to assert -- 13, which \
-         is exactly the 13 `stability.json` records as dropped-for-flipping, in \
-         the same three flows"
+        "the whole population of pairs the golden declines to assert -- 18, which \
+         is exactly the 18 `stability.json` records as dropped-for-flipping, in \
+         these four flows. 13 in three flows until the WorkingDirectory Task 8 \
+         re-harvest, which moved `dag` 1 -> 2, `if` 9 -> 10, `parallel-nested` \
+         3 -> 5 and added `finally-parallel` 1: the same instability, measured \
+         again on five new rounds, not a change in egret"
     );
-    assert_eq!(dropped.values().sum::<usize>(), 13, "and they sum to 13");
+    assert_eq!(dropped.values().sum::<usize>(), 18, "and they sum to 18");
 }
 
 /// **The 227 ordered pairs inside `spawned` are asserted now, and this is how
@@ -2261,7 +2284,7 @@ async fn the_ordered_pairs_inside_spawned_are_reachable_now() {
     );
     assert_eq!(
         (top, nested, top + nested),
-        (877, 227, 1104),
+        (889, 227, 1116),
         "the golden-side split, which nothing egret does can move. 1104 is the \
          number of pairs the harvest KEPT and 877 the number the harness could \
          assert; the difference was the sub-execution hole measured in the unit \
@@ -2289,7 +2312,10 @@ async fn the_ordered_pairs_inside_spawned_are_reachable_now() {
 /// **38 since no-silent-stall Task 1**: three entries with a `spawned` are
 /// refused at start now (`RUNS_REFUSED`), so egret produces no trace for them
 /// at all.
-const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 38;
+// 38 -> 40 at WorkingDirectory Task 8: `valids/working-directory-taskrun` and
+// `-nested`, the two entries whose one `Loop` body is a WorkingDirectory, which
+// egret now plans and runs (measured by the census, not by hand).
+const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 40;
 // +15 at W6 Task 3: the `Subflow` entries that used to stall at their first
 // `Subflow` run now finish, so the runs after it exist and have endpoints.
 // The nested figure does not move -- a `Subflow` child is linked by
@@ -2310,8 +2336,12 @@ const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 38;
 /// start (`RUNS_REFUSED`) produce no trace, so the pairs they produced are
 /// gone from both sides.
 /// **704 since the AllowFailure flowable**: the 81 top-level pairs of its three targets.
-const EGRET_TOP_LEVEL_PAIRS: usize = 704;
-const EGRET_NESTED_PAIRS: usize = 121;
+/// **718 and 125 since WorkingDirectory Task 8**: egret runs the six harvested
+/// `working-directory-real-*` flows and `retry-failed-task-duration` (their
+/// pairs are on the top level and inside them), and `working-directory-taskrun`
+/// and `-nested` are now run and compared (see `the_ordered_pairs_inside_spawned`).
+const EGRET_TOP_LEVEL_PAIRS: usize = 718;
+const EGRET_NESTED_PAIRS: usize = 125;
 
 /// **KEPT is not ASSERTED, and the line between them is the baseline rather
 /// than the nesting** — W3b Task 7.
@@ -2397,7 +2427,7 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         (m_top, m_nested, m_top + m_nested),
         // + the 81 top-level pairs of the three AllowFailure targets (45 + 15 + 21),
         // which now live on matching entries.
-        (379, 102, 481),
+        (394, 103, 497),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
@@ -2408,7 +2438,11 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         (b_top, b_nested, b_top + b_nested),
         // 579 + 125 = 704 until the AllowFailure flowable banked its three targets,
         // whose 81 top-level pairs now live on matching entries.
-        (498, 125, 623),
+        // 623 -> 619 baselined pairs at WorkingDirectory Task 8: banking
+        // `valids/working-directory-taskrun` moved its pairs to the matching side,
+        // and the re-harvest changed the pairs of four flows (see
+        // `the_golden_has_no_relation_for_exactly_these_pairs`).
+        (495, 124, 619),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 704 leaves \
          the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, at \
@@ -2424,7 +2458,7 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
             m_nested + b_nested,
             m_top + m_nested + b_top + b_nested
         ),
-        (877, 227, 1104),
+        (889, 227, 1116),
         "the total asserted beside the parts, and the same 877 / 227 / 1104 \
          `the_ordered_pairs_inside_spawned_are_reachable_now` derives from the \
          other direction"
@@ -2526,10 +2560,10 @@ fn the_baselining_argument_covers_every_field_and_not_only_the_ordered_pairs() {
         ),
         (
             TERMINALS_ON_BASELINED_ENTRIES,
-            840 - TERMINALS_ON_BASELINED_ENTRIES,
-            840
+            858 - TERMINALS_ON_BASELINED_ENTRIES,
+            858
         ),
-        "run terminals. 840 is the same population the fed table classifies, so \
+        "run terminals. 858 is the same population the fed table classifies, so \
          the two sections are talking about one set of runs"
     );
     assert_eq!(
@@ -2555,8 +2589,9 @@ fn the_baselining_argument_covers_every_field_and_not_only_the_ordered_pairs() {
         ),
         (
             EXECUTIONS_ON_BASELINED_ENTRIES,
-            408 - EXECUTIONS_ON_BASELINED_ENTRIES,
-            408
+            // 408 -> 415: the seven harvested entries add seven top-level executions.
+            415 - EXECUTIONS_ON_BASELINED_ENTRIES,
+            415
         ),
         "executions: the 266 `runs` entries plus the 142 sub-executions they \
          carry, and the baselined side is the 143 baselined `runs` entries plus \
@@ -2566,8 +2601,9 @@ fn the_baselining_argument_covers_every_field_and_not_only_the_ordered_pairs() {
         (held.history, banked.history, held.history + banked.history),
         (
             HISTORY_TOKENS_ON_BASELINED_ENTRIES,
-            3355 - HISTORY_TOKENS_ON_BASELINED_ENTRIES,
-            3355
+            // 3355 -> 3419: the harvested entries' run histories (64 tokens).
+            3419 - HISTORY_TOKENS_ON_BASELINED_ENTRIES,
+            3419
         ),
         "every state token in every RUN history -- the family the `runs` \
          comparison is made of"
@@ -2580,8 +2616,10 @@ fn the_baselining_argument_covers_every_field_and_not_only_the_ordered_pairs() {
         ),
         (
             EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES,
-            1462 - EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES,
-            1462
+            // 1462 -> 1489: the harvested flows' execution histories, 27 tokens
+            // (six WorkingDirectory flows at three each, and the retry at nine).
+            1489 - EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES,
+            1489
         ),
         "and every state token in every EXECUTION history, which is a different \
          family with its own comparison -- carried separately so `history \
@@ -2592,8 +2630,10 @@ fn the_baselining_argument_covers_every_field_and_not_only_the_ordered_pairs() {
     // which are derived elsewhere in this file.
     assert_eq!(
         held.executions + banked.executions,
-        266 + 142,
-        "408 = the comparable `runs` entries + the sub-executions they carry"
+        // 266 -> 273 `runs` entries at WorkingDirectory Task 8 (the seven harvested
+        // entries); the 142 sub-executions are unchanged.
+        273 + 142,
+        "415 = the comparable `runs` entries + the sub-executions they carry"
     );
 }
 
@@ -2813,10 +2853,17 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 /// run-history tokens and 12 execution-history tokens.
 /// **368 since the AllowFailure flowable banked three entries** (23 run terminals:
 /// 10 + 6 + 7).
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 368;
+/// **365 since WorkingDirectory Task 8 banked `valids/working-directory-taskrun`**
+/// (its three run terminals: `parallel`, `workingDir`, `log-taskrun`), and the
+/// run terminals of the golden are 858 = 840 + the 18 the harvest added.
+/// **366 since `valids/retry-failed-task-duration` was baselined** (its one
+/// run terminal, `fail`, after three attempts).
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 366;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
-const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 40;
+// 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
+// sub-execution, and it is banked.
+const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 39;
 /// **165 through W8 Task 2, 157 after W8 Task 3, 156 after W8 Task 4, 149 after
 /// W8 Task 5, 147 now** -- the eight `Pause` entries W8 Task 3 banked, the one
 /// `LoopUntil` entry W8 Task 4 banked, W8 Task 5's seven and W8 Task 6's two.
@@ -2828,7 +2875,11 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 40;
 /// iterations -- the first bank since W6 Task 4 to carry sub-executions.
 /// **140 since the AllowFailure flowable** banked three entries that carry no
 /// sub-execution.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 140;
+// 140 -> 138 at WorkingDirectory Task 8: `working-directory-taskrun` (one top-level
+// execution and one sub-execution) is banked.
+// 138 -> 139: `valids/retry-failed-task-duration` is one top-level execution with no
+// sub-executions, baselined at WorkingDirectory Task 9.
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 139;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -2838,7 +2889,11 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 140;
 ///
 /// **1509 since W9a Task 11**: 19 on `valids/loop-values-from-uri`.
 /// **1414 since the AllowFailure flowable**: 95 on its three targets (23 runs).
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1414;
+/// **1405 since WorkingDirectory Task 8**: nine on `valids/working-directory-taskrun`'s
+/// three runs (`CREATED RUNNING SUCCESS` each).
+/// **1419 since `valids/retry-failed-task-duration` was baselined**: 14 on its one
+/// run (`CREATED SUBMITTED RUNNING FAILED RETRYING`, three times, then `FAILED`).
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1419;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -2851,7 +2906,11 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1414;
 /// **510 since W9a Task 11**: three apiece on `valids/loop-values-from-uri`
 /// and its three iterations.
 /// **497 since the AllowFailure flowable**: 13 on its three targets (3 + 7 + 3).
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 497;
+/// **491 since WorkingDirectory Task 8**: six on `working-directory-taskrun`'s two
+/// executions (`CREATED RUNNING SUCCESS` each).
+/// **500 since `valids/retry-failed-task-duration` was baselined**: nine on its
+/// one execution.
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 500;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -2921,6 +2980,7 @@ async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_afte
             vec![
                 "valids/all-flowable".to_string(),
                 "valids/dag".to_string(),
+                "valids/finally-parallel".to_string(),
                 "valids/if".to_string(),
                 "valids/parallel-nested".to_string(),
                 "valids/restart-child".to_string(),
@@ -2934,6 +2994,10 @@ async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_afte
                 "valids/restart-parent".to_string(),
                 "valids/restart-parent-loop".to_string(),
                 "valids/subflow-secret-output-parent".to_string(),
+                // WorkingDirectory Task 8, from the re-harvested golden:
+                // `working-directory-invalid-runif`, egret's extra FAILED run for
+                // `s2`, has no counterpart in Kestra's list.
+                "valids/working-directory-invalid-runif".to_string(),
             ]
         ),
         "the entries the restriction removes a pair from, by name and by count"
@@ -2958,11 +3022,15 @@ async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_afte
 /// Each is a pair between a run Kestra has and a run it does not, produced
 /// because the parent got past a `Subflow` whose child SUCCEEDS here and FAILED
 /// there.
-const RESTRICTION_REMOVES: usize = 85;
+// 85 -> 92 at WorkingDirectory Task 8: the two entries above, as measured by the
+// `restriction removed` line the test prints.
+const RESTRICTION_REMOVES: usize = 92;
 /// How many entries those pairs come from — the other half of the coverage
 /// statement's *"80 pairs across 6 entries"*, which was printed and not
 /// asserted until W4 Task 6. It is 85 across 9 since W6 Task 3.
-const RESTRICTION_REMOVES_ENTRIES: usize = 9;
+// 9 -> 11 at WorkingDirectory Task 8: `valids/finally-parallel` and
+// `valids/working-directory-invalid-runif` (see the list above).
+const RESTRICTION_REMOVES_ENTRIES: usize = 11;
 /// 771 through W5; 791 at W6 Task 3; **798 since W8 Task 3**, whose eight
 /// banked `Pause` entries carry seven ordered pairs between them — the same
 /// seven `EGRET_TOP_LEVEL_PAIRS` gained, counted before the restriction rather
@@ -2975,7 +3043,9 @@ const RESTRICTION_REMOVES_ENTRIES: usize = 9;
 /// **829 since no-silent-stall Task 1**: the seven pairs (two top-level, five
 /// nested) the entries it refuses at start used to produce.
 /// **910 since the AllowFailure flowable**: the 81 pairs of its three targets.
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 910;
+// 910 -> 935 at WorkingDirectory Task 8: the 18 pairs the harvested flows add
+// are egret's own (measured: the restriction test prints `egret produced 935`).
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 935;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -3975,6 +4045,10 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
     assert_eq!(
         driver::registry(&driver::unconnected_pool()).type_ids(),
         [
+            // WorkingDirectory Task 8: the six script kinds `script::register` adds
+            // (`ScriptKind::ALL`), which the driver now registers for the Docker runner.
+            "egret.container",
+            "egret.script.python",
             "io.kestra.plugin.core.debug.Return",
             "io.kestra.plugin.core.execution.Fail",
             "io.kestra.plugin.core.flow.Sleep",
@@ -3998,10 +4072,15 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
             "io.kestra.plugin.core.storage.Size",
             "io.kestra.plugin.core.storage.Split",
             "io.kestra.plugin.core.storage.Write",
+            "io.kestra.plugin.scripts.python.Commands",
+            "io.kestra.plugin.scripts.python.Script",
+            "io.kestra.plugin.scripts.shell.Commands",
+            "io.kestra.plugin.scripts.shell.Script",
         ],
-        "the twenty-three handlers the driver runs (the four core storage tasks since \
+        "the twenty-nine handlers the driver runs (the four core storage tasks since \
          W9a Task 11, the five whole-file ones since Task 12, the four namespace-file \
-         tasks since W9b Tasks 6 and 7, the six KV tasks since W9c Task 5). If this list ever grew to cover \
+         tasks since W9b Tasks 6 and 7, the six KV tasks since W9c Task 5, and the six \
+         script kinds since WorkingDirectory Task 8). If this list ever grew to cover \
          everything the corpus declares, the derivation above would pass \
          because nothing stalls rather than because the reason holds"
     );
@@ -4148,7 +4227,10 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 /// **26 since no-silent-stall Task 1**: the 49 entries it added to
 /// [`RUNS_REFUSED`] are refused rather than run, and 42 of them differed on
 /// the execution history.
-const MISMATCH_ON_EXECUTION: usize = 26;
+// 26 -> 29 at WorkingDirectory Task 8, measured by this census over the 301-entry
+// golden (the harvested `retry-failed-task-duration` is one of the entries that
+// differ on the execution: egret makes 4 attempts where Kestra made 3).
+const MISMATCH_ON_EXECUTION: usize = 29;
 /// **112 through W8 Task 2, 104 after W8 Task 3, 103 after W8 Task 4, 96 after
 /// W8 Task 5, 94 now** -- the same eight, then `valids/waitfor-nested`, then
 /// the seven `allow*` entries, then W8 Task 6's two. The last pair differ on
@@ -4162,7 +4244,8 @@ const MISMATCH_ON_EXECUTION: usize = 26;
 ///
 /// **41 since no-silent-stall Task 1**: the 49 it added, every one of which
 /// differed on `runs`.
-const MISMATCH_ON_RUNS: usize = 41;
+// 41 -> 45 at WorkingDirectory Task 8 (measured; see `MISMATCH_ON_EXECUTION`).
+const MISMATCH_ON_RUNS: usize = 45;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
@@ -4181,7 +4264,8 @@ const MISMATCH_ON_RUNS: usize = 41;
 /// [`RUNS_REFUSED`] carried an ordered pair.
 ///
 /// **19 since no-silent-stall Task 1**: 34 of the 49 entries it added.
-const MISMATCH_ON_ORDER: usize = 19;
+// 19 -> 20 at WorkingDirectory Task 8 (measured).
+const MISMATCH_ON_ORDER: usize = 20;
 /// The `runs` entries egret refuses on purpose, in golden order: each is a
 /// flow Kestra ran holding a task egret cannot run, which before its refusal
 /// was an opaque runnable that stalled the execution for ever.
@@ -4189,14 +4273,15 @@ const MISMATCH_ON_ORDER: usize = 19;
 /// * three since the user's ruling of 2026-10-11 (W7b Task 4b): a `Pause`
 ///   declaring `behavior:`, `errors:` or `onPause:`
 ///   (`unsupported_pause_property`);
-/// * forty-nine since no-silent-stall Task 1 (2026-10-12): four `AllowFailure`
-///   (`unsupported_allow_failure`), four `WorkingDirectory`
-///   (`unsupported_working_directory`) and forty-one holding a type
+/// * forty-five since no-silent-stall Task 1 (2026-10-12): four `AllowFailure`
+///   (`unsupported_allow_failure`), and forty-one holding a type
 ///   `spec::registry` does not name (`unknown_task_type`: `OutputValues`,
 ///   `Labels`, `SetVariables`, `UnsetVariables`, `Exit`, `Assert`,
 ///   `PurgeLogs`). `executor`'s `PUBLISHED_BUT_REFUSED` holds each with its
 ///   cause; it has three more rows, flows with no golden entry.
-const RUNS_REFUSED: [&str; 49] = [
+// 49 -> 45 at WorkingDirectory Task 3 (not Task 8): its four `WorkingDirectory`
+// valids are planned now, so `unsupported_working_directory` refuses none of them.
+const RUNS_REFUSED: [&str; 45] = [
     "valids/after-execution",
     "valids/after-execution-error",
     "valids/after-execution-finally",
@@ -4233,7 +4318,6 @@ const RUNS_REFUSED: [&str; 49] = [
     "valids/task-runif",
     "valids/task-runif-executionupdating",
     "valids/task-runif-taskswithstate",
-    "valids/task-runif-workingdirectory",
     "valids/unset-variables",
     "valids/waitfor",
     "valids/waitfor-child-task-warning",
@@ -4243,13 +4327,11 @@ const RUNS_REFUSED: [&str; 49] = [
     "valids/waitfor-no-success",
     "valids/webhook-outputs",
     "valids/webhook-wait",
-    "valids/working-directory-invalid-runif",
-    "valids/working-directory-taskrun",
-    "valids/working-directory-taskrun-nested",
 ];
 /// **11 since no-silent-stall Task 1**: two of the 49 entries it added to
 /// [`RUNS_REFUSED`] carried a sub-execution.
-const MISMATCH_ON_SPAWNED: usize = 11;
+// 11 -> 12 at WorkingDirectory Task 8 (measured).
+const MISMATCH_ON_SPAWNED: usize = 12;
 /// **122 through W8 Task 2, 114 after W8 Task 3, 113 now** -- the eight `Pause`
 /// entries Task 3 banked and the one `LoopUntil` entry Task 4 did. The
 /// `refused` half of the golden is untouched by either: no `Pause` or
@@ -4520,8 +4602,9 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
         (
             SPAWNED_ENTRIES_THAT_MATCH,
             SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED,
-            // 15 through W9a Task 10; `valids/loop-values-from-uri` left it.
-            14,
+            // 15 through W9a Task 10; `valids/loop-values-from-uri` left it; 14 ->
+            // 13 at WorkingDirectory Task 8, when `working-directory-taskrun` matched.
+            13,
             41
         ),
         "the 41 partitioned: how many MATCH, how many agree on everything the \
@@ -4533,7 +4616,8 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
 
 /// The count above, as a named constant so the report and the test cannot
 /// disagree about it.
-const SPAWNED_ENTRIES_THAT_MATCH: usize = 23;
+// 23 -> 24 at WorkingDirectory Task 8: `valids/working-directory-taskrun` banked.
+const SPAWNED_ENTRIES_THAT_MATCH: usize = 24;
 
 /// And the names, which is what `baseline.txt`'s header attributes one by one.
 /// Sixteen banked at W3b Task 5, `valids/replay-loop` at the whole-branch
@@ -4574,6 +4658,9 @@ const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
     "valids/retry-new-execution-task-attempts",
     "valids/retry-new-execution-task-duration",
     "valids/switch-in-concurrent-loop",
+    // WorkingDirectory Task 8: banked (its one `Loop` body is a WorkingDirectory
+    // whose children egret now runs and matches). `-nested` stays baselined.
+    "valids/working-directory-taskrun",
 ];
 
 /// W3a's `39 of the 41 differ on nothing but `spawned`` has this as its
@@ -4670,7 +4757,7 @@ async fn no_run_is_ever_created_for_a_task_inside_a_loop() {
 
     assert_eq!(
         (entries_with_a_body, loop_bodies),
-        (36, 75),
+        (38, 82),
         "the population: 36 comparable entries hold a `Loop` that egret plans, \
          with 75 tasks inside a loop body between them. Both are derived; if \
          they move, the `Loop` slice of the corpus has changed. It was (39, 81) \
@@ -4741,7 +4828,7 @@ async fn every_sub_execution_egret_runs_is_one_kestra_ran() {
         (
             TOP_LEVEL_SPAWN_KEYS_IDENTICAL,
             TOP_LEVEL_SPAWN_KEYS_DIFFER,
-            38
+            40
         ),
         "the totals asserted beside the parts. Both figures are what W3b Task 4 \
          built the spawner for and could not measure, because the oracle still \
@@ -4862,6 +4949,16 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
         "valids/restart-child",
         "W2: `{{ 1 / taskrun.attemptsCount }}` renders `Infinity` where Java throws, so the run \
          SUCCEEDS and egret runs one more task",
+    ),
+    // WorkingDirectory Task 8, measured on the re-harvested golden: the child `s2`'s
+    // `runIf: {{ outputs.failed }}` cannot render (the render context has no
+    // `outputs`, as `valids/task-runif` shows), so egret creates a FAILED run for
+    // it and fails the block after `s1`. Kestra creates no run for `s2` and
+    // fails the block without an attempt. The entry is baselined.
+    (
+        "valids/working-directory-invalid-runif",
+        "WorkingDirectory: `s2`'s `runIf:` render fails, so egret creates a FAILED run for it; \
+         Kestra creates none and fails the block without an attempt (the context has no `outputs`)",
     ),
     (
         "valids/restart-loop",
@@ -5008,7 +5105,7 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
 // no-silent-stall Task 1: -3 identical, three entries whose keys matched and
 // that are refused at start now (`RUNS_REFUSED`), so egret produces no key
 // list for them at all.
-const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 31;
+const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 33;
 const TOP_LEVEL_SPAWN_KEYS_DIFFER: usize = 7;
 
 /// **`concurrencyLimit` defaults to 1, and the corpus can tell** — the one
@@ -5284,7 +5381,7 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
             unplanned + in_an_errors_list - refused_pause_runs,
             over_fed.values().sum::<usize>() + is_a_subflow + refused_pause_runs
         ),
-        (425, 101, 314, 92),
+        (438, 109, 311, 104),
         "the reconstruction must reproduce Task 5's four committed figures -- up \
          to the 10 runs Task 7's `errors:` support moved out of `unplanned` and \
          into `fed`, which is derived above rather than folded into these \
@@ -5346,7 +5443,10 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
         // AllowFailure left the over-feed: its four block runs are flowables now
         // (the three targets, and `valids/retry-with-flowable-errors`), and its
         // type left the map.
-        (67, 9),
+        // Re-measured at WorkingDirectory Task 8: `shell.Commands` joins the
+        // over-fed types (its six real-flow children carry no SUBMITTED in the
+        // golden), and the flow bucket moves with the banked `working-directory-taskrun`.
+        (65, 10),
         "Task 5's flow bucket, reconstructed: 7 types and 89 runs, of which \
          `io.kestra.plugin.core.flow.Subflow` was one type and 22 runs until W6 \
          -- and of which `LoopUntil` (3 runs) and `WaitFor` (6) were two more \
@@ -5504,7 +5604,7 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
     );
     assert_eq!(
         (all.len(), entries),
-        (13, 266),
+        (13, 273),
         "the golden's own vocabulary and population; `oracle-exec/README.md`'s \
          state table is derived from these"
     );
@@ -5518,7 +5618,10 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
             fits_w8_task_5,
             fits_now
         ),
-        (35, 229, 233, 237, 253, 263, 266),
+        // Re-measured at WorkingDirectory Task 8 over the 301-entry golden: each
+        // stage's count rises by the harvested entries that fit it (the last is
+        // the 273 `runs` entries, which is the population's own total).
+        (39, 234, 238, 243, 259, 270, 273),
         "what each addition to `RunState` bought. `SUBMITTED` (Task 3) is the \
          big one: 35 -> 229. `RETRIED` (Task 7) buys 4, which is the whole \
          `RETRIED` population -- and the four entries are exactly the \
@@ -5668,14 +5771,14 @@ fn the_golden_populations_are_derived_recursed_and_unrecursed() {
     );
     assert_eq!(
         (flat.0, flat.1, flat.2),
-        (266, 570, 604),
+        (273, 588, 624),
         "the UN-recursed populations. 604 is the attempt figure W8 Task 2 \
          published while claiming a recursive walk; it is kept here so the two \
          can never be confused again"
     );
     assert_eq!(
         (deep.0, deep.1, deep.2),
-        (408, 840, 878),
+        (415, 858, 898),
         "the RECURSED populations, which are the ones `RunState::Paused` and \
          `RunState::Restarted` quote. 840 is also the figure \
          `oracle-exec/README.md`'s run-history table is over, which is the \
@@ -5767,9 +5870,13 @@ fn the_skipped_state_comes_from_runif_and_never_from_disabled() {
                 "skipped_when_failures_exist"
             ),
             ("valids/task-runif-workingdirectory", "log_test"),
+            // WorkingDirectory Task 8: the `runIf: {{ false }}` child of the
+            // re-harvested `working-directory-real-runif-false`.
+            ("valids/working-directory-real-runif-false", "skipped"),
         ]
         .map(|(e, t)| (e.to_string(), t.to_string())),
-        "every SKIPPED run in the golden, by name: 6 runs across 4 entries. \
+        "every SKIPPED run in the golden, by name: 7 runs across 5 entries (6 across 4 \
+         before WorkingDirectory Task 8 added `working-directory-real-runif-false`). \
          `the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` \
          counts the ENTRIES (4); this names the runs, so a state moving between \
          them is visible too"
@@ -6492,8 +6599,10 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         (
             "Loop — a sub-execution egret runs and gets wrong",
             // 19 through W9a Task 10; `valids/loop-values-from-uri` banked at
-            // W9a Task 11 (a `Loop` over an ION file).
-            18,
+            // W9a Task 11 (a `Loop` over an ION file); 17 since WorkingDirectory
+            // Task 8 banked `valids/working-directory-taskrun` (a `Loop` whose
+            // sub-execution egret now gets right).
+            17,
             &["io.kestra.plugin.core.flow.Loop\n", "core.loop\n"],
         ),
         // **`Subflow` was a row here with 22 through W5, and W6 Task 3 removed
@@ -6659,11 +6768,14 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // it". **It declares no such thing** -- its `retry:` is a bare
         // `type: constant` on a `Loop`, so its behaviour is the default
         // `RETRY_FAILED_TASK`, and it is held by the `Loop` row. Only four
-        // corpus flows in 345 write the word, and they are the four this task
+        // corpus flows in 351 write the word, and they are the four this task
         // banked.
         (
             "WorkingDirectory",
-            4,
+            // 4 -> 3 at WorkingDirectory Task 8: `valids/working-directory-taskrun`
+            // is banked; the other three (`task-runif-workingdirectory`,
+            // `working-directory-invalid-runif`, `-taskrun-nested`) stay baselined.
+            3,
             &[
                 "io.kestra.plugin.core.flow.WorkingDirectory",
                 "core.workingdirectory",
@@ -6784,6 +6896,14 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         (
             "valids/retry-failed-flow-duration",
             "maxDuration: the driver moves time only to the next deadline",
+        ),
+        // WorkingDirectory Task 9: Kestra's scheduler adds about 0.6 s per retry,
+        // so its fourth attempt falls outside maxDuration and it stops at three.
+        // Egret retries with no scheduler latency, so it makes four. Measured
+        // 5/5 rounds on the pinned image.
+        (
+            "valids/retry-failed-task-duration",
+            "maxDuration: Kestra's ~0.6 s per-retry scheduler latency stops it at three attempts, egret makes four",
         ),
         // ------------------------------------------------------------------
         // W3b Task 5: the entries the FEED used to carry, each with its cause.
@@ -7098,6 +7218,7 @@ async fn the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_no
             spec: serde_json::json!({}),
             render: egret_workflow::runners::RenderContext::new(),
             timeout: None,
+            working_dir: None,
             principal: None,
             claimed_at: chrono::DateTime::UNIX_EPOCH,
             log: egret_workflow::logs::RunLog::discard(),
@@ -7199,6 +7320,8 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
         baseline.len(),
         "every baselined entry is either declaring a `timeout:` or not"
     );
+    // (2, 101, 103) -> (2, 102, 104): `valids/retry-failed-task-duration` is baselined
+    // and declares no `timeout:` anywhere, so only the denominator and `without` move.
     assert_eq!(
         (declaring.len(), without, baseline.len()),
         (2, 102, 104),
@@ -7398,7 +7521,7 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
 
     assert_eq!(
         (declaring.len(), without, unparseable, total),
-        (25, 264, 5, 294),
+        (26, 270, 5, 301),
         "every golden entry either declares a `retry:`, does not, or cannot be \
          parsed at all; the parts and the total: {:#?}",
         declaring.keys().collect::<Vec<_>>()
@@ -7409,7 +7532,10 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
         .partition(|id| baseline.contains(id.as_str()));
     assert_eq!(
         (baselined.len(), matching.len(), declaring.len()),
-        (7, 18, 25),
+        // 25 -> 26 declaring a `retry:` at WorkingDirectory Task 8: the harvested
+        // `retry-failed-task-duration`. Baselined at WorkingDirectory Task 9, so
+        // it moves from the matching side to the baselined side: 7 -> 8, 19 -> 18.
+        (8, 18, 26),
         "the split the coverage question turns on: a `retry:` on a MATCHING \
          entry is one the ratchet would report a change to, and a `retry:` on \
          a baselined entry is one it would not. matching: {matching:?}"
@@ -7419,6 +7545,7 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
         vec![
             "valids/full",
             "valids/retry-failed-flow-duration",
+            "valids/retry-failed-task-duration",
             "valids/retry-flowable-parallel",
             "valids/retry-subflow",
             "valids/retry-success",
@@ -7449,7 +7576,9 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
     }
     assert_eq!(
         (new_execution.len(), failed_task.len(), baselined.len()),
-        (0, 7, 7),
+        // (0, 7, 7) -> (0, 8, 8) at WorkingDirectory Task 9: the baselined
+        // `retry-failed-task-duration` is a `RETRY_FAILED_TASK` one.
+        (0, 8, 8),
         "**every remaining baselined `retry:` is a `RETRY_FAILED_TASK` one**, \
          because W6 Task 4 banked all four `CREATE_NEW_EXECUTION` entries. The \
          assertion under this used to name them; the successor is the matching \
@@ -7476,6 +7605,10 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
             matching_new_execution.len(),
             matching.len()
         ),
+        // (14, 4, 18) -> (15, 4, 19) at WorkingDirectory Task 8: the harvested
+        // `retry-failed-task-duration` is a non-baselined `RETRY_FAILED_TASK` entry.
+        // (15, 4, 19) -> (14, 4, 18) at WorkingDirectory Task 9: baselining it moves
+        // it back to the baselined side.
         (14, 4, 18),
         "the matching half, split the same way. It was (11, 0, 11): every \
          matching entry declared the behaviour that writes a `not_before`, and \
@@ -8080,7 +8213,8 @@ const MAX_DURATION_FLOWS: &[(&str, i64)] = &[
 
 /// **The `MAX_DURATION` population is read off the corpus, not remembered.**
 ///
-/// Four flows in 345 declare one, and the two `*-parent` entries that are ALSO
+/// Four flows in 351 declare one (none of the six `working-directory-real-*`
+/// flows declares a `sla:`), and the two `*-parent` entries that are ALSO
 /// held by a `MAX_DURATION` declare no `sla:` at all — which is the asymmetry
 /// [`the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded`] measures
 /// and this test is the other half of: a per-flow needle sees exactly these

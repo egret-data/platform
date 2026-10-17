@@ -21,6 +21,7 @@ pub(crate) mod loop_until;
 pub(crate) mod parallel;
 pub(crate) mod pause;
 pub(crate) mod sequential;
+pub(crate) mod working_directory;
 
 use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx, TaskKind};
@@ -301,7 +302,9 @@ pub(crate) fn is_terminal(state: &ExecutionState, run: RunIx) -> bool {
 
 /// Start a created run.
 ///
-/// **A `Runnable` gets `SUBMITTED` first and a flowable does not**, and that is
+/// **A `Runnable` gets `SUBMITTED` first and a flowable does not** (nor does a
+/// child of a `WorkingDirectory`, which is a `Runnable` the golden never submits;
+/// see the check on `in_block` below), and that is
 /// measured rather than stylistic: on `valids/parallel`, `parent` (the
 /// `Parallel`) goes `CREATED RUNNING SUCCESS` while each of `t1`..`t6` goes
 /// `CREATED SUBMITTED RUNNING SUCCESS`. `SUBMITTED` is in 580 of the golden's
@@ -314,9 +317,29 @@ pub(crate) fn is_terminal(state: &ExecutionState, run: RunIx) -> bool {
 /// does not see the [`Plan`] and so cannot tell the two apart — and because
 /// `apply` carrying that inference would be `apply` taking a decision, which is
 /// exactly what it is documented not to do.
-pub(crate) fn start(plan: &Plan, run: RunIx, task: TaskIx, now: Tick) -> Vec<Command> {
+pub(crate) fn start(
+    plan: &Plan,
+    state: &ExecutionState,
+    run: RunIx,
+    task: TaskIx,
+    now: Tick,
+) -> Vec<Command> {
     let mut cmds = Vec::new();
-    if matches!(plan.tasks[task].kind, TaskKind::Runnable { .. }) {
+    // **A child of a `WorkingDirectory` is not submitted, and no golden child of
+    // one is.** Measured: `golden.json` reads `CREATED RUNNING <terminal>` for
+    // every child of a block, and the raw captured trace of
+    // `working-directory-real-child-fails` has no `SUBMITTED` on its `fails`
+    // run. So the discriminator is the parent run's kind as well as the child's:
+    // a plain `Runnable` at the top level, or under any other flowable, is
+    // submitted as before. A block's children are the only runnables with a
+    // `WorkingDirectory` parent (`spec::validate` refuses anything else there).
+    let in_block = state.runs[run].parent.is_some_and(|p| {
+        matches!(
+            plan.tasks[state.runs[p].task].kind,
+            TaskKind::WorkingDirectory { .. }
+        )
+    });
+    if matches!(plan.tasks[task].kind, TaskKind::Runnable { .. }) && !in_block {
         cmds.push(Command::SetRunState {
             run,
             state: RunState::Submitted,
@@ -414,7 +437,7 @@ pub(crate) fn open(
     }
     match plan.tasks[task].kind {
         TaskKind::Loop { .. } => loop_::open(plan, state, run, task, now),
-        _ => Step::Commands(start(plan, run, task, now)),
+        _ => Step::Commands(start(plan, state, run, task, now)),
     }
 }
 
@@ -475,6 +498,11 @@ pub(crate) fn descend(
             branch::drive_switch(plan, state, run, cases, default, errors, now)
         }
         TaskKind::Loop { .. } => return Step::Waiting,
+        // Not returned: its `Done` is the block's, and it takes the same
+        // `allowFailure:` mapping below as every other flowable.
+        TaskKind::WorkingDirectory { tasks } => {
+            working_directory::drive(plan, state, run, tasks, now)
+        }
         // W8 Task 3. It is neither `Waiting` (there is a command to emit, and
         // the executor is the only thing that can emit it) nor a list to walk:
         // the whole of a `Pause` is the transition into `PAUSED`, which

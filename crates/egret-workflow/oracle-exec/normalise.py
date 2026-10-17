@@ -96,15 +96,44 @@ def relation(a, b):
     return "overlapping"
 
 
-def ordinals(doc):
-    """taskrun id -> its ordinal, which is its index in `taskRunList`.
+def ordered_runs(doc):
+    """The execution's taskruns in the order the normaliser numbers them.
 
-    Rule 1 says ordinal in FIRST-APPEARANCE order and rule 3 says keep
-    `taskRunList` order; those are the same order only if no taskrun's parent
-    appears after it.  That is checked rather than assumed -- see
-    `check_parent_links`.
+    That is the order each run was CREATED, which is `taskRunList` order with
+    one correction measured on `valids/working-directory-real-runif-false`.
+    There, a `SKIPPED` child and the sibling after it are created about 200
+    microseconds apart by the same executor pass, and `taskRunList` records
+    them in whichever order the write landed: in rounds 4 and 5 the sibling came
+    first in the list, though its `CREATED` instant is later than the skipped
+    child's in all five rounds. Numbering by the list therefore moved the
+    skipped run's ordinal from round to round, which made the whole trace
+    unstable and kept the entry out of the golden. Numbering by the `CREATED`
+    instant reads the same five rounds as one order.
+
+    Ties (equal `CREATED` instants) keep the `taskRunList` position, and the
+    harvest measured no tie at microsecond resolution, so for every other corpus
+    flow this is the same order `taskRunList` gives -- `golden.json`'s other
+    entries are unchanged by it, and `stability.json` says so per flow.
     """
-    return {r["id"]: i for i, r in enumerate(doc["runs"])}
+    def created(r):
+        histories = (r.get("state") or {}).get("histories") or []
+        if not histories:
+            bail(f"taskrun {r.get('taskId')!r} ({r.get('id')}) has no CREATED history, "
+                 "so it has no creation instant to number it by")
+        return histories[0][1]
+
+    keyed = [(created(r), i, r) for i, r in enumerate(doc["runs"])]
+    return [r for _, _, r in sorted(keyed, key=lambda k: (k[0], k[1]))]
+
+
+def ordinals(doc):
+    """taskrun id -> its ordinal: its index in `ordered_runs`.
+
+    Rule 1 says ordinal in FIRST-APPEARANCE order and rule 3 says keep the
+    creation order; those are the same order only if no taskrun's parent appears
+    after it.  That is checked rather than assumed -- see `check_parent_links`.
+    """
+    return {r["id"]: i for i, r in enumerate(ordered_runs(doc))}
 
 
 def check_parent_links(cid, doc):
@@ -129,7 +158,7 @@ def check_parent_links(cid, doc):
     """
     ix = ordinals(doc)
     outer = doc.get("spawnedBy")
-    for i, r in enumerate(doc["runs"]):
+    for i, r in enumerate(ordered_runs(doc)):
         p = r.get("parentTaskRunId")
         if p is None or p == outer:
             continue
@@ -147,7 +176,7 @@ def node_runs(doc):
     ix = ordinals(doc)
     outer = doc.get("spawnedBy")
     out = []
-    for r in doc["runs"]:
+    for r in ordered_runs(doc):
         p = r.get("parentTaskRunId")
         out.append({
             "task": r["taskId"],
@@ -201,9 +230,10 @@ def normalise_node(cid, doc, by_parent, path, orders):
     runs = node_runs(doc)
 
     pairs = {}
-    for i in range(len(doc["runs"])):
-        for j in range(i + 1, len(doc["runs"])):
-            pairs[f"{i},{j}"] = relation(doc["runs"][i], doc["runs"][j])
+    ordered = ordered_runs(doc)
+    for i in range(len(ordered)):
+        for j in range(i + 1, len(ordered)):
+            pairs[f"{i},{j}"] = relation(ordered[i], ordered[j])
     orders[path] = pairs
 
     ix = ordinals(doc)
@@ -526,12 +556,18 @@ def self_test():
     ok &= must_bail("a rejected class outside both vocabularies",
                     lambda: build(traces, mc))
 
-    # 3. a taskrun whose parent appears after it -- rules 1 and 3 disagreeing
+    # 3. a taskrun whose parent appears after it -- rules 1 and 3 disagreeing.
+    #    The numbering is by CREATED instant (`ordered_runs`), so the mutation
+    #    has to move a child's creation instant before its parent's: reversing
+    #    the list no longer changes the numbering, which is the point of
+    #    numbering by instant.
     m = copy.deepcopy(traces)
     cid = next(c for c, rs in sorted(m["flows"].items())
                if any(r.get("parentTaskRunId") for r in rs[0]["root"]["runs"]))
     rs = m["flows"][cid][0]["root"]["runs"]
-    rs.reverse()
+    ids = {r["id"] for r in rs}
+    child = next(r for r in rs if r.get("parentTaskRunId") in ids)
+    child["state"]["histories"][0][1] = "0000-01-01T00:00:00Z"
     ok &= must_bail("a parent taskrun that appears after its child",
                     lambda: build(m, corpus))
 

@@ -1,19 +1,4 @@
- Container w3oracle-kestra-1  Stopping
- Container w3oracle-kestra-1  Stopped
- Container w3oracle-kestra-1  Removing
- Container w3oracle-kestra-1  Removed
- Container w3oracle-postgres-1  Stopping
- Container w3oracle-postgres-1  Stopped
- Container w3oracle-postgres-1  Removing
- Container w3oracle-postgres-1  Removed
- Volume w3oracle_postgres-data  Removing
- Volume w3oracle_kestra-data  Removing
- Network w3oracle_default  Removing
- Volume w3oracle_kestra-data  Removed
- Volume w3oracle_postgres-data  Removed
- Network w3oracle_default  Removed
- kestra Pulling 
- kestra Pulled 
+time="2026-10-17T00:04:36+07:00" level=warning msg="Warning: No resource found to remove for project \"w3oracle\"."
  Network w3oracle_default  Creating
  Network w3oracle_default  Created
  Volume w3oracle_postgres-data  Creating
@@ -28,374 +13,380 @@
  Container w3oracle-postgres-1  Started
  Container w3oracle-kestra-1  Starting
  Container w3oracle-kestra-1  Started
-[ready] http://localhost:8080/api/v1/main/flows/search?size=1 -> 200 after 13.2s
+[ready] http://localhost:8080/api/v1/main/flows/search?size=1 -> 200 after 26.8s
 [pre-flight] 0 pre-existing flow(s), none of them corpus flows
-[corpus] 345 flows (317 valids, 28 invalids)
-[publish] 295/345 flows published; 50 refused
-[  1/345] valids/additional-plugin                                       rejected        publish -> 422: Invalid type: io.kestra.core.plugins.AdditionalPluginTest$AdditionalPlugin
-[  2/345] valids/after-execution-error                                   runs            FAILED
-[  3/345] valids/after-execution-finally                                 runs            SUCCESS
-[  4/345] valids/after-execution-flowable                                runs            SUCCESS
-[  5/345] valids/after-execution                                         runs            SUCCESS
-[  6/345] valids/alias-task                                              rejected        publish -> 422: Invalid type: io.kestra.core.runners.test.TaskWithAlias
-[  7/345] valids/alias-trigger                                           rejected        publish -> 422: Invalid type: io.kestra.core.runners.test.trigger.Alias
-[  8/345] valids/all-flowable                                            runs            FAILED
-[  9/345] valids/allow-failure-with-retry                                runs            WARNING
-[ 10/345] valids/allow-failure                                           runs            FAILED
-[ 11/345] valids/assert                                                  runs            FAILED
-[ 12/345] valids/cache                                                   rejected        publish -> 422: Invalid type: io.kestra.core.runners.TaskCacheTest$CounterTask
-[ 13/345] valids/change-state-errors                                     runs            FAILED
-[ 14/345] valids/condition_with_input                                    runs            FAILED
-[ 15/345] valids/dag                                                     runs            SUCCESS
-[ 16/345] valids/disable-error                                           runs            FAILED
-[ 17/345] valids/disable-flowable                                        runs            FAILED
-[ 18/345] valids/disable-simple                                          runs            SUCCESS
-[ 19/345] valids/dynamic-task                                            rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.DynamicTask
-[ 20/345] valids/empty-variables                                         runs            SUCCESS
-[ 21/345] valids/encrypted-string                                        rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
-[ 22/345] valids/errors                                                  runs            FAILED
-[ 23/345] valids/exception-with-output                                   rejected        publish -> 422: Invalid type: io.kestra.core.runners.test.TaskThatFail
-[ 24/345] valids/executable-fail                                         rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.BadExecutable
-[ 25/345] valids/execution                                               runs            SUCCESS
-[ 26/345] valids/exit-cancelled                                          runs            CANCELLED
-[ 27/345] valids/exit-killed                                             runs            KILLED
-[ 28/345] valids/exit-nested                                             runs            FAILED
-[ 29/345] valids/exit                                                    runs            WARNING
-[ 30/345] valids/fail-on-condition                                       runs            FAILED
-[ 31/345] valids/fail-on-switch                                          runs            FAILED
-[ 32/345] valids/failed-first                                            runs            FAILED
-[ 33/345] valids/failing-subflow                                         runs            FAILED
-[ 34/345] valids/finally-allowfailure                                    runs            WARNING
-[ 35/345] valids/finally-dag                                             runs            FAILED
-[ 36/345] valids/finally-flow-error-first                                runs            FAILED
-[ 37/345] valids/finally-flow-error                                      runs            FAILED
-[ 38/345] valids/finally-flow                                            runs            FAILED
-[ 39/345] valids/finally-loop-parallel                                   runs            FAILED
-[ 40/345] valids/finally-loop                                            runs            FAILED
-[ 41/345] valids/finally-parallel                                        runs            FAILED
-[ 42/345] valids/finally-sequential-error-first                          runs            FAILED
-[ 43/345] valids/finally-sequential-error                                runs            FAILED
-[ 44/345] valids/finally-sequential                                      runs            FAILED
-[ 45/345] valids/flow-concurrency-cancel-pause                           runs            SUCCESS
-[ 46/345] valids/flow-concurrency-cancel                                 runs            SUCCESS
-[ 47/345] valids/flow-concurrency-fail                                   runs            SUCCESS
-[ 48/345] valids/flow-concurrency-parallel-subflow-kill-child            runs            SUCCESS
-[ 49/345] valids/flow-concurrency-parallel-subflow-kill-grandchild       runs            SUCCESS
-[ 50/345] valids/flow-concurrency-parallel-subflow-kill                  runs            SUCCESS
-[ 51/345] valids/flow-concurrency-queue-after-execution                  runs            SUCCESS
-[ 52/345] valids/flow-concurrency-queue-fail                             runs            FAILED
-[ 53/345] valids/flow-concurrency-queue-killed-after-execution           runs            SUCCESS
-[ 54/345] valids/flow-concurrency-queue-killed                           runs            SUCCESS
-[ 55/345] valids/flow-concurrency-queue-pause                            runs            SUCCESS
-[ 56/345] valids/flow-concurrency-queue                                  runs            SUCCESS
-[ 57/345] valids/flow-concurrency-sla-assert-cancel                      runs            CANCELLED
-[ 58/345] valids/flow-concurrency-sla-fail-child                         runs            FAILED
-[ 59/345] valids/flow-concurrency-sla-fail-parent                        runs            FAILED
-[ 60/345] valids/flow-concurrency-subflow                                runs            SUCCESS
-[ 61/345] valids/flow-trigger-any-mode-flow-a                            runs            SUCCESS
-[ 62/345] valids/flow-trigger-any-mode-flow-b                            runs            SUCCESS
-[ 63/345] valids/flow-trigger-any-mode-flow-listen                       runs            SUCCESS
-[ 64/345] valids/flow-trigger-at-least-mode-flow-a                       runs            SUCCESS
-[ 65/345] valids/flow-trigger-at-least-mode-flow-b                       runs            SUCCESS
-[ 66/345] valids/flow-trigger-at-least-mode-flow-c                       runs            SUCCESS
-[ 67/345] valids/flow-trigger-at-least-mode-flow-listen                  runs            SUCCESS
-[ 68/345] valids/flow-trigger-depends-on-flow-a                          runs            SUCCESS
-[ 69/345] valids/flow-trigger-depends-on-flow-b                          runs            SUCCESS
-[ 70/345] valids/flow-trigger-depends-on-flow-listen                     runs            SUCCESS
-[ 71/345] valids/flow-trigger-fire-once-true-flow-a                      runs            SUCCESS
-[ 72/345] valids/flow-trigger-fire-once-true-flow-b                      runs            SUCCESS
-[ 73/345] valids/flow-trigger-fire-once-true-flow-listen                 rejected        publish -> 422: Unrecognized field "fireOnce" (class io.kestra.core.models.triggers.Window
-[ 74/345] valids/flow-trigger-invalid-inputs-flow-a                      runs            SUCCESS
-[ 75/345] valids/flow-trigger-invalid-inputs-flow-listen                 not-standalone  Created only by a Flow trigger on flow-trigger-invalid-inputs-flow-a (MultipleConditionTri
-[ 76/345] valids/flow-trigger-mixed-conditions-flow-a                    runs            SUCCESS
-[ 77/345] valids/flow-trigger-mixed-conditions-flow-listen               runs            SUCCESS
-[ 78/345] valids/flow-trigger-multiple-conditions-flow-a                 runs            SUCCESS
-[ 79/345] valids/flow-trigger-multiple-conditions-flow-listen            runs            SUCCESS
-[ 80/345] valids/flow-trigger-multiple-depends-on-flow-a                 runs            SUCCESS
-[ 81/345] valids/flow-trigger-multiple-depends-on-flow-listen            runs            SUCCESS
-[ 82/345] valids/flow-trigger-paused-flow                                runs            SUCCESS
-[ 83/345] valids/flow-trigger-paused-listen                              runs            SUCCESS
-[ 84/345] valids/flow-trigger-stable-condition-id-flow-a                 runs            SUCCESS
-[ 85/345] valids/flow-trigger-stable-condition-id-flow-b                 runs            SUCCESS
-[ 86/345] valids/flow-trigger-stable-condition-id-flow-listen            runs            SUCCESS
-[ 87/345] valids/flow-trigger-when-condition-flow-a                      runs            SUCCESS
-[ 88/345] valids/flow-trigger-when-condition-flow-listen                 runs            SUCCESS
-[ 89/345] valids/flow-with-array-outputs                                 runs            SUCCESS
-[ 90/345] valids/flow-with-optional-outputs                              runs            SUCCESS
-[ 91/345] valids/flow-with-outputs-failed                                runs            FAILED
-[ 92/345] valids/flow-with-outputs                                       runs            SUCCESS
-[ 93/345] valids/flowable-fail                                           rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.BadSequential
-[ 94/345] valids/flowable-with-parent-fail                               runs            FAILED
-[ 95/345] valids/follow-dependencies-partial-child                       runs            SUCCESS
-[ 96/345] valids/follow-dependencies-partial-parent                      not-standalone  reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pa
-[ 97/345] valids/full                                                    runs            SUCCESS
-[ 98/345] valids/http-listen-encrypted                                   runs            SUCCESS
-[ 99/345] valids/http-listen                                             runs            SUCCESS
-[100/345] valids/if-condition-fail                                       runs            FAILED
-[101/345] valids/if-condition                                            runs            SUCCESS
-[102/345] valids/if-in-flowable                                          runs            SUCCESS
-[103/345] valids/if-in-parallel                                          runs            SUCCESS
-[104/345] valids/if-with-only-disabled-tasks                             runs            SUCCESS
-[105/345] valids/if-without-else                                         runs            SUCCESS
-[106/345] valids/if                                                      runs            SUCCESS
-[107/345] valids/input-log-secret                                        not-standalone  POST execution -> 422:  errors:
+[corpus] 351 flows (323 valids, 28 invalids)
+[publish] 301/351 flows published; 50 refused
+[  1/351] valids/additional-plugin                                       rejected        publish -> 422: Invalid type: io.kestra.core.plugins.AdditionalPluginTest$AdditionalPlugin
+[  2/351] valids/after-execution-error                                   runs            FAILED
+[  3/351] valids/after-execution-finally                                 runs            SUCCESS
+[  4/351] valids/after-execution-flowable                                runs            SUCCESS
+[  5/351] valids/after-execution                                         runs            SUCCESS
+[  6/351] valids/alias-task                                              rejected        publish -> 422: Invalid type: io.kestra.core.runners.test.TaskWithAlias
+[  7/351] valids/alias-trigger                                           rejected        publish -> 422: Invalid type: io.kestra.core.runners.test.trigger.Alias
+[  8/351] valids/all-flowable                                            runs            FAILED
+[  9/351] valids/allow-failure-with-retry                                runs            WARNING
+[ 10/351] valids/allow-failure                                           runs            FAILED
+[ 11/351] valids/assert                                                  runs            FAILED
+[ 12/351] valids/cache                                                   rejected        publish -> 422: Invalid type: io.kestra.core.runners.TaskCacheTest$CounterTask
+[ 13/351] valids/change-state-errors                                     runs            FAILED
+[ 14/351] valids/condition_with_input                                    runs            FAILED
+[ 15/351] valids/dag                                                     runs            SUCCESS
+[ 16/351] valids/disable-error                                           runs            FAILED
+[ 17/351] valids/disable-flowable                                        runs            FAILED
+[ 18/351] valids/disable-simple                                          runs            SUCCESS
+[ 19/351] valids/dynamic-task                                            rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.DynamicTask
+[ 20/351] valids/empty-variables                                         runs            SUCCESS
+[ 21/351] valids/encrypted-string                                        rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
+[ 22/351] valids/errors                                                  runs            FAILED
+[ 23/351] valids/exception-with-output                                   rejected        publish -> 422: Invalid type: io.kestra.core.runners.test.TaskThatFail
+[ 24/351] valids/executable-fail                                         rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.BadExecutable
+[ 25/351] valids/execution                                               runs            SUCCESS
+[ 26/351] valids/exit-cancelled                                          runs            CANCELLED
+[ 27/351] valids/exit-killed                                             runs            KILLED
+[ 28/351] valids/exit-nested                                             runs            FAILED
+[ 29/351] valids/exit                                                    runs            WARNING
+[ 30/351] valids/fail-on-condition                                       runs            FAILED
+[ 31/351] valids/fail-on-switch                                          runs            FAILED
+[ 32/351] valids/failed-first                                            runs            FAILED
+[ 33/351] valids/failing-subflow                                         runs            FAILED
+[ 34/351] valids/finally-allowfailure                                    runs            WARNING
+[ 35/351] valids/finally-dag                                             runs            FAILED
+[ 36/351] valids/finally-flow-error-first                                runs            FAILED
+[ 37/351] valids/finally-flow-error                                      runs            FAILED
+[ 38/351] valids/finally-flow                                            runs            FAILED
+[ 39/351] valids/finally-loop-parallel                                   runs            FAILED
+[ 40/351] valids/finally-loop                                            runs            FAILED
+[ 41/351] valids/finally-parallel                                        runs            FAILED
+[ 42/351] valids/finally-sequential-error-first                          runs            FAILED
+[ 43/351] valids/finally-sequential-error                                runs            FAILED
+[ 44/351] valids/finally-sequential                                      runs            FAILED
+[ 45/351] valids/flow-concurrency-cancel-pause                           runs            SUCCESS
+[ 46/351] valids/flow-concurrency-cancel                                 runs            SUCCESS
+[ 47/351] valids/flow-concurrency-fail                                   runs            SUCCESS
+[ 48/351] valids/flow-concurrency-parallel-subflow-kill-child            runs            SUCCESS
+[ 49/351] valids/flow-concurrency-parallel-subflow-kill-grandchild       runs            SUCCESS
+[ 50/351] valids/flow-concurrency-parallel-subflow-kill                  runs            SUCCESS
+[ 51/351] valids/flow-concurrency-queue-after-execution                  runs            SUCCESS
+[ 52/351] valids/flow-concurrency-queue-fail                             runs            FAILED
+[ 53/351] valids/flow-concurrency-queue-killed-after-execution           runs            SUCCESS
+[ 54/351] valids/flow-concurrency-queue-killed                           runs            SUCCESS
+[ 55/351] valids/flow-concurrency-queue-pause                            runs            SUCCESS
+[ 56/351] valids/flow-concurrency-queue                                  runs            SUCCESS
+[ 57/351] valids/flow-concurrency-sla-assert-cancel                      runs            CANCELLED
+[ 58/351] valids/flow-concurrency-sla-fail-child                         runs            FAILED
+[ 59/351] valids/flow-concurrency-sla-fail-parent                        runs            FAILED
+[ 60/351] valids/flow-concurrency-subflow                                runs            SUCCESS
+[ 61/351] valids/flow-trigger-any-mode-flow-a                            runs            SUCCESS
+[ 62/351] valids/flow-trigger-any-mode-flow-b                            runs            SUCCESS
+[ 63/351] valids/flow-trigger-any-mode-flow-listen                       runs            SUCCESS
+[ 64/351] valids/flow-trigger-at-least-mode-flow-a                       runs            SUCCESS
+[ 65/351] valids/flow-trigger-at-least-mode-flow-b                       runs            SUCCESS
+[ 66/351] valids/flow-trigger-at-least-mode-flow-c                       runs            SUCCESS
+[ 67/351] valids/flow-trigger-at-least-mode-flow-listen                  runs            SUCCESS
+[ 68/351] valids/flow-trigger-depends-on-flow-a                          runs            SUCCESS
+[ 69/351] valids/flow-trigger-depends-on-flow-b                          runs            SUCCESS
+[ 70/351] valids/flow-trigger-depends-on-flow-listen                     runs            SUCCESS
+[ 71/351] valids/flow-trigger-fire-once-true-flow-a                      runs            SUCCESS
+[ 72/351] valids/flow-trigger-fire-once-true-flow-b                      runs            SUCCESS
+[ 73/351] valids/flow-trigger-fire-once-true-flow-listen                 rejected        publish -> 422: Unrecognized field "fireOnce" (class io.kestra.core.models.triggers.Window
+[ 74/351] valids/flow-trigger-invalid-inputs-flow-a                      runs            SUCCESS
+[ 75/351] valids/flow-trigger-invalid-inputs-flow-listen                 not-standalone  Created only by a Flow trigger on flow-trigger-invalid-inputs-flow-a (MultipleConditionTri
+[ 76/351] valids/flow-trigger-mixed-conditions-flow-a                    runs            SUCCESS
+[ 77/351] valids/flow-trigger-mixed-conditions-flow-listen               runs            SUCCESS
+[ 78/351] valids/flow-trigger-multiple-conditions-flow-a                 runs            SUCCESS
+[ 79/351] valids/flow-trigger-multiple-conditions-flow-listen            runs            SUCCESS
+[ 80/351] valids/flow-trigger-multiple-depends-on-flow-a                 runs            SUCCESS
+[ 81/351] valids/flow-trigger-multiple-depends-on-flow-listen            runs            SUCCESS
+[ 82/351] valids/flow-trigger-paused-flow                                runs            SUCCESS
+[ 83/351] valids/flow-trigger-paused-listen                              runs            SUCCESS
+[ 84/351] valids/flow-trigger-stable-condition-id-flow-a                 runs            SUCCESS
+[ 85/351] valids/flow-trigger-stable-condition-id-flow-b                 runs            SUCCESS
+[ 86/351] valids/flow-trigger-stable-condition-id-flow-listen            runs            SUCCESS
+[ 87/351] valids/flow-trigger-when-condition-flow-a                      runs            SUCCESS
+[ 88/351] valids/flow-trigger-when-condition-flow-listen                 runs            SUCCESS
+[ 89/351] valids/flow-with-array-outputs                                 runs            SUCCESS
+[ 90/351] valids/flow-with-optional-outputs                              runs            SUCCESS
+[ 91/351] valids/flow-with-outputs-failed                                runs            FAILED
+[ 92/351] valids/flow-with-outputs                                       runs            SUCCESS
+[ 93/351] valids/flowable-fail                                           rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.BadSequential
+[ 94/351] valids/flowable-with-parent-fail                               runs            FAILED
+[ 95/351] valids/follow-dependencies-partial-child                       runs            SUCCESS
+[ 96/351] valids/follow-dependencies-partial-parent                      not-standalone  reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pa
+[ 97/351] valids/full                                                    runs            SUCCESS
+[ 98/351] valids/http-listen-encrypted                                   runs            SUCCESS
+[ 99/351] valids/http-listen                                             runs            SUCCESS
+[100/351] valids/if-condition-fail                                       runs            FAILED
+[101/351] valids/if-condition                                            runs            SUCCESS
+[102/351] valids/if-in-flowable                                          runs            SUCCESS
+[103/351] valids/if-in-parallel                                          runs            SUCCESS
+[104/351] valids/if-with-only-disabled-tasks                             runs            SUCCESS
+[105/351] valids/if-without-else                                         runs            SUCCESS
+[106/351] valids/if                                                      runs            SUCCESS
+[107/351] valids/input-log-secret                                        not-standalone  POST execution -> 422:  errors:
 ```
 Unable to use a `SECRET` input/output as encryption is
-[108/345] valids/inputs-large                                            not-standalone  RunContextTest.java:141 builds the `string` input from a 16 KiB generated char array and r
-[109/345] valids/inputs-small-files                                      not-standalone  ExecutionControllerRunnerTest.java:394 uploads the classpath resource application-test.yml
-[110/345] valids/inputs                                                  not-standalone  FILE input `file` is a classpath resource path resolved by the JVM (InputsTest.inputs -> a
-[111/345] valids/invalid-draft-flow                                      rejected        publish -> 422: tasks: must not be empty
+[108/351] valids/inputs-large                                            not-standalone  RunContextTest.java:141 builds the `string` input from a 16 KiB generated char array and r
+[109/351] valids/inputs-small-files                                      not-standalone  ExecutionControllerRunnerTest.java:394 uploads the classpath resource application-test.yml
+[110/351] valids/inputs                                                  not-standalone  FILE input `file` is a classpath resource path resolved by the JVM (InputsTest.inputs -> a
+[111/351] valids/invalid-draft-flow                                      rejected        publish -> 422: tasks: must not be empty
 
-[112/345] valids/json-input-schema-validation                            runs            SUCCESS
-[113/345] valids/kv                                                      not-standalone  No Java test drives this flow.  Both inputs have YAML defaults, so a bare execution would 
-[114/345] valids/labels-deserialization                                  runs            SUCCESS
-[115/345] valids/labels-update-nested-value-list                         runs            SUCCESS
-[116/345] valids/labels-update-nested-value-map                          runs            SUCCESS
-[117/345] valids/labels-update-task-deduplicate                          runs            SUCCESS
-[118/345] valids/labels-update-task-empty                                runs            FAILED
-[119/345] valids/labels-update-task                                      runs            SUCCESS
-[120/345] valids/log-to-file                                             runs            SUCCESS
-[121/345] valids/logs                                                    runs            SUCCESS
-[122/345] valids/loop-empty                                              runs            SUCCESS
-[123/345] valids/loop-expression-context                                 runs            SUCCESS
-[124/345] valids/loop-failed-no-transmit                                 runs            SUCCESS
-[125/345] valids/loop-failed                                             runs            FAILED
-[126/345] valids/loop-flowable                                           runs            SUCCESS
-[127/345] valids/loop-map                                                runs            SUCCESS
-[128/345] valids/loop-multiple                                           runs            SUCCESS
-[129/345] valids/loop-nested                                             runs            SUCCESS
-[130/345] valids/loop-null                                               runs            FAILED
-[131/345] valids/loop-object-in-list                                     runs            SUCCESS
-[132/345] valids/loop-object                                             runs            SUCCESS
-[133/345] valids/loop-outputs-auto                                       runs            SUCCESS
-[134/345] valids/loop-outputs-failed-render                              runs            FAILED
-[135/345] valids/loop-outputs-store                                      runs            SUCCESS
-[136/345] valids/loop-outputs                                            runs            SUCCESS
-[137/345] valids/loop-parallel-equal                                     runs            SUCCESS
-[138/345] valids/loop-parallel-less                                      runs            SUCCESS
-[139/345] valids/loop-parallel-more                                      runs            SUCCESS
-[140/345] valids/loop-parallel-unlimited                                 runs            SUCCESS
-[141/345] valids/loop-pause                                              not-standalone  reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pa
-[142/345] valids/loop-serial-multiple-tasks                              runs            SUCCESS
-[143/345] valids/loop-serial                                             runs            SUCCESS
-[144/345] valids/loop-switch                                             runs            SUCCESS
-[145/345] valids/loop-until-restart                                      runs            FAILED
-[146/345] valids/loop-values-from-uri                                    runs            SUCCESS
-[147/345] valids/loop-with-subflow                                       runs            SUCCESS
-[148/345] valids/loopuntil-failed-flowable                               runs            FAILED
-[149/345] valids/minimal-bis                                             runs            SUCCESS
-[150/345] valids/minimal                                                 runs            SUCCESS
-[151/345] valids/minimal2                                                runs            SUCCESS
-[152/345] valids/npe-labels-update-task                                  runs            SUCCESS
-[153/345] valids/null-output                                             rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.NullOutputTask
-[154/345] valids/output-values                                           runs            SUCCESS
-[155/345] valids/parallel-disabled-tasks                                 runs            SUCCESS
-[156/345] valids/parallel-fail-with-flowable                             runs            FAILED
-[157/345] valids/parallel-nested                                         runs            SUCCESS
-[158/345] valids/parallel                                                runs            SUCCESS
-[159/345] valids/pause-behavior                                          runs            FAILED
-[160/345] valids/pause-delay                                             runs            SUCCESS
-[161/345] valids/pause-duration-from-input                               runs            SUCCESS
-[162/345] valids/pause-errors-finally-after-execution                    runs            FAILED
-[163/345] valids/pause-kill-delay                                        runs            SUCCESS
-[164/345] valids/pause-test                                              not-standalone  reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pa
-[165/345] valids/pause-timeout-allow-failure                             runs            WARNING
-[166/345] valids/pause-timeout                                           runs            FAILED
-[167/345] valids/pause_no_tasks                                          not-standalone  reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pa
-[168/345] valids/pause_on_pause                                          runs            SUCCESS
-[169/345] valids/pause_on_resume                                         not-standalone  reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pa
-[170/345] valids/pause_on_resume_optional                                not-standalone  reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pa
-[171/345] valids/primitive-labels-flow                                   runs            SUCCESS
-[172/345] valids/purge_logs_execution_only                               runs            SUCCESS
-[173/345] valids/purge_logs_full_arguments                               runs            SUCCESS
-[174/345] valids/purge_logs_no_arguments                                 runs            SUCCESS
-[175/345] valids/purge_logs_trigger_only                                 runs            SUCCESS
-[176/345] valids/purge_logs_with_batch_size                              runs            SUCCESS
-[177/345] valids/replay-loop                                             runs            FAILED
-[178/345] valids/replay-revision                                         runs            FAILED
-[179/345] valids/replay-sequential-with-error-handler                    runs            FAILED
-[180/345] valids/replay                                                  runs            SUCCESS
-[181/345] valids/restart-child                                           runs            FAILED
-[182/345] valids/restart-loop                                            runs            FAILED
-[183/345] valids/restart-parent-loop                                     runs            FAILED
-[184/345] valids/restart-parent                                          runs            FAILED
-[185/345] valids/restart-with-after-execution                            runs            FAILED
-[186/345] valids/restart-with-finally                                    runs            FAILED
-[187/345] valids/restart_always_failed                                   runs            FAILED
-[188/345] valids/restart_last_failed                                     runs            FAILED
-[189/345] valids/restart_local_errors                                    runs            FAILED
-[190/345] valids/restart_with_inputs                                     not-standalone  ExecutionControllerRunnerTest.java:176 supplies FILE input `file` as the classpath resourc
-[191/345] valids/resume-validate                                         not-standalone  reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pa
-[192/345] valids/retry-dynamic-task                                      rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.DynamicTask
-[193/345] valids/retry-expo                                              runs            FAILED
-[194/345] valids/retry-fail                                              runs            FAILED
-[195/345] valids/retry-failed-flow-attempts                              runs            FAILED
-[196/345] valids/retry-failed-flow-duration                              runs            FAILED
-[197/345] valids/retry-failed-task-attempts                              runs            FAILED
-[198/345] valids/retry-failed-task-duration                              runs            FAILED
-[199/345] valids/retry-failed                                            runs            FAILED
-[200/345] valids/retry-flowable-child                                    runs            FAILED
-[201/345] valids/retry-flowable-nested-child                             runs            FAILED
-[202/345] valids/retry-flowable-parallel                                 runs            FAILED
-[203/345] valids/retry-flowable                                          runs            FAILED
-[204/345] valids/retry-new-execution-flow-attempts                       runs            RETRIED
-[205/345] valids/retry-new-execution-flow-duration                       runs            RETRIED
-[206/345] valids/retry-new-execution-task-attempts                       runs            RETRIED
-[207/345] valids/retry-new-execution-task-duration                       runs            RETRIED
-[208/345] valids/retry-random                                            runs            FAILED
-[209/345] valids/retry-subflow                                           runs            FAILED
-[210/345] valids/retry-success-first-attempt                             runs            SUCCESS
-[211/345] valids/retry-success                                           runs            WARNING
-[212/345] valids/retry-with-flowable-errors                              runs            SUCCESS
-[213/345] valids/return                                                  runs            SUCCESS
-[214/345] valids/schedule-trigger                                        runs            SUCCESS
-[215/345] valids/scheduled-inputs-defaults                               not-standalone  Only FlowValidationTest.java:231 references it, and only to parse().  No test executes it.
-[216/345] valids/secret-input-validation                                 not-standalone  InputsTest.java:493 secretInputValidation() never executes the flow -- it calls flowIO.rea
-[217/345] valids/secrets                                                 runs            FAILED
-[218/345] valids/sequential-sleep                                        runs            SUCCESS
-[219/345] valids/sequential-with-disabled                                runs            SUCCESS
-[220/345] valids/sequential-with-global-errors                           runs            FAILED
-[221/345] valids/sequential-with-local-errors                            runs            FAILED
-[222/345] valids/sequential                                              runs            SUCCESS
-[223/345] valids/set-variables-duplicate                                 runs            FAILED
-[224/345] valids/set-variables                                           runs            SUCCESS
-[225/345] valids/sla-execution-condition                                 runs            CANCELLED
-[226/345] valids/sla-max-duration-fail                                   runs            FAILED
-[227/345] valids/sla-max-duration-ok                                     runs            SUCCESS
-[228/345] valids/sla-parent-flow                                         runs            FAILED
-[229/345] valids/sla-subflow                                             runs            FAILED
-[230/345] valids/sleep-long-after-execution-flowable                     runs            SUCCESS
-[231/345] valids/sleep-long                                              runs            SUCCESS
-[232/345] valids/sleep-short                                             runs            SUCCESS
-[233/345] valids/sleep-task-flow                                         runs            SUCCESS
-[234/345] valids/sleep                                                   runs            SUCCESS
-[235/345] valids/subflow-child-with-output                               runs            SUCCESS
-[236/345] valids/subflow-child                                           runs            SUCCESS
-[237/345] valids/subflow-function-child                                  runs            SUCCESS
-[238/345] valids/subflow-function-failing                                runs            FAILED
-[239/345] valids/subflow-function-mutual-a                               not-standalone  SubflowFunctionTest.java:147 drives it through the subflow() Pebble function and asserts t
-[240/345] valids/subflow-function-mutual-b                               not-standalone  Half of the a -> b -> a mutual-recursion pair at SubflowFunctionTest.java:147; only ever r
-[241/345] valids/subflow-function-recursive                              not-standalone  SubflowFunctionTest.java:132 drives it through the subflow() Pebble function and asserts t
-[242/345] valids/subflow-grand-child                                     runs            SUCCESS
-[243/345] valids/subflow-inherited-labels-child                          runs            SUCCESS
-[244/345] valids/subflow-inherited-labels-parent                         runs            SUCCESS
-[245/345] valids/subflow-nullable-input-child                            not-standalone  Only ever created as a subflow of subflow-nullable-input-parent (SubflowRunnerTest.java:14
-[246/345] valids/subflow-nullable-input-parent                           runs            SUCCESS
-[247/345] valids/subflow-parent-no-wait                                  runs            SUCCESS
-[248/345] valids/subflow-parent-of-failed                                runs            FAILED
-[249/345] valids/subflow-parent-retry                                    runs            SUCCESS
-[250/345] valids/subflow-parent                                          runs            SUCCESS
-[251/345] valids/subflow-secret-output-child                             runs            FAILED
-[252/345] valids/subflow-secret-output-parent                            runs            FAILED
-[253/345] valids/subflow-to-retry                                        not-standalone  Only ever created as a subflow of subflow-parent-retry (SubflowRunnerTest.java:118); no te
-[254/345] valids/switch-impossible                                       runs            FAILED
-[255/345] valids/switch-in-concurrent-loop                               runs            SUCCESS
-[256/345] valids/switch                                                  runs            SUCCESS
-[257/345] valids/task-allow-failure-executable-flow                      runs            WARNING
-[258/345] valids/task-allow-failure-flowable                             runs            WARNING
-[259/345] valids/task-allow-failure-runnable                             runs            WARNING
-[260/345] valids/task-allow-warning-executable-flow                      runs            SUCCESS
-[261/345] valids/task-allow-warning-flowable                             runs            SUCCESS
-[262/345] valids/task-allow-warning-runnable                             runs            SUCCESS
-[263/345] valids/task-flow-dynamic                                       not-standalone  FlowGraphTest.java:295 hands runOne a RAW inputs map ({namespace: f.getNamespace(), flowId
-[264/345] valids/task-flow-inherited-labels                              runs            SUCCESS
-[265/345] valids/task-flow                                               runs            FAILED
-[266/345] valids/task-runif-executionupdating                            runs            SUCCESS
-[267/345] valids/task-runif-taskswithstate                               runs            FAILED
-[268/345] valids/task-runif-workingdirectory                             runs            SUCCESS
-[269/345] valids/task-runif                                              runs            FAILED
-[270/345] valids/trigger-flow-listener-invalid                           not-standalone  Nothing in the Kestra checkout references this flow at all -- no Java test, no other flow.
-[271/345] valids/trigger-flow-listener-namespace-condition               not-standalone  Same as trigger-flow-listener: created only by a Flow trigger (FlowTriggerCaseTest.java:62
-[272/345] valids/trigger-flow-listener-no-inputs                         runs            FAILED
-[273/345] valids/trigger-flow-listener-with-concurrency-limit            runs            FAILED
-[274/345] valids/trigger-flow-listener-with-pause                        runs            FAILED
-[275/345] valids/trigger-flow-listener                                   not-standalone  Created only by its own io.kestra.plugin.core.trigger.Flow trigger, from an execution of t
-[276/345] valids/trigger-flow-with-concurrency-limit                     runs            SUCCESS
-[277/345] valids/trigger-flow-with-pause                                 runs            SUCCESS
-[278/345] valids/trigger-flow                                            runs            SUCCESS
-[279/345] valids/unset-variables                                         runs            SUCCESS
-[280/345] valids/variables-invalid                                       runs            FAILED
-[281/345] valids/variables                                               runs            FAILED
-[282/345] valids/waitfor-child-task-warning                              runs            FAILED
-[283/345] valids/waitfor-max-duration                                    runs            FAILED
-[284/345] valids/waitfor-max-iterations                                  runs            FAILED
-[285/345] valids/waitfor-multiple-tasks-failed                           runs            FAILED
-[286/345] valids/waitfor-multiple-tasks                                  runs            SUCCESS
-[287/345] valids/waitfor-nested                                          runs            SUCCESS
-[288/345] valids/waitfor-no-success                                      runs            SUCCESS
-[289/345] valids/waitfor                                                 runs            SUCCESS
-[290/345] valids/webhook-draft                                           runs            SUCCESS
-[291/345] valids/webhook-dynamic-key                                     runs            FAILED
-[292/345] valids/webhook-failed                                          runs            FAILED
-[293/345] valids/webhook-inputs                                          not-standalone  Executed only through POST /executions/webhook/{ns}/webhook-inputs/{key} with a JSON body 
-[294/345] valids/webhook-no-body                                         runs            FAILED
-[295/345] valids/webhook-outputs                                         runs            SUCCESS
-[296/345] valids/webhook-plaintext                                       runs            SUCCESS
-[297/345] valids/webhook-plugin-labels                                   runs            SUCCESS
-[298/345] valids/webhook-plugin                                          rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
-[299/345] valids/webhook-routing-test                                    runs            FAILED
-[300/345] valids/webhook-secret-key                                      runs            FAILED
-[301/345] valids/webhook-store-body                                      runs            FAILED
-[302/345] valids/webhook-wait                                            runs            SUCCESS
-[303/345] valids/webhook-with-condition                                  runs            FAILED
-[304/345] valids/webhook                                                 runs            FAILED
-[305/345] valids/workertask-result-too-large                             rejected        publish -> 422: Invalid type: io.kestra.core.runners.test.WorkerTaskResultTooLarge
-[306/345] valids/working-directory-cache                                 rejected        publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
-[307/345] valids/working-directory-inputs                                rejected        publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
-[308/345] valids/working-directory-invalid-runif                         runs            FAILED
-[309/345] valids/working-directory-loop                                  rejected        publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
-[310/345] valids/working-directory-namespace-files-with-namespaces       rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.Read
-[311/345] valids/working-directory-namespace-files                       rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.Read
-[312/345] valids/working-directory-outputs                               rejected        publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
-[313/345] valids/working-directory-secret-output                         rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
-[314/345] valids/working-directory-taskrun-encrypted                     rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
-[315/345] valids/working-directory-taskrun-nested                        runs            SUCCESS
-[316/345] valids/working-directory-taskrun                               runs            SUCCESS
-[317/345] valids/working-directory                                       rejected        publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
-[318/345] invalids/dag-cyclicdependency                                  rejected        publish -> 422: tasks[dag]: Cyclic dependency detected: task1, task2
+[112/351] valids/json-input-schema-validation                            runs            SUCCESS
+[113/351] valids/kv                                                      not-standalone  No Java test drives this flow.  Both inputs have YAML defaults, so a bare execution would 
+[114/351] valids/labels-deserialization                                  runs            SUCCESS
+[115/351] valids/labels-update-nested-value-list                         runs            SUCCESS
+[116/351] valids/labels-update-nested-value-map                          runs            SUCCESS
+[117/351] valids/labels-update-task-deduplicate                          runs            SUCCESS
+[118/351] valids/labels-update-task-empty                                runs            FAILED
+[119/351] valids/labels-update-task                                      runs            SUCCESS
+[120/351] valids/log-to-file                                             runs            SUCCESS
+[121/351] valids/logs                                                    runs            SUCCESS
+[122/351] valids/loop-empty                                              runs            SUCCESS
+[123/351] valids/loop-expression-context                                 runs            SUCCESS
+[124/351] valids/loop-failed-no-transmit                                 runs            SUCCESS
+[125/351] valids/loop-failed                                             runs            FAILED
+[126/351] valids/loop-flowable                                           runs            SUCCESS
+[127/351] valids/loop-map                                                runs            SUCCESS
+[128/351] valids/loop-multiple                                           runs            SUCCESS
+[129/351] valids/loop-nested                                             runs            SUCCESS
+[130/351] valids/loop-null                                               runs            FAILED
+[131/351] valids/loop-object-in-list                                     runs            SUCCESS
+[132/351] valids/loop-object                                             runs            SUCCESS
+[133/351] valids/loop-outputs-auto                                       runs            SUCCESS
+[134/351] valids/loop-outputs-failed-render                              runs            FAILED
+[135/351] valids/loop-outputs-store                                      runs            SUCCESS
+[136/351] valids/loop-outputs                                            runs            SUCCESS
+[137/351] valids/loop-parallel-equal                                     runs            SUCCESS
+[138/351] valids/loop-parallel-less                                      runs            SUCCESS
+[139/351] valids/loop-parallel-more                                      runs            SUCCESS
+[140/351] valids/loop-parallel-unlimited                                 runs            SUCCESS
+[141/351] valids/loop-pause                                              not-standalone  reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pa
+[142/351] valids/loop-serial-multiple-tasks                              runs            SUCCESS
+[143/351] valids/loop-serial                                             runs            SUCCESS
+[144/351] valids/loop-switch                                             runs            SUCCESS
+[145/351] valids/loop-until-restart                                      runs            FAILED
+[146/351] valids/loop-values-from-uri                                    runs            SUCCESS
+[147/351] valids/loop-with-subflow                                       runs            SUCCESS
+[148/351] valids/loopuntil-failed-flowable                               runs            FAILED
+[149/351] valids/minimal-bis                                             runs            SUCCESS
+[150/351] valids/minimal                                                 runs            SUCCESS
+[151/351] valids/minimal2                                                runs            SUCCESS
+[152/351] valids/npe-labels-update-task                                  runs            SUCCESS
+[153/351] valids/null-output                                             rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.NullOutputTask
+[154/351] valids/output-values                                           runs            SUCCESS
+[155/351] valids/parallel-disabled-tasks                                 runs            SUCCESS
+[156/351] valids/parallel-fail-with-flowable                             runs            FAILED
+[157/351] valids/parallel-nested                                         runs            SUCCESS
+[158/351] valids/parallel                                                runs            SUCCESS
+[159/351] valids/pause-behavior                                          runs            FAILED
+[160/351] valids/pause-delay                                             runs            SUCCESS
+[161/351] valids/pause-duration-from-input                               runs            SUCCESS
+[162/351] valids/pause-errors-finally-after-execution                    runs            FAILED
+[163/351] valids/pause-kill-delay                                        runs            SUCCESS
+[164/351] valids/pause-test                                              not-standalone  reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pa
+[165/351] valids/pause-timeout-allow-failure                             runs            WARNING
+[166/351] valids/pause-timeout                                           runs            FAILED
+[167/351] valids/pause_no_tasks                                          not-standalone  reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pa
+[168/351] valids/pause_on_pause                                          runs            SUCCESS
+[169/351] valids/pause_on_resume                                         not-standalone  reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pa
+[170/351] valids/pause_on_resume_optional                                not-standalone  reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pa
+[171/351] valids/primitive-labels-flow                                   runs            SUCCESS
+[172/351] valids/purge_logs_execution_only                               runs            SUCCESS
+[173/351] valids/purge_logs_full_arguments                               runs            SUCCESS
+[174/351] valids/purge_logs_no_arguments                                 runs            SUCCESS
+[175/351] valids/purge_logs_trigger_only                                 runs            SUCCESS
+[176/351] valids/purge_logs_with_batch_size                              runs            SUCCESS
+[177/351] valids/replay-loop                                             runs            FAILED
+[178/351] valids/replay-revision                                         runs            FAILED
+[179/351] valids/replay-sequential-with-error-handler                    runs            FAILED
+[180/351] valids/replay                                                  runs            SUCCESS
+[181/351] valids/restart-child                                           runs            FAILED
+[182/351] valids/restart-loop                                            runs            FAILED
+[183/351] valids/restart-parent-loop                                     runs            FAILED
+[184/351] valids/restart-parent                                          runs            FAILED
+[185/351] valids/restart-with-after-execution                            runs            FAILED
+[186/351] valids/restart-with-finally                                    runs            FAILED
+[187/351] valids/restart_always_failed                                   runs            FAILED
+[188/351] valids/restart_last_failed                                     runs            FAILED
+[189/351] valids/restart_local_errors                                    runs            FAILED
+[190/351] valids/restart_with_inputs                                     not-standalone  ExecutionControllerRunnerTest.java:176 supplies FILE input `file` as the classpath resourc
+[191/351] valids/resume-validate                                         not-standalone  reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pa
+[192/351] valids/retry-dynamic-task                                      rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.DynamicTask
+[193/351] valids/retry-expo                                              runs            FAILED
+[194/351] valids/retry-fail                                              runs            FAILED
+[195/351] valids/retry-failed-flow-attempts                              runs            FAILED
+[196/351] valids/retry-failed-flow-duration                              runs            FAILED
+[197/351] valids/retry-failed-task-attempts                              runs            FAILED
+[198/351] valids/retry-failed-task-duration                              runs            FAILED
+[199/351] valids/retry-failed                                            runs            FAILED
+[200/351] valids/retry-flowable-child                                    runs            FAILED
+[201/351] valids/retry-flowable-nested-child                             runs            FAILED
+[202/351] valids/retry-flowable-parallel                                 runs            FAILED
+[203/351] valids/retry-flowable                                          runs            FAILED
+[204/351] valids/retry-new-execution-flow-attempts                       runs            RETRIED
+[205/351] valids/retry-new-execution-flow-duration                       runs            RETRIED
+[206/351] valids/retry-new-execution-task-attempts                       runs            RETRIED
+[207/351] valids/retry-new-execution-task-duration                       runs            RETRIED
+[208/351] valids/retry-random                                            runs            FAILED
+[209/351] valids/retry-subflow                                           runs            FAILED
+[210/351] valids/retry-success-first-attempt                             runs            SUCCESS
+[211/351] valids/retry-success                                           runs            WARNING
+[212/351] valids/retry-with-flowable-errors                              runs            SUCCESS
+[213/351] valids/return                                                  runs            SUCCESS
+[214/351] valids/schedule-trigger                                        runs            SUCCESS
+[215/351] valids/scheduled-inputs-defaults                               not-standalone  Only FlowValidationTest.java:231 references it, and only to parse().  No test executes it.
+[216/351] valids/secret-input-validation                                 not-standalone  InputsTest.java:493 secretInputValidation() never executes the flow -- it calls flowIO.rea
+[217/351] valids/secrets                                                 runs            FAILED
+[218/351] valids/sequential-sleep                                        runs            SUCCESS
+[219/351] valids/sequential-with-disabled                                runs            SUCCESS
+[220/351] valids/sequential-with-global-errors                           runs            FAILED
+[221/351] valids/sequential-with-local-errors                            runs            FAILED
+[222/351] valids/sequential                                              runs            SUCCESS
+[223/351] valids/set-variables-duplicate                                 runs            FAILED
+[224/351] valids/set-variables                                           runs            SUCCESS
+[225/351] valids/sla-execution-condition                                 runs            CANCELLED
+[226/351] valids/sla-max-duration-fail                                   runs            FAILED
+[227/351] valids/sla-max-duration-ok                                     runs            SUCCESS
+[228/351] valids/sla-parent-flow                                         runs            FAILED
+[229/351] valids/sla-subflow                                             runs            FAILED
+[230/351] valids/sleep-long-after-execution-flowable                     runs            SUCCESS
+[231/351] valids/sleep-long                                              runs            SUCCESS
+[232/351] valids/sleep-short                                             runs            SUCCESS
+[233/351] valids/sleep-task-flow                                         runs            SUCCESS
+[234/351] valids/sleep                                                   runs            SUCCESS
+[235/351] valids/subflow-child-with-output                               runs            SUCCESS
+[236/351] valids/subflow-child                                           runs            SUCCESS
+[237/351] valids/subflow-function-child                                  runs            SUCCESS
+[238/351] valids/subflow-function-failing                                runs            FAILED
+[239/351] valids/subflow-function-mutual-a                               not-standalone  SubflowFunctionTest.java:147 drives it through the subflow() Pebble function and asserts t
+[240/351] valids/subflow-function-mutual-b                               not-standalone  Half of the a -> b -> a mutual-recursion pair at SubflowFunctionTest.java:147; only ever r
+[241/351] valids/subflow-function-recursive                              not-standalone  SubflowFunctionTest.java:132 drives it through the subflow() Pebble function and asserts t
+[242/351] valids/subflow-grand-child                                     runs            SUCCESS
+[243/351] valids/subflow-inherited-labels-child                          runs            SUCCESS
+[244/351] valids/subflow-inherited-labels-parent                         runs            SUCCESS
+[245/351] valids/subflow-nullable-input-child                            not-standalone  Only ever created as a subflow of subflow-nullable-input-parent (SubflowRunnerTest.java:14
+[246/351] valids/subflow-nullable-input-parent                           runs            SUCCESS
+[247/351] valids/subflow-parent-no-wait                                  runs            SUCCESS
+[248/351] valids/subflow-parent-of-failed                                runs            FAILED
+[249/351] valids/subflow-parent-retry                                    runs            SUCCESS
+[250/351] valids/subflow-parent                                          runs            SUCCESS
+[251/351] valids/subflow-secret-output-child                             runs            FAILED
+[252/351] valids/subflow-secret-output-parent                            runs            FAILED
+[253/351] valids/subflow-to-retry                                        not-standalone  Only ever created as a subflow of subflow-parent-retry (SubflowRunnerTest.java:118); no te
+[254/351] valids/switch-impossible                                       runs            FAILED
+[255/351] valids/switch-in-concurrent-loop                               runs            SUCCESS
+[256/351] valids/switch                                                  runs            SUCCESS
+[257/351] valids/task-allow-failure-executable-flow                      runs            WARNING
+[258/351] valids/task-allow-failure-flowable                             runs            WARNING
+[259/351] valids/task-allow-failure-runnable                             runs            WARNING
+[260/351] valids/task-allow-warning-executable-flow                      runs            SUCCESS
+[261/351] valids/task-allow-warning-flowable                             runs            SUCCESS
+[262/351] valids/task-allow-warning-runnable                             runs            SUCCESS
+[263/351] valids/task-flow-dynamic                                       not-standalone  FlowGraphTest.java:295 hands runOne a RAW inputs map ({namespace: f.getNamespace(), flowId
+[264/351] valids/task-flow-inherited-labels                              runs            SUCCESS
+[265/351] valids/task-flow                                               runs            FAILED
+[266/351] valids/task-runif-executionupdating                            runs            SUCCESS
+[267/351] valids/task-runif-taskswithstate                               runs            FAILED
+[268/351] valids/task-runif-workingdirectory                             runs            SUCCESS
+[269/351] valids/task-runif                                              runs            FAILED
+[270/351] valids/trigger-flow-listener-invalid                           not-standalone  Nothing in the Kestra checkout references this flow at all -- no Java test, no other flow.
+[271/351] valids/trigger-flow-listener-namespace-condition               not-standalone  Same as trigger-flow-listener: created only by a Flow trigger (FlowTriggerCaseTest.java:62
+[272/351] valids/trigger-flow-listener-no-inputs                         runs            FAILED
+[273/351] valids/trigger-flow-listener-with-concurrency-limit            runs            FAILED
+[274/351] valids/trigger-flow-listener-with-pause                        runs            FAILED
+[275/351] valids/trigger-flow-listener                                   not-standalone  Created only by its own io.kestra.plugin.core.trigger.Flow trigger, from an execution of t
+[276/351] valids/trigger-flow-with-concurrency-limit                     runs            SUCCESS
+[277/351] valids/trigger-flow-with-pause                                 runs            SUCCESS
+[278/351] valids/trigger-flow                                            runs            SUCCESS
+[279/351] valids/unset-variables                                         runs            SUCCESS
+[280/351] valids/variables-invalid                                       runs            FAILED
+[281/351] valids/variables                                               runs            FAILED
+[282/351] valids/waitfor-child-task-warning                              runs            FAILED
+[283/351] valids/waitfor-max-duration                                    runs            FAILED
+[284/351] valids/waitfor-max-iterations                                  runs            FAILED
+[285/351] valids/waitfor-multiple-tasks-failed                           runs            FAILED
+[286/351] valids/waitfor-multiple-tasks                                  runs            SUCCESS
+[287/351] valids/waitfor-nested                                          runs            SUCCESS
+[288/351] valids/waitfor-no-success                                      runs            SUCCESS
+[289/351] valids/waitfor                                                 runs            SUCCESS
+[290/351] valids/webhook-draft                                           runs            SUCCESS
+[291/351] valids/webhook-dynamic-key                                     runs            FAILED
+[292/351] valids/webhook-failed                                          runs            FAILED
+[293/351] valids/webhook-inputs                                          not-standalone  Executed only through POST /executions/webhook/{ns}/webhook-inputs/{key} with a JSON body 
+[294/351] valids/webhook-no-body                                         runs            FAILED
+[295/351] valids/webhook-outputs                                         runs            SUCCESS
+[296/351] valids/webhook-plaintext                                       runs            SUCCESS
+[297/351] valids/webhook-plugin-labels                                   runs            SUCCESS
+[298/351] valids/webhook-plugin                                          rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
+[299/351] valids/webhook-routing-test                                    runs            FAILED
+[300/351] valids/webhook-secret-key                                      runs            FAILED
+[301/351] valids/webhook-store-body                                      runs            FAILED
+[302/351] valids/webhook-wait                                            runs            SUCCESS
+[303/351] valids/webhook-with-condition                                  runs            FAILED
+[304/351] valids/webhook                                                 runs            FAILED
+[305/351] valids/workertask-result-too-large                             rejected        publish -> 422: Invalid type: io.kestra.core.runners.test.WorkerTaskResultTooLarge
+[306/351] valids/working-directory-cache                                 rejected        publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
+[307/351] valids/working-directory-inputs                                rejected        publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
+[308/351] valids/working-directory-invalid-runif                         runs            FAILED
+[309/351] valids/working-directory-loop                                  rejected        publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
+[310/351] valids/working-directory-namespace-files-with-namespaces       rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.Read
+[311/351] valids/working-directory-namespace-files                       rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.Read
+[312/351] valids/working-directory-outputs                               rejected        publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
+[313/351] valids/working-directory-real-allowfail                        runs            WARNING
+[314/351] valids/working-directory-real-cache                            runs            SUCCESS
+[315/351] valids/working-directory-real-child-fails                      runs            FAILED
+[316/351] valids/working-directory-real-input-output-files               runs            SUCCESS
+[317/351] valids/working-directory-real-runif-false                      runs            SUCCESS
+[318/351] valids/working-directory-real-shared-file                      runs            SUCCESS
+[319/351] valids/working-directory-secret-output                         rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
+[320/351] valids/working-directory-taskrun-encrypted                     rejected        publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
+[321/351] valids/working-directory-taskrun-nested                        runs            SUCCESS
+[322/351] valids/working-directory-taskrun                               runs            SUCCESS
+[323/351] valids/working-directory                                       rejected        publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
+[324/351] invalids/dag-cyclicdependency                                  rejected        publish -> 422: tasks[dag]: Cyclic dependency detected: task1, task2
 
-[319/345] invalids/dag-invalid-subtask                                   rejected        publish -> 422: tasks[task1].tasks[task1].task.message: must not be null
+[325/351] invalids/dag-invalid-subtask                                   rejected        publish -> 422: tasks[task1].tasks[task1].task.message: must not be null
 
-[320/345] invalids/dag-notexist-task                                     rejected        publish -> 422: tasks[dag]: Not existing task id in dependency: taskX
+[326/351] invalids/dag-notexist-task                                     rejected        publish -> 422: tasks[dag]: Not existing task id in dependency: taskX
 
-[321/345] invalids/duplicate-inputs                                      rejected        publish -> 422: : Invalid Flow: Duplicate input with name [first_input]
+[327/351] invalids/duplicate-inputs                                      rejected        publish -> 422: : Invalid Flow: Duplicate input with name [first_input]
 
-[322/345] invalids/duplicate-key                                         rejected        publish -> 422: Illegal genericflow source: YAML parsing error: Duplicate field 'message'
+[328/351] invalids/duplicate-key                                         rejected        publish -> 422: Illegal genericflow source: YAML parsing error: Duplicate field 'message'
 
-[323/345] invalids/duplicate-parallel                                    rejected        publish -> 422: : Invalid Flow: Duplicate task id with name [t3]
+[329/351] invalids/duplicate-parallel                                    rejected        publish -> 422: : Invalid Flow: Duplicate task id with name [t3]
 
-[324/345] invalids/duplicate                                             rejected        publish -> 422: : Invalid Flow: Duplicate task id with name [date], Duplicate trigger id w
-[325/345] invalids/empty                                                 rejected        publish -> 422: tasks: must not be empty
+[330/351] invalids/duplicate                                             rejected        publish -> 422: : Invalid Flow: Duplicate task id with name [date], Duplicate trigger id w
+[331/351] invalids/empty                                                 rejected        publish -> 422: tasks: must not be empty
 
-[326/345] invalids/if-without-condition                                  rejected        publish -> 422: tasks[if].condition: must not be null
+[332/351] invalids/if-without-condition                                  rejected        publish -> 422: tasks[if].condition: must not be null
 
-[327/345] invalids/inputs-bad-type                                       rejected        publish -> 422: Invalid type: FOO
-[328/345] invalids/inputs-bad-validator-syntax                           rejected        publish -> 422: inputs[badValidatorSyntax].validator: invalid pattern [\]
+[333/351] invalids/inputs-bad-type                                       rejected        publish -> 422: Invalid type: FOO
+[334/351] invalids/inputs-bad-validator-syntax                           rejected        publish -> 422: inputs[badValidatorSyntax].validator: invalid pattern [\]
 
-[329/345] invalids/inputs-key-with-subtraction-symbol-validation         rejected        publish -> 422: : Invalid Flow: Invalid input reference: use inputs[key-name] instead of i
-[330/345] invalids/inputs-validation                                     rejected        publish -> 422: inputs[multiselect1]: `itemType` cannot be ARRAY
-inputs[array3]: `itemType
-[331/345] invalids/inputs-with-multiple-constraint-violations            rejected        publish -> 200; POST execution -> 422: Invalid value for input `multi`. Cause: value `H` d
-[332/345] invalids/inputs                                                rejected        publish -> 422: Invalid type: null
-[333/345] invalids/invalid-parallel                                      rejected        publish -> 422: id: must match "^[a-zA-Z0-9][a-zA-Z0-9._-]*"
-namespace: must match "^[a-z0
-[334/345] invalids/invalid-property                                      rejected        publish -> 422: Unrecognized field "invalid" (class io.kestra.plugin.core.debug.Return), n
-[335/345] invalids/invalid-task                                          rejected        publish -> 422: Invalid type: io.kestra.plugin.core.debug.MissingTwo
-[336/345] invalids/invalid                                               rejected        publish -> 422: tasks[null].id: must not be blank
-tasks[null].id: must not be null
-namespa
-[337/345] invalids/loop-switch-failed                                    runs            FAILED
-[338/345] invalids/outputs-key-with-subtraction-symbol-validation        rejected        publish -> 422: : Invalid Flow: Invalid output reference: use outputs[key-name] instead of
-[339/345] invalids/recursive-flow                                        rejected        publish -> 422: : Invalid Flow: Recursive call to flow [io.kestra.tests.recursive-flow]
+[335/351] invalids/inputs-key-with-subtraction-symbol-validation         rejected        publish -> 422: : Invalid Flow: Invalid input reference: use inputs[key-name] instead of i
+[336/351] invalids/inputs-validation                                     rejected        publish -> 422: inputs[multiselect3]: `itemType` cannot be MULTISELECT
+inputs[file]: input
+[337/351] invalids/inputs-with-multiple-constraint-violations            rejected        publish -> 200; POST execution -> 422: Invalid value for input `multi`. Cause: value `H` d
+[338/351] invalids/inputs                                                rejected        publish -> 422: Invalid type: null
+[339/351] invalids/invalid-parallel                                      rejected        publish -> 422: id: must not be blank
+namespace: size must be between 1 and 150
+tasks[para
+[340/351] invalids/invalid-property                                      rejected        publish -> 422: Unrecognized field "invalid" (class io.kestra.plugin.core.debug.Return), n
+[341/351] invalids/invalid-task                                          rejected        publish -> 422: Invalid type: io.kestra.plugin.core.debug.MissingTwo
+[342/351] invalids/invalid                                               rejected        publish -> 422: tasks[null].id: must not be null
+namespace: must match "^[a-z0-9][a-z0-9._
+[343/351] invalids/loop-switch-failed                                    runs            FAILED
+[344/351] invalids/outputs-key-with-subtraction-symbol-validation        rejected        publish -> 422: : Invalid Flow: Invalid output reference: use outputs[key-name] instead of
+[345/351] invalids/recursive-flow                                        rejected        publish -> 422: : Invalid Flow: Recursive call to flow [io.kestra.tests.recursive-flow]
 
-[340/345] invalids/scheduled-missing-inputs-defaults-2                   rejected        publish -> 422: : Invalid Flow: Missing inputs for Schedule Trigger 'every_minute', missin
-[341/345] invalids/scheduled-missing-inputs-defaults                     rejected        publish -> 422: : Invalid Flow: Missing inputs for Schedule Trigger 'every_minute', missin
-[342/345] invalids/switch-invalid                                        rejected        publish -> 422: tasks[impossible]: No task defined, neither cases or default have any task
-[343/345] invalids/system-labels                                         rejected        publish -> 422: tasks[null].id: must not be null
+[346/351] invalids/scheduled-missing-inputs-defaults-2                   rejected        publish -> 422: : Invalid Flow: Missing inputs for Schedule Trigger 'every_minute', missin
+[347/351] invalids/scheduled-missing-inputs-defaults                     rejected        publish -> 422: : Invalid Flow: Missing inputs for Schedule Trigger 'every_minute', missin
+[348/351] invalids/switch-invalid                                        rejected        publish -> 422: tasks[impossible]: No task defined, neither cases or default have any task
+[349/351] invalids/system-labels                                         rejected        publish -> 422: tasks[null].id: must not be null
 : Invalid Flow: System labels can only be
-[344/345] invalids/workingdirectory-invalid                              rejected        publish -> 422: tasks[impossible]: Only runnable tasks are allowed as children of a Workin
-[345/345] invalids/workingdirectory-no-tasks                             rejected        publish -> 422: tasks[impossible]: The 'tasks' property cannot be empty
-tasks[impossible].
+[350/351] invalids/workingdirectory-invalid                              rejected        publish -> 422: tasks[impossible]: Only runnable tasks are allowed as children of a Workin
+[351/351] invalids/workingdirectory-no-tasks                             rejected        publish -> 422: tasks[impossible].tasks: The 'tasks' property cannot be empty
+tasks[imposs
 [done] corpus.json written; probing discrimination
 [probe] valids/allow-failure                                       discriminates
 [probe] valids/condition_with_input                                discriminates

@@ -107,7 +107,21 @@ pub(crate) async fn write_tar_at(
     mtime: u64,
 ) -> Result<(), TarError> {
     let dirs = plan(files).map_err(TarError::Author)?;
-    for d in &dirs {
+    write_entries(out, &dirs, files, store, mtime).await?;
+    out.write_all(&ZEROS).await.map_err(TarError::Write)?;
+    out.write_all(&ZEROS).await.map_err(TarError::Write)?;
+    out.flush().await.map_err(TarError::Write)
+}
+
+/// The directories, then the sources, of an archive, without its end marker.
+async fn write_entries(
+    out: &mut (dyn AsyncWrite + Send + Unpin),
+    dirs: &BTreeSet<String>,
+    files: &BTreeMap<String, TarSource<'_>>,
+    store: Option<&FileStore>,
+    mtime: u64,
+) -> Result<(), TarError> {
+    for d in dirs {
         let own = files
             .get(d.trim_end_matches('/'))
             .is_some_and(|s| matches!(s, TarSource::Directory));
@@ -128,6 +142,63 @@ pub(crate) async fn write_tar_at(
             }
             TarSource::Stored(stored) => copy_stored(out, name, stored, store, mtime).await?,
         }
+    }
+    Ok(())
+}
+
+/// A restore of an archive (spec §5.4): `overlay` is written first, then every
+/// regular file of `base` that `keep` accepts and `overlay` does not name, so
+/// the overlay wins a collision. A cache is restored this way before the
+/// block's own files are written over it. The directories of `base` are not
+/// carried: a file's parents are made by the extraction that reads it.
+///
+/// A `base` that breaks off or is not a ustar stream is the store's (`Store`),
+/// since egret wrote it; the names are the author's, as in [`write_tar`].
+pub async fn write_tar_over(
+    out: &mut (dyn AsyncWrite + Send + Unpin),
+    base: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+    keep: &(dyn Fn(&str) -> bool + Sync),
+    overlay: &BTreeMap<String, TarSource<'_>>,
+    store: Option<&FileStore>,
+) -> Result<(), TarError> {
+    use tokio::io::AsyncReadExt;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dirs = plan(overlay).map_err(TarError::Author)?;
+    write_entries(out, &dirs, overlay, store, now).await?;
+    let mut reader = TarReader::new(base);
+    while let Some(entry) = reader
+        .next_entry()
+        .await
+        .map_err(|e| TarError::Store(format!("the archive could not be read: {e}")))?
+    {
+        if entry.kind != EntryKind::File || overlay.contains_key(&entry.name) || !keep(&entry.name)
+        {
+            continue;
+        }
+        let h = header(&entry.name, entry.size, b'0', entry.mode, now).map_err(TarError::Author)?;
+        out.write_all(&h).await.map_err(TarError::Write)?;
+        let mut body = reader.body();
+        let mut left = entry.size;
+        let mut buf = vec![0u8; CHUNK];
+        while left > 0 {
+            let want = buf.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+            let n = body
+                .read(&mut buf[..want])
+                .await
+                .map_err(|e| TarError::Store(format!("{}: {e}", entry.name)))?;
+            if n == 0 {
+                return Err(TarError::Store(format!(
+                    "the archive ends inside {:?}, which declares {} bytes",
+                    entry.name, entry.size
+                )));
+            }
+            out.write_all(&buf[..n]).await.map_err(TarError::Write)?;
+            left -= n as u64;
+        }
+        pad(out, entry.size).await?;
     }
     out.write_all(&ZEROS).await.map_err(TarError::Write)?;
     out.write_all(&ZEROS).await.map_err(TarError::Write)?;
@@ -362,6 +433,9 @@ pub struct TarEntry {
     pub kind: EntryKind,
     /// The bytes of contents that follow the header (a PAX `size` wins).
     pub size: u64,
+    /// The permission bits of the header's mode field (`0o7777`), so a copy
+    /// keeps the execute bit a script needs (spec §5.2).
+    pub mode: u32,
 }
 
 /// Why an archive could not be read. Both are the transfer failing -- the
@@ -433,6 +507,7 @@ impl<'a> TarReader<'a> {
             }
             check_sum(&h)?;
             let size = parse_size(&h[124..136])?;
+            let mode = (parse_size(&h[100..108])? as u32) & 0o7777;
             let flag = h[156];
             if matches!(flag, b'L' | b'K' | b'x' | b'g') {
                 if size > MAX_META_BYTES {
@@ -479,7 +554,12 @@ impl<'a> TarReader<'a> {
             };
             self.left = size;
             self.pad = pad_of(size);
-            return Ok(Some(TarEntry { name, kind, size }));
+            return Ok(Some(TarEntry {
+                name,
+                kind,
+                size,
+                mode,
+            }));
         }
     }
 

@@ -1932,6 +1932,129 @@ impl DockerRunner {
         }
     }
 
+    /// Copy the snapshot a `WorkingDirectory` child starts from into `name`'s
+    /// working directory (spec §5.2): `docker cp - name:WORKING_DIR`, fed by
+    /// the stored archive and admitted by [`snapshot::admit`] on the way, so a
+    /// link or a name that climbs is refused before the container sees it.
+    ///
+    /// A snapshot the store does not hold is the store's failure (`Err`), not
+    /// an empty directory: the caller has already checked the block's pointer.
+    async fn copy_in_snapshot(&self, name: &str, wd: &super::WorkingDirCarry) -> Result<()> {
+        let files = self.snapshot_store()?;
+        let mut stored = files.store.get_stream(&wd.start_from).await.map_err(|e| {
+            Error::Internal(anyhow::anyhow!(
+                "the working-directory snapshot {} could not be read: {e}",
+                wd.start_from
+            ))
+        })?;
+        let mut child = Command::new(&self.binary)
+            .args(["cp", "-", &format!("{name}:{WORKING_DIR}")])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                Error::Internal(anyhow::anyhow!("could not run `{} cp`: {e}", self.binary))
+            })?;
+        let stderr = child.stderr.take().expect("stderr piped");
+        let errs = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut kept = Vec::new();
+            let mut stderr = stderr;
+            let _ = (&mut stderr).take(64 * 1024).read_to_end(&mut kept).await;
+            let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+            kept
+        });
+        let mut stdin = child.stdin.take().expect("stdin piped");
+        let admitted = super::snapshot::admit(&mut stored, &mut stdin, wd.cap).await;
+        drop(stdin);
+        if let Err(e) = admitted {
+            let _ = child.kill().await;
+            return Err(Error::Internal(anyhow::anyhow!(
+                "the working-directory snapshot {} could not be restored: {e}",
+                wd.start_from
+            )));
+        }
+        let status = child.wait().await.map_err(io_err)?;
+        let err = errs.await.unwrap_or_default();
+        if !status.success() {
+            return Err(self.classify("cp", &String::from_utf8_lossy(&err)).await);
+        }
+        Ok(())
+    }
+
+    /// Copy `name`'s working directory out as the snapshot a child leaves
+    /// behind (spec §5.2): `docker cp c:WORKING_DIR/. -`, admitted by
+    /// [`snapshot::admit`] and streamed straight into the store under
+    /// `wd.carry_to` (no copy on the worker's disk, no whole archive in
+    /// memory). Runs after the command whatever its exit code (spec §5.3).
+    ///
+    /// `Ok(Some(problem))` is the AUTHOR's: an archive over the cap, or a
+    /// symbolic link in the directory. The object is removed and the child
+    /// fails with the problem; the block's pointer does not move. `Err` is
+    /// egret's: the store did not answer, or the copy broke off.
+    async fn carry_out_snapshot(
+        &self,
+        name: &str,
+        wd: &super::WorkingDirCarry,
+    ) -> Result<Option<String>> {
+        let files = self.snapshot_store()?;
+        let mut out = self.copy_out(&format!("{name}:{WORKING_DIR}/.")).await?;
+        let (mut writer, mut reader) = tokio::io::duplex(256 * 1024);
+        let store = files.store.clone();
+        let uri = wd.carry_to.clone();
+        let upload = async move { store.put_stream(&uri, &mut reader, None).await };
+        let admit = async {
+            let res = super::snapshot::admit(&mut out.stdout, &mut writer, wd.cap).await;
+            // Closing the write half is what ends the upload; an admission
+            // that failed part-way leaves a short object, removed below.
+            drop(writer);
+            res
+        };
+        let (admitted, stored) = tokio::join!(admit, upload);
+        match admitted {
+            Ok(_) => {
+                stored.map_err(|e| {
+                    Error::Internal(anyhow::anyhow!(
+                        "the working-directory snapshot {} could not be stored: {e}",
+                        wd.carry_to
+                    ))
+                })?;
+                if !out.finish(true).await {
+                    let stderr = out.stderr().await;
+                    return Err(self.classify("cp", &stderr).await);
+                }
+                Ok(None)
+            }
+            Err(
+                e @ (super::snapshot::SnapshotError::TooLarge { .. }
+                | super::snapshot::SnapshotError::Refused(_)),
+            ) => {
+                out.finish(false).await;
+                let _ = files.store.delete(&wd.carry_to).await;
+                Ok(Some(e.to_string()))
+            }
+            Err(e) => {
+                out.finish(false).await;
+                let _ = files.store.delete(&wd.carry_to).await;
+                Err(Error::Internal(anyhow::anyhow!(
+                    "the working directory of {name} could not be carried out: {e}"
+                )))
+            }
+        }
+    }
+
+    /// The object store the snapshots live in, or an error naming the
+    /// absence: a `WorkingDirectory` cannot run without internal storage.
+    fn snapshot_store(&self) -> Result<std::sync::Arc<crate::storage::FileStore>> {
+        self.files.clone().ok_or_else(|| {
+            Error::Internal(anyhow::anyhow!(
+                "a WorkingDirectory needs internal storage for its snapshots, and none is installed"
+            ))
+        })
+    }
+
     /// The half of a fresh run that runs with a container in existence:
     /// input files in, `start --attach`, exit code, output files out.
     async fn run_created(
@@ -1947,6 +2070,11 @@ impl DockerRunner {
         // Kestra's `copyArchiveToContainer` and the reason the working
         // directory does not have to exist first: measured on this machine's
         // daemon (28.4.0), a copy into `/egret/working-dir` creates it.
+        // A `WorkingDirectory` child starts from its block's snapshot, before
+        // its own inputs, which may overwrite a file of it (spec §5.2).
+        if let Some(wd) = &task.working_dir {
+            self.copy_in_snapshot(name, wd).await?;
+        }
         if commands.has_inputs() {
             // **Streamed (W9a spec §5)**: `docker cp -` reads a ustar archive
             // from its stdin, written by [`write_tar`] as the stored inputs
@@ -2013,6 +2141,16 @@ impl DockerRunner {
                  and `start` exited {status}"
             ))
         })?;
+
+        // ---- the snapshot the next child starts from (spec §5.2, §5.3) -------
+        //
+        // Taken whatever the exit code: a child that failed still leaves the
+        // work it did, and the block's finish claim reads it (V2).
+        if let Some(wd) = &task.working_dir {
+            if let Some(problem) = self.carry_out_snapshot(name, wd).await? {
+                result.failure = Some(problem);
+            }
+        }
 
         // ---- output files ---------------------------------------------------
         if commands.has_outputs() && result.failure.is_none() {

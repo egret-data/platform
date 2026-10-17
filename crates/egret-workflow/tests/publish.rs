@@ -638,11 +638,8 @@ async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name
             other => panic!("{id}: {other:?}"),
         }
     }
-    // The control: the corpus flow's block, and a templated one, raise no
-    // `namespaceFiles` finding. Since no-silent-stall Task 1 a
-    // `WorkingDirectory` does not PUBLISH at all -- egret cannot run it, so it
-    // is refused as `unsupported_working_directory` at the task's own path --
-    // so the control is that the refusal is that one alone.
+    // The control: a valid `namespaceFiles` publishes. Its claim runs in the
+    // prepare step (spec §5.1), so the property is no longer refused by name.
     for (id, block) in [
         (
             "good",
@@ -660,13 +657,77 @@ async fn a_working_directory_with_a_malformed_namespace_files_is_refused_by_name
         ),
     ] {
         let good = common::draft(&repo, ws, user, &working_directory(id, block)).await;
-        let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, good.id, "")
+        egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, good.id, "")
             .await
-            .expect_err("a WorkingDirectory is refused: egret cannot run it");
+            .unwrap_or_else(|e| panic!("{id}: a valid namespaceFiles publishes: {e:?}"));
+    }
+}
+
+/// Plan Task 7 (spec §5.5): an `outputFiles` name the finish claim cannot
+/// collect is refused at publish, by name, at its own path. A `**` is not
+/// implemented by egret; a plain name and a file-name pattern are accepted.
+#[tokio::test]
+async fn a_working_directory_output_file_egret_cannot_collect_is_refused_at_publish() {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let bad = "id: wd-out-bad
+namespace: w9b.wd
+tasks:
+  - id: wd
+    type: io.kestra.plugin.core.flow.WorkingDirectory
+    outputFiles:
+      - \"**/x.txt\"
+    tasks:
+      - id: t
+        type: io.kestra.plugin.core.log.Log
+        message: hi
+";
+    let draft = common::draft(&repo, ws, user, bad).await;
+    let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "")
+        .await
+        .expect_err("a `**` output must not publish");
+    match err {
+        egret_core::Error::InvalidInput(m) => {
+            assert!(m.contains("(tasks.wd.outputFiles)"), "{m}");
+            assert!(m.contains("not implemented by egret"), "{m}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let good = "id: wd-out-good
+namespace: w9b.wd
+tasks:\n  - id: wd\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    outputFiles:\n      - out.txt\n      - \"*.csv\"\n    tasks:\n      - id: t\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n";
+    let draft = common::draft(&repo, ws, user, good).await;
+    egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "")
+        .await
+        .expect("plain names and file-name patterns publish");
+}
+
+/// Plan Task 7 (spec §5.4): a `cache` that does not say what it caches is
+/// refused at publish, naming the property. A `patterns` list is required; a
+/// `ttl` must be an ISO-8601 duration.
+#[tokio::test]
+async fn a_working_directory_cache_that_is_malformed_is_refused_at_publish() {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    for (id, cache) in [
+        ("no-patterns", "      ttl: PT1H\n"),
+        (
+            "bad-ttl",
+            "      patterns: [\"cache/**\"]\n      ttl: soon\n",
+        ),
+    ] {
+        let yaml = format!(
+            "id: wd-cache-{id}\nnamespace: w9b.wd\ntasks:\n  - id: wd\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    cache:\n{cache}    tasks:\n      - id: t\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n"
+        );
+        let draft = common::draft(&repo, ws, user, &yaml).await;
+        let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "")
+            .await
+            .expect_err("a malformed cache must not publish");
         match err {
             egret_core::Error::InvalidInput(m) => {
-                assert!(m.contains("(tasks.wd)") && m.contains("outputFiles"), "{id}: {m}");
-                assert!(!m.contains("namespaceFiles"), "{id}: a valid block: {m}");
+                assert!(m.contains("(tasks.wd.cache)"), "{id}: {m}");
             }
             other => panic!("{id}: {other:?}"),
         }

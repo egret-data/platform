@@ -86,11 +86,16 @@ mod reaper;
 mod registry;
 mod render;
 mod replay;
+// Plan Task 4 is the pure half; plan Task 6 calls it from the runner seam, and
+// this allowance goes with that call.
+#[allow(dead_code)]
+pub(crate) mod snapshot;
 mod spawn;
 mod stamps;
 mod subflow;
 mod timeout;
 pub(crate) mod txn;
+pub(crate) mod working_dir;
 
 pub(crate) use claim::start_execution_in_with;
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
@@ -171,6 +176,24 @@ pub const DEFAULT_CONTAINER_TIMEOUT: std::time::Duration = std::time::Duration::
 /// `PartialEq` and not `Eq` because a JSON number may be a float. Nothing
 /// compares two `TaskInput`s for equality; the derive is here so a test can
 /// `assert_eq!` on one field's worth of it.
+/// The snapshot a `WorkingDirectory` child moves through (spec §5.2): the
+/// object it is copied in from before its command, and the object its
+/// directory is copied out to after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkingDirCarry {
+    /// The object URI of the snapshot the child starts from. Never absent for
+    /// a child: a block that has run a child has a snapshot (spec §5.2).
+    pub start_from: String,
+    /// The object URI this child's copy-out is written to.
+    pub carry_to: String,
+    /// `max_task_bytes`: an archive over it fails the child and names the cap.
+    pub cap: u64,
+    /// The block's rendered `outputFiles` names (spec §2.2). A child's copy-out
+    /// is checked against them before the child's outcome is recorded; empty
+    /// when the block declares none.
+    pub outputs: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TaskInput {
     pub workspace_id: uuid::Uuid,
@@ -232,6 +255,11 @@ pub struct TaskInput {
     /// of calling one — so nothing downstream has to tell them apart. See
     /// [`timeout::Budget`].
     pub timeout: Option<std::time::Duration>,
+    /// The `WorkingDirectory` block this run is a child of, when it is one
+    /// (spec §5.2): the snapshot the child starts from and the one it leaves.
+    /// `None` for every run that is not a child of a block, and for the
+    /// block's own claims, which carry no handler.
+    pub working_dir: Option<WorkingDirCarry>,
     /// The identity this execution acts as, and `None` when it has none.
     ///
     /// A workflow runs with nobody logged in, so a handler that reaches an
