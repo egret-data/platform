@@ -96,8 +96,9 @@ function pathRule(id: string, scope: Omit<Scope, "catalog_id">, kind: RuleView["
     catalog_name: catalogId === "c-ice" ? "ice" : "pg",
   };
 }
-function tagRule(id: string, key: string, kind: RuleView["kind"]): RuleView {
-  return { id, name: id, kind, selector: { type: "tag", key }, exempt: { include: [], exclude: [] }, tag_name: key.toUpperCase() };
+/** The read surface resolves the tag's name (`null` when the tag is gone); the fixture tags are named `KEY`. */
+function tagRule(id: string, key: string, kind: RuleView["kind"], tagName: string | null = key.toUpperCase()): RuleView {
+  return { id, name: id, kind, selector: { type: "tag", key }, exempt: { include: [], exclude: [] }, tag_name: tagName };
 }
 const HASH = { type: "mask", mask_type: "MASK_HASH" } as const;
 const NULLIFY = { type: "mask", mask_type: "MASK_NULL" } as const;
@@ -107,7 +108,7 @@ const US_ONLY = { type: "row_filter", filter_expr: "region = 'us'" } as const;
 /** Rules around `ice.sales.orders` (tags: CONFIDENTIAL on the table, PII on `email`). Unsorted on purpose. */
 const R = {
   colPath: pathRule("hash_email", { schema: "sales", table: "orders", column: "email" }, HASH),
-  tableFilter: pathRule("us_only", { schema: "sales", table: "orders" }, US_ONLY),
+  tableFilter: { ...pathRule("us_only", { schema: "sales", table: "orders" }, US_ONLY), exempt: { include: [{ kind: "group", ref: "auditors" }, { kind: "user", ref: "alice" }], exclude: [] } },
   schemaMask: pathRule("null_sales", { schema: "sales" }, NULLIFY),
   catalogFilter: pathRule("ice_filter", {}, US_ONLY),
   pattern: pathRule("star_orders", { schema: "sales", table: "ord*" }, REDACT),
@@ -474,14 +475,15 @@ describe("OverviewTab", () => {
   });
 
   it("lists each column's masking rules by name and kind, by path or by tag, and says nothing of who sees what", async () => {
-    serveData(fixture({ rules: ok(ALL_RULES) }));
+    const exempted = { ...R.colPath, exempt: { include: [{ kind: "user" as const, ref: "bob" }], exclude: [] } };
+    serveData(fixture({ rules: ok(ALL_RULES.map((r) => (r === R.colPath ? exempted : r))) }));
     renderPage("/governance/data/ice/sales/orders");
     const columns = await within(panel()).findByRole("table", { name: "Columns" });
     const email = await within(columns).findByRole("list", { name: "Masking rules of email" });
     const items = (list: HTMLElement) => within(list).getAllByRole("listitem").map((li) => li.textContent);
     // By name; a row filter never shows on a column; nothing from another table, catalog or tag.
     expect(items(email)).toEqual([
-      "hash_email mask · MASK_HASH",
+      "hash_email mask · MASK_HASH · except user bob",
       "null_sales mask · MASK_NULL",
       "redact_confidential mask · MASK",
       "redact_pii mask · MASK",
@@ -523,6 +525,17 @@ describe("OverviewTab", () => {
     const columns = await within(panel()).findByRole("table", { name: "Columns" });
     expect(within(columns).queryByRole("columnheader", { name: "Masking rules" })).not.toBeInTheDocument();
     expect(permCalls).toEqual([]);
+  });
+
+  it("matches a column's tags and tag rules to the column without regard to case", async () => {
+    const tags: ObjectTags = { supported: true, assignments: [{ schema: "sales", table: "orders", column: "EMAIL", tag: tag("pii") }] };
+    serveData(fixture({ tags: { ...fixture().tags, "c-ice|sales|orders": ok(tags) }, rules: ok([R.tagOnColumn]) }));
+    renderPage("/governance/data/ice/sales/orders");
+    const columns = await within(panel()).findByRole("table", { name: "Columns" });
+    const tagList = await within(columns).findByRole("list", { name: "Tags of email" });
+    expect(within(tagList).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["PII"]);
+    const rules = await within(columns).findByRole("list", { name: "Masking rules of email" });
+    expect(within(rules).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["redact_pii mask · MASK"]);
   });
 
   it("shows a view's security mode, whether its owner is cleared, and its lineage state", async () => {
@@ -929,21 +942,37 @@ describe("MasksFiltersTab", () => {
       "By tag",
       "Matching a pattern",
     ]);
-    expect(rowsOf("Here")).toEqual([["us_onlyice.sales.orders", "row filter · region = 'us'", ""]]);
-    // Catalog before schema.
+    // Each row names its exemptions ("—" for none).
+    expect(rowsOf("Here")).toEqual([["us_onlyice.sales.orders", "row filter · region = 'us'", "group auditors, user alice", ""]]);
+    // Masks before row filters; then catalog before schema.
     expect(rowsOf("Inherited")).toEqual([
-      ["ice_filterice.*", "row filter · region = 'us'", "Catalog", ""],
-      ["null_salesice.sales.*", "mask · MASK_NULL", "Schema", ""],
+      ["null_salesice.sales.*", "mask · MASK_NULL", "Schema", "—", ""],
+      ["ice_filterice.*", "row filter · region = 'us'", "Catalog", "—", ""],
     ]);
-    expect(rowsOf("On columns")).toEqual([["hash_emailice.sales.orders.email", "mask · MASK_HASH", "email", ""]]);
+    expect(rowsOf("On columns")).toEqual([["hash_emailice.sales.orders.email", "mask · MASK_HASH", "email", "—", ""]]);
     // A tag on the table reaches the table; a mask by a column's tag reaches that column; a row filter by it reaches nothing.
     expect(rowsOf("By tag")).toEqual([
-      ["redact_confidentialtag CONFIDENTIAL", "mask · MASK", "On the table", ""],
-      ["redact_piitag PII", "mask · MASK", "On column email", ""],
+      ["redact_confidentialtag CONFIDENTIAL", "mask · MASK", "On the table", "—", ""],
+      ["redact_piitag PII", "mask · MASK", "On column email", "—", ""],
     ]);
-    expect(rowsOf("Matching a pattern")).toEqual([["star_ordersice.sales.“ord*”", "mask · MASK", "table “ord*”", ""]]);
+    expect(rowsOf("Matching a pattern")).toEqual([["star_ordersice.sales.“ord*”", "mask · MASK", "table “ord*”", "—", ""]]);
     expect(within(panel()).queryByText(/pii_filter|hash_customers|pg_mask|redact_secret/)).not.toBeInTheDocument();
     expect(permCalls.map((c) => c.call)).toEqual(["GET /perm/rules"]);
+  });
+
+  it("lists a rule on another tag that shares the tag's name, since the engine matches names", async () => {
+    // The rule selects key `pii_eu`, also named PII; `email` carries key `pii`, named PII.
+    serveData(fixture({ rules: ok([tagRule("redact_pii_eu", "pii_eu", REDACT, "PII")]) }));
+    renderPage("/governance/data/ice/sales/orders?tab=masks");
+    await within(panel()).findByRole("table", { name: "By tag" });
+    expect(rowsOf("By tag")).toEqual([["redact_pii_eutag PII", "mask · MASK", "On column email", "—"]]);
+  });
+
+  it("names a tag rule whose tag no longer exists, rather than dropping it silently", async () => {
+    serveData(fixture({ rules: ok([tagRule("orphan", "pii", REDACT, null), R.tableFilter]) }));
+    renderPage("/governance/data/ice/sales/orders?tab=masks");
+    expect(await within(panel()).findByText("Rule orphan selects a tag that no longer exists, so it selects nothing.")).toBeInTheDocument();
+    expect(within(panel()).queryByRole("table", { name: "By tag" })).not.toBeInTheDocument();
   });
 
   it("lists only the rules on a catalog itself, and no tag rule", async () => {
@@ -1013,11 +1042,24 @@ describe("MasksFiltersTab", () => {
     await user.click(await within(panel()).findByRole("button", { name: "Add rule" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByRole("heading", { name: "New rule" })).toBeInTheDocument();
+    // A table's path completes a row filter; a mask would need a column.
+    expect(within(dialog).getByRole("combobox", { name: "Kind" })).toHaveTextContent("Filter rows");
     expect(within(dialog).getByRole("combobox", { name: "Selects by" })).toHaveTextContent("Path");
     await waitFor(() => expect(within(dialog).getByRole("combobox", { name: "Catalog" })).toHaveTextContent("ice"));
     expect(within(dialog).getByLabelText("Schema")).toHaveValue("sales");
-    expect(within(dialog).getByLabelText("Table")).toHaveValue("orders");
+    expect(within(dialog).getByLabelText(/^Table/)).toHaveValue("orders");
     expect(within(dialog).getByText("Selects ice.sales.orders")).toBeInTheDocument();
+  });
+
+  it("opens Add rule on a schema as a mask, with only the schema set", async () => {
+    serveData(fixture({ rules: ok([]) }));
+    const user = userEvent.setup();
+    renderPage("/governance/data/ice/sales?tab=masks", EDITOR);
+    await user.click(await within(panel()).findByRole("button", { name: "Add rule" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("combobox", { name: "Kind" })).toHaveTextContent("Mask a column");
+    expect(within(dialog).getByLabelText("Schema")).toHaveValue("sales");
+    expect(within(dialog).getByLabelText("Table")).toHaveValue("");
   });
 
   it("edits a rule in RuleDialog", async () => {

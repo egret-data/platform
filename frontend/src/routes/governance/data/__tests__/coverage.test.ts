@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Grant, ResourceTagDto, Rule, Scope } from "@/api/generated/model";
-import { globMatch, grantCoverage, patternLevels, ruleSelects, tagKeysOn } from "@/routes/governance/data/coverage";
+import type { Grant, ResourceTagDto, RuleView, Scope } from "@/api/generated/model";
+import { globMatch, grantCoverage, patternLevels, ruleSelects, tagNamesOn, tagUnresolved } from "@/routes/governance/data/coverage";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
 
 const CAT = "c-ice";
@@ -121,11 +121,12 @@ describe("patternLevels", () => {
   });
 });
 
-function rule(selector: Rule["selector"], kind: Rule["kind"] = { type: "mask", mask_type: "MASK_HASH" }): Rule {
-  return { id: "r", name: "r", kind, selector, exempt: { include: [], exclude: [] } };
+function rule(selector: RuleView["selector"], extra: Partial<RuleView> = {}): RuleView {
+  return { id: "r", name: "r", kind: { type: "mask", mask_type: "MASK_HASH" }, selector, exempt: { include: [], exclude: [] }, ...extra };
 }
 const pathRule = (scope: Omit<Scope, "catalog_id">, catalogId = CAT) => rule({ type: "path", catalog_id: catalogId, ...scope });
-const tagRule = (key: string, kind?: Rule["kind"]) => rule({ type: "tag", key }, kind);
+/** A tag rule stores the tag's key; the read surface resolves its name (`null` when the tag is gone). */
+const tagRule = (key: string, name: string | null) => rule({ type: "tag", key }, { tag_name: name });
 
 describe("ruleSelects", () => {
   // A path selector selects p when it is set at p's level or above (egret-perm `selector_hits` → `covers`).
@@ -156,50 +157,73 @@ describe("ruleSelects", () => {
     }
   });
 
-  it("a tag rule selects a table or a column whose resolved tags carry its key", () => {
-    expect(ruleSelects(tagRule("pii"), COLUMN, CAT, ["pii"])).toBe("tag");
-    expect(ruleSelects(tagRule("pii"), TABLE, CAT, ["confidential", "pii"])).toBe("tag");
-    expect(ruleSelects(tagRule("pii"), COLUMN, CAT, ["confidential"])).toBeNull();
+  it("a tag rule selects a table or a column whose resolved tags carry its tag's name", () => {
+    expect(ruleSelects(tagRule("pii", "PII"), COLUMN, CAT, ["PII"])).toBe("tag");
+    expect(ruleSelects(tagRule("pii", "PII"), TABLE, CAT, ["Confidential", "PII"])).toBe("tag");
+    expect(ruleSelects(tagRule("pii", "PII"), COLUMN, CAT, ["Confidential"])).toBeNull();
   });
 
   it("a tag rule never selects a catalog or a schema, which cannot carry a tag", () => {
-    expect(ruleSelects(tagRule("pii"), CATALOG, CAT, ["pii"])).toBeNull();
-    expect(ruleSelects(tagRule("pii"), SCHEMA, CAT, ["pii"])).toBeNull();
+    expect(ruleSelects(tagRule("pii", "PII"), CATALOG, CAT, ["PII"])).toBeNull();
+    expect(ruleSelects(tagRule("pii", "PII"), SCHEMA, CAT, ["PII"])).toBeNull();
   });
 
-  it("a tag rule matches the tag's key, never its name", () => {
-    expect(ruleSelects(tagRule("pii"), COLUMN, CAT, ["PII"])).toBeNull();
+  // The engine matches the policy's tag name against the served tag's name, and names are not unique.
+  it("a rule on one tag selects a column carrying another tag of the same name, and never by key", () => {
+    // Rule selects key "pii_eu" named "PII"; the column carries key "pii_us", also named "PII".
+    const onColumn = tagNamesOn([assignment("email", "pii_us", "PII")], COLUMN);
+    expect(ruleSelects(tagRule("pii_eu", "PII"), COLUMN, CAT, onColumn)).toBe("tag");
+    // The key alone never matches.
+    expect(ruleSelects(tagRule("pii_us", "Personal"), COLUMN, CAT, onColumn)).toBeNull();
+  });
+
+  it("matches the tag name case-sensitively, and globs a name with * or ?, as Ranger's tag matcher does", () => {
+    expect(ruleSelects(tagRule("pii", "pii"), COLUMN, CAT, ["PII"])).toBeNull();
+    expect(ruleSelects(tagRule("p", "PI*"), COLUMN, CAT, ["PII"])).toBe("tag");
+    expect(ruleSelects(tagRule("p", "P?I"), COLUMN, CAT, ["PII"])).toBe("tag");
+  });
+
+  it("a tag rule whose tag did not resolve selects nothing, and says so", () => {
+    const gone = tagRule("pii", null);
+    expect(ruleSelects(gone, COLUMN, CAT, ["pii", "PII"])).toBeNull();
+    expect(tagUnresolved(gone)).toBe(true);
+    expect(tagUnresolved(tagRule("pii", "PII"))).toBe(false);
+    expect(tagUnresolved(pathRule({}))).toBe(false);
   });
 });
 
-describe("tagKeysOn", () => {
-  const a = (column: string, key: string, table = "orders", schema = "sales"): ResourceTagDto => ({
+function assignment(column: string, key: string, name = key.toUpperCase(), table = "orders", schema = "sales"): ResourceTagDto {
+  return {
     schema,
     table,
     column,
-    tag: { id: `t-${key}`, key, name: key.toUpperCase(), description: "", color: "#000", assignment_count: 0, created_at: "" },
-  });
+    tag: { id: `t-${key}`, key, name, description: "", color: "#000", assignment_count: 0, created_at: "" },
+  };
+}
+
+describe("tagNamesOn", () => {
+  const a = (column: string, key: string, table = "orders", schema = "sales") => assignment(column, key, key.toUpperCase(), table, schema);
   const ASSIGNMENTS = [a("email", "pii"), a("", "confidential"), a("id", "key"), a("", "other", "customers")];
 
   it("gives a column its own tags and its table's (the table's reach it as an ancestor)", () => {
-    expect(tagKeysOn(ASSIGNMENTS, COLUMN).sort()).toEqual(["confidential", "pii"]);
+    expect(tagNamesOn(ASSIGNMENTS, COLUMN).sort()).toEqual(["CONFIDENTIAL", "PII"]);
   });
 
   it("gives a table only its own tags: a column's tag does not reach up to its table", () => {
-    expect(tagKeysOn(ASSIGNMENTS, TABLE)).toEqual(["confidential"]);
+    expect(tagNamesOn(ASSIGNMENTS, TABLE)).toEqual(["CONFIDENTIAL"]);
   });
 
   it("gives a catalog or a schema no tags", () => {
-    expect(tagKeysOn(ASSIGNMENTS, CATALOG)).toEqual([]);
-    expect(tagKeysOn(ASSIGNMENTS, SCHEMA)).toEqual([]);
+    expect(tagNamesOn(ASSIGNMENTS, CATALOG)).toEqual([]);
+    expect(tagNamesOn(ASSIGNMENTS, SCHEMA)).toEqual([]);
   });
 
   it("matches the column, table and schema without regard to case, as egret resolves them", () => {
     const upper = [a("EMAIL", "pii", "ORDERS", "Sales")];
-    expect(tagKeysOn(upper, COLUMN)).toEqual(["pii"]);
+    expect(tagNamesOn(upper, COLUMN)).toEqual(["PII"]);
   });
 
   it("puts a tag reached at both levels in once", () => {
-    expect(tagKeysOn([a("email", "pii"), a("", "pii")], COLUMN)).toEqual(["pii"]);
+    expect(tagNamesOn([a("email", "pii"), a("", "pii")], COLUMN)).toEqual(["PII"]);
   });
 });

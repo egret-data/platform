@@ -160,24 +160,27 @@ function selectorOf(selectorType: SelectorType, tagKey: string, scope: Scope): S
  * `row_filter` uses `ScopePicker`'s `rowFilterMode` (no column field at all,
  * catalog+schema+table jointly required).
  *
- * `initialSelector` seeds a NEW rule's selector (the Data object page's Add
- * rule passes a `path` selector naming its object); `existing` wins over it.
+ * `initialSelector` and `initialKind` seed a NEW rule's selector and kind (the
+ * Data object page's Add rule passes a `path` selector naming its object, and
+ * on a table a row filter, which that selector completes); `existing` wins.
  */
 export function RuleDialog({
   open,
   onOpenChange,
   existing,
   initialSelector,
+  initialKind,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   existing?: Rule | null;
   initialSelector?: Selector;
+  initialKind?: KindType;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
-        {open && <RuleForm existing={existing} initialSelector={initialSelector} onOpenChange={onOpenChange} />}
+        {open && <RuleForm existing={existing} initialSelector={initialSelector} initialKind={initialKind} onOpenChange={onOpenChange} />}
       </DialogContent>
     </Dialog>
   );
@@ -192,10 +195,12 @@ export function RuleDialog({
 function RuleForm({
   existing,
   initialSelector,
+  initialKind,
   onOpenChange,
 }: {
   existing?: Rule | null;
   initialSelector?: Selector;
+  initialKind?: KindType;
   onOpenChange: (open: boolean) => void;
 }) {
   const seed = existing ? existing.selector : initialSelector;
@@ -206,7 +211,7 @@ function RuleForm({
   const catalogName = (id: string) => catalogs.find((c) => c.id === id)?.name ?? id;
 
   const [name, setName] = useState(existing?.name ?? "");
-  const [kindType, setKindType] = useState<KindType>(existing?.kind.type ?? "mask");
+  const [kindType, setKindType] = useState<KindType>(existing?.kind.type ?? initialKind ?? "mask");
   const [maskType, setMaskType] = useState(
     existing?.kind.type === "mask" ? existing.kind.mask_type : "MASK",
   );

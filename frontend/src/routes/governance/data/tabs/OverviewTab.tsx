@@ -9,10 +9,10 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { formatRuleKind } from "@/routes/governance/permFormat";
+import { formatPrincipals, formatRuleKind } from "@/routes/governance/permFormat";
 import { usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
-import { ruleSelects, tagKeysOn } from "@/routes/governance/data/coverage";
+import { ruleSelects, sameName, tagNamesOn } from "@/routes/governance/data/coverage";
 import {
   assignmentsOf,
   capitalise,
@@ -239,7 +239,8 @@ function ObjectList({ path, items }: { path: ObjectPath; items: NonNullable<Brow
  * The Masking rules column (shown with `policy:read`, which `GET /perm/rules`
  * needs) lists each column's mask rules by name and kind: those whose path
  * selects the column, and those whose tag the column carries itself or
- * through its table (`ruleSelects`, `tagKeysOn`). F10: which rules select a
+ * through its table (`ruleSelects`, `tagNamesOn`), each with its exemptions
+ * ("except …"). F10: which rules select a
  * column, never who sees what; only explain evaluates.
  */
 function Columns({
@@ -261,7 +262,8 @@ function Columns({
   const assignments = assignmentsOf(tags);
   const showTags = taggable && assignments !== null;
   const onTable = (assignments ?? []).filter((a) => a.column === "");
-  const onColumn = (name: string) => (assignments ?? []).filter((a) => a.column === name);
+  // Column names compare without regard to case, as egret resolves tags and the engines match columns.
+  const onColumn = (name: string) => (assignments ?? []).filter((a) => a.column !== "" && sameName(a.column, name));
   const masks =
     rulesQ.data?.status === 200 ? rulesQ.data.data.filter((r) => r.kind.type === "mask") : undefined;
   const reach = tagReach(path, catalog, tags);
@@ -346,8 +348,8 @@ function ColumnTags({ column, own, inherited }: { column: string; own: ResourceT
 
 /** Whether mask rule `r` selects the column `p`, with the tags it can find there. */
 function selectsColumn(r: RuleView, p: ObjectPath, catalogId: string, reach: TagReach): boolean {
-  const keys = reach.status === "ok" ? tagKeysOn(reach.assignments, p) : [];
-  return ruleSelects(r, p, catalogId, keys) !== null;
+  const names = reach.status === "ok" ? tagNamesOn(reach.assignments, p) : [];
+  return ruleSelects(r, p, catalogId, names) !== null;
 }
 
 function ColumnMasks({ column, rules, tagRulesUnknown }: { column: string; rules: RuleView[]; tagRulesUnknown: boolean }) {
@@ -360,7 +362,10 @@ function ColumnMasks({ column, rules, tagRulesUnknown }: { column: string; rules
         {sorted.map((r) => (
           <li key={r.id} className="text-sm break-words">
             {r.name}
-            <span className="text-xs text-muted-foreground">{` ${formatRuleKind(r)}`}</span>
+            <span className="text-xs text-muted-foreground">
+              {` ${formatRuleKind(r)}`}
+              {r.exempt.include.length > 0 ? ` · except ${formatPrincipals(r.exempt.include)}` : ""}
+            </span>
           </li>
         ))}
       </ul>

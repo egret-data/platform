@@ -11,10 +11,10 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
-import { formatRuleKind, formatSelector } from "@/routes/governance/permFormat";
+import { formatPrincipals, formatRuleKind, formatSelector } from "@/routes/governance/permFormat";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { KIND_ICON, type NodeKind } from "@/routes/governance/data/CatalogTree";
-import { patternLevels, ruleSelects, scopeCoverage, tagKeysOn, type PatternLevel } from "@/routes/governance/data/coverage";
+import { patternLevels, ruleSelects, scopeCoverage, tagNamesOn, tagUnresolved, type PatternLevel } from "@/routes/governance/data/coverage";
 import { scopeOf, tagReach, type CatalogState, type TagsResult } from "@/routes/governance/data/objectData";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
 import { CatalogGate, Section, TabError } from "@/routes/governance/data/tabs/TabStates";
@@ -51,18 +51,27 @@ const GROUPS: { id: Group; title: string; head?: string; mono?: boolean }[] = [
  *
  * A path rule reaches the object as a grant does (`scopeCoverage`), and one
  * that names a level by pattern has its own group, as on the Permissions
- * tab. A tag rule reaches it through the tags egret resolves for it
- * (`tagKeysOn`, which documents the rule): a table's tag reaches the table
+ * tab. A tag rule reaches it through the tag names egret resolves for it
+ * (`tagNamesOn` and `ruleSelects`, which document the rule; the engine
+ * matches a tag's NAME, so a rule reaches every tag sharing its tag's name):
+ * a table's tag reaches the table
  * and every column; a column's tag reaches that column only, so a mask by it
  * is listed with the column and a row filter by it (a table request) is not.
  * Only a table in an egret catalog has tags, so no other object lists a tag
- * rule, and none asks for tags (F9).
+ * rule, and none asks for tags (F9). A tag rule whose tag no longer resolves
+ * selects nothing (the compiler refuses it); on a table such rules are named
+ * in a note, never silently dropped.
+ *
+ * Each row shows the rule's exemptions, so a rule never reads as applying to
+ * everyone. Inside a group, masks come before row filters.
  *
  * The rules come from `GET /perm/rules` (`policy:read`), filtered here (spec
  * §2.3, "Not new"). Add rule, Edit and Delete each need `policy:update`, the
  * permission every rule write requires (`crates/egret-perm-compile/src/routes.rs`,
  * `create_rule`, `patch_rule`, `delete_rule` and `preview`). Add rule opens
- * `RuleDialog` with a path selector naming this object. A save or a delete
+ * `RuleDialog` with a path selector naming this object; on a table it starts
+ * as a row filter, which that selector completes (a mask needs a column,
+ * picked in the dialog). A save or a delete
  * invalidates the rules list, so this tab refetches.
  */
 export function MasksFiltersTab({
@@ -133,16 +142,32 @@ function Rules({
       return row ? [row] : [];
     });
     const noun = kind ? KIND_ICON[kind].label.toLowerCase() : "object";
+    const unresolved = assignments === null ? [] : rulesQ.data.data.filter(tagUnresolved).map((r) => r.name).sort();
     body = (
       <div className="space-y-6">
         {reach.status === "error" ? <TabError what="tags" onRetry={reach.retry} /> : null}
+        {unresolved.length > 0 ? (
+          <Alert>
+            <AlertDescription>
+              {unresolved.length === 1
+                ? `Rule ${unresolved[0]} selects a tag that no longer exists, so it selects nothing.`
+                : `Rules ${unresolved.join(", ")} select tags that no longer exist, so they select nothing.`}
+            </AlertDescription>
+          </Alert>
+        ) : null}
         {rows.length === 0 ? (
           reach.status === "error" ? null : <EmptyState icon={EyeOff} title={`No mask or row filter selects this ${noun}`} />
         ) : (
           GROUPS.map((g) => {
             const inGroup = rows
               .filter((r) => r.group === g.id)
-              .sort((a, b) => a.order - b.order || a.extra.localeCompare(b.extra) || a.rule.name.localeCompare(b.rule.name));
+              .sort(
+                (a, b) =>
+                  kindRank(a.rule) - kindRank(b.rule) ||
+                  a.order - b.order ||
+                  a.extra.localeCompare(b.extra) ||
+                  a.rule.name.localeCompare(b.rule.name),
+              );
             if (inGroup.length === 0) return null;
             return (
               <Section key={g.id} title={g.title}>
@@ -181,6 +206,7 @@ function Rules({
         }}
         existing={dialog?.existing ?? null}
         initialSelector={{ type: "path", ...scopeOf(target, catalog.id) }}
+        initialKind={target.object !== undefined ? "row_filter" : undefined}
       />
       <ConfirmDeleteDialog
         open={deleting !== null}
@@ -205,7 +231,7 @@ function Rules({
 function rowOf(r: RuleView, p: ObjectPath, catalogId: string, assignments: ResourceTagDto[] | null): Row | null {
   if (r.selector.type === "tag") {
     if (assignments === null) return null;
-    if (ruleSelects(r, p, catalogId, tagKeysOn(assignments, p)) === "tag") {
+    if (ruleSelects(r, p, catalogId, tagNamesOn(assignments, p)) === "tag") {
       return { rule: r, group: "tag", extra: "On the table", order: 0 };
     }
     // A mask by a tag on some of the table's columns reaches those columns.
@@ -213,7 +239,7 @@ function rowOf(r: RuleView, p: ObjectPath, catalogId: string, assignments: Resou
     const columns = new Map<string, string>();
     for (const a of assignments) {
       if (a.column === "" || columns.has(a.column.toLowerCase())) continue;
-      if (ruleSelects(r, { ...p, column: a.column }, catalogId, tagKeysOn(assignments, { ...p, column: a.column })) === "tag") {
+      if (ruleSelects(r, { ...p, column: a.column }, catalogId, tagNamesOn(assignments, { ...p, column: a.column })) === "tag") {
         columns.set(a.column.toLowerCase(), a.column);
       }
     }
@@ -230,6 +256,11 @@ function rowOf(r: RuleView, p: ObjectPath, catalogId: string, assignments: Resou
   if (reach === "child") return { rule: r, group: "columns", extra: r.selector.column ?? "", order: 0 };
   const order = Object.keys(LEVEL_LABEL).indexOf(reach.inheritedFrom);
   return { rule: r, group: "inherited", extra: LEVEL_LABEL[reach.inheritedFrom], order };
+}
+
+/** Masks first, then row filters. */
+function kindRank(r: RuleView): number {
+  return r.kind.type === "mask" ? 0 : 1;
 }
 
 /** `table “*”`. */
@@ -271,6 +302,7 @@ function RuleTable({
           <TableHead>Rule</TableHead>
           <TableHead>Kind</TableHead>
           {extra ? <TableHead>{extra.head}</TableHead> : null}
+          <TableHead>Exempt</TableHead>
           {canWrite ? (
             <TableHead className="w-24">
               <span className="sr-only">Actions</span>
@@ -289,6 +321,13 @@ function RuleTable({
             </TableCell>
             <TableCell className="whitespace-normal break-words">{formatRuleKind(rule)}</TableCell>
             {extra ? <TableCell className={extra.mono ? "font-mono text-xs" : undefined}>{extraText}</TableCell> : null}
+            <TableCell className="whitespace-normal break-words">
+              {rule.exempt.include.length > 0 ? (
+                formatPrincipals(rule.exempt.include)
+              ) : (
+                <span className="text-muted-foreground">—</span>
+              )}
+            </TableCell>
             {canWrite ? (
               <TableCell className="text-right">
                 <div className="flex justify-end gap-1">

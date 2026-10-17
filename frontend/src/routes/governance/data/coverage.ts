@@ -1,4 +1,4 @@
-import type { Grant, ResourceTagDto, Rule, Scope } from "@/api/generated/model";
+import type { Grant, ResourceTagDto, RuleView, Scope } from "@/api/generated/model";
 import { isPattern } from "@/routes/governance/permFormat";
 import type { ObjectPath } from "@/routes/governance/data/objectPath";
 
@@ -63,24 +63,48 @@ export function scopeCoverage(scope: Scope, p: ObjectPath, catalogId: string): G
  * (`crates/egret-perm/src/eval.rs:413-418`, `Selector::Path` → `covers`). A
  * selector set below `p` (a column, for a table) does not select `p`.
  *
- * A tag selector selects `p` when `tagsOnPath`, the tag keys resolved for
- * `p` by {@link tagKeysOn}, holds its key (the rule stores `tags.key`). Only
- * a table or a column can carry a tag, so a tag rule never selects a catalog
- * or a schema (`selector_hits`' `target.table.is_some()` guard). A tag rule is
- * catalog-unscoped: which catalog it reaches is which catalog's tags it finds.
+ * A tag selector selects `p` when one of `tagNamesOnPath`, the tag NAMES
+ * resolved for `p` by {@link tagNamesOn}, matches the rule's resolved
+ * `tag_name`. Names, not keys: the rule stores `tags.key`, but the compiler
+ * stamps the resolved `tags.name` into the tag policy
+ * (`crates/egret-perm/src/actions.rs:300-310`, `MissingTagName`), egret's tag
+ * download serves `tags.name` as each tag's type
+ * (`crates/egret-policy-api/src/dto.rs:160,185`), and explain resolves names
+ * (`crates/egret-policy/src/store.rs:1638-1643`). `tags.name` is not unique
+ * (`migrations/0080_tags.sql:8-9`), so a rule on one tag reaches every tag
+ * that shares its name, and this says so. The match is Ranger's tag matcher:
+ * case-sensitive (`ignoreCase: false`) with `wildCard: true`, so a name with
+ * `*` or `?` globs (`crates/egret-policy/src/service-defs/tag.json:21`), done by
+ * {@link globMatch}. A rule whose `tag_name` did not resolve (`null`, its tag
+ * gone) selects nothing: the compiler refuses to deploy it (`MissingTagName`);
+ * the Masks & filters tab names such rules rather than dropping them silently.
+ *
+ * Only a table or a column can carry a tag, so a tag rule never selects a
+ * catalog or a schema (`selector_hits`' `target.table.is_some()` guard). A tag
+ * rule is catalog-unscoped: which catalog it reaches is which catalog's tags
+ * it finds.
  */
-export function ruleSelects(r: Rule, p: ObjectPath, catalogId: string, tagsOnPath: string[]): "path" | "tag" | null {
+export function ruleSelects(r: RuleView, p: ObjectPath, catalogId: string, tagNamesOnPath: string[]): "path" | "tag" | null {
   if (r.selector.type === "tag") {
     if (p.schema === undefined || p.object === undefined) return null;
-    return tagsOnPath.includes(r.selector.key) ? "tag" : null;
+    const name = r.tag_name;
+    if (!name) return null;
+    return tagNamesOnPath.some((n) => globMatch(name, n)) ? "tag" : null;
   }
   const reach = scopeCoverage(r.selector, p, catalogId);
   return reach === "here" || (reach !== null && reach !== "child") ? "path" : null;
 }
 
+/** Whether `r` selects by a tag whose name did not resolve (see {@link ruleSelects}). */
+export function tagUnresolved(r: RuleView): boolean {
+  return r.selector.type === "tag" && !r.tag_name;
+}
+
 /**
- * The tag keys that reach `p`, from its table's tag assignments, mirroring how
- * egret resolves a target's tags for explain and serves them to Ranger:
+ * The tag names (`tags.name`, what the engine matches; see
+ * {@link ruleSelects}) that reach `p`, from its table's tag assignments,
+ * mirroring how egret resolves a target's tags for explain and serves them to
+ * Ranger:
  *
  * - **A table's tag reaches each of its columns.** egret serves a table-level
  *   assignment as a resource with no `column` element
@@ -92,24 +116,29 @@ export function ruleSelects(r: Rule, p: ObjectPath, catalogId: string, tagsOnPat
  *   same way: `resolved_tags_for_resource_via` returns a table-level row for a
  *   column request as `Ancestor` (`crates/egret-policy/src/store.rs:1689-1717`),
  *   reported as `ExplainResolvedTag.attached_at_column = false`
- *   (`crates/egret-perm-compile/src/routes.rs:666-698`).
+ *   (`crates/egret-perm-compile/src/routes.rs:686-698`).
  * - **A column's tag does not reach its table.** For a table request it would
  *   be `DESCENDANT`, which the enricher rejects; the same query excludes it
  *   (`store.rs:1656-1658`, point 3; the query at `store.rs:1689-1698`).
  * - **Nothing above a table carries a tag** (migration 0177; `crates/egret-perm/src/eval.rs:400-405`).
  *
  * Schema, table and column compare without regard to case, as that query's
- * `lower(…) = lower(…)` does. Each key appears once.
+ * `lower(…) = lower(…)` does; the names themselves are kept as stored. Each
+ * name appears once.
  */
-export function tagKeysOn(assignments: ResourceTagDto[], p: ObjectPath): string[] {
+export function tagNamesOn(assignments: ResourceTagDto[], p: ObjectPath): string[] {
   if (p.schema === undefined || p.object === undefined) return [];
-  const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
-  const keys = new Set<string>();
+  const names = new Set<string>();
   for (const a of assignments) {
-    if (!same(a.schema, p.schema) || !same(a.table, p.object)) continue;
-    if (a.column === "" || (p.column !== undefined && same(a.column, p.column))) keys.add(a.tag.key);
+    if (!sameName(a.schema, p.schema) || !sameName(a.table, p.object)) continue;
+    if (a.column === "" || (p.column !== undefined && sameName(a.column, p.column))) names.add(a.tag.name);
   }
-  return [...keys];
+  return [...names];
+}
+
+/** Schema, table and column names compare without regard to case, as egret resolves tags and the engines match columns. */
+export function sameName(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
 }
 
 export type PatternLevel = { level: "schema" | "table" | "column"; value: string };
