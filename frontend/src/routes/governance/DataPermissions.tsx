@@ -93,15 +93,15 @@ export default function DataPermissions() {
       cell: (g) => {
         const link = scopeToDataLink(g.scope, catalogNameById, "permissions");
         return (
-        <div className="space-y-1 py-0.5">
-          <p className="text-sm">{sentence(g)}</p>
-          {link && (
-            <OpenInDataLink to={link.to} subject={sentence(g)} stoppedAtPattern={link.stoppedAtPattern} />
-          )}
-          {g.origin.type === "workspace_assignment" && (
-            <AssignmentBadge workspaceLabel={workspaceLabel(g.origin.workspace_id)} />
-          )}
-        </div>
+          <div className="space-y-1 py-0.5">
+            <p className="text-sm">{sentence(g)}</p>
+            {link && (
+              <OpenInDataLink to={link.to} subject={sentence(g)} stoppedAtPattern={link.stoppedAtPattern} />
+            )}
+            {g.origin.type === "workspace_assignment" && (
+              <AssignmentBadge workspaceLabel={workspaceLabel(g.origin.workspace_id)} />
+            )}
+          </div>
         );
       },
     },
