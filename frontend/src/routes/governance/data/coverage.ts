@@ -19,12 +19,19 @@ const ANCESTORS = ["catalog", "schema", "table"] as const;
  * lists it so that a grant made on something inside `p`, or on a pattern
  * below it, is seen where it was made and where "Open in Data" lands.
  *
- * A level matches as egret's own evaluator matches it: by glob (`*` any run of
- * characters, `?` one), not by equality (`crates/egret-perm/src/eval.rs`,
- * `covers` and `level_covers`), because the engines enforce a stored `ord*`
- * or `*` that way. A grant with `table = "*"` is therefore "here" on every
- * table of its schema; {@link patternLevels} tells such a grant apart from one
- * set on this object by name.
+ * A level matches as the engines match it: by glob (`*` any run of
+ * characters, `?` one), not by equality, and without regard to case. egret's
+ * served Ranger service-defs set `ignoreCase: true` on catalog, schema, table
+ * and column for both Trino and StarRocks
+ * (`crates/egret-policy/src/service-defs/trino.json`, `starrocks.json`), and
+ * Ranger folds both the policy value and the requested name
+ * (`crates/egret-ranger-eval/src/resource.rs:303-312`), so a deny grant typed
+ * on `sales.Orders` reaches the table `orders`. The Data surface follows the
+ * engines; egret-perm's own evaluator (`crates/egret-perm/src/eval.rs`,
+ * `covers` and `level_covers`) still compares case-sensitively, a known
+ * divergence left as a follow-up. A grant with `table = "*"` is therefore
+ * "here" on every table of its schema; {@link patternLevels} tells such a
+ * grant apart from one set on this object by name.
  *
  * The scope's levels narrow without gaps (a column implies a table implies a
  * schema; `perm.grants` CHECKs it), so the set levels are a prefix.
@@ -35,9 +42,9 @@ export function grantCoverage(g: Grant, p: ObjectPath, catalogId: string): Grant
 
 /**
  * How a scope reaches `p`: {@link grantCoverage}'s rule, for any scope. A
- * rule's path selector is a `Scope` (`Selector`'s `path` variant), and
- * egret-perm checks it with the same `covers` a grant's scope gets
- * (`crates/egret-perm/src/eval.rs`, `selector_hits`).
+ * rule's path selector is a `Scope` (`Selector`'s `path` variant), compiled to
+ * the same engine resources a grant's scope is, so it matches the same way:
+ * by glob, each level lower-cased on both sides, as Ranger does.
  */
 export function scopeCoverage(scope: Scope, p: ObjectPath, catalogId: string): GrantCoverage {
   if (scope.catalog_id !== catalogId) return null;
@@ -46,7 +53,7 @@ export function scopeCoverage(scope: Scope, p: ObjectPath, catalogId: string): G
 
   const shared = Math.min(granted.length, target.length);
   for (let i = 0; i < shared; i++) {
-    if (!globMatch(granted[i], target[i])) return null;
+    if (!globMatch(granted[i].toLowerCase(), target[i].toLowerCase())) return null;
   }
   if (granted.length === target.length) return "here";
   if (granted.length < target.length) return { inheritedFrom: ANCESTORS[granted.length] };
@@ -61,9 +68,9 @@ export function scopeCoverage(scope: Scope, p: ObjectPath, catalogId: string): G
  * explain evaluates.
  *
  * A path selector selects `p` when it is set at `p`'s level or above and each
- * level it sets matches (by glob), as egret-perm's `selector_hits` does
- * (`crates/egret-perm/src/eval.rs:413-418`, `Selector::Path` → `covers`). A
- * selector set below `p` (a column, for a table) does not select `p`.
+ * level it sets matches (by glob, without regard to case, as the engines match
+ * it; see {@link grantCoverage}). A selector set below `p` (a column, for a
+ * table) does not select `p`.
  *
  * A tag selector selects `p` when one of `tagNamesOnPath`, the tag NAMES
  * resolved for `p` by {@link tagNamesOn}, matches the rule's resolved
@@ -185,7 +192,9 @@ function prefix(levels: (string | null | undefined)[]): string[] {
 /**
  * Ranger's resource glob: `*` matches any run of characters (none included),
  * `?` exactly one. A port of `glob_match` in `crates/egret-perm/src/eval.rs`,
- * over code points as Rust's `chars()` walks them.
+ * over code points as Rust's `chars()` walks them. It compares case-sensitively,
+ * as Ranger's tag matcher does (`ignoreCase: false`); {@link scopeCoverage}
+ * lower-cases both sides first for resource levels, which ignore case.
  */
 export function globMatch(patternText: string, valueText: string): boolean {
   const pattern = Array.from(patternText);

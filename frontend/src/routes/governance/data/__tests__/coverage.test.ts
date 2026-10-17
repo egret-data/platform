@@ -89,6 +89,17 @@ describe("grantCoverage", () => {
   });
 
   // D4: a grant on a pattern below a schema is listed on that schema's page.
+  it("matches each level without regard to case, as the engines' Ranger service-defs do (ignoreCase: true)", () => {
+    // A deny grant typed on `sales.Orders` reaches the page `orders`, and the other way round.
+    expect(grantCoverage(grant({ schema: "sales", table: "Orders" }), TABLE, CAT)).toBe("here");
+    expect(grantCoverage(grant({ schema: "SALES", table: "orders" }), COLUMN, CAT)).toEqual({ inheritedFrom: "table" });
+    expect(grantCoverage(ON_TABLE, { catalog: "ice", schema: "Sales", object: "ORDERS" }, CAT)).toBe("here");
+    // A pattern folds too.
+    expect(grantCoverage(grant({ schema: "sales", table: "ORD*" }), TABLE, CAT)).toBe("here");
+    // Folding does not make a different name match.
+    expect(grantCoverage(grant({ schema: "sales", table: "Order" }), TABLE, CAT)).toBeNull();
+  });
+
   it("puts a grant on a table pattern, or on a table, inside its schema and its catalog", () => {
     expect(grantCoverage(grant({ schema: "sales", table: "*" }), SCHEMA, CAT)).toBe("child");
     expect(grantCoverage(grant({ schema: "sales", table: "*" }), CATALOG, CAT)).toBe("child");
@@ -156,6 +167,12 @@ describe("ruleSelects", () => {
     ["a pattern that misses", { schema: "sales", table: "cust*" }, TABLE, null],
   ] as const)("a %s path rule at %j", (_what, scope, p, expected) => {
     expect(ruleSelects(pathRule(scope), p, CAT, [])).toBe(expected);
+  });
+
+  it("a path rule selects a column whose name differs only in case, as the engine masks it", () => {
+    const upperEmail: ObjectPath = { catalog: "ice", schema: "sales", object: "orders", column: "Email" };
+    expect(ruleSelects(pathRule({ schema: "sales", table: "orders", column: "email" }), upperEmail, CAT, [])).toBe("path");
+    expect(ruleSelects(pathRule({ schema: "Sales", table: "Orders", column: "EMAIL" }), COLUMN, CAT, [])).toBe("path");
   });
 
   it("a path rule in another catalog selects nothing", () => {
