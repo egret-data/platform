@@ -963,9 +963,12 @@ def check_inputs(flows, kinds, golden, baseline):
     # unknown task type now, as Kestra does); 104 since the AllowFailure
     # flowable banked `valids/allow-failure`, `valids/allow-failure-with-retry`
     # and `valids/finally-allowfailure`; 103 since WorkingDirectory Task 8 banked
-    # `valids/working-directory-taskrun`, whose Kestra trace egret now reproduces.
-    if len(baseline) != 103:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 103; the split "
+    # `valids/working-directory-taskrun`, whose Kestra trace egret now reproduces;
+    # 104 since the same WorkingDirectory pass baselined
+    # `valids/retry-failed-task-duration` (Kestra's ~0.6 s per-retry scheduler
+    # latency lets it stop at three attempts where egret makes four).
+    if len(baseline) != 104:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 104; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1615,8 +1618,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 103",
-         "not 103",
+    case("baseline.txt is no longer 104",
+         "not 104",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

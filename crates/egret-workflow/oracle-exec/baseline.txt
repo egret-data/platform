@@ -618,6 +618,10 @@ valids/restart-parent-loop
 valids/restart-with-after-execution
 valids/restart-with-finally
 valids/retry-failed-flow-duration
+# Egret retries without scheduler latency; Kestra adds about 0.6 s per retry, so its
+# fourth attempt falls outside maxDuration and egret's does not. Same class as
+# retry-failed-flow-duration above. Measured: Kestra 3 attempts in 5/5 rounds, egret 4.
+valids/retry-failed-task-duration
 valids/retry-flowable-parallel
 valids/retry-subflow
 valids/retry-success

@@ -792,7 +792,10 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // match and `retry-failed-task-duration` is the one regression that
         // `executor_matches_golden` reports (a pre-existing timing mismatch, see
         // the report); 103 + 198 = 301.
-        (301, 198, 103),
+        // 103 -> 104 baselined, 198 -> 197 matching at WorkingDirectory Task 9:
+        // `valids/retry-failed-task-duration` is baselined with its cause, so its
+        // mismatch is now attributed rather than reported; 104 + 197 = 301.
+        (301, 197, 104),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -2853,7 +2856,9 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 /// **365 since WorkingDirectory Task 8 banked `valids/working-directory-taskrun`**
 /// (its three run terminals: `parallel`, `workingDir`, `log-taskrun`), and the
 /// run terminals of the golden are 858 = 840 + the 18 the harvest added.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 365;
+/// **366 since `valids/retry-failed-task-duration` was baselined** (its one
+/// run terminal, `fail`, after three attempts).
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 366;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -2872,7 +2877,9 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 39;
 /// sub-execution.
 // 140 -> 138 at WorkingDirectory Task 8: `working-directory-taskrun` (one top-level
 // execution and one sub-execution) is banked.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 138;
+// 138 -> 139: `valids/retry-failed-task-duration` is one top-level execution with no
+// sub-executions, baselined at WorkingDirectory Task 9.
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 139;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -2884,7 +2891,9 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 138;
 /// **1414 since the AllowFailure flowable**: 95 on its three targets (23 runs).
 /// **1405 since WorkingDirectory Task 8**: nine on `valids/working-directory-taskrun`'s
 /// three runs (`CREATED RUNNING SUCCESS` each).
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1405;
+/// **1419 since `valids/retry-failed-task-duration` was baselined**: 14 on its one
+/// run (`CREATED SUBMITTED RUNNING FAILED RETRYING`, three times, then `FAILED`).
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1419;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -2899,7 +2908,9 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1405;
 /// **497 since the AllowFailure flowable**: 13 on its three targets (3 + 7 + 3).
 /// **491 since WorkingDirectory Task 8**: six on `working-directory-taskrun`'s two
 /// executions (`CREATED RUNNING SUCCESS` each).
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 491;
+/// **500 since `valids/retry-failed-task-duration` was baselined**: nine on its
+/// one execution.
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 500;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -6886,6 +6897,14 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
             "valids/retry-failed-flow-duration",
             "maxDuration: the driver moves time only to the next deadline",
         ),
+        // WorkingDirectory Task 9: Kestra's scheduler adds about 0.6 s per retry,
+        // so its fourth attempt falls outside maxDuration and it stops at three.
+        // Egret retries with no scheduler latency, so it makes four. Measured
+        // 5/5 rounds on the pinned image.
+        (
+            "valids/retry-failed-task-duration",
+            "maxDuration: Kestra's ~0.6 s per-retry scheduler latency stops it at three attempts, egret makes four",
+        ),
         // ------------------------------------------------------------------
         // W3b Task 5: the entries the FEED used to carry, each with its cause.
         // ------------------------------------------------------------------
@@ -7301,9 +7320,11 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
         baseline.len(),
         "every baselined entry is either declaring a `timeout:` or not"
     );
+    // (2, 101, 103) -> (2, 102, 104): `valids/retry-failed-task-duration` is baselined
+    // and declares no `timeout:` anywhere, so only the denominator and `without` move.
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (2, 101, 103),
+        (2, 102, 104),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \
@@ -7512,8 +7533,9 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
     assert_eq!(
         (baselined.len(), matching.len(), declaring.len()),
         // 25 -> 26 declaring a `retry:` at WorkingDirectory Task 8: the harvested
-        // `retry-failed-task-duration`; the matching side moves with it.
-        (7, 19, 26),
+        // `retry-failed-task-duration`. Baselined at WorkingDirectory Task 9, so
+        // it moves from the matching side to the baselined side: 7 -> 8, 19 -> 18.
+        (8, 18, 26),
         "the split the coverage question turns on: a `retry:` on a MATCHING \
          entry is one the ratchet would report a change to, and a `retry:` on \
          a baselined entry is one it would not. matching: {matching:?}"
@@ -7523,6 +7545,7 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
         vec![
             "valids/full",
             "valids/retry-failed-flow-duration",
+            "valids/retry-failed-task-duration",
             "valids/retry-flowable-parallel",
             "valids/retry-subflow",
             "valids/retry-success",
@@ -7553,7 +7576,9 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
     }
     assert_eq!(
         (new_execution.len(), failed_task.len(), baselined.len()),
-        (0, 7, 7),
+        // (0, 7, 7) -> (0, 8, 8) at WorkingDirectory Task 9: the baselined
+        // `retry-failed-task-duration` is a `RETRY_FAILED_TASK` one.
+        (0, 8, 8),
         "**every remaining baselined `retry:` is a `RETRY_FAILED_TASK` one**, \
          because W6 Task 4 banked all four `CREATE_NEW_EXECUTION` entries. The \
          assertion under this used to name them; the successor is the matching \
@@ -7582,7 +7607,9 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
         ),
         // (14, 4, 18) -> (15, 4, 19) at WorkingDirectory Task 8: the harvested
         // `retry-failed-task-duration` is a non-baselined `RETRY_FAILED_TASK` entry.
-        (15, 4, 19),
+        // (15, 4, 19) -> (14, 4, 18) at WorkingDirectory Task 9: baselining it moves
+        // it back to the baselined side.
+        (14, 4, 18),
         "the matching half, split the same way. It was (11, 0, 11): every \
          matching entry declared the behaviour that writes a `not_before`, and \
          W6 Task 4 moved the four `CREATE_NEW_EXECUTION` entries across, which \
