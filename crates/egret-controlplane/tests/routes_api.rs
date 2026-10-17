@@ -94,6 +94,8 @@ fn build_app(
         lineage_sweeper: std::sync::Arc::new(egret_catalog_engine::NoCatalogSweeper),
         view_catalog: std::sync::Arc::new(egret_catalog_engine::NoViewCatalog),
         view_audit_timeout: std::time::Duration::from_secs(15),
+        catalog_lister: std::sync::Arc::new(egret_controlplane::UnwiredCatalogLister),
+        browse_timeout: std::time::Duration::from_secs(15),
     })
 }
 
@@ -701,6 +703,8 @@ async fn setup_isolated_schema(iso_db: &str) -> Option<Fixture> {
         lineage_sweeper: std::sync::Arc::new(egret_catalog_engine::NoCatalogSweeper),
         view_catalog: std::sync::Arc::new(egret_catalog_engine::NoViewCatalog),
         view_audit_timeout: std::time::Duration::from_secs(15),
+        catalog_lister: std::sync::Arc::new(egret_controlplane::UnwiredCatalogLister),
+        browse_timeout: std::time::Duration::from_secs(15),
     });
 
     Some(Fixture {

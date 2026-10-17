@@ -2316,6 +2316,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         view_catalog: view_catalog.clone(),
         // The same budget as the StarRocks half's listings.
         view_audit_timeout: std::time::Duration::from_secs(15),
+        // Governance Data browse (DG frontend redesign #1). The real Trino and
+        // StarRocks listers land in the plan's Task 3; until then a non-egret
+        // catalog answers `notListed: engine_error`, never an empty listing.
+        catalog_lister: std::sync::Arc::new(egret_controlplane::UnwiredCatalogLister),
+        // Spec §2.3: 15 s per call, the view audit's budget.
+        browse_timeout: std::time::Duration::from_secs(15),
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).
