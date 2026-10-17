@@ -506,8 +506,9 @@ fn leaf<'a>(flow: &'a crate::models::Flow, task_id: &str) -> Option<Leaf<'a>> {
 /// before any worker claimed it. [`Claimed::kill_only`] marks it, and
 /// [`run_one`] cancels it and records `KILLED` without running its handler.
 ///
-/// The three arms are disjoint on `type_id`, so no row is taken as two
-/// kinds: a block (`type_id IS NULL`) is never a leaf's kill, and a
+/// No row is taken as two kinds. The `RUNNING` arm is disjoint from the two
+/// `KILLING` arms on `state`, and the two `KILLING` arms are disjoint on
+/// `type_id`: a block (`type_id IS NULL`) is never a leaf's kill, and a
 /// `KILLING` block is claimable only in `FINISHING` (its discard-only
 /// finish). A block killed in `PREPARING` stays `RUNNING`
 /// (`executor::kill::advance_killing` waits for its claim) and is taken by
@@ -1673,15 +1674,63 @@ async fn run_one(
 /// (`workflow.plugin_host.kill_grace_s`, the container grace), well inside a
 /// third of `working_timeout`. A cancel that takes longer still only costs a
 /// `LeaseLost` commit, and the next holder repeats the kill.
+///
+/// # A row whose handler cannot be built is still killed (fix round 1)
+///
+/// Kill is the operator's way out of a run that loops on the normal path, so
+/// a corrupt row must not keep it `KILLING` for ever. When the handler cannot
+/// be built for a reason **in the row's own content**
+/// ([`WorkerError::is_row_content`]: the task is not a leaf of its source,
+/// the source does not plan, the row does not read back), the reason is
+/// logged and the run is recorded `KILLED` with [`commit_kill`] -- no cancel,
+/// because there is no handler to ask, and no release: the orphan sweep owns
+/// whatever the run held. A task that is not a leaf never had a handler run
+/// for it at all (`run_one` refuses its budget), so there is nothing to stop.
+///
+/// **Any other error is transient** (a Postgres or store outage) and is
+/// returned as before: writing `KILLED` without a cancel while a container
+/// may still be running must not follow from a connection blip. The lease
+/// lapses, the reaper frees it, and the next holder tries again.
 async fn finish_claimed_kill(
     pool: &PgPool,
     c: &Claimed,
     reg: &dyn Registry,
     timing: WorkerTiming,
 ) -> Result<Committed> {
-    let (input, _budget) = input_for(pool, c, reg, timing.container_default_timeout).await?;
-    input.log.finish().await;
-    finish_kill(pool, c, c.claimed_at, reg, &input).await
+    // `Claimed::input` turns a task that is not a leaf into a refused BUDGET,
+    // not an error, so it is told apart here, before the input is built.
+    let built = match crate::spec::parse(&c.source) {
+        Ok(flow) if leaf(&flow, &c.task_id).is_none() => Err(worker_err(WorkerError::NotALeaf(
+            c.execution_id,
+            c.task_id.clone(),
+        ))),
+        _ => input_for(pool, c, reg, timing.container_default_timeout).await,
+    };
+    match built {
+        Ok((input, _budget)) => {
+            input.log.finish().await;
+            finish_kill(pool, c, c.claimed_at, reg, &input).await
+        }
+        Err(e) if row_content_fault(&e) => {
+            tracing::warn!(
+                execution = %c.execution_id,
+                run = %c.id,
+                task_id = %c.task_id,
+                type_id = %c.type_id,
+                error = %e,
+                "the handler of this killed run could not be built, so its work cannot be \
+                 cancelled; the run is recorded KILLED without a cancel"
+            );
+            commit_kill(pool, c, c.claimed_at).await
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether `e` is a [`WorkerError`] about the row's own content rather than
+/// I/O. A downcast, for [`no_handler_type`]'s reason.
+fn row_content_fault(e: &Error) -> bool {
+    matches!(e, Error::Internal(a) if a.downcast_ref::<WorkerError>().is_some_and(WorkerError::is_row_content))
 }
 
 /// Complete a `WorkingDirectory` block's own claim (spec §5.1): the prepare
@@ -5109,7 +5158,7 @@ mod tests {
                         e.source, NULL::uuid AS principal_id, t.claimed_at, \
                         t.working_dir AS block_phase, NULL::uuid AS block_id, \
                         NULL::text AS block_snapshot, \
-                    (t.type_id IS NOT NULL AND t.state = 'KILLING') AS kill_only \
+                        (t.type_id IS NOT NULL AND t.state = 'KILLING') AS kill_only \
                    FROM leased t JOIN workflow.executions e ON e.id = t.execution_id",
             )
             .bind(ex)
@@ -5275,7 +5324,7 @@ mod tests {
                         e.source, NULL::uuid AS principal_id, t.claimed_at, \
                         NULL::text AS block_phase, NULL::uuid AS block_id, \
                         NULL::text AS block_snapshot, \
-                    (t.type_id IS NOT NULL AND t.state = 'KILLING') AS kill_only \
+                        (t.type_id IS NOT NULL AND t.state = 'KILLING') AS kill_only \
                    FROM workflow.task_runs t JOIN workflow.executions e ON e.id = t.execution_id \
                   WHERE t.execution_id = $1 AND t.type_id IS NOT NULL AND t.state = 'KILLING' \
                     AND t.claimed_at IS NOT NULL",

@@ -10997,3 +10997,55 @@ async fn claim_order_is_unchanged_for_running_runs(pool: sqlx::PgPool) {
         .collect();
     assert_eq!(got, want);
 }
+
+/// Task 5 fix round 1: **a kill-only claim whose handler cannot be built is
+/// still killed.** `a` is `KILLING` with no lease, and its `task_id` names no
+/// leaf of the execution's source -- a row-content fault, which no retry can
+/// change. One tick records it `KILLED` with no cancel (there is no handler
+/// to ask) and no release (the orphan sweep owns what it held), and the
+/// execution ends `KILLED` instead of staying `KILLING` for ever.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_killing_run_whose_task_is_not_a_leaf_is_killed_without_a_cancel(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &exit_beside_an_unclaimed_leaf("exit-ghost"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    assert_eq!(
+        state_and_lease(&pool, ex, "a").await,
+        ("KILLING".to_string(), None)
+    );
+    sqlx::query(
+        "UPDATE workflow.task_runs SET task_id = 'ghost' WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(ex)
+    .execute(&pool)
+    .await
+    .expect("the row names no leaf of its source");
+
+    let reg = KillRecorder::default();
+    let done = egret_workflow::worker::tick(&pool, 8, &reg)
+        .await
+        .expect("a row-content fault is not the tick's error");
+    assert_eq!(done, 1, "the kill commits");
+    assert!(reg.ran().is_empty());
+    assert!(reg.cancels().is_empty(), "no handler, so no cancel");
+    assert!(reg.releases().is_empty(), "and no release");
+    assert_eq!(
+        state_and_lease(&pool, ex, "ghost").await,
+        ("KILLED".to_string(), None)
+    );
+    assert_eq!(
+        execution_history(&pool, ex)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned()),
+        Some(serde_json::json!("KILLED"))
+    );
+}

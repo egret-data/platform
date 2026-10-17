@@ -810,6 +810,24 @@ pub enum WorkerError {
     LeaseLost(uuid::Uuid),
 }
 
+impl WorkerError {
+    /// **The error comes from the row's own content, not from I/O**: a source
+    /// that does not plan, a task that is not a leaf of it, a row that does
+    /// not read back into an execution state. Retrying cannot change the
+    /// answer. The kill path (`claim::finish_claimed_kill`) records such a
+    /// run `KILLED` without a cancel; every other error is treated as
+    /// transient there.
+    pub fn is_row_content(&self) -> bool {
+        matches!(
+            self,
+            WorkerError::Unplannable(..)
+                | WorkerError::NotALeaf(..)
+                | WorkerError::Corrupt(..)
+                | WorkerError::UnknownState(..)
+        )
+    }
+}
+
 /// The most rounds of `advance()` one [`apply_outcome`] will drive.
 ///
 /// Derived from the executor's own bound rather than picked: `executor::plan`
